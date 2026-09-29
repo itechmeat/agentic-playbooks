@@ -71,6 +71,10 @@ mod runs_detail_cli_test;
 mod server_key_cli_test;
 #[path = "suite/stats_cli_test.rs"]
 mod stats_cli_test;
+// --- 0.24.0 eval suites ---
+#[path = "suite/eval_cli_test.rs"]
+mod eval_cli_test;
+// --- end 0.24.0 eval suites ---
 #[cfg(unix)]
 #[path = "suite/stdio_profile_e2e_test.rs"]
 mod stdio_profile_e2e_test;

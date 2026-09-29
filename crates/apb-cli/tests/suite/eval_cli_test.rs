@@ -1,0 +1,465 @@
+//! `apb eval` (0.24.0): the runner end to end with a stub agent
+//! (`APB_AGENT_CMD`), each test in its own config directory.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use predicates::prelude::*;
+use serde_json::Value;
+
+use crate::common::apb;
+
+/// A review-like playbook: one agent node that writes a report.
+const PLAYBOOK: &str = "schema: 2\nid: rev\nname: rev\nversion: 1.0.0\ndefaults: { profile: x }\neffects: [fs_read, fs_write]\ngoal:\n  statement: a report exists\n  criteria:\n    - { description: report written, check: { type: marker, marker: REPORT-OK } }\nnodes:\n  - { id: start, type: start }\n  - { id: review, type: agent_task, prompt: review }\n  - { id: done, type: finish, outcome: success }\n  - { id: failed, type: finish, outcome: failure }\nedges:\n  - { from: start, to: review }\n  - { from: review, to: done, condition: { type: node_status, node: review, equals: success } }\n  - { from: review, to: failed, condition: { type: node_status, node: review, equals: failure } }\n";
+
+const CASE: &str = "schema: 1\nid: writes-report\ninstruction: review it\nfixture:\n  dir: fixtures/base\n  change: fixtures/change\nchecks:\n  run: { outcome: [succeeded] }\n  route: { visits: [review, done], in_order: true, not_visits: [failed] }\n  outputs: [{ node: review, matches: \"REPORT-OK\" }]\n  files:\n    - { path: report.md, matches: \"names lib.txt\" }\n    - { path: lib.txt, unchanged_from_fixture: true }\n  events: { absent: [run_error] }\n  scripts: [scripts/branch.sh]\nrepeat: 1\n";
+
+/// The stub agent: writes `report.md` in its working directory; on the
+/// second repetition (`APB_EVAL_SCRATCH` ends in `-2`) it writes the wrong
+/// report, so a repeated case passes once.
+const STUB: &str = "#!/bin/sh\ncase \"$APB_EVAL_SCRATCH\" in\n  *-2) echo 'nothing useful' > report.md ;;\n  *) echo 'the review names lib.txt' > report.md ;;\nesac\nprintf 'REPORT-OK\\n```yaml\\nstatus: success\\nsummary: done\\n```\\n'\n";
+
+struct Env {
+    project: tempfile::TempDir,
+    cfg: tempfile::TempDir,
+    stub: PathBuf,
+}
+
+fn write(path: &Path, body: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+fn setup(playbook: &str) -> Env {
+    let project = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = project.path();
+    apb_core::registry::init_project(root).unwrap();
+    let pb = root.join(".apb/playbooks/rev");
+    write(&pb.join("1.0.0/playbook.yaml"), playbook);
+    write(&pb.join("current"), "1.0.0");
+    write(
+        &root.join(".apb/profiles/x/profile.yaml"),
+        "name: x\nexecutor:\n  agent: claude\n  model: claude-haiku-4-5-20251001\n",
+    );
+    let ev = pb.join("evals");
+    write(&ev.join("writes-report.yaml"), CASE);
+    write(&ev.join("fixtures/base/lib.txt"), "base\n");
+    write(&ev.join("fixtures/change/lib.txt"), "changed\n");
+    write(
+        &ev.join("scripts/branch.sh"),
+        "#!/bin/sh\n[ \"$(git rev-parse --abbrev-ref HEAD)\" = eval-change ] && git rev-parse --verify -q origin/main >/dev/null && [ -d \"$APB_EVAL_RUN_DIR\" ] && [ \"$APB_EVAL_CASE\" = writes-report ]\n",
+    );
+    let stub = cfg.path().join("stub.sh");
+    write(&stub, STUB);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    Env { project, cfg, stub }
+}
+
+impl Env {
+    fn eval(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        apb()
+            .arg("eval")
+            .args(args)
+            .current_dir(self.project.path())
+            .env("APB_CONFIG_DIR", self.cfg.path())
+            .env("APB_AGENT_CMD", &self.stub)
+            .env("APB_NO_REGISTRY", "1")
+            .assert()
+    }
+
+    fn eval_json(&self, args: &[&str]) -> (i32, Value) {
+        let mut a = vec!["rev", "--yes", "--json"];
+        a.extend_from_slice(args);
+        let out = self.eval(&a).get_output().clone();
+        let v = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "not json ({e}): {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        (out.status.code().unwrap_or(-1), v)
+    }
+}
+
+/// Every path under `dir`, relative, sorted.
+fn listing(dir: &Path) -> Vec<String> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+        for e in fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            out.push(p.strip_prefix(base).unwrap().to_string_lossy().into_owned());
+            if p.is_dir() && !p.is_symlink() {
+                walk(base, &p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn a_passing_case_is_checked_stored_and_leaves_nothing_behind() {
+    let env = setup(PLAYBOOK);
+    let before = listing(env.project.path());
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let case = &v["result"]["cases"][0];
+    assert_eq!(case["case"], "writes-report");
+    assert_eq!(
+        (case["passes"].as_u64(), case["of"].as_u64()),
+        (Some(1), Some(1))
+    );
+    let rep = &case["repetitions"][0];
+    assert_eq!(rep["verdict"], "passed", "{rep:#}");
+    let kinds: Vec<&str> = rep["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "run.outcome",
+            "goal",
+            "route.visits",
+            "route.not_visits",
+            "outputs[review]",
+            "files[report.md]",
+            "files[lib.txt]",
+            "events.absent[run_error]",
+            "script[scripts/branch.sh]"
+        ]
+    );
+    assert_eq!(rep["goal"][0]["status"], "passed");
+    // No write outside the scratch dirs: the project is untouched, the run
+    // directory was moved under the config dir, the scratch tree is gone.
+    assert_eq!(listing(env.project.path()), before);
+    let evals = env.cfg.path().join("evals");
+    assert!(!evals.join("scratch").exists(), "scratch left behind");
+    let run_dir = PathBuf::from(rep["run_dir"].as_str().unwrap());
+    assert!(run_dir.starts_with(evals.join("runs/rev")), "{run_dir:?}");
+    assert!(run_dir.join("events.jsonl").is_file());
+    let stored = PathBuf::from(v["stored"].as_str().unwrap());
+    assert!(stored.starts_with(evals.join("rev")) && stored.is_file());
+    assert!(v["comparison"].is_null(), "nothing to compare with yet");
+}
+
+#[test]
+fn repetitions_aggregate_into_a_pass_count() {
+    let env = setup(PLAYBOOK);
+    let (code, v) = env.eval_json(&["--repeat", "2"]);
+    assert_eq!(code, 1, "one repetition fails: {v:#}");
+    let case = &v["result"]["cases"][0];
+    assert_eq!(
+        (case["passes"].as_u64(), case["of"].as_u64()),
+        (Some(1), Some(2))
+    );
+    let verdicts: Vec<&str> = case["repetitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["verdict"].as_str().unwrap())
+        .collect();
+    assert_eq!(verdicts, ["passed", "failed"]);
+    let failed: Vec<&str> = case["repetitions"][1]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["status"] != "passed")
+        .map(|c| c["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(failed, ["files[report.md]"]);
+    assert!(case["wilson95"].is_array());
+}
+
+/// Replaces the fields that differ between runs, so the JSON shape and
+/// every deterministic value can be compared exactly.
+fn normalize(v: &mut Value) {
+    const VOLATILE: [&str; 13] = [
+        "eval_id",
+        "started_at_ms",
+        "finished_at_ms",
+        "workspace",
+        "config_key",
+        "playbook_digest",
+        "case_digest",
+        "run_id",
+        "run_dir",
+        "duration_ms",
+        "stored",
+        "apb_version",
+        "profile_bundles",
+    ];
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if VOLATILE.contains(&k.as_str()) && !x.is_null() {
+                    *x = Value::String("*".into());
+                } else {
+                    normalize(x);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(normalize),
+        _ => {}
+    }
+}
+
+#[test]
+fn the_json_output_matches_its_snapshot() {
+    let env = setup(PLAYBOOK);
+    let (_, mut v) = env.eval_json(&["--model", "claude:claude-haiku-4-5-20251001"]);
+    normalize(&mut v);
+    let expected = serde_json::json!({
+        "comparison": null,
+        "stored": "*",
+        "result": {
+            "eval_id": "*", "playbook": "rev", "version": "1.0.0",
+            "started_at_ms": "*", "finished_at_ms": "*", "apb_version": "*",
+            "workspace": "*", "config_key": "*",
+            "config": {
+                "playbook_digest": "*",
+                "profile_bundles": "*",
+                "executors": { "review": "claude/claude-haiku-4-5-20251001" },
+                "overrides_digest": "sha256:f86f034919f5145ebcec05cae1cdf709102a0d2d2513ca672994d4e121a7c1da"
+            },
+            "cases": [{
+                "case": "writes-report", "case_digest": "*", "passes": 1, "of": 1,
+                "wilson95": [0.2065, 1.0],
+                "repetitions": [{
+                    "repetition": 1, "run_id": "*", "run_dir": "*",
+                    "verdict": "passed", "outcome": "succeeded",
+                    "checks": [
+                        { "kind": "run.outcome", "status": "passed" },
+                        { "kind": "goal", "status": "passed" },
+                        { "kind": "route.visits", "status": "passed" },
+                        { "kind": "route.not_visits", "status": "passed" },
+                        { "kind": "outputs[review]", "status": "passed" },
+                        { "kind": "files[report.md]", "status": "passed" },
+                        { "kind": "files[lib.txt]", "status": "passed" },
+                        { "kind": "events.absent[run_error]", "status": "passed" },
+                        { "kind": "script[scripts/branch.sh]", "status": "passed" }
+                    ],
+                    "goal": [{ "index": 0, "description": "report written", "check": "marker", "status": "passed" }],
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    "duration_ms": "*"
+                }]
+            }],
+            "total_cost_usd": 0.0,
+            "total_tokens": 0
+        }
+    });
+    assert_eq!(v, expected, "{v:#}");
+}
+
+#[test]
+fn a_second_configuration_is_compared_with_the_first() {
+    let env = setup(PLAYBOOK);
+    let (_, _) = env.eval_json(&["--model", "claude:model-a"]);
+    let (_, v) = env.eval_json(&["--model", "claude:model-b"]);
+    let c = &v["comparison"];
+    assert_eq!(c["same_configuration"], false, "{c:#}");
+    let changes: Vec<&str> = c["configuration_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert!(
+        changes.contains(&"executor review: claude/model-a -> claude/model-b"),
+        "{changes:?}"
+    );
+    assert_eq!(c["cases"][0]["baseline"], "1/1");
+    assert_eq!(c["cases"][0]["candidate"], "1/1");
+    // `--compare` runs nothing and prints the same comparison as text.
+    env.eval(&["rev", "--compare"])
+        .success()
+        .stdout(predicate::str::contains("configuration changed:"))
+        .stdout(predicate::str::contains(
+            "executor review: claude/model-a -> claude/model-b",
+        ))
+        .stdout(predicate::str::contains(
+            "writes-report: baseline 1/1 -> candidate 1/1 (delta +0.00)",
+        ));
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+#[test]
+fn an_irreversible_playbook_is_refused_before_anything_runs() {
+    let env = setup(&PLAYBOOK.replace("effects: [fs_read, fs_write]", "effects: [irreversible]"));
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 2);
+    assert_eq!(v["refused"], "eval_refused_effects");
+    assert!(v["reasons"][0].as_str().unwrap().contains("irreversible"));
+    assert!(
+        !env.cfg.path().join("evals").exists(),
+        "nothing was created"
+    );
+    // `apb validate` says the same as V81.
+    apb()
+        .args(["validate", "rev"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("rev: error V81"));
+}
+
+#[test]
+fn a_run_waiting_for_a_person_is_stopped_and_judged_by_the_case() {
+    let gated = PLAYBOOK
+        .replace(
+            "  - { id: done, type: finish, outcome: success }",
+            "  - { id: gate, type: human_review }\n  - { id: done, type: finish, outcome: success }",
+        )
+        .replace(
+            "{ from: review, to: done, condition",
+            "{ from: review, to: gate, condition",
+        )
+        .replace("edges:\n", "edges:\n  - { from: gate, to: done }\n");
+    let env = setup(&gated);
+    let case = CASE
+        .replace(
+            "run: { outcome: [succeeded] }",
+            "run: { outcome: [stopped] }",
+        )
+        .replace("visits: [review, done]", "visits: [review, gate]");
+    write(
+        &env.project
+            .path()
+            .join(".apb/playbooks/rev/evals/writes-report.yaml"),
+        &case,
+    );
+    let (code, v) = env.eval_json(&[]);
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(code, 0, "{v:#}");
+    assert_eq!(rep["outcome"], "stopped");
+    assert!(
+        rep["stopped"]
+            .as_str()
+            .unwrap()
+            .starts_with("eval_gate_unanswered"),
+        "{rep:#}"
+    );
+    assert_eq!(
+        rep["goal"],
+        Value::Null,
+        "the finish node was never reached"
+    );
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+#[test]
+fn drafts_bad_cases_and_unknown_cases_are_refused() {
+    let env = setup(PLAYBOOK);
+    let pb = env.project.path().join(".apb/playbooks/rev");
+    fs::write(pb.join("lifecycle"), "draft").unwrap();
+    env.eval(&["rev", "--yes"])
+        .code(2)
+        .stderr(predicate::str::contains("pass --draft"));
+    fs::write(pb.join("lifecycle"), "active").unwrap();
+    env.eval(&["rev", "--yes", "--case", "nope"])
+        .code(2)
+        .stderr(predicate::str::contains("no eval case `nope`"));
+    // Without --yes on a non-terminal nothing starts.
+    env.eval(&["rev"])
+        .code(2)
+        .stderr(predicate::str::contains("refused without confirmation"));
+    fs::write(
+        pb.join("evals/broken.yaml"),
+        "schema: 1\nid: other\nfixture: { dir: fixtures/base }\n",
+    )
+    .unwrap();
+    env.eval(&["rev", "--yes"])
+        .code(2)
+        .stderr(predicate::str::contains("V80"));
+    apb()
+        .args(["validate", "rev"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "does not match the file name `broken.yaml`",
+        ));
+}
+
+/// The repository's own suite for `branch-quality-review` runs with a stub
+/// reviewer: both first cases pass, the planted-defect script finds the
+/// line the stub names. The playbook's `requires.commands` is cut to the
+/// tools every CI runner has (the review tools are the reviewer's business).
+#[test]
+fn the_branch_quality_review_suite_runs_with_a_stub_reviewer() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.apb");
+    let project = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = project.path();
+    apb_core::registry::init_project(root).unwrap();
+    let dst = root.join(".apb/playbooks/branch-quality-review");
+    apb_core::fsutil::copy_tree(&repo.join("playbooks/branch-quality-review"), &dst).unwrap();
+    apb_core::fsutil::copy_tree(
+        &repo.join("profiles/branch-reviewer"),
+        &root.join(".apb/profiles/branch-reviewer"),
+    )
+    .unwrap();
+    let current = fs::read_to_string(dst.join("current")).unwrap();
+    let yaml_path = dst.join(current.trim()).join("playbook.yaml");
+    let yaml = fs::read_to_string(&yaml_path)
+        .unwrap()
+        .replace("  - code-ranker\n  - bun\n", "");
+    fs::write(&yaml_path, yaml).unwrap();
+    // The suite's fixtures carry the files the playbook requires.
+    let stub = cfg.path().join("reviewer.sh");
+    write(
+        &stub,
+        "#!/bin/sh\nmkdir -p docs/reviews\nprintf '# Review\\n\\n## Findings\\n\\n1. Low: src/lib.rs:16 skips the last window.\\n' > docs/reviews/_date_time_review.md\nprintf 'ok\\n```yaml\\nstatus: success\\nsummary: ok\\n```\\n'\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = apb()
+        .args([
+            "eval",
+            "branch-quality-review",
+            "--yes",
+            "--draft",
+            "--json",
+        ])
+        .current_dir(root)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .env("APB_AGENT_CMD", &stub)
+        .env("APB_NO_REGISTRY", "1")
+        .assert()
+        .get_output()
+        .clone();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let cases = v["result"]["cases"].as_array().unwrap();
+    let summary: Vec<(String, u64)> = cases
+        .iter()
+        .map(|c| {
+            (
+                c["case"].as_str().unwrap().to_string(),
+                c["passes"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("review-clean-branch".to_string(), 1),
+            ("review-planted-defect".to_string(), 1)
+        ],
+        "{v:#}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+}

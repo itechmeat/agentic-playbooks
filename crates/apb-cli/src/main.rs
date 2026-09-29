@@ -2,6 +2,9 @@ mod cache;
 mod connector;
 mod dashboard_check;
 mod decisions;
+// --- 0.24.0 eval suites ---
+mod eval;
+// --- end 0.24.0 eval suites ---
 mod manage;
 mod onboarding;
 mod profile;
@@ -298,6 +301,55 @@ enum Command {
         json: bool,
     },
     // --- end of 0.23.0 stats ---
+    // --- 0.24.0 eval suites ---
+    /// Run a playbook's eval cases (`.apb/playbooks/<id>/evals/`), each
+    /// repetition as a run in a disposable repository, check the outcomes,
+    /// store the result per configuration and compare it with the previous
+    /// one. Opt-in and paid: every repetition is a full agent run
+    Eval {
+        /// Playbook id (a project playbook)
+        id: String,
+        /// Version to evaluate (default: current)
+        #[arg(long)]
+        version: Option<String>,
+        /// Only these cases (repeatable)
+        #[arg(long = "case", value_name = "NAME")]
+        cases: Vec<String>,
+        /// Only cases with one of these tags (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Repetitions per case, over the case and suite `repeat`
+        #[arg(long)]
+        repeat: Option<u32>,
+        /// Run-level overrides YAML file, as for `apb run --overrides`
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+        /// NODE=PROFILE: another profile for one agent node (repeatable)
+        #[arg(long = "profile-override", value_name = "NODE=PROFILE")]
+        profile_overrides: Vec<String>,
+        /// AGENT:MODEL: one ephemeral executor for every agent node
+        #[arg(long, value_name = "AGENT:MODEL")]
+        model: Option<String>,
+        /// Invocation budget in USD (default: suite.yaml, else 10)
+        #[arg(long)]
+        max_usd: Option<f64>,
+        /// Run nothing: compare the latest stored result with the one before
+        #[arg(long)]
+        compare: bool,
+        /// Print the plan without starting anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Evaluate a draft playbook (only the scratch copy is marked active)
+        #[arg(long)]
+        draft: bool,
+        /// Approve the suite and start without asking
+        #[arg(long)]
+        yes: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    // --- end 0.24.0 eval suites ---
     /// Inspect and manage the project-local node result cache
     Cache {
         #[command(subcommand)]
@@ -569,6 +621,42 @@ fn main() -> ExitCode {
             json,
         ),
         // --- end of 0.23.0 stats ---
+        // --- 0.24.0 eval suites ---
+        Some(Command::Eval {
+            id,
+            version,
+            cases,
+            tags,
+            repeat,
+            overrides,
+            profile_overrides,
+            model,
+            max_usd,
+            compare,
+            dry_run,
+            draft,
+            yes,
+            json,
+        }) => eval::eval_cmd(
+            &root,
+            eval::EvalArgs {
+                id,
+                version,
+                cases,
+                tags,
+                repeat,
+                overrides,
+                profile_overrides,
+                model,
+                max_usd,
+                compare,
+                dry_run,
+                draft,
+                yes,
+                json,
+            },
+        ),
+        // --- end 0.24.0 eval suites ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),

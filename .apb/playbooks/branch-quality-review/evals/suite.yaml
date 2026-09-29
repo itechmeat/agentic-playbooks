@@ -1,0 +1,12 @@
+# Defaults for every branch-quality-review eval case. See docs/EVALS.md.
+schema: 1
+env:
+  # The review must not reach GitHub through a logged-in CLI.
+  GH_CONFIG_DIR: "{{eval.scratch}}/gh"
+  GH_TOKEN: ""
+limits:
+  timeout: 30m
+repeat: 1
+tags: [quick]
+budget:
+  max_usd_per_invocation: 5.00
