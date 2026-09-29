@@ -252,3 +252,22 @@ fn whatsapp_inbox_demo_playbook_validates() {
         "whatsapp-inbox should validate cleanly: {stdout}"
     );
 }
+
+#[test]
+fn ci_failure_triage_demo_playbook_validates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = setup(dir.path());
+    register_playbook(
+        &root,
+        "ci-failure-triage",
+        "1.0.0",
+        &repo_playbook_yaml("ci-failure-triage.yaml"),
+    );
+
+    let out = apb_ok(&root, &["validate", "ci-failure-triage"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ci-failure-triage: OK"),
+        "ci-failure-triage should validate cleanly: {stdout}"
+    );
+}

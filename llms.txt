@@ -132,6 +132,7 @@ Five crates under `crates/` with dependency direction core <- engine <- mcp, and
 - [Profile authoring](docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
 - [Playbook authoring guide](docs/HOWTO-authoring.md): node types, edges, conditions, params, templating
 - [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
+- [Running apb in CI](docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
 
 ## Optional
 
