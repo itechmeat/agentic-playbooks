@@ -3051,7 +3051,7 @@ pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> Result<bool, EngineE
 /// The parent run's definition origin (from its RunProvenance event), used to
 /// resolve a child's `scope: auto` the same way the policy gate does (parent
 /// origin first, then global). Defaults to Project when the label is absent.
-pub(super) fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
+pub(crate) fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
     use apb_core::scope::Origin;
     let events = read_all(run_dir).unwrap_or_default();
     for e in &events {

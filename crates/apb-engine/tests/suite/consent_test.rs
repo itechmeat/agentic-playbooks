@@ -633,3 +633,52 @@ fn an_unresolvable_sub_playbook_needs_consent_at_start() {
     assert!(err.contains("(sub-playbook node sub)"), "{err}");
     assert!(runs_dir_is_empty(dir.path()));
 }
+
+// --- the run's origin ---
+
+/// A resume resolves a global playbook's `auto` sub-playbook from the global
+/// store, as the run itself did, not from the project: a project playbook
+/// with the same id that declares `irreversible` does not make the resume of
+/// a global run ask for consent (and one that does not declare it would not
+/// hide a global child that does).
+#[test]
+fn a_resume_resolves_a_global_runs_children_from_the_global_store() {
+    use apb_core::scope::{Origin, PlaybookRef};
+    use apb_engine::gate::resume_consent_need;
+    let _env = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = set_config_dir(cfg.path());
+    let seed_global = |id: &str, yaml: &str| {
+        let vdir = cfg.path().join("playbooks").join(id).join("1.0.0");
+        fs::create_dir_all(&vdir).unwrap();
+        fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+        fs::write(
+            cfg.path().join("playbooks").join(id).join("current"),
+            "1.0.0",
+        )
+        .unwrap();
+    };
+    seed_global("gp", &parent_named("gp", "c"));
+    seed_global("c", &linear("c", "", ""));
+    let dir = tempfile::tempdir().unwrap();
+    // The project's own `c` is irreversible; the global run never uses it.
+    seed(
+        dir.path(),
+        "c",
+        &linear("c", "effects: [irreversible]\n", ""),
+    );
+    let resolved = apb_core::store::resolve(
+        dir.path(),
+        &PlaybookRef {
+            origin: Origin::Global,
+            id: "gp".into(),
+            version: None,
+        },
+    )
+    .unwrap();
+    let res = apb_engine::scheduler::run_resolved(&resolved, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(manifest_consent(dir.path(), &res.run_id), None);
+
+    assert_eq!(resume_consent_need(dir.path(), &res.run_id).unwrap(), None);
+}

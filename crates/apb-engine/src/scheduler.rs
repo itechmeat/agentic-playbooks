@@ -84,6 +84,7 @@ pub(crate) use journal::{
 };
 pub use listing::{RunSummary, list_runs};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
+pub(crate) use node::parent_run_origin;
 use node::*;
 use patch::*;
 use prepare::*;

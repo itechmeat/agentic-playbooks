@@ -216,7 +216,8 @@ pub fn resume_consent_need(root: &Path, run_id: &str) -> Result<Option<ConsentNe
     let pins = crate::run_config::read_run_config(&run_dir)
         .ok()
         .and_then(|c| c.expected_children);
-    let origin = Origin::Project { workspace_id: None };
+    // Children resolve from the run's own origin, as the run spawns them.
+    let origin = crate::scheduler::parent_run_origin(&run_dir);
     let sources = consent_sources(root, &playbook, &origin, pins.as_ref());
     let local = apb_core::run_origin::verify(&run_dir, run_id);
     let recorded = crate::manifest::read(&run_dir)

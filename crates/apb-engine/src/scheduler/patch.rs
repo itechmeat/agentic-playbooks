@@ -132,7 +132,9 @@ pub(crate) fn apply_patch(
 /// The rejection reason when `patched` declares consent sources that the
 /// run's recorded consent does not cover, `None` when it adds none.
 fn uncovered_consent_sources(root: &Path, run_dir: &Path, patched: &Playbook) -> Option<String> {
-    let origin = apb_core::scope::Origin::Project { workspace_id: None };
+    // Children resolve from the run's own origin, as the run spawns them: a
+    // global playbook's `auto` child is the global one.
+    let origin = super::parent_run_origin(run_dir);
     let sources = crate::gate::consent_sources(root, patched, &origin, None);
     let consent = crate::manifest::read(run_dir)
         .ok()
