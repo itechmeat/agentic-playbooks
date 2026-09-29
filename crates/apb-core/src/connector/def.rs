@@ -292,6 +292,12 @@ pub struct FunctionSpec {
     pub description: String,
     #[serde(default)]
     pub read_only: bool,
+    /// The call cannot be taken back (0.23.0): a merge, a deletion, a
+    /// payment, a publication. A node granted such a function after a
+    /// `human_review` gate refuses the gate's `auto_decide` (V73). Default
+    /// `false`; meaningless together with `read_only`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub irreversible: bool,
     #[serde(default)]
     pub deprecated: Option<String>,
     #[serde(default)]
@@ -598,6 +604,15 @@ impl ConnectorDoc {
         self.functions
             .iter()
             .filter(|f| f.read_only)
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
+    /// Names of functions flagged `irreversible: true`, in manifest order.
+    pub fn irreversible_functions(&self) -> Vec<String> {
+        self.functions
+            .iter()
+            .filter(|f| f.irreversible)
             .map(|f| f.name.clone())
             .collect()
     }
@@ -1295,6 +1310,18 @@ functions:
         assert_eq!(f.timeout_sec, 30);
         assert!(doc.function("ping").unwrap().is_mock());
         assert_eq!(doc.read_only_functions(), vec!["list_issues".to_string()]);
+    }
+
+    /// `irreversible: true` (0.23.0) parses and is listed; an unflagged
+    /// function serializes without the key, so existing manifests are
+    /// unchanged.
+    #[test]
+    fn an_irreversible_flag_parses_and_is_left_out_when_false() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: merge\n    description: d\n    method: PUT\n    url: http://a\n    irreversible: true\n  - name: list\n    description: d\n    method: GET\n    url: http://a\n";
+        let doc = ConnectorDoc::from_yaml(y, "x").unwrap();
+        assert_eq!(doc.irreversible_functions(), vec!["merge".to_string()]);
+        let list = serde_yaml_ng::to_string(doc.function("list").unwrap()).unwrap();
+        assert!(!list.contains("irreversible"), "{list}");
     }
 
     #[test]

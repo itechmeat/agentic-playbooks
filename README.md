@@ -175,7 +175,7 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Released on the `0.x` line (the latest release is `0.22.1`); each tagged
+Released on the `0.x` line (the latest release is `0.23.0`); each tagged
 release has its notes in [docs/release-notes/](docs/release-notes/) and on
 the GitHub releases page. The engine, web editor, versioning, MCP surface, and
 supervisor are implemented and tested; until `1.0` the schema and CLI may
@@ -194,7 +194,9 @@ apb dev                       # Vite HMR + API from the source tree
 More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
 [docs/PROFILES.md](docs/PROFILES.md), [docs/CONNECTORS.md](docs/CONNECTORS.md),
 [docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md),
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md),
+[docs/GUARDRAILS.md](docs/GUARDRAILS.md), [docs/CI.md](docs/CI.md),
+[docs/STATS.md](docs/STATS.md).
 
 ## Security
 

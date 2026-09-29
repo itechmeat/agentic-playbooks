@@ -70,8 +70,17 @@ pub(crate) fn recommend(
             return Some("effects");
         }
         match inherited_effects(root, run_dir, playbook) {
-            Some(inherited) => apb_core::validate::auto_decide_refusal(playbook, gate, &inherited)
-                .map(|_| "effects"),
+            // The installed connectors' flags (0.23.0): a granted
+            // `irreversible` function after the gate refuses too, and so
+            // does a bound connector whose manifest no longer loads or that
+            // is not installed (its effects are unknown: fail-closed).
+            Some(inherited) => apb_core::validate::auto_decide_run_refusal(
+                playbook,
+                gate,
+                &inherited,
+                &apb_core::connector::resolve::validation_facts(),
+            )
+            .map(|_| "effects"),
             None => Some("effects"),
         }
     });

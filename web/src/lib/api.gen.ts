@@ -4,11 +4,53 @@
 
 import type { PlaybookEdge, PlaybookNode, WfEvent, WfLayout } from './types'
 
+export type CommittedArtifact = { sha: string, subject: string, };
+
+export type NodeCommits = { node: string, 
+/**
+ * `HEAD` before the node ran.
+ */
+before: string, 
+/**
+ * `HEAD` after it.
+ */
+after: string, 
+/**
+ * Newest first, at most 50.
+ */
+commits: Array<CommittedArtifact>, 
+/**
+ * Commits past the listed ones.
+ */
+omitted: number, };
+
+export type GoalCriterionResult = { index: number, description: string, 
+/**
+ * `script`, `marker` or `manual`.
+ */
+check: string, 
+/**
+ * `passed`, `failed`, `error`, `manual` (a person confirms it), or
+ * `pending` while the run has not reached a finish node.
+ */
+status: string, detail?: string, };
+
+export type RunGoal = { statement: string, 
+/**
+ * `goal.enforce: true`: a failed script or marker criterion fails the
+ * run.
+ */
+enforce: boolean, 
+/**
+ * Whether the criteria were checked (the run reached a finish node).
+ */
+checked: boolean, criteria: Array<GoalCriterionResult>, passed: number, failed: number, manual: number, };
+
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
 export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
 
-export type WaitingKind = "human_review" | "wait" | "question" | "supervisor";
+export type WaitingKind = "human_review" | "wait" | "question" | "supervisor" | "host_task";
 
 export type PendingQuestion = { node: string, question: string, options: Array<string>, 
 /**
@@ -25,6 +67,52 @@ answer_by: string,
  * synthesizing a non-deterministic clock reading here.
  */
 asked_at: number, };
+
+export type PendingHostTask = { 
+/**
+ * The run the task belongs to: the run itself, or a sub-playbook child
+ * run it started (a child inherits its parent's host). Submit with this
+ * id or the parent's.
+ */
+run_id: string, task_id: string, node: string, attempt: number, 
+/**
+ * The task for the subagent: the rendered node prompt, the report
+ * contract included.
+ */
+prompt: string, 
+/**
+ * The subagent's system context (the profile's role prompt), when the
+ * profile has one.
+ */
+role_prompt: string | null, 
+/**
+ * Paths of the skills the subagent should load.
+ */
+skills: Array<string>, 
+/**
+ * The directory the subagent works in.
+ */
+workdir: string, 
+/**
+ * The node's declared `outputs` contract, if any.
+ */
+outputs: unknown, 
+/**
+ * Wall-clock milliseconds by which the task must be submitted.
+ */
+deadline: number | null, 
+/**
+ * The model a fallback entry or tier routing asks for (a hint).
+ */
+model_hint: string | null, 
+/**
+ * Environment variables to set for the subagent.
+ */
+env: { [key in string]: string }, 
+/**
+ * Milliseconds since epoch when the task was requested.
+ */
+requested_at: number, };
 
 export type ReviewRecommendation = { 
 /**
@@ -129,6 +217,13 @@ pending_questions: Array<PendingQuestion>,
  */
 pending_waits: Array<string>, 
 /**
+ * Host execution mode (0.23.0): every host task waiting for the host
+ * session, in request order, prompts inline (read from the run
+ * directory, so only the `from_run_dir` family fills it).
+ * Absent when empty, so a run without host tasks serializes as before.
+ */
+pending_tasks?: Array<PendingHostTask>, 
+/**
  * Deterministic identity of the work plan behind this percent (spec
  * section 3): the playbook version bound to the run plus the latest
  * reported `total` of each cyclic group. It changes exactly when a report
@@ -163,7 +258,13 @@ cost_attempts: number,
  * At least one attempt's numbers are apb's own estimate rather than a
  * count the agent CLI printed (`source: estimated`).
  */
-estimated?: boolean, };
+estimated?: boolean, 
+/**
+ * Every attempt the run finished, with or without usage, so a line
+ * can say "5 attempts, 3 with usage" instead of passing the reporting
+ * ones off as all of them.
+ */
+finished_attempts: number, };
 
 export type RunDecisions = { 
 /**
@@ -197,6 +298,104 @@ applied: number,
  * Shadow decisions whose answer a higher mode would have acted on.
  */
 shadow_would_change: number, };
+
+export type Rate = { count: number, of: number, rate?: number, };
+
+export type PerRun = { total: number, runs: number, per_run?: number, };
+
+export type Waits = { count: number, median_ms?: number, max_ms?: number, };
+
+export type Outcomes = { succeeded: number, failed: number, aborted: number, 
+/**
+ * Still running, paused, or ended without a terminal event.
+ */
+other: number, };
+
+export type Spend = { 
+/**
+ * Runs whose attempts reported usage.
+ */
+runs_with_usage: number, 
+/**
+ * Input plus output tokens (cache reads and writes not included).
+ */
+tokens: PerRun, 
+/**
+ * Runs that reported a cost.
+ */
+runs_with_cost: number, cost_usd: number, cost_per_run_usd?: number, };
+
+export type GoalStats = { index: number, description: string, 
+/**
+ * `script`, `marker` or `manual`.
+ */
+check: string, 
+/**
+ * Runs that checked it.
+ */
+checked: number, passed: Rate, failed: number, 
+/**
+ * `error`: the check could not run.
+ */
+errors: number, manual: number, };
+
+export type NodeStats = { node: string, 
+/**
+ * Runs the node started in.
+ */
+runs: number, 
+/**
+ * Runs where the node's first result was a success on attempt 1, with
+ * no retry, fallback or later re-entry.
+ */
+first_pass: Rate, retries: number, fallbacks: number, 
+/**
+ * Starts after the first in the same run (a loop back into it).
+ */
+reentries: number, duration: Waits, 
+/**
+ * The declared `expected_duration`, in seconds.
+ */
+expected_s?: number, 
+/**
+ * Finished executions that took longer than `expected_s`.
+ */
+over_expected?: Rate, deliverable_missing: number, output_fields_missing: number, };
+
+export type VersionStats = { playbook: string, version: string, runs: number, outcomes: Outcomes, 
+/**
+ * Succeeded runs over finished runs (succeeded, failed, aborted).
+ */
+success: Rate, 
+/**
+ * Succeeded runs with no retry, fallback or loop traversal, over
+ * finished runs.
+ */
+first_pass: Rate, retries: PerRun, fallbacks: PerRun, loop_traversals: PerRun, gate_wait: Waits, question_wait: Waits, 
+/**
+ * Run start to its terminal event.
+ */
+duration: Waits, spend: Spend, deliverable_missing: number, output_fields_missing: number, 
+/**
+ * Empty when the runs checked no goal.
+ */
+goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, };
+
+export type Comparison = { playbook: string, base: string, 
+/**
+ * `None` when no other version of the playbook has runs.
+ */
+against?: string, success_delta?: number, first_pass_delta?: number, retries_per_run_delta?: number, loops_per_run_delta?: number, median_duration_delta_ms?: number, cost_per_run_delta_usd?: number, };
+
+export type StatsReport = { runs: number, 
+/**
+ * By playbook id, then version (oldest first).
+ */
+versions: Array<VersionStats>, compare?: Comparison, 
+/**
+ * [`NO_RUNS`] when no run matched.
+ */
+note?: string, };
 
 export type UsageSource = "reported" | "estimated";
 
@@ -280,6 +479,15 @@ model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[];
  */
 children: Array<ChildRun>, 
 /**
+ * The playbook's goal with each criterion's result (C1); absent for a
+ * playbook without a goal.
+ */
+goal?: RunGoal, 
+/**
+ * The commits the run's nodes made on a git tree (C7); empty when none.
+ */
+commits?: Array<NodeCommits>, 
+/**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.
  */
@@ -298,7 +506,16 @@ decisions?: RunDecisions,
  * Events of a type this binary does not know (a newer apb wrote them),
  * left out of `events`; 0 for a journal read in full.
  */
-unknown_events: number, events: WfEvent[], };
+unknown_events: number, 
+/**
+ * Who executes the run's agent steps, from its manifest: `cli` (the
+ * profiles' CLIs) or `host` (the host session's subagents). Read-only.
+ */
+execution: "cli" | "host", 
+/**
+ * A `cli` run whose steps fall back to host tasks when no CLI can start.
+ */
+execution_fallback: boolean, events: WfEvent[], };
 
 export type TrashEntry = { 
 /**

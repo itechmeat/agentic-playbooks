@@ -8,6 +8,9 @@ pub mod meta;
 pub mod playbooks;
 pub mod profiles;
 pub mod runs;
+// --- 0.23.0 stats (C3) ---
+pub mod stats;
+// --- end of 0.23.0 stats ---
 pub mod suggestions;
 pub mod trash;
 pub mod trust;

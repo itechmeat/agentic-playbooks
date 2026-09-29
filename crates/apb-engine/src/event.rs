@@ -61,6 +61,11 @@ pub enum EventPayload {
         digest: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution_root: Option<String>,
+        /// The content digest of the run directory's `scripts/` copy as the
+        /// start verified it (`none` without scripts). Goal `script`
+        /// criteria run only while the copy still matches it (C1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scripts_digest: Option<String>,
         /// Profiles used by the run (spec 6.5). Empty for playbooks without
         /// profiles (the executor path).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -660,6 +665,96 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    // --- host execution mode (0.23.0) ---
+    /// An agent attempt of a host-mode run became a host task (see
+    /// `crate::host_task`): the engine spawned nothing and waits for the host
+    /// session that started the run to execute `task_id` with its own
+    /// subagent and submit the reply. Journaled by the drive before it parks.
+    /// The prompt texts live in the run directory (`prompt_ref`,
+    /// `role_prompt_ref`, relative to it), never in the event.
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record. The attempt it belongs to still ends
+    /// with its own `attempt_finished` and `node_finished`. Every field
+    /// defaults, so a shape a newer apb writes still reads.
+    HostTaskRequested {
+        #[serde(default)]
+        task_id: String,
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        prompt_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role_prompt_ref: Option<String>,
+        /// Paths of the skills the step may load (materialized from the run
+        /// snapshot).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
+        #[serde(default)]
+        workdir: String,
+        /// The node's declared `outputs` contract, as JSON.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outputs: Option<serde_json::Value>,
+        /// Wall-clock milliseconds by which the task must be submitted (the
+        /// node's timeout); `None` without a timeout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u64>,
+        /// The model a fallback entry or tier routing asks for; a hint the
+        /// host may ignore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_hint: Option<String>,
+    },
+    /// A host task was closed: the host submitted it (`submitted_by: host`,
+    /// `client` names the MCP host), or the engine closed it (`submitted_by:
+    /// engine`, status `expired`, `cancelled`, `interrupted` or `superseded`, the last when a resume re-exposed another open task of the node). The reply
+    /// text lives in the run directory (`output_ref`).
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record; the attempt still ends with its own
+    /// `attempt_finished`. Every field defaults.
+    HostTaskSubmitted {
+        #[serde(default)]
+        task_id: String,
+        /// `succeeded`, `failed`, `blocked`, or an engine closure.
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<String>,
+        /// Token usage the host reported, if any (`source: reported`). Read
+        /// leniently like `attempt_finished.usage`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_usage"
+        )]
+        usage: Option<apb_core::agent_output::AgentUsage>,
+        #[serde(default)]
+        submitted_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A `cli` run started by an MCP host session could not start any CLI
+    /// of an agent step's chain (every binary missing, or not logged in), so
+    /// the step continues as a host task (see `crate::host_task`). `attempt`
+    /// is the host task's attempt; `reason` the last start failure. Later
+    /// steps keep using their CLIs.
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record; the attempt still ends with its own
+    /// `attempt_finished`. Every field defaults.
+    ExecutionFallback {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        reason: String,
+    },
+    // --- end host execution mode ---
     DeliverableMissing {
         #[serde(default)]
         node: String,
@@ -668,6 +763,68 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    // --- 0.23.0: run provenance, goal criteria, protected paths ----------
+    /// A node moved `HEAD` of the git tree it ran in (C7): the commits it
+    /// made, newest first. Written only on a git tree with a commit and only
+    /// when `HEAD` moved forward on the branch the node started on, just before the node's `node_finished`, so it is
+    /// safe to skip up to that checkpoint: it records history, the engine
+    /// never reads it back. `omitted` counts commits past the listed ones.
+    ArtifactsCommitted {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        before: String,
+        #[serde(default)]
+        after: String,
+        #[serde(default)]
+        commits: Vec<CommittedArtifact>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: usize,
+    },
+    /// One goal criterion checked when the run reached a finish node (C1):
+    /// `check` is `script`, `marker` or `manual`; `status` is `passed`,
+    /// `failed`, `manual` (left to a person) or `error` (the check could not
+    /// run), with `detail` saying why. `enforced` marks a script or marker
+    /// criterion under `goal.enforce: true`. Written before the finish
+    /// node's `node_finished`, so it is safe to skip up to that checkpoint;
+    /// an enforced failure also journals a `run_error` there.
+    GoalChecked {
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        check: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        enforced: bool,
+    },
+    /// An agent_task attempt changed files its node protects (C6): each
+    /// path with `modified`, `deleted` or `added`. The engine restored them
+    /// from its pre-attempt copy (`restore_failed` names any it could not)
+    /// and a reported success was rejected. Written before the attempt's
+    /// `attempt_finished`; the next checkpoint is the node's
+    /// `node_finished`, and it is safe to skip up to there: the attempt's
+    /// own result carries the effect.
+    ProtectedPathsModified {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        changes: Vec<ProtectedChange>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        restore_failed: Vec<String>,
+        /// Where the snapshot copies were kept because a path could not be
+        /// restored; absent when everything was restored and the copies
+        /// were removed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_copies: Option<String>,
+    },
+    // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
     /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or
     /// not), or a `defaults.on_failure` policy hop that consulted no edge at
@@ -763,6 +920,30 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+}
+
+/// One commit of an [`EventPayload::ArtifactsCommitted`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedArtifact {
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub subject: String,
+}
+
+/// One path of an [`EventPayload::ProtectedPathsModified`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedChange {
+    #[serde(default)]
+    pub path: String,
+    /// `modified`, `deleted` or `added`.
+    #[serde(default)]
+    pub change: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -40,7 +40,7 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                 ["nodes", nid, "output" | "report", field] => {
                     nodes.contains(nid) && !field.trim().is_empty()
                 }
-                ["run", "instruction" | "context"] => true,
+                ["run", "instruction" | "context" | "id"] => true,
                 ["run", "hooks", key] => hooks.contains(key),
                 _ => false,
             };
@@ -203,7 +203,7 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
 pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nodes.<id>.output, \
     nodes.<id>.report, nodes.<id>.output.<field>, nodes.<id>.report.<field>, \
     nodes.<id>.review_note, nodes.<id>.review_decision, nodes.<id>.rejected_output, \
-    run.instruction, run.context, run.hooks.*";
+    run.instruction, run.context, run.id, run.hooks.*";
 
 pub(crate) fn check_refs(playbook: &Playbook, ctx: &ValidationContext, r: &mut ValidationReport) {
     // Checking a profile reference (schema 2): scope:project in a global

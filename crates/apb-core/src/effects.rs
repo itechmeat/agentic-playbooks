@@ -49,6 +49,10 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
 pub fn effective(playbook: &Playbook) -> BTreeSet<Effect> {
     let mut set = inferred(playbook);
     set.extend(playbook.effects.iter().copied());
+    // A node's own declaration (0.23.0) widens the same way.
+    for n in &playbook.nodes {
+        set.extend(n.effects.iter().copied());
+    }
     set
 }
 
@@ -118,6 +122,18 @@ edges:
         let set = effective(&playbook(yaml));
         assert!(set.contains(&Effect::Network));
         assert!(set.contains(&Effect::External));
+    }
+
+    #[test]
+    fn a_node_declaration_widens_the_effective_effects() {
+        let yaml = SCRIPT_WF.replace(
+            "script: \"scripts/x.sh\", runner: sh }",
+            "script: \"scripts/x.sh\", runner: sh, effects: [irreversible] }",
+        );
+        let p = playbook(&yaml);
+        assert_eq!(p.nodes[1].effects, [Effect::Irreversible]);
+        assert!(effective(&p).contains(&Effect::Irreversible));
+        assert!(!effective(&playbook(SCRIPT_WF)).contains(&Effect::Irreversible));
     }
 
     #[test]

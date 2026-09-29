@@ -84,6 +84,18 @@ pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
             "goal.criteria is empty, at least one criterion is required".to_string(),
         );
     }
+    // `enforce` acts on script and marker criteria only: with nothing but
+    // manual ones it can never fail a run.
+    if g.enforce
+        && !g.criteria.is_empty()
+        && g.criteria.iter().all(|c| c.check == GoalCheck::Manual)
+    {
+        r.warn(
+            "V41",
+            None,
+            "goal.enforce is set but every criterion is manual, so it never fails a run; add a script or marker criterion".to_string(),
+        );
+    }
     for (i, c) in g.criteria.iter().enumerate() {
         if c.description.trim().is_empty() {
             r.error(
@@ -110,6 +122,32 @@ pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
                 );
             }
             _ => {}
+        }
+    }
+}
+
+/// V75: an agent_task's `protect` globs (C6) must each be a non-empty,
+/// valid glob relative to the node's working directory: not absolute and
+/// without a `..` segment, so the check cannot reach (or restore) files
+/// outside the tree the node works in.
+pub(crate) fn check_protect(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        for g in n.kind.protect_globs() {
+            let why = if g.trim().is_empty() {
+                Some("is empty")
+            } else if g.starts_with('/')
+                || g.starts_with('\\')
+                || g.split(['/', '\\']).any(|seg| seg == "..")
+            {
+                Some("must be relative to the node's working directory, without `..`")
+            } else if globset::Glob::new(g).is_err() {
+                Some("is not a valid glob")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                r.error("V75", Some(&n.id), format!("protect glob `{g}` {why}"));
+            }
         }
     }
 }

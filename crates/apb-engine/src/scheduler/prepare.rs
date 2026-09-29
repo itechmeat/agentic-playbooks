@@ -81,6 +81,37 @@ fn prep_try<T, E: Into<EngineError>>(
     r.map_err(|e| finalize_prepare_failure(log, e.into()))
 }
 
+/// What a run that fails before its `run_started` event still records, so
+/// it is not an orphan: the journal names the playbook and version, and the
+/// directory carries this installation's origin stamp. Without them `apb
+/// stats` and `apb decisions report` skip the run as one that did not come
+/// from this machine, and a run that never got past its start disappears
+/// from the failure counts.
+struct Unstarted<'a> {
+    run_dir: &'a Path,
+    run_id: &'a str,
+    playbook: &'a str,
+    version: &'a str,
+}
+
+/// [`prep_try`] for the steps before `run_started`: on a failure it first
+/// appends `run_started` and stamps the directory (both best-effort; the
+/// stamp covers whatever manifest was written), then finalizes as usual.
+fn prep_try_unstarted<T, E: Into<EngineError>>(
+    log: &mut EventLog,
+    u: &Unstarted<'_>,
+    r: Result<T, E>,
+) -> Result<T, EngineError> {
+    r.map_err(|e| {
+        let _ = log.append(EventPayload::RunStarted {
+            playbook: u.playbook.into(),
+            version: u.version.into(),
+        });
+        let _ = apb_core::run_origin::stamp(u.run_dir, u.run_id);
+        finalize_prepare_failure(log, e.into())
+    })
+}
+
 pub(crate) fn soul_delivery_str(d: SoulDelivery) -> String {
     match d {
         SoulDelivery::Native => "native".to_string(),
@@ -469,6 +500,17 @@ pub(crate) fn prepare_run_target(
     // The global config is needed to resolve profile invocations (agents, program).
     // A broken config is a start-up error, not a silent default.
     let global = GlobalConfig::load().map_err(EngineError::Invalid)?;
+    // Host execution mode (0.23.0): resolved once, before anything is
+    // written, so a refusal leaves no run behind. The manifest keeps it.
+    let execution =
+        apb_core::execution::resolve_for(root, &opts.execution).map_err(EngineError::Invalid)?;
+    if execution.mode == apb_core::execution::ExecutionMode::Host
+        && opts.mode.expects_supervisor_agent()
+    {
+        return Err(EngineError::Invalid(
+            "host execution mode spawns no agent CLI, so it cannot start a background supervisor agent: supervise the run from the host session (supervise: self) instead".into(),
+        ));
+    }
 
     // Run-level overrides (spec 11): produce an "effective playbook" = version +
     // overrides. All the code afterward works only with it. Empty overrides
@@ -572,6 +614,14 @@ pub(crate) fn prepare_run_target(
         crate::run_lineage::validate_continued_from(root, pred, id)?;
     }
     let (run_id, run_dir, mut log) = allocate_run(root, id)?;
+    let run_dir_owned = run_dir.clone();
+    let run_id_owned = run_id.clone();
+    let unstarted = Unstarted {
+        run_dir: &run_dir_owned,
+        run_id: &run_id_owned,
+        playbook: id,
+        version: &loaded.version,
+    };
     // Every run path (CLI, MCP, dashboard, detached driver, child runs) comes
     // through here, and nothing but the event log is in the run yet: make sure
     // `.apb/.gitignore` covers the run directory before any node output or
@@ -581,14 +631,19 @@ pub(crate) fn prepare_run_target(
     // (preserving formatting/comments); with overrides we serialize the
     // effective playbook, so the snapshot honestly reflects what actually ran.
     let snapshot_yaml = if has_overrides {
-        prep_try(
+        prep_try_unstarted(
             &mut log,
+            &unstarted,
             serde_yaml_ng::to_string(&playbook).map_err(|e| EngineError::Yaml(e.to_string())),
         )?
     } else {
         loaded.yaml.clone()
     };
-    prep_try(&mut log, snapshot_playbook(&run_dir, &snapshot_yaml))?;
+    prep_try_unstarted(
+        &mut log,
+        &unstarted,
+        snapshot_playbook(&run_dir, &snapshot_yaml),
+    )?;
     // Scripts live in the definition's version directory (<def_parent>/playbooks/<id>/<version>/scripts),
     // not in the run snapshot - we copy them into run_dir, otherwise script nodes would not find
     // their files. The source is definition_parent (for a global playbook this is the
@@ -598,24 +653,46 @@ pub(crate) fn prepare_run_target(
         .join("playbooks")
         .join(id)
         .join(&loaded.version);
-    prep_try(&mut log, copy_scripts(&version_dir, &run_dir))?;
+    prep_try_unstarted(&mut log, &unstarted, copy_scripts(&version_dir, &run_dir))?;
     // The copy is what script nodes execute, so verify THE COPY against the
     // digest checked above (and against the caller's permit through it): a
     // script swapped between loading the definition and copying it must not
     // run under an approval that never covered it.
     let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
         .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
-    let copied = prep_try(&mut log, copied)?;
-    if copied != digest {
-        return prep_try(
+    let copied = prep_try_unstarted(&mut log, &unstarted, copied)?;
+    // Pinned only for a playbook with goal `script` criteria, the one
+    // reader of the pin, so every other run's `run_provenance` stays as it
+    // was in 0.22.
+    let has_goal_scripts = playbook.goal.as_ref().is_some_and(|g| {
+        g.criteria
+            .iter()
+            .any(|c| matches!(c.check, apb_core::schema::GoalCheck::Script { .. }))
+    });
+    let scripts_digest = if has_goal_scripts {
+        Some(prep_try_unstarted(
             &mut log,
+            &unstarted,
+            super::goal::scripts_digest(&run_dir),
+        )?)
+    } else {
+        None
+    };
+    if copied != digest {
+        return prep_try_unstarted(
+            &mut log,
+            &unstarted,
             Err(EngineError::Invalid(format!(
                 "playbook `{id}` changed since it was checked (scripts digest mismatch)"
             ))),
         );
     }
     // The run's webhook hook secrets (for wait nodes, spec 6.7).
-    prep_try(&mut log, crate::hooks::generate_hooks(&run_dir, &playbook))?;
+    prep_try_unstarted(
+        &mut log,
+        &unstarted,
+        crate::hooks::generate_hooks(&run_dir, &playbook),
+    )?;
 
     // Run input precedence (spec A): an explicitly passed instruction wins;
     // otherwise the playbook's autosaved draft, read at start time; otherwise
@@ -629,9 +706,8 @@ pub(crate) fn prepare_run_target(
     // `?`; the old `.ok().flatten()` swallowed both cases alike.
     let instruction = match opts.instruction.clone() {
         Some(i) => Some(i),
-        None => {
-            prep_try(&mut log, reg.read_instruction_draft(id))?.filter(|s| !s.trim().is_empty())
-        }
+        None => prep_try_unstarted(&mut log, &unstarted, reg.read_instruction_draft(id))?
+            .filter(|s| !s.trim().is_empty()),
     };
 
     let cfg = RunConfig {
@@ -662,7 +738,7 @@ pub(crate) fn prepare_run_target(
             .workdir_queue_wait
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
     };
-    prep_try(&mut log, write_run_config(&run_dir, &cfg))?;
+    prep_try_unstarted(&mut log, &unstarted, write_run_config(&run_dir, &cfg))?;
 
     // Resolve profiles into the run snapshot + the immutable manifest (spec 3.6).
     // The executor path (no profiles) does not write a manifest. `origin` was already
@@ -670,8 +746,9 @@ pub(crate) fn prepare_run_target(
     // gated sub-playbook child with a missing/drifted connector permit, or a
     // profile bundle mismatch, is refused (issue #42 finding 3b) - the run
     // directory and its journal already exist at this point, hence `prep_try`.
-    let mut manifest = prep_try(
+    let mut manifest = prep_try_unstarted(
         &mut log,
+        &unstarted,
         build_run_manifest(
             &playbook,
             root,
@@ -701,13 +778,24 @@ pub(crate) fn prepare_run_target(
     if !manifest.profiles.is_empty() {
         manifest.decisions = crate::decision::snapshot(root);
     }
+    // Host execution mode (0.23.0): absent for cli, so a CLI run's manifest
+    // stays byte-identical.
+    manifest.execution = crate::manifest::ManifestExecution::from_resolved(&execution);
     if !manifest.is_empty() {
-        prep_try(&mut log, crate::manifest::write(&run_dir, &manifest))?;
+        prep_try_unstarted(
+            &mut log,
+            &unstarted,
+            crate::manifest::write(&run_dir, &manifest),
+        )?;
     }
     // Mark the directory as created by this installation (after the
     // write-once manifest, which the stamp covers), so a resume can tell it
     // from a run directory that arrived with the repository.
-    prep_try(&mut log, apb_core::run_origin::stamp(&run_dir, &run_id))?;
+    prep_try_unstarted(
+        &mut log,
+        &unstarted,
+        apb_core::run_origin::stamp(&run_dir, &run_id),
+    )?;
 
     log.append(EventPayload::RunStarted {
         playbook: id.into(),
@@ -720,6 +808,7 @@ pub(crate) fn prepare_run_target(
         origin: Some(t.origin_label.into()),
         digest: Some(digest),
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
+        scripts_digest,
         profiles: profiles_prov,
     })?;
     // Right after provenance, so a reader of the journal alone can tell an

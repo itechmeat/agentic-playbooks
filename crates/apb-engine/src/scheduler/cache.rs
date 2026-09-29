@@ -320,7 +320,15 @@ pub(crate) fn agent_key_parts(
         .flatten()?;
     let primary = entry.chain.first()?;
     let bundle = entry.bundle_digest.clone();
-    let agent = primary.agent_id.clone();
+    // Host execution mode (0.23.0): the host, not the profile's CLI, produces
+    // the output, so a host run keys under `host` and never shares an entry
+    // with a CLI run of the same node (either way round). A CLI run's key is
+    // unchanged, so existing cache entries stay valid.
+    let agent = if manifest.is_host_mode().ok()? {
+        "host".to_string()
+    } else {
+        primary.agent_id.clone()
+    };
     let model = primary.model.clone();
     let mut digests: Vec<String> = manifest
         .grants_for(node_id)
@@ -768,6 +776,14 @@ pub(crate) fn settle(
                     node: node_id.to_string(),
                     reason: "judge output is a fallback, not a provider answer".into(),
                 });
+            } else if ctx.is_some() && ran_as_host_fallback(run_dir, node_id) {
+                // A `cli` run's key names the CLI agent; an output the host
+                // produced through the execution fallback is not that agent's
+                // and must not serve a later CLI run.
+                events.push(EventPayload::NodeCacheRejected {
+                    node: node_id.to_string(),
+                    reason: "output came from the host fallback, not the CLI agent".into(),
+                });
             } else if let Some(ctx) = ctx {
                 // Scan the run log for this node's connector calls (written out
                 // of band by the connector-call subprocess) and verify each
@@ -797,6 +813,26 @@ pub(crate) fn settle(
             (Vec::new(), events)
         }
     }
+}
+
+/// Whether this node's latest execution handed a step to the host through
+/// the execution fallback (0.23.0): an `execution_fallback` since its most
+/// recent `node_started`. An unreadable log counts as yes (fail closed: no
+/// store).
+fn ran_as_host_fallback(run_dir: &Path, node_id: &str) -> bool {
+    let Ok(events) = crate::event::read_all(run_dir) else {
+        return true;
+    };
+    let from = events
+        .iter()
+        .rposition(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
+        )
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    events[from..].iter().any(
+        |e| matches!(&e.payload, EventPayload::ExecutionFallback { node, .. } if node == node_id),
+    )
 }
 
 /// Captures a node's declared output artifacts after a successful execution.

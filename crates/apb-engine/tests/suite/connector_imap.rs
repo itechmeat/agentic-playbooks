@@ -173,7 +173,13 @@ fn serve(stream: &mut TcpStream, rec: &Arc<Mutex<Recorded>>, script: &Script) {
     let mut reader = BufReader::new(&*stream);
     let _ = w.write_all(b"* OK apb-test ready\r\n");
     if script.stall {
-        std::thread::sleep(Duration::from_secs(5));
+        // Answer nothing and keep the connection open until the client gives
+        // up and closes it. A fixed sleep closed the socket first on a
+        // loaded host, with the client's command unread, and the client saw
+        // a reset instead of its own timeout.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        let mut sink = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut sink);
         return;
     }
     loop {

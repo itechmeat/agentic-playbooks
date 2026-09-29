@@ -52,11 +52,13 @@ already reported, and a plugin can inject unrelated context.
 
 With `minimal`, a claude or claude-code executor is launched with:
 
-- `--settings <run>/agent-settings/<node>.json`: an apb-owned settings file with no
-  hooks, no plugins and no auto-enabled project MCP servers;
-- `--setting-sources project,local`: the user's settings, `CLAUDE.md`, skills and
-  agents stay out, while the project's own `CLAUDE.md` and `.claude/skills` still
-  load;
+- `--settings <run>/agent-settings/<node>.json`: an apb-owned settings file with an
+  empty `hooks` object, no plugins and no auto-enabled project MCP servers (the
+  empty `hooks` does not remove the project's own hooks: those still run, see
+  GUARDRAILS.md "Host agent settings");
+- `--setting-sources project,local`: the user's settings (and their hooks),
+  `CLAUDE.md`, skills and agents stay out, while the project's own `CLAUDE.md`,
+  `.claude/skills` and `.claude/settings.json` hooks still load;
 - `--strict-mcp-config`: only the MCP servers apb passes itself (the `ask_user`
   server of a live interactive node);
 - `--add-dir <run>/agent-skills/bundle-<digest>` when the profile declares
@@ -99,6 +101,32 @@ not anyone chose it, so it cannot mean the opt-in, and `hermetic: true` is what
 the default does anyway. Rewrites drop it. On the write surfaces (`--hermetic`,
 the MCP and HTTP `hermetic` field) it is a deprecated alias: `true` means
 `minimal`, `false` means `full`.
+
+## Host execution mode: what a profile still means
+
+A run started with `execution: host` (see `docs/HOST-INTEGRATION.md`) spawns
+no agent CLI: the host session executes every agent step with its own
+subagents. Nothing in a profile has to change for it, but part of the
+profile no longer applies:
+
+- ignored: `executor.agent`, `executor.model` (the host picks its own model),
+  the `agent` of each fallback, `command` and every invocation setting of the
+  agent (`transport`, `ui_sync`, `zcode_mode`), `environment: minimal` (a
+  claude-only mechanism), and session continuation (`continue_session` starts
+  cold with reason `host_mode`);
+- turned into hints: the `model` of each fallback entry and of a routed tier
+  becomes the host task's `model_hint` (the profile's own model gives none);
+  the host may honor it or not;
+- still in force: the role prompt (`SOUL.md`, handed over as `role_prompt`),
+  the skills (their snapshot copies are materialized as for a CLI step and
+  their paths handed over), and on the node `timeout_seconds` (the task's
+  deadline), `expected_duration`, `outputs`, `success_check`,
+  `require_verdict`, `completion_check` and `protect` (a protected file a host
+  subagent changed is restored and fails the attempt, as for a CLI step).
+
+Profile trust is checked exactly as for a CLI run: host mode changes who
+executes, not what is allowed. `apb doctor` and `playbook_adopt_report` judge
+the profile CLIs as usual and say that a host-mode run ignores them.
 
 ## Executor tiers (optional)
 

@@ -164,6 +164,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/hooks/{run_id}/{secret}",
             post(routes::runs::post_hook_handler),
         )
+        // --- 0.23.0 stats (C3) ---
+        .route("/api/stats", get(routes::stats::get_stats_handler))
+        // --- end of 0.23.0 stats ---
         .route("/api/ws", get(ws::ws_handler))
         .fallback(assets::static_handler)
         // The gate wraps everything, including the static fallback, so that

@@ -338,7 +338,8 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
 /// ([`apb_core::model_check`]): a model zcode's allowlist or the config's
 /// `model_policy` refuses is an error (`zcode_model_not_allowed`,
 /// `model_policy_violation`); one outside apb's list for its agent, or one the
-/// installed agent does not list, is a warning. Returns whether no profile had
+/// installed agent does not list, is a warning; an agent with no invocation
+/// form is an error (`agent_no_invocation`). Returns whether no profile had
 /// an error. An unreadable profile is left to the run-time resolver, which
 /// reports it with its own error.
 fn validate_profile_models(root: &Path, names: &[String]) -> bool {
@@ -357,12 +358,30 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
         return true;
     }
     let cx = model_check::ModelContext::load();
+    // An agent with no invocation form (neither built in nor defined under
+    // `agents:`) makes every run of the profile fail at start, in cli and in
+    // host mode alike (the run snapshots the whole executor chain before it
+    // knows which steps become host tasks), so it is an error here as it is
+    // in `profile_write`. A broken global config is reported by the run
+    // itself; it is not a finding about the profile.
+    let global = apb_core::config::GlobalConfig::load().ok();
     let mut ok = true;
     for (name, doc) in &docs {
         // The executor, its fallbacks and every tier (issue #165 Part 12).
         for problem in doc.tiers.problems() {
             println!("profile {name}: error profile_tiers_invalid {problem}");
             ok = false;
+        }
+        if let Some(global) = &global {
+            let mut seen = std::collections::BTreeSet::new();
+            for (agent, _) in doc.executor_pairs() {
+                if seen.insert(agent) && apb_engine::invocation::spec_for(agent, global).is_err() {
+                    println!(
+                        "profile {name}: error agent_no_invocation agent `{agent}` has no invocation form (define `agents.{agent}.invocation` in the global config); every run of this profile fails at start"
+                    );
+                    ok = false;
+                }
+            }
         }
         for (agent, model) in doc.executor_pairs() {
             let Some(issue) = model_check::check(agent, model, &cx) else {
@@ -407,9 +426,29 @@ pub(crate) fn run_cmd(
     refresh_cache: bool,
     continued_from: Option<String>,
     worktree: Option<String>,
+    execution: Option<&str>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
+        return ExitCode::from(2);
+    }
+    // Host execution mode (0.23.0): a CLI start never gets the host
+    // fallback (nothing here serves tasks unless the caller asked for host).
+    let execution_mode = match execution {
+        None => None,
+        Some(v) => match apb_core::execution::ExecutionMode::parse(v) {
+            Some(m) => Some(m),
+            None => {
+                eprintln!("bad --execution `{v}` (expected cli or host)");
+                return ExitCode::from(2);
+            }
+        },
+    };
+    let host = execution_mode == Some(apb_core::execution::ExecutionMode::Host);
+    if supervise && host {
+        eprintln!(
+            "--execution host spawns no agent CLI, so it cannot start a background supervisor agent (--supervise)"
+        );
         return ExitCode::from(2);
     }
     // clap's `conflicts_with` already refuses `--no-cache --refresh-cache`
@@ -497,6 +536,10 @@ pub(crate) fn run_cmd(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution: apb_core::execution::ExecutionRequest {
+            mode: execution_mode,
+            ..Default::default()
+        },
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };
@@ -504,10 +547,24 @@ pub(crate) fn run_cmd(
         eprintln!("run failed: {msg}");
         return ExitCode::from(2);
     }
+    let resolved = apb_core::execution::resolve_for(root, &opts.execution);
+    // What the resolution ignored (APB_EXECUTION=cli over --execution host,
+    // a project that tried to set the mode) is said, never silent.
+    if let Ok(r) = &resolved {
+        for note in &r.notes {
+            eprintln!("note: {note}");
+        }
+    }
+    let host = host && resolved.is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
             Ok(run_id) => {
                 println!("run started: {run_id}");
+                if host {
+                    println!(
+                        "host execution mode: its agent steps wait as host tasks; `apb tasks {run_id}` lists them"
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -516,10 +573,59 @@ pub(crate) fn run_cmd(
             }
         };
     }
+    if host {
+        return run_host_foreground(root, name, version, opts);
+    }
     match run(root, name, version, opts) {
         Ok(res) => {
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
             match res.outcome {
+                RunStatus::Succeeded => ExitCode::SUCCESS,
+                _ => ExitCode::from(1),
+            }
+        }
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// A foreground host-mode run (0.23.0): drives the run on a thread of this
+/// process, names every host task as it appears (it waits for `apb tasks
+/// submit`), and returns with the run's outcome.
+fn run_host_foreground(
+    root: &Path,
+    name: &str,
+    version: Option<&str>,
+    opts: RunOptions,
+) -> ExitCode {
+    let run_id = match apb_engine::run_background(root, name, version, opts) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    println!("run started: {run_id} (host execution mode)");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let announcer = {
+        let (root, run_id, stop) = (root.to_path_buf(), run_id.clone(), stop.clone());
+        std::thread::spawn(move || crate::tasks::announce_tasks(root, run_id, stop))
+    };
+    let outcome = loop {
+        match apb_engine::run_wait::wait_run(root, &run_id, std::time::Duration::from_secs(3600)) {
+            Ok(r) if r.reason == apb_engine::run_wait::WaitReason::Finished => break Ok(r.status),
+            Ok(_) => continue,
+            Err(e) => break Err(e),
+        }
+    };
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = announcer.join();
+    match outcome {
+        Ok(status) => {
+            println!("run {run_id} finished: {}", status.as_str());
+            match status {
                 RunStatus::Succeeded => ExitCode::SUCCESS,
                 _ => ExitCode::from(1),
             }
@@ -842,6 +948,35 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if let Some(d) = view.decisions() {
         println!("  decisions: {}", d.line());
     }
+    // --- 0.23.0: run outcome blocks (C1, C7) ---
+    if let Some(goal) = view.goal(&run_dir) {
+        println!(
+            "  goal: {} ({})",
+            sanitize_for_terminal(&goal.statement, QUESTION_TEXT_MAX),
+            goal.line()
+        );
+        for c in &goal.criteria {
+            let detail = c
+                .detail
+                .as_deref()
+                .map(|d| format!(": {d}"))
+                .unwrap_or_default();
+            println!(
+                "    [{}] {} ({}){}",
+                c.status,
+                sanitize_for_terminal(&c.description, QUESTION_TEXT_MAX),
+                c.check,
+                sanitize_for_terminal(&detail, QUESTION_TEXT_MAX)
+            );
+        }
+    }
+    for line in apb_engine::run_outcome::commit_lines(&view.commits()) {
+        println!(
+            "  commit {}",
+            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+        );
+    }
+    // --- end of the 0.23.0 blocks ---
     if !view.unknown.is_empty() {
         println!("  {}", unknown_events_note(view.unknown.len()));
     }
@@ -861,6 +996,11 @@ fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
         "{} input, {} output, {} cache read, {} cache write tokens over {} {attempts}",
         u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens, u.attempts
     );
+    // The totals cover only the attempts that reported usage; say how many
+    // of the run's attempts that is when some did not.
+    if u.finished_attempts > u.attempts {
+        line.push_str(&format!(" (of {} finished)", u.finished_attempts));
+    }
     if u.estimated {
         line.push_str(" (partly estimated by apb)");
     }
@@ -901,6 +1041,31 @@ pub(crate) fn resume_cmd(
         .ok()
         .flatten()
         .is_some();
+    // Host execution mode (0.23.0): this process cannot serve the run's host
+    // tasks, so a host-mode run resumes in a detached driver and the command
+    // says where its tasks wait instead of blocking on the first of them.
+    let host_run = is_safe_segment(run_id)
+        && apb_engine::manifest::run_execution_mode(&root.join(".apb/runs").join(run_id))
+            .is_ok_and(|m| m == apb_core::execution::ExecutionMode::Host);
+    if host_run {
+        return match apb_engine::resume_detached_with(
+            root,
+            run_id,
+            from_node,
+            allow_environment_drift,
+        ) {
+            Ok(_) => {
+                println!(
+                    "resumed {run_id} in the background (host execution mode): `apb tasks {run_id}` lists what waits for a host"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("resume failed: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match resume_with(root, run_id, from_node, allow_environment_drift) {
         Ok(res) => {
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());
@@ -968,7 +1133,12 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
                 Some(NeedsInput::Review) => format!(
                     "a human review is pending: `apb review {run_id} <node> --decision <option>`"
                 ),
-                _ => "a supervisor decision is pending".to_string(),
+                Some(NeedsInput::HostTask) => format!(
+                    "host tasks wait for a host to execute them: `apb tasks {run_id}` lists them, `apb tasks submit {run_id} <task> --status succeeded --output-file <reply>` answers one"
+                ),
+                Some(NeedsInput::Supervisor) | None => {
+                    "a supervisor decision is pending".to_string()
+                }
             };
             println!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
             print_decisions();

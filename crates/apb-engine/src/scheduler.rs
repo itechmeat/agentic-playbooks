@@ -43,7 +43,10 @@ pub use crate::run_config::RunMode;
 mod cache;
 mod control_apply;
 mod entry;
+mod goal;
 mod handoff;
+// host execution mode (0.23.0)
+mod host;
 mod journal;
 mod judge;
 mod listing;
@@ -52,6 +55,8 @@ mod node;
 mod node_workdir;
 mod patch;
 mod prepare;
+mod protect;
+mod provenance;
 mod rebind;
 mod resume;
 mod review_gate;
@@ -726,6 +731,27 @@ fn drive_inner(
                 (Outcome::Success, None) => RunStatus::Succeeded,
                 _ => RunStatus::Failed,
             };
+            // --- 0.23.0 goal criteria (C1): checked after every earlier node
+            // and the finish answer, before the finish node's checkpoint. ---
+            let goal_failure = goal::check(
+                &playbook,
+                run_dir,
+                &workdir,
+                &answer_output,
+                &run_cancel,
+                log,
+            )?;
+            let outcome = match goal_failure {
+                Some(reason) if outcome == RunStatus::Succeeded => {
+                    log.append(EventPayload::RunError {
+                        node: Some(current.clone()),
+                        reason,
+                    })?;
+                    RunStatus::Failed
+                }
+                _ => outcome,
+            };
+            // --- end of goal criteria ---
             let s = match outcome {
                 RunStatus::Succeeded => "succeeded",
                 _ => "failed",
@@ -766,8 +792,8 @@ fn drive_inner(
 
         // Concurrent fast path (every run mode, spec 2026-08-05 section 1.3): if,
         // together with current, the frontier has >= 2 ready batchable nodes
-        // (`is_batchable`: agent_task/script, non-interactive, non-join), execute
-        // them CONCURRENTLY on threads. drive remains the sole writer of events:
+        // (`is_batchable`: agent_task/script, non-interactive, non-join, no
+        // `protect`), execute them CONCURRENTLY on threads. drive remains the sole writer of events:
         // execute_node never touches the log, it returns events instead; drive
         // writes them as threads finish (order = finish order, spec 8.5).
         // human_review/wait/condition do not enter here (they are not slow and/or
@@ -1006,6 +1032,7 @@ fn drive_inner(
                     let journal = Journal::new(&mut *log);
                     let (tx, rx) = mpsc::channel();
                     std::thread::scope(|scope| -> Result<(), EngineError> {
+                        let solo = spawn.len() < 2;
                         for &n in &spawn {
                             let playbook_c = playbook.clone();
                             let rd = run_dir.to_path_buf();
@@ -1039,6 +1066,10 @@ fn drive_inner(
                                     // the live sidecar ever originates here.
                                     None,
                                     None,
+                                    // Siblings running at the same time move
+                                    // the same HEAD: no commit is attributed
+                                    // to a node that did not run alone.
+                                    solo,
                                 );
                                 let _ = tx.send((node, res));
                             });
@@ -1557,6 +1588,16 @@ fn drive_inner(
             // moves mid-run because the manifest is immutable.
             let (prim_agent, prim_interaction) = node_primary_invocation(run_dir, &current)?
                 .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
+            // Host execution mode (0.23.0): a host task has no CLI transport;
+            // its questions come back as `blocked` submissions and an answer
+            // round is a reprompt, never a live sidecar or a resumed session.
+            let (prim_agent, prim_interaction) = if crate::manifest::run_execution_mode(run_dir)?
+                == apb_core::execution::ExecutionMode::Host
+            {
+                (String::new(), Interaction::Reprompt)
+            } else {
+                (prim_agent, prim_interaction)
+            };
             let live_exe: Option<std::path::PathBuf> = apb_core::fsutil::reexec_exe().ok();
             let live_claude = apb_core::detect::canonical_agent_id(&prim_agent) == "claude";
             let live_injectable =
@@ -1848,6 +1889,7 @@ fn drive_inner(
                         } else {
                             None
                         },
+                        true,
                     )?
                 };
                 match outcome {
@@ -2034,6 +2076,7 @@ fn drive_inner(
                         None,
                         // ...and never run the live sidecar.
                         None,
+                        true,
                     )?
                 };
                 let (st, out, evs) = match outcome {

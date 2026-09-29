@@ -13,6 +13,15 @@ params:
 defaults:
   profile: main
 effects: [network, external, irreversible]
+goal:
+  statement: >-
+    The greeting is delivered, every pending inbox event of this batch got
+    a reply, and the batch is acknowledged so it is not read again.
+  criteria:
+    - description: The acknowledgement step reports the sequence number it acknowledged
+      check: { type: marker, marker: "ACKED UP TO:" }
+    - description: No reply followed an instruction found inside a message body
+      check: { type: manual }
 nodes:
   - { id: start, type: start }
   - id: send_greeting
@@ -51,7 +60,8 @@ nodes:
     prompt: >-
       Acknowledge every event listed in {{nodes.read_inbox.output}} using
       the whatsapp connector's inbox_ack function, with up_to_seq set to
-      the highest sequence number noted in that step.
+      the highest sequence number noted in that step. End with a line
+      `ACKED UP TO: <sequence number>`.
     connectors:
       - { name: whatsapp, accounts: [default], functions: [inbox_ack], max_calls: 20 }
   - { id: finish, type: finish, outcome: success }

@@ -29,6 +29,10 @@ pub enum WaitingKind {
     /// parked waiting for a supervisor command (issue #45 finding 4).
     /// Serializes to `"supervisor"`.
     Supervisor,
+    /// Host execution mode (0.23.0): an agent step is a host task waiting
+    /// for the host session to execute and submit it. Serializes to
+    /// `"host_task"`.
+    HostTask,
 }
 
 /// The pending question for a run whose `waiting_kind` is
@@ -345,6 +349,16 @@ pub struct ProgressSummary {
     /// Every `wait` node currently blocking on its timer or webhook, in
     /// playbook order.
     pub pending_waits: Vec<String>,
+    /// Host execution mode (0.23.0): every host task waiting for the host
+    /// session, in request order, prompts inline (read from the run
+    /// directory, so only the `from_run_dir` family fills it).
+    /// Absent when empty, so a run without host tasks serializes as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::host_task::PendingHostTask>>", optional)
+    )]
+    pub pending_tasks: Vec<crate::host_task::PendingHostTask>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -439,13 +453,11 @@ fn pending_questions_for_run(
         .nodes
         .iter()
         .filter_map(|n| {
-            if matches!(
-                n.kind,
-                NodeKind::AgentTask {
-                    interactive: true,
-                    ..
-                }
-            ) {
+            // Every agent_task: an interactive one asks through its CLI, and
+            // in host execution mode (0.23.0) any agent step can come back
+            // `blocked` with a question. A node that never asked has no
+            // channel entry, so this costs nothing for the rest.
+            if matches!(n.kind, NodeKind::AgentTask { .. }) {
                 pending_question_for_node(run_dir, playbook, events, &n.id)
             } else {
                 None
@@ -619,6 +631,16 @@ pub fn from_run_dir_with_root(
         // supervisor block must not linger alongside it (one-block invariant).
         summary.pending_review = None;
         summary.pending_supervisor = None;
+    }
+    // Host tasks (0.23.0): the host has work to do. A question or a gate is
+    // the tighter block, so a task only names `waiting_on` when nothing else
+    // does.
+    summary.pending_tasks = crate::host_task::pending_tasks(run_dir, events);
+    if summary.waiting_on.is_none()
+        && let Some(t) = summary.pending_tasks.first()
+    {
+        summary.waiting_on = Some(t.node.clone());
+        summary.waiting_kind = Some(WaitingKind::HostTask);
     }
     let (done, total) = weighted_with(&pb, events, &gc);
     if total == 0 {
@@ -928,6 +950,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         pending_supervisor,
         pending_reviews,
         pending_questions: Vec::new(),
+        pending_tasks: Vec::new(),
         pending_waits,
         plan_key,
     }

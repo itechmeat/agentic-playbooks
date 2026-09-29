@@ -277,3 +277,9 @@ export const deleteSuggestion = (pattern: string, workspace = '', scope = 'proje
   )
 
 // Connectors (design doc section 9). The server wire shape is snake_case; the
+
+// --- 0.23.0 stats (C3) ---
+// Cross-run metrics of one playbook's runs in a project (`apb stats --json`).
+export const fetchStats = (playbook: string, workspace = '', since = '') =>
+  getJson<import('../api.gen').StatsReport>(`/api/stats${qs({ workspace, playbook, since })}`)
+// --- end of 0.23.0 stats ---

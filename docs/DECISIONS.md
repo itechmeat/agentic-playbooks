@@ -384,7 +384,9 @@ pooled with a decision model. With no matching decision the report prints
 | Use | Label |
 |---|---|
 | `completion_check` | acting was right when, before the node starts again, a supervisor retried it, the run was moved back to it or to a node that ran before it (`run_continue_from`, a patch or migration `continue_from`), or the next node to start after it failed; wrong when the next node succeeded, or the node was the last and the run succeeded. Unlabelled when another attempt of the same visit followed (its outcome is not this attempt's), when above shadow the check's own anomaly wake came first (the outcome may be the decision's doing), and otherwise until the run shows an outcome |
-| other uses | not labelled yet: their decisions journal the join keys (`decision_made.join`: attempt, `gate_visit`, `wake_seq`, tier), and each use gets its labeller in a later release |
+| `review_triage` | acting (deciding on the recommendation) was right when the person chose the recommended option at the same gate visit (`gate_visit`, the decision's `attempt`), wrong when they chose another. Unlabelled while the visit is undecided or was withdrawn, and when the model decided the gate itself (an `auto:` note). A recommendation the reviewer was shown (advise or enforce) is labelled, but reported on its own line, "shown to the reviewer", and kept out of every figure: agreement with advice one has seen is a biased label. Only shadow decisions measure the model |
+| `retry_advice` | acting (switching executor or stopping) was right when the next attempt of the node on the same agent and model failed too, wrong when it succeeded. Unlabelled when no further attempt followed, when the next attempt ran on another executor (a fallback), and when an enforced advice changed what ran next |
+| other uses | not labelled yet: their decisions journal the join keys (`decision_made.join`: `wake_seq`, tier), and each use gets its labeller in a later release |
 
 Unlabelled decisions stay out of every accuracy figure and are listed with the
 reason.
@@ -588,7 +590,12 @@ Two backends:
 `judge_node` use is above off), then the profile. The profile backend runs
 whatever the use's mode, `APB_DECISIONS=off` included, because it is the
 playbook's own declared executor; its answer is replayed on resume like any
-decision.
+decision. A host-mode run (`execution: host`) never spawns an agent CLI, so
+there the profile backend is unavailable: after the `llm_emulation` providers
+give no answer, the node fails with the reason "host execution mode spawns no
+agent CLI" and follows its failure edges, like an emulation that gave no
+answer. It is not turned into a host task: a judge answer is a decision, not
+an agent step.
 
 ## Judge edge (`judge_edge`)
 
@@ -728,8 +735,19 @@ the review auto-decision, which is fail-closed.
 
 The review auto-decision is refused by the validator (V73) on a playbook that
 declares `irreversible` or `secrets` effects, or whose nodes after the gate
-include a merge, push, deploy or publish step (by id, title or script path),
-unless the gate sets `auto_decide_ok: true`. The inferred `external` effect
+include a step that ships something out of reach of a later correction,
+unless the gate sets `auto_decide_ok: true`. A node after the gate counts as
+such a step when it declares node-level `effects: [irreversible]` (or
+`secrets`), when it is granted a connector function its manifest flags
+`irreversible: true`, or, as the fallback, when its id, title or script path
+names a merge, push, deploy or publish. A node granted connector functions
+that are merely not `read_only` gets a V73 warning naming them, not a
+refusal. A node after the gate bound to a connector whose installed manifest
+no longer loads gets a V73 warning (its effects are unknown), and at run time
+such a connector, or one bound but not installed, refuses the automatic
+decision with `enforce_refused: effects` (a `read_only` grant does not). The
+run reads the installed connectors live, not the run's frozen grant. The
+inferred `external` effect
 does not count (every playbook with an agent has it). The run re-checks the
 same rule with the declared effects of every sub-playbook it runs, at any
 depth and in any scope (resolved as the run gate resolves them), and refuses

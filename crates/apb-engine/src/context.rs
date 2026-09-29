@@ -669,6 +669,12 @@ fn resolve(
         ["params", name] => params.get(*name).cloned().unwrap_or_default(),
         ["run", "instruction"] => instruction.unwrap_or("").to_string(),
         ["run", "context"] => context.to_string(),
+        // The run id (C7): the run directory's name.
+        ["run", "id"] => clip_outputs
+            .run_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         ["run", "hooks", key] => hooks.get(*key).cloned().unwrap_or_default(),
         ["nodes", id, "output"] | ["nodes", id, "report"] => {
             clipped(id, outputs.get(*id).cloned().unwrap_or_default())

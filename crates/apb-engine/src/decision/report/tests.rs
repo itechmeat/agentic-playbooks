@@ -584,3 +584,92 @@ fn a_linked_runs_directory_is_not_read() {
     assert_eq!(candidate_run_dirs(&[other.path().to_path_buf()]).len(), 1);
     assert!(candidate_run_dirs(&[linked.path().to_path_buf()]).is_empty());
 }
+
+/// A review recommendation labelled by the gate visit's decision (C9); the
+/// one shown to the reviewer (advise) is reported apart and kept out of the
+/// figures.
+#[test]
+fn review_triage_labels_count_advise_shown_decisions_apart() {
+    let review = |id: &str, mode: &str, decided: &str| {
+        let decision = ev(
+            2,
+            EventPayload::DecisionMade {
+                enforce_refused: None,
+                join: BTreeMap::new(),
+                use_site: "review_triage".into(),
+                node: Some("g".into()),
+                attempt: Some(1),
+                provider: Some("main".into()),
+                model: Some("jev-1.13.0".into()),
+                calibrated: true,
+                mode: mode.into(),
+                questions_digest: "sha256:q".into(),
+                state_digest: "sha256:s".into(),
+                state_bytes: 10,
+                output_chars: None,
+                answers: BTreeMap::from([(
+                    "decision".to_string(),
+                    DecisionAnswer {
+                        value: Some(serde_json::json!("needs_changes")),
+                        p: Some(0.9),
+                        confidence: Some(0.95),
+                        invalid: None,
+                    },
+                )]),
+                applied: false,
+                would_change: None,
+                baseline: None,
+                latency_ms: 100,
+                input_tokens: None,
+                cost_usd: Some(0.0001),
+                cost_estimated: false,
+                cached: false,
+                error: None,
+            },
+        );
+        RunJournal {
+            run_id: id.into(),
+            playbook: "pb".into(),
+            events: vec![
+                decision,
+                ev(
+                    3,
+                    serde_json::from_value(serde_json::json!({
+                        "type": "review_requested", "node": "g", "options": ["approve", "needs_changes"]
+                    }))
+                    .unwrap(),
+                ),
+                ev(
+                    4,
+                    EventPayload::ReviewDecided {
+                        node: "g".into(),
+                        decision: decided.into(),
+                        note: String::new(),
+                    },
+                ),
+            ],
+            provider_kinds: BTreeMap::new(),
+        }
+    };
+    let journals = vec![
+        review("r1", "shadow", "needs_changes"),
+        review("r2", "shadow", "approve"),
+        review("r3", "advise", "needs_changes"),
+    ];
+    let r = build(
+        &journals,
+        &ReportFilter::default(),
+        &ReportSettings::default(),
+    );
+    let g = one_group(&r);
+    assert_eq!(g.use_site, "review_triage");
+    assert_eq!((g.labelled, g.act_labels, g.keep_labels), (2, 1, 1));
+    let shown = g.shown_to_reviewer.as_ref().unwrap();
+    assert_eq!((shown.labelled, shown.agreed), (1, 1));
+    assert!(!g.eligibility.iter().any(|w| w.contains("no labeller")));
+    assert!(
+        render_text(&r).contains(
+            "shown to the reviewer (advise, kept out of the figures): 1 labelled, 1 agreed"
+        )
+    );
+}

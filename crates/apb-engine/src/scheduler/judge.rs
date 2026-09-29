@@ -7,8 +7,8 @@
 //! `on_unavailable`: `route` and `default` succeed with an output naming the
 //! reason, `fail` fails like any node, and `emulate` asks the configured
 //! `llm_emulation` providers and then the node's profile (an APB agent run
-//! once on the primary executor, at most one retry), failing the node when
-//! that fails too.
+//! once on the primary executor, at most one retry, never in a host-mode
+//! run, which spawns no agent CLI), failing the node when that fails too.
 //!
 //! Judge edges are asked once when their source node succeeds, all edges of
 //! that node in one request, journaled before routing; edge selection then
@@ -173,7 +173,18 @@ pub(crate) fn execute(
             ));
         }
     }
-    // 2b. The node's profile.
+    // 2b. The node's profile. A host-mode run spawns no agent CLI, so the
+    // profile emulation is unavailable there: the node fails like an
+    // emulation that gave no answer (docs/DECISIONS.md).
+    if crate::manifest::run_execution_mode(run_dir)? == apb_core::execution::ExecutionMode::Host {
+        return Ok(finished(
+            NodeStatus::Failed,
+            format!(
+                "judge node `{node_id}` has no usable answer ({reason}) and cannot emulate through its profile: host execution mode spawns no agent CLI"
+            ),
+            Vec::new(),
+        ));
+    }
     let fresh;
     let runner = match decisions {
         Some(r) => r,

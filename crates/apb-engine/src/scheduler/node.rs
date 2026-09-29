@@ -295,11 +295,17 @@ fn observe_control(
 /// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
 /// therefore does NOT bypass the gate.
 fn success_check_rejection(
+    protect_violation: Option<&str>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
     attempt_workdir: &Path,
     output: &str,
 ) -> Result<Option<String>, EngineError> {
+    // A protected file the attempt changed (C6) rejects the report before
+    // any check runs: the check would judge a tree the engine just restored.
+    if let Some(reason) = protect_violation {
+        return Ok(Some(reason.to_string()));
+    }
     match check {
         // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
         // report regardless of the agent's self-assessment. Run in the SAME
@@ -609,8 +615,75 @@ fn journal_missing_inputs(
     )
 }
 
+// --- 0.23.0 run provenance (C7) ----------------------------------------------
+
+/// Executes one node: [`execute_node_kind`] plus the provenance record of a
+/// git tree's `HEAD` around it (see [`super::provenance`]). A suspended node
+/// (an interactive question) records nothing yet; it keeps the `HEAD` it
+/// started from, and its answer round records the whole span.
+/// `track_provenance` is false for a member of a concurrent batch that
+/// shares the tree with a sibling: `HEAD` moves by both, so no commit could
+/// be attributed to one node.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
+    playbook: &Playbook,
+    run_dir: &Path,
+    workdir: &Path,
+    node_id: &str,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    override_prompt: Option<String>,
+    cancel: &AtomicBool,
+    env_scrub: &[String],
+    journal: &Journal,
+    decisions: Option<&crate::decision::DecisionRunner>,
+    resume: Option<ResumeContext>,
+    live: Option<LiveContext>,
+    track_provenance: bool,
+) -> Result<AttemptOutcome, EngineError> {
+    let tracker = track_provenance
+        .then(|| {
+            super::provenance::Tracker::start(playbook, run_dir, node_id, workdir, |t| {
+                render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    t,
+                    &playbook.context_budget(node_id),
+                )
+            })
+        })
+        .flatten();
+    let outcome = execute_node_kind(
+        playbook,
+        run_dir,
+        workdir,
+        node_id,
+        run_id,
+        state,
+        cfg,
+        override_prompt,
+        cancel,
+        env_scrub,
+        journal,
+        decisions,
+        resume,
+        live,
+    )?;
+    match (tracker, &outcome) {
+        (Some(t), AttemptOutcome::Finished { .. }) => t.finish(run_dir, journal)?,
+        (Some(t), AttemptOutcome::Suspended { .. }) => t.park(run_dir),
+        (None, _) => {}
+    }
+    Ok(outcome)
+}
+
+// --- end of run provenance ----------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn execute_node_kind(
     playbook: &Playbook,
     run_dir: &Path,
     workdir: &Path,
@@ -800,6 +873,13 @@ pub(crate) fn execute_node(
                 model: String,
                 soul_delivery: Option<String>,
                 invocation: Option<crate::invocation::ResolvedInvocation>,
+                // Host execution mode (0.23.0): the step is a host task, with
+                // the model its chain entry asks for as a hint; `fallback_host`
+                // marks the step appended to a `cli` chain for the host
+                // fallback, taken only when no CLI of the chain could start.
+                host: bool,
+                model_hint: Option<String>,
+                fallback_host: bool,
             }
 
             // A node's executor is always a profile (schema 2). We take the
@@ -835,17 +915,51 @@ pub(crate) fn execute_node(
                     "no manifest entry for node `{node_id}` (no profile bound)"
                 ))
             })?;
+            // Host execution mode (0.23.0): every chain step is a host task,
+            // or, for a `cli` run an MCP host session started, one host step
+            // follows the chain for when none of its CLIs can start.
+            let host_mode = manifest.is_host_mode()?;
+            let host_fallback = !host_mode && manifest.falls_back_to_host();
 
-            let steps: Vec<Step> = entry
+            let mut steps: Vec<Step> = entry
                 .chain
                 .iter()
-                .map(|ri| Step {
-                    agent: ri.agent_id.clone(),
+                .enumerate()
+                .map(|(i, ri)| Step {
+                    agent: if host_mode {
+                        super::host::HOST_AGENT.to_string()
+                    } else {
+                        ri.agent_id.clone()
+                    },
                     model: ri.model.clone(),
                     soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
-                    invocation: Some(ri.clone()),
+                    invocation: (!host_mode).then(|| ri.clone()),
+                    host: host_mode,
+                    // The profile's own executor gives no hint; routed tiers
+                    // and fallback entries hint their model.
+                    model_hint: (host_mode && i != entry.cascade as usize)
+                        .then(|| ri.model.clone()),
+                    fallback_host: false,
                 })
                 .collect();
+            if host_fallback && let Some(primary) = entry.chain.get(entry.cascade as usize) {
+                steps.push(Step {
+                    agent: super::host::HOST_AGENT.to_string(),
+                    model: primary.model.clone(),
+                    soul_delivery: None,
+                    invocation: None,
+                    host: true,
+                    model_hint: None,
+                    fallback_host: true,
+                });
+            }
+            // Whether every CLI attempt of this execution so far failed
+            // before any model turn (binary missing, not logged in): the
+            // condition of the host fallback. `last_start_failure` is the
+            // reason it records.
+            let mut all_unstartable = true;
+            let mut cli_attempted = false;
+            let mut last_start_failure = String::new();
             let soul_text = Some(entry.soul.clone());
             let skill_names: Vec<String> = entry.skills.iter().map(|s| s.name.clone()).collect();
             let profile_key = Some(entry.key());
@@ -916,10 +1030,21 @@ pub(crate) fn execute_node(
             // re-invocation. Non-interactive nodes receive neither. The marker
             // scan stays active on a live node too, so a live agent that ignores
             // the tool and prints the marker still parks (no regression).
-            if first_turn && live.is_some() {
-                text = format!("{text}\n\n{}", crate::adapter::LIVE_PROMPT_PARAGRAPH);
+            // The CLI paragraph appended, so the host fallback step can swap
+            // it for the host one (a host step has neither channel).
+            let mut cli_question_paragraph: Option<String> = None;
+            if first_turn && host_mode && *interactive {
+                // Host execution mode (0.23.0): a host subagent has neither
+                // the `ask_user` tool nor the stdout marker; its host submits
+                // the question as a `blocked` task.
+                text = format!("{text}\n\n{}", super::host::HOST_QUESTION_PARAGRAPH);
+            } else if first_turn && live.is_some() {
+                cli_question_paragraph = Some(crate::adapter::LIVE_PROMPT_PARAGRAPH.to_string());
             } else if first_turn && *interactive {
-                text = format!("{text}\n\n{}", marker_contract());
+                cli_question_paragraph = Some(marker_contract());
+            }
+            if let Some(p) = &cli_question_paragraph {
+                text = format!("{text}\n\n{p}");
             }
 
             // Status-file contract (subtask S2): a node with a success_check may
@@ -974,14 +1099,20 @@ pub(crate) fn execute_node(
             // session, so it is never a handoff.
             let mut handoff_warm = false;
             if let (Some(source), None) = (continue_session, &resume) {
-                let decision = super::handoff::decide(
-                    journaled.as_deref().unwrap_or(&[]),
-                    source,
-                    &steps[0].agent,
-                    &steps[0].model,
-                    &node_dir,
-                    isolated,
-                );
+                // Host execution mode (0.23.0): a host subagent has no
+                // session apb can see or continue, so the step starts cold.
+                let decision = if host_mode {
+                    super::handoff::Handoff::Cold(super::host::HOST_MODE_REASON.to_string())
+                } else {
+                    super::handoff::decide(
+                        journaled.as_deref().unwrap_or(&[]),
+                        source,
+                        &steps[0].agent,
+                        &steps[0].model,
+                        &node_dir,
+                        isolated,
+                    )
+                };
                 let (warm, reason) = match decision {
                     super::handoff::Handoff::Warm { id, workdir } => {
                         sessions.insert(
@@ -1069,7 +1200,20 @@ pub(crate) fn execute_node(
             // an ordinary attempt walks the whole fallback chain.
             let step_count = if resume.is_some() { 1 } else { steps.len() };
             for (idx, step) in steps.iter().enumerate().take(step_count) {
-                if idx > 0 {
+                // Host fallback (0.23.0): taken only when every CLI attempt of
+                // this execution failed before any model turn. It is not a
+                // chain fallback, so it journals `execution_fallback` instead
+                // of `fallback_triggered`.
+                if step.fallback_host {
+                    if !(cli_attempted && all_unstartable) {
+                        continue;
+                    }
+                    journal.append(EventPayload::ExecutionFallback {
+                        node: node_id.to_string(),
+                        attempt: attempt + 1,
+                        reason: last_start_failure.clone(),
+                    })?;
+                } else if idx > 0 {
                     let same_binding = last_tried
                         .as_ref()
                         .is_some_and(|(agent, model)| *agent == step.agent && *model == step.model);
@@ -1138,27 +1282,29 @@ pub(crate) fn execute_node(
                 // whose working directory already holds them. Other agents have
                 // no such mechanism and run as configured. The file content is
                 // fixed, so writing it once per step is enough.
-                let hermetic_settings: Option<crate::adapter::HermeticEnv> =
-                    if entry.hermetic && crate::adapter::agent_supports_hermetic(&step.agent) {
-                        let skills_dir = if !isolated && !entry.skills.is_empty() {
-                            // One copy per profile bundle per run, at a path
-                            // every node of the profile shares, so the
-                            // agent's system portion stays byte-identical
-                            // across them and a provider prompt cache hits
-                            // (issue #67 item 7). Checked against the
-                            // snapshot digests before each step and laid
-                            // down again when it drifted.
-                            Some(super::skills_copy::shared_skills_dir(run_dir, &entry)?)
-                        } else {
-                            None
-                        };
-                        Some(crate::adapter::HermeticEnv {
-                            settings: crate::adapter::write_hermetic_settings(run_dir, node_id)?,
-                            skills_dir,
-                        })
+                let hermetic_settings: Option<crate::adapter::HermeticEnv> = if !step.host
+                    && entry.hermetic
+                    && crate::adapter::agent_supports_hermetic(&step.agent)
+                {
+                    let skills_dir = if !isolated && !entry.skills.is_empty() {
+                        // One copy per profile bundle per run, at a path
+                        // every node of the profile shares, so the
+                        // agent's system portion stays byte-identical
+                        // across them and a provider prompt cache hits
+                        // (issue #67 item 7). Checked against the
+                        // snapshot digests before each step and laid
+                        // down again when it drifted.
+                        Some(super::skills_copy::shared_skills_dir(run_dir, &entry)?)
                     } else {
                         None
                     };
+                    Some(crate::adapter::HermeticEnv {
+                        settings: crate::adapter::write_hermetic_settings(run_dir, node_id)?,
+                        skills_dir,
+                    })
+                } else {
+                    None
+                };
                 // The node's own retry budget is walked by `try_i`; an
                 // INFRASTRUCTURE retry (spec 2026-08-05 section 2.3) does not
                 // advance it, which is why this is a while loop and not
@@ -1198,7 +1344,8 @@ pub(crate) fn execute_node(
                     let handoff_round = handoff_warm && attempt == 1;
                     let continued: Option<(String, Option<PathBuf>)> = match &base_spec {
                         Some((_, program))
-                            if (attempt > 1 || answer_round || handoff_round)
+                            if !step.host
+                                && (attempt > 1 || answer_round || handoff_round)
                                 && crate::invocation::resume_argv(&step.agent).is_some() =>
                         {
                             resolve_session(&mut sessions, &binding, program)
@@ -1248,45 +1395,86 @@ pub(crate) fn execute_node(
                     // continued session, else the base form plus whatever makes
                     // the new session findable later (`FreshSession`).
                     let mut fresh: Option<crate::invocation::FreshSession> = None;
-                    let adapter: Box<dyn crate::adapter::AgentAdapter> = match &base_spec {
-                        Some((base, program)) => {
-                            let spec = match &continued {
-                                Some((sid, _)) => {
-                                    crate::invocation::resume_spec(base, &step.agent, sid)
-                                        .expect("a continued session implies a resume form")
-                                }
-                                None => {
-                                    let f = crate::invocation::fresh_session(
-                                        &step.agent,
-                                        &format!("apb {run_id} {node_id} {attempt}"),
-                                    );
-                                    let mut spec = base.clone();
-                                    match &f {
-                                        crate::invocation::FreshSession::Assigned {
-                                            args, ..
-                                        }
-                                        | crate::invocation::FreshSession::Titled {
-                                            args, ..
-                                        } => spec.argv.extend(args.iter().cloned()),
-                                        crate::invocation::FreshSession::Printed => {}
-                                    }
-                                    fresh = Some(f);
-                                    spec
-                                }
-                            };
-                            Box::new(crate::adapter::ClaudeAdapter {
-                                program: program.to_string_lossy().into_owned(),
-                                spec,
+                    // Host execution mode (0.23.0): the skill paths a host
+                    // task hands over, materialized from the run snapshot
+                    // like a CLI step's (the attempt's own copy for an
+                    // isolated node, the shared per-bundle copy otherwise).
+                    let host_skills: Vec<String> = if !step.host || entry.skills.is_empty() {
+                        Vec::new()
+                    } else {
+                        let base = if isolated {
+                            attempt_workdir.clone()
+                        } else {
+                            super::skills_copy::shared_skills_dir(run_dir, &entry)?
+                        };
+                        entry
+                            .skills
+                            .iter()
+                            .map(|sk| {
+                                base.join(".agents/skills")
+                                    .join(&sk.name)
+                                    .to_string_lossy()
+                                    .into_owned()
                             })
-                        }
-                        None => adapter_for(&step.agent)?,
+                            .collect()
                     };
-                    // Desktop-history sync (`agents.zcode.ui_sync`).
-                    let adapter = crate::zcode_ui_sync::wrap_step(
-                        adapter,
-                        &step.agent,
-                        base_spec.as_ref().map(|(spec, _)| spec),
-                    );
+                    let adapter: Box<dyn crate::adapter::AgentAdapter + '_> = if step.host {
+                        Box::new(super::host::HostAdapter {
+                            run_dir,
+                            journal,
+                            attempt,
+                            skills: host_skills,
+                            outputs: node
+                                .outputs
+                                .as_ref()
+                                .and_then(|o| serde_json::to_value(o).ok()),
+                            model_hint: step.model_hint.clone(),
+                            question_timeout: *question_timeout_seconds,
+                            default_answer: default_answer.clone(),
+                        })
+                    } else {
+                        let adapter: Box<dyn crate::adapter::AgentAdapter> = match &base_spec {
+                            Some((base, program)) => {
+                                let spec = match &continued {
+                                    Some((sid, _)) => {
+                                        crate::invocation::resume_spec(base, &step.agent, sid)
+                                            .expect("a continued session implies a resume form")
+                                    }
+                                    None => {
+                                        let f = crate::invocation::fresh_session(
+                                            &step.agent,
+                                            &format!("apb {run_id} {node_id} {attempt}"),
+                                        );
+                                        let mut spec = base.clone();
+                                        match &f {
+                                            crate::invocation::FreshSession::Assigned {
+                                                args,
+                                                ..
+                                            }
+                                            | crate::invocation::FreshSession::Titled {
+                                                args,
+                                                ..
+                                            } => spec.argv.extend(args.iter().cloned()),
+                                            crate::invocation::FreshSession::Printed => {}
+                                        }
+                                        fresh = Some(f);
+                                        spec
+                                    }
+                                };
+                                Box::new(crate::adapter::ClaudeAdapter {
+                                    program: program.to_string_lossy().into_owned(),
+                                    spec,
+                                })
+                            }
+                            None => adapter_for(&step.agent)?,
+                        };
+                        // Desktop-history sync (`agents.zcode.ui_sync`).
+                        crate::zcode_ui_sync::wrap_step(
+                            adapter,
+                            &step.agent,
+                            base_spec.as_ref().map(|(spec, _)| spec),
+                        )
+                    };
                     // Where to stream the attempt's NDJSON events (acp transport); one
                     // file per attempt. The headless field ignores it.
                     let stream_log = run_dir
@@ -1319,6 +1507,18 @@ pub(crate) fn execute_node(
                     // cut off mid-work. Appended here rather than inside
                     // `render_node_prompt`, so the recovery note (fixed text) does
                     // not shift the node's cache key.
+                    // The host fallback step of a `cli` run asks its
+                    // question the host way (a `blocked` submission), never
+                    // through the CLI's tool or stdout marker.
+                    let step_text: std::borrow::Cow<'_, str> =
+                        match (&cli_question_paragraph, step.fallback_host) {
+                            (Some(p), true) => std::borrow::Cow::Owned(text.replacen(
+                                &format!("\n\n{p}"),
+                                &format!("\n\n{}", super::host::HOST_QUESTION_PARAGRAPH),
+                                1,
+                            )),
+                            _ => std::borrow::Cow::Borrowed(text.as_str()),
+                        };
                     let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
                         Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
                         // A handed-off session holds the earlier step, not
@@ -1346,10 +1546,10 @@ pub(crate) fn execute_node(
                             ))
                         }
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
-                            "{text}\n\n{}",
+                            "{step_text}\n\n{}",
                             super::status_file::INTERRUPTION_NOTE
                         )),
-                        None => std::borrow::Cow::Borrowed(text.as_str()),
+                        None => step_text,
                     };
                     timeout_continuation = false;
                     let task = AgentTask {
@@ -1549,6 +1749,15 @@ pub(crate) fn execute_node(
                         on_poll: &on_control_poll,
                         interrupt: &interrupt,
                     };
+                    // --- 0.23.0 protected paths (C6): the files as they were
+                    // before this attempt. ---
+                    let protect_snapshot = super::protect::Snapshot::take(
+                        run_dir,
+                        node_id,
+                        attempt,
+                        &node_dir,
+                        node.kind.protect_globs(),
+                    )?;
                     let mut outcome = adapter.run_cancellable(
                         &task,
                         cancel,
@@ -1569,6 +1778,32 @@ pub(crate) fn execute_node(
                     if let Some(e) = control_err.borrow_mut().take() {
                         return Err(e);
                     }
+                    // Host fallback (0.23.0): whether this CLI attempt failed
+                    // before any model turn - the process never started (a
+                    // missing binary) or the agent is not logged in. An
+                    // auth-looking message after a model turn (reported
+                    // usage, a real reply) is the agent's own failure: the
+                    // step never re-runs as a host task then.
+                    let unstartable = !step.host
+                        && match &outcome {
+                            Err(f) => {
+                                spawn_at.get().is_none()
+                                    || (!f.model_turn
+                                        && crate::failure_class::classify(&f.message)
+                                            == FailureKind::Auth)
+                            }
+                            Ok(_) => false,
+                        };
+                    if !step.host {
+                        cli_attempted = true;
+                        if unstartable {
+                            if let Err(f) = &outcome {
+                                last_start_failure = f.message.clone();
+                            }
+                        } else {
+                            all_unstartable = false;
+                        }
+                    }
                     // The agent process is gone; everything below until the
                     // `attempt_finished` (status file, session lookup,
                     // success_check) is the drive finishing the attempt. Say
@@ -1580,6 +1815,35 @@ pub(crate) fn execute_node(
                             attempt,
                         })?;
                     }
+                    // --- 0.23.0 protected paths (C6): undo and name any change
+                    // to a protected file before anything else reads the tree. ---
+                    let protect_violation = match protect_snapshot {
+                        Some(snapshot) => snapshot.check_and_restore(journal)?,
+                        None => None,
+                    };
+                    // A tampered snapshot copy fails the node at once: a retry
+                    // would start from a tree the engine could not restore.
+                    if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
+                        let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
+                        journal.append(EventPayload::AttemptFinished {
+                            node: node_id.into(),
+                            attempt,
+                            status: "failed".into(),
+                            duration_ms,
+                            session: None,
+                            summary: None,
+                            rejected_output: outcome.as_ref().ok().map(|r| r.output.clone()),
+                            partial_output: None,
+                            failure_kind: None,
+                            usage: None,
+                        })?;
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: v.reason.clone(),
+                            events,
+                        });
+                    }
+                    let protect_violation = protect_violation.map(|v| v.reason);
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
                     // fix): the adapter tore the agent down on the abort flag.
                     // Fail this attempt with the node-named message, journaling
@@ -1805,6 +2069,7 @@ pub(crate) fn execute_node(
                                 // branch was not cancelled) - we do not propagate
                                 // cancellation here.
                                 let rejection = success_check_rejection(
+                                    protect_violation.as_deref(),
                                     node.success_check.as_ref(),
                                     run_dir,
                                     &attempt_workdir,
@@ -1926,6 +2191,7 @@ pub(crate) fn execute_node(
                             class,
                             message: msg,
                             usage: failed_usage,
+                            ..
                         }) => {
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
@@ -2028,6 +2294,7 @@ pub(crate) fn execute_node(
                                     // consumes a retry with the discarded text
                                     // preserved (S3 behavior).
                                     match success_check_rejection(
+                                        protect_violation.as_deref(),
                                         node.success_check.as_ref(),
                                         run_dir,
                                         &attempt_workdir,
@@ -2182,7 +2449,12 @@ pub(crate) fn execute_node(
                             // A resume that found no session never reached the
                             // model: drop the session and start fresh, once per
                             // step, without spending a retry (issue #136 item 2).
-                            if session_lost && !lost_session_retried {
+                            if host_fallback && unstartable {
+                                // A CLI that cannot start does not start on a
+                                // retry either: go to the next chain step, and
+                                // after the last one to the host fallback.
+                                break;
+                            } else if session_lost && !lost_session_retried {
                                 sessions.remove(&binding);
                                 lost_session_retried = true;
                                 infra_retry = true;
@@ -2368,7 +2640,15 @@ pub(crate) fn execute_node(
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
-            let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
+            let r = crate::script::run_script_with_env(
+                run_dir,
+                workdir,
+                script,
+                runner,
+                timeout,
+                Some(cancel),
+                &crate::script::run_env(run_dir, Some(node_id)),
+            )?;
             // A killed script's captured stdout is whatever it happened to
             // print before the signal landed (often nothing at all), not the
             // stable "cancelled" text the agent_task cancel paths already
@@ -2503,6 +2783,7 @@ pub(crate) fn execute_finish_answer(
             "finish node `{node_id}` has an empty executor chain"
         )));
     }
+    let host_mode = manifest.is_host_mode()?;
 
     // The drive's run-level cancel flag (Task 8), the same one the inline
     // agent_task path gets: a stop posted while this finish-answer agent is
@@ -2555,12 +2836,33 @@ pub(crate) fn execute_finish_answer(
             });
         }
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
-        let adapter = crate::adapter::ClaudeAdapter {
+        let cli_adapter = crate::adapter::ClaudeAdapter {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };
         for try_i in 0..=retries {
             attempt += 1;
+            // Host execution mode (0.23.0): the closing answer is a host task
+            // too; the report contract stays off (see `report_contract`).
+            let host_adapter = host_mode.then(|| super::host::HostAdapter {
+                run_dir,
+                journal,
+                attempt,
+                skills: Vec::new(),
+                outputs: None,
+                model_hint: (idx > 0).then(|| ri.model.clone()),
+                question_timeout: None,
+                default_answer: None,
+            });
+            let adapter: &dyn crate::adapter::AgentAdapter = match &host_adapter {
+                Some(h) => h,
+                None => &cli_adapter,
+            };
+            let agent_label = if host_mode {
+                super::host::HOST_AGENT.to_string()
+            } else {
+                ri.agent_id.clone()
+            };
             if try_i > 0 {
                 events.push(EventPayload::RetryStarted {
                     node: node_id.into(),
@@ -2602,7 +2904,7 @@ pub(crate) fn execute_finish_answer(
             // crash during the terminal answer composition leaves an open attempt
             // the fold maps to interrupted.
             let cur_attempt = attempt;
-            let agent_name = ri.agent_id.clone();
+            let agent_name = agent_label.clone();
             let soul_del = Some(soul_delivery_str(ri.soul_delivery));
             let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
             let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
@@ -2638,7 +2940,7 @@ pub(crate) fn execute_finish_answer(
                 journal.append(EventPayload::AttemptStarted {
                     node: node_id.into(),
                     attempt,
-                    agent: ri.agent_id.clone(),
+                    agent: agent_label.clone(),
                     soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
                     skills_mode: None,
                     pid: None,
@@ -2675,6 +2977,7 @@ pub(crate) fn execute_finish_answer(
                     class,
                     message: msg,
                     usage: failed_usage,
+                    ..
                 }) => {
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {
@@ -2965,6 +3268,9 @@ pub(crate) fn run_playbook_node(
     // A child works in its parent's tree (issue #67 item 8): it runs under the
     // parent's lock, so it must not wander back into the execution root.
     opts.worktree = RunState::fold(&events).worktree;
+    // Host execution mode (0.23.0): a sub-playbook inherits its parent's mode
+    // and host, so its agent steps are host tasks of the same session.
+    opts.execution = super::host::child_execution_request(run_dir)?;
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -3088,9 +3394,16 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
 /// by this narrowing: `defaults.on_failure: <node>` pushes its handler with no
 /// readiness check at all, and the sequential arm would execute a not-ready
 /// implicit join there too.
+///
+/// A node with `protect` (C6) is never batchable: its check compares the
+/// whole tree before and after the attempt, so a concurrent sibling's write
+/// under its globs would be undone and blamed on it.
 pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
     is_agent_or_script(playbook, node)
         && !is_interactive(playbook, node)
+        && playbook
+            .node(node)
+            .is_none_or(|n| n.kind.protect_globs().is_empty())
         && !matches!(
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))
@@ -3118,6 +3431,12 @@ pub(crate) fn maybe_compact_context(
         return Ok(None);
     };
     if max_bytes == 0 || build_context(events).len() <= max_bytes {
+        return Ok(None);
+    }
+    // Host execution mode (0.23.0): compaction would spawn a CLI, which a
+    // host-mode run never does. It is an optimization, so the run keeps the
+    // full context instead.
+    if crate::manifest::run_execution_mode(run_dir)? == apb_core::execution::ExecutionMode::Host {
         return Ok(None);
     }
     // We keep the tail at roughly half the limit and compact the rest.

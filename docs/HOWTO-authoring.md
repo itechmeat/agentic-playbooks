@@ -140,6 +140,59 @@ attempt and exposed to downstream templates as
 `{{nodes.<id>.rejected_output}}`, so a fix or review node can read exactly what
 the rejected attempt claimed.
 
+### Protected paths (protect)
+
+`protect` on an `agent_task` lists globs of files the attempt must not
+change, relative to the node's working directory (the run's working tree, or
+the node's own `workdir`):
+
+```yaml
+- id: fix
+  type: agent_task
+  prompt: "Make the failing test pass without touching the tests"
+  protect: ["tests/**", "docs/spec/*.md"]
+```
+
+Before every attempt the engine copies the matching files into the run
+directory; after the attempt's process has ended it lists the matches again.
+A file that was modified, deleted or added under a protected glob fails the
+attempt with `protected path modified: <path>`: a normal retry that keeps the
+report as `rejected_output`, exactly like a failed success check. The engine
+restores the protected files from its copy (an added one is removed) before
+anything else runs, so the retry and every later node start from the files
+as they were, without needing a separate worktree. One
+`protected_paths_modified` event names each changed path and how it changed.
+
+The check works for every agent because it runs after the attempt, not inside
+the agent: it cannot stop a write, only reject and undo it. On a git tree,
+paths git ignores are never protected, so build output under a protected
+directory does not count; what git ignored when the attempt started stays
+unprotected and untouched even if the attempt edits `.gitignore`, so a local
+file is never removed as "added". `.git` and `.apb` are never covered, and
+neither is a path below a symlinked directory.
+
+The restore is careful about what it writes through. A symlink the attempt
+put in place of a protected directory is removed (the link, never its target)
+and the directory is recreated; nothing is written or removed through it. A
+file is restored by writing the copy beside it and renaming it over the
+path, so a hardlink the attempt made to a file elsewhere never changes that
+file, and a crash leaves either the old file or the whole copy. Every copy is
+checked against the digest taken with it: a copy that changed in the
+meantime (the copies live under the run directory, which the agent can
+reach) is never written back, and the node fails at once with
+`protected path snapshot was tampered with: <path>` instead of retrying.
+A path that could not be restored is listed in the event's `restore_failed`;
+the copies are then kept, and the event's `kept_copies` and the failure
+message name where.
+
+A node with `protect` never runs in a concurrent batch: the check compares
+the whole tree before and after the attempt, so a sibling's legitimate write
+under the node's globs would otherwise be undone and blamed on it. Its
+siblings run before or after it. A glob that is
+absolute, climbs out with `..`, or does not parse is validator error **V75**;
+a glob that matches no file in the project is warning **V76** (from
+`apb validate` and `apb doctor`), because it protects nothing.
+
 ### Completion check (decision models)
 
 When the machine's `decisions.yaml` turns the `completion_check` use on, each
@@ -174,12 +227,50 @@ without a `decisions.yaml` that enables the use (validator V74 notes them).
 - `auto_decide: { allow: [needs_changes], min_confidence: 0.9 }` on a
   `human_review` (V72, V73): let a confident recommendation of
   `needs_changes` decide the gate. Never `approve`. Refused on a playbook that
-  declares `irreversible` or `secrets` effects or runs a merge, push, deploy
-  or publish step after the gate, unless the gate sets `auto_decide_ok: true`.
+  declares `irreversible` or `secrets` effects, or when a node after the gate
+  declares them itself, is granted a connector function flagged
+  `irreversible: true`, or is named like a merge, push, deploy or publish
+  step, unless the gate sets `auto_decide_ok: true` (see "effects").
 - `defaults.retry_advice: enforce`: let retry advice skip doomed
   same-executor retries.
 - `supervisor: { pre_triage: enforce }`: let wake pre-triage post a retry
   itself (at most three per run by default).
+
+### Run provenance
+
+Every agent_task and script process runs with three environment variables:
+`APB_RUN_ID` (the run's id), `APB_RUN_DIR` (its `.apb/runs/<id>` directory)
+and `APB_NODE_ID` (the node's id). A prompt can read the id as `{{run.id}}`.
+
+On a git working tree the engine reads `HEAD` before an agent_task or script
+node runs and again when it finishes. When `HEAD` moved, the node's commits
+(newest first, at most 50 listed) are journaled as one `artifacts_committed`
+event and shown by `run_report`, `run_status`, `apb runs <id>` and the
+dashboard run page. Outside git, or on a repository without a commit, nothing
+is recorded.
+
+Only commits added on top of where the node started are recorded: when
+`HEAD` ends on another branch than it started on, or moved anywhere but
+forward (a checkout, a reset, a rebase), the node gets no record, since the
+difference would list someone else's history. An interactive node that
+commits and then asks a question keeps the `HEAD` it started from, so its
+record after the answer covers both rounds. Nodes that run at the same time
+in a concurrent batch share one `HEAD`, so a node gets a record only when it
+ran alone; commits made in a parallel fan-out are linked to the run by the
+`Apb-Run:` trailer below, not by `artifacts_committed`.
+
+That links a run to its commits. For the other direction, from a commit to
+its run, write the run id as a commit trailer:
+
+```
+Fix the date parser
+
+Apb-Run: <run id>
+```
+
+In a prompt: "commit with the trailer `Apb-Run: {{run.id}}`". From a script:
+`git commit -m "..." -m "Apb-Run: $APB_RUN_ID"`. `git log --grep "Apb-Run: <id>"`
+then finds every commit of a run.
 
 ### Status file (APB_STATUS_FILE)
 
@@ -531,6 +622,11 @@ a V13 validation error:
   discarded on the node's last rejected attempt (see Success checks). Empty when
   the node was never rejected; a later rejection overwrites an earlier one.
 - `run.instruction` - the run's input prompt (see below).
+- `run.id` - the run's id, the name of its `.apb/runs/<id>` directory. Every
+  agent_task and script process also gets it as `APB_RUN_ID`, next to
+  `APB_RUN_DIR` and `APB_NODE_ID` (see "Run provenance" below). A prompt that
+  reads it renders differently on every run, so such a node never hits the
+  node cache.
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
   Bounded by the node's context budget (see "Context budget" below).
@@ -1390,6 +1486,52 @@ run_report. A finish without a prompt stays instant and free with no answer.
 Do not set a profile without a prompt (validator V21). Estimate
 expected_duration on a finish-with-prompt like any agent step.
 
+## Host execution mode (running without agent CLIs)
+
+A playbook needs nothing special to run in host execution mode (informally
+"mono-agent" mode): it is a per-run choice, not a playbook or profile field.
+Runs are `cli` by default: apb spawns the agent CLI each node's profile names.
+Pass `execution: "host"` on `playbook_run` (CLI: `apb run --execution host`)
+only when the person explicitly asks for it: mono, host or single-agent mode,
+or for the run to use your own subagents. Do not choose it yourself. The only
+other way a step runs as a host task is the automatic fallback below, when no
+CLI of the step can start. Nothing detects a host by name, there is no
+machine switch, and a project `.apb/config.yaml` can only turn the fallback
+off.
+
+In host mode apb spawns no agent CLI. Every agent step (and a finish answer)
+becomes a host task that `run_wait` returns in `pending_tasks`, each with the
+full `prompt` (the rendered node prompt, report contract included), the
+profile's `role_prompt`, the `skills` paths, the `workdir`, the `env` to set
+(`APB_RUN_DIR`, `APB_RUN_ID`, `APB_NODE_ID`, `APB_STATUS_FILE`), the `outputs` contract, a
+`deadline` from the node's `timeout_seconds`, and a `model_hint` for fallback
+entries and routed tiers. Run each with a subagent (independent tasks may run
+concurrently) and submit its final reply verbatim with `run_task_submit`
+(`succeeded`, `failed`, or `blocked` with the question for the user). The
+engine treats the reply like a finished CLI attempt: report block, status
+file, `success_check`, `require_verdict` (the submission counts as the verdict
+unless the subagent wrote the status file), the completion check, retries and
+fallbacks (each a new task), loops, gates and resume all work unchanged.
+Sub-playbooks inherit the mode; their tasks show up on the parent run.
+
+What host mode ignores in a profile: the executor's `agent`, `model` and the
+`agent` of each fallback (a fallback's `model` becomes the hint), the
+invocation `command`, `environment: minimal` (a claude-only mechanism) and
+`continue_session` (a host subagent has no session apb can continue; the node
+starts cold with `session_handoff.reason: host_mode`). The role prompt,
+skills, `timeout_seconds`, `expected_duration`, `outputs`, `success_check`,
+`require_verdict`, `completion_check`, `protect` and the goal criteria apply as
+always. Context compaction
+is skipped (it would spawn a CLI).
+
+Host fallback: a `cli` run you start in the background or under `supervise:
+self` can also hand you a single step as a host task when none of its CLIs can
+start at all (the binary is missing, or it is not logged in); the journal
+records `execution_fallback`. Ordinary agent failures never fall back. Turn it
+off with `execution: { fallback_to_host: false }` in the global config or the
+project `.apb/config.yaml`; `APB_EXECUTION=cli` turns off host mode and the
+fallback for a process.
+
 ## Sub-playbooks (the playbook node)
 
 A `playbook` node runs another playbook as a full child run:
@@ -1439,6 +1581,21 @@ the server infers from node types, never narrow it. Values: `fs_read`,
 `irreversible` for anything that cannot be rolled back (deploys, publishes,
 external notifications) so the policy layer requires explicit confirmation.
 
+A node can declare its own `effects` too, for example on the one step that
+merges or deploys:
+
+```yaml
+- id: release
+  type: agent_task
+  prompt: "Publish the release"
+  effects: [irreversible]
+```
+
+A node's declaration widens the playbook's effective effects the same way,
+and it is what V73 reads before the name of the node: an automatic review
+decision (`auto_decide`) is refused on a gate followed by a node that
+declares `irreversible` or `secrets`, whatever the node is called.
+
 ## goal (target and criteria)
 
 Optional. The goal this playbook exists to reach, in the owner's words, plus
@@ -1460,13 +1617,36 @@ validates its playbooks.
   recorded in the tracking sheet and sent for approval".
 - `criteria` (list): each `{ description, check? }`.
   - `check: { type: manual }` (default when omitted): a person confirms the
-    criterion.
-  - `check: { type: marker, marker: <string> }`: the marker string is
-    expected in the run result. Marker matching is not wired into run
-    verdicts yet; the field records the contract, same as `script` below.
-  - `check: { type: script, path: <relative path> }`: a check script
-    confirms the criterion. Script execution is not wired into run verdicts
-    yet; the field records the contract.
+    criterion. The engine never checks it; every run surface lists it as an
+    item to confirm.
+  - `check: { type: marker, marker: <string> }`: the literal string must
+    appear in the finish answer or in the latest output of any node.
+  - `check: { type: script, path: scripts/<file> }`: a script under the
+    version's `scripts/` (covered by the trust digest like every script) runs
+    with `sh` in the run's working tree, with `APB_RUN_ID` and `APB_RUN_DIR`
+    set; exit 0 passes. It may run for up to 10 minutes. It runs from the
+    run directory's copy of `scripts/`, and only while that copy still
+    matches the digest the run pinned at start: when an earlier node changed
+    it, every `script` criterion is `error` (so `enforce` fails the run)
+    instead of running an edited check.
+- `enforce` (bool, default `false`): a failed `script` or `marker` criterion
+  fails a run that would otherwise succeed, with a `run_error` naming the
+  criterion. Without it the results are only reported. V41 warns when
+  `enforce` is set and every criterion is manual, because nothing could fail.
+
+When the checks run: when the run reaches a finish node, after every node
+before it has run and after the finish answer is composed, just before the
+finish node's `node_finished`. Every criterion journals one `goal_checked`
+event (`index`, `description`, `check`, `status`: `passed`, `failed`,
+`manual` or `error` when the check could not run, and a `detail`). A run that
+ends before a finish node (a failure no route handles, a stop) checks
+nothing. Because the checks run after cleanup-style nodes (a node that
+deletes a scratch worktree or resets a branch), write criteria against
+persistent outcomes: a pushed branch, a file in the repository, a passing
+test suite, a published release, not scratch state a later node removes.
+
+`run_status`, `run_report`, `apb runs <id>` and the dashboard run page show
+the goal with each criterion's result (`pending` until the run is checked).
 
 The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may
@@ -1477,6 +1657,56 @@ change them.
 Never put secret values in a playbook or in a capture synopsis. Reference them
 by env or config key name, or a placeholder param. Concrete secret-looking
 values are rejected at capture and should never be committed to a definition.
+
+## Recurring review findings go into project memory
+
+A review node (an agent review, a judge, a `human_review` gate) that keeps
+flagging the same kind of problem is telling you the implementing agent lacks
+a rule. After a finding shows up for the second time across runs, write it
+down where every later agent reads it: the project's memory file
+(`CLAUDE.md`, `AGENTS.md`) or a skill the implementing profile loads. Keep
+the rule short and concrete (what to do, where, why), not the whole review.
+
+Make it a step of the playbook rather than a chore someone remembers: a
+`docs` agent_task after the review that reads `{{nodes.review.output}}`,
+compares the findings with the memory file and adds a rule only for a
+finding it has seen before (for example because the same rule was already
+proposed in an earlier run's review, or the file carries a "seen once" note
+the node maintains). Put the memory file under `protect` on the
+implementing node if that node must not edit its own rules, and gate the
+docs node with `human_review` when rules need an owner's approval. A rule
+in memory advises; if it must always hold, add a deterministic check behind
+it (a `success_check` script, a `goal` criterion, `protect`; see
+GUARDRAILS.md).
+
+## Linking runs, commits and tracker records
+
+When a playbook works on a tracked item (an issue, a ticket, a task), link
+both directions so either end leads to the other:
+
+- **The record id goes into the artifact.** Pass the tracker id as a param
+  (`{{params.issue}}`) and have the nodes put it where the work lands: the
+  branch name, the commit message, the pull request title or body, the
+  report file.
+- **The run id and the commits go into the record.** Every agent and script
+  node gets `APB_RUN_ID` in its environment (next to `APB_RUN_DIR` and
+  `APB_NODE_ID`), and a prompt can place the id itself with `{{run.id}}`.
+  End every commit a run makes with the trailer
+
+  ```text
+  Apb-Run: <run id>
+  ```
+
+  so `git log --grep 'Apb-Run: <run id>'` finds the run's commits and a
+  commit leads back to `.apb/runs/<run id>/`. On a git working tree apb
+  also records the commits each node made (HEAD before and after the node)
+  as an `artifacts_committed` event, and the run report lists them. A final
+  node that comments on the tracker record with the run id and those
+  commits closes the loop from the record side. "Run provenance" above
+  has the details.
+
+Keep the tracker write in one node near the end (after the gates), so a
+record is not updated for work that a later gate rejects.
 
 ## Language
 

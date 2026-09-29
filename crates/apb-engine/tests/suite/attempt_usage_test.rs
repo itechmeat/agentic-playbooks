@@ -163,6 +163,7 @@ fn a_claude_json_result_journals_its_usage_and_the_unwrapped_reply() {
             cost_usd: Some(0.0125),
             cost_attempts: 1,
             estimated: false,
+            finished_attempts: 1,
         })
     );
 }

@@ -158,97 +158,35 @@ fn setup(dir: &Path) -> std::path::PathBuf {
     root
 }
 
+/// Every example playbook that binds the repository connectors validates
+/// cleanly against them, in one project with one connector setup.
+/// `review-triage.yaml` binds none; the judge validator tests cover it.
 #[test]
-fn sentry_triage_demo_playbook_validates() {
+fn the_demo_playbooks_validate() {
     let dir = tempfile::tempdir().unwrap();
     let root = setup(dir.path());
-    register_playbook(
-        &root,
+    let ids = [
         "sentry-triage",
-        "1.0.0",
-        &repo_playbook_yaml("sentry-triage.yaml"),
-    );
-
-    let out = apb_ok(&root, &["validate", "sentry-triage"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("sentry-triage: OK"),
-        "sentry-triage should validate cleanly: {stdout}"
-    );
-}
-
-#[test]
-fn release_announce_demo_playbook_validates() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = setup(dir.path());
-    register_playbook(
-        &root,
         "release-announce",
-        "1.0.0",
-        &repo_playbook_yaml("release-announce.yaml"),
-    );
-
-    let out = apb_ok(&root, &["validate", "release-announce"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("release-announce: OK"),
-        "release-announce should validate cleanly: {stdout}"
-    );
-}
-
-#[test]
-fn release_heartbeat_demo_playbook_validates() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = setup(dir.path());
-    register_playbook(
-        &root,
         "release-heartbeat",
-        "1.0.0",
-        &repo_playbook_yaml("release-heartbeat.yaml"),
-    );
-
-    let out = apb_ok(&root, &["validate", "release-heartbeat"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("release-heartbeat: OK"),
-        "release-heartbeat should validate cleanly: {stdout}"
-    );
-}
-
-#[test]
-fn inbox_triage_demo_playbook_validates() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = setup(dir.path());
-    register_playbook(
-        &root,
         "inbox-triage",
-        "1.0.0",
-        &repo_playbook_yaml("inbox-triage.yaml"),
-    );
-
-    let out = apb_ok(&root, &["validate", "inbox-triage"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("inbox-triage: OK"),
-        "inbox-triage should validate cleanly: {stdout}"
-    );
-}
-
-#[test]
-fn whatsapp_inbox_demo_playbook_validates() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = setup(dir.path());
-    register_playbook(
-        &root,
         "whatsapp-inbox",
-        "1.0.0",
-        &repo_playbook_yaml("whatsapp-inbox.yaml"),
-    );
-
-    let out = apb_ok(&root, &["validate", "whatsapp-inbox"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("whatsapp-inbox: OK"),
-        "whatsapp-inbox should validate cleanly: {stdout}"
-    );
+        "ci-failure-triage",
+    ];
+    for id in ids {
+        register_playbook(
+            &root,
+            id,
+            "1.0.0",
+            &repo_playbook_yaml(&format!("{id}.yaml")),
+        );
+    }
+    for id in ids {
+        let out = apb_ok(&root, &["validate", id]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(&format!("{id}: OK")),
+            "{id} should validate cleanly: {stdout}"
+        );
+    }
 }

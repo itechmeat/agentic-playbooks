@@ -41,10 +41,16 @@ fn render_types() -> String {
     // numbers on the wire.
     let cfg = Config::new().with_large_int("number");
     let decls = [
+        // 0.23.0 run outcome blocks (C1, C7).
+        apb_engine::event::CommittedArtifact::decl(&cfg),
+        apb_engine::run_outcome::NodeCommits::decl(&cfg),
+        apb_engine::run_outcome::GoalCriterionResult::decl(&cfg),
+        apb_engine::run_outcome::RunGoal::decl(&cfg),
         apb_engine::state::RunStatus::decl(&cfg),
         apb_engine::state::NodeStatus::decl(&cfg),
         apb_engine::progress::WaitingKind::decl(&cfg),
         apb_engine::progress::PendingQuestion::decl(&cfg),
+        apb_engine::host_task::PendingHostTask::decl(&cfg),
         apb_engine::event::ReviewRecommendation::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
@@ -53,6 +59,18 @@ fn render_types() -> String {
         apb_engine::run_view::RunUsage::decl(&cfg),
         apb_engine::run_view::RunDecisions::decl(&cfg),
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
+        // --- 0.23.0 stats (C3) ---
+        apb_engine::run_stats::Rate::decl(&cfg),
+        apb_engine::run_stats::PerRun::decl(&cfg),
+        apb_engine::run_stats::Waits::decl(&cfg),
+        apb_engine::run_stats::Outcomes::decl(&cfg),
+        apb_engine::run_stats::Spend::decl(&cfg),
+        apb_engine::run_stats::GoalStats::decl(&cfg),
+        apb_engine::run_stats::NodeStats::decl(&cfg),
+        apb_engine::run_stats::VersionStats::decl(&cfg),
+        apb_engine::run_stats::Comparison::decl(&cfg),
+        apb_engine::run_stats::StatsReport::decl(&cfg),
+        // --- end of 0.23.0 stats ---
         apb_core::agent_output::UsageSource::decl(&cfg),
         apb_core::agent_output::AgentUsage::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),

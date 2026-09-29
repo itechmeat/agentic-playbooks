@@ -801,6 +801,7 @@ mod tests {
         for yaml in [
             include_str!("../../../../examples/playbooks/review-triage.yaml"),
             include_str!("../../../../.apb/playbooks/apb-task-implement/1.15.0/playbook.yaml"),
+            include_str!("../../../../.apb/playbooks/apb-task-implement/1.16.0/playbook.yaml"),
         ] {
             let p = Playbook::from_yaml(yaml).unwrap();
             assert!(judge_codes(&p).is_empty(), "{:?}", issues(&p));

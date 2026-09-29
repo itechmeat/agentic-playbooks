@@ -78,6 +78,15 @@ pub struct PlaybookRunArgs {
     /// decide (the project root when it declares none).
     #[serde(default)]
     pub worktree: Option<String>,
+    // --- host execution mode (0.23.0) ---
+    /// "host" or "cli" (default "cli"). Pass "host" ONLY when the person
+    /// asked for mono, host or single-agent mode, or for the run to use your
+    /// own subagents: apb then spawns no agent CLI, and every agent step
+    /// becomes a host task YOU execute (see run_wait and run_task_submit).
+    /// A host-mode run always starts in the background.
+    #[serde(default)]
+    pub execution: Option<String>,
+    // --- end host execution mode ---
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -545,3 +554,44 @@ pub struct PlaybookExecutePlanArgs {
     #[serde(default)]
     pub acknowledge_untrusted: Option<bool>,
 }
+
+// --- host execution mode (0.23.0) ---
+/// Token usage a host reports for a task (all optional counts).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskUsageArg {
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunTaskSubmitArgs {
+    /// The run the task belongs to.
+    pub run_id: String,
+    /// The task id from `pending_tasks`, verbatim.
+    pub task_id: String,
+    /// "succeeded" (the subagent did the task), "failed" (it could not; the
+    /// normal retry policy applies) or "blocked" (it needs the person: put
+    /// the question in `output`; the run then waits for run_answer).
+    pub status: String,
+    /// The subagent's final reply, verbatim, including its closing yaml
+    /// status block. For "blocked": the question for the person.
+    pub output: String,
+    /// Token usage the subagent consumed, when your host reports it.
+    #[serde(default)]
+    pub usage: Option<TaskUsageArg>,
+    /// A short note for the journal (optional).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+// --- end host execution mode ---

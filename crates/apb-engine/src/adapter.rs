@@ -281,6 +281,12 @@ pub struct AgentFailure {
     /// non-zero. `None` when the failed output reported none. The drive loop
     /// writes it into the failed `AttemptFinished.usage`.
     pub usage: Option<apb_core::agent_output::AgentUsage>,
+    /// Whether the failed attempt shows a model turn: it reported token
+    /// usage, or printed a reply that is not an error result. The host
+    /// fallback treats an auth-looking failure as "cannot start" only
+    /// without one, so text such as a `git push` 403 printed after real work
+    /// never re-runs the step as a host task.
+    pub model_turn: bool,
 }
 
 impl AgentFailure {
@@ -289,7 +295,15 @@ impl AgentFailure {
             class,
             message: message.into(),
             usage: None,
+            model_turn: false,
         }
+    }
+
+    /// The same failure, marked as having had a model turn.
+    #[must_use]
+    pub fn after_model_turn(mut self, turn: bool) -> Self {
+        self.model_turn = turn;
+        self
     }
 
     /// The same failure, with the usage the output reported.
@@ -311,7 +325,8 @@ impl From<(ErrorClass, String)> for AgentFailure {
 /// config (both scopes), removed from the child so a connector token can never
 /// be inherited by an agent. `run_dir`/`node_id`, when set, become the
 /// `APB_RUN_DIR`/`APB_NODE_ID` context env that `apb connector call` (a child
-/// of the agent) reads to locate the run manifest and check its grants. The
+/// of the agent) reads to locate the run manifest and check its grants, plus
+/// `APB_RUN_ID` (the run directory's name) for provenance. The
 /// default is empty: no scrub and no context env, so non-connector spawn paths
 /// are untouched.
 #[derive(Debug, Clone, Default)]
@@ -330,6 +345,11 @@ impl ConnectorEnvPolicy {
         }
         if let Some(dir) = &self.run_dir {
             cmd.env("APB_RUN_DIR", dir);
+            // The run id (C7), for an `Apb-Run:` commit trailer or a tracker
+            // record: the run directory's name is the id.
+            if let Some(id) = dir.file_name() {
+                cmd.env("APB_RUN_ID", id);
+            }
         }
         if let Some(node) = &self.node_id {
             cmd.env("APB_NODE_ID", node);
@@ -1142,7 +1162,7 @@ fn with_report_instruction(prompt: &str) -> String {
 /// the terminal finish-answer composer per issue #70 item 1) sends its prompt
 /// verbatim so the agent treats its whole reply as the deliverable rather than a
 /// status-bearing verdict.
-fn transport_prompt(task: &AgentTask) -> String {
+pub(crate) fn transport_prompt(task: &AgentTask) -> String {
     if task.report_contract {
         with_report_instruction(task.prompt)
     } else {
@@ -1152,16 +1172,16 @@ fn transport_prompt(task: &AgentTask) -> String {
 
 /// The three things the report contract (spec 6.2) yields from an agent's reply.
 #[derive(Debug)]
-struct ReportOutcome {
+pub(crate) struct ReportOutcome {
     /// Routing status: the agent's self-assessment from the report block, else
     /// the default Succeeded.
-    status: NodeStatus,
+    pub(crate) status: NodeStatus,
     /// The node output: the reply body with the trailing report block removed.
     /// Everything before the block stays verbatim. When there is no valid
     /// report block, the whole (trimmed) reply is the output.
-    output: String,
+    pub(crate) output: String,
     /// Display-only one-line summary, kept for humans and NEVER used as output.
-    summary: String,
+    pub(crate) summary: String,
 }
 
 /// Interprets the agent's reply per the report contract (spec 6.2): the last
@@ -1177,7 +1197,7 @@ struct ReportOutcome {
 /// (backward compatibility with agents and stubs that have no structured
 /// block). NOTE: the strict variant of the spec (no block -> unknown + anomaly)
 /// is deliberately NOT included so as not to break agents without the contract.
-fn interpret_report(text: &str) -> ReportOutcome {
+pub(crate) fn interpret_report(text: &str) -> ReportOutcome {
     if let Some((start, end, block)) = last_yaml_block_span(text)
         && let Ok(val) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&block)
     {
@@ -1256,7 +1276,7 @@ fn last_yaml_block(text: &str) -> Option<String> {
 /// turn append anything after the agent's work product without shadowing it, as
 /// long as the work product is the final wrapped block. Content spanning
 /// multiple lines is preserved verbatim between the tags before trimming.
-fn extract_marker(text: &str, tag: &str) -> Option<String> {
+pub(crate) fn extract_marker(text: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let mut best: Option<String> = None;
@@ -1548,6 +1568,14 @@ impl ClaudeAdapter {
             // The tokens were spent either way: claude prints its errored
             // result, usage included, and exits non-zero, so the failed
             // attempt records what the output reported.
+            let usage = apb_core::agent_output::usage(task.agent, &stdout);
+            let spent = usage.as_ref().is_some_and(|u| {
+                u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens > 0
+            });
+            let replied = match apb_core::agent_output::reply(task.agent, &stdout) {
+                Some(r) => !r.is_error && !r.text.trim().is_empty(),
+                None => !stdout.is_empty(),
+            };
             return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!(
@@ -1556,7 +1584,8 @@ impl ClaudeAdapter {
                     exit_detail(&stderr, &said())
                 ),
             )
-            .with_usage(apb_core::agent_output::usage(task.agent, &stdout)));
+            .with_usage(usage)
+            .after_model_turn(spent || replied));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full

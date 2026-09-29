@@ -144,6 +144,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_stop",
         "review_decide",
         "run_answer",
+        "run_task_submit",
         "supervisor_wait_event",
         "supervisor_run_inspect",
         "supervisor_node_retry",
@@ -297,6 +298,7 @@ fn tools_carry_safety_annotations() {
         "run_stop",
         "review_decide",
         "run_answer",
+        "run_task_submit",
         "supervisor_node_retry",
         "supervisor_run_continue_from",
         "supervisor_run_pause",
@@ -527,6 +529,7 @@ async fn supervise_self_returns_token() {
             scope: None,
             continued_from: None,
             worktree: None,
+            execution: None,
         }))
         .await;
 
@@ -571,6 +574,7 @@ async fn background_run_returns_run_id_without_blocking() {
             scope: None,
             continued_from: None,
             worktree: None,
+            execution: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -862,6 +866,7 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -926,6 +931,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -986,6 +992,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -1676,6 +1683,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             scope: Some("global".into()),
             continued_from: None,
             worktree: None,
+            execution: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1790,4 +1798,73 @@ async fn catalog_ranking_runs_off_the_runtime_and_keeps_tier0() {
     unsafe {
         std::env::remove_var("APB_CONFIG_DIR");
     }
+}
+
+/// `APB_EXECUTION=cli` wins over `execution: host`, and says so: the start
+/// stays non-blocking and the response carries the execution block and the
+/// note.
+#[tokio::test]
+async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        std::env::set_var("APB_EXECUTION", "cli");
+    }
+    seed_noagent(dir.path());
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let result = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent_sv".to_string(),
+            version: None,
+            params: BTreeMap::new(),
+            instruction: None,
+            supervise: None,
+            background: None,
+            acknowledge_untrusted: Some(true),
+            scope: None,
+            continued_from: None,
+            worktree: None,
+            execution: Some("host".to_string()),
+        }))
+        .await;
+    unsafe {
+        std::env::remove_var("APB_EXECUTION");
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+    let v: serde_json::Value = serde_json::from_str(&result_text(&result)).expect("json body");
+    assert_eq!(v["execution"]["mode"], "cli", "{v}");
+    let notes = v["execution_notes"].to_string();
+    assert!(
+        notes.contains("execution: host was requested") && notes.contains("APB_EXECUTION=cli"),
+        "{v}"
+    );
+    assert!(
+        v.get("outcome").is_none(),
+        "a host request never becomes a blocking run: {v}"
+    );
+}
+
+/// H10: the host-mode section of `playbook_howto` lets only the person pick
+/// host mode; the agent never selects it on its own.
+#[test]
+fn playbook_howto_never_lets_the_agent_pick_host_mode_itself() {
+    let howto = crate::tools::playbook_howto().unwrap()["howto"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let section = howto
+        .split("## Host execution mode")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("HOWTO has a host execution mode section");
+    let flat = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        !flat.contains("cannot or must not have apb spawn"),
+        "no self-selection clause: {flat}"
+    );
+    assert!(flat.contains("explicitly asks"), "{flat}");
+    assert!(flat.contains("Do not choose it yourself"), "{flat}");
 }

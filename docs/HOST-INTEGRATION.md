@@ -48,3 +48,41 @@ Example node:
   outputs:
     extract: node_output
 ```
+
+## Host execution mode (running agent steps with the host's own subagents)
+
+By default apb executes every agent step by spawning the agent CLI the node's profile names (`claude`, `codex`, `zcode`, ...). Host execution mode (informally "mono-agent" mode) turns that around: apb spawns no agent CLI at all, and the agent that started the run executes every agent step with its own subagents. Nothing in apb detects or special-cases a host by name; the mode works the same in any MCP host that can run subagents (Claude Code, ZCode, opencode, and so on).
+
+### When an agent picks it
+
+`cli` is always the default, and there is no machine or dashboard switch that turns host mode on. The host agent passes `execution: "host"` on `playbook_run`, per run, only when the person explicitly asks for it: "mono", "host" or "single-agent" mode, or "run it with your own subagents". The agent never picks host mode on its own. A person may ask because apb spawning a second copy of an agent's CLI does not suit their setup, for example a subscription-bound desktop agent whose second CLI process would run outside the desktop session and lose the subscription context the person is paying for.
+
+Besides that explicit request, a step becomes a host task only through the automatic fallback below, when no CLI of the step can start at all.
+
+The rule is stated in the `playbook_run` tool description and in `playbook_howto`, which is where a host agent looks when it runs a playbook; the tier-0 instructions do not grow (their byte budget is spent, see above).
+
+A second, automatic path exists for runs a host session starts in the background (`background: true` or `supervise: "self"`): when none of a step's CLIs can start at all (the binary is missing, or it is not logged in), that single step is handed to the host as a host task and the journal records `execution_fallback`. Ordinary agent failures (a model turn that fails, a timeout, a bad report, or an auth error printed after a model turn) never fall back; they follow the normal retry policy. A step's output that came from the fallback is never stored in the node cache, which is keyed by the CLI agent. `execution: { fallback_to_host: false }` in the global `config.yaml` or the project `.apb/config.yaml` turns the fallback off; a project can never turn host mode or the fallback on. `APB_EXECUTION=cli` in a process's environment turns off both host mode and the fallback for that process. It is never silent: a run that asked for `execution: host` under it starts as a `cli` run (still in the background on MCP), and every start response carries the `execution` block with `execution_notes` saying "execution: host was requested but APB_EXECUTION=cli forces cli"; `apb run --execution host` prints the same note to stderr.
+
+### The protocol
+
+1. `playbook_run { id, execution: "host", ... }` starts the run in the background (a blocking call could not serve the tasks) and answers `run_id`, `execution: { mode: "host" }` and a `next` hint.
+2. `run_wait { run_id }` returns `reason: needs_input`, `needs: host_task` and `pending_tasks`: one entry per agent step waiting for the host, each with `task_id`, `node`, `attempt`, the full `prompt` (the rendered node prompt with apb's report contract appended), `role_prompt` (the profile's SOUL), `skills` (paths of the skill copies materialized from the run snapshot), `workdir`, `env` (`APB_RUN_DIR`, `APB_RUN_ID`, `APB_NODE_ID`, `APB_STATUS_FILE`: set them for the subagent so `apb connector call`, the status file and commit provenance work), `outputs` (the node's declared outputs contract), `deadline` (from the node's `timeout_seconds`) and `model_hint` (from a fallback entry or tier routing; optional to honor).
+3. For each task the host spawns a subagent with `role_prompt` as its system context and `prompt` as its task, working in `workdir`. Independent tasks may run concurrently (parallel branches expose several tasks at once, bounded by `max_parallel`).
+4. `run_task_submit { run_id, task_id, status, output, usage?, note? }` hands the subagent's final reply back verbatim. `status` is `succeeded`, `failed` (the run applies its retry policy; a retry or a fallback is a new task) or `blocked` (the subagent needs the person: `output` is the question; the run parks on it like on an interactive question and `run_answer` continues it with a follow-up task that carries the question and the answer).
+5. `run_wait` again, until `reason: finished`.
+
+The engine treats a submission exactly like a finished CLI attempt: the report block is parsed (a missing block reads as success), the status file (if the subagent wrote it) and `success_check` decide, `require_verdict` takes the submission as the verdict, the completion check and judge nodes run in the engine, and retries, fallbacks, loops, gates, sub-playbooks (they inherit the mode, and their tasks show up on the parent run; each task carries its own `run_id`, and a submission through the parent's id is refused as ambiguous when the same task id is pending on more than one of those runs, so pass the task's `run_id`) and resume work unchanged. A task that is not submitted by its deadline fails its attempt (`host_task_timeout`). A resume after a driver died re-exposes the same task (the node's latest open task under its own id, even when the resumed prompt differs, for example by an interruption note), and a submission that landed meanwhile is consumed without a new task. Any other task of that node still open is closed by the engine with status `superseded`.
+
+A supervising session (`supervise: "self"`) also gets each request from `supervisor_wait_event` (`reason: host_task`, with `pending_tasks`).
+
+### Trust and attribution
+
+Host mode changes who executes, not what is allowed: the run gate (trusted playbook and profiles, effects consent, `irreversible` confirmation) is unchanged. The prompt is rendered from the trusted snapshot exactly as for a CLI attempt, and the host never receives a connector secret (connector calls still go through `apb connector call`). Every submission is journaled as `host_task_submitted` with `submitted_by: host` and the MCP client name (`clientInfo.name`); the engine's own closures of a task (expired, cancelled, interrupted) say `submitted_by: engine`.
+
+### Other surfaces
+
+- CLI: `apb run <id> --execution host` (the scripted hand-off: `apb tasks [run]` lists the tasks, `apb tasks submit <run> <task_id> --status succeeded --output-file <file>` answers one).
+- `apb doctor` and `playbook_adopt_report` state the default and whether the fallback is on; `run_status` carries the run's `execution`.
+- The dashboard's run page shows a read-only host mode badge, the pending host tasks with their prompts, and the request and submission rows in its timeline.
+- `docs/PROFILES.md` lists what host mode ignores in a profile.
+

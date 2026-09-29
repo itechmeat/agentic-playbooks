@@ -10,7 +10,9 @@
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
+  import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
+  import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -42,6 +44,7 @@
   const questions = $derived(gates?.questions ?? [])
   const waiting = $derived(gates?.waits ?? [])
   const supervisor = $derived(gates?.supervisor ?? null)
+  const hostTasks = $derived(gates?.tasks ?? [])
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
   const children = $derived(detail?.children ?? [])
   const usageLine = $derived(detail?.usage ? runUsageSummary(detail.usage) : null)
@@ -113,6 +116,11 @@
       </Badge>
       {#if showsDriverDead(detail.run_status, detail.driver_alive === false)}
         <Badge variant="outline">needs resume</Badge>
+      {/if}
+      {#if detail.execution === 'host'}
+        <Badge variant="outline" title="Host execution mode: the host session runs every agent step with its own subagents; no agent CLI is spawned" data-testid="execution-host">host mode</Badge>
+      {:else if detail.execution_fallback}
+        <Badge variant="outline" title="A step whose CLIs cannot start is handed to the host session" data-testid="execution-fallback">host fallback</Badge>
       {/if}
     {/if}
   {/snippet}
@@ -191,6 +199,8 @@
     {#each questions as q (q.node)}
       <QuestionPanel question={q} posting={answering} onAnswer={answer} />
     {/each}
+
+    <HostTaskPanel tasks={hostTasks} />
 
     {#if pending.length}
       <Card.Root class="border-primary/60">
@@ -302,6 +312,10 @@
           {/if}
         </Card.Content>
       </Card.Root>
+    {/if}
+
+    {#if detail}
+      <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
     {/if}
 
     {#if detail}

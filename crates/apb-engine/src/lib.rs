@@ -14,6 +14,8 @@ pub mod inspect;
 pub mod invocation;
 pub mod legacy_snapshot;
 pub mod liveness;
+// host execution mode (0.23.0)
+pub mod host_task;
 pub mod manifest;
 pub mod parallel;
 pub mod proc;
@@ -23,6 +25,10 @@ pub mod review;
 pub mod run_config;
 pub mod run_doctor;
 mod run_lineage;
+pub mod run_outcome;
+// --- 0.23.0 stats (C3) ---
+pub mod run_stats;
+// --- end of 0.23.0 stats ---
 pub mod run_view;
 pub mod run_wait;
 pub mod scheduler;
