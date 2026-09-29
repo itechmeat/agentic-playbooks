@@ -455,6 +455,44 @@ fn a_start_from_inside_a_run_cannot_consent_at_the_terminal() {
     assert!(no_runs(dir.path()));
 }
 
+/// Inside a run the flag is no consent either: a step that read the
+/// refusal could echo its nonce. The refusal names the parent run and
+/// points at the host, and no run is written; the same nonce works outside
+/// the run.
+#[test]
+fn a_start_from_inside_a_run_cannot_consent_with_the_flag() {
+    let dir = seeded_irreversible();
+    let refused = playbook()
+        .args(["run", "rel", "--param", "who=x"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2);
+    let nonce = printed_nonce(&String::from_utf8_lossy(&refused.get_output().stderr));
+    let flag = format!("--confirm-irreversible={nonce}");
+    for detach in [false, true] {
+        let mut cmd = playbook();
+        cmd.args(["run", "rel", "--param", "who=x", &flag]);
+        if detach {
+            cmd.arg("--detach");
+        }
+        cmd.env("APB_RUN_ID", "outer-1")
+            .current_dir(dir.path())
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("inside run `outer-1`"))
+            .stderr(predicate::str::contains("confirm_irreversible"));
+        assert!(
+            no_runs(dir.path()),
+            "detach={detach}: a refusal writes no run"
+        );
+    }
+    playbook()
+        .args(["run", "rel", "--param", "who=x", &flag])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
 /// The hidden `__drive-supervised --consent` accepts only `cli` and
 /// `cli_flag`, and only together with the nonce.
 #[test]

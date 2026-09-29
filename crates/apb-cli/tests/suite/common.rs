@@ -73,6 +73,9 @@ fn prune_stale_sandboxes(parent: &Path) {
 pub fn apb() -> assert_cmd::Command {
     let mut cmd = assert_cmd::Command::new(apb_bin());
     cmd.env("APB_CONFIG_DIR", sandbox_config_dir());
+    // A suite run from inside an apb run (an agent step) inherits its run
+    // id; the binary would then treat every start as a nested one.
+    cmd.env_remove("APB_RUN_ID");
     cmd
 }
 
@@ -80,6 +83,7 @@ pub fn apb() -> assert_cmd::Command {
 pub fn apb_std() -> std::process::Command {
     let mut cmd = std::process::Command::new(apb_bin());
     cmd.env("APB_CONFIG_DIR", sandbox_config_dir());
+    cmd.env_remove("APB_RUN_ID");
     cmd
 }
 

@@ -7,9 +7,14 @@
 //!   deprecation warning.
 //! - A `y` to the `[y/N]` question asked on the controlling terminal
 //!   (`by: cli`), after the sources are printed. It is asked only when stdin
-//!   and stderr are terminals and `/dev/tty` opens, and never inside a run
-//!   (`APB_RUN_ID` set): a process that merely inherited a terminal is not a
-//!   person.
+//!   and stderr are terminals and `/dev/tty` opens.
+//!
+//! Inside a run (`APB_RUN_ID` set: an agent or script step) none of these
+//! counts, the flag and a forwarded consent included: a process that
+//! inherited a terminal is not a person, and a step that read the refusal
+//! could echo its nonce. Such a start is refused with the parent run named;
+//! the consent comes from the host (MCP `confirm_irreversible`). No apb path
+//! forwards a consent to a nested start through the environment.
 //!
 //! Anything else is refused with the sources and the nonce.
 
@@ -40,6 +45,9 @@ pub(crate) fn obtain(need: &ConsentNeed, how: &CliConsent) -> Result<Granted, St
         by: by.to_string(),
         nonce: need.nonce(),
     };
+    if let Some(parent) = parent_run() {
+        return Err(nested_refusal(need, &parent));
+    }
     match how {
         CliConsent::Ask { flag: Some(value) } => {
             let note = need
@@ -52,12 +60,6 @@ pub(crate) fn obtain(need: &ConsentNeed, how: &CliConsent) -> Result<Granted, St
         }
         CliConsent::Ask { flag: None } => {
             let refusal = need.check(None).expect_err("no confirmation is a refusal");
-            if std::env::var_os("APB_RUN_ID").is_some_and(|v| !v.is_empty()) {
-                return Err(format!(
-                    "{} (APB_RUN_ID is set: a start from inside a run cannot consent at the terminal; pass --confirm-irreversible=<consent_nonce>)",
-                    refusal_message(&refusal)
-                ));
-            }
             match ask(need) {
                 Some(true) => Ok(granted("cli")),
                 Some(false) => Err(format!(
@@ -76,6 +78,23 @@ pub(crate) fn obtain(need: &ConsentNeed, how: &CliConsent) -> Result<Granted, St
             &need.check(None).expect_err("no confirmation is a refusal"),
         )),
     }
+}
+
+/// The run this process was started from (`APB_RUN_ID`, which the engine
+/// sets for every agent and script step), if any.
+fn parent_run() -> Option<String> {
+    std::env::var("APB_RUN_ID").ok().filter(|v| !v.is_empty())
+}
+
+/// The refusal of a start from inside the run `parent`: an agent or script
+/// step cannot consent for the person, neither at the terminal nor with the
+/// flag, which it could simply copy from the refusal it just read.
+fn nested_refusal(need: &ConsentNeed, parent: &str) -> String {
+    format!(
+        "run refused ({}): irreversible effects ({}); this start comes from inside run `{parent}` (APB_RUN_ID is set), and a start from inside a run cannot consent, so --confirm-irreversible is not accepted here. Ask the person through the host instead: an MCP host passes confirm_irreversible on playbook_run after asking, or the person starts it from a terminal, a CI step or the dashboard",
+        apb_engine::consent::REFUSAL_POLICY,
+        need.sources.join(", ")
+    )
 }
 
 /// Prints the sources and asks `[y/N]` on the controlling terminal.
