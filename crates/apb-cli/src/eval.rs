@@ -1095,9 +1095,16 @@ fn print_compare(r: &EvalResult, all: &[EvalResult], json_out: bool) -> Option<s
 
 /// `apb eval <id> --compare`: the latest stored result against the one
 /// before it, nothing run.
-fn compare_only(evals_home: &Path, args: &EvalArgs) -> ExitCode {
+fn compare_only(root: &Path, evals_home: &Path, args: &EvalArgs) -> ExitCode {
+    if !apb_core::registry::is_safe_segment(&args.id) || args.id.starts_with('.') {
+        return fail(
+            args.json,
+            "bad_id",
+            format!("`{}` is not a playbook id", args.id),
+        );
+    }
     let all = store::load_all(evals_home, &args.id);
-    let Some(latest) = all.last() else {
+    let Some(latest) = store::latest_for(&all, &root.to_string_lossy()) else {
         return fail(
             args.json,
             "no_results",
@@ -1131,7 +1138,7 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         return fail(args.json, "no_config_dir", "no apb config directory".into());
     };
     if args.compare {
-        return compare_only(&evals_home, &args);
+        return compare_only(root, &evals_home, &args);
     }
     let reg = match Registry::open(root) {
         Ok(r) => r,
@@ -1492,15 +1499,11 @@ fn run_eval(
             results.push(CaseResult::new(&lc.case.id, &p.digest, reps));
         }
     }
-    let config = key.unwrap_or_else(|| ConfigKey {
-        playbook_digest: Registry::open(root)
-            .ok()
-            .and_then(|r| r.load(&args.id, Some(version)).ok())
-            .and_then(|l| l.trust_digest().ok())
-            .unwrap_or_default(),
-        overrides_digest: overrides_digest(overrides),
-        ..Default::default()
-    });
+    // With no repetition started there is no configuration to key the
+    // result by: it is reported, not stored, so no made-up key ever shows
+    // up as a configuration change in a later comparison.
+    let started = key.is_some();
+    let config = key.unwrap_or_default();
     let result = EvalResult {
         eval_id: eval_id.to_string(),
         playbook: args.id.clone(),
@@ -1516,23 +1519,33 @@ fn run_eval(
         total_cost_usd: (spent * 1e6).round() / 1e6,
         total_tokens: tokens,
     };
-    let stored_at = store::store(evals_home, &result);
-    let all = store::load_all(evals_home, &args.id);
+    let stored_at = if started {
+        Some(store::store(evals_home, &result))
+    } else {
+        None
+    };
+    let all = if started {
+        store::load_all(evals_home, &args.id)
+    } else {
+        Vec::new()
+    };
     let (p, o) = result.passes();
     if args.json {
         let cmp = print_compare(&result, &all, true);
         print_json(&json!({
             "result": result,
             "comparison": cmp,
-            "stored": stored_at.as_ref().ok().map(|p| p.to_string_lossy().into_owned()),
+            "stored": stored_at.as_ref().and_then(|s| s.as_ref().ok()).map(|p| p.to_string_lossy().into_owned()),
         }));
     } else {
         print!("{}", store::render_result(&result));
         match &stored_at {
-            Ok(p) => println!("stored: {}", p.display()),
-            Err(e) => eprintln!("eval: the result could not be stored: {e}"),
+            Some(Ok(p)) => println!("stored: {}", p.display()),
+            Some(Err(e)) => eprintln!("eval: the result could not be stored: {e}"),
+            None => println!("not stored: no repetition started a run"),
         }
-        if print_compare(&result, &all, false).is_none()
+        if started
+            && print_compare(&result, &all, false).is_none()
             && store::baseline_for(&all, &result).is_none()
         {
             println!("no earlier result to compare with");

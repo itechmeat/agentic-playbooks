@@ -148,7 +148,7 @@ fn a_passing_case_is_checked_stored_and_leaves_nothing_behind() {
     assert!(run_dir.starts_with(evals.join("runs/rev")), "{run_dir:?}");
     assert!(run_dir.join("events.jsonl").is_file());
     let stored = PathBuf::from(v["stored"].as_str().unwrap());
-    assert!(stored.starts_with(evals.join("rev")) && stored.is_file());
+    assert!(stored.starts_with(evals.join("results/rev")) && stored.is_file());
     assert!(v["comparison"].is_null(), "nothing to compare with yet");
 }
 
@@ -813,6 +813,9 @@ fn a_run_that_cannot_start_is_an_error_and_leaves_nothing() {
     assert_eq!(rep["checks"][0]["kind"], "start", "{rep:#}");
     assert!(rep["kept_worktree"].is_null());
     assert!(!env.cfg.path().join("evals/scratch").exists());
+    // No run started, so there is no configuration to store it under.
+    assert!(v["stored"].is_null(), "{v:#}");
+    assert!(!env.cfg.path().join("evals/results").exists());
 }
 
 /// E2: a fixture ref that does not resolve is an `error` repetition named
@@ -976,4 +979,77 @@ fn stale_scratch_directories_are_swept_at_start() {
         scratch.join("eval-2").exists(),
         "a live owner's scratch went"
     );
+}
+
+// --- stored results and comparisons ------------------------------------------
+
+/// E5: the comparison names what moved between configurations (a profile
+/// edit, then a playbook edit), and `--compare` says when there is nothing
+/// or only one result to compare.
+#[test]
+fn compare_names_profile_and_playbook_changes() {
+    let env = setup(PLAYBOOK);
+    env.eval(&["rev", "--compare", "--json"])
+        .code(2)
+        .stdout(predicate::str::contains("\"no_results\""));
+    let (_, _) = env.eval_json(&[]);
+    env.eval(&["rev", "--compare"])
+        .success()
+        .stdout(predicate::str::contains("nothing to compare"));
+    write(
+        &env.project.path().join(".apb/profiles/x/profile.yaml"),
+        "name: x\nexecutor:\n  agent: claude\n  model: claude-sonnet-4-5\n",
+    );
+    let (_, v) = env.eval_json(&[]);
+    let changes = v["comparison"]["configuration_changes"].to_string();
+    assert!(changes.contains("profile bundle project/x:"), "{changes}");
+    let pb = env
+        .project
+        .path()
+        .join(".apb/playbooks/rev/1.0.0/playbook.yaml");
+    write(&pb, &PLAYBOOK.replace("name: rev\n", "name: rev renamed\n"));
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let out = env
+        .eval(&["rev", "--compare", "--json"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let c: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(c["latest"], v["result"]["eval_id"]);
+    let changes = c["comparison"]["configuration_changes"].to_string();
+    assert!(changes.contains("playbook digest"), "{changes}");
+    env.eval(&["../rev", "--compare"])
+        .code(2)
+        .stderr(predicate::str::contains("is not a playbook id"));
+}
+
+/// E6: an invocation in which no repetition started is not stored, so the
+/// next comparison sees the same configuration as the last real one.
+#[test]
+fn an_invocation_that_started_nothing_adds_no_configuration_change() {
+    let env = setup(PLAYBOOK);
+    let (code, _) = env.eval_json(&[]);
+    assert_eq!(code, 0);
+    let pb = env
+        .project
+        .path()
+        .join(".apb/playbooks/rev/1.0.0/playbook.yaml");
+    write(
+        &pb,
+        &PLAYBOOK.replace(
+            "effects: [fs_read, fs_write]",
+            "effects: [fs_read, fs_write]\nrequires: { commands: [apb-eval-definitely-not-installed] }",
+        ),
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 1, "{v:#}");
+    assert!(v["comparison"].is_null(), "{v:#}");
+    write(&pb, PLAYBOOK);
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let c = &v["comparison"];
+    assert_eq!(c["same_configuration"], true, "{c:#}");
+    assert_eq!(c["configuration_changes"], serde_json::json!([]), "{c:#}");
 }
