@@ -131,6 +131,7 @@ Five crates under `crates/` with dependency direction core <- engine <- mcp, and
 - [Host integration](docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
 - [Profile authoring](docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
 - [Playbook authoring guide](docs/HOWTO-authoring.md): node types, edges, conditions, params, templating
+- [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
 
 ## Optional
 
