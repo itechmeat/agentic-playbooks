@@ -738,12 +738,26 @@ fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
     ));
     let _lock = common::env_lock();
     let _env = p.env();
+    // The installation key an `apb` process creates at its entry point, so
+    // the run is stamped as created here.
+    apb_core::run_origin::ensure_key().unwrap();
     let (status, run_id, _) = p.run();
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!((server.count(), other.count()), (2, 0));
+    // A copy under another id carries a stamp that does not verify, like a
+    // journal a repository ships: neither report nor replay reads it.
+    let planted = p.root.path().join(".apb/runs/planted-1");
+    fs::create_dir_all(&planted).unwrap();
+    for (path, bytes) in tree(&p.run_dir(&run_id)) {
+        let rel = path.strip_prefix(p.run_dir(&run_id)).unwrap();
+        fs::create_dir_all(planted.join(rel).parent().unwrap()).unwrap();
+        fs::write(planted.join(rel), bytes).unwrap();
+    }
 
     let roots = [p.root.path().to_path_buf()];
+    assert_eq!(report::unverified_run_dirs(&roots), 1);
     let r = report::report(&roots, &ReportFilter::default(), &ReportSettings::default());
+    assert_eq!(r.runs, 1, "the planted copy is not read");
     assert_eq!(r.decisions, 2);
     let g = &r.groups[0];
     assert_eq!(

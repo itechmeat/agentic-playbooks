@@ -341,7 +341,11 @@ apb decisions report [--use USE] [--since 7d|2026-09-20] [--playbook ID]
 ```
 
 Reads run journals only (this project's, or every registered one with
-`--all-projects`); it asks no model and writes nothing. Per use and
+`--all-projects`); it asks no model and writes nothing. Only run directories
+apb created on this machine count (their `origin.stamp` verifies against the
+installation key, as for an MCP resume): a `.apb/runs/<id>` that came with a
+repository is skipped by the report and by `apb decisions replay`, and the
+command names how many it skipped on stderr. Per use and
 `(provider, model)`:
 
 - counts, errors, and label coverage (labelled of answered);

@@ -101,6 +101,7 @@ pub(crate) fn decisions_cmd(root: &Path, action: DecisionsAction) -> ExitCode {
             let roots = roots(root, all_projects);
             let settings = ReportSettings::load(config_dir.as_deref());
             let r = report::report(&roots, &filter, &settings);
+            warn_unverified(&roots);
             if json {
                 print_json(&serde_json::to_value(&r).unwrap_or_default());
             } else {
@@ -129,6 +130,7 @@ pub(crate) fn decisions_cmd(root: &Path, action: DecisionsAction) -> ExitCode {
             let Some(filter) = filter(use_site, since.as_deref(), None, None) else {
                 return ExitCode::from(2);
             };
+            warn_unverified(&[root.to_path_buf()]);
             match replay::replay(
                 &[root.to_path_buf()],
                 &dir,
@@ -150,6 +152,18 @@ pub(crate) fn decisions_cmd(root: &Path, action: DecisionsAction) -> ExitCode {
                 }
             }
         }
+    }
+}
+
+/// Names the run directories the report and replay left out: ones apb did
+/// not create on this machine (a repository can ship a planted journal).
+fn warn_unverified(roots: &[PathBuf]) {
+    let n = report::unverified_run_dirs(roots);
+    if n > 0 {
+        eprintln!(
+            "decisions: skipped {n} run director{} not created by apb on this machine",
+            if n == 1 { "y" } else { "ies" }
+        );
     }
 }
 

@@ -202,8 +202,36 @@ impl RunJournal {
     }
 }
 
-/// Every run directory under the given project roots.
+/// Every run directory under the given project roots that apb created on
+/// this machine ([`apb_core::run_origin::verify`]). A repository can ship a
+/// `.apb/runs/<id>` with a planted journal; the report must not count it and
+/// replay must not send its states. [`unverified_run_dirs`] counts the ones
+/// left out.
 pub fn run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
+    candidate_run_dirs(roots)
+        .into_iter()
+        .filter(|d| created_here(d))
+        .collect()
+}
+
+/// How many run directories under `roots` [`run_dirs`] leaves out because
+/// apb did not create them on this machine.
+pub fn unverified_run_dirs(roots: &[PathBuf]) -> usize {
+    candidate_run_dirs(roots)
+        .iter()
+        .filter(|d| !created_here(d))
+        .count()
+}
+
+fn created_here(run_dir: &Path) -> bool {
+    run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|id| apb_core::run_origin::verify(run_dir, id))
+}
+
+/// Every directory under the given project roots' `.apb/runs`.
+fn candidate_run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
         // `.apb` and `.apb/runs` must be real directories: a link would
