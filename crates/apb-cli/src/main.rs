@@ -10,6 +10,8 @@ mod selfupdate;
 mod serve;
 mod server;
 mod suggestions;
+// host execution mode (0.23.0)
+mod tasks;
 mod trash;
 mod trust;
 mod util;
@@ -35,6 +37,7 @@ use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
 use crate::server::{ServerAction, server_cmd};
 use crate::suggestions::{SuggestionsAction, suggestions_cmd};
+use crate::tasks::{TasksAction, tasks_cmd};
 use crate::trash::{TrashAction, trash_cmd};
 use crate::trust::{TrustAction, trust_cmd};
 use crate::util::{resolve_bind, resolve_port};
@@ -175,6 +178,27 @@ enum Command {
         /// `worktree`
         #[arg(long, value_name = "DIR")]
         worktree: Option<String>,
+        /// Who executes the agent steps: cli (the default, the profiles'
+        /// agent CLIs) or host (no CLI is spawned; every agent step becomes
+        /// a host task that `apb tasks` lists and `apb tasks submit`
+        /// answers, meant for an MCP host session)
+        #[arg(long, value_name = "MODE")]
+        execution: Option<String>,
+    },
+    /// Host tasks of host-execution-mode runs: list what waits for a host
+    /// (all runs, or one), or submit a reply
+    #[command(args_conflicts_with_subcommands = true)]
+    Tasks {
+        #[command(subcommand)]
+        action: Option<TasksAction>,
+        /// Only this run
+        run_id: Option<String>,
+        /// Print each task's full prompt and role prompt
+        #[arg(long)]
+        full: bool,
+        /// Machine-readable output (the same objects as MCP pending_tasks)
+        #[arg(long)]
+        json: bool,
     },
     /// List runs, or show one run (its nodes and the token usage its agents
     /// reported)
@@ -417,6 +441,7 @@ fn main() -> ExitCode {
             refresh_cache,
             continued_from,
             worktree,
+            execution,
         }) => run_cmd(
             &root,
             &name,
@@ -431,7 +456,14 @@ fn main() -> ExitCode {
             refresh_cache,
             continued_from,
             worktree,
+            execution.as_deref(),
         ),
+        Some(Command::Tasks {
+            action,
+            run_id,
+            full,
+            json,
+        }) => tasks_cmd(&root, action, run_id, full, json),
         Some(Command::Runs { run_id }) => runs_cmd(&root, run_id.as_deref()),
         Some(Command::Resume {
             run_id,
