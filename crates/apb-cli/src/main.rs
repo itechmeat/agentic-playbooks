@@ -1,5 +1,6 @@
 mod cache;
 mod connector;
+mod consent;
 mod dashboard_check;
 mod decisions;
 // --- 0.24.0 eval suites ---
@@ -194,10 +195,18 @@ enum Command {
         #[arg(long, value_name = "MODE")]
         execution: Option<String>,
         /// Consent to the playbook's irreversible effects (a push, a merge,
-        /// a deploy) for a start without an interactive terminal, such as a
-        /// CI step. From a terminal, typing `apb run` is the consent
-        #[arg(long)]
-        confirm_irreversible: bool,
+        /// a deploy) for a start without a person at a terminal, such as a
+        /// CI step: pass the consent_nonce the refusal printed, which binds
+        /// the consent to that version of the playbook. A bare flag is
+        /// deprecated. At a terminal, apb asks instead
+        #[arg(
+            long,
+            value_name = "CONSENT_NONCE",
+            num_args = 0..=1,
+            default_missing_value = "true",
+            require_equals = true
+        )]
+        confirm_irreversible: Option<String>,
     },
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
@@ -236,6 +245,18 @@ enum Command {
         /// (the accepted drift is recorded as an event in the run log).
         #[arg(long = "allow-environment-drift")]
         allow_environment_drift: bool,
+        /// Consent to the run's irreversible effects when it has no valid
+        /// consent recorded (a run an older apb started, or a run directory
+        /// apb did not create here): the consent_nonce the refusal printed.
+        /// At a terminal, apb asks instead
+        #[arg(
+            long,
+            value_name = "CONSENT_NONCE",
+            num_args = 0..=1,
+            default_missing_value = "true",
+            require_equals = true
+        )]
+        confirm_irreversible: Option<String>,
     },
     /// Block until a run finishes, needs input (a question, a review, a
     /// supervisor decision) or stops, then print why. A single call that
@@ -428,10 +449,15 @@ enum Command {
         /// The run's working tree, forwarded from `apb run --worktree`.
         #[arg(long, value_name = "DIR")]
         worktree: Option<String>,
-        /// The irreversible consent `apb run --supervise` was started with
-        /// (`cli` or `cli_flag`), forwarded across the detached spawn.
-        #[arg(long, value_name = "BY")]
+        /// The irreversible consent `apb run --supervise` obtained (`cli` or
+        /// `cli_flag`), forwarded across the detached spawn. Any other value
+        /// is refused.
+        #[arg(long, value_name = "BY", value_parser = ["cli", "cli_flag"], requires = "consent_nonce")]
         consent: Option<String>,
+        /// The consent nonce of the tree the forwarded consent was given for;
+        /// the child refuses when its own gate computes another one.
+        #[arg(long = "consent-nonce", value_name = "NONCE", requires = "consent")]
+        consent_nonce: Option<String>,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -566,11 +592,13 @@ fn main() -> ExitCode {
             run_id,
             from_node,
             allow_environment_drift,
+            confirm_irreversible,
         }) => resume_cmd(
             &root,
             &run_id,
             from_node.as_deref(),
             allow_environment_drift,
+            confirm_irreversible,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
@@ -671,6 +699,7 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             consent,
+            consent_nonce,
             handshake,
         }) => drive_supervised_child(
             &root,
@@ -681,7 +710,7 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
-            consent,
+            consent.zip(consent_nonce),
             &handshake,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:
