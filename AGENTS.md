@@ -35,7 +35,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
   each agent CLI's machine output: reply and reported token usage
   (`agent_output.rs`), the decision-model config (`decisions.rs`: the
-  machine's `decisions.yaml`, project narrowing, the doctor line) and the
+  machine's `decisions.yaml`, project narrowing, the doctor line), the
+  doctor's free per-provider request (`decision_probe.rs`) and the
   measured-threshold store (`decision_thresholds.rs`).
 - `apb-decide` - a blocking, provider-agnostic decision-model client: the
   `DecisionProvider` trait, question and answer types, the `systemone`,
