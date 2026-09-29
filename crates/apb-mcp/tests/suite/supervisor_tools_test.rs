@@ -724,3 +724,51 @@ fn run_inspect_elides_long_event_texts_unless_asked() {
     let full = apb_mcp::tools::sv_run_inspect_with(dir.path(), "ins", true).unwrap();
     assert!(full["events"].to_string().contains(&big));
 }
+
+// Host execution mode (0.23.0): a session that supervises its own host-mode
+// run learns about each host task from supervisor_wait_event, and the answer
+// carries the task inline.
+#[test]
+fn supervisor_wait_event_surfaces_a_host_task_of_the_supervised_run() {
+    let _guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supflow_mcp", WF_SUPERVISED);
+    let run_id = apb_engine::run_background(
+        dir.path(),
+        "supflow_mcp",
+        None,
+        apb_engine::RunOptions {
+            mode: apb_engine::RunMode::Supervised,
+            execution: apb_core::execution::ExecutionRequest {
+                mode: Some(apb_core::execution::ExecutionMode::Host),
+                host_session: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let _drive = InProcessRun {
+        root: dir.path().to_path_buf(),
+        run_id: run_id.clone(),
+    };
+    let woke = supervisor_wait_event(dir.path(), &run_id, None, Some(5000)).unwrap();
+    assert_eq!(woke["reason"], "host_task", "{woke}");
+    let tasks = woke["pending_tasks"].as_array().expect("pending_tasks");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["node"], "work");
+    let submitted = apb_mcp::tools::run_task_submit(
+        dir.path(),
+        &run_id,
+        tasks[0]["task_id"].as_str().unwrap(),
+        "succeeded",
+        "worked".into(),
+        None,
+        None,
+        "host",
+        Some("test".into()),
+    )
+    .unwrap();
+    assert_eq!(submitted["node"], "work");
+    wait_for_status(dir.path(), &run_id, "succeeded");
+}

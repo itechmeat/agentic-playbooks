@@ -1390,6 +1390,50 @@ run_report. A finish without a prompt stays instant and free with no answer.
 Do not set a profile without a prompt (validator V21). Estimate
 expected_duration on a finish-with-prompt like any agent step.
 
+## Host execution mode (running without agent CLIs)
+
+A playbook needs nothing special to run in host execution mode (informally
+"mono-agent" mode): it is a per-run choice, not a playbook or profile field.
+Runs are `cli` by default: apb spawns the agent CLI each node's profile names.
+Pass `execution: "host"` on `playbook_run` (CLI: `apb run --execution host`)
+only when the user asks for mono, host or single-agent mode, or asks for the
+run to use your own subagents; or when you cannot or must not have apb spawn
+other CLIs (a subscription-bound or sandboxed host). Nothing else turns it on:
+there is no machine switch, and a project `.apb/config.yaml` can only turn the
+fallback below off.
+
+In host mode apb spawns no agent CLI. Every agent step (and a finish answer)
+becomes a host task that `run_wait` returns in `pending_tasks`, each with the
+full `prompt` (the rendered node prompt, report contract included), the
+profile's `role_prompt`, the `skills` paths, the `workdir`, the `env` to set
+(`APB_RUN_DIR`, `APB_NODE_ID`, `APB_STATUS_FILE`), the `outputs` contract, a
+`deadline` from the node's `timeout_seconds`, and a `model_hint` for fallback
+entries and routed tiers. Run each with a subagent (independent tasks may run
+concurrently) and submit its final reply verbatim with `run_task_submit`
+(`succeeded`, `failed`, or `blocked` with the question for the user). The
+engine treats the reply like a finished CLI attempt: report block, status
+file, `success_check`, `require_verdict` (the submission counts as the verdict
+unless the subagent wrote the status file), the completion check, retries and
+fallbacks (each a new task), loops, gates and resume all work unchanged.
+Sub-playbooks inherit the mode; their tasks show up on the parent run.
+
+What host mode ignores in a profile: the executor's `agent`, `model` and the
+`agent` of each fallback (a fallback's `model` becomes the hint), the
+invocation `command`, `environment: minimal` (a claude-only mechanism) and
+`continue_session` (a host subagent has no session apb can continue; the node
+starts cold with `session_handoff.reason: host_mode`). The role prompt,
+skills, `timeout_seconds`, `expected_duration`, `outputs`, `success_check`,
+`require_verdict` and `completion_check` apply as always. Context compaction
+is skipped (it would spawn a CLI).
+
+Host fallback: a `cli` run you start in the background or under `supervise:
+self` can also hand you a single step as a host task when none of its CLIs can
+start at all (the binary is missing, or it is not logged in); the journal
+records `execution_fallback`. Ordinary agent failures never fall back. Turn it
+off with `execution: { fallback_to_host: false }` in the global config or the
+project `.apb/config.yaml`; `APB_EXECUTION=cli` turns off host mode and the
+fallback for a process.
+
 ## Sub-playbooks (the playbook node)
 
 A `playbook` node runs another playbook as a full child run:

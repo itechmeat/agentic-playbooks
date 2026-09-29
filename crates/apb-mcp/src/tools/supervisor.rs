@@ -66,6 +66,7 @@ pub fn supervisor_wait_result(
             (v, Some(w.seq), "wake")
         }
         SupervisorWait::Review { seq, .. } => (Value::Null, Some(*seq), "review"),
+        SupervisorWait::HostTask { seq, .. } => (Value::Null, Some(*seq), "host_task"),
         SupervisorWait::Ended => (Value::Null, after_seq, "ended"),
         SupervisorWait::TimedOut => (Value::Null, after_seq, "timeout"),
     };
@@ -79,6 +80,8 @@ pub fn supervisor_wait_result(
         "run_status": status["run_status"],
         "pending_review": status["pending_review"],
         "pending_supervisor": status["pending_supervisor"],
+        // Host execution mode (0.23.0): the tasks this session executes.
+        "pending_tasks": status["pending_tasks"],
     }))
 }
 

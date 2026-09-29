@@ -67,6 +67,19 @@ mod tests {
         }
     }
 
+    /// Host execution mode (0.23.0) added nothing to TIER0: its protocol
+    /// lives in the tool descriptions of `playbook_run`, `run_wait` and
+    /// `run_task_submit` and in `playbook_howto`, because TIER0 sits at the
+    /// host's byte limit. Pinned so a later change is a decision, not drift.
+    #[test]
+    fn tier0_is_byte_identical_to_0_22_1() {
+        assert_eq!(TIER0.len(), 1948);
+        assert_eq!(
+            apb_core::content::sha256_hex(TIER0.as_bytes()),
+            "sha256:f2dcd933e9f4dd96a82385414a936ad83aaf21c72a82e92ae29829bc76e4c5c5"
+        );
+    }
+
     #[test]
     fn tier0_follows_the_prose_conventions() {
         assert!(
