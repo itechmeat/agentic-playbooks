@@ -113,7 +113,12 @@ on:
 
 jobs:
   triage:
-    if: github.event.workflow_run.conclusion == 'failure'
+    # Only builds of this repository's own branches: a build started by a
+    # fork's pull request must never reach a job that holds secrets.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.event != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,9 +127,9 @@ jobs:
       APB_CONFIG_DIR: ${{ github.workspace }}/.apb-ci-config
       APB_VERSION: vX.Y.Z   # the apb release to install
     steps:
+      # The default branch, not the failed build's head: `.apb/` (playbooks,
+      # profiles, scripts) comes from reviewed code only.
       - uses: actions/checkout@v4   # pin to a commit SHA in real use
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Install apb
         run: |
@@ -162,6 +167,13 @@ jobs:
           name: apb-run
           path: .apb/runs/${{ env.run_id }}/
 ```
+
+A `workflow_run` job runs in the base repository with its secrets, even when
+the build it reacts to came from a fork's pull request, and a fresh
+`APB_CONFIG_DIR` plus a CLI start approves whatever `.apb/` the checkout holds.
+So the job skips builds from other repositories and pull requests, checks out
+the default branch (reviewed `.apb/`), and treats the downloaded build log as
+data only; it never checks out or executes the failed build's code.
 
 The installer places `apb` in `CARGO_HOME` (`~/.cargo/bin` by default, see
 INSTALL.md), which the `GITHUB_PATH` line adds for later steps. The summary is the `triage` node's output in
