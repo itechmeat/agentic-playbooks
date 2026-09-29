@@ -526,6 +526,7 @@ async fn supervise_self_returns_token() {
             // The pipeline is seeded directly (untrusted), and the gate now
             // also applies to supervise:self - confirm explicitly.
             acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
             scope: None,
             continued_from: None,
             worktree: None,
@@ -571,6 +572,7 @@ async fn background_run_returns_run_id_without_blocking() {
             // explicitly so it verifies the non-blocking start specifically,
             // not the policy gate.
             acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
             scope: None,
             continued_from: None,
             worktree: None,
@@ -1373,6 +1375,7 @@ async fn prepare_then_execute_runs_in_target_workspace() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token,
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1415,6 +1418,7 @@ async fn token_is_single_use() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token.clone(),
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     assert!(result_text(&first).contains("run_ref"));
@@ -1422,6 +1426,7 @@ async fn token_is_single_use() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token,
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     assert!(
@@ -1456,6 +1461,7 @@ async fn digest_drift_invalidates_plan() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token,
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     assert!(
@@ -1487,6 +1493,7 @@ async fn tampered_token_is_rejected() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: forged,
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     assert!(
@@ -1557,6 +1564,7 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token.clone(),
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     assert!(
@@ -1569,6 +1577,7 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token,
             acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
         }))
         .await;
     assert!(
@@ -1628,6 +1637,7 @@ async fn execute_plan_refuses_an_unapproved_child_without_acknowledge() {
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
             plan_token: token,
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
@@ -1683,6 +1693,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             supervise: None,
             background: None,
             acknowledge_untrusted: None,
+            confirm_irreversible: None,
             scope: Some("global".into()),
             continued_from: None,
             worktree: None,
@@ -1826,6 +1837,7 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             supervise: None,
             background: None,
             acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
             scope: None,
             continued_from: None,
             worktree: None,
@@ -1874,15 +1886,67 @@ fn playbook_howto_never_lets_the_agent_pick_host_mode_itself() {
 
 // --- 0.24.0 irreversible consent ---
 
-fn irreversible_args(ack: Option<bool>) -> PlaybookRunArgs {
+/// Points `APB_CONFIG_DIR` at a temp dir and restores the prior value on
+/// drop, so a failed assertion cannot leak it into later tests. Held under
+/// `CROSS_ENV_LOCK`.
+struct ConfigDirGuard {
+    prior: Option<std::ffi::OsString>,
+    _dir: tempfile::TempDir,
+}
+
+impl ConfigDirGuard {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let prior = std::env::var_os("APB_CONFIG_DIR");
+        // SAFETY: under CROSS_ENV_LOCK, like every env mutation in this file.
+        unsafe { std::env::set_var("APB_CONFIG_DIR", dir.path()) };
+        Self { prior, _dir: dir }
+    }
+}
+
+impl Drop for ConfigDirGuard {
+    fn drop(&mut self) {
+        // SAFETY: under CROSS_ENV_LOCK.
+        unsafe {
+            match &self.prior {
+                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
+                None => std::env::remove_var("APB_CONFIG_DIR"),
+            }
+        }
+    }
+}
+
+/// Seeds playbook `rel` (NOAGENT with `effects: [irreversible]`), approved
+/// when `trusted`.
+fn seed_rel(root: &Path, trusted: bool) {
+    apb_core::registry::init_project(root).unwrap();
+    let yaml = NOAGENT
+        .replace("id: noagent_sv", "id: rel")
+        .replace("nodes:", "effects: [irreversible]\nnodes:");
+    let vdir = root.join(".apb/playbooks/rel/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), &yaml).unwrap();
+    fs::write(root.join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
+    if trusted {
+        approve_version(root, "rel", "1.0.0");
+    }
+}
+
+fn rel_args(
+    ack: Option<bool>,
+    confirm: Option<ConfirmIrreversibleArg>,
+    background: Option<bool>,
+    supervise: Option<&str>,
+) -> PlaybookRunArgs {
     PlaybookRunArgs {
         id: "rel".into(),
         version: None,
         params: BTreeMap::new(),
         instruction: None,
-        supervise: None,
-        background: None,
+        supervise: supervise.map(str::to_string),
+        background,
         acknowledge_untrusted: ack,
+        confirm_irreversible: confirm,
         scope: None,
         continued_from: None,
         worktree: None,
@@ -1890,78 +1954,302 @@ fn irreversible_args(ack: Option<bool>) -> PlaybookRunArgs {
     }
 }
 
-/// A TRUSTED playbook whose effects include `irreversible` is refused
-/// without the confirmation argument, naming what to ask, and runs with it;
-/// the manifest records the MCP consent.
-#[tokio::test]
-async fn playbook_run_needs_the_confirmation_for_an_irreversible_playbook() {
-    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = tempfile::tempdir().unwrap();
-    let proj = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("APB_CONFIG_DIR", cfg.path());
-    }
-    apb_core::registry::init_project(proj.path()).unwrap();
-    let yaml = NOAGENT
-        .replace("id: noagent_sv", "id: rel")
-        .replace("nodes:", "effects: [irreversible]\nnodes:");
-    let vdir = proj.path().join(".apb/playbooks/rel/1.0.0");
-    fs::create_dir_all(&vdir).unwrap();
-    fs::write(vdir.join("playbook.yaml"), &yaml).unwrap();
-    fs::write(proj.path().join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
-    let digest = apb_core::registry::Registry::open(proj.path())
-        .unwrap()
-        .load("rel", None)
-        .unwrap()
-        .trust_digest()
-        .unwrap();
-    apb_core::trust::TrustStore::load()
-        .approve(&digest, "rel", apb_core::trust::OriginKind::LocallyApproved)
-        .unwrap();
+fn no_runs(root: &Path) -> bool {
+    fs::read_dir(root.join(".apb/runs"))
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true)
+}
 
-    let server = WfMcp::new(proj.path().to_path_buf());
-    let refused = server
-        .playbook_run(Parameters(irreversible_args(None)))
-        .await;
-    let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
-    assert_eq!(
-        out["policy_refusal"]["policy"], "irreversible_requires_confirmation",
-        "got: {out}"
-    );
-    assert_eq!(
-        out["policy_refusal"]["sources"],
-        serde_json::json!(["playbook"])
-    );
-    assert!(
-        out["policy_refusal"]["detail"]
-            .as_str()
-            .unwrap()
-            .contains("acknowledge_untrusted: true"),
-        "the refusal says what to pass: {out}"
-    );
-    assert!(
-        !proj.path().join(".apb/runs").is_dir()
-            || fs::read_dir(proj.path().join(".apb/runs"))
-                .unwrap()
-                .next()
-                .is_none(),
-        "a refused start writes no run"
-    );
-
-    let res = server
-        .playbook_run(Parameters(irreversible_args(Some(true))))
-        .await;
-    let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
-    let run_id = out["run_id"].as_str().expect("run_id present").to_string();
-    assert!(run_finished(proj.path(), &run_id));
-    let consent = apb_engine::manifest::read(&proj.path().join(".apb/runs").join(&run_id))
+fn manifest_consent_of(root: &Path, run_id: &str) -> apb_engine::consent::RunConsent {
+    apb_engine::manifest::read(&root.join(".apb/runs").join(run_id))
         .unwrap()
         .and_then(|m| m.consent)
-        .expect("the manifest records the consent");
-    assert!(consent.irreversible);
-    assert_eq!(consent.by, "mcp");
+        .expect("the manifest records the consent")
+}
 
-    unsafe {
-        std::env::remove_var("APB_CONFIG_DIR");
+async fn call_run(
+    server: &WfMcp,
+    args: PlaybookRunArgs,
+    client: Option<&str>,
+) -> serde_json::Value {
+    let res = server
+        .playbook_run_for(Parameters(args), client.map(str::to_string))
+        .await;
+    serde_json::from_str(&result_text(&res)).unwrap()
+}
+
+/// Every MCP start path (blocking, `background`, `supervise: "self"`), with
+/// and without a client name: a TRUSTED irreversible playbook is refused
+/// without `confirm_irreversible` (with its sources and nonce, no run
+/// written), refused again for a stale nonce, and started with the nonce,
+/// the manifest recording `mcp` or `mcp:<client>`.
+#[tokio::test]
+async fn every_mcp_start_path_needs_the_consent_nonce_for_an_irreversible_playbook() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    /// (name, background, supervise, client, expected `by`).
+    type Mode<'a> = (
+        &'a str,
+        Option<bool>,
+        Option<&'a str>,
+        Option<&'a str>,
+        &'a str,
+    );
+    let modes: [Mode; 4] = [
+        ("blocking", None, None, None, "mcp"),
+        ("background", Some(true), None, None, "mcp"),
+        ("supervised", None, Some("self"), None, "mcp"),
+        (
+            "background with a client",
+            Some(true),
+            None,
+            Some("claude-code"),
+            "mcp:claude-code",
+        ),
+    ];
+    for (mode, background, supervise, client, by) in modes {
+        let proj = tempfile::tempdir().unwrap();
+        seed_rel(proj.path(), true);
+        let server = WfMcp::new(proj.path().to_path_buf());
+
+        let out = call_run(&server, rel_args(None, None, background, supervise), client).await;
+        let refusal = &out["policy_refusal"];
+        assert_eq!(
+            refusal["policy"], "irreversible_requires_confirmation",
+            "{mode}: {out}"
+        );
+        assert_eq!(
+            refusal["sources"],
+            serde_json::json!(["playbook"]),
+            "{mode}"
+        );
+        assert!(
+            refusal["detail"]
+                .as_str()
+                .unwrap()
+                .contains("confirm_irreversible"),
+            "{mode}: the refusal says what to pass: {out}"
+        );
+        let nonce = refusal["consent_nonce"]
+            .as_str()
+            .expect("a nonce")
+            .to_string();
+        assert!(
+            no_runs(proj.path()),
+            "{mode}: a refused start writes no run"
+        );
+
+        let stale = Some(ConfirmIrreversibleArg::Nonce("consent-stale".into()));
+        let out = call_run(
+            &server,
+            rel_args(None, stale, background, supervise),
+            client,
+        )
+        .await;
+        assert!(
+            out["policy_refusal"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("consent_nonce_mismatch")),
+            "{mode}: {out}"
+        );
+        assert!(no_runs(proj.path()), "{mode}");
+
+        let confirm = Some(ConfirmIrreversibleArg::Nonce(nonce));
+        let out = call_run(
+            &server,
+            rel_args(None, confirm, background, supervise),
+            client,
+        )
+        .await;
+        let run_id = out["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{mode}: {out}"));
+        assert!(out.get("deprecation").is_none(), "{mode}: {out}");
+        let consent = manifest_consent_of(proj.path(), run_id);
+        assert!(consent.irreversible, "{mode}");
+        assert_eq!(consent.by, by, "{mode}");
+        assert_eq!(consent.sources, vec!["playbook".to_string()], "{mode}");
+        if background.is_none() && supervise.is_none() {
+            assert!(run_finished(proj.path(), run_id), "{mode}");
+        } else {
+            let _ = tools::run_stop(proj.path(), run_id);
+        }
     }
+}
+
+/// The two questions stay apart: consent to irreversible effects does not
+/// acknowledge untrusted content, and the trust refusal of an irreversible
+/// playbook names its irreversible sources and nonce so one question covers
+/// both. For one release `acknowledge_untrusted: true` alone still counts as
+/// the consent, with a deprecation note.
+#[tokio::test]
+async fn trust_and_irreversible_consent_are_separate_questions() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    let proj = tempfile::tempdir().unwrap();
+    seed_rel(proj.path(), false);
+    let server = WfMcp::new(proj.path().to_path_buf());
+
+    let out = call_run(&server, rel_args(None, None, None, None), None).await;
+    let refusal = &out["policy_refusal"];
+    assert_eq!(refusal["policy"], "untrusted_requires_acknowledge", "{out}");
+    assert_eq!(
+        refusal["irreversible"],
+        serde_json::json!(["playbook"]),
+        "{out}"
+    );
+    let nonce = refusal["consent_nonce"]
+        .as_str()
+        .expect("a nonce")
+        .to_string();
+
+    // The irreversible consent alone does not get past trust.
+    let confirm = || Some(ConfirmIrreversibleArg::Nonce(nonce.clone()));
+    let out = call_run(&server, rel_args(None, confirm(), None, None), None).await;
+    assert_eq!(
+        out["policy_refusal"]["policy"], "untrusted_requires_acknowledge",
+        "{out}"
+    );
+    assert!(no_runs(proj.path()));
+
+    // Both answers in one retry: runs, no deprecation.
+    let out = call_run(&server, rel_args(Some(true), confirm(), None, None), None).await;
+    let run_id = out["run_id"].as_str().unwrap_or_else(|| panic!("{out}"));
+    assert!(out.get("deprecation").is_none(), "{out}");
+    assert!(run_finished(proj.path(), run_id));
+
+    // The old way: trust acknowledgement alone, accepted with a note.
+    let out = call_run(&server, rel_args(Some(true), None, None, None), None).await;
+    let run_id = out["run_id"].as_str().unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        out["deprecation"]
+            .as_str()
+            .is_some_and(|d| d.contains("confirm_irreversible")),
+        "{out}"
+    );
+    assert!(run_finished(proj.path(), run_id));
+    assert_eq!(manifest_consent_of(proj.path(), run_id).by, "mcp");
+}
+
+/// `playbook_execute_plan` of an irreversible plan needs the consent nonce
+/// too, and records `mcp:<client>`.
+#[tokio::test]
+async fn execute_plan_needs_the_consent_nonce_and_records_the_client() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    let cfg_dir = std::path::PathBuf::from(std::env::var_os("APB_CONFIG_DIR").unwrap());
+    let (a, b, b_id) = setup_two(&cfg_dir);
+    // Make B's playbook irreversible and trusted.
+    let vfile = b.path().join(".apb/playbooks/noagent/1.0.0/playbook.yaml");
+    let yaml = fs::read_to_string(&vfile).unwrap();
+    fs::write(
+        &vfile,
+        yaml.replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+    approve_version(b.path(), "noagent", "1.0.0");
+    let server = WfMcp::new(a.path().to_path_buf());
+
+    let execute = |confirm: Option<ConfirmIrreversibleArg>, token: String| {
+        server.playbook_execute_plan_for(
+            Parameters(PlaybookExecutePlanArgs {
+                plan_token: token,
+                acknowledge_untrusted: None,
+                confirm_irreversible: confirm,
+            }),
+            Some("claude-code".to_string()),
+        )
+    };
+    let token = prepared_token(&server, &b_id).await["plan_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out: serde_json::Value =
+        serde_json::from_str(&result_text(&execute(None, token.clone()).await)).unwrap();
+    let refusal = &out["policy_refusal"];
+    assert_eq!(
+        refusal["policy"], "irreversible_requires_confirmation",
+        "{out}"
+    );
+    let nonce = refusal["consent_nonce"].as_str().unwrap().to_string();
+    assert!(no_runs(b.path()), "a refused plan writes no run");
+
+    // The refusal did not burn the token: the retry with the nonce runs.
+    let out: serde_json::Value = serde_json::from_str(&result_text(
+        &execute(Some(ConfirmIrreversibleArg::Nonce(nonce)), token).await,
+    ))
+    .unwrap();
+    let run_id = out["run_ref"]["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(manifest_consent_of(b.path(), run_id).by, "mcp:claude-code");
+}
+
+/// MCP `run_resume` of a run with no consent recorded (as one an older apb
+/// started) asks once, bound to the nonce, and records the consent.
+#[tokio::test]
+async fn run_resume_asks_once_for_a_run_without_consent() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    apb_core::run_origin::ensure_key().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    seed_noagent_run(proj.path());
+    approve_version(proj.path(), "noagent", "1.0.0");
+    let server = WfMcp::new(proj.path().to_path_buf());
+    let res = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent".into(),
+            ..rel_args(None, None, None, None)
+        }))
+        .await;
+    let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
+    let run_id = out["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{out}"))
+        .to_string();
+    assert!(run_finished(proj.path(), &run_id));
+    // The snapshot is the irreversible version an older apb ignored.
+    let snap = proj
+        .path()
+        .join(".apb/runs")
+        .join(&run_id)
+        .join("playbook.yaml");
+    let yaml = fs::read_to_string(&snap).unwrap();
+    fs::write(
+        &snap,
+        yaml.replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+
+    let resume = |confirm: Option<ConfirmIrreversibleArg>| {
+        server.run_resume_for(
+            RunResumeArgs {
+                run_id: run_id.clone(),
+                from_node: Some("note".into()),
+                allow_environment_drift: false,
+                acknowledge_untrusted: Some(true),
+                confirm_irreversible: confirm,
+                workspace: None,
+            },
+            Some("claude-code".into()),
+        )
+    };
+    let out: serde_json::Value = serde_json::from_str(&result_text(&resume(Some(
+        ConfirmIrreversibleArg::Nonce("consent-stale".into()),
+    ))))
+    .unwrap();
+    let refusal = &out["policy_refusal"];
+    assert_eq!(
+        refusal["policy"], "irreversible_requires_confirmation",
+        "{out}"
+    );
+    assert_eq!(refusal["resume"], true);
+    let nonce = refusal["consent_nonce"].as_str().unwrap().to_string();
+
+    let out = result_text(&resume(Some(ConfirmIrreversibleArg::Nonce(nonce))));
+    assert!(!out.contains("policy_refusal"), "{out}");
+    assert_eq!(
+        manifest_consent_of(proj.path(), &run_id).by,
+        "mcp:claude-code"
+    );
 }
