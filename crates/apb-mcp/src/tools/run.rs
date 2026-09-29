@@ -29,6 +29,8 @@ pub fn playbook_run(
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
     worktree: Option<String>,
+    // host execution mode (0.23.0)
+    execution: apb_core::execution::ExecutionRequest,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -54,6 +56,7 @@ pub fn playbook_run(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -83,6 +86,8 @@ pub fn playbook_run_background(
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
     worktree: Option<String>,
+    // host execution mode (0.23.0)
+    execution: apb_core::execution::ExecutionRequest,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -108,6 +113,7 @@ pub fn playbook_run_background(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -444,6 +450,8 @@ pub fn playbook_run_supervised(
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
     worktree: Option<String>,
+    // host execution mode (0.23.0)
+    execution: apb_core::execution::ExecutionRequest,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -472,6 +480,7 @@ pub fn playbook_run_supervised(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

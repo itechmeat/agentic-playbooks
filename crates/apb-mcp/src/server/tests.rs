@@ -527,6 +527,7 @@ async fn supervise_self_returns_token() {
             scope: None,
             continued_from: None,
             worktree: None,
+            execution: None,
         }))
         .await;
 
@@ -571,6 +572,7 @@ async fn background_run_returns_run_id_without_blocking() {
             scope: None,
             continued_from: None,
             worktree: None,
+            execution: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -862,6 +864,7 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -926,6 +929,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -986,6 +990,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -1676,6 +1681,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             scope: Some("global".into()),
             continued_from: None,
             worktree: None,
+            execution: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();

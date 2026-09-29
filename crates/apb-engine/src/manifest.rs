@@ -170,7 +170,93 @@ pub struct RunExecutionManifest {
         deserialize_with = "lenient_decisions"
     )]
     pub decisions: Option<apb_core::decisions::EffectiveDecisions>,
+    // --- host execution mode (0.23.0) ---
+    /// Who executes the run's agent steps, resolved once at start (see
+    /// `apb_core::execution`). Absent means `cli`, so a CLI run's manifest is
+    /// byte-identical to one written before the field existed. A resume keeps
+    /// the mode because it is read from here, never re-resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ManifestExecution>,
+    // --- end host execution mode ---
 }
+
+// --- host execution mode (0.23.0) ---
+/// The execution block of a run manifest. `mode` is kept as the raw string so
+/// a mode a newer apb writes does not make the whole manifest unreadable:
+/// [`RunExecutionManifest::execution_mode`] refuses to drive such a run with a
+/// version message instead of silently executing it in another mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestExecution {
+    pub mode: String,
+    /// Where the mode came from (`apb_core::execution::ExecutionSource`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The MCP client name of the session that started the run, the host
+    /// every submission is attributed to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// A `cli` run started by an MCP host session: an agent step whose CLI
+    /// chain cannot start at all becomes a host task (`execution_fallback`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback_to_host: bool,
+}
+
+impl ManifestExecution {
+    /// The block for a resolved execution; `None` for a plain `cli` run
+    /// without the fallback, which keeps the manifest unchanged.
+    pub fn from_resolved(r: &apb_core::execution::ResolvedExecution) -> Option<Self> {
+        (r.mode != apb_core::execution::ExecutionMode::Cli || r.fallback_to_host).then(|| Self {
+            mode: r.mode.as_str().to_string(),
+            source: Some(r.source.as_str().to_string()),
+            client: r.client.clone(),
+            fallback_to_host: r.fallback_to_host,
+        })
+    }
+}
+
+impl RunExecutionManifest {
+    /// The run's execution mode. An unknown mode (written by a newer apb) is
+    /// an error naming the version mismatch: a binary that does not know the
+    /// mode must not drive the run in another one.
+    pub fn execution_mode(&self) -> Result<apb_core::execution::ExecutionMode, EngineError> {
+        match &self.execution {
+            None => Ok(apb_core::execution::ExecutionMode::Cli),
+            Some(e) => apb_core::execution::ExecutionMode::parse(&e.mode).ok_or_else(|| {
+                EngineError::Conflict(format!(
+                    "the run manifest names execution mode `{}`, which this apb {} does not know; it was written by a newer apb: upgrade apb and retry",
+                    e.mode,
+                    env!("CARGO_PKG_VERSION"),
+                ))
+            }),
+        }
+    }
+
+    /// Whether the run executes its agent steps as host tasks.
+    pub fn is_host_mode(&self) -> Result<bool, EngineError> {
+        Ok(self.execution_mode()? == apb_core::execution::ExecutionMode::Host)
+    }
+
+    /// Whether a `cli` step whose CLI chain cannot start becomes a host task.
+    pub fn falls_back_to_host(&self) -> bool {
+        self.execution.as_ref().is_some_and(|e| e.fallback_to_host)
+    }
+
+    /// The MCP client name of the host session that started the run.
+    pub fn host_client(&self) -> Option<&str> {
+        self.execution.as_ref().and_then(|e| e.client.as_deref())
+    }
+}
+
+/// The execution mode of the run in `run_dir`: `cli` without a manifest.
+pub fn run_execution_mode(
+    run_dir: &Path,
+) -> Result<apb_core::execution::ExecutionMode, EngineError> {
+    match read(run_dir)? {
+        Some(m) => m.execution_mode(),
+        None => Ok(apb_core::execution::ExecutionMode::Cli),
+    }
+}
+// --- end host execution mode ---
 
 fn lenient_decisions<'de, D>(
     d: D,
@@ -185,7 +271,12 @@ where
 
 impl RunExecutionManifest {
     pub fn is_empty(&self) -> bool {
-        self.profiles.is_empty() && self.connectors.is_empty() && self.decisions.is_none()
+        self.profiles.is_empty()
+            && self.connectors.is_empty()
+            && self.decisions.is_none()
+            // host execution mode (0.23.0): a run without agent steps of its
+            // own still passes its execution on to its sub-playbooks.
+            && self.execution.is_none()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {
@@ -275,6 +366,48 @@ pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cli_manifest_carries_no_execution_block() {
+        let m = RunExecutionManifest::default();
+        assert!(!serde_yaml_ng::to_string(&m).unwrap().contains("execution"));
+        assert_eq!(
+            m.execution_mode().unwrap(),
+            apb_core::execution::ExecutionMode::Cli
+        );
+    }
+
+    #[test]
+    fn a_host_manifest_round_trips_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = RunExecutionManifest {
+            execution: Some(ManifestExecution {
+                mode: "host".into(),
+                source: Some("argument".into()),
+                client: Some("some-host".into()),
+                fallback_to_host: false,
+            }),
+            ..Default::default()
+        };
+        write(dir.path(), &m).unwrap();
+        assert_eq!(
+            run_execution_mode(dir.path()).unwrap(),
+            apb_core::execution::ExecutionMode::Host
+        );
+    }
+
+    #[test]
+    fn an_execution_mode_from_a_newer_apb_refuses_with_a_version_message() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\nexecution:\n  mode: warp\n  future: 1\n",
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        let err = m.execution_mode().unwrap_err().to_string();
+        assert!(err.contains("`warp`") && err.contains("newer apb"), "{err}");
+    }
 
     #[test]
     fn a_decisions_block_from_a_newer_apb_leaves_the_manifest_readable() {

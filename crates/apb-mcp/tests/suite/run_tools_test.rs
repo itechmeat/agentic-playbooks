@@ -72,6 +72,7 @@ fn run_then_inspect() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     assert_eq!(run["outcome"], "succeeded");
@@ -117,6 +118,7 @@ fn playbook_run_workdir_busy_is_conflict() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .unwrap_err();
     assert!(
@@ -144,6 +146,7 @@ fn runs_list_and_status_expose_lineage_fields() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     let first_id = first["run_id"].as_str().unwrap().to_string();
@@ -161,6 +164,7 @@ fn runs_list_and_status_expose_lineage_fields() {
         Default::default(),
         Some(first_id.clone()),
         None,
+        Default::default(),
     )
     .unwrap();
     let second_id = second["run_id"].as_str().unwrap().to_string();
@@ -456,6 +460,7 @@ fn run_status_carries_answer_key() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     let run_id = started["run_id"].as_str().unwrap();
@@ -486,6 +491,7 @@ fn run_status_children_empty_for_childless_run() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     let status = run_status(dir.path(), started["run_id"].as_str().unwrap()).unwrap();
@@ -1114,6 +1120,7 @@ fn a_run_over_its_own_worktree_is_not_blocked_by_the_root_and_reports_it() {
             Default::default(),
             None,
             worktree.map(str::to_string),
+            Default::default(),
         )
     };
     assert!(start(None).is_err(), "the root is held");
@@ -1191,6 +1198,7 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
         Default::default(),
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();

@@ -10,7 +10,7 @@ use rmcp::{RoleServer, tool, tool_router};
 use serde_json::json;
 
 use super::args::*;
-use super::{WfMcp, sliced_wait, to_call_tool_result, with_warnings};
+use super::{WfMcp, sliced_wait, to_call_tool_result, with_execution, with_warnings};
 use crate::tools::{self, ToolError};
 
 #[tool_router(router = run_router, vis = "pub(crate)")]
@@ -206,10 +206,27 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends",
+        name = "playbook_run",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with a subagent and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in).",
         annotations(destructive_hint = true)
     )]
-    pub(crate) async fn playbook_run(
+    pub(crate) async fn playbook_run_tool(
+        &self,
+        params: Parameters<PlaybookRunArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        // host execution mode (0.23.0): the MCP client name, for attribution.
+        let client = ctx.peer.peer_info().map(|i| i.client_info.name.clone());
+        self.playbook_run_for(params, client).await
+    }
+
+    /// `playbook_run` without a request context (tests): no client name.
+    #[cfg(test)]
+    pub(crate) async fn playbook_run(&self, params: Parameters<PlaybookRunArgs>) -> CallToolResult {
+        self.playbook_run_for(params, None).await
+    }
+
+    pub(crate) async fn playbook_run_for(
         &self,
         Parameters(PlaybookRunArgs {
             id,
@@ -222,8 +239,46 @@ impl WfMcp {
             scope,
             continued_from,
             worktree,
+            execution,
         }): Parameters<PlaybookRunArgs>,
+        client: Option<String>,
     ) -> CallToolResult {
+        // --- host execution mode (0.23.0) ---
+        // The mode is the caller's choice per run; the client name is only
+        // recorded for attribution. A blocking call cannot serve host tasks,
+        // so a host-mode run always starts in the background, and only a
+        // background or supervised start gets the host fallback.
+        let requested_mode = match execution.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(v) => match apb_core::execution::ExecutionMode::parse(v) {
+                Some(m) => Some(m),
+                None => {
+                    return to_call_tool_result(Ok(json!({
+                        "error": "unknown_execution",
+                        "detail": format!("execution must be \"host\" or \"cli\", got `{v}`"),
+                    })));
+                }
+            },
+        };
+        let host_requested = requested_mode == Some(apb_core::execution::ExecutionMode::Host);
+        let execution = apb_core::execution::ExecutionRequest {
+            mode: requested_mode,
+            host_session: host_requested
+                || background == Some(true)
+                || supervise.as_deref() == Some("self"),
+            client,
+            inherited: false,
+        };
+        let resolved = match apb_core::execution::resolve_for(&self.root, &execution) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
+        let background = if resolved.mode == apb_core::execution::ExecutionMode::Host {
+            Some(true)
+        } else {
+            background
+        };
+        // --- end host execution mode ---
         // Definition scope: a global playbook runs in the current project.
         // An unknown scope is not silently treated as project - we refuse it (spec 9).
         let origin = match scope.as_deref() {
@@ -276,24 +331,28 @@ impl WfMcp {
                     "error": "supervise_self_global_unsupported",
                 })));
             }
-            return self.run_supervised_self(
-                id,
-                version,
-                params,
-                instruction,
-                permit.playbook_digest,
-                permit.profile_bundles,
-                permit.children,
-                permit.connectors,
-                permit.connector_accounts,
-                continued_from,
-                worktree,
-                warnings,
+            return with_execution(
+                self.run_supervised_self(
+                    id,
+                    version,
+                    params,
+                    instruction,
+                    permit.playbook_digest,
+                    permit.profile_bundles,
+                    permit.children,
+                    permit.connectors,
+                    permit.connector_accounts,
+                    continued_from,
+                    worktree,
+                    warnings,
+                    execution,
+                ),
+                &resolved,
             );
         }
 
         if matches!(origin, apb_core::scope::Origin::Global) {
-            let resolved = match apb_core::store::resolve(&self.root, &wref) {
+            let resolved_def = match apb_core::store::resolve(&self.root, &wref) {
                 Ok(r) => r,
                 Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
             };
@@ -307,18 +366,22 @@ impl WfMcp {
                 expected_connector_accounts: permit.connector_accounts,
                 continued_from,
                 worktree,
+                execution,
                 ..Default::default()
             };
             if background == Some(true) {
-                return match apb_engine::start_detached_resolved(&resolved, opts) {
-                    Ok(run_id) => to_call_tool_result(with_warnings(
-                        Ok(json!({ "run_id": run_id, "scope": "global" })),
-                        &warnings,
-                    )),
-                    Err(e) => to_call_tool_result(Err(ToolError::from(e))),
-                };
+                return with_execution(
+                    match apb_engine::start_detached_resolved(&resolved_def, opts) {
+                        Ok(run_id) => to_call_tool_result(with_warnings(
+                            Ok(json!({ "run_id": run_id, "scope": "global" })),
+                            &warnings,
+                        )),
+                        Err(e) => to_call_tool_result(Err(ToolError::from(e))),
+                    },
+                    &resolved,
+                );
             }
-            return match apb_engine::run_resolved(&resolved, opts) {
+            return match apb_engine::run_resolved(&resolved_def, opts) {
                 Ok(res) => to_call_tool_result(with_warnings(
                     Ok(
                         json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
@@ -329,23 +392,27 @@ impl WfMcp {
             };
         }
         if background == Some(true) {
-            return to_call_tool_result(with_warnings(
-                tools::playbook_run_background(
-                    &self.root,
-                    &id,
-                    version.as_deref(),
-                    params,
-                    instruction,
-                    Some(permit.playbook_digest),
-                    Some(permit.profile_bundles),
-                    Some(permit.children),
-                    permit.connectors,
-                    permit.connector_accounts,
-                    continued_from,
-                    worktree,
-                ),
-                &warnings,
-            ));
+            return with_execution(
+                to_call_tool_result(with_warnings(
+                    tools::playbook_run_background(
+                        &self.root,
+                        &id,
+                        version.as_deref(),
+                        params,
+                        instruction,
+                        Some(permit.playbook_digest),
+                        Some(permit.profile_bundles),
+                        Some(permit.children),
+                        permit.connectors,
+                        permit.connector_accounts,
+                        continued_from,
+                        worktree,
+                        execution,
+                    ),
+                    &warnings,
+                )),
+                &resolved,
+            );
         }
         to_call_tool_result(with_warnings(
             tools::playbook_run(
@@ -361,6 +428,7 @@ impl WfMcp {
                 permit.connector_accounts,
                 continued_from,
                 worktree,
+                execution,
             ),
             &warnings,
         ))

@@ -117,6 +117,20 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         decisions_detail,
     );
 
+    // Host execution mode (0.23.0): the machine default for a run started
+    // here without a run argument, and in host mode that profile CLIs are
+    // ignored.
+    let (execution_ok, execution_detail) = crate::execution::doctor_line(root);
+    r.push(
+        if execution_ok {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        "execution",
+        execution_detail,
+    );
+
     let reg = match Registry::open(root) {
         Ok(reg) => reg,
         Err(e) => {

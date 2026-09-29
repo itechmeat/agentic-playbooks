@@ -137,6 +137,57 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
     }
 }
 
+// --- host execution mode (0.23.0) ---
+/// What a started host-mode run tells its caller to do next.
+pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI. Call run_wait: it returns pending_tasks; for each one spawn a subagent with role_prompt as its system context and prompt as its task, load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
+
+/// Adds the resolved execution of a run start to a successful response: the
+/// mode, whether the host fallback is on, and in host mode what to do next.
+fn with_execution(
+    result: CallToolResult,
+    resolved: &apb_core::execution::ResolvedExecution,
+) -> CallToolResult {
+    if result.is_error == Some(true) {
+        return result;
+    }
+    let mut result = result;
+    if let Some(Value::Object(obj)) = result.structured_content.as_mut() {
+        annotate_execution(obj, resolved);
+        return result;
+    }
+    if let Some(block) = result.content.first_mut()
+        && let Some(text) = block.as_text().map(|t| t.text.clone())
+        && let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(&text)
+        && obj.contains_key("run_id")
+    {
+        annotate_execution(&mut obj, resolved);
+        if let Ok(new) = ContentBlock::json(Value::Object(obj)) {
+            *block = new;
+        }
+    }
+    result
+}
+
+fn annotate_execution(
+    obj: &mut serde_json::Map<String, Value>,
+    resolved: &apb_core::execution::ResolvedExecution,
+) {
+    obj.insert(
+        "execution".to_string(),
+        json!({
+            "mode": resolved.mode.as_str(),
+            "fallback_to_host": resolved.fallback_to_host,
+        }),
+    );
+    if !resolved.notes.is_empty() {
+        obj.insert("execution_notes".to_string(), json!(resolved.notes));
+    }
+    if resolved.mode == apb_core::execution::ExecutionMode::Host {
+        obj.insert("next".to_string(), json!(HOST_MODE_NEXT));
+    }
+}
+// --- end host execution mode ---
+
 /// Merges the policy gate's non-fatal consent-time warnings (finding 11 of
 /// issue #42 - a bound connector with zero configured accounts) into a
 /// successful run response object, so the caller can show them to the user
@@ -323,6 +374,7 @@ impl WfMcp {
         continued_from: Option<String>,
         worktree: Option<String>,
         warnings: Vec<String>,
+        execution: apb_core::execution::ExecutionRequest,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -342,6 +394,7 @@ impl WfMcp {
             expected_connector_accounts,
             continued_from,
             worktree,
+            execution,
         );
         let value = match started {
             Ok(v) => v,

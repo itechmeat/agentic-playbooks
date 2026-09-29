@@ -60,7 +60,29 @@ pub struct GlobalConfig {
     /// work on a smaller model"), enforced by `apb validate`, `apb doctor` and the adoption
     /// report (`crate::model_check`). Empty means no rule.
     pub model_policy: Vec<ModelRule>,
+    // --- host execution mode (0.23.0) ---
+    /// Host execution mode knobs (`crate::execution`): `fallback_to_host`
+    /// turns the host-task fallback of MCP-started runs off. Host mode itself
+    /// has no machine switch: a run asks for it.
+    pub execution: ExecutionSettings,
+    // --- end host execution mode ---
 }
+
+// --- host execution mode (0.23.0) ---
+/// The `execution:` section of the global `config.yaml` (see
+/// `crate::execution`).
+///
+/// ```yaml
+/// execution:
+///   fallback_to_host: false   # default true
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_to_host: Option<bool>,
+}
+// --- end host execution mode ---
 
 /// One `model_policy` rule: for `agent` (and, with `when`, only its models
 /// matching that glob), a profile model must match one of the `allow` globs.
