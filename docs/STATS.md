@@ -33,7 +33,8 @@ Per playbook version:
 - **first pass**: runs that succeeded with no retry, no fallback and no loop
   traversal, over finished runs.
 - **retries, fallbacks, loop traversals** per run: `retry_started`,
-  `fallback_triggered`, and `edge_traversed` over a bounded edge (one with
+  `fallback_triggered` (and `execution_fallback`, a step handed to the host
+  because none of its CLIs could start), and `edge_traversed` over a bounded edge (one with
   `max_traversals`) back into a node that already ran in that run. A loop of
   two nodes counts both hops.
 - **gate wait**: each `review_requested` to the `review_decided` of the same

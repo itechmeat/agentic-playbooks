@@ -506,7 +506,10 @@ fn run_facts(
                 f.retries += 1;
                 *retried.entry(node).or_default() += 1;
             }
-            EventPayload::FallbackTriggered { node, .. } => {
+            // A host-mode execution fallback (a step whose CLIs could not
+            // start, handed to the host) is a fallback like a profile one.
+            EventPayload::FallbackTriggered { node, .. }
+            | EventPayload::ExecutionFallback { node, .. } => {
                 f.fallbacks += 1;
                 *fell_back.entry(node).or_default() += 1;
             }

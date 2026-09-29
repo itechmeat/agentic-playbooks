@@ -427,6 +427,7 @@ fn a_stub_mcp_host_drives_a_host_mode_run_end_to_end() {
             break;
         }
         assert_eq!(waited["reason"], "needs_input", "{waited}");
+        assert_eq!(waited["needs"], "host_task", "{waited}");
         let tasks = waited["pending_tasks"].as_array().expect("pending_tasks");
         assert!(
             waited["next"].as_str().unwrap().contains("run_task_submit"),

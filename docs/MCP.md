@@ -257,8 +257,9 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
   returns `run_id` **immediately**, without waiting for completion.
 - The client then calls `run_wait { run_id, timeout_ms }`, which blocks
   server-side and returns only when the run finishes (`reason: finished`),
-  needs input (`needs_input`, with `pending_question`, `pending_review` or
-  `pending_supervisor`), is paused or driverless (`stopped`), or `timeout_ms`
+  needs input (`needs_input`, with `needs` naming the channel, `question`,
+  `review`, `supervisor` or `host_task`, and the matching `pending_question`,
+  `pending_review`, `pending_supervisor` or `pending_tasks`), is paused or driverless (`stopped`), or `timeout_ms`
   runs out (`timeout`: call it again). Do not poll `run_status` in a loop:
   every call is a model turn that re-reads the whole conversation plus every
   node output, while `run_wait` costs one turn per decision. `timeout_ms`

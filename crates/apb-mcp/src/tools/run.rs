@@ -345,6 +345,13 @@ pub fn run_wait_result(
         "nodes": counts,
         "next": next,
     });
+    // Which answer channel a `needs_input` is about (`question`, `review`,
+    // `supervisor`, `host_task`), as the docs and the tool description name it.
+    if res.reason == WaitReason::NeedsInput
+        && let Some(needs) = res.needs
+    {
+        out["needs"] = json!(needs.as_str());
+    }
     let progress = view.progress.as_ref();
     let dir = resolve_run_dir(root, run_id)?;
     let fields = [

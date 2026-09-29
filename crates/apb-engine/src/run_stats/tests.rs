@@ -292,3 +292,28 @@ fn the_json_shape_is_stable() {
     assert!(v.get("compare").is_none());
     assert!(v.get("note").is_none());
 }
+
+#[test]
+fn a_host_execution_fallback_counts_as_a_fallback() {
+    use serde_json::json;
+    let runs = vec![run(
+        "fb",
+        "1.0.0",
+        Some(SNAPSHOT),
+        &[
+            (1_000, started("work")),
+            (
+                1_000,
+                json!({"type": "execution_fallback", "node": "work", "attempt": 2, "reason": "spawn failed"}),
+            ),
+            (3_000, finished("work", "succeeded", 1)),
+            (4_000, end("succeeded")),
+        ],
+    )];
+    let r = build(&runs, &StatsFilter::default());
+    let v = &r.versions[0];
+    assert_eq!(v.fallbacks.total, 1);
+    assert_eq!(v.first_pass.text(), "0/1 (0%)");
+    let work = v.nodes.iter().find(|n| n.node == "work").unwrap();
+    assert_eq!(work.fallbacks, 1);
+}

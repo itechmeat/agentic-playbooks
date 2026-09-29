@@ -1060,6 +1060,10 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
     let out = apb_mcp::tools::run_wait_result(dir.path(), "r1", &res).unwrap();
     assert_eq!(out["reason"], "needs_input");
     assert_eq!(
+        out["needs"], "review",
+        "the answer names its channel: {out}"
+    );
+    assert_eq!(
         out["pending_review"]["node"], "gate",
         "the answer must carry the gate its reason is about: {out}"
     );
