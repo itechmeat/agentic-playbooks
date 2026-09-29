@@ -55,10 +55,9 @@ By default apb executes every agent step by spawning the agent CLI the node's pr
 
 ### When an agent picks it
 
-`cli` is always the default, and there is no machine or dashboard switch that turns host mode on. The host agent passes `execution: "host"` on `playbook_run` itself, per run, in exactly these cases:
+`cli` is always the default, and there is no machine or dashboard switch that turns host mode on. The host agent passes `execution: "host"` on `playbook_run`, per run, only when the person explicitly asks for it: "mono", "host" or "single-agent" mode, or "run it with your own subagents". The agent never picks host mode on its own. A person may ask because apb spawning a second copy of an agent's CLI does not suit their setup, for example a subscription-bound desktop agent whose second CLI process would run outside the desktop session and lose the subscription context the person is paying for.
 
-- the person asks for it: "mono", "host" or "single-agent" mode, or "run it with your own subagents";
-- the host cannot or must not have apb spawn other CLIs. A subscription-bound desktop agent is the typical example: when apb spawns a second copy of the agent's CLI, that process runs outside the desktop session and loses the subscription context the person is paying for (the ZCode desktop app is the first host where this matters). A sandboxed host that may not start processes is another.
+Besides that explicit request, a step becomes a host task only through the automatic fallback below, when no CLI of the step can start at all.
 
 The rule is stated in the `playbook_run` tool description and in `playbook_howto`, which is where a host agent looks when it runs a playbook; the tier-0 instructions do not grow (their byte budget is spent, see above).
 

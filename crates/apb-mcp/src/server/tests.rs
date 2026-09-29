@@ -1846,3 +1846,25 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
         "a host request never becomes a blocking run: {v}"
     );
 }
+
+/// H10: the host-mode section of `playbook_howto` lets only the person pick
+/// host mode; the agent never selects it on its own.
+#[test]
+fn playbook_howto_never_lets_the_agent_pick_host_mode_itself() {
+    let howto = crate::tools::playbook_howto().unwrap()["howto"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let section = howto
+        .split("## Host execution mode")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("HOWTO has a host execution mode section");
+    let flat = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        !flat.contains("cannot or must not have apb spawn"),
+        "no self-selection clause: {flat}"
+    );
+    assert!(flat.contains("explicitly asks"), "{flat}");
+    assert!(flat.contains("Do not choose it yourself"), "{flat}");
+}

@@ -1460,11 +1460,12 @@ A playbook needs nothing special to run in host execution mode (informally
 "mono-agent" mode): it is a per-run choice, not a playbook or profile field.
 Runs are `cli` by default: apb spawns the agent CLI each node's profile names.
 Pass `execution: "host"` on `playbook_run` (CLI: `apb run --execution host`)
-only when the user asks for mono, host or single-agent mode, or asks for the
-run to use your own subagents; or when you cannot or must not have apb spawn
-other CLIs (a subscription-bound or sandboxed host). Nothing else turns it on:
-there is no machine switch, and a project `.apb/config.yaml` can only turn the
-fallback below off.
+only when the person explicitly asks for it: mono, host or single-agent mode,
+or for the run to use your own subagents. Do not choose it yourself. The only
+other way a step runs as a host task is the automatic fallback below, when no
+CLI of the step can start. Nothing detects a host by name, there is no
+machine switch, and a project `.apb/config.yaml` can only turn the fallback
+off.
 
 In host mode apb spawns no agent CLI. Every agent step (and a finish answer)
 becomes a host task that `run_wait` returns in `pending_tasks`, each with the
