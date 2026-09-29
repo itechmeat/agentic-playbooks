@@ -148,6 +148,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ts-rs",
+ "ureq",
  "uuid",
 ]
 

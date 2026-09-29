@@ -185,8 +185,18 @@ A node can switch the completion check off for itself with
 ### `apb doctor`
 
 One line: `not configured`, or the ceiling, the effective use modes and each
-provider's id, kind, host, whether its key resolves and whether a TCP
-connection to its host opens. No key and no request are ever sent by doctor.
+provider's id, kind, host, whether its key resolves, and the outcome of one
+request that costs nothing, sent with the provider's key to its own base URL
+within `timeout_ms`: the HTTP status and latency (`GET /v1/models: HTTP 200
+in 230 ms`), or `no answer within <timeout_ms> ms`, or why it failed. The
+free request per kind is `GET /v1/models` (`systemone`, `vercel_evaluate`),
+`GET /models` (`llm_emulation`), `GET /api/v1/key` (`openrouter_decisions`)
+and `GET /user/tokens/verify` (`cloudflare`). A provider whose key comes from
+a command (`{{cmd:...}}`, which only a run executes) or whose variable does
+not resolve gets a TCP connect instead, reported as `reachable (connect
+only)` or `unreachable (connect only)`. The line is a warning when any
+provider's check fails. Doctor never sends a decision request and never
+prints a key.
 
 ## What is sent
 

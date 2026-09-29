@@ -971,6 +971,20 @@ fn key_resolves(key: &Option<KeyRef>) -> Option<bool> {
     }
 }
 
+/// The doctor's check of one provider: a free request where the route has
+/// one ([`crate::decision_probe`]), else a TCP connect. `None` for a
+/// provider without a base URL (the fake provider).
+fn probe(
+    spec: &ProviderSpec,
+    timeout: std::time::Duration,
+) -> Option<crate::decision_probe::ProbeResult> {
+    use crate::decision_probe::{ProbeResult, probe_request, send};
+    match probe_request(spec, resolve_key_var) {
+        Some(req) => Some(send(&req, timeout)),
+        None => reachable(spec).map(|reachable| ProbeResult::ConnectOnly { reachable }),
+    }
+}
+
 /// Whether a TCP connection to the provider's host opens within a second.
 /// Sends nothing: no request, no key.
 fn reachable(spec: &ProviderSpec) -> Option<bool> {
@@ -986,8 +1000,9 @@ fn reachable(spec: &ProviderSpec) -> Option<bool> {
     Some(std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).is_ok())
 }
 
-/// The one doctor line: `(ok, detail)`. Never prints a key; the only
-/// network use is a TCP connect to each configured host.
+/// The one doctor line: `(ok, detail)`, not ok when a provider's check
+/// fails. Never prints a key; the network use is one free request (or a TCP
+/// connect) per configured provider, within `timeout_ms`.
 pub fn doctor_line(root: &Path) -> (bool, String) {
     match resolve(root) {
         Resolution::NotConfigured => (true, "not configured".into()),
@@ -996,6 +1011,8 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
         Resolution::OptedOut(why) => (true, format!("off for this project: {why}")),
         Resolution::AllOff => (true, "configured, every use off".into()),
         Resolution::Active(eff) => {
+            let timeout = std::time::Duration::from_millis(eff.timeout_ms.max(1));
+            let mut all_ok = true;
             let uses: Vec<String> = eff
                 .uses
                 .iter()
@@ -1019,8 +1036,9 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                         (_, Some(false)) => "key missing".into(),
                         (_, None) => "key from command".into(),
                     });
-                    if let Some(r) = reachable(p) {
-                        parts.push(if r { "reachable" } else { "unreachable" }.into());
+                    if let Some(r) = probe(p, timeout) {
+                        all_ok &= r.ok();
+                        parts.push(r.describe());
                     }
                     if p.model.as_deref().is_some_and(is_model_alias) {
                         parts.push("model is an alias, pin a version".into());
@@ -1029,7 +1047,7 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                 })
                 .collect();
             (
-                true,
+                all_ok,
                 format!(
                     "ceiling {}; {}; providers: {}",
                     eff.mode.as_str(),
