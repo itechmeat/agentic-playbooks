@@ -1133,7 +1133,12 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
                 Some(NeedsInput::Review) => format!(
                     "a human review is pending: `apb review {run_id} <node> --decision <option>`"
                 ),
-                _ => "a supervisor decision is pending".to_string(),
+                Some(NeedsInput::HostTask) => format!(
+                    "host tasks wait for a host to execute them: `apb tasks {run_id}` lists them, `apb tasks submit {run_id} <task> --status succeeded --output-file <reply>` answers one"
+                ),
+                Some(NeedsInput::Supervisor) | None => {
+                    "a supervisor decision is pending".to_string()
+                }
             };
             println!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
             print_decisions();

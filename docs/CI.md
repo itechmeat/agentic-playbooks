@@ -26,7 +26,7 @@ verdict in its exit code:
 | 0 | the run succeeded | pass |
 | 1 | the run failed or was aborted | fail the job |
 | 2 | error (unknown run id, unreadable run) | fail the job |
-| 3 | the run needs input: a question, a `human_review` gate or a supervisor decision | fail, or hand the run id to a person (see below) |
+| 3 | the run needs input: a question, a `human_review` gate, a supervisor decision, or host tasks of a host-mode run (`apb tasks <run>` lists them) | fail, or hand the run id to a person (see below) |
 | 4 | the run is paused or its driver is gone | fail; `apb resume <run_id>` continues it |
 | 5 | `--timeout` elapsed while the run was still going | fail, and `apb stop <run_id>` |
 

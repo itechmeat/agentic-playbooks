@@ -416,6 +416,31 @@ fn apb_tasks_never_prints_terminal_escapes_from_a_prompt() {
 }
 
 #[test]
+fn apb_wait_on_a_host_task_names_apb_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let run_id = start_detached(root);
+    let plan = task_of(root, &run_id, "plan");
+    let out = crate::common::apb_std()
+        .args(["wait", run_id.as_str(), "--timeout", "30"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(3), "{stdout}");
+    assert!(
+        stdout.contains(&format!("apb tasks {run_id}")),
+        "names where the tasks wait: {stdout}"
+    );
+    assert!(!stdout.contains("supervisor decision"), "{stdout}");
+    submit(root, &run_id, plan["task_id"].as_str().unwrap(), "PLAN");
+    let build = task_of(root, &run_id, "build");
+    submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
+    assert_eq!(wait_outcome(root, &run_id), "succeeded");
+}
+
+#[test]
 fn doctor_states_the_execution_mode() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
