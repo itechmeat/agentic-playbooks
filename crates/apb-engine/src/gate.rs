@@ -282,6 +282,23 @@ pub fn record_resume_consent(
     by: &str,
 ) -> Result<(), Value> {
     let run_dir = root.join(".apb/runs").join(run_id);
+    let unwritable =
+        |e: crate::EngineError| json!({ "policy": "manifest_unwritable", "detail": e.to_string() });
+    // A run an older apb started from a schema-1 snapshot has no manifest
+    // until its first resume builds the ephemeral one; a manifest written
+    // with only the consent would skip that build and leave its agent nodes
+    // without a profile, so the ephemeral manifest is built first.
+    if crate::manifest::read(&run_dir)
+        .map_err(unwritable)?
+        .is_none()
+    {
+        let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml")).unwrap_or_default();
+        if crate::legacy_snapshot::has_legacy_executors(&yaml) {
+            let m = crate::legacy_snapshot::build_ephemeral_manifest(&run_dir, &yaml)
+                .map_err(unwritable)?;
+            crate::manifest::write(&run_dir, &m).map_err(unwritable)?;
+        }
+    }
     let consent = crate::consent::RunConsent {
         sources: need.sources.clone(),
         ..crate::consent::RunConsent::irreversible(by)
