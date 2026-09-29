@@ -951,17 +951,17 @@ fn set_live(run: Option<LiveRun>) {
 /// The driver is gone, so its pid, and with it the group id, may already
 /// name someone else's group: only members whose working directory lies
 /// inside the repetition are killed from that group, one by one. A detached
-/// helper is recognised by the run's id in its environment (`APB_RUN_ID`,
-/// which the engine gives every agent and script step and which a child
-/// inherits); the groups such helpers lead are killed whole, so their own
-/// children go with them even without the variable. Linux only (it reads
-/// `/proc`); elsewhere a leftover helper is left to the operator.
+/// helper is recognised by its environment ([`is_run_env`]: the run's id and
+/// a run directory inside the repetition, both of which the engine gives
+/// every agent and script step and a child inherits); the groups such
+/// helpers lead are killed whole, so their own children go with them even
+/// without the variables. Linux only (it reads `/proc`); elsewhere a
+/// leftover helper is left to the operator.
 fn kill_leftover_group(driver_pid: Option<u32>, rep_dir: &Path, run_id: &str) {
     #[cfg(target_os = "linux")]
     {
         let driver_group = driver_pid.filter(|p| *p > 1);
         let rep = std::fs::canonicalize(rep_dir).ok();
-        let marker = format!("APB_RUN_ID={run_id}");
         // SAFETY: getpgrp(2) cannot fail.
         let own_group = u32::try_from(unsafe { libc::getpgrp() }).ok();
         // Two passes: a helper forked while the first one ran is caught by
@@ -969,9 +969,8 @@ fn kill_leftover_group(driver_pid: Option<u32>, rep_dir: &Path, run_id: &str) {
         for _ in 0..2 {
             let mut groups = std::collections::BTreeSet::new();
             for (pid, pgrp, proc_dir) in proc_entries() {
-                let marked = !run_id.is_empty()
-                    && std::fs::read(proc_dir.join("environ"))
-                        .is_ok_and(|env| env.split(|b| *b == 0).any(|kv| kv == marker.as_bytes()));
+                let marked = std::fs::read(proc_dir.join("environ"))
+                    .is_ok_and(|env| is_run_env(&env, run_id, rep_dir, rep.as_deref()));
                 let inside = rep.as_ref().is_some_and(|rep| {
                     std::fs::read_link(proc_dir.join("cwd")).is_ok_and(|c| c.starts_with(rep))
                 });
@@ -991,6 +990,32 @@ fn kill_leftover_group(driver_pid: Option<u32>, rep_dir: &Path, run_id: &str) {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = (driver_pid, rep_dir, run_id);
+}
+
+/// Whether a NUL-separated environment block belongs to run `run_id` of the
+/// repetition at `rep_dir` (`rep` is its canonical form). The id alone is not
+/// enough: it is `<playbook>-<ms>`, unique only within one tree, so two
+/// repetitions (or two evals) of one playbook started in the same
+/// millisecond share it. The run directory (`APB_RUN_DIR`) names the tree,
+/// so it has to lie inside this repetition too.
+#[cfg(target_os = "linux")]
+fn is_run_env(env: &[u8], run_id: &str, rep_dir: &Path, rep: Option<&Path>) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    if run_id.is_empty() {
+        return false;
+    }
+    let value = |name: &[u8]| {
+        env.split(|b| *b == 0)
+            .find_map(|kv| kv.strip_prefix(name)?.strip_prefix(b"="))
+    };
+    let dir = value(b"APB_RUN_DIR").map(|v| Path::new(std::ffi::OsStr::from_bytes(v)));
+    value(b"APB_RUN_ID") == Some(run_id.as_bytes())
+        && dir.is_some_and(|d| {
+            d.starts_with(rep_dir)
+                || rep.is_some_and(|r| {
+                    d.starts_with(r) || std::fs::canonicalize(d).is_ok_and(|c| c.starts_with(r))
+                })
+        })
 }
 
 /// Every process as `(pid, process group, /proc/<pid>)`.
@@ -2051,7 +2076,9 @@ mod tests {
     /// A helper that detached into a group of its own, with its working
     /// directory outside the repetition, is killed with its whole group
     /// (a member that lost `APB_RUN_ID` included); a process of another
-    /// run is left alone. Linux only, like the cleanup it tests.
+    /// run is left alone, and so is one of another repetition whose run
+    /// carries the same id (ids are unique only within one tree). Linux
+    /// only, like the cleanup it tests.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_detached_helper_group_of_the_run_is_killed() {
@@ -2065,11 +2092,14 @@ mod tests {
             std::process::id(),
             apb_core::clock::now_ms()
         );
+        let run_dir = |rep: &Path, id: &str| rep.join("tree/.apb/runs").join(id);
+        let other_rep = t.path().join("case-2");
         let sleeper = |id: &str, group: i32| {
             let mut c = Command::new("sleep");
             c.arg("30")
                 .current_dir(t.path())
                 .env("APB_RUN_ID", id)
+                .env("APB_RUN_DIR", run_dir(&rep, id))
                 .process_group(group)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -2083,6 +2113,9 @@ mod tests {
         member.env_remove("APB_RUN_ID");
         reap.0.push(member.spawn().unwrap());
         reap.0.push(sleeper("another-run", 0).spawn().unwrap());
+        let mut twin = sleeper(&run_id, 0);
+        twin.env("APB_RUN_DIR", run_dir(&other_rep, &run_id));
+        reap.0.push(twin.spawn().unwrap());
         // A plausible driver pid that is gone: spawned, waited, reaped.
         let mut gone = Command::new("true").spawn().unwrap();
         let gone_pid = gone.id();
@@ -2102,6 +2135,42 @@ mod tests {
             reap.0[2].try_wait().unwrap().is_none(),
             "a process of another run was killed"
         );
+        assert!(
+            reap.0[3].try_wait().unwrap().is_none(),
+            "a process of another repetition with the same run id was killed"
+        );
+    }
+
+    /// The environment test behind the cleanup: the run id must match
+    /// exactly and the run directory must lie inside the repetition, by its
+    /// given or its canonical path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_env_needs_the_id_and_a_run_dir_inside_the_repetition() {
+        let t = tempfile::tempdir().unwrap();
+        let rep = t.path().join("case-1");
+        std::fs::create_dir_all(rep.join("tree/.apb/runs/rev-1")).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&rep, &link).unwrap();
+        let canon = std::fs::canonicalize(&rep).unwrap();
+        let env = |pairs: &[(&str, &Path)]| {
+            let mut b = b"PATH=/bin\0APB_RUN_ID=rev-1\0".to_vec();
+            for (k, v) in pairs {
+                b.extend_from_slice(format!("{k}={}\0", v.display()).as_bytes());
+            }
+            b
+        };
+        let inside = rep.join("tree/.apb/runs/rev-1");
+        let via_link = link.join("tree/.apb/runs/rev-1");
+        let elsewhere = t.path().join("case-2/tree/.apb/runs/rev-1");
+        let is = |e: &[u8], id: &str| is_run_env(e, id, &rep, Some(&canon));
+        assert!(is(&env(&[("APB_RUN_DIR", &inside)]), "rev-1"));
+        assert!(is(&env(&[("APB_RUN_DIR", &via_link)]), "rev-1"));
+        assert!(!is(&env(&[("APB_RUN_DIR", &elsewhere)]), "rev-1"));
+        assert!(!is(&env(&[]), "rev-1"), "no run directory");
+        assert!(!is(&env(&[("APB_RUN_DIR", &inside)]), "rev-10"));
+        assert!(!is(&env(&[("APB_RUN_DIR", &inside)]), "rev-"));
+        assert!(!is(&env(&[("APB_RUN_DIR", &inside)]), ""));
     }
 
     #[test]

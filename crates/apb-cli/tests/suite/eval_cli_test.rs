@@ -780,9 +780,12 @@ fn a_kept_tree_survives_the_scratch_cleanup() {
         &probe.join("holder.sh"),
         "echo $$ > \"$RUN/driver.pid\"\nchmod a-w \"$RUN\"\necho $$ > \"$PROBE_DIR/helper.pid\"\nwhile :; do sleep 1; done\n",
     );
+    // Detached through perl's POSIX::setsid rather than the util-linux
+    // `setsid` binary, which macOS does not ship; `exec {"/bin/sh"} "apb"`
+    // sets argv[0] without bash's `exec -a`.
     slow_stub(
         &env,
-        "RUN=\"$APB_RUN_DIR\" setsid bash -c 'exec -a apb sh \"$0\"' \"$PROBE_DIR/holder.sh\" >/dev/null 2>&1 &\nwhile [ ! -s \"$PROBE_DIR/helper.pid\" ]; do sleep 0.05; done\nexec sleep 45",
+        "RUN=\"$APB_RUN_DIR\" perl -MPOSIX -e 'defined(POSIX::setsid()) or die \"setsid: $!\"; exec {\"/bin/sh\"} \"apb\", @ARGV or die \"exec: $!\"' \"$PROBE_DIR/holder.sh\" </dev/null >/dev/null 2>&1 &\nwhile [ ! -s \"$PROBE_DIR/helper.pid\" ]; do sleep 0.05; done\nexec sleep 45",
     );
     let (code, v) = env.eval_json(&[]);
     let rep = v["result"]["cases"][0]["repetitions"][0].clone();
