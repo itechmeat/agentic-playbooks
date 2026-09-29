@@ -195,7 +195,8 @@ More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
 [docs/PROFILES.md](docs/PROFILES.md), [docs/CONNECTORS.md](docs/CONNECTORS.md),
 [docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md),
-[docs/GUARDRAILS.md](docs/GUARDRAILS.md), [docs/CI.md](docs/CI.md).
+[docs/GUARDRAILS.md](docs/GUARDRAILS.md), [docs/CI.md](docs/CI.md),
+[docs/STATS.md](docs/STATS.md).
 
 ## Security
 
@@ -217,8 +218,7 @@ With at least one key present, every `/api` route requires either
 through the dashboard. Binding a non-loopback address with no key configured is
 refused at startup. The full runbook, including Caddy and nginx examples, a
 systemd unit, and a fail2ban filter, is in
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md),
-[docs/GUARDRAILS.md](docs/GUARDRAILS.md), [docs/CI.md](docs/CI.md).
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 Do not expose `apb mcp` to untrusted users; it speaks stdio and has no
 authentication of its own.

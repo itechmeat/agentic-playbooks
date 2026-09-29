@@ -58,6 +58,18 @@ fn render_types() -> String {
         apb_engine::run_view::RunUsage::decl(&cfg),
         apb_engine::run_view::RunDecisions::decl(&cfg),
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
+        // --- 0.23.0 stats (C3) ---
+        apb_engine::run_stats::Rate::decl(&cfg),
+        apb_engine::run_stats::PerRun::decl(&cfg),
+        apb_engine::run_stats::Waits::decl(&cfg),
+        apb_engine::run_stats::Outcomes::decl(&cfg),
+        apb_engine::run_stats::Spend::decl(&cfg),
+        apb_engine::run_stats::GoalStats::decl(&cfg),
+        apb_engine::run_stats::NodeStats::decl(&cfg),
+        apb_engine::run_stats::VersionStats::decl(&cfg),
+        apb_engine::run_stats::Comparison::decl(&cfg),
+        apb_engine::run_stats::StatsReport::decl(&cfg),
+        // --- end of 0.23.0 stats ---
         apb_core::agent_output::UsageSource::decl(&cfg),
         apb_core::agent_output::AgentUsage::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),

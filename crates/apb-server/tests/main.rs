@@ -34,6 +34,8 @@ mod profiles_api_test;
 mod runs_api_test;
 #[path = "suite/runs_watch_test.rs"]
 mod runs_watch_test;
+#[path = "suite/stats_api_test.rs"]
+mod stats_api_test;
 #[path = "suite/suggestions_api_test.rs"]
 mod suggestions_api_test;
 #[path = "suite/ws_test.rs"]

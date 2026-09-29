@@ -191,7 +191,7 @@ fn filter(
     })
 }
 
-fn roots(root: &Path, all_projects: bool) -> Vec<PathBuf> {
+pub(crate) fn roots(root: &Path, all_projects: bool) -> Vec<PathBuf> {
     if !all_projects {
         return vec![root.to_path_buf()];
     }

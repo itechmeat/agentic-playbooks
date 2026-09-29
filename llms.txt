@@ -105,6 +105,7 @@ apb migrate         migrate schema 1 playbooks to schema 2
 apb doctor          diagnose environment, or one run with --run
 apb cache           inspect and manage the node result cache
 apb decisions       decision-model report, stored thresholds, replay
+apb stats           cross-run metrics per playbook version and node (read-only)
 apb projects        list or manage the workspace registry
 apb dashboard       web UI on port 7321
 apb ingest          only the inbound webhook listener (headless)
@@ -128,6 +129,7 @@ Five crates under `crates/` with dependency direction core <- engine <- mcp, and
 
 - [Install guide](docs/INSTALL.md): detailed installation methods and environment checks
 - [MCP tools reference](docs/MCP.md): full tool surface, annotations, safety model
+- [Run stats](docs/STATS.md): `apb stats`, cross-run metrics from the run journals
 - [Host integration](docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
 - [Profile authoring](docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
 - [Playbook authoring guide](docs/HOWTO-authoring.md): node types, edges, conditions, params, templating

@@ -2,7 +2,7 @@
   import { untrack } from 'svelte'
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchPlaybook, fetchVersions, promoteVersion, runPlaybook, setFrozen } from '../lib/api'
+  import { fetchPlaybook, fetchStats, fetchVersions, promoteVersion, runPlaybook, setFrozen } from '../lib/api'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
@@ -24,6 +24,10 @@
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
   import Code from '@lucide/svelte/icons/code'
   import History from '@lucide/svelte/icons/history'
+  // --- 0.23.0 stats (C3) ---
+  import ChartColumn from '@lucide/svelte/icons/chart-column'
+  import PlaybookStatsCard from '../lib/PlaybookStatsCard.svelte'
+  // --- end of 0.23.0 stats ---
   import X from '@lucide/svelte/icons/x'
 
   let { id, workspace = '' }: { id: string; workspace?: string } = $props()
@@ -47,6 +51,32 @@
   // Version history is a side trip, not the reason this page exists, so it
   // stays off the canvas until asked for.
   let showHistory = $state(false)
+  // --- 0.23.0 stats (C3): cross-run metrics, a side panel like the history.
+  let showStats = $state(false)
+  let stats = $state<import('../lib/api.gen').StatsReport | null>(null)
+  let statsLoading = $state(false)
+  let statsError = $state<string | null>(null)
+
+  // Loaded each time the panel opens, so it reflects runs finished since.
+  async function loadStats() {
+    const key = `${workspace}/${id}`
+    statsLoading = true
+    statsError = null
+    try {
+      const r = await fetchStats(id, workspace)
+      if (key === `${workspace}/${id}`) stats = r
+    } catch (e) {
+      statsError = String(e)
+    } finally {
+      statsLoading = false
+    }
+  }
+
+  function toggleStats() {
+    showStats = !showStats
+    if (showStats) loadStats()
+  }
+  // --- end of 0.23.0 stats ---
   // The playbook's own nodes (not the flow nodes): clicking a node opens the
   // same form the editor uses, read-only, so a prompt can be read here without
   // switching to edit mode.
@@ -64,6 +94,8 @@
       selectedNodeId = null
     } else if (showHistory) {
       showHistory = false
+    } else if (showStats) {
+      showStats = false
     }
   })
 
@@ -171,6 +203,8 @@
     selectedNodeId = null
     versions = []
     validation = []
+    stats = null
+    showStats = false
     reload()
     return subscribeChanges(reload)
   })
@@ -230,6 +264,17 @@
     >
       <History data-icon="inline-start" />
       <span class="max-sm:sr-only">History</span>
+    </Button>
+    <!-- 0.23.0 stats (C3) -->
+    <Button
+      variant={showStats ? 'default' : 'outline'}
+      size="sm"
+      class="max-sm:px-2"
+      onclick={toggleStats}
+      title="Show how the runs of this playbook went, per version"
+    >
+      <ChartColumn data-icon="inline-start" />
+      <span class="max-sm:sr-only">Stats</span>
     </Button>
     <Button
       variant="outline"
@@ -327,6 +372,19 @@
       <Controls />
     </SvelteFlow>
   </div>
+
+  <!-- 0.23.0 stats (C3) -->
+  {#if showStats}
+    <aside class="min-h-0 w-80 shrink-0 overflow-auto border-l border-border p-4" data-testid="playbook-stats-panel">
+      <div class="mb-3 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold">Run stats</h2>
+        <Button variant="ghost" size="icon" class="size-7" title="Hide the run stats" onclick={() => (showStats = false)}>
+          <X />
+        </Button>
+      </div>
+      <PlaybookStatsCard report={stats} loading={statsLoading} error={statsError} />
+    </aside>
+  {/if}
 
   {#if showHistory}
     <aside class="min-h-0 w-72 shrink-0 overflow-auto border-l border-border p-4">
