@@ -84,8 +84,12 @@ fn fail(json_out: bool, code: &str, message: String) -> ExitCode {
     ExitCode::from(2)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+/// Git for the runner, hardened (`apb_engine::eval::git`): the operator's
+/// `GIT_DIR` and friends are removed, hooks come from the empty `hooks`
+/// directory, no filesystem monitor runs and only the local transport is
+/// allowed.
+fn git(hooks: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = apb_engine::eval::git::command(hooks)
         .arg("-C")
         .arg(dir)
         .args([
@@ -351,6 +355,7 @@ const TREE_EXCLUDES: &str = ".apb/runs/\n.apb/cache/\n.apb/trash/\n.apb/locks/\n
 
 /// Builds the repetition's repository; returns the fixture commit.
 fn materialize(
+    hooks: &Path,
     root: &Path,
     id: &str,
     lc: &LoadedCase,
@@ -365,6 +370,7 @@ fn materialize(
     if let Some(commit) = git_commit {
         let tar = rep_dir.join("fixture.tar");
         git(
+            hooks,
             root,
             &[
                 "archive",
@@ -394,33 +400,45 @@ fn materialize(
     // Every layer is checked before anything else writes into the tree: a
     // link the fixture planted must never redirect apb's own writes.
     check_layer(&tree, true)?;
-    git(&tree, &["init", "-q", "-b", "main"])?;
+    git(hooks, &tree, &["init", "-q", "-b", "main"])?;
     copy_definitions(root, id, &tree, draft)
         .map_err(|e| format!("copying the definitions: {e}"))?;
     check_layer(&tree, false)?;
     apb_core::registry::init_project(&tree).map_err(|e| e.to_string())?;
     std::fs::write(tree.join(".git/info/exclude"), TREE_EXCLUDES).map_err(|e| e.to_string())?;
-    git(&tree, &["add", "-A"])?;
+    git(hooks, &tree, &["add", "-A"])?;
     git(
+        hooks,
         &tree,
         &["commit", "-q", "--no-verify", "-m", "eval fixture"],
     )?;
     let remote = rep_dir.join("remote.git");
     git(
+        hooks,
         rep_dir,
         &["init", "-q", "--bare", &remote.to_string_lossy()],
     )?;
     git(
+        hooks,
         &tree,
         &["remote", "add", "origin", &remote.to_string_lossy()],
     )?;
-    git(&tree, &["push", "-q", "origin", "main"])?;
+    // Only `origin` is local: a push anywhere else must not find the
+    // operator's credential helper, and a bare `git push` goes to origin.
+    for (k, v) in [
+        ("credential.helper", ""),
+        ("remote.pushDefault", "origin"),
+        ("push.default", "current"),
+    ] {
+        git(hooks, &tree, &["config", k, v])?;
+    }
+    git(hooks, &tree, &["push", "-q", "origin", "main"])?;
     if let Some(change) = &fx.change {
         let branch = fx
             .branch
             .clone()
             .unwrap_or_else(|| core_eval::DEFAULT_CHANGE_BRANCH.to_string());
-        git(&tree, &["checkout", "-q", "-b", &branch])?;
+        git(hooks, &tree, &["checkout", "-q", "-b", &branch])?;
         let overlay_src = suite_copy.join(change);
         if let Some(g) = carries_git(&overlay_src) {
             return Err(format!(
@@ -431,13 +449,14 @@ fn materialize(
         apb_core::fsutil::copy_tree_no_follow(&overlay_src, rep_dir, &tree)
             .map_err(|e| e.to_string())?;
         check_layer(&tree, false)?;
-        git(&tree, &["add", "-A"])?;
+        git(hooks, &tree, &["add", "-A"])?;
         git(
+            hooks,
             &tree,
             &["commit", "-q", "--no-verify", "-m", "eval fixture change"],
         )?;
     }
-    git(&tree, &["rev-parse", "HEAD"])
+    git(hooks, &tree, &["rev-parse", "HEAD"])
 }
 
 /// The case env with `{{eval.scratch}}` expanded.
@@ -649,8 +668,9 @@ struct Planned<'a> {
 }
 
 /// A fixture ref of this repository as a commit id.
-fn resolve_ref(root: &Path, r: &str) -> Result<String, String> {
+fn resolve_ref(hooks: &Path, root: &Path, r: &str) -> Result<String, String> {
     git(
+        hooks,
         root,
         &[
             "rev-parse",
@@ -662,6 +682,8 @@ fn resolve_ref(root: &Path, r: &str) -> Result<String, String> {
 }
 
 struct RepContext<'a> {
+    /// The empty directory every hardened git call takes its hooks from.
+    hooks: &'a Path,
     root: &'a Path,
     args: &'a EvalArgs,
     playbook: &'a Playbook,
@@ -701,6 +723,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
     let tree = rep_dir.join("tree");
     let fixture_commit = match p.fixture_commit.clone().transpose().and_then(|commit| {
         materialize(
+            cx.hooks,
             cx.root,
             &cx.args.id,
             lc,
@@ -745,6 +768,9 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         ("APB_EVAL_REPETITION", n.to_string()),
         ("APB_EVAL_SCRATCH", rep_dir.to_string_lossy().into_owned()),
     ];
+    // The agent had the operator's filesystem: the hooks directory is
+    // emptied again before any check runs git.
+    let _ = apb_engine::eval::git::empty_hooks_dir(cx.hooks);
     let input = CheckInput {
         case: &lc.case,
         playbook: cx.playbook,
@@ -755,6 +781,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         suite_dir: cx.suite_copy,
         stopped: stop.as_ref().map(|s| s.text.as_str()),
         script_env,
+        hooks_dir: cx.hooks,
     };
     let (check_results, goal) = checks::evaluate(&input);
     let verdict = if stop.as_ref().is_some_and(|s| s.limit) {
@@ -1025,11 +1052,24 @@ fn run_eval(
         .max_usd
         .or(suite.suite.budget.max_usd_per_invocation)
         .unwrap_or(core_eval::DEFAULT_MAX_USD_PER_INVOCATION);
+    let hooks = scratch.join("no-hooks");
+    if let Err(e) = apb_engine::eval::git::empty_hooks_dir(&hooks) {
+        return fail(
+            args.json,
+            "scratch",
+            format!("cannot prepare the scratch: {e}"),
+        );
+    }
     let mut planned: Vec<Planned> = Vec::new();
     for lc in &cases {
         // A `git:` fixture ref is resolved once per case: every repetition
         // materializes the same commit, and the case digest names it.
-        let fixture_commit = lc.case.fixture.git.as_ref().map(|r| resolve_ref(root, r));
+        let fixture_commit = lc
+            .case
+            .fixture
+            .git
+            .as_ref()
+            .map(|r| resolve_ref(&hooks, root, r));
         let resolved = fixture_commit.as_ref().and_then(|c| c.as_ref().ok());
         let digest = match core_eval::case_digest(lc, resolved.map(String::as_str)) {
             Ok(d) => d,
@@ -1132,6 +1172,7 @@ fn run_eval(
         None => None,
     };
     let cx = RepContext {
+        hooks: &hooks,
         root,
         args,
         playbook,

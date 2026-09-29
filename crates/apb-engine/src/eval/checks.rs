@@ -114,6 +114,9 @@ pub struct CheckInput<'a> {
     pub stopped: Option<&'a str>,
     /// `APB_EVAL_*` and the run ids for the case scripts.
     pub script_env: Vec<(&'static str, String)>,
+    /// An empty directory: the hooks path of every git call the checks and
+    /// the case scripts make in the tree (see [`super::git`]).
+    pub hooks_dir: &'a Path,
 }
 
 /// The run's terminal outcome as the checks see it: `stopped` when the
@@ -374,8 +377,14 @@ fn output_checks(input: &CheckInput, state: &RunState, out: &mut Vec<CheckResult
 }
 
 /// The file at `rel` in the fixture commit, `None` when it has none.
-fn fixture_file(tree: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
-    let out = std::process::Command::new("git")
+/// The tree's `.git` is the agent's to edit, so the read is hardened.
+fn fixture_file(
+    hooks: &Path,
+    tree: &Path,
+    commit: &str,
+    rel: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let out = super::git::command(hooks)
         .arg("-C")
         .arg(tree)
         .args(["cat-file", "blob", &format!("{commit}:{rel}")])
@@ -410,7 +419,7 @@ fn file_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
             }
         }
         if f.unchanged_from_fixture == Some(true) {
-            match fixture_file(input.tree, input.fixture_commit, &f.path) {
+            match fixture_file(input.hooks_dir, input.tree, input.fixture_commit, &f.path) {
                 Ok(before) if before == now => {}
                 Ok(_) => problems.push("changed from the fixture".to_string()),
                 Err(e) => {
@@ -456,14 +465,23 @@ fn event_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
 fn script_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
     for s in &input.case.checks.scripts {
         let kind = format!("script[{s}]");
-        match crate::script::run_script_with_env(
+        // The scripts run after untrusted agent activity in the tree: their
+        // own git calls get the same hardening as apb's.
+        let mut env = input.script_env.clone();
+        env.push((
+            "GIT_CONFIG_PARAMETERS",
+            super::git::config_parameters(input.hooks_dir),
+        ));
+        env.push(("GIT_CONFIG_NOSYSTEM", "1".into()));
+        match crate::script::run_script_with_env_removed(
             input.suite_dir,
             input.tree,
             s,
             "sh",
             Some(CASE_SCRIPT_TIMEOUT),
             None,
-            &input.script_env,
+            &env,
+            &super::git::LOCATION_VARS,
         ) {
             Ok(r) if r.status == NodeStatus::Succeeded => {
                 out.push(CheckResult::new(kind, true, String::new))
@@ -598,6 +616,7 @@ mod tests {
             suite_dir: tree.path(),
             stopped: None,
             script_env: Vec::new(),
+            hooks_dir: tree.path(),
         };
         evaluate(&input).0
     }

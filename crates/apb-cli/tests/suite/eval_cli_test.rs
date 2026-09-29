@@ -590,3 +590,55 @@ fn a_symlinked_fixture_cannot_leave_the_tree() {
         assert!(!env.cfg.path().join("evals/scratch").exists(), "{branch}");
     }
 }
+
+/// The runner's git ignores a `GIT_DIR` the operator's shell carries (as it
+/// does inside a git hook): the fixture is committed to the scratch
+/// repository, never to the operator's. The scratch repository clears the
+/// credential helper and pushes to its local origin, and a case script's
+/// own git calls get the hardening through `GIT_CONFIG_PARAMETERS`.
+#[test]
+fn the_runner_git_ignores_the_operators_git_dir_and_cuts_credentials() {
+    let env = setup(PLAYBOOK);
+    let other = tempfile::tempdir().unwrap();
+    git_in(other.path(), &["init", "-q", "-b", "main"]);
+    write(&other.path().join("a"), "a\n");
+    git_in(other.path(), &["add", "a"]);
+    git_in(other.path(), &["commit", "-q", "-m", "only"]);
+    let ev = env.project.path().join(".apb/playbooks/rev/evals");
+    write(
+        &ev.join("scripts/config.sh"),
+        "#!/bin/sh\nset -eu\n[ \"$(git config --get push.default)\" = current ]\n[ \"$(git config --get remote.pushDefault)\" = origin ]\n[ -z \"$(git config --get-all credential.helper)\" ]\n[ -z \"${GIT_DIR:-}\" ]\ncase \"$GIT_CONFIG_PARAMETERS\" in *core.fsmonitor=false*core.hooksPath=*) ;; *) exit 1 ;; esac\n",
+    );
+    write(
+        &ev.join("writes-report.yaml"),
+        &CASE.replace(
+            "scripts: [scripts/branch.sh]",
+            "scripts: [scripts/branch.sh, scripts/config.sh]",
+        ),
+    );
+    let out = apb()
+        .args(["eval", "rev", "--yes", "--json"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .env("APB_AGENT_CMD", &env.stub)
+        .env("APB_NO_REGISTRY", "1")
+        .env("GIT_DIR", other.path().join(".git"))
+        .env("GIT_WORK_TREE", other.path())
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(rep["verdict"], "passed", "{rep:#}");
+    let log = std::process::Command::new("git")
+        .args([
+            "-C",
+            &other.path().to_string_lossy(),
+            "rev-list",
+            "--count",
+            "HEAD",
+        ])
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "1");
+}
