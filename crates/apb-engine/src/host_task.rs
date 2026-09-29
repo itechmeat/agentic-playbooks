@@ -463,11 +463,22 @@ pub fn submit_to_run(
 ) -> Result<SubmitReceipt, EngineError> {
     let run_dir = run_dir_of(root, run_id)?;
     let events = crate::event::read_all_lossy_tail(&run_dir)?;
-    let owner = pending_tasks(&run_dir, &events)
+    // Task ids are unique only within one run: a parent and a child run may
+    // both have a pending `build-1`. Through the parent's id that is
+    // ambiguous, so the caller has to name the run.
+    let owners: Vec<String> = pending_tasks(&run_dir, &events)
         .into_iter()
-        .find(|t| t.task_id == req.task_id)
-        .map(|t| t.run_id);
-    match owner {
+        .filter(|t| t.task_id == req.task_id)
+        .map(|t| t.run_id)
+        .collect();
+    if owners.len() > 1 {
+        return Err(EngineError::Conflict(format!(
+            "host task `{}` is pending on more than one run ({}); submit with the run id of the one you mean",
+            req.task_id,
+            owners.join(", ")
+        )));
+    }
+    match owners.into_iter().next() {
         Some(owner) if owner != run_id => submit(&run_dir_of(root, &owner)?, req),
         _ => submit(&run_dir, req),
     }
@@ -699,5 +710,56 @@ mod tests {
         let found = adoptable(run, &events, "plan");
         assert_eq!(found.adopted.map(|r| r.task_id), Some(a));
         assert_eq!(found.superseded, vec![b]);
+    }
+
+    /// A run directory `.apb/runs/<id>` under `root` with one requested task
+    /// per `(task_id, node)` and, optionally, a started child run.
+    fn seed_run(root: &Path, id: &str, tasks: &[(&str, &str)], child: Option<&str>) -> PathBuf {
+        let run = root.join(".apb/runs").join(id);
+        std::fs::create_dir_all(&run).unwrap();
+        let mut log = crate::event::EventLog::open(&run).unwrap();
+        if let Some(child) = child {
+            log.append(EventPayload::ChildRunStarted {
+                node_id: "sub".into(),
+                run_id: child.into(),
+            })
+            .unwrap();
+        }
+        for (task_id, node) in tasks {
+            std::fs::create_dir_all(task_dir(&run, task_id)).unwrap();
+            write_task(&run, &record(task_id, node), "p", None).unwrap();
+            log.append(requested(1, task_id, node).payload).unwrap();
+        }
+        run
+    }
+
+    #[test]
+    fn a_task_id_pending_on_the_parent_and_a_child_is_refused_through_the_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_run(root, "parent", &[("build-1", "build")], Some("child"));
+        let child = seed_run(root, "child", &[("build-1", "build")], None);
+        let req = SubmitRequest {
+            task_id: "build-1".into(),
+            status: SubmitStatus::Succeeded,
+            output: "done".into(),
+            usage: None,
+            note: None,
+            submitted_by: "host".into(),
+            client: None,
+        };
+        let err = submit_to_run(root, "parent", req.clone()).unwrap_err();
+        match err {
+            EngineError::Conflict(msg) => {
+                assert!(msg.contains("parent") && msg.contains("child"), "{msg}")
+            }
+            other => panic!("expected a conflict, got {other}"),
+        }
+        assert!(read_submission(&child, "build-1").is_none());
+        // Naming the child run is unambiguous.
+        submit_to_run(root, "child", req.clone()).unwrap();
+        assert_eq!(read_submission(&child, "build-1").unwrap().output, "done");
+        // With the child's task submitted, the parent id is unambiguous again.
+        submit_to_run(root, "parent", req).unwrap();
     }
 }
