@@ -31,7 +31,7 @@ const report: StatsReport = {
   versions: [
     version('1.0.0'),
     version('1.1.0', {
-      runs: 1,
+      runs: 4,
       goal: [
         { index: 0, description: 'tests pass', check: 'script', checked: 1, passed: { count: 1, of: 1, rate: 1 }, failed: 0, errors: 0, manual: 0 },
         { index: 1, description: 'a person reads it', check: 'manual', checked: 1, passed: { count: 0, of: 0 }, failed: 0, errors: 0, manual: 1 },
@@ -45,12 +45,14 @@ describe('playbook stats formatting', () => {
   it('shows counts next to rates', () => {
     expect(rateText({ count: 2, of: 3, rate: 0.6667 })).toBe('2/3 (67%)')
     expect(rateText({ count: 0, of: 0 })).toBe('0/0')
-    expect(perRunText({ total: 1, runs: 3, per_run: 0.33 })).toBe('0.33 per run')
+    expect(perRunText({ total: 1, runs: 3, per_run: 0.33 })).toBe('0.33 per run (1 over 3 runs)')
     expect(perRunText({ total: 0, runs: 0 })).toBe('0')
     expect(waitsText({ count: 1, median_ms: 60_000 })).toBe('median 1.0 min over 1')
     expect(waitsText({ count: 0 })).toBe('none')
     expect(spendText(report.versions[0])).toBeNull()
-    expect(spendText(report.versions[1])).toBe('1500 tokens per run, $0.0200 per run')
+    expect(spendText(report.versions[1])).toBe(
+      '1500.00 tokens per run (1500 over 1 runs), $0.0200 per run reported by 1 of 4 runs',
+    )
     expect(versionsNewestFirst(report).map((v) => v.version)).toEqual(['1.1.0', '1.0.0'])
     expect(versionsNewestFirst(null)).toEqual([])
   })
@@ -67,7 +69,8 @@ describe('PlaybookStatsCard', () => {
     expect(body).toContain('passed 1/1 (100%)')
     expect(body).toContain('manual in 1')
     expect(body.match(/data-testid="playbook-stats-goal"/g)?.length).toBe(1)
-    expect(body).toContain('$0.0200 per run')
+    expect(body).toContain('$0.0200 per run reported by 1 of 4 runs')
+    expect(body).toContain('0.33 per run (1 over 3 runs)')
   })
 
   it('has a loading, an error and an empty state', () => {
