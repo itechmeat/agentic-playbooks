@@ -339,10 +339,12 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
         let adopt_verdict = || {
             if let (Some(old), Some(new)) = (&prior_status_file, &task.status_file) {
                 let old = std::path::Path::new(old);
-                if old != new.as_path() && old.is_file() && !new.exists() {
-                    if let Ok(bytes) = std::fs::read(old) {
-                        let _ = apb_core::fsutil::atomic_write_private(new, &bytes);
-                    }
+                if old != new.as_path()
+                    && old.is_file()
+                    && !new.exists()
+                    && let Ok(bytes) = std::fs::read(old)
+                {
+                    let _ = apb_core::fsutil::atomic_write_private(new, &bytes);
                 }
             }
         };
