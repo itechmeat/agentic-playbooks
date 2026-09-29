@@ -240,7 +240,7 @@ fn goal_check(input: &CheckInput, goal: &[GoalResult], accepted: &[String]) -> O
 /// `node_started`, every `review_requested` (a gate the run reached), plus
 /// a `node_finished` with no open start (a finish or start node, which the
 /// engine journals without `node_started`).
-pub fn visited(events: &[Event]) -> Vec<&str> {
+fn visited(events: &[Event]) -> Vec<&str> {
     let mut open: BTreeMap<&str, usize> = BTreeMap::new();
     let mut out = Vec::new();
     for e in events {
@@ -595,7 +595,9 @@ pub fn verdict(checks: &[CheckResult]) -> &'static str {
 }
 
 /// How often each check kind did not pass across repetitions, most first.
-pub fn failing_kinds<'a>(reps: impl Iterator<Item = &'a [CheckResult]>) -> Vec<(String, usize)> {
+pub(crate) fn failing_kinds<'a>(
+    reps: impl Iterator<Item = &'a [CheckResult]>,
+) -> Vec<(String, usize)> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for checks in reps {
         for c in checks.iter().filter(|c| c.status != CheckStatus::Passed) {
@@ -627,13 +629,14 @@ mod tests {
             ev(3, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),
             ev(4, EventPayload::NodeStarted { node: "w".into(), attempt: 1 }),
             ev(5, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),
-            ev(6, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"f","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
-            ev(7, EventPayload::RunFinished { outcome: "succeeded".into() }),
+            ev(6, serde_json::from_value(serde_json::json!({"type":"review_requested","node":"g","options":["approve"]})).unwrap()),
+            ev(7, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"f","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
+            ev(8, EventPayload::RunFinished { outcome: "succeeded".into() }),
         ]
     }
 
     fn case(yaml: &str) -> EvalCase {
-        apb_core::eval::parse_case(yaml, "c").unwrap()
+        serde_yaml_ng::from_str(yaml).unwrap()
     }
 
     const PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: prompt, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: f }\n";
@@ -671,19 +674,18 @@ mod tests {
     }
 
     #[test]
-    fn visited_counts_executions_and_finish_nodes_once() {
-        assert_eq!(visited(&journal()), ["s", "w", "w", "f"]);
-    }
-
-    #[test]
     fn route_output_and_event_checks_read_the_journal() {
         let checks = run(
-            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  route: { visits: [s, w, f], in_order: true, not_visits: [f], max_visits: { w: 1 } }\n  outputs:\n    - { node: w, field: verdict, equals: ok }\n    - { node: w, field: n, equals: \"3\" }\n    - { node: w, not_matches: verdict }\n    - { node: w, field: missing, non_empty: true }\n  events: { absent: [run_error], max: { retry_started: 1 } }\n",
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  route: { visits: [s, w, g, f], in_order: true, not_visits: [f], max_visits: { w: 1, f: 1, g: 1 } }\n  outputs:\n    - { node: w, field: verdict, equals: ok }\n    - { node: w, field: n, equals: \"3\" }\n    - { node: w, not_matches: verdict }\n    - { node: w, field: missing, non_empty: true }\n  events: { absent: [run_error], max: { retry_started: 1 } }\n",
         );
         assert_eq!(status(&checks, "run.outcome"), CheckStatus::Passed);
         assert_eq!(status(&checks, "route.visits"), CheckStatus::Passed);
         assert_eq!(status(&checks, "route.not_visits"), CheckStatus::Failed);
+        // Two executions of `w`; the finish node (no `node_started`) and the
+        // gate (`review_requested`) count once each.
         assert_eq!(status(&checks, "route.max_visits[w]"), CheckStatus::Failed);
+        assert_eq!(status(&checks, "route.max_visits[f]"), CheckStatus::Passed);
+        assert_eq!(status(&checks, "route.max_visits[g]"), CheckStatus::Passed);
         assert_eq!(status(&checks, "outputs[w.verdict]"), CheckStatus::Passed);
         assert_eq!(status(&checks, "outputs[w.n]"), CheckStatus::Passed);
         assert_eq!(status(&checks, "outputs[w]"), CheckStatus::Failed);

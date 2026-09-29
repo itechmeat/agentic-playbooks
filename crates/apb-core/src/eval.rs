@@ -339,7 +339,7 @@ fn later_field(raw: &str) -> Option<String> {
 }
 
 /// Parses one case file's text. `stem` is the file stem the id must equal.
-pub fn parse_case(raw: &str, stem: &str) -> Result<EvalCase, String> {
+fn parse_case(raw: &str, stem: &str) -> Result<EvalCase, String> {
     if let Some(f) = later_field(raw) {
         return Err(format!(
             "{f} is not supported by this apb (it needs mock connectors, a later release)"
@@ -1252,7 +1252,20 @@ mod tests {
         let b = case_digest(&load(), None).unwrap();
         assert_ne!(a, b, "fixture change");
         std::fs::write(evals.join("scripts/ok.sh"), "exit 1").unwrap();
-        assert_ne!(b, case_digest(&load(), None).unwrap(), "script change");
+        let c = case_digest(&load(), None).unwrap();
+        assert_ne!(b, c, "script change");
+        std::fs::create_dir_all(evals.join("fixtures/change")).unwrap();
+        std::fs::write(
+            evals.join("good.yaml"),
+            GOOD.replace(
+                "dir: fixtures/base }",
+                "dir: fixtures/base, change: fixtures/change }",
+            ),
+        )
+        .unwrap();
+        let d = case_digest(&load(), None).unwrap();
+        std::fs::write(evals.join("fixtures/change/new.txt"), "n").unwrap();
+        assert_ne!(d, case_digest(&load(), None).unwrap(), "change overlay");
     }
 
     /// Two suites over the skill-bundle limits (more than 512 files) are

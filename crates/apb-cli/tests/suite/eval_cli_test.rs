@@ -118,27 +118,10 @@ fn a_passing_case_is_checked_stored_and_leaves_nothing_behind() {
     );
     let rep = &case["repetitions"][0];
     assert_eq!(rep["verdict"], "passed", "{rep:#}");
-    let kinds: Vec<&str> = rep["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["kind"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        kinds,
-        [
-            "run.outcome",
-            "goal",
-            "route.visits",
-            "route.not_visits",
-            "outputs[review]",
-            "files[report.md]",
-            "files[lib.txt]",
-            "events.absent[run_error]",
-            "script[scripts/branch.sh]"
-        ]
-    );
-    assert_eq!(rep["goal"][0]["status"], "passed");
+    // The check list itself is the snapshot test's; here: what is stored
+    // and what is left behind. The runner reports a kept tree, so a clean
+    // run must report none.
+    assert!(rep["kept_worktree"].is_null(), "{rep:#}");
     // No write outside the scratch dirs: the project is untouched, the run
     // directory was moved under the config dir, the scratch tree is gone.
     assert_eq!(listing(env.project.path()), before);
@@ -218,6 +201,9 @@ fn the_json_output_matches_its_snapshot() {
     let env = setup(PLAYBOOK);
     let (_, mut v) = env.eval_json(&["--model", "claude:claude-haiku-4-5-20251001"]);
     normalize(&mut v);
+    // `overrides_digest` is pinned on purpose: it is part of the storage key
+    // of `--model` results (`evals/results/<id>/<key>.json`), so a change of
+    // its canonical form would orphan them.
     let expected = serde_json::json!({
         "comparison": null,
         "stored": "*",
@@ -1174,4 +1160,28 @@ fn the_review_scripts_pass_and_fail_on_their_documented_inputs() {
         "{only}: an edited source"
     );
     assert!(!run(only, None, false), "{only}: no report");
+}
+
+/// E8: the invocation budget counts the cost the agent reports; once it is
+/// spent the next repetition does not start.
+#[test]
+fn a_spent_invocation_budget_stops_the_next_repetition() {
+    let env = setup(PLAYBOOK);
+    // claude's `--output-format json` result object, with a cost.
+    write(
+        &env.stub,
+        "#!/bin/sh\necho 'the review names lib.txt' > report.md\nprintf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"REPORT-OK\\n```yaml\\nstatus: success\\nsummary: done\\n```\",\"total_cost_usd\":0.6,\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}'\n",
+    );
+    let (code, v) = env.eval_json(&["--repeat", "3", "--max-usd", "1"]);
+    assert_eq!(code, 1, "{v:#}");
+    let case = &v["result"]["cases"][0];
+    assert_eq!(case["of"], 2, "{v:#}");
+    assert_eq!(case["repetitions"][0]["usage"]["cost_usd"], 0.6, "{v:#}");
+    assert_eq!(v["result"]["incomplete"], "invocation budget $1.00 spent");
+    assert_eq!(v["result"]["total_cost_usd"], 1.2);
+    assert_eq!(
+        v["warnings"],
+        serde_json::json!([]),
+        "the cost was reported"
+    );
 }
