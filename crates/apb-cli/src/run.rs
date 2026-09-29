@@ -312,7 +312,21 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                 for (code, message) in apb_core::preflight::findings(root, &loaded.playbook) {
                     println!("{id}: warning {code} {message}");
                 }
-                if report.is_valid() {
+                // --- 0.24.0 eval suites ---
+                let suite_issues = apb_core::eval::validate_suite(
+                    &root.join(".apb/playbooks").join(&id),
+                    &loaded.playbook,
+                );
+                for issue in &suite_issues {
+                    let sev = match issue.severity {
+                        Severity::Error => "error",
+                        Severity::Warning => "warning",
+                    };
+                    println!("{id}: {sev} {} {}", issue.code, issue.message);
+                }
+                let suite_ok = !suite_issues.iter().any(|i| i.severity == Severity::Error);
+                // --- end 0.24.0 eval suites ---
+                if report.is_valid() && suite_ok {
                     println!("{id}: OK");
                 } else {
                     failed = true;

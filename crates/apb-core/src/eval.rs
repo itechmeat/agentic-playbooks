@@ -768,10 +768,7 @@ pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> String {
     if let Some(c) = resolved_git {
         parts.push(format!("git:{c}"));
     }
-    format!(
-        "sha256:{}",
-        crate::content::sha256_hex(parts.join("\n").as_bytes())
-    )
+    crate::content::sha256_hex(parts.join("\n").as_bytes())
 }
 
 /// The suite digest: the whole `evals/` tree. It is what a person approves

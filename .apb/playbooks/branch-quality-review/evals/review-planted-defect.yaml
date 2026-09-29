@@ -1,0 +1,25 @@
+schema: 1
+id: review-planted-defect
+title: The review finds a planted off-by-one error and writes exactly its report
+source: "issue #74 findings 4 and 5 (verdict and deliverable), issue #45 item 14"
+instruction: |
+  Review the checked-out branch `eval-change` against `main`.
+fixture:
+  dir: fixtures/window-max/base
+  change: fixtures/window-max/planted
+checks:
+  goal: required
+  run: { outcome: [succeeded] }
+  route:
+    visits: [review, done]
+    in_order: true
+    not_visits: [failed]
+  files:
+    - { path: docs/reviews/_date_time_review.md, exists: true }
+    - { path: src/lib.rs, unchanged_from_fixture: true }
+    - { path: Cargo.toml, unchanged_from_fixture: true }
+    - { path: AGENTS.md, unchanged_from_fixture: true }
+  scripts:
+    - scripts/only-the-review-file.sh
+    - scripts/names-the-planted-defect.sh
+tags: [review]
