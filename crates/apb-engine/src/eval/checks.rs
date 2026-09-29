@@ -96,6 +96,21 @@ impl RepUsage {
     }
 }
 
+/// Whether `t` is an event type this apb's journal can hold. Asked of the
+/// event type itself (serde names every variant it does not know), so the
+/// list can never drift from the journal.
+pub fn is_event_type(t: &str) -> bool {
+    match serde_json::from_value::<EventPayload>(serde_json::json!({ "type": t })) {
+        Ok(_) => true,
+        Err(e) => !e.to_string().contains("unknown variant"),
+    }
+}
+
+/// [`apb_core::eval::validate_suite`] with the journal's event types.
+pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<apb_core::validate::Issue> {
+    apb_core::eval::validate_suite_with(playbook_dir, playbook, &is_event_type)
+}
+
 /// What the checks read.
 pub struct CheckInput<'a> {
     pub case: &'a EvalCase,
@@ -400,7 +415,7 @@ fn fixture_file(
 fn read_checked(tree: &Path, rel: &str) -> Result<Option<Vec<u8>>, String> {
     let path = tree.join(rel);
     apb_core::fsutil::ensure_no_symlink_below(tree, &path)
-        .map_err(|_| format!("`{rel}` is reached through a symlink, which is not followed"))?;
+        .map_err(|_| format!("`{rel}` is a symlink or lies below one, which is not followed"))?;
     match std::fs::symlink_metadata(&path) {
         Ok(m) if m.is_file() => std::fs::read(&path).map(Some).map_err(|e| e.to_string()),
         Ok(_) => Err(format!("`{rel}` is not a regular file")),
@@ -425,10 +440,12 @@ fn file_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
             problems.push(if want { "does not exist" } else { "exists" }.to_string());
         }
         if let Some(p) = &f.matches {
-            let text = now
-                .as_deref()
-                .map(String::from_utf8_lossy)
-                .unwrap_or_default();
+            let Some(bytes) = now.as_deref() else {
+                problems.push(format!("does not exist, so it cannot match `{p}`"));
+                out.push(CheckResult::new(kind, false, || problems.join(", ")));
+                continue;
+            };
+            let text = String::from_utf8_lossy(bytes);
             match regex_is_match(p, &text) {
                 Ok(true) => {}
                 Ok(false) => problems.push(format!("does not match `{p}`")),
@@ -696,5 +713,108 @@ mod tests {
             CheckStatus::Error
         );
         assert_eq!(verdict(&checks), "error");
+    }
+
+    /// K2: an event type this apb never writes is a V80, a real one is not.
+    #[test]
+    fn v80_names_an_event_type_the_journal_does_not_have() {
+        assert!(is_event_type("run_error"));
+        assert!(is_event_type("run_finished"));
+        assert!(!is_event_type("run_eror"));
+        let dir = tempfile::tempdir().unwrap();
+        let evals = dir.path().join("evals");
+        std::fs::create_dir_all(evals.join("fixtures/x")).unwrap();
+        std::fs::write(
+            evals.join("c.yaml"),
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  events: { absent: [run_eror, run_error], max: { retry_startd: 1 } }\n",
+        )
+        .unwrap();
+        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let got: Vec<String> = validate_suite(dir.path(), &pb)
+            .into_iter()
+            .map(|i| format!("{} {}", i.code, i.message))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "V80 eval case `c`: events: `retry_startd` is not an event type of this apb",
+                "V80 eval case `c`: events: `run_eror` is not an event type of this apb",
+            ]
+        );
+    }
+
+    /// K3: the `files` checks over a real tree with a fixture commit: a
+    /// changed file, a file that should not exist, a pattern over a missing
+    /// file and a symlinked path all fail with their reason.
+    #[cfg(unix)]
+    #[test]
+    fn file_checks_fail_with_their_reason() {
+        let tree = tempfile::tempdir().unwrap();
+        let t = tree.path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(t)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(t.join("kept.txt"), "same\n").unwrap();
+        std::fs::write(t.join("edited.txt"), "before\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+        std::fs::write(t.join("edited.txt"), "after\n").unwrap();
+        std::fs::write(t.join("present.txt"), "x\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "secret\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), t.join("link.txt")).unwrap();
+        let c = case(
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  files:\n    - { path: kept.txt, unchanged_from_fixture: true }\n    - { path: edited.txt, unchanged_from_fixture: true }\n    - { path: present.txt, exists: false }\n    - { path: missing.txt, matches: \"^\" }\n    - { path: link.txt, matches: secret }\n",
+        );
+        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        let input = CheckInput {
+            case: &c,
+            playbook: &pb,
+            events: &journal(),
+            raw_types: &[],
+            tree: t,
+            fixture_commit: "HEAD",
+            suite_dir: t,
+            stopped: None,
+            script_env: Vec::new(),
+            hooks_dir: hooks.path(),
+        };
+        let mut out = Vec::new();
+        file_checks(&input, &mut out);
+        let got: Vec<(String, CheckStatus, Option<String>)> = out
+            .into_iter()
+            .map(|c| (c.kind, c.status, c.detail))
+            .collect();
+        let row = |k: &str| got.iter().find(|(kind, ..)| kind == k).unwrap().clone();
+        assert_eq!(row("files[kept.txt]").1, CheckStatus::Passed);
+        assert_eq!(
+            row("files[edited.txt]").2.as_deref(),
+            Some("changed from the fixture")
+        );
+        assert_eq!(row("files[present.txt]").2.as_deref(), Some("exists"));
+        let missing = row("files[missing.txt]");
+        assert_eq!(missing.1, CheckStatus::Failed);
+        assert!(missing.2.unwrap().starts_with("does not exist"));
+        let link = row("files[link.txt]");
+        assert_eq!(link.1, CheckStatus::Failed);
+        assert!(link.2.unwrap().contains("symlink"), "the link was followed");
     }
 }

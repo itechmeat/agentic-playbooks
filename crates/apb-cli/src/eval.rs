@@ -1193,7 +1193,7 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
             );
         }
     }
-    let issues = core_eval::validate_suite(&playbook_dir, &playbook);
+    let issues = checks::validate_suite(&playbook_dir, &playbook);
     let errors: Vec<String> = issues
         .iter()
         .filter(|i| i.severity == apb_core::validate::Severity::Error)

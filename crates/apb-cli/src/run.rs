@@ -338,7 +338,7 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                     println!("{id}: warning {code} {message}");
                 }
                 // --- 0.24.0 eval suites ---
-                let suite_issues = apb_core::eval::validate_suite(
+                let suite_issues = apb_engine::eval::checks::validate_suite(
                     &root.join(".apb/playbooks").join(&id),
                     &loaded.playbook,
                 );

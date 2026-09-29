@@ -1070,3 +1070,29 @@ fn an_invocation_that_started_nothing_adds_no_configuration_change() {
     assert_eq!(c["same_configuration"], true, "{c:#}");
     assert_eq!(c["configuration_changes"], serde_json::json!([]), "{c:#}");
 }
+
+/// V1: V82 is a warning in `apb validate`: the playbook still validates.
+#[test]
+fn v82_is_a_warning_in_apb_validate() {
+    let gated = PLAYBOOK
+        .replace(
+            "  - { id: done, type: finish, outcome: success }",
+            "  - { id: gate, type: human_review }\n  - { id: done, type: finish, outcome: success }",
+        )
+        .replace(
+            "{ from: review, to: done, condition",
+            "{ from: review, to: gate, condition",
+        )
+        .replace("edges:\n", "edges:\n  - { from: gate, to: done }\n");
+    let env = setup(&gated);
+    apb()
+        .args(["validate", "rev"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "rev: warning V82 node(s) `gate` wait for a person",
+        ))
+        .stdout(predicate::str::contains("rev: OK"));
+}

@@ -547,8 +547,22 @@ fn unknown_nodes(case: &EvalCase, playbook: &Playbook) -> Vec<String> {
 
 const OUTCOMES: [&str; 4] = ["succeeded", "failed", "aborted", "stopped"];
 
+/// Whether the case file sets `checks.goal` itself (the field defaults to
+/// `required`, which only a case that says so is held to).
+fn goal_set_explicitly(raw: &str) -> bool {
+    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("checks").and_then(|c| c.get("goal")).cloned())
+        .is_some()
+}
+
 /// V80 problems of one parsed case against the version it targets.
-fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
+/// `is_event_type` tells a journal event type this apb writes from a typo.
+fn case_problems(
+    lc: &LoadedCase,
+    playbook: &Playbook,
+    is_event_type: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let c = &lc.case;
     let mut p = Vec::new();
     match (&c.fixture.git, &c.fixture.dir) {
@@ -621,6 +635,44 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
             "versions `{r}` is not a range like `>=1.2.0, <2.0.0`"
         ));
     }
+    if let Some(ev) = &c.checks.events {
+        let mut bad: Vec<&str> = ev
+            .absent
+            .iter()
+            .chain(ev.max.keys())
+            .map(String::as_str)
+            .filter(|t| !is_event_type(t))
+            .collect();
+        bad.sort();
+        bad.dedup();
+        for t in bad {
+            p.push(format!("events: `{t}` is not an event type of this apb"));
+        }
+    }
+    // The node, param and goal checks judge the case against the loaded
+    // version; a case kept for other versions is not held to this one.
+    let excluded = c
+        .versions
+        .as_deref()
+        .and_then(VersionRange::parse)
+        .is_some_and(|r| !r.contains(&playbook.version));
+    if excluded {
+        return p;
+    }
+    if c.checks.goal == GoalMode::Required && goal_set_explicitly(&lc.raw) {
+        let criteria = playbook.goal.as_ref().map_or(0, |g| {
+            g.criteria
+                .iter()
+                .filter(|c| !matches!(c.check, crate::schema::GoalCheck::Manual))
+                .count()
+        });
+        if criteria == 0 {
+            p.push(format!(
+                "checks.goal is `required` but version {} has no script or marker goal criterion",
+                playbook.version
+            ));
+        }
+    }
     let unknown = unknown_nodes(c, playbook);
     if !unknown.is_empty() {
         p.push(format!(
@@ -663,6 +715,17 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
 ///
 /// A playbook without `evals/` yields nothing.
 pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
+    validate_suite_with(playbook_dir, playbook, &|_| true)
+}
+
+/// [`validate_suite`] that also refuses event type names `is_event_type`
+/// does not know (the engine's journal types; `apb_engine::eval::checks::
+/// validate_suite` passes them).
+pub fn validate_suite_with(
+    playbook_dir: &Path,
+    playbook: &Playbook,
+    is_event_type: &dyn Fn(&str) -> bool,
+) -> Vec<Issue> {
     if !has_suite(playbook_dir) {
         return Vec::new();
     }
@@ -693,7 +756,7 @@ pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
         ));
     }
     for lc in &loaded.cases {
-        for problem in case_problems(lc, playbook) {
+        for problem in case_problems(lc, playbook, is_event_type) {
             out.push(issue(
                 "V80",
                 Severity::Error,
@@ -1056,45 +1119,110 @@ mod tests {
         has("param `who` is not declared");
     }
 
+    /// V2: one row per reason a playbook cannot be evaluated, each with its
+    /// V81 message; a plain playbook has none.
     #[test]
-    fn v81_refuses_irreversible_connector_and_shipping_playbooks() {
+    fn v81_refuses_every_effect_an_eval_cannot_neutralize() {
         let dir = suite_with(&[("good.yaml", GOOD)]);
-        let irreversible = PB.replace("nodes:", "effects: [irreversible]\nnodes:");
-        let got = codes(&validate_suite(dir.path(), &pb(&irreversible)));
-        assert!(
-            got.iter()
-                .any(|(c, m)| *c == "V81" && m.contains("irreversible")),
-            "{got:?}"
-        );
-        let shipping = PB
-            .replace("{ id: w, type: prompt", "{ id: push_branch, type: prompt")
-            .replace("to: w }", "to: push_branch }")
-            .replace("from: w,", "from: push_branch,");
-        let shipping_pb = pb(&shipping);
-        assert!(
-            refusal(&shipping_pb)
-                .iter()
-                .any(|r| r.contains("push_branch")),
-            "{:?}",
-            refusal(&shipping_pb)
-        );
+        let w = "{ id: w, type: prompt, prompt: hi }";
+        let rows: [(&str, String, &str); 5] = [
+            (
+                "irreversible",
+                PB.replace("nodes:", "effects: [irreversible]\nnodes:"),
+                "the playbook's effects contain `irreversible`",
+            ),
+            (
+                "node secrets effect",
+                PB.replace(w, "{ id: w, type: prompt, prompt: hi, effects: [secrets] }"),
+                "`w`",
+            ),
+            (
+                "shipping step",
+                PB.replace(w, "{ id: push_branch, type: prompt, prompt: hi }")
+                    .replace("to: w }", "to: push_branch }")
+                    .replace("from: w,", "from: push_branch,"),
+                "push_branch",
+            ),
+            (
+                "connector",
+                PB.replace(
+                    w,
+                    "{ id: w, type: agent_task, prompt: hi, profile: x, connectors: [jira] }",
+                ),
+                "node `w` binds a connector",
+            ),
+            (
+                "sub-playbook",
+                PB.replace(w, "{ id: w, type: playbook, playbook: child }"),
+                "node `w` starts a sub-playbook",
+            ),
+        ];
+        for (what, yaml, needle) in rows {
+            let got = codes(&validate_suite(dir.path(), &pb(&yaml)));
+            assert!(
+                got.iter().any(|(c, m)| *c == "V81"
+                    && m.starts_with("the eval suite cannot run: ")
+                    && m.contains(needle)),
+                "{what}: {got:?}"
+            );
+        }
         assert!(refusal(&pb(PB)).is_empty());
     }
 
+    /// V82 names a gate and an interactive agent step (a warning); V83 says
+    /// which version no case applies to.
     #[test]
     fn v82_warns_on_a_gate_and_v83_on_no_applicable_case() {
         let pinned = GOOD.replace("repeat: 2", "versions: \">=2.0.0\"");
         let dir = suite_with(&[("good.yaml", &pinned)]);
         let gated = PB.replace(
             "{ id: w, type: prompt, prompt: hi }",
-            "{ id: w, type: prompt, prompt: hi }\n  - { id: g, type: human_review }",
+            "{ id: w, type: prompt, prompt: hi }\n  - { id: g, type: human_review }\n  - { id: i, type: agent_task, prompt: ask, profile: x, interactive: true }",
         );
-        let got = codes(&validate_suite(dir.path(), &pb(&gated)));
-        assert!(
-            got.iter().any(|(c, m)| *c == "V82" && m.contains("`g`")),
-            "{got:?}"
+        let issues = validate_suite(dir.path(), &pb(&gated));
+        let v82 = issues.iter().find(|i| i.code == "V82").expect("V82");
+        assert_eq!(v82.severity, Severity::Warning);
+        assert_eq!(
+            v82.message,
+            "node(s) `g`, `i` wait for a person; an eval run stops there (outcome `stopped`)"
         );
-        assert!(got.iter().any(|(c, _)| *c == "V83"), "{got:?}");
+        let v83 = issues.iter().find(|i| i.code == "V83").expect("V83");
+        assert_eq!(v83.severity, Severity::Warning);
+        assert_eq!(v83.message, "no eval case applies to version 1.2.0");
+    }
+
+    /// A case kept for other versions is not judged by the loaded one: its
+    /// nodes and params may be gone there (OCR 10).
+    #[test]
+    fn a_case_for_other_versions_is_not_held_to_the_loaded_version() {
+        let old = "schema: 1\nid: old\nversions: \"<1.0.0\"\nfixture: { dir: fixtures/base }\nparams: { gone: x }\nchecks:\n  route: { visits: [gone] }\n";
+        let dir = suite_with(&[("old.yaml", old)]);
+        let got = codes(&validate_suite(dir.path(), &pb(PB)));
+        assert!(got.iter().all(|(c, _)| *c != "V80"), "{got:?}");
+    }
+
+    /// K1: an explicit `goal: required` needs a script or marker criterion
+    /// to check; the default does not.
+    #[test]
+    fn v80_refuses_a_required_goal_the_playbook_cannot_check() {
+        let explicit = "schema: 1\nid: explicit\nfixture: { dir: fixtures/base }\nchecks: { goal: required }\n";
+        let implicit = "schema: 1\nid: implicit\nfixture: { dir: fixtures/base }\n";
+        let dir = suite_with(&[("explicit.yaml", explicit), ("implicit.yaml", implicit)]);
+        let got = codes(&validate_suite(dir.path(), &pb(PB)));
+        let v80: Vec<&String> = got
+            .iter()
+            .filter(|(c, _)| *c == "V80")
+            .map(|(_, m)| m)
+            .collect();
+        assert_eq!(
+            v80,
+            [&"eval case `explicit`: checks.goal is `required` but version 1.2.0 has no script or marker goal criterion".to_string()]
+        );
+        let with_goal = PB.replace(
+            "nodes:",
+            "goal:\n  statement: s\n  criteria:\n    - { description: d, check: { type: marker, marker: OK } }\nnodes:",
+        );
+        assert!(validate_suite(dir.path(), &pb(&with_goal)).is_empty());
     }
 
     #[test]
