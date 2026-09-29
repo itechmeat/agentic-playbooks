@@ -527,13 +527,14 @@ fn a_lowered_judge_mode_mid_run_skips_the_cached_answer() {
             .any(|e| matches!(e.payload, EventPayload::NodeCacheStored { .. }))
     );
     // The second run starts at enforce; its review step lowers the judge to
-    // shadow before the judge node is reached.
+    // shadow before the judge node is reached. Plain `sed` plus a rename, not
+    // `sed -i`: BSD sed (macOS) reads the script as `-i`'s backup suffix.
     let agent = p.root.path().join("agent.sh");
     let script = fs::read_to_string(&agent).unwrap().replacen(
         "#!/bin/sh\n",
         &format!(
-            "#!/bin/sh\nsed -i 's/judge_node: {{ mode: enforce }}/judge_node: {{ mode: shadow }}/' '{}'\n",
-            p.cfg.path().join("decisions.yaml").display()
+            "#!/bin/sh\nsed 's/judge_node: {{ mode: enforce }}/judge_node: {{ mode: shadow }}/' '{c}' > '{c}.tmp' && mv '{c}.tmp' '{c}'\n",
+            c = p.cfg.path().join("decisions.yaml").display()
         ),
         1,
     );

@@ -238,6 +238,8 @@ mod script_test;
 #[cfg(unix)]
 #[path = "suite/session_handoff_test.rs"]
 mod session_handoff_test;
+#[path = "suite/shell_portability_test.rs"]
+mod shell_portability_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
 #[cfg(unix)]
