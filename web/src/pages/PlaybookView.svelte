@@ -19,6 +19,7 @@
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
+  import { consentStep } from '../lib/irreversibleconsent'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -173,9 +174,13 @@
     } catch (e) {
       starting = false
       if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
-        const sources = e.body?.sources
-        irreversibleSources = Array.isArray(sources) ? sources.map(String) : []
-        irreversibleNonce = typeof e.body?.consent_nonce === 'string' ? e.body.consent_nonce : ''
+        const step = consentStep(e.body, consentNonce)
+        if (step.kind === 'stop') {
+          toast.error('Run refused', { description: step.message })
+          return
+        }
+        irreversibleSources = step.sources
+        irreversibleNonce = step.nonce
         irreversibleOpen = true
         return
       }
@@ -184,7 +189,7 @@
   }
 
   function confirmIrreversibleRun() {
-    void run(irreversibleNonce || undefined)
+    void run(irreversibleNonce)
   }
   // --- end 0.24.0 irreversible consent ---
 
