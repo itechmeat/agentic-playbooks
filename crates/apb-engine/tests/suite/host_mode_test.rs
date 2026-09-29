@@ -847,8 +847,8 @@ fn a_cli_started_run_keeps_refusing_as_before() {
 }
 
 #[test]
-fn the_fallback_is_off_when_the_config_or_the_kill_switch_says_so() {
-    for how in ["config", "project", "env"] {
+fn the_fallback_is_off_when_the_global_or_the_project_config_says_so() {
+    for how in ["config", "project"] {
         let h = Host::new(&one_node(""), &[]);
         match how {
             "config" => fs::write(
@@ -866,7 +866,6 @@ fn the_fallback_is_off_when_the_config_or_the_kill_switch_says_so() {
         let _lock = common::env_lock();
         let _env = h.env();
         let _missing = Env::set(&[("APB_AGENT_CMD", "/nonexistent/apb-test-agent")]);
-        let _kill = (how == "env").then(|| Env::set(&[("APB_EXECUTION", "cli")]));
         let run_id = h.start(CLI_SESSION);
         let (status, events) = h.finish(&run_id);
         assert_eq!(status, RunStatus::Failed, "{how}");

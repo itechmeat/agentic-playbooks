@@ -195,10 +195,22 @@ fn apb_tasks_lists_and_submits_until_the_run_succeeds() {
         ])
         .args(["--status", "succeeded", "--output-file", "-"])
         .current_dir(root)
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.take().unwrap().write_all(b"replayed reply")?;
+            c.wait_with_output()
+        })
         .unwrap();
     assert!(!again.status.success());
+    // Refused as a replay, not for an unrelated reason such as empty input.
+    let err = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        err.contains("already submitted") || err.contains("not pending"),
+        "{err}"
+    );
 }
 
 fn kill_driver(root: &Path, run_id: &str) {
