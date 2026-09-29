@@ -12,6 +12,17 @@ params:
 defaults:
   profile: main
 effects: [network, external, irreversible]
+goal:
+  statement: >-
+    Every actionable unread message in the folder has an Asana task, and
+    the processed messages no longer show as unread.
+  criteria:
+    - description: The task-filing step reports the tasks it created
+      check: { type: marker, marker: "TASKS FILED:" }
+    - description: Each actionable message has exactly one task, with no duplicates
+      check: { type: manual }
+    - description: Only the messages that were triaged are marked read
+      check: { type: manual }
 nodes:
   - { id: start, type: start }
   - id: search_inbox
@@ -46,7 +57,8 @@ nodes:
       For each item selected in {{nodes.triage.output}}, create an Asana
       task in project {{params.asana_project}} using the asana
       connector's create_task function, with the proposed name and
-      notes.
+      notes. End with a line `TASKS FILED: <n>` giving how many tasks you
+      created.
     connectors:
       - { name: asana, accounts: [default], functions: [create_task], max_calls: 10 }
   - id: mark_processed

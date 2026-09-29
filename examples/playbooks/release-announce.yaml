@@ -14,6 +14,15 @@ params:
 defaults:
   profile: main
 effects: [network, external, irreversible]
+goal:
+  statement: >-
+    The release is published on GitHub and announced by email and on
+    Telegram with a link to it.
+  criteria:
+    - description: The release step reports the published release URL
+      check: { type: marker, marker: "RELEASE URL:" }
+    - description: The email and the Telegram post both reached their recipients
+      check: { type: manual }
 nodes:
   - { id: start, type: start }
   - id: create_release
@@ -21,7 +30,8 @@ nodes:
     prompt: >-
       Create a GitHub release in {{params.github_owner}}/{{params.github_repo}}
       tagged {{params.release_tag}} with body {{params.release_notes}}, using
-      the github connector's create_release function.
+      the github connector's create_release function. End with a line
+      `RELEASE URL: <html_url of the created release>`.
     connectors:
       - { name: github, accounts: [default], functions: [create_release], max_calls: 3 }
   - id: announce_email

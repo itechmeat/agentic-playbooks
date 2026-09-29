@@ -13,6 +13,15 @@ params:
 defaults:
   profile: main
 effects: [network, external, irreversible]
+goal:
+  statement: >-
+    Every unresolved Sentry issue that is a real bug has a GitHub issue,
+    noise is left alone, and the team chat has a summary.
+  criteria:
+    - description: The filing step reports the GitHub issues it created
+      check: { type: marker, marker: "ISSUES FILED:" }
+    - description: No duplicate GitHub issue was filed for a Sentry issue
+      check: { type: manual }
 nodes:
   - { id: start, type: start }
   - id: fetch_issues
@@ -38,7 +47,8 @@ nodes:
     prompt: >-
       For each issue selected in {{nodes.triage.output}}, create a GitHub
       issue in {{params.github_owner}}/{{params.github_repo}} using the
-      github connector's create_issue function.
+      github connector's create_issue function. End with a line
+      `ISSUES FILED: <comma-separated issue numbers, or none>`.
     connectors:
       - { name: github, accounts: [default], functions: [create_issue], max_calls: 10 }
   - id: notify_telegram

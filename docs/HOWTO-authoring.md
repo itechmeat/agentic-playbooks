@@ -1576,6 +1576,56 @@ Never put secret values in a playbook or in a capture synopsis. Reference them
 by env or config key name, or a placeholder param. Concrete secret-looking
 values are rejected at capture and should never be committed to a definition.
 
+## Recurring review findings go into project memory
+
+A review node (an agent review, a judge, a `human_review` gate) that keeps
+flagging the same kind of problem is telling you the implementing agent lacks
+a rule. After a finding shows up for the second time across runs, write it
+down where every later agent reads it: the project's memory file
+(`CLAUDE.md`, `AGENTS.md`) or a skill the implementing profile loads. Keep
+the rule short and concrete (what to do, where, why), not the whole review.
+
+Make it a step of the playbook rather than a chore someone remembers: a
+`docs` agent_task after the review that reads `{{nodes.review.output}}`,
+compares the findings with the memory file and adds a rule only for a
+finding it has seen before (for example because the same rule was already
+proposed in an earlier run's review, or the file carries a "seen once" note
+the node maintains). Put the memory file under `protect` on the
+implementing node if that node must not edit its own rules, and gate the
+docs node with `human_review` when rules need an owner's approval. A rule
+in memory advises; if it must always hold, add a deterministic check behind
+it (a `success_check` script, a `goal` criterion, `protect`; see
+GUARDRAILS.md).
+
+## Linking runs, commits and tracker records
+
+When a playbook works on a tracked item (an issue, a ticket, a task), link
+both directions so either end leads to the other:
+
+- **The record id goes into the artifact.** Pass the tracker id as a param
+  (`{{params.issue}}`) and have the nodes put it where the work lands: the
+  branch name, the commit message, the pull request title or body, the
+  report file.
+- **The run id and the commits go into the record.** Every agent and script
+  node gets `APB_RUN_ID` in its environment (next to `APB_RUN_DIR` and
+  `APB_NODE_ID`), and a prompt can place the id itself with `{{run.id}}`.
+  End every commit a run makes with the trailer
+
+  ```text
+  Apb-Run: <run id>
+  ```
+
+  so `git log --grep 'Apb-Run: <run id>'` finds the run's commits and a
+  commit leads back to `.apb/runs/<run id>/`. On a git working tree apb
+  also records the commits each node made (HEAD before and after the node)
+  as an `artifacts_committed` event, and the run report lists them. A final
+  node that comments on the tracker record with the run id and those
+  commits closes the loop from the record side. "Run provenance" above
+  has the details.
+
+Keep the tracker write in one node near the end (after the gates), so a
+record is not updated for work that a later gate rejects.
+
 ## Language
 
 Machine fields (`id`, canonical `trigger.when` / `avoid_when`) are English.

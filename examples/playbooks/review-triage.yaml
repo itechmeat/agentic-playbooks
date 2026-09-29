@@ -10,6 +10,15 @@ description: >-
 version: 1.0.0
 defaults:
   profile: main
+goal:
+  statement: >-
+    The change leaves the review with no open blocking defect, either
+    because the review found none or because they were fixed.
+  criteria:
+    - description: The review states its findings in a form the judge can classify
+      check: { type: marker, marker: "BLOCKING:" }
+    - description: Every blocking defect the review listed is fixed or consciously accepted
+      check: { type: manual }
 nodes:
   - { id: start, type: start }
   - id: review
@@ -18,7 +27,8 @@ nodes:
     expected_duration: 5m
     prompt: >-
       Review the change described in {{run.instruction}}. List every
-      blocking defect with file and line, or say there is none.
+      blocking defect with file and line, or say there is none. Start
+      your reply with a line `BLOCKING: <count>`.
   - id: triage
     type: judge
     title: Classify the review result
