@@ -3102,11 +3102,24 @@ fn child_run_options(
 }
 
 // --- 0.24.0 irreversible consent ---
-/// The consent a sub-playbook of the run in `parent_dir` inherits: the
-/// parent's recorded consent, marked with the parent's run id. `None` when
-/// the parent recorded none (its tree needed none when it started).
-fn inherited_consent(parent_dir: &Path, parent_run_id: &str) -> Option<crate::consent::RunConsent> {
+/// The consent the sub-playbook of node `node_id` of the run in
+/// `parent_dir` inherits: the parent's recorded consent, marked with the
+/// parent's run id, and only when that consent covered this node. `None`
+/// when the parent recorded none (its tree needed none when it started) or
+/// when this node was not among what the person consented to (its child
+/// became irreversible since), so the child's own start refuses.
+fn inherited_consent(
+    parent_dir: &Path,
+    parent_run_id: &str,
+    node_id: &str,
+) -> Option<crate::consent::RunConsent> {
     let parent = crate::manifest::read(parent_dir).ok().flatten()?.consent?;
+    if !parent
+        .sources
+        .contains(&crate::consent::sub_playbook_source(node_id))
+    {
+        return None;
+    }
     Some(crate::consent::RunConsent {
         inherited_from: Some(parent_run_id.to_string()),
         ..parent
@@ -3290,7 +3303,7 @@ pub(crate) fn run_playbook_node(
     // and host, so its agent steps are host tasks of the same session.
     opts.execution = super::host::child_execution_request(run_dir)?;
     // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
-    opts.consent = inherited_consent(run_dir, run_id);
+    opts.consent = inherited_consent(run_dir, run_id, node_id);
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -4026,5 +4039,24 @@ mod tests {
         );
         assert_eq!(opts.continued_from.as_deref(), Some("predecessor-run"));
         assert_eq!(opts.expected_connectors, connectors);
+    }
+
+    /// A sub-playbook inherits the parent's consent only for a node the
+    /// parent's consent covered.
+    #[test]
+    fn a_child_inherits_only_a_consent_that_covered_its_node() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(inherited_consent(dir.path(), "p", "sub"), None);
+        let manifest = crate::manifest::RunExecutionManifest {
+            consent: Some(crate::consent::RunConsent {
+                sources: vec!["playbook".into(), "sub-playbook node sub".into()],
+                ..crate::consent::RunConsent::irreversible("cli")
+            }),
+            ..Default::default()
+        };
+        crate::manifest::write(dir.path(), &manifest).unwrap();
+        let got = inherited_consent(dir.path(), "p", "sub").expect("covered");
+        assert_eq!(got.inherited_from.as_deref(), Some("p"));
+        assert_eq!(inherited_consent(dir.path(), "p", "other"), None);
     }
 }

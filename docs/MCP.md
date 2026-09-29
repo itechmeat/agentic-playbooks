@@ -144,8 +144,8 @@ the tree (the playbook, its nodes, every sub-playbook, every granted connector
 function flagged `irreversible: true`) declares `irreversible`, even for a
 trusted playbook. Consent is its own argument: show the sources to the person
 and, if they agree, call again with `confirm_irreversible: "<consent_nonce>"`.
-The nonce binds the consent to what the person saw; a playbook that changed in
-between is refused again with a new nonce (`reason: consent_nonce_mismatch`).
+The nonce binds the consent to what the person saw (the playbook and every
+pinned sub-playbook); a tree that changed in between is refused again with a new nonce (`reason: consent_nonce_mismatch`).
 The manifest records `consent: { irreversible: true, by: "mcp:<client>",
 sources }`. `acknowledge_untrusted` answers trust only: a trust refusal of an
 irreversible playbook also lists `irreversible` and `consent_nonce`, so the
@@ -155,9 +155,10 @@ accepted as the consent and the response carries a `deprecation` note. The same
 holds for `playbook_execute_plan`, which records the client name too, and for
 `run_resume`, which asks once for a run with no valid consent recorded (one an
 older apb started) and writes the consent into its manifest. Every start path
-checks it (the engine again when it prepares the run); a supervisor patch may
-not add irreversible steps the consent does not cover; a sub-playbook inherits
-the parent's consent. The tier-0 text itself is unchanged (it sits at the
+checks it (the engine again when it prepares the run, and on every resume); a
+supervisor patch may not add irreversible steps the consent does not cover or
+retarget a consented sub-playbook node; a sub-playbook inherits the parent's
+consent for a node that consent covered. The tier-0 text itself is unchanged (it sits at the
 host's byte limit); the argument is described on the tools and in the refusal.
 `playbook_execute_plan` runs the same gate in the target workspace, with the
 caller's `acknowledge_untrusted`: the parent and every sub-playbook child must

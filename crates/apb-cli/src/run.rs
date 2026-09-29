@@ -1160,9 +1160,14 @@ pub(crate) fn resume_cmd(
                 return ExitCode::from(2);
             }
         }
-        // A run that does not resolve fails below with the engine's own
-        // error, as before.
-        Err(_) => {}
+        // A run that does not exist fails below with the engine's own
+        // error, as before; anything else (an unreadable snapshot) refuses
+        // rather than resuming unchecked.
+        Err(v) if v.get("policy").and_then(|p| p.as_str()) == Some("not_found") => {}
+        Err(v) => {
+            eprintln!("resume failed: cannot check the irreversible consent: {v}");
+            return ExitCode::from(2);
+        }
     }
     // Read BEFORE the drive: a resume of a run with a pending stop applies that
     // stop before it executes anything and returns immediately, which otherwise

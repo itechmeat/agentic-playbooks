@@ -101,7 +101,7 @@ pub(crate) fn apply_patch(
     // the run's consent does not cover. A run started without consent may
     // not gain any; a consented run may not gain sources beyond the ones the
     // person consented to (the manifest records them).
-    if let Some(reason) = uncovered_consent_sources(root, run_dir, &loaded.playbook) {
+    if let Some(reason) = uncovered_consent_sources(root, run_dir, playbook, &loaded.playbook) {
         return append_patch_rejected(log, reason);
     }
 
@@ -130,8 +130,15 @@ pub(crate) fn apply_patch(
 }
 
 /// The rejection reason when `patched` declares consent sources that the
-/// run's recorded consent does not cover, `None` when it adds none.
-fn uncovered_consent_sources(root: &Path, run_dir: &Path, patched: &Playbook) -> Option<String> {
+/// run's recorded consent does not cover, `None` when it adds none. A
+/// sub-playbook node that keeps its id but now runs another playbook is a
+/// new source too: the consent covered the child it named.
+fn uncovered_consent_sources(
+    root: &Path,
+    run_dir: &Path,
+    running: &Playbook,
+    patched: &Playbook,
+) -> Option<String> {
     // Children resolve from the run's own origin, as the run spawns them: a
     // global playbook's `auto` child is the global one.
     let origin = super::parent_run_origin(run_dir);
@@ -142,9 +149,24 @@ fn uncovered_consent_sources(root: &Path, run_dir: &Path, patched: &Playbook) ->
         .and_then(|m| m.consent)
         .filter(|c| c.irreversible);
     let covered: &[String] = consent.as_ref().map_or(&[], |c| &c.sources);
+    let child_ref = |p: &Playbook, id: &str| {
+        p.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| match &n.kind {
+                apb_core::schema::NodeKind::Playbook { playbook, .. } => Some(playbook.clone()),
+                _ => None,
+            })
+    };
+    let retargeted = |s: &String| {
+        patched.nodes.iter().any(|n| {
+            crate::consent::sub_playbook_source(&n.id) == *s
+                && child_ref(running, &n.id) != child_ref(patched, &n.id)
+        })
+    };
     let added: Vec<&str> = sources
         .iter()
-        .filter(|s| !covered.contains(s))
+        .filter(|s| !covered.contains(s) || retargeted(s))
         .map(String::as_str)
         .collect();
     if added.is_empty() {

@@ -100,6 +100,41 @@ pub fn refusal_detail(id: &str, sources: &[String]) -> String {
     )
 }
 
+/// The consent source of a sub-playbook node whose tree needs consent.
+pub fn sub_playbook_source(node_id: &str) -> String {
+    format!("sub-playbook node {node_id}")
+}
+
+/// The digest a consent nonce binds: the parent's trust digest alone for a
+/// tree without pinned sub-playbooks, otherwise a sha256 over it and every
+/// pinned child's node, id, version and digest, recursively. A child whose
+/// content changed after the person was asked therefore changes the nonce.
+pub fn tree_digest(
+    parent_digest: &str,
+    children: &std::collections::BTreeMap<String, crate::run_config::ChildExpectation>,
+) -> String {
+    fn walk(
+        out: &mut String,
+        prefix: &str,
+        children: &std::collections::BTreeMap<String, crate::run_config::ChildExpectation>,
+    ) {
+        for (node, c) in children {
+            let path = format!("{prefix}/{node}");
+            out.push_str(&format!(
+                "\n{path}={}@{}:{}",
+                c.id, c.version, c.playbook_digest
+            ));
+            walk(out, &path, &c.children);
+        }
+    }
+    if children.is_empty() {
+        return parent_digest.to_string();
+    }
+    let mut input = String::from(parent_digest);
+    walk(&mut input, "", children);
+    apb_core::content::sha256_hex(input.as_bytes())
+}
+
 /// The consent nonce for a tree with trust digest `digest` and consent
 /// `sources`: `consent-` and 32 hex digits of a sha256 over the digest and
 /// the sorted sources. It is not a secret; it binds a confirmation to what
@@ -240,5 +275,38 @@ mod tests {
             Confirmation::Nonce("consent-x".into())
         );
         assert!(!Confirmation::Flag(false).is_given());
+    }
+
+    /// A child whose content changed since the refusal changes the digest
+    /// the nonce binds; a tree without children keeps the parent's digest.
+    #[test]
+    fn the_tree_digest_moves_with_a_pinned_childs_digest() {
+        use crate::run_config::ChildExpectation;
+        use std::collections::BTreeMap;
+        assert_eq!(tree_digest("d", &BTreeMap::new()), "d");
+        let child = |digest: &str| ChildExpectation {
+            id: "c".into(),
+            scope: apb_core::profile::ProfileScope::Project,
+            version: "1.0.0".into(),
+            playbook_digest: digest.into(),
+            profile_bundles: BTreeMap::new(),
+            connectors: BTreeMap::new(),
+            connector_accounts: BTreeMap::new(),
+            children: BTreeMap::new(),
+        };
+        let pins = |digest: &str| BTreeMap::from([("sub".to_string(), child(digest))]);
+        let a = tree_digest("d", &pins("c1"));
+        assert_ne!(a, "d");
+        assert_eq!(a, tree_digest("d", &pins("c1")));
+        assert_ne!(a, tree_digest("d", &pins("c2")));
+        // A grandchild counts too.
+        let mut deep = child("c1");
+        deep.children = pins("g1");
+        let deep_a = tree_digest("d", &BTreeMap::from([("sub".to_string(), deep.clone())]));
+        deep.children = pins("g2");
+        assert_ne!(
+            deep_a,
+            tree_digest("d", &BTreeMap::from([("sub".to_string(), deep)]))
+        );
     }
 }

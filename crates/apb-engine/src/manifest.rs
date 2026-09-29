@@ -378,6 +378,23 @@ pub fn replace_consent(
     if existing.is_none() && consent.is_none() {
         return Ok(());
     }
+    // A run an older apb started from a schema-1 snapshot has no manifest
+    // until its first resume builds the ephemeral one; a manifest written
+    // here with only the consent would skip that build and leave its agent
+    // nodes without a profile, so the ephemeral manifest is built first.
+    let existing = match existing {
+        Some(m) => Some(m),
+        None => {
+            let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml")).unwrap_or_default();
+            if crate::legacy_snapshot::has_legacy_executors(&yaml) {
+                Some(crate::legacy_snapshot::build_ephemeral_manifest(
+                    run_dir, &yaml,
+                )?)
+            } else {
+                None
+            }
+        }
+    };
     let mut manifest = existing.unwrap_or_default();
     manifest.consent = consent;
     let yaml = serde_yaml_ng::to_string(&manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;

@@ -205,13 +205,37 @@ impl ConsentNeed {
 /// with the repository. Such a consent is dropped from the manifest when the
 /// tree needs none, so no sub-playbook inherits it.
 pub fn resume_consent_need(root: &Path, run_id: &str) -> Result<Option<ConsentNeed>, Value> {
+    resume_consent_need_inner(root, run_id, true)
+}
+
+/// The engine's own resume check ([`crate::scheduler`] resume entry
+/// points): like [`resume_consent_need`], but a recorded consent that covers
+/// the sources is honoured without the origin stamp. The stamp guards the
+/// surfaces, which ask a person (and refuse a foreign run directory over
+/// MCP); the engine only makes sure no resume path runs an irreversible
+/// tree with no consent recorded at all, including on an installation that
+/// has no run-origin key and so stamps nothing.
+pub(crate) fn engine_resume_consent_need(
+    root: &Path,
+    run_id: &str,
+) -> Result<Option<ConsentNeed>, Value> {
+    resume_consent_need_inner(root, run_id, false)
+}
+
+fn resume_consent_need_inner(
+    root: &Path,
+    run_id: &str,
+    require_local: bool,
+) -> Result<Option<ConsentNeed>, Value> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
     }
     let run_dir = root.join(".apb/runs").join(run_id);
     let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))
         .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
-    let playbook = Playbook::from_yaml(&yaml)
+    // The same tolerant parser the resume itself uses, so a schema-1
+    // snapshot (legacy executors) is checked instead of refused.
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)
         .map_err(|e| json!({ "policy": "snapshot_unreadable", "detail": e.to_string() }))?;
     let pins = crate::run_config::read_run_config(&run_dir)
         .ok()
@@ -219,7 +243,7 @@ pub fn resume_consent_need(root: &Path, run_id: &str) -> Result<Option<ConsentNe
     // Children resolve from the run's own origin, as the run spawns them.
     let origin = crate::scheduler::parent_run_origin(&run_dir);
     let sources = consent_sources(root, &playbook, &origin, pins.as_ref());
-    let local = apb_core::run_origin::verify(&run_dir, run_id);
+    let local = !require_local || apb_core::run_origin::verify(&run_dir, run_id);
     let recorded = crate::manifest::read(&run_dir)
         .ok()
         .flatten()
@@ -237,6 +261,10 @@ pub fn resume_consent_need(root: &Path, run_id: &str) -> Result<Option<ConsentNe
     }
     let digest = apb_core::scope::definition_digest(&yaml, &run_dir)
         .map_err(|e| json!({ "policy": "snapshot_unreadable", "detail": e.to_string() }))?;
+    let digest = match &pins {
+        Some(pins) => crate::consent::tree_digest(&digest, pins),
+        None => digest,
+    };
     Ok(Some(ConsentNeed {
         playbook_id: playbook.id,
         digest,
@@ -480,7 +508,7 @@ pub fn consent_sources(
                 .is_none_or(|e| e.contains(&Effect::Irreversible)),
         };
         if child_irreversible {
-            out.push(format!("sub-playbook node {}", n.id));
+            out.push(crate::consent::sub_playbook_source(&n.id));
         }
     }
     out
@@ -551,15 +579,21 @@ impl RunPermit {
     pub fn consent_need(&self) -> Option<ConsentNeed> {
         self.needs_consent().then(|| ConsentNeed {
             playbook_id: self.playbook_id.clone(),
-            digest: self.playbook_digest.clone(),
+            digest: self.consent_digest(),
             sources: self.irreversible.clone(),
         })
+    }
+
+    /// The digest the nonce binds: the playbook's and every pinned child's
+    /// (see [`crate::consent::tree_digest`]).
+    fn consent_digest(&self) -> String {
+        crate::consent::tree_digest(&self.playbook_digest, &self.children)
     }
 
     /// The nonce a confirmation echoes to bind the consent to this tree
     /// (see [`crate::consent::consent_nonce`]).
     pub fn consent_nonce(&self) -> String {
-        crate::consent::consent_nonce(&self.playbook_digest, &self.irreversible)
+        crate::consent::consent_nonce(&self.consent_digest(), &self.irreversible)
     }
 
     /// Checks a surface's confirmation against this tree: `Ok(None)` when the
@@ -576,7 +610,7 @@ impl RunPermit {
         }
         crate::consent::check_confirmation(
             &self.playbook_id,
-            &self.playbook_digest,
+            &self.consent_digest(),
             &self.irreversible,
             confirmation,
         )

@@ -295,6 +295,7 @@ pub fn resume_detached_with(
     // allowed); this parent-side pass exists only so the error reaches the
     // caller instead of vanishing with the child process.
     check_environment_drift(&run_dir, allow_environment_drift)?;
+    require_resume_consent(root, run_id)?;
     // The same for a journal holding events of a type this binary does not
     // know and cannot skip safely (see `event::read_all`): refuse here, where
     // the caller sees the version mismatch.
@@ -394,7 +395,31 @@ pub fn resume_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<RunResult, EngineError> {
+    require_resume_consent(root, run_id)?;
     resume_inner(root, run_id, from_node, allow_environment_drift, false)
+}
+
+/// The engine's own irreversible-consent check on resume (0.24.0): a run
+/// whose snapshot needs a consent that its manifest does not record is
+/// refused here, whatever the caller, so no resume path skips the check the launch
+/// surfaces ask for (`apb resume`, MCP `run_resume` record the consent
+/// first). A sub-playbook reattached by its parent's resume goes through
+/// `resume_inner` directly and is covered by the parent's check. A run that
+/// does not exist falls through to the caller's own not-found error.
+fn require_resume_consent(root: &Path, run_id: &str) -> Result<(), EngineError> {
+    match crate::gate::engine_resume_consent_need(root, run_id) {
+        Ok(None) => Ok(()),
+        Ok(Some(need)) => Err(EngineError::Invalid(format!(
+            "{}: {}; resume it with `apb resume` or MCP `run_resume` to be asked (consent_nonce: {})",
+            crate::consent::REFUSAL_POLICY,
+            crate::consent::refusal_detail(&need.playbook_id, &need.sources),
+            need.nonce()
+        ))),
+        Err(v) if v.get("policy").and_then(|p| p.as_str()) == Some("not_found") => Ok(()),
+        Err(v) => Err(EngineError::Invalid(format!(
+            "cannot check the irreversible consent of run `{run_id}`: {v}"
+        ))),
+    }
 }
 
 /// Shared implementation behind `resume`/`resume_with`. `allow_shared_workdir`

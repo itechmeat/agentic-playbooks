@@ -682,3 +682,119 @@ fn a_resume_resolves_a_global_runs_children_from_the_global_store() {
 
     assert_eq!(resume_consent_need(dir.path(), &res.run_id).unwrap(), None);
 }
+
+/// The engine itself refuses to resume a run whose snapshot needs a consent
+/// it has not validly recorded, whatever the caller (a detached driver, a
+/// library user): the surfaces record the consent first, and then the same
+/// resume goes through.
+#[test]
+fn the_engine_refuses_a_resume_without_a_recorded_consent() {
+    use apb_engine::gate::{check_resume_consent, resume_consent_need};
+    let _env = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = set_config_dir(cfg.path());
+    apb_core::run_origin::ensure_key().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "rel", &linear("rel", "", ""));
+    let res = run(dir.path(), "rel", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    fs::write(
+        run_dir.join("playbook.yaml"),
+        linear("rel", "effects: [irreversible]\n", ""),
+    )
+    .unwrap();
+
+    let err = resume(dir.path(), &res.run_id, Some("a"))
+        .expect_err("no consent recorded")
+        .to_string();
+    assert!(err.contains("irreversible_requires_confirmation"), "{err}");
+    let err = apb_engine::resume_detached_with(dir.path(), &res.run_id, Some("a"), false)
+        .expect_err("the detached path checks too")
+        .to_string();
+    assert!(err.contains("irreversible_requires_confirmation"), "{err}");
+
+    let need = resume_consent_need(dir.path(), &res.run_id)
+        .unwrap()
+        .expect("asks");
+    check_resume_consent(
+        dir.path(),
+        &res.run_id,
+        Some(&Confirmation::Nonce(need.nonce())),
+        "cli",
+    )
+    .unwrap();
+    let again = resume(dir.path(), &res.run_id, Some("a")).unwrap();
+    assert_eq!(again.outcome, RunStatus::Succeeded);
+}
+
+/// A patch that keeps a consented sub-playbook node's id but points it at
+/// another irreversible playbook is a new source: the consent covered the
+/// child the person was shown.
+#[test]
+fn a_patch_may_not_retarget_a_consented_sub_playbook() {
+    use apb_engine::control::Control;
+    use apb_engine::scheduler::{
+        RunMode, drive_prepared, post_supervisor_command, prepare_supervised_background,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let parent = |child: &str| {
+        playbook(
+            "p",
+            "",
+            &format!(
+                "  - {{ id: a, type: prompt, prompt: \"x\" }}\n  - {{ id: sub, type: playbook, playbook: {child} }}\n"
+            ),
+            "  - { from: start, to: a }\n  - { from: a, to: sub }\n  - { from: sub, to: done }\n",
+        )
+    };
+    seed(
+        dir.path(),
+        "c1",
+        &linear("c1", "effects: [irreversible]\n", ""),
+    );
+    seed(
+        dir.path(),
+        "c2",
+        &linear("c2", "effects: [irreversible]\n", ""),
+    );
+    seed(dir.path(), "p", &parent("c1"));
+    let prepared = prepare_supervised_background(
+        dir.path(),
+        "p",
+        None,
+        RunOptions {
+            mode: RunMode::Supervised,
+            consent: Some(RunConsent::irreversible("cli")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    let version = apb_core::versioning::create_patch_version(
+        dir.path(),
+        "p",
+        "1.0.0",
+        &parent("c2"),
+        &run_id,
+        "workaround",
+    )
+    .unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Patch {
+            version,
+            classification: "workaround".into(),
+            continue_from: "a".into(),
+        },
+    )
+    .unwrap();
+    drive_prepared(dir.path(), prepared).unwrap();
+    let events: Vec<EventPayload> = read_all(&dir.path().join(".apb/runs").join(&run_id))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.payload)
+        .collect();
+    let reason = rejection(&events).expect("rejected");
+    assert!(reason.contains("sub-playbook node sub"), "{reason}");
+}
