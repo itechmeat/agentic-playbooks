@@ -941,3 +941,47 @@ fn a_judge_node_never_emulates_through_the_profile_cli_in_host_mode() {
         0
     );
 }
+
+#[test]
+fn a_host_fallback_output_is_never_cached_for_the_cli_agent() {
+    let h = Host::new(&one_node(", cache: auto"), &[]);
+    let root = h.root.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/work.txt"), "hello\n").unwrap();
+    fs::write(root.join(".gitignore"), ".apb/\nagent.sh\ncli-ran\n").unwrap();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@t"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "c1"]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    // A cli run whose CLI cannot start: the host does the step.
+    let fell_back = {
+        let _missing = Env::set(&[("APB_AGENT_CMD", "/nonexistent/apb-test-agent")]);
+        let run_id = h.start(CLI_SESSION);
+        let task = h.task(&run_id, "w");
+        h.submit(
+            &run_id,
+            &task.task_id,
+            SubmitStatus::Succeeded,
+            "host reply",
+        );
+        h.finish(&run_id).1
+    };
+    assert_eq!(fallback_events(&fell_back).len(), 1);
+    assert_eq!(
+        count(&fell_back, |p| matches!(
+            p,
+            EventPayload::NodeCacheStored { .. }
+        )),
+        0,
+        "the host's output is not stored under the CLI agent's key"
+    );
+    // A later pure CLI run runs its CLI instead of reusing the host reply.
+    let run_id = h.start(ExecutionRequest::default());
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    assert!(h.cli_ran(), "the CLI run is not served the host's output");
+    assert_eq!(node_output(&events, "w"), "ok");
+}

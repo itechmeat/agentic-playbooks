@@ -776,6 +776,14 @@ pub(crate) fn settle(
                     node: node_id.to_string(),
                     reason: "judge output is a fallback, not a provider answer".into(),
                 });
+            } else if ctx.is_some() && ran_as_host_fallback(run_dir, node_id) {
+                // A `cli` run's key names the CLI agent; an output the host
+                // produced through the execution fallback is not that agent's
+                // and must not serve a later CLI run.
+                events.push(EventPayload::NodeCacheRejected {
+                    node: node_id.to_string(),
+                    reason: "output came from the host fallback, not the CLI agent".into(),
+                });
             } else if let Some(ctx) = ctx {
                 // Scan the run log for this node's connector calls (written out
                 // of band by the connector-call subprocess) and verify each
@@ -805,6 +813,26 @@ pub(crate) fn settle(
             (Vec::new(), events)
         }
     }
+}
+
+/// Whether this node's latest execution handed a step to the host through
+/// the execution fallback (0.23.0): an `execution_fallback` since its most
+/// recent `node_started`. An unreadable log counts as yes (fail closed: no
+/// store).
+fn ran_as_host_fallback(run_dir: &Path, node_id: &str) -> bool {
+    let Ok(events) = crate::event::read_all(run_dir) else {
+        return true;
+    };
+    let from = events
+        .iter()
+        .rposition(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
+        )
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    events[from..].iter().any(
+        |e| matches!(&e.payload, EventPayload::ExecutionFallback { node, .. } if node == node_id),
+    )
 }
 
 /// Captures a node's declared output artifacts after a successful execution.
