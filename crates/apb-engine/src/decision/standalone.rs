@@ -29,6 +29,10 @@ pub const DECISIONS_LOG: &str = "decisions.jsonl";
 const MAX_LOG_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
 const DAY_MS: u64 = 86_400_000;
+/// The lock serializing the log's count, request and line.
+const LOG_LOCK: &str = "decisions.jsonl.lock";
+/// Added to the provider chain's worst case in [`StandaloneDecider::lock_lifetime`].
+const LOCK_MARGIN_MS: u64 = 10_000;
 
 /// An answered standalone decision.
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +245,19 @@ impl StandaloneDecider {
             .count() as u32
     }
 
+    /// How long the log lock may be held before another caller treats it as
+    /// abandoned: every provider in the chain taking its whole
+    /// `timeout_ms`, plus a margin for the count and the log write.
+    fn lock_lifetime(&self) -> std::time::Duration {
+        let providers = self.settings.providers.len().max(1) as u64;
+        std::time::Duration::from_millis(
+            self.settings
+                .timeout_ms
+                .saturating_mul(providers)
+                .saturating_add(LOCK_MARGIN_MS),
+        )
+    }
+
     /// Best effort: a log that cannot be written never changes the answer.
     fn log(&self, line: &Value) {
         if !self.log_path().parent().is_some_and(Path::is_dir) {
@@ -313,14 +330,26 @@ impl StandaloneDecider {
         // servers of several agents share the log, and a count read before
         // another's reply is logged would let each of them past the cap. A
         // lock still held after its wait (a slow request elsewhere) skips
-        // this one: fail-open, the caller keeps its plain answer.
-        let Some(_lock) = self
+        // this one: fail-open, the caller keeps its plain answer. The holder
+        // may legitimately hold it for a whole provider chain, so the lock
+        // counts as stale only past that bound ([`Self::lock_lifetime`]); a
+        // stale one (a holder that died) is broken and the break is logged.
+        let lifetime = self.lock_lifetime();
+        let Some((_lock, broke_stale)) = self
             .log_path()
             .parent()
-            .and_then(|dir| apb_core::fsutil::lock_dir(dir, "decisions.jsonl.lock").ok())
+            .and_then(|dir| apb_core::fsutil::lock_dir_with_lifetime(dir, LOG_LOCK, lifetime).ok())
         else {
             return StandaloneOutcome::Skipped { reason: "busy" };
         };
+        if broke_stale {
+            self.log(&json!({
+                "ts_ms": now_ms,
+                "note": "stale_lock_broken",
+                "lock": LOG_LOCK,
+                "stale_after_ms": lifetime.as_millis() as u64,
+            }));
+        }
         if self.requests_today(site, now_ms) >= self.daily_cap(site) {
             line["error"] = json!("budget");
             self.log(&line);
@@ -507,6 +536,73 @@ mod tests {
             assert!(slow.seen.lock().unwrap().is_empty(), "{plant}");
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep\n");
+    }
+
+    /// Plants a held log lock whose mtime is `age` in the past.
+    fn plant_lock(root: &Path, age: std::time::Duration) {
+        let path = root.join(".apb").join(LOG_LOCK);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - age).unwrap();
+    }
+
+    fn log_notes(root: &Path) -> Vec<Value> {
+        std::fs::read_to_string(root.join(".apb").join(DECISIONS_LOG))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v.get("note").is_some())
+            .collect()
+    }
+
+    /// The lock's lifetime follows the configured provider timeout and the
+    /// chain length, not a fixed minute: a lock younger than a whole chain's
+    /// worst case belongs to a live request and is never broken (busy), one
+    /// older than it is broken with a logged note and the call proceeds.
+    #[test]
+    fn the_log_lock_lives_as_long_as_the_provider_chain_can() {
+        let root = project();
+        let slow = Arc::new(Slow::default());
+        let mut d = decider(root.path(), 10, &slow);
+        let ask = |d: &StandaloneDecider| {
+            d.decide(
+                UseSite::CatalogRank,
+                json!({"task": "x"}),
+                vec!["task".into()],
+                questions("s"),
+            )
+        };
+
+        // Two providers at 60 s each: a 90 s old lock may still be a live
+        // chain (a fixed 60 s staleness would have broken it).
+        d.settings.timeout_ms = 60_000;
+        d.settings.providers.push(d.settings.providers[0].clone());
+        assert_eq!(d.lock_lifetime().as_millis(), 130_000);
+        plant_lock(root.path(), std::time::Duration::from_secs(90));
+        assert!(
+            matches!(ask(&d), StandaloneOutcome::Skipped { reason: "busy" }),
+            "a lock within the chain's lifetime was broken"
+        );
+        assert!(slow.seen.lock().unwrap().is_empty());
+        assert!(log_notes(root.path()).is_empty());
+
+        // One provider at 100 ms: the lock lives 10.1 s, so a 30 s old lock
+        // is abandoned. It is broken, the break is logged, and the call runs.
+        d.settings.timeout_ms = 100;
+        d.settings.providers.truncate(1);
+        plant_lock(root.path(), std::time::Duration::from_secs(30));
+        assert!(
+            matches!(ask(&d), StandaloneOutcome::Answered(_)),
+            "a stale lock kept the call busy"
+        );
+        assert_eq!(slow.seen.lock().unwrap().len(), 1);
+        let notes = log_notes(root.path());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0]["note"], "stale_lock_broken");
+        assert_eq!(notes[0]["stale_after_ms"], 10_100);
+        assert!(
+            !root.path().join(".apb").join(LOG_LOCK).exists(),
+            "the broken lock was released"
+        );
     }
 
     #[test]

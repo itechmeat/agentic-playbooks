@@ -228,6 +228,27 @@ const LOCK_STALE_MS: u128 = 60_000;
 /// (a live owner or a fresh lock held by someone else is never stolen - this
 /// also closes the ABA race).
 pub fn lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
+    lock_dir_stale_after(dir, lock_name, LOCK_STALE_MS).map(|(lock, _)| lock)
+}
+
+/// [`lock_dir`] for a critical section that can legitimately run longer than
+/// a state-file update (a network request under the lock): a held lock counts
+/// as stale only once it is older than `stale_after`, which the caller derives
+/// from its own bounded working window. Also says whether a stale lock was
+/// broken to get it, so the caller can record that.
+pub fn lock_dir_with_lifetime(
+    dir: &Path,
+    lock_name: &str,
+    stale_after: std::time::Duration,
+) -> io::Result<(DirLock, bool)> {
+    lock_dir_stale_after(dir, lock_name, stale_after.as_millis())
+}
+
+fn lock_dir_stale_after(
+    dir: &Path,
+    lock_name: &str,
+    stale_ms: u128,
+) -> io::Result<(DirLock, bool)> {
     fs::create_dir_all(dir)?;
     let path = dir.join(lock_name);
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
@@ -239,7 +260,7 @@ pub fn lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
         {
             Ok(mut f) => {
                 f.write_all(token.as_bytes())?;
-                return Ok(DirLock { path, token });
+                return Ok((DirLock { path, token }, false));
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 std::thread::sleep(std::time::Duration::from_millis(LOCK_STEP_MS));
@@ -248,7 +269,7 @@ pub fn lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
         }
     }
     // Timeout: we steal the lock only if it is stale (staleness by mtime), otherwise busy.
-    if !lock_is_stale(&path) {
+    if !lock_is_stale(&path, stale_ms) {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             format!(
@@ -277,7 +298,7 @@ pub fn lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
     {
         Ok(mut f) => {
             f.write_all(token.as_bytes())?;
-            Ok(DirLock { path, token })
+            Ok((DirLock { path, token }, true))
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -290,10 +311,10 @@ pub fn lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
     }
 }
 
-/// Whether the lock is stale: its mtime age is greater than `LOCK_STALE_MS`. An
-/// unreadable mtime is treated as NOT stale (conservatively - we don't steal
-/// when in doubt).
-fn lock_is_stale(path: &Path) -> bool {
+/// Whether the lock is stale: its mtime age is at least `stale_ms`
+/// (`LOCK_STALE_MS` for [`lock_dir`]). An unreadable mtime is treated as NOT
+/// stale (conservatively - we don't steal when in doubt).
+fn lock_is_stale(path: &Path, stale_ms: u128) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
@@ -301,7 +322,7 @@ fn lock_is_stale(path: &Path) -> bool {
         return false;
     };
     match mtime.elapsed() {
-        Ok(age) => age.as_millis() >= LOCK_STALE_MS,
+        Ok(age) => age.as_millis() >= stale_ms,
         // mtime in the future (clock skew) - not stale.
         Err(_) => false,
     }
