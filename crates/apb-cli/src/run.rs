@@ -590,7 +590,7 @@ pub(crate) fn spawn_detached_supervised(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = match cmd.spawn() {
+    let child = match apb_core::fsutil::spawn_when_not_busy(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("run failed: cannot spawn supervised drive process: {e}");

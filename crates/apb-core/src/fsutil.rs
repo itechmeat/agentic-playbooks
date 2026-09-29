@@ -13,6 +13,27 @@ pub fn reexec_exe() -> io::Result<PathBuf> {
     Ok(live_exe_path(std::env::current_exe()?))
 }
 
+/// Spawns `cmd`, retrying for up to about two seconds while the executable
+/// is busy (`ETXTBSY`). A binary that was just written, by a reinstall or a
+/// copy, stays "busy" for as long as any process still holds a write handle
+/// to it, and on Linux a process forked while the writer had the file open
+/// holds that handle until its own `exec`. The window is short but real on a
+/// loaded host; any other error is returned at once.
+pub fn spawn_when_not_busy(cmd: &mut std::process::Command) -> io::Result<std::process::Child> {
+    const ATTEMPTS: u32 = 40;
+    const STEP: std::time::Duration = std::time::Duration::from_millis(50);
+    let mut attempt = 1;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(STEP);
+            }
+            other => return other,
+        }
+    }
+}
+
 fn live_exe_path(exe: PathBuf) -> PathBuf {
     if exe.exists() {
         return exe;

@@ -81,14 +81,33 @@ fn wait_for_workdir_unlocked(root: &Path) {
     });
 }
 
-fn node_finished(run_dir: &Path, node: &str) -> bool {
+fn node_started(run_dir: &Path, node: &str) -> bool {
     read_all(run_dir)
         .unwrap_or_default()
         .iter()
-        .any(|e| matches!(&e.payload, EventPayload::NodeFinished { node: n, .. } if n == node))
+        .any(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
 }
 
-// Four prompt nodes, each with a short but distinct output, feeding a terminal
+/// `p2`'s script: it holds the run inside `p2` until the test creates
+/// `release-p2` (bounded: it gives up after about 30 s), then prints its
+/// marker. The test posts its Pause while `p2` is held, so the pause lands at
+/// the boundary after `p2` by construction instead of racing a run whose
+/// remaining nodes finish in milliseconds.
+fn seed_p2_script(root: &Path) {
+    let release = root.join("release-p2");
+    let dir = root.join(".apb/playbooks/fctx/1.0.0/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("p2.sh"),
+        format!(
+            "i=0\nwhile [ ! -f '{r}' ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i+1)); done\necho 'MARKER_P2 opened-the-pull-request'\n",
+            r = release.display()
+        ),
+    )
+    .unwrap();
+}
+
+// Four nodes, each with a short but distinct output, feeding a terminal
 // finish-with-prompt. With a small context_max_bytes, compaction summarizes the
 // oldest sections (p1 among them) into the lossy summary before the finish node
 // runs - so p1's output only survives to the terminal node if that node reads
@@ -105,7 +124,7 @@ defaults:
 nodes:
   - {{ id: start, type: start }}
   - {{ id: p1, type: prompt, prompt: "MARKER_P1 shipped-the-feature-branch" }}
-  - {{ id: p2, type: prompt, prompt: "MARKER_P2 opened-the-pull-request" }}
+  - {{ id: p2, type: script, script: "scripts/p2.sh", runner: sh }}
   - {{ id: p3, type: prompt, prompt: "MARKER_P3 {p3}" }}
   - {{ id: done, type: finish, outcome: success, prompt: "compose closing answer from: {{{{run.context}}}}" }}
 edges:
@@ -126,6 +145,7 @@ edges:
 fn finish_context_survives_resume_and_patch_migration() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), &wf("merged-and-closed"));
+    seed_p2_script(dir.path());
     let _env = common::env_lock();
     let prog = lossy_summarizer_agent(dir.path());
     unsafe {
@@ -157,11 +177,11 @@ fn finish_context_survives_resume_and_patch_migration() {
     )
     .unwrap();
 
-    // Pause after p2 finished: p1 and p2 are done, p3 is still pending.
-    poll_until("p2 finished", || {
-        node_finished(&run_dir, "p2").then_some(())
-    });
+    // Pause after p2 finished: p1 and p2 are done, p3 is still pending. The
+    // pause is posted while p2 is held, then p2 is released.
+    poll_until("p2 started", || node_started(&run_dir, "p2").then_some(()));
     post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    fs::write(dir.path().join("release-p2"), "").unwrap();
     poll_until("run paused", || {
         (RunState::fold(&read_all(&run_dir).unwrap()).run_status == RunStatus::Paused).then_some(())
     });
