@@ -465,3 +465,59 @@ fn the_protect_listing_never_runs_the_repository_fsmonitor() {
     assert_eq!(outcome, RunStatus::Succeeded);
     assert!(!root.join("marker").exists());
 }
+
+const FORK: &str = r#"
+schema: 2
+id: fork
+name: Fork
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: guarded, type: agent_task, prompt: "work slowly", max_retries: 0, protect: ["shared/**"] }
+  - { id: writer, type: script, script: "scripts/write.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: guarded }
+  - { from: start, to: writer }
+  - { from: guarded, to: done }
+  - { from: writer, to: done }
+"#;
+
+/// A node with `protect` never shares a concurrent batch with a sibling:
+/// the sibling's legitimate write under its globs is neither undone nor
+/// blamed on it.
+#[test]
+fn a_protected_node_does_not_run_concurrently_with_a_writing_sibling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let agent = seed(root);
+    common::write_sync(Path::new(&agent), "#!/bin/sh\nsleep 1\necho ok\n");
+    let dir = root.join(".apb/playbooks/fork/1.0.0");
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(dir.join("playbook.yaml"), FORK).unwrap();
+    fs::write(
+        dir.join("scripts/write.sh"),
+        "mkdir -p shared\necho sibling > shared/new.txt\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/fork/current"), "1.0.0").unwrap();
+    fs::create_dir_all(root.join("shared")).unwrap();
+    fs::write(root.join("shared/base.txt"), "base\n").unwrap();
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &agent);
+    }
+    let res = run(root, "fork", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    assert!(modified(&events).is_empty(), "{:?}", modified(&events));
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(
+        fs::read_to_string(root.join("shared/new.txt")).unwrap(),
+        "sibling\n"
+    );
+}

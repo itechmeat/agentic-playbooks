@@ -3383,9 +3383,16 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
 /// by this narrowing: `defaults.on_failure: <node>` pushes its handler with no
 /// readiness check at all, and the sequential arm would execute a not-ready
 /// implicit join there too.
+///
+/// A node with `protect` (C6) is never batchable: its check compares the
+/// whole tree before and after the attempt, so a concurrent sibling's write
+/// under its globs would be undone and blamed on it.
 pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
     is_agent_or_script(playbook, node)
         && !is_interactive(playbook, node)
+        && playbook
+            .node(node)
+            .is_none_or(|n| n.kind.protect_globs().is_empty())
         && !matches!(
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))

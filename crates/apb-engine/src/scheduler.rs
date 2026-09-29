@@ -792,8 +792,8 @@ fn drive_inner(
 
         // Concurrent fast path (every run mode, spec 2026-08-05 section 1.3): if,
         // together with current, the frontier has >= 2 ready batchable nodes
-        // (`is_batchable`: agent_task/script, non-interactive, non-join), execute
-        // them CONCURRENTLY on threads. drive remains the sole writer of events:
+        // (`is_batchable`: agent_task/script, non-interactive, non-join, no
+        // `protect`), execute them CONCURRENTLY on threads. drive remains the sole writer of events:
         // execute_node never touches the log, it returns events instead; drive
         // writes them as threads finish (order = finish order, spec 8.5).
         // human_review/wait/condition do not enter here (they are not slow and/or
