@@ -68,8 +68,11 @@ pub struct EvalCase {
     #[serde(default)]
     pub params: BTreeMap<String, String>,
     pub fixture: Fixture,
-    /// Overlay for the run's processes (agents and scripts); merged over the
-    /// suite's. `{{eval.scratch}}` expands to the repetition's scratch dir.
+    /// Overlay for the agents and scripts the run spawns and for the case
+    /// scripts, never for apb itself; merged over the suite's. Keys that
+    /// reconfigure apb, the shell, the loader or git are V80
+    /// ([`env_key_problem`]). `{{eval.scratch}}` expands to the
+    /// repetition's scratch dir.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -339,7 +342,7 @@ fn later_field(raw: &str) -> Option<String> {
 }
 
 /// Parses one case file's text. `stem` is the file stem the id must equal.
-pub fn parse_case(raw: &str, stem: &str) -> Result<EvalCase, String> {
+fn parse_case(raw: &str, stem: &str) -> Result<EvalCase, String> {
     if let Some(f) = later_field(raw) {
         return Err(format!(
             "{f} is not supported by this apb (it needs mock connectors, a later release)"
@@ -482,6 +485,49 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
     why
 }
 
+/// Env names an overlay may not set: they reconfigure apb itself (`APB_*`,
+/// the config-directory variables), the program search path, the dynamic
+/// loader, git's idea of the repository and config, or the shell.
+const ENV_EXACT: [&str; 22] = [
+    "HOME",
+    "PATH",
+    "USERPROFILE",
+    "APPDATA",
+    "SHELL",
+    "ENV",
+    "BASH_ENV",
+    "IFS",
+    "CDPATH",
+    "ZDOTDIR",
+    "PROMPT_COMMAND",
+    "PS4",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_EXEC_PATH",
+    "GIT_SSH_COMMAND",
+];
+const ENV_PREFIXES: [&str; 6] = ["APB_", "XDG_", "LD_", "DYLD_", "GIT_CONFIG", "BASH_FUNC_"];
+
+/// Why an overlay may not set `name`, if it may not.
+pub fn env_key_problem(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains(['=', '\0']) || name.chars().any(char::is_whitespace) {
+        return Some(format!("env `{name}` is not a variable name"));
+    }
+    let upper = name.to_ascii_uppercase();
+    if ENV_EXACT.contains(&upper.as_str()) || ENV_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+        return Some(format!(
+            "env `{name}` cannot be set by an eval suite (it reconfigures apb, the shell, the loader or git)"
+        ));
+    }
+    None
+}
+
 /// Nodes of `playbook` a case names that do not exist.
 fn unknown_nodes(case: &EvalCase, playbook: &Playbook) -> Vec<String> {
     let known: BTreeSet<&str> = playbook.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -504,8 +550,22 @@ fn unknown_nodes(case: &EvalCase, playbook: &Playbook) -> Vec<String> {
 
 const OUTCOMES: [&str; 4] = ["succeeded", "failed", "aborted", "stopped"];
 
+/// Whether the case file sets `checks.goal` itself (the field defaults to
+/// `required`, which only a case that says so is held to).
+fn goal_set_explicitly(raw: &str) -> bool {
+    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("checks").and_then(|c| c.get("goal")).cloned())
+        .is_some()
+}
+
 /// V80 problems of one parsed case against the version it targets.
-fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
+/// `is_event_type` tells a journal event type this apb writes from a typo.
+fn case_problems(
+    lc: &LoadedCase,
+    playbook: &Playbook,
+    is_event_type: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let c = &lc.case;
     let mut p = Vec::new();
     match (&c.fixture.git, &c.fixture.dir) {
@@ -578,6 +638,44 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
             "versions `{r}` is not a range like `>=1.2.0, <2.0.0`"
         ));
     }
+    if let Some(ev) = &c.checks.events {
+        let mut bad: Vec<&str> = ev
+            .absent
+            .iter()
+            .chain(ev.max.keys())
+            .map(String::as_str)
+            .filter(|t| !is_event_type(t))
+            .collect();
+        bad.sort();
+        bad.dedup();
+        for t in bad {
+            p.push(format!("events: `{t}` is not an event type of this apb"));
+        }
+    }
+    // The node, param and goal checks judge the case against the loaded
+    // version; a case kept for other versions is not held to this one.
+    let excluded = c
+        .versions
+        .as_deref()
+        .and_then(VersionRange::parse)
+        .is_some_and(|r| !r.contains(&playbook.version));
+    if excluded {
+        return p;
+    }
+    if c.checks.goal == GoalMode::Required && goal_set_explicitly(&lc.raw) {
+        let criteria = playbook.goal.as_ref().map_or(0, |g| {
+            g.criteria
+                .iter()
+                .filter(|c| !matches!(c.check, crate::schema::GoalCheck::Manual))
+                .count()
+        });
+        if criteria == 0 {
+            p.push(format!(
+                "checks.goal is `required` but version {} has no script or marker goal criterion",
+                playbook.version
+            ));
+        }
+    }
     let unknown = unknown_nodes(c, playbook);
     if !unknown.is_empty() {
         p.push(format!(
@@ -589,6 +687,11 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
                 .join(", "),
             playbook.version
         ));
+    }
+    for k in c.env.keys() {
+        if let Some(why) = env_key_problem(k) {
+            p.push(why);
+        }
     }
     let declared: BTreeSet<&str> = playbook.params.iter().map(|p| p.name.as_str()).collect();
     for k in c.params.keys() {
@@ -604,7 +707,7 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
 /// - **V80** (error): a case does not parse, its id is not its file stem, it
 ///   uses a field of a later release, a check names a node the version does
 ///   not have, a path leaves `evals/scripts/` or `evals/fixtures/`, a regex
-///   does not compile.
+///   does not compile; the suite holds a symlink or cannot be digested.
 /// - **V81** (error): the playbook has a suite but cannot be evaluated at
 ///   all ([`refusal`]): irreversible effects, shipping steps, connectors or
 ///   sub-playbooks.
@@ -615,13 +718,48 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
 ///
 /// A playbook without `evals/` yields nothing.
 pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
+    validate_suite_with(playbook_dir, playbook, &|_| true)
+}
+
+/// [`validate_suite`] that also refuses event type names `is_event_type`
+/// does not know (the engine's journal types; `apb_engine::eval::checks::
+/// validate_suite` passes them).
+pub fn validate_suite_with(
+    playbook_dir: &Path,
+    playbook: &Playbook,
+    is_event_type: &dyn Fn(&str) -> bool,
+) -> Vec<Issue> {
     if !has_suite(playbook_dir) {
         return Vec::new();
     }
     let loaded = load_suite(playbook_dir);
     let mut out = loaded.issues.clone();
+    let dir = suite_dir(playbook_dir);
+    for link in symlinks_under(&dir) {
+        out.push(issue(
+            "V80",
+            Severity::Error,
+            format!("`evals/{link}` is a symlink; an eval suite may not contain symlinks"),
+        ));
+    }
+    for k in loaded.suite.env.keys() {
+        if let Some(why) = env_key_problem(k) {
+            out.push(issue(
+                "V80",
+                Severity::Error,
+                format!("eval `{SUITE_FILE}`: {why}"),
+            ));
+        }
+    }
+    if let Err(e) = suite_digest(&dir) {
+        out.push(issue(
+            "V80",
+            Severity::Error,
+            format!("the suite cannot be digested: {e}"),
+        ));
+    }
     for lc in &loaded.cases {
-        for problem in case_problems(lc, playbook) {
+        for problem in case_problems(lc, playbook, is_event_type) {
             out.push(issue(
                 "V80",
                 Severity::Error,
@@ -735,22 +873,36 @@ impl VersionRange {
     }
 }
 
-fn file_sha(path: &Path) -> String {
-    std::fs::read(path)
-        .map(|b| crate::content::sha256_hex(&b))
-        .unwrap_or_else(|_| "missing".into())
+/// The walk limits of an eval suite and its fixtures. Fixtures are real
+/// repositories, far bigger than the skill bundles the default
+/// [`crate::content::TreeLimits`] are sized for; a suite over these limits
+/// cannot be digested and is refused, never approved under a shared value.
+pub fn suite_limits() -> crate::content::TreeLimits {
+    crate::content::TreeLimits {
+        max_total_bytes: 1024 * 1024 * 1024,
+        max_files: 50_000,
+        max_depth: 64,
+        max_file_bytes: 128 * 1024 * 1024,
+    }
 }
 
-fn dir_digest(path: &Path) -> String {
-    crate::content::tree_digest(path, &crate::content::TreeLimits::default())
-        .unwrap_or_else(|_| "missing".into())
+fn file_sha(path: &Path) -> Result<String, String> {
+    std::fs::read(path)
+        .map(|b| crate::content::sha256_hex(&b))
+        .map_err(|e| format!("`{}`: {e}", path.display()))
+}
+
+fn dir_digest(path: &Path) -> Result<String, String> {
+    crate::content::tree_digest(path, &suite_limits())
+        .map_err(|e| format!("`{}`: {e}", path.display()))
 }
 
 /// The case digest: the case file, every fixture directory and check script
 /// it references, and the fixture ref resolved to a commit (`resolved_git`,
 /// when the fixture is `git:`). A stored result is valid for a case only
-/// while this digest is unchanged.
-pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> String {
+/// while this digest is unchanged. A part that cannot be read or digested
+/// is an error, never a placeholder shared with other cases.
+pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> Result<String, String> {
     let dir = lc.path.parent().unwrap_or(Path::new("."));
     let mut parts: Vec<String> = vec![format!(
         "case:{}",
@@ -760,21 +912,54 @@ pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> String {
         .into_iter()
         .flatten()
     {
-        parts.push(format!("dir:{d}:{}", dir_digest(&dir.join(d))));
+        parts.push(format!("dir:{d}:{}", dir_digest(&dir.join(d))?));
     }
     for s in &lc.case.checks.scripts {
-        parts.push(format!("script:{s}:{}", file_sha(&dir.join(s))));
+        parts.push(format!("script:{s}:{}", file_sha(&dir.join(s))?));
     }
     if let Some(c) = resolved_git {
         parts.push(format!("git:{c}"));
     }
-    crate::content::sha256_hex(parts.join("\n").as_bytes())
+    Ok(crate::content::sha256_hex(parts.join("\n").as_bytes()))
 }
 
 /// The suite digest: the whole `evals/` tree. It is what a person approves
-/// before the suite's scripts run on this machine (`apb eval --yes`).
-pub fn suite_digest(suite_dir: &Path) -> String {
+/// before the suite's scripts run on this machine (`apb eval --yes`). A
+/// suite that cannot be digested (a symlink, a special file, a name that is
+/// not UTF-8, over [`suite_limits`]) is an error: the run is refused and
+/// nothing is approved.
+pub fn suite_digest(suite_dir: &Path) -> Result<String, String> {
     dir_digest(suite_dir)
+}
+
+/// Every symlink under `dir`, relative to it, sorted. An eval suite may not
+/// carry one (V80): a link re-resolves differently once the suite is copied
+/// into a scratch tree, and content reached through it is not what the
+/// digest covers.
+fn symlinks_under(dir: &Path) -> Vec<String> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                out.push(
+                    p.strip_prefix(base)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            } else if ft.is_dir() {
+                walk(base, &p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
 }
 
 // --- eval suite approvals ------------------------------------------------------
@@ -803,25 +988,43 @@ fn approvals_path() -> Option<PathBuf> {
     evals_home().map(|d| d.join("approved.json"))
 }
 
+/// The value an older apb stored for every suite it could not digest. It
+/// never names content, so it is dropped on load and can never match.
+const LEGACY_UNDIGESTED: &str = "missing";
+
 impl SuiteApprovals {
-    pub fn load() -> Self {
-        approvals_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
+    fn read(path: &Path) -> Self {
+        let mut a: SuiteApprovals = std::fs::read_to_string(path)
+            .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        a.approved.remove(LEGACY_UNDIGESTED);
+        a
+    }
+
+    pub fn load() -> Self {
+        approvals_path().map(|p| Self::read(&p)).unwrap_or_default()
     }
 
     pub fn is_approved(&self, digest: &str) -> bool {
-        self.approved.contains_key(digest)
+        digest != LEGACY_UNDIGESTED && self.approved.contains_key(digest)
     }
 
     /// Records the approval of `digest` for `playbook` and writes the file.
+    /// The file is re-read under a lock, so an approval another invocation
+    /// recorded in the meantime is kept.
     pub fn approve(&mut self, digest: &str, playbook: &str) -> std::io::Result<()> {
+        if digest == LEGACY_UNDIGESTED {
+            return Err(std::io::Error::other("not a suite digest"));
+        }
         let path =
             approvals_path().ok_or_else(|| std::io::Error::other("no apb config directory"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("no apb config directory"))?;
+        std::fs::create_dir_all(parent)?;
+        let _lock = crate::fsutil::lock_dir(parent, "approved.lock")?;
+        *self = Self::read(&path);
         self.approved.insert(
             digest.to_string(),
             SuiteApproval {
@@ -919,45 +1122,110 @@ mod tests {
         has("param `who` is not declared");
     }
 
+    /// V2: one row per reason a playbook cannot be evaluated, each with its
+    /// V81 message; a plain playbook has none.
     #[test]
-    fn v81_refuses_irreversible_connector_and_shipping_playbooks() {
+    fn v81_refuses_every_effect_an_eval_cannot_neutralize() {
         let dir = suite_with(&[("good.yaml", GOOD)]);
-        let irreversible = PB.replace("nodes:", "effects: [irreversible]\nnodes:");
-        let got = codes(&validate_suite(dir.path(), &pb(&irreversible)));
-        assert!(
-            got.iter()
-                .any(|(c, m)| *c == "V81" && m.contains("irreversible")),
-            "{got:?}"
-        );
-        let shipping = PB
-            .replace("{ id: w, type: prompt", "{ id: push_branch, type: prompt")
-            .replace("to: w }", "to: push_branch }")
-            .replace("from: w,", "from: push_branch,");
-        let shipping_pb = pb(&shipping);
-        assert!(
-            refusal(&shipping_pb)
-                .iter()
-                .any(|r| r.contains("push_branch")),
-            "{:?}",
-            refusal(&shipping_pb)
-        );
+        let w = "{ id: w, type: prompt, prompt: hi }";
+        let rows: [(&str, String, &str); 5] = [
+            (
+                "irreversible",
+                PB.replace("nodes:", "effects: [irreversible]\nnodes:"),
+                "the playbook's effects contain `irreversible`",
+            ),
+            (
+                "node secrets effect",
+                PB.replace(w, "{ id: w, type: prompt, prompt: hi, effects: [secrets] }"),
+                "`w`",
+            ),
+            (
+                "shipping step",
+                PB.replace(w, "{ id: push_branch, type: prompt, prompt: hi }")
+                    .replace("to: w }", "to: push_branch }")
+                    .replace("from: w,", "from: push_branch,"),
+                "push_branch",
+            ),
+            (
+                "connector",
+                PB.replace(
+                    w,
+                    "{ id: w, type: agent_task, prompt: hi, profile: x, connectors: [jira] }",
+                ),
+                "node `w` binds a connector",
+            ),
+            (
+                "sub-playbook",
+                PB.replace(w, "{ id: w, type: playbook, playbook: child }"),
+                "node `w` starts a sub-playbook",
+            ),
+        ];
+        for (what, yaml, needle) in rows {
+            let got = codes(&validate_suite(dir.path(), &pb(&yaml)));
+            assert!(
+                got.iter().any(|(c, m)| *c == "V81"
+                    && m.starts_with("the eval suite cannot run: ")
+                    && m.contains(needle)),
+                "{what}: {got:?}"
+            );
+        }
         assert!(refusal(&pb(PB)).is_empty());
     }
 
+    /// V82 names a gate and an interactive agent step (a warning); V83 says
+    /// which version no case applies to.
     #[test]
     fn v82_warns_on_a_gate_and_v83_on_no_applicable_case() {
         let pinned = GOOD.replace("repeat: 2", "versions: \">=2.0.0\"");
         let dir = suite_with(&[("good.yaml", &pinned)]);
         let gated = PB.replace(
             "{ id: w, type: prompt, prompt: hi }",
-            "{ id: w, type: prompt, prompt: hi }\n  - { id: g, type: human_review }",
+            "{ id: w, type: prompt, prompt: hi }\n  - { id: g, type: human_review }\n  - { id: i, type: agent_task, prompt: ask, profile: x, interactive: true }",
         );
-        let got = codes(&validate_suite(dir.path(), &pb(&gated)));
-        assert!(
-            got.iter().any(|(c, m)| *c == "V82" && m.contains("`g`")),
-            "{got:?}"
+        let issues = validate_suite(dir.path(), &pb(&gated));
+        let v82 = issues.iter().find(|i| i.code == "V82").expect("V82");
+        assert_eq!(v82.severity, Severity::Warning);
+        assert_eq!(
+            v82.message,
+            "node(s) `g`, `i` wait for a person; an eval run stops there (outcome `stopped`)"
         );
-        assert!(got.iter().any(|(c, _)| *c == "V83"), "{got:?}");
+        let v83 = issues.iter().find(|i| i.code == "V83").expect("V83");
+        assert_eq!(v83.severity, Severity::Warning);
+        assert_eq!(v83.message, "no eval case applies to version 1.2.0");
+    }
+
+    /// A case kept for other versions is not judged by the loaded one: its
+    /// nodes and params may be gone there (OCR 10).
+    #[test]
+    fn a_case_for_other_versions_is_not_held_to_the_loaded_version() {
+        let old = "schema: 1\nid: old\nversions: \"<1.0.0\"\nfixture: { dir: fixtures/base }\nparams: { gone: x }\nchecks:\n  route: { visits: [gone] }\n";
+        let dir = suite_with(&[("old.yaml", old)]);
+        let got = codes(&validate_suite(dir.path(), &pb(PB)));
+        assert!(got.iter().all(|(c, _)| *c != "V80"), "{got:?}");
+    }
+
+    /// K1: an explicit `goal: required` needs a script or marker criterion
+    /// to check; the default does not.
+    #[test]
+    fn v80_refuses_a_required_goal_the_playbook_cannot_check() {
+        let explicit = "schema: 1\nid: explicit\nfixture: { dir: fixtures/base }\nchecks: { goal: required }\n";
+        let implicit = "schema: 1\nid: implicit\nfixture: { dir: fixtures/base }\n";
+        let dir = suite_with(&[("explicit.yaml", explicit), ("implicit.yaml", implicit)]);
+        let got = codes(&validate_suite(dir.path(), &pb(PB)));
+        let v80: Vec<&String> = got
+            .iter()
+            .filter(|(c, _)| *c == "V80")
+            .map(|(_, m)| m)
+            .collect();
+        assert_eq!(
+            v80,
+            [&"eval case `explicit`: checks.goal is `required` but version 1.2.0 has no script or marker goal criterion".to_string()]
+        );
+        let with_goal = PB.replace(
+            "nodes:",
+            "goal:\n  statement: s\n  criteria:\n    - { description: d, check: { type: marker, marker: OK } }\nnodes:",
+        );
+        assert!(validate_suite(dir.path(), &pb(&with_goal)).is_empty());
     }
 
     #[test]
@@ -975,14 +1243,122 @@ mod tests {
     fn the_case_digest_moves_with_the_case_its_fixture_and_its_scripts() {
         let dir = suite_with(&[("good.yaml", GOOD)]);
         let load = || load_suite(dir.path()).cases.remove(0);
-        let a = case_digest(&load(), None);
-        assert_eq!(a, case_digest(&load(), None), "stable across loads");
-        assert_ne!(a, case_digest(&load(), Some("abc")));
+        let a = case_digest(&load(), None).unwrap();
+        assert_eq!(
+            a,
+            case_digest(&load(), None).unwrap(),
+            "stable across loads"
+        );
+        assert_ne!(a, case_digest(&load(), Some("abc")).unwrap());
         let evals = dir.path().join(EVALS_DIR);
         std::fs::write(evals.join("fixtures/base/a.txt"), "b").unwrap();
-        let b = case_digest(&load(), None);
+        let b = case_digest(&load(), None).unwrap();
         assert_ne!(a, b, "fixture change");
         std::fs::write(evals.join("scripts/ok.sh"), "exit 1").unwrap();
-        assert_ne!(b, case_digest(&load(), None), "script change");
+        let c = case_digest(&load(), None).unwrap();
+        assert_ne!(b, c, "script change");
+        std::fs::create_dir_all(evals.join("fixtures/change")).unwrap();
+        std::fs::write(
+            evals.join("good.yaml"),
+            GOOD.replace(
+                "dir: fixtures/base }",
+                "dir: fixtures/base, change: fixtures/change }",
+            ),
+        )
+        .unwrap();
+        let d = case_digest(&load(), None).unwrap();
+        std::fs::write(evals.join("fixtures/change/new.txt"), "n").unwrap();
+        assert_ne!(d, case_digest(&load(), None).unwrap(), "change overlay");
+    }
+
+    /// Two suites over the skill-bundle limits (more than 512 files) are
+    /// digested under the suite limits and never share a value; a suite that
+    /// cannot be digested is an error and a V80, never a placeholder.
+    #[test]
+    fn oversized_suites_get_their_own_digests_and_undigestable_ones_are_refused() {
+        let a = suite_with(&[("good.yaml", GOOD)]);
+        let b = suite_with(&[("good.yaml", GOOD)]);
+        for (dir, tag) in [(&a, "a"), (&b, "b")] {
+            let big = dir.path().join(EVALS_DIR).join("fixtures/big");
+            std::fs::create_dir_all(&big).unwrap();
+            for i in 0..600 {
+                std::fs::write(big.join(format!("f{i}.txt")), format!("{tag}{i}")).unwrap();
+            }
+        }
+        let da = suite_digest(&suite_dir(a.path())).unwrap();
+        let db = suite_digest(&suite_dir(b.path())).unwrap();
+        assert_ne!(da, db);
+        #[cfg(unix)]
+        {
+            let evals = suite_dir(a.path());
+            std::os::unix::fs::symlink("../../outside", evals.join("fixtures/base/out")).unwrap();
+            assert!(suite_digest(&evals).is_err());
+            assert!(case_digest(&load_suite(a.path()).cases[0], None).is_err());
+            let got = codes(&validate_suite(a.path(), &pb(PB)));
+            for needle in [
+                "`evals/fixtures/base/out` is a symlink",
+                "the suite cannot be digested",
+            ] {
+                assert!(
+                    got.iter().any(|(c, m)| *c == "V80" && m.contains(needle)),
+                    "missing `{needle}` in {got:?}"
+                );
+            }
+        }
+    }
+
+    /// The approval an older apb stored for every undigestable suite is
+    /// dropped on load and matches nothing.
+    #[test]
+    fn a_stored_missing_approval_is_dropped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approved.json");
+        std::fs::write(
+            &path,
+            r#"{"approved":{"missing":{"playbook":"p","approved_at_ms":1},"sha256:ab":{"playbook":"p","approved_at_ms":2}}}"#,
+        )
+        .unwrap();
+        let a = SuiteApprovals::read(&path);
+        assert_eq!(a.approved.keys().collect::<Vec<_>>(), ["sha256:ab"]);
+        assert!(!a.is_approved("missing"));
+        assert!(a.is_approved("sha256:ab"));
+    }
+
+    /// The env overlay cannot reconfigure apb, the loader, git or the
+    /// shell, in a case or in `suite.yaml`; an ordinary variable passes.
+    #[test]
+    fn v80_refuses_env_keys_that_reconfigure_apb_the_loader_or_git() {
+        let case = GOOD.replace(
+            "repeat: 2\n",
+            "repeat: 2\nenv: { APB_CONFIG_DIR: x, HOME: x, LD_PRELOAD: x, GIT_CONFIG_GLOBAL: x, xdg_config_home: x, GH_TOKEN: \"\" }\n",
+        );
+        let dir = suite_with(&[
+            ("good.yaml", &case),
+            ("suite.yaml", "env: { PATH: /x, GH_CONFIG_DIR: /y }\n"),
+        ]);
+        let got: Vec<String> = validate_suite(dir.path(), &pb(PB))
+            .iter()
+            .filter(|i| i.code == "V80")
+            .map(|i| i.message.clone())
+            .collect();
+        for key in [
+            "APB_CONFIG_DIR",
+            "HOME",
+            "LD_PRELOAD",
+            "GIT_CONFIG_GLOBAL",
+            "xdg_config_home",
+        ] {
+            assert!(
+                got.iter().any(|m| m.starts_with("eval case `good`: env `")
+                    && m.contains(&format!("`{key}` cannot be set"))),
+                "{key}: {got:#?}"
+            );
+        }
+        assert!(
+            got.iter()
+                .any(|m| m.starts_with("eval `suite.yaml`: env `PATH` cannot be set")),
+            "{got:#?}"
+        );
+        assert_eq!(got.len(), 6, "GH_TOKEN and GH_CONFIG_DIR pass: {got:#?}");
     }
 }

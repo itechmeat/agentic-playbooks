@@ -96,6 +96,21 @@ impl RepUsage {
     }
 }
 
+/// Whether `t` is an event type this apb's journal can hold. Asked of the
+/// event type itself (serde names every variant it does not know), so the
+/// list can never drift from the journal.
+pub fn is_event_type(t: &str) -> bool {
+    match serde_json::from_value::<EventPayload>(serde_json::json!({ "type": t })) {
+        Ok(_) => true,
+        Err(e) => !e.to_string().contains("unknown variant"),
+    }
+}
+
+/// [`apb_core::eval::validate_suite`] with the journal's event types.
+pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<apb_core::validate::Issue> {
+    apb_core::eval::validate_suite_with(playbook_dir, playbook, &is_event_type)
+}
+
 /// What the checks read.
 pub struct CheckInput<'a> {
     pub case: &'a EvalCase,
@@ -112,8 +127,12 @@ pub struct CheckInput<'a> {
     pub suite_dir: &'a Path,
     /// Set when the runner stopped the run (a gate, the timeout, a budget).
     pub stopped: Option<&'a str>,
-    /// `APB_EVAL_*` and the run ids for the case scripts.
-    pub script_env: Vec<(&'static str, String)>,
+    /// The case env overlay, then `APB_EVAL_*` and the run ids, for the
+    /// case scripts.
+    pub script_env: Vec<(String, String)>,
+    /// An empty directory: the hooks path of every git call the checks and
+    /// the case scripts make in the tree (see [`super::git`]).
+    pub hooks_dir: &'a Path,
 }
 
 /// The run's terminal outcome as the checks see it: `stopped` when the
@@ -221,7 +240,7 @@ fn goal_check(input: &CheckInput, goal: &[GoalResult], accepted: &[String]) -> O
 /// `node_started`, every `review_requested` (a gate the run reached), plus
 /// a `node_finished` with no open start (a finish or start node, which the
 /// engine journals without `node_started`).
-pub fn visited(events: &[Event]) -> Vec<&str> {
+fn visited(events: &[Event]) -> Vec<&str> {
     let mut open: BTreeMap<&str, usize> = BTreeMap::new();
     let mut out = Vec::new();
     for e in events {
@@ -374,8 +393,14 @@ fn output_checks(input: &CheckInput, state: &RunState, out: &mut Vec<CheckResult
 }
 
 /// The file at `rel` in the fixture commit, `None` when it has none.
-fn fixture_file(tree: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
-    let out = std::process::Command::new("git")
+/// The tree's `.git` is the agent's to edit, so the read is hardened.
+fn fixture_file(
+    hooks: &Path,
+    tree: &Path,
+    commit: &str,
+    rel: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let out = super::git::command(hooks)
         .arg("-C")
         .arg(tree)
         .args(["cat-file", "blob", &format!("{commit}:{rel}")])
@@ -384,11 +409,30 @@ fn fixture_file(tree: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
     Ok(out.status.success().then_some(out.stdout))
 }
 
+/// The checked file's bytes, `None` when absent. A symlink at the path, or
+/// on any directory below the tree, is never followed: the agent could
+/// point it anywhere on the operator's filesystem.
+fn read_checked(tree: &Path, rel: &str) -> Result<Option<Vec<u8>>, String> {
+    let path = tree.join(rel);
+    apb_core::fsutil::ensure_no_symlink_below(tree, &path)
+        .map_err(|_| format!("`{rel}` is a symlink or lies below one, which is not followed"))?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.is_file() => std::fs::read(&path).map(Some).map_err(|e| e.to_string()),
+        Ok(_) => Err(format!("`{rel}` is not a regular file")),
+        Err(_) => Ok(None),
+    }
+}
+
 fn file_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
     for f in &input.case.checks.files {
         let kind = format!("files[{}]", f.path);
-        let path = input.tree.join(&f.path);
-        let now = std::fs::read(&path).ok();
+        let now = match read_checked(input.tree, &f.path) {
+            Ok(n) => n,
+            Err(why) => {
+                out.push(CheckResult::new(kind, false, || why));
+                continue;
+            }
+        };
         let mut problems = Vec::new();
         if let Some(want) = f.exists
             && want != now.is_some()
@@ -396,10 +440,12 @@ fn file_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
             problems.push(if want { "does not exist" } else { "exists" }.to_string());
         }
         if let Some(p) = &f.matches {
-            let text = now
-                .as_deref()
-                .map(String::from_utf8_lossy)
-                .unwrap_or_default();
+            let Some(bytes) = now.as_deref() else {
+                problems.push(format!("does not exist, so it cannot match `{p}`"));
+                out.push(CheckResult::new(kind, false, || problems.join(", ")));
+                continue;
+            };
+            let text = String::from_utf8_lossy(bytes);
             match regex_is_match(p, &text) {
                 Ok(true) => {}
                 Ok(false) => problems.push(format!("does not match `{p}`")),
@@ -410,7 +456,7 @@ fn file_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
             }
         }
         if f.unchanged_from_fixture == Some(true) {
-            match fixture_file(input.tree, input.fixture_commit, &f.path) {
+            match fixture_file(input.hooks_dir, input.tree, input.fixture_commit, &f.path) {
                 Ok(before) if before == now => {}
                 Ok(_) => problems.push("changed from the fixture".to_string()),
                 Err(e) => {
@@ -456,14 +502,27 @@ fn event_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
 fn script_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
     for s in &input.case.checks.scripts {
         let kind = format!("script[{s}]");
-        match crate::script::run_script_with_env(
+        // The scripts run after untrusted agent activity in the tree: their
+        // own git calls get the same hardening as apb's.
+        let mut env: Vec<(&str, String)> = input
+            .script_env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        env.push((
+            "GIT_CONFIG_PARAMETERS",
+            super::git::config_parameters(input.hooks_dir),
+        ));
+        env.push(("GIT_CONFIG_NOSYSTEM", "1".into()));
+        match crate::script::run_script_with_env_removed(
             input.suite_dir,
             input.tree,
             s,
             "sh",
             Some(CASE_SCRIPT_TIMEOUT),
             None,
-            &input.script_env,
+            &env,
+            &super::git::LOCATION_VARS,
         ) {
             Ok(r) if r.status == NodeStatus::Succeeded => {
                 out.push(CheckResult::new(kind, true, String::new))
@@ -536,7 +595,9 @@ pub fn verdict(checks: &[CheckResult]) -> &'static str {
 }
 
 /// How often each check kind did not pass across repetitions, most first.
-pub fn failing_kinds<'a>(reps: impl Iterator<Item = &'a [CheckResult]>) -> Vec<(String, usize)> {
+pub(crate) fn failing_kinds<'a>(
+    reps: impl Iterator<Item = &'a [CheckResult]>,
+) -> Vec<(String, usize)> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for checks in reps {
         for c in checks.iter().filter(|c| c.status != CheckStatus::Passed) {
@@ -568,13 +629,14 @@ mod tests {
             ev(3, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),
             ev(4, EventPayload::NodeStarted { node: "w".into(), attempt: 1 }),
             ev(5, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),
-            ev(6, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"f","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
-            ev(7, EventPayload::RunFinished { outcome: "succeeded".into() }),
+            ev(6, serde_json::from_value(serde_json::json!({"type":"review_requested","node":"g","options":["approve"]})).unwrap()),
+            ev(7, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"f","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
+            ev(8, EventPayload::RunFinished { outcome: "succeeded".into() }),
         ]
     }
 
     fn case(yaml: &str) -> EvalCase {
-        apb_core::eval::parse_case(yaml, "c").unwrap()
+        serde_yaml_ng::from_str(yaml).unwrap()
     }
 
     const PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: prompt, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: f }\n";
@@ -598,6 +660,7 @@ mod tests {
             suite_dir: tree.path(),
             stopped: None,
             script_env: Vec::new(),
+            hooks_dir: tree.path(),
         };
         evaluate(&input).0
     }
@@ -611,19 +674,18 @@ mod tests {
     }
 
     #[test]
-    fn visited_counts_executions_and_finish_nodes_once() {
-        assert_eq!(visited(&journal()), ["s", "w", "w", "f"]);
-    }
-
-    #[test]
     fn route_output_and_event_checks_read_the_journal() {
         let checks = run(
-            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  route: { visits: [s, w, f], in_order: true, not_visits: [f], max_visits: { w: 1 } }\n  outputs:\n    - { node: w, field: verdict, equals: ok }\n    - { node: w, field: n, equals: \"3\" }\n    - { node: w, not_matches: verdict }\n    - { node: w, field: missing, non_empty: true }\n  events: { absent: [run_error], max: { retry_started: 1 } }\n",
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  route: { visits: [s, w, g, f], in_order: true, not_visits: [f], max_visits: { w: 1, f: 1, g: 1 } }\n  outputs:\n    - { node: w, field: verdict, equals: ok }\n    - { node: w, field: n, equals: \"3\" }\n    - { node: w, not_matches: verdict }\n    - { node: w, field: missing, non_empty: true }\n  events: { absent: [run_error], max: { retry_started: 1 } }\n",
         );
         assert_eq!(status(&checks, "run.outcome"), CheckStatus::Passed);
         assert_eq!(status(&checks, "route.visits"), CheckStatus::Passed);
         assert_eq!(status(&checks, "route.not_visits"), CheckStatus::Failed);
+        // Two executions of `w`; the finish node (no `node_started`) and the
+        // gate (`review_requested`) count once each.
         assert_eq!(status(&checks, "route.max_visits[w]"), CheckStatus::Failed);
+        assert_eq!(status(&checks, "route.max_visits[f]"), CheckStatus::Passed);
+        assert_eq!(status(&checks, "route.max_visits[g]"), CheckStatus::Passed);
         assert_eq!(status(&checks, "outputs[w.verdict]"), CheckStatus::Passed);
         assert_eq!(status(&checks, "outputs[w.n]"), CheckStatus::Passed);
         assert_eq!(status(&checks, "outputs[w]"), CheckStatus::Failed);
@@ -653,5 +715,108 @@ mod tests {
             CheckStatus::Error
         );
         assert_eq!(verdict(&checks), "error");
+    }
+
+    /// K2: an event type this apb never writes is a V80, a real one is not.
+    #[test]
+    fn v80_names_an_event_type_the_journal_does_not_have() {
+        assert!(is_event_type("run_error"));
+        assert!(is_event_type("run_finished"));
+        assert!(!is_event_type("run_eror"));
+        let dir = tempfile::tempdir().unwrap();
+        let evals = dir.path().join("evals");
+        std::fs::create_dir_all(evals.join("fixtures/x")).unwrap();
+        std::fs::write(
+            evals.join("c.yaml"),
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  events: { absent: [run_eror, run_error], max: { retry_startd: 1 } }\n",
+        )
+        .unwrap();
+        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let got: Vec<String> = validate_suite(dir.path(), &pb)
+            .into_iter()
+            .map(|i| format!("{} {}", i.code, i.message))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "V80 eval case `c`: events: `retry_startd` is not an event type of this apb",
+                "V80 eval case `c`: events: `run_eror` is not an event type of this apb",
+            ]
+        );
+    }
+
+    /// K3: the `files` checks over a real tree with a fixture commit: a
+    /// changed file, a file that should not exist, a pattern over a missing
+    /// file and a symlinked path all fail with their reason.
+    #[cfg(unix)]
+    #[test]
+    fn file_checks_fail_with_their_reason() {
+        let tree = tempfile::tempdir().unwrap();
+        let t = tree.path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(t)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(t.join("kept.txt"), "same\n").unwrap();
+        std::fs::write(t.join("edited.txt"), "before\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+        std::fs::write(t.join("edited.txt"), "after\n").unwrap();
+        std::fs::write(t.join("present.txt"), "x\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "secret\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), t.join("link.txt")).unwrap();
+        let c = case(
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  files:\n    - { path: kept.txt, unchanged_from_fixture: true }\n    - { path: edited.txt, unchanged_from_fixture: true }\n    - { path: present.txt, exists: false }\n    - { path: missing.txt, matches: \"^\" }\n    - { path: link.txt, matches: secret }\n",
+        );
+        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        let input = CheckInput {
+            case: &c,
+            playbook: &pb,
+            events: &journal(),
+            raw_types: &[],
+            tree: t,
+            fixture_commit: "HEAD",
+            suite_dir: t,
+            stopped: None,
+            script_env: Vec::new(),
+            hooks_dir: hooks.path(),
+        };
+        let mut out = Vec::new();
+        file_checks(&input, &mut out);
+        let got: Vec<(String, CheckStatus, Option<String>)> = out
+            .into_iter()
+            .map(|c| (c.kind, c.status, c.detail))
+            .collect();
+        let row = |k: &str| got.iter().find(|(kind, ..)| kind == k).unwrap().clone();
+        assert_eq!(row("files[kept.txt]").1, CheckStatus::Passed);
+        assert_eq!(
+            row("files[edited.txt]").2.as_deref(),
+            Some("changed from the fixture")
+        );
+        assert_eq!(row("files[present.txt]").2.as_deref(), Some("exists"));
+        let missing = row("files[missing.txt]");
+        assert_eq!(missing.1, CheckStatus::Failed);
+        assert!(missing.2.unwrap().starts_with("does not exist"));
+        let link = row("files[link.txt]");
+        assert_eq!(link.1, CheckStatus::Failed);
+        assert!(link.2.unwrap().contains("symlink"), "the link was followed");
     }
 }

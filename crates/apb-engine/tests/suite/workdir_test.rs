@@ -27,6 +27,7 @@ fn run_config_round_trips() {
         mode: RunMode::Supervised,
         max_parallel: Some(2),
         workdir_queue_wait_ms: Some(60_000),
+        eval: None,
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();

@@ -4,4 +4,5 @@
 //! materializes fixtures and starts runs is `apb eval` in the CLI.
 
 pub mod checks;
+pub mod git;
 pub mod store;

@@ -99,6 +99,31 @@ pub fn run_script_with_env(
     cancel: Option<&AtomicBool>,
     env: &[(&str, String)],
 ) -> Result<ScriptResult, EngineError> {
+    run_script_with_env_removed(
+        version_dir,
+        workdir,
+        script_rel,
+        runner,
+        timeout,
+        cancel,
+        env,
+        &[],
+    )
+}
+
+/// [`run_script_with_env`] that also removes the `remove` variables from
+/// the environment the script inherits.
+#[allow(clippy::too_many_arguments)]
+pub fn run_script_with_env_removed(
+    version_dir: &Path,
+    workdir: &Path,
+    script_rel: &str,
+    runner: &str,
+    timeout: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+    env: &[(&str, String)],
+    remove: &[&str],
+) -> Result<ScriptResult, EngineError> {
     let script_path = version_dir.join(script_rel);
     if !script_path.is_file() {
         return Err(EngineError::Script(format!(
@@ -114,6 +139,9 @@ pub fn run_script_with_env(
     })?;
     let mut cmd = command_for_runtime(program, &script_path);
     cmd.current_dir(workdir);
+    for k in remove {
+        cmd.env_remove(k);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }

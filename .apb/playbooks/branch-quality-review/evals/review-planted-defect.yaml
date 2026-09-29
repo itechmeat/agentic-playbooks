@@ -8,7 +8,9 @@ fixture:
   dir: fixtures/window-max/base
   change: fixtures/window-max/planted
 checks:
-  goal: required
+  # The playbook declares no script or marker goal criterion yet: its
+  # criteria are recorded when it does, the verdict rests on the checks below.
+  goal: report
   run: { outcome: [succeeded] }
   route:
     visits: [review, done]

@@ -1,9 +1,11 @@
 //! Stored eval results, their configuration key, and the comparison with
 //! the previous stored result (design C2 section 9).
 //!
-//! Layout: `<config-dir>/evals/<playbook-id>/<key>.json`, one file per
-//! configuration key holding every invocation that ran under it, newest
-//! last. Files are written atomically with mode 0600. The key is the
+//! Layout: `<config-dir>/evals/results/<playbook-id>/<key>.json`, one file
+//! per configuration key holding every invocation that ran under it, newest
+//! last (apart from the runner's own `runs/`, `scratch/` and `kept/`).
+//! Files are written atomically with mode 0600, under a directory lock; a
+//! file that exists but does not parse is moved aside, never overwritten. The key is the
 //! SHA-256 of the canonical JSON of [`ConfigKey`]: the playbook digest, the
 //! profile bundle digests, the executor (agent and model) each agent node
 //! resolved to, and the overrides digest. A model alias that resolves
@@ -245,9 +247,22 @@ pub struct EvalResult {
     pub incomplete: Option<String>,
     pub total_cost_usd: f64,
     pub total_tokens: u64,
+    /// The run journal the checks read lives in the agent's own tree, so the
+    /// agent under test could have edited it (usage, route and deliverable
+    /// events). Always `true` in this release; the verdict trusts it.
+    #[serde(default)]
+    pub journal_agent_writable: bool,
 }
 
 impl EvalResult {
+    /// Whether any repetition started a run (only then does the result
+    /// carry a real configuration key).
+    pub fn started_any(&self) -> bool {
+        self.cases
+            .iter()
+            .any(|c| c.repetitions.iter().any(|r| r.run_id.is_some()))
+    }
+
     pub fn passes(&self) -> (u32, u32) {
         self.cases
             .iter()
@@ -263,24 +278,45 @@ pub struct StoredConfig {
     pub results: Vec<EvalResult>,
 }
 
-/// `<evals_home>/<playbook>`.
+/// `<evals_home>/results/<playbook>`.
 pub fn playbook_dir(evals_home: &Path, playbook: &str) -> PathBuf {
-    evals_home.join(playbook)
+    evals_home.join("results").join(playbook)
 }
 
-/// Appends `result` to its key's file.
+/// The lock file of a playbook's results directory.
+const STORE_LOCK: &str = "store.lock";
+
+/// Appends `result` to its key's file, under the directory lock so two
+/// invocations of the same configuration never lose one another's result.
+/// A key file that exists but does not parse (a newer apb wrote it, or it
+/// is damaged) is moved aside to `<key>.json.corrupt-<ms>` and the result
+/// starts a fresh file: its history is kept, never overwritten.
 pub fn store(evals_home: &Path, result: &EvalResult) -> std::io::Result<PathBuf> {
     let dir = playbook_dir(evals_home, &result.playbook);
     std::fs::create_dir_all(&dir)?;
+    let _lock = apb_core::fsutil::lock_dir(&dir, STORE_LOCK)?;
     let path = dir.join(format!("{}.json", result.config.file_stem()));
-    let mut stored = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<StoredConfig>(&raw).ok())
-        .unwrap_or_else(|| StoredConfig {
-            config_key: result.config_key.clone(),
-            config: result.config.clone(),
-            results: Vec::new(),
-        });
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<StoredConfig>(&raw) {
+            Ok(s) => Some(s),
+            Err(_) => {
+                let aside = dir.join(format!(
+                    "{}.json.corrupt-{}",
+                    result.config.file_stem(),
+                    apb_core::clock::now_ms()
+                ));
+                std::fs::rename(&path, &aside)?;
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let mut stored = existing.unwrap_or_else(|| StoredConfig {
+        config_key: result.config_key.clone(),
+        config: result.config.clone(),
+        results: Vec::new(),
+    });
     stored.results.push(result.clone());
     let body = serde_json::to_string_pretty(&stored).map_err(std::io::Error::other)?;
     apb_core::fsutil::atomic_write_private(&path, body.as_bytes())?;
@@ -415,11 +451,20 @@ pub fn compare(baseline: &EvalResult, candidate: &EvalResult) -> Comparison {
 }
 
 /// The stored result `candidate` is compared with: the most recent other
-/// invocation of the same playbook.
+/// invocation of the same playbook in the same project (another repository
+/// with a playbook of the same id is a different suite). An invocation in
+/// which no repetition started names no configuration and is never a
+/// baseline.
 pub fn baseline_for<'a>(all: &'a [EvalResult], candidate: &EvalResult) -> Option<&'a EvalResult> {
     all.iter()
-        .filter(|r| r.eval_id != candidate.eval_id)
+        .filter(|r| r.eval_id != candidate.eval_id && r.workspace == candidate.workspace)
+        .filter(|r| r.started_any())
         .max_by_key(|r| (r.finished_at_ms, r.eval_id.clone()))
+}
+
+/// The latest stored result of `workspace`, oldest-first `all`.
+pub fn latest_for<'a>(all: &'a [EvalResult], workspace: &str) -> Option<&'a EvalResult> {
+    all.iter().rev().find(|r| r.workspace == workspace)
 }
 
 fn money(v: Option<f64>) -> String {
@@ -601,6 +646,7 @@ mod tests {
             incomplete: None,
             total_cost_usd: 0.0,
             total_tokens: 0,
+            journal_agent_writable: true,
         }
     }
 
@@ -640,15 +686,15 @@ mod tests {
         for r in [&first, &second, &third] {
             store(home.path(), r).unwrap();
         }
-        let files = std::fs::read_dir(home.path().join("pb")).unwrap().count();
+        let files = std::fs::read_dir(playbook_dir(home.path(), "pb"))
+            .unwrap()
+            .count();
         assert_eq!(files, 2, "one file per configuration key");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let f = home
-                .path()
-                .join("pb")
-                .join(format!("{}.json", key("haiku").file_stem()));
+            let f =
+                playbook_dir(home.path(), "pb").join(format!("{}.json", key("haiku").file_stem()));
             assert_eq!(
                 std::fs::metadata(f).unwrap().permissions().mode() & 0o777,
                 0o600
@@ -690,5 +736,54 @@ mod tests {
         let c = compare(&base, &changed);
         assert!(c.cases.is_empty());
         assert_eq!(c.case_changed, vec!["c1".to_string()]);
+    }
+
+    /// S1: a key file that does not parse is moved aside, byte for byte,
+    /// and the new result starts a fresh file next to it.
+    #[test]
+    fn a_corrupt_key_file_is_moved_aside_not_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        let r = result("e1", 100, key("haiku"), &[true]);
+        let dir = playbook_dir(home.path(), "pb");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.json", key("haiku").file_stem()));
+        for broken in [
+            "{",
+            "{\"config_key\":\"k\",\"config\":{},\"results\":[{\"future\":1}]}",
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            store(home.path(), &r).unwrap();
+            let aside: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.to_string_lossy().contains(".json.corrupt-"))
+                .collect();
+            assert!(
+                aside
+                    .iter()
+                    .any(|p| std::fs::read_to_string(p).unwrap() == broken),
+                "{aside:?}"
+            );
+            assert_eq!(load_all(home.path(), "pb").len(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    /// The baseline comes from the same project, and never from an
+    /// invocation in which nothing started.
+    #[test]
+    fn the_baseline_is_from_the_same_workspace_and_started() {
+        let a1 = result("a1", 100, key("haiku"), &[true]);
+        let mut b1 = result("b1", 200, key("haiku"), &[true]);
+        b1.workspace = "/other".into();
+        let mut none = result("a2", 300, key("haiku"), &[true]);
+        none.cases[0].repetitions[0].run_id = None;
+        let a3 = result("a3", 400, key("haiku"), &[false]);
+        let all = vec![a1, b1, none, a3.clone()];
+        assert_eq!(baseline_for(&all, &a3).unwrap().eval_id, "a1");
+        assert_eq!(latest_for(&all, "/other").unwrap().eval_id, "b1");
+        assert!(latest_for(&all, "/nowhere").is_none());
     }
 }

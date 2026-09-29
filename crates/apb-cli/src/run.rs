@@ -329,7 +329,7 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                     println!("{id}: warning {code} {message}");
                 }
                 // --- 0.24.0 eval suites ---
-                let suite_issues = apb_core::eval::validate_suite(
+                let suite_issues = apb_engine::eval::checks::validate_suite(
                     &root.join(".apb/playbooks").join(&id),
                     &loaded.playbook,
                 );
@@ -458,6 +458,7 @@ pub(crate) fn run_cmd(
     worktree: Option<String>,
     execution: Option<&str>,
     confirm_irreversible: Option<String>,
+    eval_settings: Option<&Path>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -530,6 +531,18 @@ pub(crate) fn run_cmd(
     let how = crate::consent::CliConsent::Ask {
         flag: confirm_irreversible,
     };
+    let eval = match eval_settings.map(crate::eval::read_run_settings) {
+        None => None,
+        Some(Ok(s)) => Some(s),
+        Some(Err(e)) => {
+            eprintln!("bad --eval-settings: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if eval.is_some() && (supervise || host) {
+        eprintln!("--eval-settings is only for a cli run");
+        return ExitCode::from(2);
+    }
     if supervise {
         // The detached child has no terminal, so the consent is obtained
         // here, against the same gate the child runs, and forwarded with the
@@ -588,6 +601,7 @@ pub(crate) fn run_cmd(
             mode: execution_mode,
             ..Default::default()
         },
+        eval,
         // The consent and the `expected_*` pins come from the run gate
         // (`gate_run`).
         ..Default::default()
