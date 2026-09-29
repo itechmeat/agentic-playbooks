@@ -171,7 +171,9 @@
     } catch (e) {
       starting = false
       if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
-        irreversibleDetail = e.detail ?? ''
+        // The refusal's detail names what is irreversible, then how each
+        // surface consents; the person needs only the first part here.
+        irreversibleDetail = (e.detail ?? '').split(';')[0].trim()
         irreversibleOpen = true
         return
       }
@@ -473,8 +475,9 @@
     <AlertDialog.Header>
       <AlertDialog.Title>Run a playbook with irreversible effects?</AlertDialog.Title>
       <AlertDialog.Description>
-        {irreversibleDetail ||
-          'This playbook declares irreversible effects, such as a push, a merge or a deploy.'}
+        {irreversibleDetail
+          ? `The ${irreversibleDetail}.`
+          : 'This playbook declares irreversible effects, such as a push, a merge or a deploy.'}
         Starting it records your consent in the run manifest, and its sub-playbooks inherit it.
       </AlertDialog.Description>
     </AlertDialog.Header>
