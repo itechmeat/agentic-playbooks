@@ -842,6 +842,14 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if let Some(d) = view.decisions() {
         println!("  decisions: {}", d.line());
     }
+    // --- 0.23.0: run outcome blocks (C1, C7) ---
+    for line in apb_engine::run_outcome::commit_lines(&view.commits()) {
+        println!(
+            "  commit {}",
+            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+        );
+    }
+    // --- end of the 0.23.0 blocks ---
     if !view.unknown.is_empty() {
         println!("  {}", unknown_events_note(view.unknown.len()));
     }

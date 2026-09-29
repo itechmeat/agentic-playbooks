@@ -54,6 +54,15 @@ pub struct RunDetail {
     pub hooks: std::collections::BTreeMap<String, String>,
     /// Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
     pub children: Vec<apb_engine::run_view::ChildRun>,
+    // --- 0.23.0: run outcome blocks (C1, C7) ---
+    /// The commits the run's nodes made on a git tree (C7); empty when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_outcome::NodeCommits>>", optional)
+    )]
+    pub commits: Vec<apb_engine::run_outcome::NodeCommits>,
+    // --- end of the 0.23.0 blocks ---
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -165,6 +174,7 @@ pub(crate) async fn get_run_handler(
     let failure_reason = view.failure_reason();
     let usage = view.usage();
     let decisions = view.decisions();
+    let commits = view.commits();
     let nodes = view.nodes();
     Json(RunDetail {
         run_id: id,
@@ -182,6 +192,7 @@ pub(crate) async fn get_run_handler(
         layout,
         hooks,
         children,
+        commits,
         usage,
         decisions,
         unknown_events: view.unknown.len(),

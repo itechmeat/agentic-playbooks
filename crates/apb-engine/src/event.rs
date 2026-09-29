@@ -668,6 +668,25 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    // --- 0.23.0: run provenance, goal criteria, protected paths ----------
+    /// A node moved `HEAD` of the git tree it ran in (C7): the commits it
+    /// made, newest first. Written only on a git tree with a commit and only
+    /// when `HEAD` changed, just before the node's `node_finished`, so it is
+    /// safe to skip up to that checkpoint: it records history, the engine
+    /// never reads it back. `omitted` counts commits past the listed ones.
+    ArtifactsCommitted {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        before: String,
+        #[serde(default)]
+        after: String,
+        #[serde(default)]
+        commits: Vec<CommittedArtifact>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: usize,
+    },
+    // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
     /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or
     /// not), or a `defaults.on_failure` policy hop that consulted no edge at
@@ -763,6 +782,20 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+}
+
+/// One commit of an [`EventPayload::ArtifactsCommitted`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedArtifact {
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub subject: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

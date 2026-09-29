@@ -4,6 +4,26 @@
 
 import type { PlaybookEdge, PlaybookNode, WfEvent, WfLayout } from './types'
 
+export type CommittedArtifact = { sha: string, subject: string, };
+
+export type NodeCommits = { node: string, 
+/**
+ * `HEAD` before the node ran.
+ */
+before: string, 
+/**
+ * `HEAD` after it.
+ */
+after: string, 
+/**
+ * Newest first, at most 50.
+ */
+commits: Array<CommittedArtifact>, 
+/**
+ * Commits past the listed ones.
+ */
+omitted: number, };
+
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
 export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
@@ -279,6 +299,10 @@ model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[];
  * Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
  */
 children: Array<ChildRun>, 
+/**
+ * The commits the run's nodes made on a git tree (C7); empty when none.
+ */
+commits?: Array<NodeCommits>, 
 /**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.

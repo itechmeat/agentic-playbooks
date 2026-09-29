@@ -181,6 +181,32 @@ without a `decisions.yaml` that enables the use (validator V74 notes them).
 - `supervisor: { pre_triage: enforce }`: let wake pre-triage post a retry
   itself (at most three per run by default).
 
+### Run provenance
+
+Every agent_task and script process runs with three environment variables:
+`APB_RUN_ID` (the run's id), `APB_RUN_DIR` (its `.apb/runs/<id>` directory)
+and `APB_NODE_ID` (the node's id). A prompt can read the id as `{{run.id}}`.
+
+On a git working tree the engine reads `HEAD` before an agent_task or script
+node runs and again when it finishes. When `HEAD` moved, the node's commits
+(newest first, at most 50 listed) are journaled as one `artifacts_committed`
+event and shown by `run_report`, `run_status`, `apb runs <id>` and the
+dashboard run page. Outside git, or on a repository without a commit, nothing
+is recorded.
+
+That links a run to its commits. For the other direction, from a commit to
+its run, write the run id as a commit trailer:
+
+```
+Fix the date parser
+
+Apb-Run: <run id>
+```
+
+In a prompt: "commit with the trailer `Apb-Run: {{run.id}}`". From a script:
+`git commit -m "..." -m "Apb-Run: $APB_RUN_ID"`. `git log --grep "Apb-Run: <id>"`
+then finds every commit of a run.
+
 ### Status file (APB_STATUS_FILE)
 
 Each agent_task attempt is handed an `APB_STATUS_FILE` environment variable
@@ -531,6 +557,11 @@ a V13 validation error:
   discarded on the node's last rejected attempt (see Success checks). Empty when
   the node was never rejected; a later rejection overwrites an earlier one.
 - `run.instruction` - the run's input prompt (see below).
+- `run.id` - the run's id, the name of its `.apb/runs/<id>` directory. Every
+  agent_task and script process also gets it as `APB_RUN_ID`, next to
+  `APB_RUN_DIR` and `APB_NODE_ID` (see "Run provenance" below). A prompt that
+  reads it renders differently on every run, so such a node never hits the
+  node cache.
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
   Bounded by the node's context budget (see "Context budget" below).

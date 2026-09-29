@@ -179,6 +179,12 @@ fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     if let Some(decisions) = view.decisions() {
         out["decisions"] = json!(decisions);
     }
+    // --- 0.23.0: run outcome blocks (C1, C7) ---
+    let commits = view.commits();
+    if !commits.is_empty() {
+        out["commits"] = json!(commits);
+    }
+    // --- end of the 0.23.0 blocks ---
     if !view.unknown.is_empty() {
         out["unknown_events"] = json!(view.unknown.len());
         let n = view.unknown.len();

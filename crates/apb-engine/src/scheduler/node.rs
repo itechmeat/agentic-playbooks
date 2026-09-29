@@ -609,8 +609,64 @@ fn journal_missing_inputs(
     )
 }
 
+// --- 0.23.0 run provenance (C7) ----------------------------------------------
+
+/// Executes one node: [`execute_node_kind`] plus the provenance record of a
+/// git tree's `HEAD` around it (see [`super::provenance`]). A suspended node
+/// (an interactive question) records nothing yet; its answer round does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
+    playbook: &Playbook,
+    run_dir: &Path,
+    workdir: &Path,
+    node_id: &str,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    override_prompt: Option<String>,
+    cancel: &AtomicBool,
+    env_scrub: &[String],
+    journal: &Journal,
+    decisions: Option<&crate::decision::DecisionRunner>,
+    resume: Option<ResumeContext>,
+    live: Option<LiveContext>,
+) -> Result<AttemptOutcome, EngineError> {
+    let tracker = super::provenance::Tracker::start(playbook, node_id, workdir, |t| {
+        render_node_prompt(
+            run_dir,
+            run_id,
+            state,
+            cfg,
+            t,
+            &playbook.context_budget(node_id),
+        )
+    });
+    let outcome = execute_node_kind(
+        playbook,
+        run_dir,
+        workdir,
+        node_id,
+        run_id,
+        state,
+        cfg,
+        override_prompt,
+        cancel,
+        env_scrub,
+        journal,
+        decisions,
+        resume,
+        live,
+    )?;
+    if let (Some(t), AttemptOutcome::Finished { .. }) = (tracker, &outcome) {
+        t.finish(journal)?;
+    }
+    Ok(outcome)
+}
+
+// --- end of run provenance ----------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn execute_node_kind(
     playbook: &Playbook,
     run_dir: &Path,
     workdir: &Path,
@@ -2368,7 +2424,15 @@ pub(crate) fn execute_node(
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
-            let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
+            let r = crate::script::run_script_with_env(
+                run_dir,
+                workdir,
+                script,
+                runner,
+                timeout,
+                Some(cancel),
+                &crate::script::run_env(run_dir, Some(node_id)),
+            )?;
             // A killed script's captured stdout is whatever it happened to
             // print before the signal landed (often nothing at all), not the
             // stable "cancelled" text the agent_task cancel paths already

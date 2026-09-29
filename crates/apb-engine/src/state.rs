@@ -355,6 +355,9 @@ impl RunState {
                 EventPayload::DeliverableMissing { .. }
                 | EventPayload::OutputFieldsMissing { .. }
                 | EventPayload::SessionHandoff { .. } => {}
+                // 0.23.0 records (provenance, goal criteria, protected paths):
+                // reports about the tree and the run's goal, no state effect.
+                EventPayload::ArtifactsCommitted { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a

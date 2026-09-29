@@ -11,6 +11,7 @@
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
+  import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -302,6 +303,10 @@
           {/if}
         </Card.Content>
       </Card.Root>
+    {/if}
+
+    {#if detail}
+      <RunOutcomePanel commits={detail.commits} />
     {/if}
 
     {#if detail}
