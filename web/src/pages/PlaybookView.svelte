@@ -2,7 +2,15 @@
   import { untrack } from 'svelte'
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchPlaybook, fetchStats, fetchVersions, promoteVersion, runPlaybook, setFrozen } from '../lib/api'
+  import {
+    ApiError,
+    fetchPlaybook,
+    fetchStats,
+    fetchVersions,
+    promoteVersion,
+    runPlaybook,
+    setFrozen,
+  } from '../lib/api'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
@@ -10,6 +18,8 @@
   import type { VersionInfo, PlaybookNode as PlaybookNodeType } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
+  import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
+  import { consentStep } from '../lib/irreversibleconsent'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -148,16 +158,40 @@
 
   const reload = () => load(++loadToken)
 
-  async function run() {
+  // --- 0.24.0 irreversible consent: the server refuses an irreversible
+  // playbook until the person confirms it here; the dialog lists the
+  // refusal's structured sources, and only its confirm button sends the
+  // refusal's consent nonce, which binds the consent to what it showed.
+  let irreversibleOpen = $state(false)
+  let irreversibleSources = $state<string[]>([])
+  let irreversibleNonce = $state('')
+
+  async function run(consentNonce?: string) {
     starting = true
     try {
-      const { run_id } = await runPlaybook(id, workspace)
+      const { run_id } = await runPlaybook(id, workspace, consentNonce)
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
-      toast.error('Failed to start run', { description: String(e) })
       starting = false
+      if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
+        const step = consentStep(e.body, consentNonce)
+        if (step.kind === 'stop') {
+          toast.error('Run refused', { description: step.message })
+          return
+        }
+        irreversibleSources = step.sources
+        irreversibleNonce = step.nonce
+        irreversibleOpen = true
+        return
+      }
+      toast.error('Failed to start run', { description: String(e) })
     }
   }
+
+  function confirmIrreversibleRun() {
+    void run(irreversibleNonce)
+  }
+  // --- end 0.24.0 irreversible consent ---
 
   async function toggleFreeze() {
     freezing = true
@@ -299,7 +333,7 @@
     <Button
       size="sm"
       class="max-sm:px-2 bg-success text-success-foreground hover:bg-success/90"
-      onclick={run}
+      onclick={() => run()}
       disabled={starting}
       title="Start a run of this playbook"
     >
@@ -440,3 +474,11 @@
     </aside>
   {/if}
 </div>
+
+<!-- 0.24.0 irreversible consent -->
+<IrreversibleRunDialog
+  bind:open={irreversibleOpen}
+  playbookId={id}
+  sources={irreversibleSources}
+  onconfirm={confirmIrreversibleRun}
+/>

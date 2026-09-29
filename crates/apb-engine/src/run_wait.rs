@@ -311,7 +311,26 @@ pub fn wait_supervisor_event(
     wait_supervisor_event_with(root, run_id, after_seq, timeout, HEARTBEAT_EVERY)
 }
 
-/// [`wait_supervisor_event`] with an explicit heartbeat cadence (tests).
+/// The shortest heartbeat cadence a wait keeps: a quarter of [`WAIT_POLL`].
+/// A shorter one (only tests ask for it) would read the journal and write
+/// the heartbeat file every few milliseconds for nothing.
+const MIN_HEARTBEAT_EVERY: Duration = Duration::from_millis(WAIT_POLL.as_millis() as u64 / 4);
+
+/// How long the wait sleeps before its next look: whichever comes first of
+/// the next poll, the deadline and the next beat, so a cadence shorter than
+/// [`WAIT_POLL`] is kept rather than rounded up to it; never below 1 ms, so
+/// the loop cannot spin.
+fn next_wake(now: Instant, deadline: Instant, last_beat: Instant, every: Duration) -> Duration {
+    let next_beat = (last_beat + every)
+        .saturating_duration_since(now)
+        .max(Duration::from_millis(1));
+    WAIT_POLL
+        .min(deadline.saturating_duration_since(now))
+        .min(next_beat)
+}
+
+/// [`wait_supervisor_event`] with an explicit heartbeat cadence (tests),
+/// clamped to at least [`MIN_HEARTBEAT_EVERY`].
 pub fn wait_supervisor_event_with(
     root: &Path,
     run_id: &str,
@@ -319,6 +338,7 @@ pub fn wait_supervisor_event_with(
     timeout: Duration,
     heartbeat_every: Duration,
 ) -> Result<SupervisorWait, EngineError> {
+    let heartbeat_every = heartbeat_every.max(MIN_HEARTBEAT_EVERY);
     let run_dir = resolve(root, run_id)?;
     let cursor: i128 = after_seq.map(i128::from).unwrap_or(-1);
     let deadline = Instant::now() + timeout;
@@ -371,7 +391,7 @@ pub fn wait_supervisor_event_with(
             crate::inspect::touch_heartbeat(root, run_id)?;
             last_beat = now;
         }
-        sleep(WAIT_POLL.min(deadline - now));
+        sleep(next_wake(now, deadline, last_beat, heartbeat_every));
     }
 }
 
@@ -405,4 +425,35 @@ pub fn clip_tail(text: &str, max: usize) -> (String, bool) {
         ),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cadence shorter than `WAIT_POLL` is kept, not rounded up to the
+    /// poll; the deadline wins when it is nearer; the wake is never 0.
+    #[test]
+    fn the_next_wake_keeps_a_short_cadence_and_never_spins() {
+        let now = Instant::now();
+        let far = now + Duration::from_secs(60);
+        let every = Duration::from_millis(50);
+        assert!(every < WAIT_POLL);
+        assert_eq!(next_wake(now, far, now, every), every);
+        assert_eq!(next_wake(now, far, now, Duration::from_secs(10)), WAIT_POLL);
+        assert_eq!(
+            next_wake(now, now + Duration::from_millis(5), now, every),
+            Duration::from_millis(5)
+        );
+        // A beat that is already due, or a zero cadence: 1 ms, not 0.
+        assert_eq!(
+            next_wake(now, far, now, Duration::ZERO),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            MIN_HEARTBEAT_EVERY,
+            WAIT_POLL / 4,
+            "the wait clamps a cadence to a quarter of the poll"
+        );
+    }
 }

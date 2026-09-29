@@ -119,6 +119,15 @@ pub struct RunPermit {
     /// time, so the user is told up front rather than only discovering it mid-run.
     /// Never a refusal channel - a refusal is an `Err(Value)` from the gate.
     pub warnings: Vec<String>,
+    // --- 0.24.0 irreversible consent ---
+    /// What in the tree declares `irreversible` (`playbook`, `node <id>`,
+    /// `sub-playbook node <id>`); empty when the run needs no consent. The
+    /// surface checks it with [`RunPermit::consent_refusal`] and the engine
+    /// enforces it again at start ([`crate::consent`]).
+    pub irreversible: Vec<String>,
+    /// The playbook id, for the refusal text.
+    pub playbook_id: String,
+    // --- end 0.24.0 irreversible consent ---
 }
 
 /// The gate for an agent resuming an existing run (MCP `run_resume`). A
@@ -154,6 +163,171 @@ pub fn check_resume(root: &Path, run_id: &str, acknowledge_untrusted: bool) -> R
         .unwrap_or_default();
     check_digest_trust(&id, &digest, acknowledge_untrusted)
 }
+
+// --- 0.24.0 irreversible consent ---
+/// What a surface must show the person before it may consent: the playbook,
+/// the trust digest of what will run, and the consent sources. Built from a
+/// start's permit ([`RunPermit::consent_need`]) or from a run directory on
+/// resume ([`resume_consent_need`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentNeed {
+    pub playbook_id: String,
+    pub digest: String,
+    pub sources: Vec<String>,
+}
+
+impl ConsentNeed {
+    /// The nonce a confirmation echoes (see [`crate::consent::consent_nonce`]).
+    pub fn nonce(&self) -> String {
+        crate::consent::consent_nonce(&self.digest, &self.sources)
+    }
+
+    /// Checks a confirmation against what this need showed (see
+    /// [`crate::consent::check_confirmation`]).
+    pub fn check(
+        &self,
+        confirmation: Option<&crate::consent::Confirmation>,
+    ) -> Result<Option<&'static str>, Value> {
+        crate::consent::check_confirmation(
+            &self.playbook_id,
+            &self.digest,
+            &self.sources,
+            confirmation,
+        )
+    }
+}
+
+/// Whether resuming run `run_id` needs a fresh consent to irreversible
+/// effects, and to what. `Ok(None)` when the run's snapshot needs no consent,
+/// or its manifest records one that covers the sources and the directory
+/// carries this installation's origin stamp. A manifest consent of a run
+/// directory apb did not create here is never honoured: it may have come
+/// with the repository. Such a consent is dropped from the manifest when the
+/// tree needs none, so no sub-playbook inherits it.
+pub fn resume_consent_need(root: &Path, run_id: &str) -> Result<Option<ConsentNeed>, Value> {
+    resume_consent_need_inner(root, run_id, true)
+}
+
+/// The engine's own resume check ([`crate::scheduler`] resume entry
+/// points): like [`resume_consent_need`], but a recorded consent that covers
+/// the sources is honoured without the origin stamp. The stamp guards the
+/// surfaces, which ask a person (and refuse a foreign run directory over
+/// MCP); the engine only makes sure no resume path runs an irreversible
+/// tree with no consent recorded at all, including on an installation that
+/// has no run-origin key and so stamps nothing.
+pub(crate) fn engine_resume_consent_need(
+    root: &Path,
+    run_id: &str,
+) -> Result<Option<ConsentNeed>, Value> {
+    resume_consent_need_inner(root, run_id, false)
+}
+
+fn resume_consent_need_inner(
+    root: &Path,
+    run_id: &str,
+    require_local: bool,
+) -> Result<Option<ConsentNeed>, Value> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
+    // The same tolerant parser the resume itself uses, so a schema-1
+    // snapshot (legacy executors) is checked instead of refused.
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)
+        .map_err(|e| json!({ "policy": "snapshot_unreadable", "detail": e.to_string() }))?;
+    let pins = crate::run_config::read_run_config(&run_dir)
+        .ok()
+        .and_then(|c| c.expected_children);
+    // Children resolve from the run's own origin, as the run spawns them.
+    let origin = crate::scheduler::parent_run_origin(&run_dir);
+    let sources = consent_sources(root, &playbook, &origin, pins.as_ref());
+    let local = !require_local || apb_core::run_origin::verify(&run_dir, run_id);
+    let recorded = crate::manifest::read(&run_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.consent)
+        .filter(|c| c.irreversible);
+    if sources.is_empty() {
+        if recorded.is_some() && !local {
+            crate::manifest::replace_consent(&run_dir, run_id, None)
+                .map_err(|e| json!({ "policy": "manifest_unwritable", "detail": e.to_string() }))?;
+        }
+        return Ok(None);
+    }
+    if local && recorded.is_some_and(|c| sources.iter().all(|s| c.sources.contains(s))) {
+        return Ok(None);
+    }
+    let digest = apb_core::scope::definition_digest(&yaml, &run_dir)
+        .map_err(|e| json!({ "policy": "snapshot_unreadable", "detail": e.to_string() }))?;
+    let digest = match &pins {
+        Some(pins) => crate::consent::tree_digest(&digest, pins),
+        None => digest,
+    };
+    Ok(Some(ConsentNeed {
+        playbook_id: playbook.id,
+        digest,
+        sources,
+    }))
+}
+
+/// Records the consent `by` gave to `need` in the manifest of run `run_id`
+/// before it resumes, so its sub-playbooks inherit it and a later resume
+/// asks no more.
+pub fn record_resume_consent(
+    root: &Path,
+    run_id: &str,
+    need: &ConsentNeed,
+    by: &str,
+) -> Result<(), Value> {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let unwritable =
+        |e: crate::EngineError| json!({ "policy": "manifest_unwritable", "detail": e.to_string() });
+    // A run an older apb started from a schema-1 snapshot has no manifest
+    // until its first resume builds the ephemeral one; a manifest written
+    // with only the consent would skip that build and leave its agent nodes
+    // without a profile, so the ephemeral manifest is built first.
+    if crate::manifest::read(&run_dir)
+        .map_err(unwritable)?
+        .is_none()
+    {
+        let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml")).unwrap_or_default();
+        if crate::legacy_snapshot::has_legacy_executors(&yaml) {
+            let m = crate::legacy_snapshot::build_ephemeral_manifest(&run_dir, &yaml)
+                .map_err(unwritable)?;
+            crate::manifest::write(&run_dir, &m).map_err(unwritable)?;
+        }
+    }
+    let consent = crate::consent::RunConsent {
+        sources: need.sources.clone(),
+        ..crate::consent::RunConsent::irreversible(by)
+    };
+    crate::manifest::replace_consent(&run_dir, run_id, Some(consent))
+        .map_err(|e| json!({ "policy": "manifest_unwritable", "detail": e.to_string() }))
+}
+
+/// The resume gate for irreversible effects in one call, for a surface that
+/// already holds the person's confirmation (MCP `run_resume`): nothing to do,
+/// the consent recorded (with a deprecation note for a bare `true`), or the
+/// structured refusal with the sources and the `consent_nonce`.
+pub fn check_resume_consent(
+    root: &Path,
+    run_id: &str,
+    confirmation: Option<&crate::consent::Confirmation>,
+    by: &str,
+) -> Result<Option<&'static str>, Value> {
+    let Some(need) = resume_consent_need(root, run_id)? else {
+        return Ok(None);
+    };
+    let note = need.check(confirmation).map_err(|mut refusal| {
+        refusal["resume"] = json!(true);
+        refusal
+    })?;
+    record_resume_consent(root, run_id, &need, by)?;
+    Ok(note)
+}
+// --- end 0.24.0 irreversible consent ---
 
 /// One-pass walk of a playbook's sub-playbook tree (spec C), shared by the local
 /// run gate (`check_run`) and the cross-workspace consent surface (`preflight`)
@@ -217,28 +391,147 @@ fn collect_pinned_effects(
             continue;
         }
         let pin = pins.get(&n.id)?;
-        let origin = match pin.scope {
-            ProfileScope::Global => Origin::Global,
-            _ => Origin::Project { workspace_id: None },
-        };
-        let cref = PlaybookRef {
-            origin,
-            id: pin.id.clone(),
-            version: Some(pin.version.clone()),
-        };
-        let resolved = apb_core::store::resolve(root, &cref).ok()?;
-        if resolved.digest != pin.playbook_digest {
-            return None;
-        }
-        let loaded = Registry::open_dir(&resolved.definition_parent)
-            .ok()?
-            .load(&resolved.id, Some(&resolved.version))
-            .ok()?;
-        effects.extend(apb_core::effects::effective(&loaded.playbook));
-        collect_pinned_effects(root, &loaded.playbook, &pin.children, effects)?;
+        let loaded = load_pinned(root, pin)?;
+        effects.extend(apb_core::effects::effective(&loaded));
+        collect_pinned_effects(root, &loaded, &pin.children, effects)?;
     }
     Some(())
 }
+
+/// The definition a sub-playbook pin names, at its pinned version; `None`
+/// when it no longer resolves or no longer matches the pinned digest.
+fn load_pinned(root: &Path, pin: &ChildExpectation) -> Option<Playbook> {
+    let origin = match pin.scope {
+        ProfileScope::Global => Origin::Global,
+        _ => Origin::Project { workspace_id: None },
+    };
+    let cref = PlaybookRef {
+        origin,
+        id: pin.id.clone(),
+        version: Some(pin.version.clone()),
+    };
+    let resolved = apb_core::store::resolve(root, &cref).ok()?;
+    if resolved.digest != pin.playbook_digest {
+        return None;
+    }
+    Registry::open_dir(&resolved.definition_parent)
+        .ok()?
+        .load(&resolved.id, Some(&resolved.version))
+        .ok()
+        .map(|l| l.playbook)
+}
+
+// --- 0.24.0 irreversible consent ---
+/// The effects of one pinned sub-playbook's tree, at the pinned versions
+/// (the consent gate names each irreversible child node).
+pub(crate) fn pinned_child_effects(
+    root: &Path,
+    pin: &ChildExpectation,
+) -> Option<std::collections::BTreeSet<Effect>> {
+    let loaded = load_pinned(root, pin)?;
+    pinned_tree_effects(root, &loaded, &pin.children)
+}
+
+/// The effects of the sub-playbook node `node_id` of `playbook`, resolved
+/// live the way an ungated run resolves it; `None` when it does not resolve.
+/// A scope candidate whose registry or definition fails to load is skipped,
+/// not taken as the answer for the whole lookup.
+pub(crate) fn live_child_effects(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+    node_id: &str,
+) -> Option<std::collections::BTreeSet<Effect>> {
+    let node = playbook.nodes.iter().find(|n| n.id == node_id)?;
+    let NodeKind::Playbook { playbook: pref, .. } = &node.kind else {
+        return None;
+    };
+    for cand in apb_core::scope::scope_candidates(pref.scope, origin) {
+        let cref = PlaybookRef {
+            origin: cand.clone(),
+            id: pref.id.clone(),
+            version: None,
+        };
+        let Ok(resolved) = apb_core::store::resolve(root, &cref) else {
+            continue;
+        };
+        let Some(loaded) = Registry::open_dir(&resolved.definition_parent)
+            .ok()
+            .and_then(|reg| reg.load(&resolved.id, Some(&resolved.version)).ok())
+        else {
+            continue;
+        };
+        return tree_effects(root, &loaded.playbook, &cand);
+    }
+    None
+}
+
+/// The connector functions flagged `irreversible: true` that node `n` is
+/// granted, as `node <id> (connector <name>: <fn>, ...)` sources. A
+/// connector that is not installed or does not load adds nothing here: the
+/// connector trust gate refuses such a run before it starts.
+fn connector_sources(n: &apb_core::schema::Node) -> Vec<String> {
+    let mut out = Vec::new();
+    for b in n.kind.connector_bindings() {
+        let Ok(loaded) = apb_core::connector::store::load(&b.name) else {
+            continue;
+        };
+        let irreversible = loaded.doc.irreversible_functions();
+        let fns = apb_core::validate::granted_functions(b, &irreversible);
+        if !fns.is_empty() {
+            out.push(format!(
+                "node {} (connector {}: {})",
+                n.id,
+                b.name,
+                fns.iter()
+                    .map(|f| f.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    out
+}
+
+/// Why a start of `playbook` needs consent: the sources in the playbook
+/// itself (its own and its nodes' `irreversible` declarations, and each
+/// granted connector function flagged `irreversible: true`) plus
+/// `sub-playbook node <id>` for each sub-playbook node whose tree declares
+/// `irreversible`. Empty when the run needs no consent. With pins (a gated
+/// run) each child is read at its pinned version; without them (an ungated
+/// start) as it resolves now; an unpinned child that does not resolve counts
+/// as needing consent (fail closed at start rather than halfway through).
+pub fn consent_sources(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+    pins: Option<&std::collections::BTreeMap<String, ChildExpectation>>,
+) -> Vec<String> {
+    let mut out = crate::consent::own_sources(playbook);
+    for n in &playbook.nodes {
+        out.extend(connector_sources(n));
+        if !matches!(n.kind, NodeKind::Playbook { .. }) {
+            continue;
+        }
+        let child_irreversible = match pins {
+            // A gated run never starts a child without a pin that loads (the
+            // spawn fails closed), so a missing pin adds nothing here.
+            Some(pins) => pins.get(&n.id).is_some_and(|pin| {
+                pinned_child_effects(root, pin).is_some_and(|e| e.contains(&Effect::Irreversible))
+            }),
+            // An ungated run resolves the child live when it gets there; one
+            // that does not resolve now counts as needing consent.
+            None => live_child_effects(root, playbook, origin, &n.id)
+                .is_none_or(|e| e.contains(&Effect::Irreversible)),
+        };
+        if child_irreversible {
+            out.push(crate::consent::sub_playbook_source(&n.id));
+        }
+    }
+    out
+}
+
+// --- end 0.24.0 irreversible consent ---
 
 /// Seeds the effects union and cycle path with the parent itself, then walks and
 /// verifies its sub-playbook tree once. `parent_id`/`origin` identify the parent
@@ -291,6 +584,69 @@ impl RunPermit {
         opts.expected_connectors = self.connectors;
         opts.expected_connector_accounts = self.connector_accounts;
     }
+
+    // --- 0.24.0 irreversible consent ---
+    /// Whether a start of this tree needs consent to irreversible effects.
+    pub fn needs_consent(&self) -> bool {
+        !self.irreversible.is_empty()
+    }
+
+    /// What a surface must show before it may consent; `None` when the run
+    /// needs no consent.
+    pub fn consent_need(&self) -> Option<ConsentNeed> {
+        self.needs_consent().then(|| ConsentNeed {
+            playbook_id: self.playbook_id.clone(),
+            digest: self.consent_digest(),
+            sources: self.irreversible.clone(),
+        })
+    }
+
+    /// The digest the nonce binds: the playbook's and every pinned child's
+    /// (see [`crate::consent::tree_digest`]).
+    fn consent_digest(&self) -> String {
+        crate::consent::tree_digest(&self.playbook_digest, &self.children)
+    }
+
+    /// The nonce a confirmation echoes to bind the consent to this tree
+    /// (see [`crate::consent::consent_nonce`]).
+    pub fn consent_nonce(&self) -> String {
+        crate::consent::consent_nonce(&self.consent_digest(), &self.irreversible)
+    }
+
+    /// Checks a surface's confirmation against this tree: `Ok(None)` when the
+    /// run needs no consent or the confirmation echoes this tree's nonce,
+    /// `Ok(Some(note))` for a deprecated bare `true`, and the structured
+    /// refusal (`policy: irreversible_requires_confirmation`, the sources,
+    /// the `consent_nonce`, what to do) otherwise.
+    pub fn check_confirmation(
+        &self,
+        confirmation: Option<&crate::consent::Confirmation>,
+    ) -> Result<Option<&'static str>, Value> {
+        if !self.needs_consent() {
+            return Ok(None);
+        }
+        crate::consent::check_confirmation(
+            &self.playbook_id,
+            &self.consent_digest(),
+            &self.irreversible,
+            confirmation,
+        )
+    }
+
+    /// The structured refusal for a start of an irreversible tree without
+    /// consent; `Ok` when the run needs no consent or has it. Unlike
+    /// [`RunPermit::check_confirmation`] it takes a consent already granted
+    /// (the engine's own view), so no nonce is checked.
+    pub fn consent_refusal(
+        &self,
+        consent: Option<&crate::consent::RunConsent>,
+    ) -> Result<(), Value> {
+        if !self.needs_consent() || consent.is_some_and(|c| c.irreversible) {
+            return Ok(());
+        }
+        self.check_confirmation(None).map(|_| ())
+    }
+    // --- end 0.24.0 irreversible consent ---
 }
 
 /// Checks whether a run is permitted. `Ok(RunPermit)` - the run may proceed (digest +
@@ -344,6 +700,64 @@ pub fn check_run(
     let digest = loaded
         .trust_digest()
         .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
+    check_run_loaded(
+        root,
+        wref,
+        &loaded,
+        digest.clone(),
+        acknowledge_untrusted,
+        supervised,
+    )
+    .map_err(|refusal| {
+        with_consent_hint(refusal, || {
+            // The hint must be the nonce the retry is checked against: the
+            // same check with trust acknowledged yields the permit whose
+            // pins (and so whose nonce) the retry computes.
+            match check_run_loaded(root, wref, &loaded, digest.clone(), true, supervised) {
+                Ok(permit) => (permit.irreversible.clone(), permit.consent_nonce()),
+                // Another refusal would stop the retry anyway: the live
+                // sources over the playbook digest, a best effort.
+                Err(_) => {
+                    let sources = consent_sources(root, &loaded.playbook, &wref.origin, None);
+                    let nonce = crate::consent::consent_nonce(&digest, &sources);
+                    (sources, nonce)
+                }
+            }
+        })
+    })
+}
+
+/// A trust refusal of a tree that also needs consent to irreversible
+/// effects names those sources and their `consent_nonce` too, so a host asks
+/// the person one question that covers both and passes both answers
+/// (`acknowledge_untrusted` and `confirm_irreversible`) in one retry.
+/// `hint` yields the sources and the nonce; it runs only for a trust
+/// refusal.
+fn with_consent_hint(mut refusal: Value, hint: impl FnOnce() -> (Vec<String>, String)) -> Value {
+    let is_trust = refusal
+        .get("policy")
+        .and_then(Value::as_str)
+        .is_some_and(|p| p.starts_with("untrusted_") && p.ends_with("_requires_acknowledge"));
+    if !is_trust {
+        return refusal;
+    }
+    let (sources, nonce) = hint();
+    if !sources.is_empty() {
+        refusal["irreversible"] = json!(sources);
+        refusal["consent_nonce"] = json!(nonce);
+    }
+    refusal
+}
+
+/// The rest of [`check_run`] once the definition is loaded and its digest known.
+fn check_run_loaded(
+    root: &Path,
+    wref: &PlaybookRef,
+    loaded: &apb_core::registry::LoadedPlaybook,
+    digest: String,
+    acknowledge_untrusted: bool,
+    supervised: bool,
+) -> Result<RunPermit, Value> {
     check_digest_trust(&wref.id, &digest, acknowledge_untrusted)?;
 
     // Profile bundle trust (spec 5.1): the profile plus the actual content of its
@@ -384,6 +798,7 @@ pub fn check_run(
         check_requires(root, req, &wref.id)?;
     }
 
+    let irreversible = consent_sources(root, &loaded.playbook, &wref.origin, Some(&tree.children));
     Ok(RunPermit {
         playbook_digest: digest,
         profile_bundles,
@@ -391,6 +806,8 @@ pub fn check_run(
         connectors,
         connector_accounts,
         warnings: connector_warnings,
+        irreversible,
+        playbook_id: wref.id.clone(),
     })
 }
 

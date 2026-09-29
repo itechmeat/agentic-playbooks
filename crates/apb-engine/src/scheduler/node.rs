@@ -1071,6 +1071,7 @@ fn execute_node_kind(
                 scrub: env_scrub.to_vec(),
                 run_dir: Some(run_dir.to_path_buf()),
                 node_id: Some(node_id.to_string()),
+                overlay: cfg.spawn_env(),
             };
 
             // Agent sessions this execution's attempts left behind, by binding
@@ -2640,6 +2641,9 @@ fn execute_node_kind(
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
+            let mut env = crate::script::run_env(run_dir, Some(node_id));
+            let overlay = cfg.spawn_env();
+            env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
             let r = crate::script::run_script_with_env(
                 run_dir,
                 workdir,
@@ -2647,7 +2651,7 @@ fn execute_node_kind(
                 runner,
                 timeout,
                 Some(cancel),
-                &crate::script::run_env(run_dir, Some(node_id)),
+                &env,
             )?;
             // A killed script's captured stdout is whatever it happened to
             // print before the signal landed (often nothing at all), not the
@@ -2796,6 +2800,7 @@ pub(crate) fn execute_finish_answer(
         scrub: env_scrub.to_vec(),
         run_dir: Some(run_dir.to_path_buf()),
         node_id: Some(node_id.to_string()),
+        overlay: cfg.spawn_env(),
     };
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
@@ -3046,7 +3051,7 @@ pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> Result<bool, EngineE
 /// The parent run's definition origin (from its RunProvenance event), used to
 /// resolve a child's `scope: auto` the same way the policy gate does (parent
 /// origin first, then global). Defaults to Project when the label is absent.
-pub(super) fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
+pub(crate) fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
     use apb_core::scope::Origin;
     let events = read_all(run_dir).unwrap_or_default();
     for e in &events {
@@ -3095,6 +3100,32 @@ fn child_run_options(
         ..Default::default()
     }
 }
+
+// --- 0.24.0 irreversible consent ---
+/// The consent the sub-playbook of node `node_id` of the run in
+/// `parent_dir` inherits: the parent's recorded consent, marked with the
+/// parent's run id, and only when that consent covered this node. `None`
+/// when the parent recorded none (its tree needed none when it started) or
+/// when this node was not among what the person consented to (its child
+/// became irreversible since), so the child's own start refuses.
+fn inherited_consent(
+    parent_dir: &Path,
+    parent_run_id: &str,
+    node_id: &str,
+) -> Option<crate::consent::RunConsent> {
+    let parent = crate::manifest::read(parent_dir).ok().flatten()?.consent?;
+    if !parent
+        .sources
+        .contains(&crate::consent::sub_playbook_source(node_id))
+    {
+        return None;
+    }
+    Some(crate::consent::RunConsent {
+        inherited_from: Some(parent_run_id.to_string()),
+        ..parent
+    })
+}
+// --- end 0.24.0 irreversible consent ---
 
 /// Executes a `playbook` node (spec C): starts (or, on resume, reattaches to) a
 /// full child run and maps its terminal state to this node's status/output. The
@@ -3271,6 +3302,8 @@ pub(crate) fn run_playbook_node(
     // Host execution mode (0.23.0): a sub-playbook inherits its parent's mode
     // and host, so its agent steps are host tasks of the same session.
     opts.execution = super::host::child_execution_request(run_dir)?;
+    // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
+    opts.consent = inherited_consent(run_dir, run_id, node_id);
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -3475,6 +3508,7 @@ pub(crate) fn maybe_compact_context(
         scrub: env_scrub.to_vec(),
         run_dir: None,
         node_id: None,
+        overlay: cfg.spawn_env(),
     };
     let task = AgentTask {
         prompt: &prompt,
@@ -4005,5 +4039,24 @@ mod tests {
         );
         assert_eq!(opts.continued_from.as_deref(), Some("predecessor-run"));
         assert_eq!(opts.expected_connectors, connectors);
+    }
+
+    /// A sub-playbook inherits the parent's consent only for a node the
+    /// parent's consent covered.
+    #[test]
+    fn a_child_inherits_only_a_consent_that_covered_its_node() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(inherited_consent(dir.path(), "p", "sub"), None);
+        let manifest = crate::manifest::RunExecutionManifest {
+            consent: Some(crate::consent::RunConsent {
+                sources: vec!["playbook".into(), "sub-playbook node sub".into()],
+                ..crate::consent::RunConsent::irreversible("cli")
+            }),
+            ..Default::default()
+        };
+        crate::manifest::write(dir.path(), &manifest).unwrap();
+        let got = inherited_consent(dir.path(), "p", "sub").expect("covered");
+        assert_eq!(got.inherited_from.as_deref(), Some("p"));
+        assert_eq!(inherited_consent(dir.path(), "p", "other"), None);
     }
 }

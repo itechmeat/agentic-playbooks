@@ -84,6 +84,7 @@ pub(crate) use journal::{
 };
 pub use listing::{RunSummary, list_runs};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
+pub(crate) use node::parent_run_origin;
 use node::*;
 use patch::*;
 use prepare::*;
@@ -383,6 +384,54 @@ fn drive(
     }
 }
 
+/// Posts an abort to the run it watches once the wall clock passes
+/// `deadline_ms`; dropping it (the drive ended) ends the watch.
+struct DeadlineWatch {
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The abort reason a run past its eval deadline is stopped with.
+pub const DEADLINE_REASON: &str = "deadline: the run passed its wall-clock limit";
+
+impl DeadlineWatch {
+    fn start(run_dir: &Path, deadline_ms: u64) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let (flag, dir) = (done.clone(), run_dir.to_path_buf());
+        let thread = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                let now = apb_core::clock::now_ms();
+                let at = u128::from(deadline_ms);
+                if now >= at {
+                    let _ = crate::control::post_control(
+                        &dir,
+                        Control::Abort {
+                            reason: DEADLINE_REASON.into(),
+                        },
+                    );
+                    return;
+                }
+                let left = (at - now).min(500) as u64;
+                std::thread::park_timeout(Duration::from_millis(left));
+            }
+        });
+        DeadlineWatch {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for DeadlineWatch {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            t.thread().unpark();
+            let _ = t.join();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive_inner(
     mut playbook: Playbook,
@@ -403,6 +452,14 @@ fn drive_inner(
     // dedicated driver of the child. The guard removes the claim on every
     // exit path.
     let _driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
+    // An eval run's wall clock (0.24.0): the driver aborts the run itself at
+    // the deadline, so the limit holds even when the `apb eval` that
+    // started it is gone.
+    let _deadline = cfg
+        .eval
+        .as_ref()
+        .and_then(|e| e.deadline_ms)
+        .map(|at| DeadlineWatch::start(run_dir, at));
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once
     // per run and removed from every spawned agent's environment - even runs
@@ -739,6 +796,7 @@ fn drive_inner(
                 &workdir,
                 &answer_output,
                 &run_cancel,
+                &cfg.spawn_env(),
                 log,
             )?;
             let outcome = match goal_failure {

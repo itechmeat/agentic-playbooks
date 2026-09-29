@@ -207,6 +207,11 @@ fn resume_reattaches_to_the_same_nonterminal_child() {
     // dir that is still Running (RunStarted + NodeStarted, no terminal event).
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path()).unwrap();
+    // The definitions exist, as they do for a real run: a resume's consent
+    // check resolves the child to see whether it is irreversible (0.24.0),
+    // and one that does not resolve counts as needing consent.
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD);
 
     // Parent: Running, blocked at node c with a child already started.
     let parent_events = concat!(

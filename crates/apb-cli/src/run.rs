@@ -28,13 +28,18 @@ use crate::util::open_registry;
 /// will be spawned, so its profile joins the verified bundle set. Consent-time
 /// warnings go to stderr. On `Err` this returns a ready-to-print, actionable
 /// message (see `gate_refusal_message`).
+///
+/// 0.24.0: a tree that declares `irreversible` also needs the consent `how`
+/// obtains (see [`crate::consent`]); it is written into `opts.consent` and
+/// returned, so `apb run --supervise` can forward it to its detached child.
 fn gate_run(
     root: &Path,
     name: &str,
     version: Option<&str>,
     supervised: bool,
     opts: &mut RunOptions,
-) -> Result<(), String> {
+    how: &crate::consent::CliConsent,
+) -> Result<Option<crate::consent::Granted>, String> {
     let wref = apb_core::scope::PlaybookRef {
         origin: apb_core::scope::Origin::Project { workspace_id: None },
         id: name.to_string(),
@@ -42,11 +47,21 @@ fn gate_run(
     };
     let permit = apb_engine::gate::check_run(root, &wref, true, supervised)
         .map_err(|refusal| gate_refusal_message(&refusal))?;
+    let granted = match permit.consent_need() {
+        Some(need) => {
+            let granted = crate::consent::obtain(&need, how)?;
+            opts.consent = Some(apb_engine::consent::RunConsent::irreversible(
+                granted.by.clone(),
+            ));
+            Some(granted)
+        }
+        None => None,
+    };
     for w in &permit.warnings {
         eprintln!("warning: {w}");
     }
     permit.apply(opts);
-    Ok(())
+    Ok(granted)
 }
 
 /// Turns a run-gate refusal (see `apb_engine::gate::check_run`) into an
@@ -108,6 +123,7 @@ fn gate_refusal_message(refusal: &serde_json::Value) -> String {
                 missing.join(", ")
             )
         }
+        p if p == apb_engine::consent::REFUSAL_POLICY => crate::consent::refusal_message(refusal),
         other => format!("run refused ({other}): {refusal}"),
     }
 }
@@ -312,7 +328,21 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                 for (code, message) in apb_core::preflight::findings(root, &loaded.playbook) {
                     println!("{id}: warning {code} {message}");
                 }
-                if report.is_valid() {
+                // --- 0.24.0 eval suites ---
+                let suite_issues = apb_engine::eval::checks::validate_suite(
+                    &root.join(".apb/playbooks").join(&id),
+                    &loaded.playbook,
+                );
+                for issue in &suite_issues {
+                    let sev = match issue.severity {
+                        Severity::Error => "error",
+                        Severity::Warning => "warning",
+                    };
+                    println!("{id}: {sev} {} {}", issue.code, issue.message);
+                }
+                let suite_ok = !suite_issues.iter().any(|i| i.severity == Severity::Error);
+                // --- end 0.24.0 eval suites ---
+                if report.is_valid() && suite_ok {
                     println!("{id}: OK");
                 } else {
                     failed = true;
@@ -427,6 +457,8 @@ pub(crate) fn run_cmd(
     continued_from: Option<String>,
     worktree: Option<String>,
     execution: Option<&str>,
+    confirm_irreversible: Option<String>,
+    eval_settings: Option<&Path>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -494,7 +526,35 @@ pub(crate) fn run_cmd(
         eprintln!("--no-cache/--refresh-cache is not yet supported together with --supervise");
         return ExitCode::from(2);
     }
+    // 0.24.0 irreversible consent: the flag's nonce, or a person answering
+    // the terminal question.
+    let how = crate::consent::CliConsent::Ask {
+        flag: confirm_irreversible,
+    };
+    let eval = match eval_settings.map(crate::eval::read_run_settings) {
+        None => None,
+        Some(Ok(s)) => Some(s),
+        Some(Err(e)) => {
+            eprintln!("bad --eval-settings: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if eval.is_some() && (supervise || host) {
+        eprintln!("--eval-settings is only for a cli run");
+        return ExitCode::from(2);
+    }
     if supervise {
+        // The detached child has no terminal, so the consent is obtained
+        // here, against the same gate the child runs, and forwarded with the
+        // nonce of the tree it was given for.
+        let mut probe = RunOptions::default();
+        let granted = match gate_run(root, name, version, true, &mut probe, &how) {
+            Ok(g) => g,
+            Err(msg) => {
+                eprintln!("run failed: {msg}");
+                return ExitCode::from(2);
+            }
+        };
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
         // itself cannot stay in the current process - std::thread does not
@@ -515,6 +575,7 @@ pub(crate) fn run_cmd(
             allow_shared_workdir,
             continued_from.as_deref(),
             worktree.as_deref(),
+            granted.as_ref(),
         );
     }
     let mut opts = RunOptions {
@@ -540,10 +601,12 @@ pub(crate) fn run_cmd(
             mode: execution_mode,
             ..Default::default()
         },
-        // The `expected_*` pins come from the run gate (`gate_run`).
+        eval,
+        // The consent and the `expected_*` pins come from the run gate
+        // (`gate_run`).
         ..Default::default()
     };
-    if let Err(msg) = gate_run(root, name, version, false, &mut opts) {
+    if let Err(msg) = gate_run(root, name, version, false, &mut opts, &how) {
         eprintln!("run failed: {msg}");
         return ExitCode::from(2);
     }
@@ -656,6 +719,7 @@ pub(crate) fn spawn_detached_supervised(
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
     worktree: Option<&str>,
+    consent: Option<&crate::consent::Granted>,
 ) -> ExitCode {
     let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
@@ -689,6 +753,10 @@ pub(crate) fn spawn_detached_supervised(
     }
     if let Some(tree) = worktree {
         cmd.arg("--worktree").arg(tree);
+    }
+    if let Some(granted) = consent {
+        cmd.arg("--consent").arg(&granted.by);
+        cmd.arg("--consent-nonce").arg(&granted.nonce);
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -749,6 +817,7 @@ pub(crate) fn drive_supervised_child(
     allow_shared_workdir: bool,
     continued_from: Option<String>,
     worktree: Option<String>,
+    consent: Option<(String, String)>,
     handshake: &Path,
 ) -> ExitCode {
     let mut parsed = BTreeMap::new();
@@ -785,10 +854,17 @@ pub(crate) fn drive_supervised_child(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
-        // The `expected_*` pins come from the run gate (`gate_run`).
+        // The consent and the `expected_*` pins come from the run gate
+        // (`gate_run`).
         ..Default::default()
     };
-    if let Err(msg) = gate_run(root, name, version, true, &mut opts) {
+    // The consent the parent obtained, checked against this process's own
+    // gate by its nonce, so a tree that changed in between is refused.
+    let how = match consent {
+        Some((by, nonce)) => crate::consent::CliConsent::Forwarded { by, nonce },
+        None => crate::consent::CliConsent::None,
+    };
+    if let Err(msg) = gate_run(root, name, version, true, &mut opts, &how) {
         let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
         return ExitCode::from(2);
     }
@@ -859,9 +935,9 @@ pub(crate) fn drive_run_child(
     }
 }
 
-pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
+pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCode {
     if let Some(run_id) = run_id {
-        return run_detail_cmd(root, run_id);
+        return run_detail_cmd(root, run_id, json);
     }
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {
@@ -869,12 +945,24 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(runs) => {
-            for r in runs {
+            // The execution mode column (0.24.0) appears only when some run
+            // has an execution block, so a table of plain `cli` runs reads
+            // exactly as before.
+            let modes: Vec<Option<String>> = runs
+                .iter()
+                .map(|r| crate::run_mode::list_mode(root, &r.run_id))
+                .collect();
+            let show_mode = modes.iter().any(Option::is_some);
+            for (r, mode) in runs.into_iter().zip(modes) {
                 // The status column stays exactly as it always has (a script
                 // parsing it must keep working); a dead driver and events a
                 // newer apb wrote are called out as appended markers rather
                 // than a rewrite of that text (#85 finding 4).
                 let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                if show_mode {
+                    line.push('\t');
+                    line.push_str(mode.as_deref().unwrap_or("cli"));
+                }
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
                 }
@@ -901,8 +989,9 @@ fn unknown_events_note(n: usize) -> String {
 }
 
 /// `apb runs <run_id>`: one run through the same run view as `run_status`,
-/// with the token usage its attempts reported when there is any.
-fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
+/// with the token usage its attempts reported when there is any. `--json`
+/// prints the MCP `run_status` object itself.
+fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     if !is_safe_segment(run_id) {
         eprintln!("runs: invalid run id `{run_id}`");
         return ExitCode::from(2);
@@ -911,6 +1000,18 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if !run_dir.is_dir() {
         eprintln!("runs: run `{run_id}` not found");
         return ExitCode::from(2);
+    }
+    if json {
+        return match apb_mcp::tools::run::run_status(root, run_id) {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("runs failed: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
     let view = match apb_engine::run_view::RunView::load(&run_dir, run_id) {
         Ok(v) => v,
@@ -930,6 +1031,13 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
         })
         .unwrap_or_default();
     println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    println!(
+        "  execution: {}",
+        sanitize_for_terminal(
+            &crate::run_mode::detail_line(&run_dir, &view.events),
+            QUESTION_TEXT_MAX
+        )
+    );
     if view.driver_alive == Some(false) {
         println!("  driver dead");
     }
@@ -1032,7 +1140,35 @@ pub(crate) fn resume_cmd(
     run_id: &str,
     from_node: Option<&str>,
     allow_environment_drift: bool,
+    confirm_irreversible: Option<String>,
 ) -> ExitCode {
+    // 0.24.0 irreversible consent: a run of an irreversible tree with no
+    // valid consent recorded (one an older apb started, or a directory apb
+    // did not create here) asks once; the consent goes into its manifest.
+    match apb_engine::gate::resume_consent_need(root, run_id) {
+        Ok(None) => {}
+        Ok(Some(need)) => {
+            let how = crate::consent::CliConsent::Ask {
+                flag: confirm_irreversible,
+            };
+            let recorded = crate::consent::obtain(&need, &how).and_then(|granted| {
+                apb_engine::gate::record_resume_consent(root, run_id, &need, &granted.by)
+                    .map_err(|r| format!("cannot record the consent: {r}"))
+            });
+            if let Err(msg) = recorded {
+                eprintln!("resume failed: {msg}");
+                return ExitCode::from(2);
+            }
+        }
+        // A run that does not exist fails below with the engine's own
+        // error, as before; anything else (an unreadable snapshot) refuses
+        // rather than resuming unchecked.
+        Err(v) if v.get("policy").and_then(|p| p.as_str()) == Some("not_found") => {}
+        Err(v) => {
+            eprintln!("resume failed: cannot check the irreversible consent: {v}");
+            return ExitCode::from(2);
+        }
+    }
     // Read BEFORE the drive: a resume of a run with a pending stop applies that
     // stop before it executes anything and returns immediately, which otherwise
     // looks like a resume that silently did nothing. Best effort - an

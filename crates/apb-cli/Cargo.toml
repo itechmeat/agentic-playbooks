@@ -22,11 +22,15 @@ clap = { version = "4.6", features = ["derive"] }
 anyhow = "1.0"
 open = "5.3.6"
 serde_json.workspace = true
-apb-engine = { version = "0.23.0", path = "../apb-engine" }
-apb-mcp = { version = "0.23.0", path = "../apb-mcp" }
+apb-engine = { version = "0.24.0", path = "../apb-engine" }
+apb-mcp = { version = "0.24.0", path = "../apb-mcp" }
 cliclack = "0.5.5"
 axoupdater = { version = "0.10.0", default-features = false, features = ["github_releases", "blocking"] }
 serde_yaml_ng.workspace = true
+
+# `apb eval`: the SIGINT/SIGTERM handler and the process-group cleanup.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

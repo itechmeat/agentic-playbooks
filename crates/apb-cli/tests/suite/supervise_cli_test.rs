@@ -316,3 +316,69 @@ fn supervise_continued_from_rejects_unknown_predecessor() {
 
     drop(_env);
 }
+
+/// `apb run --supervise` of an irreversible playbook: the refusal reaches
+/// stderr (it is decided before the detached child starts) and writes no
+/// run; with `--confirm-irreversible=<nonce>` the child checks the forwarded
+/// nonce against its own gate and records `cli_flag`.
+#[test]
+fn supervise_of_an_irreversible_playbook_needs_the_consent_nonce() {
+    let dir = seeded();
+    let vfile = dir
+        .path()
+        .join(".apb/playbooks/svnoagent/1.0.0/playbook.yaml");
+    fs::write(
+        &vfile,
+        SUPERVISED_NOAGENT.replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+    let marker_file = dir.path().join("agent_invocation.txt");
+    let stub = agent_stub(dir.path(), &marker_file);
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let runs_dir = dir.path().join(".apb/runs");
+
+    let refused = playbook()
+        .args(["run", "svnoagent", "--supervise"])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("irreversible_requires_confirmation"),
+        "{stderr}"
+    );
+    assert!(
+        fs::read_dir(&runs_dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
+        "a refusal writes no run"
+    );
+    let at = stderr.find("consent_nonce: ").unwrap() + "consent_nonce: ".len();
+    let nonce: String = stderr[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    let assert = playbook()
+        .args(["run", "svnoagent", "--supervise"])
+        .arg(format!("--confirm-irreversible={nonce}"))
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("supervised run started:"));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let run_dir = runs_dir.join(extract_run_id(&stdout, &runs_dir));
+    poll_until("the supervised run to finish", || {
+        fs::read_to_string(run_dir.join("events.jsonl"))
+            .ok()
+            .filter(|t| t.contains("\"type\":\"run_finished\""))
+    });
+    let consent = apb_engine::manifest::read(&run_dir)
+        .unwrap()
+        .and_then(|m| m.consent)
+        .expect("consent recorded");
+    assert_eq!(consent.by, "cli_flag");
+    drop(_env);
+}

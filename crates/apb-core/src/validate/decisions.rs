@@ -71,8 +71,13 @@ pub fn auto_decide_refusal(
 
 // --- 0.23.0 V73 by declared effects ---------------------------------------------
 
-/// The functions of `facts` a binding grants, among `names`.
-fn granted<'a>(binding: &crate::schema::ConnectorBinding, names: &'a [String]) -> Vec<&'a String> {
+/// The functions a binding grants, among `names` (a `read_only` grant
+/// reaches none of them). Shared with the engine's consent gate, which
+/// counts a granted function flagged `irreversible` as a consent source.
+pub fn granted<'a>(
+    binding: &crate::schema::ConnectorBinding,
+    names: &'a [String],
+) -> Vec<&'a String> {
     use crate::schema::FunctionsAllow;
     match &binding.functions {
         FunctionsAllow::All => names.iter().collect(),
@@ -130,6 +135,19 @@ fn shipping_reason(
         )
     })
 }
+
+// --- 0.24.0 eval suites ------------------------------------------------------------
+
+/// Why node `n` counts as a shipping step by its own declaration or its
+/// name: declared `irreversible` or `secrets` effects, or the merge, push,
+/// deploy or publish name heuristic. The eval runner refuses a playbook with
+/// such a node (`apb_core::eval::refusal`); connector bindings are refused
+/// there outright, so the connector leg of the chain is not consulted.
+pub fn node_shipping_reason(n: &crate::schema::Node) -> Option<String> {
+    shipping_reason(n, &BTreeMap::new()).map(|r| r.replace(" after the gate", ""))
+}
+
+// --- end 0.24.0 eval suites ---------------------------------------------------------
 
 /// [`auto_decide_refusal`] that also honours the connector functions a
 /// downstream node is granted, from the installed connectors' `facts`.
@@ -434,6 +452,44 @@ pub(super) fn check_decision_opt_ins(
     }
 }
 
+// --- 0.24.0 irreversible consent ------------------------------------------------
+
+/// V90 (warning): a node that looks like a merge, push, deploy or publish
+/// step by its id, title or script path but declares no `irreversible`
+/// effect (nor does the playbook). Only a declaration makes a run ask the
+/// person for consent, so the name heuristic stays a hint to the author, not
+/// a consent source. Sub-playbook nodes are left out (their child's own
+/// declaration is what counts), and so are review gates such as a
+/// `merge_gate`: a person decides there, nothing ships.
+pub(super) fn check_undeclared_shipping(playbook: &Playbook, r: &mut ValidationReport) {
+    if playbook.effects.contains(&Effect::Irreversible) {
+        return;
+    }
+    for n in &playbook.nodes {
+        if matches!(
+            n.kind,
+            NodeKind::Start
+                | NodeKind::Finish { .. }
+                | NodeKind::Playbook { .. }
+                | NodeKind::HumanReview { .. }
+        ) || n.effects.contains(&Effect::Irreversible)
+            || !ships(n)
+        {
+            continue;
+        }
+        r.warn(
+            "V90",
+            Some(n.id.as_str()),
+            format!(
+                "node `{}` looks like a merge, push, deploy or publish step but declares no `irreversible` effect; declare `effects: [irreversible]` so a run asks the person for consent, or rename it if it ships nothing",
+                n.id
+            ),
+        );
+    }
+}
+
+// --- end 0.24.0 irreversible consent --------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::super::{Severity, ValidationContext, validate};
@@ -680,5 +736,45 @@ mod tests {
         );
         let yaml = gate(", route: auto", "", "fix");
         assert!(issues(&yaml).contains(&("V70".to_string(), Severity::Error)));
+    }
+
+    /// V90 warns on a shipping-looking step that declares nothing, and is
+    /// silent once the node or the playbook declares `irreversible`, or for
+    /// a neutral name.
+    #[test]
+    fn v90_warns_on_an_undeclared_shipping_step() {
+        let v90 = |head: &str, node: &str| -> Vec<Severity> {
+            let yaml = format!(
+                "schema: 2\nid: p\nname: P\nversion: 1.0.0\n{head}nodes:\n  - {{ id: start, type: start }}\n  - {node}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: n }}\n  - {{ from: n, to: done }}\n"
+            );
+            validate(
+                &Playbook::from_yaml(&yaml).unwrap(),
+                &ValidationContext::default(),
+            )
+            .issues
+            .into_iter()
+            .filter(|i| i.code == "V90")
+            .map(|i| i.severity)
+            .collect()
+        };
+        let pushing = "{ id: n, type: script, script: scripts/push-branch.sh, runner: sh }";
+        assert_eq!(v90("", pushing), vec![Severity::Warning]);
+        assert!(
+            v90(
+                "",
+                "{ id: n, type: prompt, title: Deploy to prod, prompt: x }"
+            )
+            .len()
+                == 1
+        );
+        assert!(v90("effects: [irreversible]\n", pushing).is_empty());
+        assert!(
+            v90(
+                "",
+                "{ id: n, type: script, script: scripts/push-branch.sh, runner: sh, effects: [irreversible] }"
+            )
+            .is_empty()
+        );
+        assert!(v90("", "{ id: n, type: prompt, prompt: x }").is_empty());
     }
 }

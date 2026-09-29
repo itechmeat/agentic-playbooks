@@ -89,6 +89,17 @@ pub struct RunOptions {
     /// The default asks for nothing: the machine default applies.
     pub execution: apb_core::execution::ExecutionRequest,
     // --- end host execution mode ---
+    // --- 0.24.0 irreversible consent ---
+    /// The consent the launch surface grants (see [`crate::consent`]). A run
+    /// whose tree declares `irreversible` refuses to start without one; the
+    /// manifest records it only for such a run. `None`: a trigger, a
+    /// headless start, a caller that did not ask the person.
+    pub consent: Option<crate::consent::RunConsent>,
+    // --- end 0.24.0 irreversible consent ---
+    /// Set by `apb eval` only: the env overlay for spawned agents and
+    /// scripts and the run's wall-clock deadline (see
+    /// [`crate::run_config::EvalRunSettings`]).
+    pub eval: Option<crate::run_config::EvalRunSettings>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry

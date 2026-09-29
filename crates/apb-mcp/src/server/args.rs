@@ -59,10 +59,19 @@ pub struct PlaybookRunArgs {
     #[serde(default)]
     pub background: Option<bool>,
     /// acknowledge_untrusted: true - the user's confirmation to run a
-    /// playbook with an unapproved digest (spec 9). Without it an untrusted
-    /// playbook is refused by policy.
+    /// playbook with an unapproved digest (spec 9). Trust only; consent to
+    /// irreversible effects is `confirm_irreversible`. Pass it only after
+    /// asking the person. Without it an untrusted playbook is refused.
     #[serde(default)]
     pub acknowledge_untrusted: Option<bool>,
+    /// confirm_irreversible - the person's consent to a playbook whose
+    /// effects include irreversible (push, merge, deploy, publish; 0.24.0,
+    /// recorded in the run manifest). Pass the `consent_nonce` of the refusal
+    /// you showed the person; a playbook that changed since then is refused
+    /// again with a new nonce. A bare `true` is accepted for one release with
+    /// a deprecation note.
+    #[serde(default)]
+    pub confirm_irreversible: Option<ConfirmIrreversibleArg>,
     /// Definition scope: "project" (default) or "global". A global playbook
     /// runs in the current project (spec 5.1).
     #[serde(default)]
@@ -189,6 +198,11 @@ pub struct RunResumeArgs {
     /// `playbook_run`.
     #[serde(default)]
     pub acknowledge_untrusted: Option<bool>,
+    /// The person's consent to the run's irreversible effects, needed once
+    /// for a run that has no valid consent recorded (one started by an
+    /// older apb): the refusal's `consent_nonce`, or (deprecated) `true`.
+    #[serde(default)]
+    pub confirm_irreversible: Option<ConfirmIrreversibleArg>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -550,9 +564,33 @@ pub struct PlaybookExecutePlanArgs {
     /// Signed plan_token from playbook_prepare_run.
     pub plan_token: String,
     /// The user's confirmation to run an unapproved (untrusted) playbook in
-    /// another workspace (spec 9). Without it an untrusted plan is refused.
+    /// another workspace (spec 9). Trust only. Without it such a plan is
+    /// refused.
     #[serde(default)]
     pub acknowledge_untrusted: Option<bool>,
+    /// The person's consent to irreversible effects in the plan (0.24.0):
+    /// the `consent_nonce` of the refusal you showed them, or (deprecated
+    /// for one release) `true`.
+    #[serde(default)]
+    pub confirm_irreversible: Option<ConfirmIrreversibleArg>,
+}
+
+/// `confirm_irreversible`: the refusal's `consent_nonce` (a string), or a
+/// bare boolean (`true` is deprecated for one release).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ConfirmIrreversibleArg {
+    Flag(bool),
+    Nonce(String),
+}
+
+impl From<ConfirmIrreversibleArg> for apb_engine::consent::Confirmation {
+    fn from(a: ConfirmIrreversibleArg) -> Self {
+        match a {
+            ConfirmIrreversibleArg::Flag(b) => Self::Flag(b),
+            ConfirmIrreversibleArg::Nonce(n) => Self::Nonce(n),
+        }
+    }
 }
 
 // --- host execution mode (0.23.0) ---

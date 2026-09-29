@@ -1,0 +1,27 @@
+schema: 1
+id: review-clean-branch
+title: A correct, tested change gets no finding above the lowest severity
+source: "negative control for review-planted-defect"
+instruction: |
+  Review the checked-out branch `eval-change` against `main`.
+fixture:
+  dir: fixtures/window-max/base
+  change: fixtures/window-max/clean
+checks:
+  # The playbook declares no script or marker goal criterion yet: its
+  # criteria are recorded when it does, the verdict rests on the checks below.
+  goal: report
+  run: { outcome: [succeeded] }
+  route:
+    visits: [review, done]
+    in_order: true
+    not_visits: [failed]
+  files:
+    - { path: docs/reviews/_date_time_review.md, exists: true }
+    - { path: src/lib.rs, unchanged_from_fixture: true }
+    - { path: Cargo.toml, unchanged_from_fixture: true }
+    - { path: AGENTS.md, unchanged_from_fixture: true }
+  scripts:
+    - scripts/only-the-review-file.sh
+    - scripts/no-severe-finding.sh
+tags: [review]

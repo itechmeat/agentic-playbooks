@@ -1,12 +1,17 @@
 pub mod adapter;
 mod agent_home;
 pub mod connector;
+// 0.24.0 irreversible consent
+pub mod consent;
 pub mod context;
 pub mod control;
 pub mod decision;
 pub mod driver;
 pub mod error;
 pub mod event;
+// --- 0.24.0 eval suites ---
+pub mod eval;
+// --- end 0.24.0 eval suites ---
 pub mod failure_class;
 pub mod gate;
 pub mod hooks;

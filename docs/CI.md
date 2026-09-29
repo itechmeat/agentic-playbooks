@@ -37,7 +37,12 @@ input" and "timed out" from "failed", and a wait can be bounded with `--timeout`
 without stopping the run itself.
 
 `apb runs <run_id>` prints the node statuses, the failure reason, the token
-usage and cost the agents reported, and the goal criteria results; the journal
+usage and cost the agents reported, the goal criteria results and the
+execution mode (`execution: cli`, `execution: host (argument, client ...)`,
+and `host fallback: <nodes>` for steps the journal records as
+`execution_fallback`); `apb runs <run_id> --json` prints the same object as
+the MCP `run_status`, for a step that parses it. The `apb runs` table gets a
+mode column only when some run has an execution block. The journal
 itself is `.apb/runs/<run_id>/events.jsonl`. Upload `.apb/runs/<run_id>/` as a
 build artifact to keep the evidence.
 
@@ -82,7 +87,19 @@ the pipeline, so the confirmation moves to code review:
 - **Keep irreversible steps behind a person.** A playbook whose effects include
   `irreversible` (merge, deploy, publish) should stop at a `human_review` gate;
   in CI that surfaces as `apb wait` exit 3. A CI trigger is not a person's
-  approval.
+  approval: a headless `apb run` of such a playbook is refused
+  (`irreversible_requires_confirmation`, printing a `consent_nonce`) unless
+  the step says `--confirm-irreversible=<consent_nonce>`, which is the workflow
+  author's standing consent for that version of the tree and is recorded in
+  the run manifest as `consent: { by: cli_flag }`. A new version of the
+  playbook (another digest, another irreversible step) prints a new nonce and
+  is refused until the workflow is updated; a bare `--confirm-irreversible`
+  still works for one release with a deprecation warning.
+- **Evals are opt-in there too.** `apb eval` is a paid run per repetition and
+  asks before it starts; a job refuses without `--yes`, which also approves the
+  suite's scripts on that runner (`<config>/evals/approved.json`). Pin the
+  version with `--version`, set `--max-usd`, and review `evals/` changes like
+  any other executable instruction (docs/EVALS.md).
 
 ## Working trees
 

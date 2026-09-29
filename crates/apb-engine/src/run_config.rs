@@ -191,6 +191,42 @@ pub struct RunConfig {
     /// refuses the start outright.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir_queue_wait_ms: Option<u64>,
+    /// What `apb eval` asks of a run it starts (0.24.0). Persisted because
+    /// the detached driver learns everything from `runs/<id>`. `None` for
+    /// every other run and every config written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval: Option<EvalRunSettings>,
+}
+
+/// The settings of an eval repetition's run (`apb eval`).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvalRunSettings {
+    /// The case env overlay: set on every agent and script the run spawns,
+    /// after the connector scrub, and never on the driver itself, so it
+    /// cannot reconfigure apb (the config directory, the trust store, the
+    /// agent programs).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub spawn_env: BTreeMap<String, String>,
+    /// Wall clock (epoch milliseconds) at which the driver aborts the run,
+    /// whether or not anyone still follows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+}
+
+impl RunConfig {
+    /// The env overlay every spawned agent and script gets (empty outside
+    /// eval runs).
+    pub fn spawn_env(&self) -> Vec<(String, String)> {
+        self.eval
+            .as_ref()
+            .map(|e| {
+                e.spawn_env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {

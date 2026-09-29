@@ -130,6 +130,7 @@ pub(crate) fn check(
     workdir: &Path,
     answer: &str,
     cancel: &AtomicBool,
+    spawn_env: &[(String, String)],
     log: &mut EventLog,
 ) -> Result<Option<String>, EngineError> {
     let Some(goal) = &playbook.goal else {
@@ -166,7 +167,8 @@ pub(crate) fn check(
             }
             GoalCheck::Script { .. } if tampered.is_some() => (status::ERROR, tampered.clone()),
             GoalCheck::Script { path } => {
-                let env = crate::script::run_env(run_dir, None);
+                let mut env = crate::script::run_env(run_dir, None);
+                env.extend(spawn_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
                 match crate::script::run_script_with_env(
                     run_dir,
                     workdir,

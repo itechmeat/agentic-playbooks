@@ -1,11 +1,18 @@
 mod cache;
 mod connector;
+mod consent;
 mod dashboard_check;
 mod decisions;
+// --- 0.24.0 eval suites ---
+mod eval;
+// --- end 0.24.0 eval suites ---
 mod manage;
 mod onboarding;
 mod profile;
 mod run;
+// --- 0.24.0 run execution mode lines ---
+mod run_mode;
+// --- end 0.24.0 run execution mode lines ---
 mod selfupdate;
 mod serve;
 mod server;
@@ -187,6 +194,23 @@ enum Command {
         /// answers, meant for an MCP host session)
         #[arg(long, value_name = "MODE")]
         execution: Option<String>,
+        /// Consent to the playbook's irreversible effects (a push, a merge,
+        /// a deploy) for a start without a person at a terminal, such as a
+        /// CI step: pass the consent_nonce the refusal printed, which binds
+        /// the consent to that version of the playbook. A bare flag is
+        /// deprecated. At a terminal, apb asks instead
+        #[arg(
+            long,
+            value_name = "CONSENT_NONCE",
+            num_args = 0..=1,
+            default_missing_value = "true",
+            require_equals = true
+        )]
+        confirm_irreversible: Option<String>,
+        /// Internal: the eval settings of a run `apb eval` starts (a JSON
+        /// file with the spawn env overlay and the wall-clock deadline).
+        #[arg(long, value_name = "FILE", hide = true)]
+        eval_settings: Option<PathBuf>,
     },
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
@@ -208,6 +232,9 @@ enum Command {
     Runs {
         /// Show only this run
         run_id: Option<String>,
+        /// With a run id: the run as JSON, the same object as MCP run_status
+        #[arg(long, requires = "run_id")]
+        json: bool,
     },
     /// Resume a paused/interrupted run
     Resume {
@@ -222,6 +249,18 @@ enum Command {
         /// (the accepted drift is recorded as an event in the run log).
         #[arg(long = "allow-environment-drift")]
         allow_environment_drift: bool,
+        /// Consent to the run's irreversible effects when it has no valid
+        /// consent recorded (a run an older apb started, or a run directory
+        /// apb did not create here): the consent_nonce the refusal printed.
+        /// At a terminal, apb asks instead
+        #[arg(
+            long,
+            value_name = "CONSENT_NONCE",
+            num_args = 0..=1,
+            default_missing_value = "true",
+            require_equals = true
+        )]
+        confirm_irreversible: Option<String>,
     },
     /// Block until a run finishes, needs input (a question, a review, a
     /// supervisor decision) or stops, then print why. A single call that
@@ -287,6 +326,55 @@ enum Command {
         json: bool,
     },
     // --- end of 0.23.0 stats ---
+    // --- 0.24.0 eval suites ---
+    /// Run a playbook's eval cases (`.apb/playbooks/<id>/evals/`), each
+    /// repetition as a run in a disposable repository, check the outcomes,
+    /// store the result per configuration and compare it with the previous
+    /// one. Opt-in and paid: every repetition is a full agent run
+    Eval {
+        /// Playbook id (a project playbook)
+        id: String,
+        /// Version to evaluate (default: current)
+        #[arg(long)]
+        version: Option<String>,
+        /// Only these cases (repeatable)
+        #[arg(long = "case", value_name = "NAME")]
+        cases: Vec<String>,
+        /// Only cases with one of these tags (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Repetitions per case, over the case and suite `repeat`
+        #[arg(long)]
+        repeat: Option<u32>,
+        /// Run-level overrides YAML file, as for `apb run --overrides`
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+        /// NODE=PROFILE: another profile for one agent node (repeatable)
+        #[arg(long = "profile-override", value_name = "NODE=PROFILE")]
+        profile_overrides: Vec<String>,
+        /// AGENT:MODEL: one ephemeral executor for every agent node
+        #[arg(long, value_name = "AGENT:MODEL")]
+        model: Option<String>,
+        /// Invocation budget in USD (default: suite.yaml, else 10)
+        #[arg(long)]
+        max_usd: Option<f64>,
+        /// Run nothing: compare the latest stored result with the one before
+        #[arg(long)]
+        compare: bool,
+        /// Print the plan without starting anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Evaluate a draft playbook (only the scratch copy is marked active)
+        #[arg(long)]
+        draft: bool,
+        /// Approve the suite and start without asking
+        #[arg(long)]
+        yes: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    // --- end 0.24.0 eval suites ---
     /// Inspect and manage the project-local node result cache
     Cache {
         #[command(subcommand)]
@@ -365,6 +453,15 @@ enum Command {
         /// The run's working tree, forwarded from `apb run --worktree`.
         #[arg(long, value_name = "DIR")]
         worktree: Option<String>,
+        /// The irreversible consent `apb run --supervise` obtained (`cli` or
+        /// `cli_flag`), forwarded across the detached spawn. Any other value
+        /// is refused.
+        #[arg(long, value_name = "BY", value_parser = ["cli", "cli_flag"], requires = "consent_nonce")]
+        consent: Option<String>,
+        /// The consent nonce of the tree the forwarded consent was given for;
+        /// the child refuses when its own gate computes another one.
+        #[arg(long = "consent-nonce", value_name = "NONCE", requires = "consent")]
+        consent_nonce: Option<String>,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -470,6 +567,8 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             execution,
+            confirm_irreversible,
+            eval_settings,
         }) => run_cmd(
             &root,
             &name,
@@ -485,6 +584,8 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             execution.as_deref(),
+            confirm_irreversible,
+            eval_settings.as_deref(),
         ),
         Some(Command::Tasks {
             action,
@@ -492,16 +593,18 @@ fn main() -> ExitCode {
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
-        Some(Command::Runs { run_id }) => runs_cmd(&root, run_id.as_deref()),
+        Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
         Some(Command::Resume {
             run_id,
             from_node,
             allow_environment_drift,
+            confirm_irreversible,
         }) => resume_cmd(
             &root,
             &run_id,
             from_node.as_deref(),
             allow_environment_drift,
+            confirm_irreversible,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
@@ -552,6 +655,42 @@ fn main() -> ExitCode {
             json,
         ),
         // --- end of 0.23.0 stats ---
+        // --- 0.24.0 eval suites ---
+        Some(Command::Eval {
+            id,
+            version,
+            cases,
+            tags,
+            repeat,
+            overrides,
+            profile_overrides,
+            model,
+            max_usd,
+            compare,
+            dry_run,
+            draft,
+            yes,
+            json,
+        }) => eval::eval_cmd(
+            &root,
+            eval::EvalArgs {
+                id,
+                version,
+                cases,
+                tags,
+                repeat,
+                overrides,
+                profile_overrides,
+                model,
+                max_usd,
+                compare,
+                dry_run,
+                draft,
+                yes,
+                json,
+            },
+        ),
+        // --- end 0.24.0 eval suites ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),
@@ -565,6 +704,8 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
+            consent,
+            consent_nonce,
             handshake,
         }) => drive_supervised_child(
             &root,
@@ -575,6 +716,7 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
+            consent.zip(consent_nonce),
             &handshake,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:

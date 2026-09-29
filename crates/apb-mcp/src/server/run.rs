@@ -83,15 +83,37 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Phase 2: execute a previously prepared cross-workspace plan by its plan_token. Verifies signature, expiry, single-use and that the playbook digest has not drifted, then runs it in the target workspace.",
+        name = "playbook_execute_plan",
+        description = "Phase 2: execute a previously prepared cross-workspace plan by its plan_token. Verifies signature, expiry, single-use and that the playbook digest has not drifted, then runs it in the target workspace. An irreversible plan needs confirm_irreversible (the refusal's consent_nonce) after asking the person; acknowledge_untrusted answers trust only.",
         annotations(destructive_hint = true)
     )]
+    pub(crate) async fn playbook_execute_plan_tool(
+        &self,
+        params: Parameters<PlaybookExecutePlanArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        // The MCP client name, recorded as `by: mcp:<client>` in the consent.
+        let client = ctx.peer.peer_info().map(|i| i.client_info.name.clone());
+        self.playbook_execute_plan_for(params, client).await
+    }
+
+    /// `playbook_execute_plan` without a request context (tests).
+    #[cfg(test)]
     pub(crate) async fn playbook_execute_plan(
+        &self,
+        params: Parameters<PlaybookExecutePlanArgs>,
+    ) -> CallToolResult {
+        self.playbook_execute_plan_for(params, None).await
+    }
+
+    pub(crate) async fn playbook_execute_plan_for(
         &self,
         Parameters(PlaybookExecutePlanArgs {
             plan_token,
             acknowledge_untrusted,
+            confirm_irreversible,
         }): Parameters<PlaybookExecutePlanArgs>,
+        client: Option<String>,
     ) -> CallToolResult {
         let payload = match crate::plan::decode(&plan_token) {
             Some(p) => p,
@@ -139,6 +161,18 @@ impl WfMcp {
             false,
         ) {
             Ok(p) => p,
+            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+        };
+        // 0.24.0 irreversible consent: as for playbook_run,
+        // `confirm_irreversible` after asking the person, bound to the nonce
+        // of the refusal they saw.
+        let (consent, deprecation) = match super::mcp_consent(
+            &permit,
+            confirm_irreversible,
+            acknowledge_untrusted,
+            client.as_deref(),
+        ) {
+            Ok(c) => c,
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
         // The plan the user confirmed must still be what runs: the digest and
@@ -193,21 +227,25 @@ impl WfMcp {
             expected_digest: Some(payload.digest.clone()),
             expected_profile_bundles: Some(expected_bundles),
             expected_children: Some(permit.children),
+            consent,
             ..Default::default()
         };
         // Driven by a detached process, like every other background start:
         // the run must not die with this MCP session.
-        match apb_engine::start_detached_resolved(&resolved, opts) {
-            Ok(run_id) => to_call_tool_result(Ok(json!({
-                "run_ref": { "workspace_id": payload.workspace_id, "run_id": run_id }
-            }))),
-            Err(e) => to_call_tool_result(Err(ToolError::from(e))),
-        }
+        super::with_deprecation(
+            match apb_engine::start_detached_resolved(&resolved, opts) {
+                Ok(run_id) => to_call_tool_result(Ok(json!({
+                    "run_ref": { "workspace_id": payload.workspace_id, "run_id": run_id }
+                }))),
+                Err(e) => to_call_tool_result(Err(ToolError::from(e))),
+            },
+            deprecation,
+        )
     }
 
     #[tool(
         name = "playbook_run",
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with a subagent and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in).",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with a subagent and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run_tool(
@@ -236,6 +274,7 @@ impl WfMcp {
             supervise,
             background,
             acknowledge_untrusted,
+            confirm_irreversible,
             scope,
             continued_from,
             worktree,
@@ -321,6 +360,21 @@ impl WfMcp {
             Ok(p) => p,
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
+        // --- 0.24.0 irreversible consent ---
+        // `confirm_irreversible` is the consent, checked against the nonce of
+        // the refusal the person saw; `acknowledge_untrusted` answers trust
+        // only (for one release it still counts as a consent, with a
+        // deprecation note in the response).
+        let (consent, deprecation) = match super::mcp_consent(
+            &permit,
+            confirm_irreversible,
+            acknowledge_untrusted,
+            execution.client.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+        };
+        // --- end 0.24.0 irreversible consent ---
 
         // Consent-time warnings the gate produced (finding 11: a bound connector
         // with zero configured accounts). Surfaced on every successful run
@@ -350,8 +404,10 @@ impl WfMcp {
                     worktree,
                     warnings,
                     execution,
+                    consent,
                 ),
                 &resolved,
+                deprecation,
             );
         }
 
@@ -371,6 +427,7 @@ impl WfMcp {
                 continued_from,
                 worktree,
                 execution,
+                consent,
                 ..Default::default()
             };
             if background == Some(true) {
@@ -383,6 +440,7 @@ impl WfMcp {
                         Err(e) => to_call_tool_result(Err(ToolError::from(e))),
                     },
                     &resolved,
+                    deprecation,
                 );
             }
             return with_execution(
@@ -396,6 +454,7 @@ impl WfMcp {
                     Err(e) => to_call_tool_result(Err(ToolError::from(e))),
                 },
                 &resolved,
+                deprecation,
             );
         }
         if background == Some(true) {
@@ -415,10 +474,12 @@ impl WfMcp {
                         continued_from,
                         worktree,
                         execution,
+                        consent,
                     ),
                     &warnings,
                 )),
                 &resolved,
+                deprecation,
             );
         }
         with_execution(
@@ -437,10 +498,12 @@ impl WfMcp {
                     continued_from,
                     worktree,
                     execution,
+                    consent,
                 ),
                 &warnings,
             )),
             &resolved,
+            deprecation,
         )
     }
 
@@ -589,7 +652,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Resume a run, optionally from a given node. Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway.",
+        description = "Resume a run, optionally from a given node. Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway. A run with no valid consent to its irreversible effects (one an older apb started) is refused once with irreversible_requires_confirmation; pass confirm_irreversible set to its consent_nonce after asking the person.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_resume(
@@ -599,8 +662,36 @@ impl WfMcp {
             from_node,
             allow_environment_drift,
             acknowledge_untrusted,
+            confirm_irreversible,
             workspace,
         }): Parameters<RunResumeArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let client = ctx.peer.peer_info().map(|i| i.client_info.name.clone());
+        self.run_resume_for(
+            RunResumeArgs {
+                run_id,
+                from_node,
+                allow_environment_drift,
+                acknowledge_untrusted,
+                confirm_irreversible,
+                workspace,
+            },
+            client,
+        )
+    }
+
+    pub(crate) fn run_resume_for(
+        &self,
+        RunResumeArgs {
+            run_id,
+            from_node,
+            allow_environment_drift,
+            acknowledge_untrusted,
+            confirm_irreversible,
+            workspace,
+        }: RunResumeArgs,
+        client: Option<String>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
             Ok(r) => r,
@@ -611,12 +702,30 @@ impl WfMcp {
         {
             return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
         }
-        to_call_tool_result(tools::run_resume(
+        // 0.24.0 irreversible consent: a run with no valid consent recorded
+        // (one an older apb started) asks once; the consent is then written
+        // into its manifest.
+        let (confirmation, acknowledge_note) =
+            super::mcp_confirmation(confirm_irreversible, acknowledge_untrusted);
+        let by = apb_engine::consent::RunConsent::mcp(client.as_deref()).by;
+        let note = match apb_engine::gate::check_resume_consent(
             &root,
             &run_id,
-            from_node.as_deref(),
-            allow_environment_drift,
-        ))
+            confirmation.as_ref(),
+            &by,
+        ) {
+            Ok(n) => n.map(|n| acknowledge_note.unwrap_or(n)),
+            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+        };
+        super::with_deprecation(
+            to_call_tool_result(tools::run_resume(
+                &root,
+                &run_id,
+                from_node.as_deref(),
+                allow_environment_drift,
+            )),
+            note,
+        )
     }
 
     #[tool(

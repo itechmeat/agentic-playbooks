@@ -79,6 +79,12 @@ listed in `skills`. Command-line tools (`gh`, `zg`, `code-ranker`, ...) and file
 read by path (`~/.agents/skills/<name>/SKILL.md`) are reachable either way:
 `environment` governs the agent's own configuration, not the shell.
 
+The repository's own `branch-reviewer` profile (the reviewer of the
+`branch-quality-review` playbook) runs `minimal`: it lists no skills and needs
+no plugin, user skill or user-scope MCP server, and the command-line tools its
+review uses are reachable either way. A profile of your own that does depend on
+the personal setup still works with `full`, in runs and in `apb eval` alike.
+
 Only claude and claude-code have such a mechanism today. Other agents run as they
 are configured (codex already gets a run-scoped config home). The value is
 snapshotted into the run manifest at start, so a retry, fallback, or resume uses

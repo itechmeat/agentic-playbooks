@@ -27,12 +27,23 @@ export class ApiError extends Error {
   status: number
   code?: string
   detail?: string
-  constructor(message: string, status: number, code?: string, detail?: string) {
+  // The parsed JSON body of a structured refusal (a run gate `policy`), so a
+  // caller reads its fields (for example `sources`, `consent_nonce`) instead
+  // of parsing `detail`.
+  body?: Record<string, unknown>
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    detail?: string,
+    body?: Record<string, unknown>,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.detail = detail
+    this.body = body
   }
 }
 
@@ -43,7 +54,7 @@ export async function requestJson<T>(url: string, init: RequestInit): Promise<T>
   if (!res.ok) {
     if (res.status === 401) markUnauthenticated()
     const err = await errorMessage(res)
-    throw new ApiError(err.message, res.status, err.code, err.detail)
+    throw new ApiError(err.message, res.status, err.code, err.detail, err.body)
   }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
@@ -51,7 +62,7 @@ export async function requestJson<T>(url: string, init: RequestInit): Promise<T>
 
 export async function errorMessage(
   res: Response,
-): Promise<{ message: string; code?: string; detail?: string }> {
+): Promise<{ message: string; code?: string; detail?: string; body?: Record<string, unknown> }> {
   const url = res.url || ''
   const text = await res.text().catch(() => '')
   try {
@@ -75,6 +86,7 @@ export async function errorMessage(
         message: `${url}: run refused (${body.policy})${what ? `: ${what}` : ''}`,
         code: body.policy,
         detail: body.detail,
+        body,
       }
     }
     const meta = { code: body.error, detail: body.detail }

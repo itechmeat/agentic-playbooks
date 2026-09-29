@@ -31,6 +31,8 @@ pub fn playbook_run(
     worktree: Option<String>,
     // host execution mode (0.23.0)
     execution: apb_core::execution::ExecutionRequest,
+    // 0.24.0: the irreversible consent the caller obtained from the person.
+    consent: Option<apb_engine::consent::RunConsent>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -57,6 +59,8 @@ pub fn playbook_run(
         workdir_queue_wait: None,
         worktree,
         execution,
+        consent,
+        eval: None,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -88,6 +92,8 @@ pub fn playbook_run_background(
     worktree: Option<String>,
     // host execution mode (0.23.0)
     execution: apb_core::execution::ExecutionRequest,
+    // 0.24.0: the irreversible consent the caller obtained from the person.
+    consent: Option<apb_engine::consent::RunConsent>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -114,6 +120,8 @@ pub fn playbook_run_background(
         workdir_queue_wait: None,
         worktree,
         execution,
+        consent,
+        eval: None,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -175,7 +183,15 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // prompts inline. `pending_tasks` is there only while a task waits, as in
     // `run_wait` and `supervisor_wait_event`, so a `cli` run's status reads
     // as before whenever nothing fell back to the host.
-    let execution = run_execution(&dir);
+    let mut execution = run_execution(&dir);
+    if let Some(obj) = execution.as_object_mut() {
+        // 0.24.0: the nodes that actually fell back, so the JSON carries what
+        // the `apb runs <id>` text line names.
+        let fell_back = apb_engine::run_view::fell_back_nodes(&view.events);
+        if !fell_back.is_empty() {
+            obj.insert("fell_back".to_string(), json!(fell_back));
+        }
+    }
     if !execution.is_null() {
         out["execution"] = execution;
     }
@@ -536,6 +552,8 @@ pub fn playbook_run_supervised(
     worktree: Option<String>,
     // host execution mode (0.23.0)
     execution: apb_core::execution::ExecutionRequest,
+    // 0.24.0: the irreversible consent the caller obtained from the person.
+    consent: Option<apb_engine::consent::RunConsent>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -565,6 +583,8 @@ pub fn playbook_run_supervised(
         workdir_queue_wait: None,
         worktree,
         execution,
+        consent,
+        eval: None,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

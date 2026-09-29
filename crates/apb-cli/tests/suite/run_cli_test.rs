@@ -308,3 +308,272 @@ fn run_refuses_a_playbook_whose_requires_is_unmet() {
         "a refused start writes no run"
     );
 }
+
+// --- 0.24.0 irreversible consent ---
+
+fn seeded_irreversible() -> tempfile::TempDir {
+    let dir = seeded();
+    let vdir = dir.path().join(".apb/playbooks/rel/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT
+            .replace("id: noagent", "id: rel")
+            .replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
+    dir
+}
+
+/// The consent nonce an `irreversible_requires_confirmation` refusal printed.
+pub(crate) fn printed_nonce(stderr: &str) -> String {
+    let at = stderr
+        .find("consent_nonce: ")
+        .expect("the refusal prints a nonce")
+        + "consent_nonce: ".len();
+    stderr[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect()
+}
+
+fn only_run(root: &std::path::Path) -> std::path::PathBuf {
+    let mut runs: Vec<_> = fs::read_dir(root.join(".apb/runs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    runs.pop().unwrap()
+}
+
+fn no_runs(root: &std::path::Path) -> bool {
+    fs::read_dir(root.join(".apb/runs"))
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true)
+}
+
+fn consent_by(run: &std::path::Path) -> String {
+    apb_engine::manifest::read(run)
+        .unwrap()
+        .and_then(|m| m.consent)
+        .expect("consent recorded")
+        .by
+}
+
+/// Polls until the run in `run` has finished (a detached driver), bounded.
+fn wait_finished(run: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if fs::read_to_string(run.join("events.jsonl"))
+            .is_ok_and(|t| t.contains("\"type\":\"run_finished\""))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("run {} did not finish within 30s", run.display());
+}
+
+/// A headless `apb run` (no terminal, as in a test or CI) of an irreversible
+/// playbook is refused with the sources and a consent nonce, foreground and
+/// `--detach` alike; `--confirm-irreversible=<nonce>` is the script author's
+/// consent and lands in the manifest, a stale nonce is refused, and a bare
+/// flag still works for one release with a deprecation warning.
+#[test]
+fn a_headless_run_of_an_irreversible_playbook_needs_the_consent_nonce() {
+    for detach in [false, true] {
+        let dir = seeded_irreversible();
+        let base = |extra: &[&str]| {
+            let mut cmd = playbook();
+            cmd.args(["run", "rel", "--param", "who=x"]);
+            if detach {
+                cmd.arg("--detach");
+            }
+            cmd.args(extra).current_dir(dir.path());
+            cmd
+        };
+        let refused = base(&[]).assert().code(2);
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr).to_string();
+        assert!(
+            stderr.contains(
+                "run refused (irreversible_requires_confirmation): irreversible effects (playbook)"
+            ),
+            "detach={detach}: {stderr}"
+        );
+        assert!(
+            stderr.contains("--confirm-irreversible=consent-"),
+            "{stderr}"
+        );
+        let nonce = printed_nonce(&stderr);
+        assert!(
+            no_runs(dir.path()),
+            "detach={detach}: a refusal writes no run"
+        );
+
+        base(&["--confirm-irreversible=consent-stale"])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("consent_nonce_mismatch"));
+        assert!(no_runs(dir.path()));
+
+        let flag = format!("--confirm-irreversible={nonce}");
+        base(&[&flag])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("deprecated").not());
+        let run = only_run(dir.path());
+        if detach {
+            wait_finished(&run);
+        }
+        assert_eq!(consent_by(&run), "cli_flag", "detach={detach}");
+    }
+    let dir = seeded_irreversible();
+    playbook()
+        .args(["run", "rel", "--param", "who=x", "--confirm-irreversible"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("deprecated"));
+    assert_eq!(consent_by(&only_run(dir.path())), "cli_flag");
+}
+
+/// Inside a run (`APB_RUN_ID` set) the terminal is never taken as consent;
+/// the refusal says so. The interactive `[y/N]` question itself needs a
+/// pseudo-terminal, which this suite has no helper for, so the `cli` path is
+/// covered only by reading `crate::consent::ask`.
+#[test]
+fn a_start_from_inside_a_run_cannot_consent_at_the_terminal() {
+    let dir = seeded_irreversible();
+    playbook()
+        .args(["run", "rel", "--param", "who=x"])
+        .env("APB_RUN_ID", "outer-1")
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("APB_RUN_ID is set"));
+    assert!(no_runs(dir.path()));
+}
+
+/// Inside a run the flag is no consent either: a step that read the
+/// refusal could echo its nonce. The refusal names the parent run and
+/// points at the host, and no run is written; the same nonce works outside
+/// the run.
+#[test]
+fn a_start_from_inside_a_run_cannot_consent_with_the_flag() {
+    let dir = seeded_irreversible();
+    let refused = playbook()
+        .args(["run", "rel", "--param", "who=x"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2);
+    let nonce = printed_nonce(&String::from_utf8_lossy(&refused.get_output().stderr));
+    let flag = format!("--confirm-irreversible={nonce}");
+    for detach in [false, true] {
+        let mut cmd = playbook();
+        cmd.args(["run", "rel", "--param", "who=x", &flag]);
+        if detach {
+            cmd.arg("--detach");
+        }
+        cmd.env("APB_RUN_ID", "outer-1")
+            .current_dir(dir.path())
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("inside run `outer-1`"))
+            .stderr(predicate::str::contains("confirm_irreversible"));
+        assert!(
+            no_runs(dir.path()),
+            "detach={detach}: a refusal writes no run"
+        );
+    }
+    playbook()
+        .args(["run", "rel", "--param", "who=x", &flag])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
+/// The hidden `__drive-supervised --consent` accepts only `cli` and
+/// `cli_flag`, and only together with the nonce.
+#[test]
+fn drive_supervised_accepts_only_the_cli_consents() {
+    let dir = seeded_irreversible();
+    let handshake = dir.path().join("hs.txt");
+    playbook()
+        .args([
+            "__drive-supervised",
+            "rel",
+            "--consent",
+            "dashboard",
+            "--consent-nonce",
+            "x",
+            "--handshake",
+        ])
+        .arg(&handshake)
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid value 'dashboard'"));
+    playbook()
+        .args([
+            "__drive-supervised",
+            "rel",
+            "--consent",
+            "cli",
+            "--handshake",
+        ])
+        .arg(&handshake)
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--consent-nonce"));
+    assert!(no_runs(dir.path()));
+}
+
+/// `apb resume` of a run whose snapshot is irreversible and whose manifest
+/// has no consent (as a run an older apb started) asks once: refused
+/// headless with the nonce, then resumed with it, the consent recorded.
+#[test]
+fn a_resume_of_a_run_without_consent_asks_once() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=x"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let run = only_run(dir.path());
+    let run_id = run.file_name().unwrap().to_string_lossy().to_string();
+    let snap = run.join("playbook.yaml");
+    let yaml = fs::read_to_string(&snap).unwrap();
+    fs::write(
+        &snap,
+        yaml.replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+
+    let refused = playbook()
+        .args(["resume", &run_id, "--from-node", "note"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("irreversible_requires_confirmation"),
+        "{stderr}"
+    );
+    let nonce = printed_nonce(&stderr);
+
+    playbook()
+        .args(["resume", &run_id, "--from-node", "note"])
+        .arg(format!("--confirm-irreversible={nonce}"))
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_eq!(consent_by(&run), "cli_flag");
+    // Recorded: the next resume asks nothing.
+    playbook()
+        .args(["resume", &run_id, "--from-node", "note"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}

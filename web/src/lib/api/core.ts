@@ -245,11 +245,16 @@ export const fetchDiff = (id: string, from: string, to: string, workspace = '') 
 export const fetchVersions = (id: string, workspace = '') =>
   getJson<VersionInfo[]>(`${pb(id)}/versions${qs({ workspace })}`)
 
-export const runPlaybook = (id: string, workspace = '') =>
+// `consentNonce` is sent only after the person confirmed the playbook's
+// irreversible effects in the Run dialog: it is the `consent_nonce` of the
+// refusal the dialog showed, so a playbook that changed in between is refused
+// again. Without it such a run is refused with
+// `irreversible_requires_confirmation` (0.24.0).
+export const runPlaybook = (id: string, workspace = '', consentNonce?: string) =>
   requestJson<{ run_id: string }>(`${pb(id)}/run${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({}),
+    body: JSON.stringify(consentNonce ? { confirm_irreversible: consentNonce } : {}),
   })
 
 export const promoteVersion = (id: string, version: string, workspace = '') =>

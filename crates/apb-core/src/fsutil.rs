@@ -105,6 +105,122 @@ pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Fails when `path`, or any existing component of it strictly below
+/// `anchor`, is a symbolic link. `anchor` itself is trusted (the caller
+/// created it). A write or a removal through such a path would land at the
+/// link's target, outside the directory the caller meant.
+pub fn ensure_no_symlink_below(anchor: &Path, path: &Path) -> io::Result<()> {
+    let rel = path.strip_prefix(anchor).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not under {}", path.display(), anchor.display()),
+        )
+    })?;
+    let mut cur = anchor.to_path_buf();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(name) => cur.push(name),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not a plain path under the anchor", path.display()),
+                ));
+            }
+        }
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is a symlink", cur.display()),
+                ));
+            }
+            Ok(_) => {}
+            // Nothing below a missing component exists yet either.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// [`copy_tree`] into `dst` under `anchor` that never writes through a
+/// symlink already at the destination: `dst` and every existing path
+/// component below `anchor` are checked first, and every entry is checked
+/// again before it is written. A symlink in the source is copied as a
+/// symlink (never followed), and never over an existing entry.
+pub fn copy_tree_no_follow(src: &Path, anchor: &Path, dst: &Path) -> io::Result<()> {
+    ensure_no_symlink_below(anchor, dst)?;
+    copy_no_follow_inner(src, dst)
+}
+
+fn copy_no_follow_inner(src: &Path, dst: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(dst) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", dst.display()),
+            ));
+        }
+        Ok(m) if !m.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a directory", dst.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(dst)?,
+        Err(e) => return Err(e),
+    }
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        let existing = match fs::symlink_metadata(&to) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|m| m.file_type().is_symlink())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", to.display()),
+            ));
+        }
+        if ft.is_symlink() {
+            if existing.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} already exists", to.display()),
+                ));
+            }
+            symlink(&fs::read_link(&from)?, &to)?;
+        } else if ft.is_dir() {
+            copy_no_follow_inner(&from, &to)?;
+        } else if ft.is_file() {
+            if existing.as_ref().is_some_and(|m| !m.is_file()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not a regular file", to.display()),
+                ));
+            }
+            fs::copy(&from, &to)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "not a regular file, directory or symlink: {}",
+                    from.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Control files are always written this way: temp + fsync + atomic rename (spec 4.3).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
@@ -346,5 +462,41 @@ fn lock_is_stale(path: &Path, stale_ms: u128) -> bool {
         Ok(age) => age.as_millis() >= stale_ms,
         // mtime in the future (clock skew) - not stale.
         Err(_) => false,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod no_follow_tests {
+    use super::*;
+
+    /// An overlay whose directory name matches a symlink already in the
+    /// destination is refused, and nothing lands at the link's target;
+    /// neither can a destination reached through a symlinked component.
+    #[test]
+    fn the_no_follow_copy_never_writes_through_a_destination_symlink() {
+        let t = tempfile::tempdir().unwrap();
+        let (anchor, outside, src) = (t.path().join("a"), t.path().join("out"), t.path().join("s"));
+        fs::create_dir_all(anchor.join("tree")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(src.join("link")).unwrap();
+        fs::write(src.join("link/f"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, anchor.join("tree/link")).unwrap();
+        let tree = anchor.join("tree");
+        assert!(copy_tree_no_follow(&src, &anchor, &tree).is_err());
+        assert!(!outside.join("f").exists());
+        let through = anchor.join("tree/link/sub");
+        assert!(copy_tree_no_follow(&src, &anchor, &through).is_err());
+        assert!(!outside.join("sub").exists());
+        // A plain destination copies, links in the source stay links.
+        fs::remove_file(anchor.join("tree/link")).unwrap();
+        std::os::unix::fs::symlink("f", src.join("l")).unwrap();
+        copy_tree_no_follow(&src, &anchor, &tree).unwrap();
+        assert_eq!(fs::read_to_string(tree.join("link/f")).unwrap(), "x");
+        assert!(
+            fs::symlink_metadata(tree.join("l"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }

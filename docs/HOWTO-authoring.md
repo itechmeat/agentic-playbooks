@@ -1578,8 +1578,19 @@ about where it can run.
 `effects` declares the playbook's side effects. Declarations can only widen what
 the server infers from node types, never narrow it. Values: `fs_read`,
 `fs_write`, `network`, `external`, `secrets`, `irreversible`. Declare
-`irreversible` for anything that cannot be rolled back (deploys, publishes,
-external notifications) so the policy layer requires explicit confirmation.
+`irreversible` for anything that cannot be rolled back (a push, a merged or
+opened pull request, deploys, publishes, external notifications): a run of a
+playbook whose tree declares it starts only with an explicit consent (MCP
+`confirm_irreversible` with the refusal's `consent_nonce` after asking the
+person, a `y` to the question `apb run` asks at a terminal or
+`--confirm-irreversible=<consent_nonce>`, the dashboard's Run dialog), which
+the run manifest records as `consent: { irreversible: true, by: ... }`. A
+connector function flagged `irreversible: true` that a node is granted counts
+the same way. A node that looks like a merge, push, deploy or publish step by
+its name but declares nothing is warning V90: declare it. A
+trigger or a headless start without that consent is refused before the run is
+created. A sub-playbook inherits its parent's consent, so declaring
+`irreversible` on a child makes every parent that runs it ask once, at start.
 
 A node can declare its own `effects` too, for example on the one step that
 merges or deploys:
@@ -1591,8 +1602,9 @@ merges or deploys:
   effects: [irreversible]
 ```
 
-A node's declaration widens the playbook's effective effects the same way,
-and it is what V73 reads before the name of the node: an automatic review
+A node's declaration widens the playbook's effective effects the same way
+(so it needs the same consent at start), and it is what V73 reads before the
+name of the node: an automatic review
 decision (`auto_decide`) is refused on a gate followed by a node that
 declares `irreversible` or `secrets`, whatever the node is called.
 
@@ -1651,6 +1663,28 @@ the goal with each criterion's result (`pending` until the run is checked).
 The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may
 change them.
+
+<!-- 0.24.0 eval suites -->
+## Eval cases (evals/)
+
+A playbook can carry an eval suite under `.apb/playbooks/<id>/evals/`: one
+YAML case per file, with a fixture (a directory under `evals/fixtures/` or a
+ref of the repository), an instruction, and checks over the finished run
+(outcome, the goal criteria above, the visited route, node outputs, files in
+the tree, journal events, and case scripts under `evals/scripts/`).
+`apb eval <id>` runs each case as a run in a disposable repository, repeats
+it on request, stores the pass counts per configuration (playbook digest,
+profile bundles, resolved models) and compares them with the previous
+result. Write goal criteria against persistent outcomes and the suite gets
+them for free: `checks.goal: required` is the default.
+
+Evals never run a playbook with `irreversible` effects, a shipping step, a
+connector or a sub-playbook; such a suite is V81 and `apb eval` refuses it.
+Keep the cases small (the fixture of the repository's own
+`branch-quality-review` suite is a twenty-line crate), tag a quick subset,
+and set `limits` and `budget` in `suite.yaml`: every repetition is a paid
+agent run. The format, the checks and the storage are in `docs/EVALS.md`.
+<!-- end 0.24.0 eval suites -->
 
 ## Secrets
 

@@ -146,7 +146,9 @@ pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agen
 fn with_execution(
     result: CallToolResult,
     resolved: &apb_core::execution::ResolvedExecution,
+    deprecation: Option<&str>,
 ) -> CallToolResult {
+    let result = with_deprecation(result, deprecation);
     if result.is_error == Some(true) {
         return result;
     }
@@ -166,6 +168,85 @@ fn with_execution(
         }
     }
     result
+}
+
+/// Adds a `deprecation` note to a successful run response (0.24.0: a consent
+/// given the old way). A no-op without a note or on an error.
+fn with_deprecation(result: CallToolResult, note: Option<&str>) -> CallToolResult {
+    let Some(note) = note else {
+        return result;
+    };
+    if result.is_error == Some(true) {
+        return result;
+    }
+    let mut result = result;
+    if let Some(Value::Object(obj)) = result.structured_content.as_mut() {
+        obj.insert("deprecation".to_string(), json!(note));
+        return result;
+    }
+    if let Some(block) = result.content.first_mut()
+        && let Some(text) = block.as_text().map(|t| t.text.clone())
+        && let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(&text)
+        && !obj.contains_key("policy_refusal")
+        && !obj.contains_key("error")
+    {
+        obj.insert("deprecation".to_string(), json!(note));
+        if let Ok(new) = ContentBlock::json(Value::Object(obj)) {
+            *block = new;
+        }
+    }
+    result
+}
+
+/// The MCP consent to irreversible effects from a call's two arguments:
+/// `confirm_irreversible` when given; otherwise, for one release,
+/// `acknowledge_untrusted: true` still counts as a bare confirmation, with a
+/// deprecation note. Returns the confirmation to check and that note.
+fn mcp_confirmation(
+    confirm_irreversible: Option<args::ConfirmIrreversibleArg>,
+    acknowledge_untrusted: Option<bool>,
+) -> (
+    Option<apb_engine::consent::Confirmation>,
+    Option<&'static str>,
+) {
+    match confirm_irreversible {
+        Some(c) => (Some(c.into()), None),
+        None if acknowledge_untrusted == Some(true) => (
+            Some(apb_engine::consent::Confirmation::Flag(true)),
+            Some(apb_engine::consent::ACKNOWLEDGE_AS_CONSENT_NOTE),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Checks an MCP confirmation against a start's permit: the consent to pass
+/// to the engine (`by: mcp[:<client>]`) and the deprecation note to return,
+/// or the structured refusal.
+fn mcp_consent(
+    permit: &apb_engine::gate::RunPermit,
+    confirm_irreversible: Option<args::ConfirmIrreversibleArg>,
+    acknowledge_untrusted: Option<bool>,
+    client: Option<&str>,
+) -> Result<
+    (
+        Option<apb_engine::consent::RunConsent>,
+        Option<&'static str>,
+    ),
+    Value,
+> {
+    let (confirmation, acknowledge_note) =
+        mcp_confirmation(confirm_irreversible, acknowledge_untrusted);
+    let note = permit.check_confirmation(confirmation.as_ref())?;
+    let consent = confirmation
+        .as_ref()
+        .filter(|c| c.is_given() && permit.needs_consent())
+        .map(|_| apb_engine::consent::RunConsent::mcp(client));
+    let note = if consent.is_some() {
+        acknowledge_note.or(note)
+    } else {
+        None
+    };
+    Ok((consent, note))
 }
 
 fn annotate_execution(
@@ -375,6 +456,8 @@ impl WfMcp {
         worktree: Option<String>,
         warnings: Vec<String>,
         execution: apb_core::execution::ExecutionRequest,
+        // 0.24.0: the irreversible consent.
+        consent: Option<apb_engine::consent::RunConsent>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -395,6 +478,7 @@ impl WfMcp {
             continued_from,
             worktree,
             execution,
+            consent,
         );
         let value = match started {
             Ok(v) => v,

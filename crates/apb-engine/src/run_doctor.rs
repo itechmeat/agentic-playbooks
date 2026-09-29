@@ -821,6 +821,7 @@ mod tests {
             connector_grants: BTreeMap::new(),
             decisions: None,
             execution: None,
+            consent: None,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

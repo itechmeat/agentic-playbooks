@@ -108,9 +108,9 @@ Once installed, run `apb init` in a project to set it up. In an interactive term
 apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbooks, profile models, requires and connectors
-apb run <id>        run a playbook (--overrides, --supervise, --detach, params)
+apb run <id>        run a playbook (--overrides, --supervise, --detach, --confirm-irreversible, params)
 apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
-apb runs [run]      list runs, or one run with the tokens its agents reported
+apb runs [run]      list runs, or one run with its execution mode and tokens (--json)
 apb resume <run>    resume a paused or interrupted run
 apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
 apb note <run> <t>  post a note (context append) to a run's control channel
@@ -175,7 +175,7 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Released on the `0.x` line (the latest release is `0.23.0`); each tagged
+Released on the `0.x` line (the latest release is `0.24.0`); each tagged
 release has its notes in [docs/release-notes/](docs/release-notes/) and on
 the GitHub releases page. The engine, web editor, versioning, MCP surface, and
 supervisor are implemented and tested; until `1.0` the schema and CLI may
@@ -196,7 +196,7 @@ More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
 [docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md),
 [docs/GUARDRAILS.md](docs/GUARDRAILS.md), [docs/CI.md](docs/CI.md),
-[docs/STATS.md](docs/STATS.md).
+[docs/STATS.md](docs/STATS.md), [docs/EVALS.md](docs/EVALS.md).
 
 ## Security
 

@@ -1220,3 +1220,73 @@ async fn run_detail_reads_a_journal_with_a_future_event_and_totals_usage() {
         .expect("the run is listed");
     assert_eq!(row["unknown_events"], 1);
 }
+
+// --- 0.24.0 irreversible consent ---
+
+/// Clicking Run is not enough for irreversible effects: the start is refused
+/// with the gate's structured refusal (what an event bridge posting here
+/// gets), carrying the sources and a consent nonce; a stale nonce is refused
+/// again, and the dialog's `confirm_irreversible: <nonce>` starts the run
+/// with the dashboard's consent in the manifest. A bare `true` still works
+/// for one release, with a deprecation note. The detached driver this spawns
+/// is the test binary, not `apb`, so it exits at once and nothing outlives
+/// the tempdir.
+#[tokio::test]
+async fn post_playbook_run_needs_the_consent_nonce() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/rel/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT
+            .replace("id: noagent", "id: rel")
+            .replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let post = |confirm: Option<serde_json::Value>| {
+        let mut body = serde_json::json!({ "params": { "who": "x" } });
+        if let Some(c) = confirm {
+            body["confirm_irreversible"] = c;
+        }
+        post_json(app.clone(), "/api/playbooks/rel/run", body)
+    };
+
+    let (status, json) = post(None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        json["policy"], "irreversible_requires_confirmation",
+        "{json}"
+    );
+    assert_eq!(json["sources"], serde_json::json!(["playbook"]));
+    let nonce = json["consent_nonce"].as_str().expect("a nonce").to_string();
+    assert!(apb_engine::list_runs(dir.path()).unwrap().is_empty());
+
+    let (status, json) = post(Some(serde_json::json!("consent-stale"))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert!(
+        json["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("consent_nonce_mismatch")
+    );
+    assert!(apb_engine::list_runs(dir.path()).unwrap().is_empty());
+
+    let consent_of = |run_id: &str| {
+        apb_engine::manifest::read(&dir.path().join(".apb/runs").join(run_id))
+            .unwrap()
+            .and_then(|m| m.consent)
+            .expect("consent recorded")
+    };
+    let (status, json) = post(Some(serde_json::json!(nonce))).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json.get("deprecation").is_none(), "{json}");
+    assert_eq!(consent_of(json["run_id"].as_str().unwrap()).by, "dashboard");
+
+    let (status, json) = post(Some(serde_json::json!(true))).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["deprecation"].as_str().is_some(), "{json}");
+    assert_eq!(consent_of(json["run_id"].as_str().unwrap()).by, "dashboard");
+}

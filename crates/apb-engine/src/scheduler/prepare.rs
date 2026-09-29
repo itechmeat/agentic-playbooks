@@ -543,6 +543,23 @@ pub(crate) fn prepare_run_target(
         )));
     }
 
+    // --- 0.24.0 irreversible consent ---
+    // Checked on the effective playbook before anything is written, so a
+    // refusal leaves no run behind. The manifest keeps what it returns.
+    let consent_origin = if t.origin_label == "global" {
+        apb_core::scope::Origin::Global
+    } else {
+        apb_core::scope::Origin::Project { workspace_id: None }
+    };
+    let consent = check_consent(
+        root,
+        &playbook,
+        &consent_origin,
+        opts.expected_children.as_ref(),
+        opts.consent.as_ref(),
+    )?;
+    // --- end 0.24.0 irreversible consent ---
+
     let start_node = playbook
         .nodes
         .iter()
@@ -737,6 +754,7 @@ pub(crate) fn prepare_run_target(
         workdir_queue_wait_ms: opts
             .workdir_queue_wait
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
+        eval: opts.eval.clone(),
     };
     prep_try_unstarted(&mut log, &unstarted, write_run_config(&run_dir, &cfg))?;
 
@@ -781,6 +799,8 @@ pub(crate) fn prepare_run_target(
     // Host execution mode (0.23.0): absent for cli, so a CLI run's manifest
     // stays byte-identical.
     manifest.execution = crate::manifest::ManifestExecution::from_resolved(&execution);
+    // 0.24.0: the irreversible consent, only for a run that needed it.
+    manifest.consent = consent;
     if !manifest.is_empty() {
         prep_try_unstarted(
             &mut log,
@@ -845,3 +865,34 @@ pub(crate) fn prepare_run_target(
         mode: opts.mode,
     })
 }
+
+// --- 0.24.0 irreversible consent ---
+/// The engine's check at run start: `Ok(Some(consent))` to record in the
+/// manifest (with the sources it covers) when the run needs it and has it, `Ok(None)` when it needs none,
+/// an error naming what is irreversible when it needs one and has none.
+fn check_consent(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &apb_core::scope::Origin,
+    pins: Option<&BTreeMap<String, crate::run_config::ChildExpectation>>,
+    granted: Option<&crate::consent::RunConsent>,
+) -> Result<Option<crate::consent::RunConsent>, EngineError> {
+    let sources = crate::gate::consent_sources(root, playbook, origin, pins);
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    match granted {
+        // The manifest records what the consent covered, so a later patch
+        // cannot widen it (see `scheduler::patch`).
+        Some(c) if c.irreversible => Ok(Some(crate::consent::RunConsent {
+            sources,
+            ..c.clone()
+        })),
+        _ => Err(EngineError::Invalid(format!(
+            "{}: {}",
+            crate::consent::REFUSAL_POLICY,
+            crate::consent::refusal_detail(&playbook.id, &sources)
+        ))),
+    }
+}
+// --- end 0.24.0 irreversible consent ---
