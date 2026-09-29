@@ -668,7 +668,11 @@ fn decision_reply(value: &str, confidence: f64) -> StubResponse {
     reply(json!({"decision": choice(value, &["approve", "needs_changes"], 0.9, confidence)}))
 }
 
-fn run_in_background(root: PathBuf, opts: RunOptions) -> mpsc::Receiver<RunResult> {
+fn run_in_background(root: PathBuf, mut opts: RunOptions) -> mpsc::Receiver<RunResult> {
+    // These runs stand for a person's start: an irreversible tree needs the
+    // consent (0.24.0), which the auto-decide refusal is about, not the gate.
+    opts.consent
+        .get_or_insert_with(|| apb_engine::consent::RunConsent::irreversible("cli"));
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         if let Ok(res) = run(&root, "d", None, opts) {

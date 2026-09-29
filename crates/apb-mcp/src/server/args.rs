@@ -59,8 +59,10 @@ pub struct PlaybookRunArgs {
     #[serde(default)]
     pub background: Option<bool>,
     /// acknowledge_untrusted: true - the user's confirmation to run a
-    /// playbook with an unapproved digest (spec 9). Without it an untrusted
-    /// playbook is refused by policy.
+    /// playbook with an unapproved digest (spec 9), and their consent to a
+    /// playbook whose effects include irreversible (0.24.0; recorded in the
+    /// run manifest). Pass it only after asking the person. Without it an
+    /// untrusted or irreversible playbook is refused by policy.
     #[serde(default)]
     pub acknowledge_untrusted: Option<bool>,
     /// Definition scope: "project" (default) or "global". A global playbook
@@ -550,7 +552,8 @@ pub struct PlaybookExecutePlanArgs {
     /// Signed plan_token from playbook_prepare_run.
     pub plan_token: String,
     /// The user's confirmation to run an unapproved (untrusted) playbook in
-    /// another workspace (spec 9). Without it an untrusted plan is refused.
+    /// another workspace (spec 9), and their consent to irreversible effects
+    /// in the plan (0.24.0). Without it such a plan is refused.
     #[serde(default)]
     pub acknowledge_untrusted: Option<bool>,
 }

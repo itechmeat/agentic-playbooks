@@ -135,6 +135,21 @@ digest, or all of an id's.
 `playbook_trial`), an unapproved digest requires `acknowledge_untrusted: true`
 after user confirmation, and running in another workspace only happens via the
 two-phase `playbook_prepare_run` / `playbook_execute_plan`.
+
+Irreversible effects are enforced, not only listed (0.24.0). The catalog and
+`playbook_prepare_run` show the effects for the consent screen; the start
+itself is refused with `policy_refusal: { policy:
+"irreversible_requires_confirmation", sources, detail }` when the tree (the
+playbook, its nodes, every sub-playbook) declares `irreversible` and the call
+has no `acknowledge_untrusted: true`, even for a trusted playbook. The tier-0
+running policy already tells the host to confirm such effects with the person;
+passing `acknowledge_untrusted: true` after that confirmation is the consent,
+and the manifest records it as `consent: { irreversible: true, by: "mcp:<client>" }`.
+The same holds for `playbook_execute_plan`. The engine checks it again when it
+prepares the run, so a start that bypasses the gate is refused too; a
+sub-playbook inherits the parent's consent and a resume keeps it. The tier-0
+text itself is unchanged (it sits at the host's byte limit); the argument is
+described on `playbook_run` and in the refusal.
 `playbook_execute_plan` runs the same gate in the target workspace, with the
 caller's `acknowledge_untrusted`: the parent and every sub-playbook child must
 be approved (or acknowledged), and the verified child pins go to the engine,

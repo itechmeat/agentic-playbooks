@@ -308,3 +308,58 @@ fn run_refuses_a_playbook_whose_requires_is_unmet() {
         "a refused start writes no run"
     );
 }
+
+// --- 0.24.0 irreversible consent ---
+
+fn seeded_irreversible() -> tempfile::TempDir {
+    let dir = seeded();
+    let vdir = dir.path().join(".apb/playbooks/rel/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT
+            .replace("id: noagent", "id: rel")
+            .replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
+    dir
+}
+
+/// A headless `apb run` (no terminal, as in a test or CI) of an irreversible
+/// playbook is refused with what to do; `--confirm-irreversible` is the
+/// script author's consent and lands in the manifest.
+#[test]
+fn a_headless_run_of_an_irreversible_playbook_needs_the_flag() {
+    let dir = seeded_irreversible();
+    playbook()
+        .args(["run", "rel", "--param", "who=x"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "run refused (irreversible_requires_confirmation): playbook `rel` has irreversible effects (playbook)",
+        ))
+        .stderr(predicate::str::contains("--confirm-irreversible"));
+    assert!(
+        fs::read_dir(dir.path().join(".apb/runs"))
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+    );
+    playbook()
+        .args(["run", "rel", "--param", "who=x", "--confirm-irreversible"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let run = fs::read_dir(dir.path().join(".apb/runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let consent = apb_engine::manifest::read(&run)
+        .unwrap()
+        .and_then(|m| m.consent)
+        .expect("consent recorded");
+    assert_eq!(consent.by, "cli_flag");
+}

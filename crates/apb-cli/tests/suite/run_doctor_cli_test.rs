@@ -239,6 +239,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         connector_grants: std::collections::BTreeMap::new(),
         decisions: None,
         execution: None,
+        consent: None,
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 

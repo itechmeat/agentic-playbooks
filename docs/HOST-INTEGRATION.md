@@ -77,7 +77,7 @@ A supervising session (`supervise: "self"`) also gets each request from `supervi
 
 ### Trust and attribution
 
-Host mode changes who executes, not what is allowed: the run gate (trusted playbook and profiles, effects consent, `irreversible` confirmation) is unchanged. The prompt is rendered from the trusted snapshot exactly as for a CLI attempt, and the host never receives a connector secret (connector calls still go through `apb connector call`). Every submission is journaled as `host_task_submitted` with `submitted_by: host` and the MCP client name (`clientInfo.name`); the engine's own closures of a task (expired, cancelled, interrupted) say `submitted_by: engine`.
+Host mode changes who executes, not what is allowed: the run gate (trusted playbook and profiles, effects consent, `irreversible` confirmation) is unchanged. A host-mode start of a playbook whose tree declares `irreversible` needs the same consent as a `cli` one: the host asks the person and passes `acknowledge_untrusted: true`, the manifest records `consent: { irreversible: true, by: "mcp:<client>" }`, and the sub-playbooks whose steps come back as host tasks inherit it. The host fallback does not change it either: a step that falls back to the host runs under the consent the run started with. The prompt is rendered from the trusted snapshot exactly as for a CLI attempt, and the host never receives a connector secret (connector calls still go through `apb connector call`). Every submission is journaled as `host_task_submitted` with `submitted_by: host` and the MCP client name (`clientInfo.name`); the engine's own closures of a task (expired, cancelled, interrupted) say `submitted_by: engine`.
 
 ### Other surfaces
 

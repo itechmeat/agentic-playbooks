@@ -1578,8 +1578,15 @@ about where it can run.
 `effects` declares the playbook's side effects. Declarations can only widen what
 the server infers from node types, never narrow it. Values: `fs_read`,
 `fs_write`, `network`, `external`, `secrets`, `irreversible`. Declare
-`irreversible` for anything that cannot be rolled back (deploys, publishes,
-external notifications) so the policy layer requires explicit confirmation.
+`irreversible` for anything that cannot be rolled back (a push, a merged or
+opened pull request, deploys, publishes, external notifications): a run of a
+playbook whose tree declares it starts only with an explicit consent (MCP
+`acknowledge_untrusted: true` after asking the person, `apb run` from a
+terminal or with `--confirm-irreversible`, the dashboard's Run dialog), which
+the run manifest records as `consent: { irreversible: true, by: ... }`. A
+trigger or a headless start without that consent is refused before the run is
+created. A sub-playbook inherits its parent's consent, so declaring
+`irreversible` on a child makes every parent that runs it ask once, at start.
 
 A node can declare its own `effects` too, for example on the one step that
 merges or deploys:
@@ -1591,8 +1598,9 @@ merges or deploys:
   effects: [irreversible]
 ```
 
-A node's declaration widens the playbook's effective effects the same way,
-and it is what V73 reads before the name of the node: an automatic review
+A node's declaration widens the playbook's effective effects the same way
+(so it needs the same consent at start), and it is what V73 reads before the
+name of the node: an automatic review
 decision (`auto_decide`) is refused on a gate followed by a node that
 declares `irreversible` or `secrets`, whatever the node is called.
 
