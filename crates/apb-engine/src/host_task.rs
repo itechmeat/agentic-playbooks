@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
 
+pub mod hint;
+pub(crate) use hint::describe as describe_hint;
+pub use hint::{FallbackOf, HintSource};
+
 /// The directory under a run that holds its host tasks.
 pub const TASKS_DIR: &str = "tasks";
 const PROMPT_FILE: &str = "prompt.md";
@@ -111,6 +115,23 @@ pub struct TaskRecord {
     pub deadline_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_hint: Option<String>,
+    /// The chain step the task runs: the label of `model_hint`. Read
+    /// leniently: a shape a newer apb wrote reads as absent instead of
+    /// hiding the whole task.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::event::lenient_option"
+    )]
+    pub hint_source: Option<HintSource>,
+    /// What closed the previous chain step, for a later step's first task.
+    /// Read leniently like `hint_source`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::event::lenient_option"
+    )]
+    pub fallback_of: Option<FallbackOf>,
     /// Environment the step expects, as the engine would have set it for a
     /// CLI attempt (`APB_RUN_DIR`, `APB_NODE_ID`, `APB_STATUS_FILE`): the
     /// host sets them for its subagent so `apb connector call` and the status
@@ -137,6 +158,9 @@ pub struct Submission {
     /// The MCP client name of the submitting session, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// The model the host reports it ran the task on, when it says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub submitted_ts: u64,
 }
@@ -168,8 +192,20 @@ pub struct PendingHostTask {
     pub outputs: Option<serde_json::Value>,
     /// Wall-clock milliseconds by which the task must be submitted.
     pub deadline: Option<u64>,
-    /// The model a fallback entry or tier routing asks for (a hint).
+    /// The model the profile declares for this chain step (a fallback
+    /// entry or a routed tier): a hint, not a measured fact. The host picks
+    /// its own model; the profile's own executor gives no hint.
     pub model_hint: Option<String>,
+    /// Which chain step the task runs (`primary`, `fallback`, `tier`):
+    /// the label of `model_hint`. `None` for an older run's task.
+    pub hint_source: Option<HintSource>,
+    /// For the first task of a later chain step: the attempt that closed
+    /// the previous step and how (`failed`, `expired`, ...).
+    pub fallback_of: Option<FallbackOf>,
+    /// `model_hint`, `hint_source` and `fallback_of` as one English line,
+    /// e.g. `model hint M (fallback 1 of 1 declared by profile P after
+    /// attempt 1 failed; the host picks its own model)`.
+    pub hint_note: Option<String>,
     /// Environment variables to set for the subagent.
     pub env: BTreeMap<String, String>,
     /// Milliseconds since epoch when the task was requested.
@@ -395,7 +431,14 @@ fn pending_task(run_dir: &Path, task_id: &str) -> Option<PendingHostTask> {
         workdir: record.workdir,
         outputs: record.outputs,
         deadline: record.deadline_ms,
+        hint_note: describe_hint(
+            record.model_hint.as_deref(),
+            record.hint_source.as_ref(),
+            record.fallback_of.as_ref(),
+        ),
         model_hint: record.model_hint,
+        hint_source: record.hint_source,
+        fallback_of: record.fallback_of,
         env: record.env,
         requested_at: record.requested_ts,
     })
@@ -419,6 +462,25 @@ pub struct SubmitRequest {
     pub note: Option<String>,
     pub submitted_by: String,
     pub client: Option<String>,
+    /// The model the host ran the task on, when it reports it.
+    pub model: Option<String>,
+}
+
+/// The longest model name a submission may report, in characters.
+const MODEL_MAX_CHARS: usize = 128;
+
+/// A host-reported model name as journaled: trimmed, blank as none, cut to
+/// [`MODEL_MAX_CHARS`]; a control character is refused (it would reach a
+/// terminal through `apb tasks` and the journal views).
+fn reported_model(model: Option<String>) -> Result<Option<String>, EngineError> {
+    let Some(m) = model else { return Ok(None) };
+    let m = m.trim();
+    if m.chars().any(char::is_control) {
+        return Err(EngineError::Invalid(
+            "`model` must not contain control characters".into(),
+        ));
+    }
+    Ok((!m.is_empty()).then(|| m.chars().take(MODEL_MAX_CHARS).collect()))
 }
 
 /// Records a host's reply to a pending task of the run in `run_dir`. Every
@@ -455,6 +517,7 @@ pub fn submit(run_dir: &Path, req: SubmitRequest) -> Result<SubmitReceipt, Engin
         note: req.note.filter(|n| !n.trim().is_empty()),
         submitted_by: req.submitted_by,
         client: req.client.filter(|c| !c.trim().is_empty()),
+        model: reported_model(req.model)?,
         submitted_ts: apb_core::clock::now_ms() as u64,
     };
     let dir = task_dir(run_dir, &req.task_id);
@@ -584,6 +647,8 @@ mod tests {
             outputs: None,
             deadline_ms: None,
             model_hint: None,
+            hint_source: None,
+            fallback_of: None,
             env: BTreeMap::new(),
             requested_ts: 1,
         }
@@ -604,6 +669,9 @@ mod tests {
                 outputs: None,
                 deadline_ms: None,
                 model_hint: None,
+                hint_source: None,
+                fallback_of: None,
+                hint_note: None,
             },
         }
     }
@@ -646,6 +714,7 @@ mod tests {
             note: None,
             submitted_by: "host".into(),
             client: Some("test-host".into()),
+            model: None,
         };
         submit(run, req.clone()).unwrap();
         assert!(pending_tasks(run, &events).is_empty());
@@ -670,6 +739,7 @@ mod tests {
             note: None,
             submitted_by: "host".into(),
             client: None,
+            model: None,
         };
         assert!(matches!(
             submit(run, req.clone()),
@@ -700,6 +770,7 @@ mod tests {
                     submitted_by: "engine".into(),
                     client: None,
                     note: None,
+                    model: None,
                 },
             },
         ];
@@ -772,6 +843,7 @@ mod tests {
             note: None,
             submitted_by: "host".into(),
             client: None,
+            model: None,
         };
         let err = submit_to_run(root, "parent", req.clone()).unwrap_err();
         match err {
@@ -814,5 +886,41 @@ mod tests {
                 ("b".to_string(), "y-1".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn a_reported_model_is_trimmed_capped_and_refused_with_control_characters() {
+        assert_eq!(reported_model(None).unwrap(), None);
+        assert_eq!(reported_model(Some("   ".into())).unwrap(), None);
+        assert_eq!(
+            reported_model(Some("  opus  ".into())).unwrap().as_deref(),
+            Some("opus")
+        );
+        let long = reported_model(Some("x".repeat(300))).unwrap().unwrap();
+        assert_eq!(long.chars().count(), MODEL_MAX_CHARS);
+        assert!(matches!(
+            reported_model(Some("op\u{1b}[31mus".into())),
+            Err(EngineError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_task_with_a_hint_label_from_a_newer_apb_stays_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path();
+        let id = allocate(run, "plan").unwrap();
+        write_task(run, &record(&id, "plan"), "do it", None).unwrap();
+        // Rewrite task.json the way a newer apb might: an unknown kind and a
+        // reshaped fallback_of.
+        let path = task_dir(run, &id).join(TASK_FILE);
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["hint_source"] = serde_json::json!({ "kind": "x" });
+        v["fallback_of"] = serde_json::json!({ "attempt": "one" });
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let pending = pending_tasks(run, &[requested(1, &id, "plan")]);
+        assert_eq!(pending.len(), 1, "the task must not vanish");
+        assert_eq!(pending[0].hint_source, None);
+        assert_eq!(pending[0].fallback_of, None);
     }
 }

@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use apb_core::execution::{ExecutionMode, ExecutionRequest};
 use apb_core::registry::init_project;
 use apb_engine::event::{Event, EventPayload, read_all};
-use apb_engine::host_task::{self, PendingHostTask, SubmitRequest, SubmitStatus, SubmittedUsage};
+use apb_engine::host_task::{
+    self, FallbackOf, HintSource, PendingHostTask, SubmitRequest, SubmitStatus, SubmittedUsage,
+};
 use apb_engine::scheduler::{RunOptions, run_background};
 use apb_engine::state::{RunState, RunStatus};
 
@@ -173,6 +175,26 @@ impl Host {
                 note: None,
                 submitted_by: "host".into(),
                 client: Some("test-host".into()),
+                model: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// A `succeeded` reply that names the model the host ran it on.
+    fn submit_on_model(&self, run_id: &str, task_id: &str, output: &str, model: &str) {
+        host_task::submit_to_run(
+            self.root.path(),
+            run_id,
+            SubmitRequest {
+                task_id: task_id.into(),
+                status: SubmitStatus::Succeeded,
+                output: output.into(),
+                usage: None,
+                note: None,
+                submitted_by: "host".into(),
+                client: Some("test-host".into()),
+                model: Some(model.into()),
             },
         )
         .unwrap();
@@ -253,6 +275,15 @@ fn a_two_node_run_succeeds_on_host_replies_without_spawning_a_cli() {
         Some("You are a careful engineer.")
     );
     assert_eq!(plan.model_hint, None, "the profile's own model is no hint");
+    assert_eq!(
+        plan.hint_source,
+        Some(HintSource::Primary {
+            profile: "main".into()
+        }),
+        "the primary step is labelled as the profile's own executor"
+    );
+    assert_eq!(plan.fallback_of, None);
+    assert_labelled(&plan);
     assert_eq!(plan.run_id, run_id);
     h.submit_with(
         &run_id,
@@ -367,28 +398,132 @@ fn a_failure_report_block_fails_the_attempt_and_a_retry_is_a_new_task() {
     assert_eq!(attempt_statuses(&events, "w"), vec!["failed", "succeeded"]);
 }
 
+/// The `host_task_requested` event of `task_id`: its hint, the hint's label,
+/// what closed the previous chain step and the rendered note.
+fn requested_hint(
+    events: &[Event],
+    task_id: &str,
+) -> (
+    Option<String>,
+    Option<HintSource>,
+    Option<FallbackOf>,
+    Option<String>,
+) {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::HostTaskRequested {
+                task_id: t,
+                model_hint,
+                hint_source,
+                fallback_of,
+                hint_note,
+                ..
+            } if t == task_id => Some((
+                model_hint.clone(),
+                hint_source.clone(),
+                fallback_of.clone(),
+                hint_note.clone(),
+            )),
+            _ => None,
+        })
+        .expect("a host_task_requested event for the task")
+}
+
+/// The task's note is the engine's rendering of its own fields, and the
+/// journal's request event carries the same fields and note while the task
+/// is still pending (before `fallback_triggered` lands at the node's end).
+fn assert_labelled(t: &PendingHostTask) {
+    let note = host_task::hint::describe(
+        t.model_hint.as_deref(),
+        t.hint_source.as_ref(),
+        t.fallback_of.as_ref(),
+    );
+    assert!(note.is_some());
+    assert_eq!(t.hint_note, note);
+    let dir = t.env.get("APB_RUN_DIR").expect("APB_RUN_DIR");
+    let events = read_all(Path::new(dir)).unwrap();
+    assert_eq!(
+        requested_hint(&events, &t.task_id),
+        (
+            t.model_hint.clone(),
+            t.hint_source.clone(),
+            t.fallback_of.clone(),
+            note
+        )
+    );
+}
+
+fn fallback(index: u32, of: u32) -> Option<HintSource> {
+    Some(HintSource::Fallback {
+        index,
+        of,
+        profile: "main".into(),
+    })
+}
+
+fn closed(attempt: u32, reason: &str) -> Option<FallbackOf> {
+    Some(FallbackOf {
+        attempt,
+        reason: reason.into(),
+    })
+}
+
+/// The next pending task of `node` other than `after`.
+fn next_task(h: &Host, run_id: &str, after: &str) -> PendingHostTask {
+    poll("the next task", || {
+        h.pending(run_id).into_iter().find(|t| t.task_id != after)
+    })
+}
+
 #[test]
 fn a_failed_submission_retries_and_then_walks_the_fallback_with_a_model_hint() {
-    let h = Host::new(&one_node(", max_retries: 1"), &[("claude", "sonnet")]);
+    let h = Host::new(
+        &one_node(", max_retries: 1"),
+        &[("claude", "sonnet"), ("claude", "opus")],
+    );
     let _lock = common::env_lock();
     let _env = h.env();
     let run_id = h.start(HOST);
     let first = h.task(&run_id, "w");
     h.submit(&run_id, &first.task_id, SubmitStatus::Failed, "no luck");
-    let retry = poll("the retry", || {
-        h.pending(&run_id)
-            .into_iter()
-            .find(|t| t.task_id != first.task_id)
-    });
+    let retry = next_task(&h, &run_id, &first.task_id);
     assert_eq!(retry.model_hint, None, "a retry keeps the same executor");
+    assert!(matches!(
+        retry.hint_source,
+        Some(HintSource::Primary { .. })
+    ));
+    assert_eq!(retry.fallback_of, None, "a retry is no chain advance");
     h.submit(&run_id, &retry.task_id, SubmitStatus::Failed, "still no");
-    let fallback = poll("the fallback task", || {
-        h.pending(&run_id)
-            .into_iter()
-            .find(|t| t.model_hint.is_some())
-    });
-    assert_eq!(fallback.model_hint.as_deref(), Some("sonnet"));
-    h.submit(&run_id, &fallback.task_id, SubmitStatus::Succeeded, "done");
+    // Fallback 1 after the primary's last attempt.
+    let fb1 = next_task(&h, &run_id, &retry.task_id);
+    assert_eq!(fb1.attempt, 3);
+    assert_eq!(fb1.model_hint.as_deref(), Some("sonnet"));
+    assert_eq!(fb1.hint_source, fallback(1, 2));
+    assert_eq!(fb1.fallback_of, closed(2, "failed"));
+    assert_labelled(&fb1);
+    let dir = h.run_dir(&run_id);
+    assert_eq!(
+        count(&read_all(&dir).unwrap(), |p| matches!(
+            p,
+            EventPayload::FallbackTriggered { .. }
+        )),
+        0,
+        "the request event, not fallback_triggered, says why the task exists"
+    );
+    h.submit(&run_id, &fb1.task_id, SubmitStatus::Failed, "no");
+    // A retry inside the fallback step names no previous step.
+    let fb1_retry = next_task(&h, &run_id, &fb1.task_id);
+    assert_eq!(fb1_retry.hint_source, fallback(1, 2));
+    assert_eq!(fb1_retry.fallback_of, None);
+    h.submit(&run_id, &fb1_retry.task_id, SubmitStatus::Failed, "no");
+    // Fallback 2 after the last attempt of fallback 1.
+    let fb2 = next_task(&h, &run_id, &fb1_retry.task_id);
+    assert_eq!(fb2.model_hint.as_deref(), Some("opus"));
+    assert_eq!(fb2.hint_source, fallback(2, 2));
+    assert_eq!(fb2.fallback_of, closed(fb1_retry.attempt, "failed"));
+    assert_labelled(&fb2);
+    h.submit_on_model(&run_id, &fb2.task_id, "done", "host-model-x");
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(
@@ -396,9 +531,89 @@ fn a_failed_submission_retries_and_then_walks_the_fallback_with_a_model_hint() {
             p,
             EventPayload::FallbackTriggered { .. }
         )),
-        1
+        2
     );
+    // The model the host reports it used is journaled as reported.
+    let reported = events.iter().find_map(|e| match &e.payload {
+        EventPayload::HostTaskSubmitted { task_id, model, .. } if *task_id == fb2.task_id => {
+            Some(model.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(reported, Some(Some("host-model-x".to_string())));
     assert!(!h.cli_ran());
+}
+
+#[test]
+fn an_expired_deadline_walks_the_fallback_and_says_so_on_the_task() {
+    let h = Host::new(&one_node(", timeout_seconds: 1"), &[("claude", "sonnet")]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let first = h.task(&run_id, "w");
+    let fb = next_task(&h, &run_id, &first.task_id);
+    assert_eq!(fb.hint_source, fallback(1, 1));
+    assert_eq!(fb.fallback_of, closed(1, "expired"));
+    assert_labelled(&fb);
+    h.submit(&run_id, &fb.task_id, SubmitStatus::Succeeded, "done");
+    let (status, _) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+#[test]
+fn an_unanswered_question_walks_the_fallback_as_question_timeout() {
+    let h = Host::new(
+        &one_node(", interactive: true, question_timeout_seconds: 1"),
+        &[("claude", "sonnet")],
+    );
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let first = h.task(&run_id, "w");
+    h.submit(
+        &run_id,
+        &first.task_id,
+        SubmitStatus::Blocked,
+        "Which colour?",
+    );
+    let fb = next_task(&h, &run_id, &first.task_id);
+    assert_eq!(fb.hint_source, fallback(1, 1));
+    assert_eq!(fb.fallback_of, closed(1, "question_timeout"));
+    assert_labelled(&fb);
+    assert!(
+        fb.hint_note
+            .as_deref()
+            .is_some_and(|n| n.contains("after attempt 1 got no answer to its question in time")),
+        "{:?}",
+        fb.hint_note
+    );
+    h.submit(&run_id, &fb.task_id, SubmitStatus::Succeeded, "done");
+    let (status, _) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+#[test]
+fn the_closing_answer_labels_its_fallback_task() {
+    let yaml = "schema: 1\nid: h\nname: H\nversion: 1.0.0\ndefaults:\n  profile: main\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"compose the answer\" }\nedges:\n  - { from: start, to: done }\n";
+    let h = Host::new(yaml, &[("claude", "sonnet")]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let first = h.task(&run_id, "done");
+    assert!(matches!(
+        first.hint_source,
+        Some(HintSource::Primary { .. })
+    ));
+    h.submit(&run_id, &first.task_id, SubmitStatus::Failed, "no");
+    let fb = next_task(&h, &run_id, &first.task_id);
+    assert_eq!(fb.node, "done");
+    assert_eq!(fb.model_hint.as_deref(), Some("sonnet"));
+    assert_eq!(fb.hint_source, fallback(1, 1));
+    assert_eq!(fb.fallback_of, closed(first.attempt, "failed"));
+    assert_labelled(&fb);
+    h.submit(&run_id, &fb.task_id, SubmitStatus::Succeeded, "the answer");
+    let (status, _) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
 }
 
 #[test]
@@ -721,6 +936,17 @@ fn a_missing_agent_binary_falls_back_to_a_host_task() {
     let run_id = h.start(CLI_SESSION);
     let task = h.task(&run_id, "w");
     assert!(task.prompt.starts_with("Do the work"));
+    // The host step stands in for the whole CLI chain: its own label, no
+    // hint, and the CLI attempt that could not start.
+    assert_eq!(
+        task.hint_source,
+        Some(HintSource::HostFallback {
+            profile: "main".into()
+        })
+    );
+    assert_eq!(task.model_hint, None);
+    assert_eq!(task.fallback_of, closed(1, "unstartable"));
+    assert_labelled(&task);
     h.submit(
         &run_id,
         &task.task_id,

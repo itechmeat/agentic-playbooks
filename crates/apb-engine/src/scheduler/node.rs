@@ -879,6 +879,9 @@ fn execute_node_kind(
                 // fallback, taken only when no CLI of the chain could start.
                 host: bool,
                 model_hint: Option<String>,
+                // The chain step's role (primary, fallback entry, routed
+                // tier), the label a host task gives `model_hint`.
+                hint_source: Option<crate::host_task::HintSource>,
                 fallback_host: bool,
             }
 
@@ -921,11 +924,15 @@ fn execute_node_kind(
             let host_mode = manifest.is_host_mode()?;
             let host_fallback = !host_mode && manifest.falls_back_to_host();
 
+            let sources = super::host::chain_sources(&entry);
+            let primary_idx = sources
+                .iter()
+                .position(|s| matches!(s, crate::host_task::HintSource::Primary { .. }));
             let mut steps: Vec<Step> = entry
                 .chain
                 .iter()
-                .enumerate()
-                .map(|(i, ri)| Step {
+                .zip(sources)
+                .map(|(ri, source)| Step {
                     agent: if host_mode {
                         super::host::HOST_AGENT.to_string()
                     } else {
@@ -936,13 +943,17 @@ fn execute_node_kind(
                     invocation: (!host_mode).then(|| ri.clone()),
                     host: host_mode,
                     // The profile's own executor gives no hint; routed tiers
-                    // and fallback entries hint their model.
-                    model_hint: (host_mode && i != entry.cascade as usize)
-                        .then(|| ri.model.clone()),
+                    // and fallback entries hint their declared model.
+                    model_hint: (host_mode
+                        && !matches!(source, crate::host_task::HintSource::Primary { .. }))
+                    .then(|| ri.model.clone()),
+                    hint_source: host_mode.then_some(source),
                     fallback_host: false,
                 })
                 .collect();
-            if host_fallback && let Some(primary) = entry.chain.get(entry.cascade as usize) {
+            // The host fallback stands in for the whole CLI chain; it runs
+            // the profile's own executor's model, never a routed tier's.
+            if host_fallback && let Some(primary) = primary_idx.and_then(|i| entry.chain.get(i)) {
                 steps.push(Step {
                     agent: super::host::HOST_AGENT.to_string(),
                     model: primary.model.clone(),
@@ -950,6 +961,9 @@ fn execute_node_kind(
                     invocation: None,
                     host: true,
                     model_hint: None,
+                    hint_source: Some(crate::host_task::HintSource::HostFallback {
+                        profile: entry.name.clone(),
+                    }),
                     fallback_host: true,
                 });
             }
@@ -1200,6 +1214,12 @@ fn execute_node_kind(
             // A resume re-invocation runs the primary step only (see above);
             // an ordinary attempt walks the whole fallback chain.
             let step_count = if resume.is_some() { 1 } else { steps.len() };
+            // Chain steps actually walked so far: the first attempt of every
+            // later one names, on its host task, what closed the step before.
+            let mut walked: u32 = 0;
+            // How the last attempt closed, carried in memory to the first
+            // task of the next chain step (`fallback_of`).
+            let mut last_close: Option<crate::host_task::FallbackOf> = None;
             for (idx, step) in steps.iter().enumerate().take(step_count) {
                 // Host fallback (0.23.0): taken only when every CLI attempt of
                 // this execution failed before any model turn. It is not a
@@ -1248,6 +1268,8 @@ fn execute_node_kind(
                     });
                 }
                 last_tried = Some((step.agent.clone(), step.model.clone()));
+                walked += 1;
+                let mut step_attempts: u32 = 0;
                 // The profile path builds the adapter from the fixed invocation
                 // (call form + canonical binary from the manifest), so that editing
                 // agents.<id>.invocation in the config between start and resume does
@@ -1331,6 +1353,7 @@ fn execute_node_kind(
                         });
                     }
                     attempt += 1;
+                    step_attempts += 1;
                     if try_i > 0 {
                         events.push(EventPayload::RetryStarted {
                             node: node_id.into(),
@@ -1419,6 +1442,8 @@ fn execute_node_kind(
                             })
                             .collect()
                     };
+                    // How a host attempt's task closed, set by the adapter.
+                    let host_closed = std::cell::Cell::new(None);
                     let adapter: Box<dyn crate::adapter::AgentAdapter + '_> = if step.host {
                         Box::new(super::host::HostAdapter {
                             run_dir,
@@ -1430,6 +1455,13 @@ fn execute_node_kind(
                                 .as_ref()
                                 .and_then(|o| serde_json::to_value(o).ok()),
                             model_hint: step.model_hint.clone(),
+                            hint_source: step.hint_source.clone(),
+                            fallback_of: if walked > 1 && step_attempts == 1 {
+                                last_close.clone()
+                            } else {
+                                None
+                            },
+                            closed: Some(&host_closed),
                             question_timeout: *question_timeout_seconds,
                             default_answer: default_answer.clone(),
                         })
@@ -1795,6 +1827,19 @@ fn execute_node_kind(
                             }
                             Ok(_) => false,
                         };
+                    last_close = Some(crate::host_task::FallbackOf {
+                        attempt,
+                        reason: crate::host_task::hint::close_reason(
+                            crate::host_task::hint::AttemptEnd {
+                                host_closed: host_closed.get(),
+                                replied: outcome.is_ok(),
+                                timed_out: matches!(&outcome, Err(f) if f.class == ErrorClass::Timeout),
+                                interrupted: interrupt.load(Ordering::Relaxed),
+                                unstartable,
+                            },
+                        )
+                        .to_string(),
+                    });
                     if !step.host {
                         cli_attempted = true;
                         if unstartable {
@@ -2810,7 +2855,10 @@ pub(crate) fn execute_finish_answer(
     // each candidate step against the (agent, model) pair actually attempted
     // last, not against the positionally-previous step.
     let mut last_tried: Option<(String, String)> = None;
-    for (idx, ri) in entry.chain.iter().enumerate() {
+    let sources = super::host::chain_sources(&entry);
+    let mut walked: u32 = 0;
+    let mut last_close: Option<crate::host_task::FallbackOf> = None;
+    for (idx, (ri, source)) in entry.chain.iter().zip(sources).enumerate() {
         if idx > 0 {
             let same_binding = last_tried
                 .as_ref()
@@ -2841,6 +2889,7 @@ pub(crate) fn execute_finish_answer(
             });
         }
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
+        walked += 1;
         let cli_adapter = crate::adapter::ClaudeAdapter {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
@@ -2849,13 +2898,23 @@ pub(crate) fn execute_finish_answer(
             attempt += 1;
             // Host execution mode (0.23.0): the closing answer is a host task
             // too; the report contract stays off (see `report_contract`).
+            let fallback_of = if walked > 1 && try_i == 0 {
+                last_close.clone()
+            } else {
+                None
+            };
+            let host_closed = std::cell::Cell::new(None);
             let host_adapter = host_mode.then(|| super::host::HostAdapter {
                 run_dir,
                 journal,
                 attempt,
                 skills: Vec::new(),
                 outputs: None,
-                model_hint: (idx > 0).then(|| ri.model.clone()),
+                model_hint: (!matches!(source, crate::host_task::HintSource::Primary { .. }))
+                    .then(|| ri.model.clone()),
+                hint_source: Some(source.clone()),
+                fallback_of,
+                closed: Some(&host_closed),
                 question_timeout: None,
                 default_answer: None,
             });
@@ -2935,6 +2994,16 @@ pub(crate) fn execute_finish_answer(
             // stall watch (`None`), and the terminal answer composition is not a
             // supervisor-interruptible node, so no control observation (`None`).
             let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
+            last_close = Some(crate::host_task::FallbackOf {
+                attempt,
+                reason: crate::host_task::hint::close_reason(crate::host_task::hint::AttemptEnd {
+                    host_closed: host_closed.get(),
+                    replied: outcome.is_ok(),
+                    timed_out: matches!(&outcome, Err(f) if f.class == ErrorClass::Timeout),
+                    ..Default::default()
+                })
+                .to_string(),
+            });
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }

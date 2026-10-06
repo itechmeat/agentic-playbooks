@@ -538,7 +538,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. For each pending task spawn a subagent with `role_prompt` as its system context and `prompt` as its task, have it load `skills` and work in `workdir` with `env` set (`model_hint` names a preferred model, optional), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output.",
+        description = "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. For each pending task spawn a subagent with `role_prompt` as its system context and `prompt` as its task, have it load `skills` and work in `workdir` with `env` set (`model_hint` is only the model the profile declares for a fallback entry or a routed tier, labelled by `hint_source` and `hint_note`, with `fallback_of` saying what closed the previous step; it is not a measured fact, the choice of model is yours), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_wait(
@@ -803,7 +803,7 @@ impl WfMcp {
 
     // --- host execution mode (0.23.0) ---
     #[tool(
-        description = "Submit the result of a host task (a run in host execution mode, or a step whose CLI could not start, hands its agent steps to you through run_wait's pending_tasks). Pass run_id and task_id verbatim from pending_tasks, status succeeded (the subagent did the task), failed (it could not; the run applies its retry policy) or blocked (it needs the user: output is the question, the run waits for run_answer), and output: the subagent's final reply verbatim, including its closing yaml status block. usage (token counts) and note are optional. Then call run_wait again.",
+        description = "Submit the result of a host task (a run in host execution mode, or a step whose CLI could not start, hands its agent steps to you through run_wait's pending_tasks). Pass run_id and task_id verbatim from pending_tasks, status succeeded (the subagent did the task), failed (it could not; the run applies its retry policy) or blocked (it needs the user: output is the question, the run waits for run_answer), and output: the subagent's final reply verbatim, including its closing yaml status block. usage (token counts), note and model (the model the subagent actually ran on) are optional. Then call run_wait again.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_task_submit(
@@ -815,6 +815,7 @@ impl WfMcp {
             output,
             usage,
             note,
+            model,
             workspace,
         }): Parameters<RunTaskSubmitArgs>,
         ctx: RequestContext<RoleServer>,
@@ -832,7 +833,7 @@ impl WfMcp {
             cost_usd: u.cost_usd,
         });
         to_call_tool_result(tools::run_task_submit(
-            &root, &run_id, &task_id, &status, output, usage, note, "host", client,
+            &root, &run_id, &task_id, &status, output, usage, note, "host", client, model,
         ))
     }
     // --- end host execution mode ---

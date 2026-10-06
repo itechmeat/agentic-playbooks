@@ -1505,13 +1505,20 @@ full `prompt` (the rendered node prompt, report contract included), the
 profile's `role_prompt`, the `skills` paths, the `workdir`, the `env` to set
 (`APB_RUN_DIR`, `APB_RUN_ID`, `APB_NODE_ID`, `APB_STATUS_FILE`), the `outputs` contract, a
 `deadline` from the node's `timeout_seconds`, and a `model_hint` for fallback
-entries and routed tiers. Run each with a subagent (independent tasks may run
+entries and routed tiers. The hint is only the model the profile declares for
+that chain step, labelled by `hint_source` (`primary`, `fallback` with its
+index, or `tier`), `fallback_of` (the attempt that closed the previous step
+and how: `failed`, `expired`, ...) and the one-line `hint_note`; the host
+picks the model itself. Run each with a subagent (independent tasks may run
 concurrently) and submit its final reply verbatim with `run_task_submit`
 (`succeeded`, `failed`, or `blocked` with the question for the user). The
 engine treats the reply like a finished CLI attempt: report block, status
 file, `success_check`, `require_verdict` (the submission counts as the verdict
 unless the subagent wrote the status file), the completion check, retries and
-fallbacks (each a new task), loops, gates and resume all work unchanged.
+fallbacks (each a new task, so a fallback's or a tier's task does appear in
+host mode: an expired deadline or an unanswered question advances the
+profile's chain at once, while a `failed` submission first spends the node's
+retries on the same step), loops, gates and resume all work unchanged.
 Sub-playbooks inherit the mode; their tasks show up on the parent run.
 
 What host mode ignores in a profile: the executor's `agent`, `model` and the

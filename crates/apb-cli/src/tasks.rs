@@ -32,6 +32,10 @@ pub(crate) enum TasksAction {
         /// Output tokens the reply consumed, when known
         #[arg(long)]
         output_tokens: Option<u64>,
+        /// The model the reply was actually produced on, when known (the
+        /// task's model hint is only the profile's declaration)
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 
@@ -108,6 +112,7 @@ pub(crate) fn tasks_cmd(
             note,
             input_tokens,
             output_tokens,
+            model,
         }) => submit(
             root,
             &run_id,
@@ -115,8 +120,8 @@ pub(crate) fn tasks_cmd(
             &status,
             &output_file,
             note,
-            input_tokens,
-            output_tokens,
+            (input_tokens, output_tokens),
+            model,
         ),
         None => list(root, run_id.as_deref(), full, json),
     }
@@ -148,9 +153,11 @@ fn list(root: &Path, run_id: Option<&str>, full: bool, json: bool) -> ExitCode {
             one_line(&t.task_id),
             one_line(&t.node),
             t.attempt,
-            t.model_hint
+            // The hint with its label: a fallback's or a tier's declared
+            // model is not the model the host runs.
+            t.hint_note
                 .as_deref()
-                .map(|m| format!("  model hint {}", one_line(m)))
+                .map(|n| format!("  {}", one_line(n)))
                 .unwrap_or_default()
         );
         println!("  workdir: {}", one_line(&t.workdir));
@@ -186,8 +193,8 @@ fn submit(
     status: &str,
     output_file: &Path,
     note: Option<String>,
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
+    (input_tokens, output_tokens): (Option<u64>, Option<u64>),
+    model: Option<String>,
 ) -> ExitCode {
     let Some(status) = SubmitStatus::parse(status) else {
         eprintln!("submit failed: --status must be succeeded, failed or blocked");
@@ -228,6 +235,7 @@ fn submit(
             note,
             submitted_by: "cli".to_string(),
             client: None,
+            model,
         },
     ) {
         Ok(r) => {

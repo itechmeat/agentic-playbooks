@@ -86,10 +86,19 @@ function eventNote(e: WfEvent): string | undefined {
     case 'wake_raised':
       return triageNote(r.triage)
     // Host execution mode (0.23.0): the request and submission rows.
-    case 'host_task_requested':
-      return `task ${String(r.task_id ?? '')}${r.model_hint ? `, model hint ${String(r.model_hint)}` : ''}`
+    // `hint_note` is the engine's own label of the model hint; an event
+    // from before it existed gets a short generic one.
+    case 'host_task_requested': {
+      const hint =
+        typeof r.hint_note === 'string' && r.hint_note
+          ? r.hint_note
+          : r.model_hint
+            ? `model hint ${String(r.model_hint)} (declared by the profile)`
+            : ''
+      return `task ${String(r.task_id ?? '')}${hint ? `, ${hint}` : ''}`
+    }
     case 'host_task_submitted':
-      return `task ${String(r.task_id ?? '')}: ${String(r.status ?? '')} by ${String(r.submitted_by ?? '')}${r.client ? ` (${String(r.client)})` : ''}`
+      return `task ${String(r.task_id ?? '')}: ${String(r.status ?? '')} by ${String(r.submitted_by ?? '')}${r.client ? ` (${String(r.client)})` : ''}${r.model ? `, ran on ${String(r.model)} (reported)` : ''}`
     case 'execution_fallback':
       return `no CLI could start, running as a host task${r.reason ? `: ${String(r.reason)}` : ''}`
     case 'worktree_resolved':

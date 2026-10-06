@@ -11,6 +11,7 @@ const task = (over: Partial<HostTaskEntry> = {}): HostTaskEntry => ({
   prompt: 'Plan the work',
   rolePrompt: null,
   modelHint: null,
+  hintNote: null,
   deadline: null,
   ...over,
 })
@@ -26,7 +27,12 @@ describe('HostTaskPanel', () => {
     const { body } = render(HostTaskPanel, {
       props: {
         tasks: [
-          task({ deadline: 60_000, modelHint: 'sonnet', rolePrompt: 'You plan.' }),
+          task({
+            deadline: 60_000,
+            modelHint: 'sonnet',
+            hintNote: 'HINT-NOTE',
+            rolePrompt: 'You plan.',
+          }),
           task({ taskId: 'build-1', node: 'build', prompt: 'Build it' }),
         ],
         now: 0,
@@ -36,6 +42,9 @@ describe('HostTaskPanel', () => {
     expect(body).toContain('plan-1')
     expect(body).toContain('build-1')
     expect(body).toContain('model hint sonnet')
+    // The hint is shown with the engine's label, once per labelled task.
+    expect(body).toContain('HINT-NOTE')
+    expect(body.match(/data-testid="host-task-hint"/g)).toHaveLength(1)
     expect(body).toContain('deadline in 60s')
     // The prompt is there but inside a closed <details>: hidden until opened.
     expect(body).toMatch(/<details[^>]*>\s*<summary[^>]*>Prompt<\/summary>/)
