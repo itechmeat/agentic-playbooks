@@ -41,6 +41,39 @@ pub(crate) fn child_execution_request(
     })
 }
 
+/// The role of every step of `entry`'s executor chain, in chain order: the
+/// routed tiers in front of the profile's executor (see
+/// `decision::routing::routed_entry`), the profile's own executor, then its
+/// fallback entries.
+pub(crate) fn chain_sources(
+    entry: &crate::manifest::ManifestProfile,
+) -> Vec<host_task::HintSource> {
+    use host_task::HintSource;
+    let profile = entry.name.clone();
+    let mut tiers = crate::decision::routing::routed_tier_names(entry);
+    if tiers.len() >= entry.chain.len() {
+        tiers.clear();
+    }
+    let lead = tiers.len();
+    let of = entry.chain.len().saturating_sub(lead + 1) as u32;
+    (0..entry.chain.len())
+        .map(|i| match i.cmp(&lead) {
+            std::cmp::Ordering::Less => HintSource::Tier {
+                tier: tiers[i].clone(),
+                profile: profile.clone(),
+            },
+            std::cmp::Ordering::Equal => HintSource::Primary {
+                profile: profile.clone(),
+            },
+            std::cmp::Ordering::Greater => HintSource::Fallback {
+                index: (i - lead) as u32,
+                of,
+                profile: profile.clone(),
+            },
+        })
+        .collect()
+}
+
 /// An agent attempt executed by the host session instead of a CLI.
 ///
 /// `run_cancellable` writes the task (`crate::host_task`), journals
@@ -60,8 +93,17 @@ pub(crate) struct HostAdapter<'a, 'j> {
     pub skills: Vec<String>,
     /// The node's `outputs` contract.
     pub outputs: Option<serde_json::Value>,
-    /// The model a fallback entry or tier routing asks for.
+    /// The model a fallback entry or tier routing declares for this step.
     pub model_hint: Option<String>,
+    /// The chain step this attempt runs: the label of `model_hint`.
+    pub hint_source: Option<host_task::HintSource>,
+    /// For the first attempt of a later chain step: what closed the step
+    /// before it.
+    pub fallback_of: Option<host_task::FallbackOf>,
+    /// Where the attempt records how its task closed (`succeeded`,
+    /// `failed`, `expired`, `interrupted`, `cancelled`,
+    /// `question_timeout`), for the next chain step's `fallback_of`.
+    pub closed: Option<&'a std::cell::Cell<Option<&'static str>>>,
     /// The node's `question_timeout_seconds` and `default_answer`, enforced
     /// while a `blocked` task waits for the person.
     pub question_timeout: Option<u64>,
@@ -128,6 +170,13 @@ struct Requested {
 }
 
 impl HostAdapter<'_, '_> {
+    /// Records how this attempt's task closed.
+    fn mark(&self, status: &'static str) {
+        if let Some(c) = self.closed {
+            c.set(Some(status));
+        }
+    }
+
     /// Opens a task for `prompt`, writes its files and journals the request.
     /// With `adopt` (an attempt's first request), a task of the node a dead
     /// driver left open is re-exposed under its own id instead, and any other
@@ -179,6 +228,8 @@ impl HostAdapter<'_, '_> {
             outputs: self.outputs.clone(),
             deadline_ms,
             model_hint: self.model_hint.clone(),
+            hint_source: self.hint_source.clone(),
+            fallback_of: self.fallback_of.clone(),
             env: env.clone(),
             requested_ts: now_ms,
         };
@@ -197,6 +248,13 @@ impl HostAdapter<'_, '_> {
             outputs: self.outputs.clone(),
             deadline_ms,
             model_hint: self.model_hint.clone(),
+            hint_source: self.hint_source.clone(),
+            fallback_of: self.fallback_of.clone(),
+            hint_note: host_task::describe_hint(
+                self.model_hint.as_deref(),
+                self.hint_source.as_ref(),
+                self.fallback_of.as_ref(),
+            ),
         })?;
         Ok(Requested {
             task_id,
@@ -216,6 +274,7 @@ impl HostAdapter<'_, '_> {
             submitted_by: "engine".to_string(),
             client: None,
             note: Some(note),
+            model: None,
         })
     }
 
@@ -230,11 +289,13 @@ impl HostAdapter<'_, '_> {
     ) -> Result<String, AgentFailure> {
         loop {
             if cancel.load(Ordering::Relaxed) {
+                self.mark("cancelled");
                 return Err(AgentFailure::new(ErrorClass::Transport, "cancelled"));
             }
             if let Some(c) = control {
                 (c.on_poll)();
                 if c.interrupt.load(Ordering::Relaxed) {
+                    self.mark("interrupted");
                     return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "host task interrupted by the supervisor",
@@ -250,6 +311,7 @@ impl HostAdapter<'_, '_> {
             )
             .map_err(failure)?
             {
+                self.mark("question_timeout");
                 return Err(AgentFailure::new(ErrorClass::Timeout, msg));
             }
             let answers: Vec<_> = read_answers_after(self.run_dir, None)
@@ -369,9 +431,11 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                         submitted_by: sub.submitted_by.clone(),
                         client: sub.client.clone(),
                         note: sub.note.clone(),
+                        model: sub.model.clone(),
                     })
                     .map_err(failure)?;
                 if sub.status != SubmitStatus::Blocked {
+                    self.mark(sub.status.as_str());
                     adopt_verdict();
                     return Ok(self.report(task, &sub));
                 }
@@ -404,12 +468,14 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                 continue;
             }
             if cancel.load(Ordering::Relaxed) {
+                self.mark("cancelled");
                 let _ = self.close(&task_id, "cancelled", "the run was stopped".into());
                 return Err(AgentFailure::new(ErrorClass::Transport, "cancelled"));
             }
             if let Some(c) = control {
                 (c.on_poll)();
                 if c.interrupt.load(Ordering::Relaxed) {
+                    self.mark("interrupted");
                     let _ = self.close(
                         &task_id,
                         "interrupted",
@@ -430,10 +496,131 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                     "host_task_timeout: host task `{task_id}` of node `{}` was not submitted within {secs}s",
                     task.node
                 );
+                self.mark("expired");
                 let _ = self.close(&task_id, "expired", msg.clone());
                 return Err(AgentFailure::new(ErrorClass::Timeout, msg));
             }
             std::thread::sleep(HOST_POLL);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{ManifestProfile, ManifestTier};
+    use host_task::HintSource;
+
+    fn ri(model: &str) -> crate::invocation::ResolvedInvocation {
+        crate::invocation::ResolvedInvocation {
+            agent_id: "claude".into(),
+            model: model.into(),
+            spec: crate::invocation::builtin("claude").unwrap(),
+            soul_delivery: apb_core::config::SoulDelivery::default(),
+            canonical_executable: PathBuf::from("/bin/true"),
+            executable_fingerprint: "0:0".into(),
+        }
+    }
+
+    fn tier(name: &str, model: Option<&str>) -> ManifestTier {
+        ManifestTier {
+            name: name.into(),
+            for_work: "work".into(),
+            invocation: model.map(ri),
+        }
+    }
+
+    /// Tiers `light`, `mid`, the executor (the tier without an invocation,
+    /// `use: executor`, sitting in the middle of the list), then `heavy`;
+    /// chain: the primary `exec` and two fallbacks `fb1`, `fb2`.
+    fn entry() -> ManifestProfile {
+        ManifestProfile {
+            scope: "project".into(),
+            name: "p".into(),
+            profile_digest: String::new(),
+            bundle_digest: String::new(),
+            soul: String::new(),
+            soul_requirement: apb_core::profile::SoulRequirement::Any,
+            skills: Vec::new(),
+            chain: vec![ri("exec"), ri("fb1"), ri("fb2")],
+            ephemeral: false,
+            hermetic: false,
+            zcode_mode: None,
+            tiers: vec![
+                tier("light", Some("l")),
+                tier("mid", Some("m")),
+                tier("executor", None),
+                tier("heavy", Some("h")),
+            ],
+            routed_tier: None,
+            cascade: 0,
+        }
+    }
+
+    fn labels(e: &ManifestProfile) -> Vec<(String, String)> {
+        e.chain
+            .iter()
+            .zip(chain_sources(e))
+            .map(|(ri, s)| {
+                let role = match s {
+                    HintSource::Primary { .. } => "primary".to_string(),
+                    HintSource::Fallback { index, of, .. } => format!("fallback {index}/{of}"),
+                    HintSource::Tier { tier, .. } => format!("tier {tier}"),
+                    HintSource::HostFallback { .. } => "host fallback".to_string(),
+                };
+                (ri.model.clone(), role)
+            })
+            .collect()
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn every_chain_step_is_labelled_by_its_role_in_the_profile() {
+        let e = entry();
+        assert_eq!(
+            labels(&e),
+            pairs(&[
+                ("exec", "primary"),
+                ("fb1", "fallback 1/2"),
+                ("fb2", "fallback 2/2")
+            ])
+        );
+        // Routed below the executor: every tier up to the executor, then the
+        // profile's own chain with both fallbacks.
+        let below = crate::decision::routing::routed_entry(&e, "light").unwrap();
+        assert_eq!(below.cascade, 2);
+        assert_eq!(
+            labels(&below),
+            pairs(&[
+                ("l", "tier light"),
+                ("m", "tier mid"),
+                ("exec", "primary"),
+                ("fb1", "fallback 1/2"),
+                ("fb2", "fallback 2/2"),
+            ])
+        );
+        let mid = crate::decision::routing::routed_entry(&e, "mid").unwrap();
+        assert_eq!(
+            labels(&mid)[..2],
+            pairs(&[("m", "tier mid"), ("exec", "primary")])[..]
+        );
+        // A tier above the executor runs first with no cascade: it is still
+        // a tier, and the profile's executor behind it is the primary.
+        let above = crate::decision::routing::routed_entry(&e, "heavy").unwrap();
+        assert_eq!(above.cascade, 0);
+        assert_eq!(
+            labels(&above),
+            pairs(&[
+                ("h", "tier heavy"),
+                ("exec", "primary"),
+                ("fb1", "fallback 1/2"),
+                ("fb2", "fallback 2/2"),
+            ])
+        );
     }
 }

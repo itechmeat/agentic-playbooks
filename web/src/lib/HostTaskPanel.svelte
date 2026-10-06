@@ -26,9 +26,12 @@
             <span class="font-mono text-xs">{t.node}</span>
             <Badge variant="outline" class="h-5 text-[10px]">attempt {t.attempt}</Badge>
             {#if t.modelHint}
-              <Badge variant="outline" class="h-5 text-[10px]">model hint {t.modelHint}</Badge>
+              <Badge variant="outline" class="h-5 text-[10px]" title={t.hintNote ?? undefined}>model hint {t.modelHint}</Badge>
             {/if}
           </div>
+          {#if t.hintNote}
+            <p class="hint-note" data-testid="host-task-hint">{t.hintNote}</p>
+          {/if}
           <div class="text-[11px] text-muted-foreground">
             <span class="font-mono">{t.taskId}</span>
             {#if deadlineNote(t.deadline, now)}
@@ -50,3 +53,12 @@
     </Card.Content>
   </Card.Root>
 {/if}
+
+<style>
+  /* Plain CSS over the app's variables: the labelled model hint. */
+  .hint-note {
+    margin: 0;
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+</style>

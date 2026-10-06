@@ -628,6 +628,10 @@ pub struct RunTaskSubmitArgs {
     /// A short note for the journal (optional).
     #[serde(default)]
     pub note: Option<String>,
+    /// The model the subagent actually ran on, when you know it (optional).
+    /// Journaled as reported; `model_hint` is only the profile's declaration.
+    #[serde(default)]
+    pub model: Option<String>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,

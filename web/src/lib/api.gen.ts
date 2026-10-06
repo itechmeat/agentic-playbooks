@@ -68,6 +68,10 @@ answer_by: string,
  */
 asked_at: number, };
 
+export type HintSource = { "kind": "primary", profile: string, } | { "kind": "fallback", index: number, of: number, profile: string, } | { "kind": "tier", tier: string, profile: string, } | { "kind": "host_fallback", profile: string, };
+
+export type FallbackOf = { attempt: number, reason: string, };
+
 export type PendingHostTask = { 
 /**
  * The run the task belongs to: the run itself, or a sub-playbook child
@@ -102,9 +106,27 @@ outputs: unknown,
  */
 deadline: number | null, 
 /**
- * The model a fallback entry or tier routing asks for (a hint).
+ * The model the profile declares for this chain step (a fallback
+ * entry or a routed tier): a hint, not a measured fact. The host picks
+ * its own model; the profile's own executor gives no hint.
  */
 model_hint: string | null, 
+/**
+ * Which chain step the task runs (`primary`, `fallback`, `tier`):
+ * the label of `model_hint`. `None` for an older run's task.
+ */
+hint_source: HintSource | null, 
+/**
+ * For the first task of a later chain step: the attempt that closed
+ * the previous step and how (`failed`, `expired`, ...).
+ */
+fallback_of: FallbackOf | null, 
+/**
+ * `model_hint`, `hint_source` and `fallback_of` as one English line,
+ * e.g. `model hint M (fallback 1 of 1 declared by profile P after
+ * attempt 1 failed; the host picks its own model)`.
+ */
+hint_note: string | null, 
 /**
  * Environment variables to set for the subagent.
  */

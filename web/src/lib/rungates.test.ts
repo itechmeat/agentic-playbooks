@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { deadlineNote, runGates } from './rungates'
 import type { ProgressSummary, RunDetail, WfEvent } from './types'
+import type { PendingHostTask } from './api.gen'
 
 const progress = (over: Partial<ProgressSummary> = {}): ProgressSummary => ({
   percent: 0,
@@ -137,6 +138,9 @@ describe('review recommendation', () => {
       outputs: null,
       deadline: null,
       model_hint: 'sonnet',
+      hint_source: { kind: 'fallback' as const, index: 1, of: 1, profile: 'main' },
+      fallback_of: { attempt: 1, reason: 'failed' },
+      hint_note: 'NOTE',
       env: {},
       requested_at: 1,
     }
@@ -150,9 +154,19 @@ describe('review recommendation', () => {
         prompt: 'Plan it',
         rolePrompt: 'You plan.',
         modelHint: 'sonnet',
+        hintNote: 'NOTE',
         deadline: null,
       },
     ])
+  })
+
+  it('reads a task without a hint note from an older server as none', () => {
+    const pending = {
+      run_id: 'r', task_id: 'plan-1', node: 'plan', attempt: 1, prompt: 'p', role_prompt: null,
+      skills: [], workdir: '/w', outputs: null, deadline: null, model_hint: null, env: {}, requested_at: 1,
+    } as unknown as PendingHostTask
+    const d = detail([], progress({ waiting_kind: 'host_task', pending_tasks: [pending] }), 'running')
+    expect(runGates(d).tasks[0].hintNote).toBeNull()
   })
 
   it('reads a payload from a server without pending_tasks as none', () => {

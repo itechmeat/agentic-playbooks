@@ -180,6 +180,28 @@ pub(crate) fn routed_entry(entry: &ManifestProfile, tier: &str) -> Option<Manife
     Some(routed)
 }
 
+/// The tiers a routed entry's chain starts with, in chain order: the routed
+/// tier, then (below the profile's executor) every tier with an executor up
+/// to it, mirroring [`routed_entry`]. Empty for an entry that is not routed.
+pub(crate) fn routed_tier_names(entry: &ManifestProfile) -> Vec<String> {
+    let Some(tier) = entry.routed_tier.as_deref() else {
+        return Vec::new();
+    };
+    let mut names = vec![tier.to_string()];
+    let (_, exec_idx) = executor_tier(entry);
+    if let Some(idx) = entry.tiers.iter().position(|t| t.name == tier)
+        && idx < exec_idx
+    {
+        names.extend(
+            entry.tiers[idx + 1..exec_idx.min(entry.tiers.len())]
+                .iter()
+                .filter(|t| t.invocation.is_some())
+                .map(|t| t.name.clone()),
+        );
+    }
+    names
+}
+
 /// Asks once for this execution. Fail-open: anything but an enforced answer
 /// runs the profile's own executor.
 pub(crate) fn route(runner: &DecisionRunner, journal: &dyn DecisionJournal, s: Step) -> Plan {

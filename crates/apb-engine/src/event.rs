@@ -701,10 +701,35 @@ pub enum EventPayload {
         /// node's timeout); `None` without a timeout.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deadline_ms: Option<u64>,
-        /// The model a fallback entry or tier routing asks for; a hint the
-        /// host may ignore.
+        /// The model a fallback entry or tier routing declares for this
+        /// chain step; a hint the host may ignore (the host picks its own
+        /// model). The profile's own executor gives none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_hint: Option<String>,
+        /// Which step of the profile's executor chain the task runs (its
+        /// primary, a fallback entry or a routed tier): the label of
+        /// `model_hint`. `None` for old logs. Additive, read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        hint_source: Option<crate::host_task::hint::HintSource>,
+        /// For the first task of a later chain step: the attempt that closed
+        /// the previous step and how (`failed`, `expired`, ...), so the
+        /// journal says why this task exists before `fallback_triggered`
+        /// lands at the node's end. Additive, read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        fallback_of: Option<crate::host_task::hint::FallbackOf>,
+        /// `model_hint`, `hint_source` and `fallback_of` as the one English
+        /// line every surface shows (the same text as a pending task's
+        /// `hint_note`). `None` for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint_note: Option<String>,
     },
     /// A host task was closed: the host submitted it (`submitted_by: host`,
     /// `client` names the MCP host), or the engine closed it (`submitted_by:
@@ -736,6 +761,10 @@ pub enum EventPayload {
         client: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// The model the host reports it actually ran the task on, when it
+        /// says so; never inferred by apb. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// A `cli` run started by an MCP host session could not start any CLI
     /// of an agent step's chain (every binary missing, or not logged in), so
@@ -1296,7 +1325,7 @@ where
 }
 
 /// [`lenient_default`] for an optional field.
-fn lenient_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+pub(crate) fn lenient_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned,
@@ -1690,6 +1719,41 @@ mod tests {
         match back {
             EventPayload::AttemptFinished { session, .. } => assert_eq!(session, None),
             other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_task_events_without_the_hint_labels_still_decode() {
+        // A line an apb before the hint labels wrote: no `hint_source`,
+        // `fallback_of` or submission `model`.
+        let old = r#"{"type":"host_task_requested","task_id":"w-2","node":"w","attempt":2,"prompt_ref":"tasks/w-2/prompt.md","workdir":"/w","model_hint":"sonnet"}"#;
+        match serde_json::from_str::<EventPayload>(old).unwrap() {
+            EventPayload::HostTaskRequested {
+                model_hint,
+                hint_source,
+                fallback_of,
+                ..
+            } => {
+                assert_eq!(model_hint.as_deref(), Some("sonnet"));
+                assert_eq!((hint_source, fallback_of), (None, None));
+            }
+            other => panic!("expected HostTaskRequested, got {other:?}"),
+        }
+        let old = r#"{"type":"host_task_submitted","task_id":"w-2","status":"failed","submitted_by":"host"}"#;
+        match serde_json::from_str::<EventPayload>(old).unwrap() {
+            EventPayload::HostTaskSubmitted { model, .. } => assert_eq!(model, None),
+            other => panic!("expected HostTaskSubmitted, got {other:?}"),
+        }
+        // A shape a newer apb might write reads as absent instead of failing
+        // the journal.
+        let newer = r#"{"type":"host_task_requested","task_id":"w-2","node":"w","attempt":2,"hint_source":{"kind":"something_new"},"fallback_of":{"attempt":"one"}}"#;
+        match serde_json::from_str::<EventPayload>(newer).unwrap() {
+            EventPayload::HostTaskRequested {
+                hint_source,
+                fallback_of,
+                ..
+            } => assert_eq!((hint_source, fallback_of), (None, None)),
+            other => panic!("expected HostTaskRequested, got {other:?}"),
         }
     }
 

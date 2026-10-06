@@ -122,7 +122,23 @@ profile no longer applies:
   cold with reason `host_mode`);
 - turned into hints: the `model` of each fallback entry and of a routed tier
   becomes the host task's `model_hint` (the profile's own model gives none);
-  the host may honor it or not;
+  the host may honor it or not. The chain itself still engages, and each
+  step is a new host task: an expired deadline or an unanswered question
+  advances to the next fallback or tier at once, while a `failed`
+  submission (or a reply the status file, `success_check` or the completion
+  check rejects) first spends the node's retries on the same step. A host
+  submission is a reply, so a routed tier below the executor spends those
+  retries too; only a CLI agent failure there goes up a tier at once. The
+  hint is only the declared model of that step, never the model the host
+  ran, so every surface labels it with its source (`hint_source`: `primary`,
+  `fallback` with its index, `tier`, or `host_fallback` for the host step
+  of a `cli` run whose CLIs could not start) and, on the first task of a
+  later step, with what closed the previous one (`fallback_of`: the attempt
+  and `failed`, `expired`, `question_timeout`, ...). `apb tasks` prints it
+  as `model hint M (fallback 1 of 1 declared by profile P after attempt 1
+  failed; the host picks its own model)`. With a tier routed above the
+  executor, that tier is the engine's first step and the profile's executor
+  behind it is labelled `primary` but reached like a fallback;
 - still in force: the role prompt (`SOUL.md`, handed over as `role_prompt`),
   the skills (their snapshot copies are materialized as for a CLI step and
   their paths handed over), and on the node `timeout_seconds` (the task's

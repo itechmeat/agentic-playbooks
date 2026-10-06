@@ -213,6 +213,105 @@ fn apb_tasks_lists_and_submits_until_the_run_succeeds() {
     );
 }
 
+#[test]
+fn apb_tasks_labels_a_fallback_hint_with_its_source_and_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    fs::write(
+        root.join(".apb/profiles/main/profile.yaml"),
+        "name: main\ndescription: d\nexecutor:\n  agent: claude-code\n  model: haiku\n  fallbacks:\n    - { agent: claude, model: sonnet }\n",
+    )
+    .unwrap();
+    let run_id = start_detached(root);
+    let plan = task_of(root, &run_id, "plan");
+    let plan_id = plan["task_id"].as_str().unwrap().to_string();
+    let out = crate::common::apb_std()
+        .args(["tasks", "submit", &run_id, &plan_id, "--status", "failed"])
+        .args(["--output-file", "-"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.take().unwrap().write_all(b"could not")?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fallback = poll("the fallback task", || {
+        tasks_json(root, &run_id)
+            .into_iter()
+            .find(|t| t["task_id"] != plan_id.as_str())
+    });
+    assert_eq!(fallback["model_hint"], "sonnet");
+    assert_eq!(
+        fallback["hint_source"],
+        json!({ "kind": "fallback", "index": 1, "of": 1, "profile": "main" })
+    );
+    assert_eq!(
+        fallback["fallback_of"],
+        json!({ "attempt": 1, "reason": "failed" })
+    );
+    let listing = crate::common::apb_std()
+        .args(["tasks", &run_id])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let header = format!(
+        "{run_id}  {}  node plan  attempt 2  model hint sonnet (fallback 1 of 1 declared by profile main after attempt 1 failed; the host picks its own model)",
+        fallback["task_id"].as_str().unwrap()
+    );
+    assert!(
+        text.lines().any(|l| l == header),
+        "expected `{header}` in:\n{text}"
+    );
+    // `--model` journals the model the host reports it ran on.
+    let fallback_id = fallback["task_id"].as_str().unwrap();
+    let file = root.join("reply.md");
+    fs::write(&file, "built").unwrap();
+    let out = crate::common::apb_std()
+        .args([
+            "tasks",
+            "submit",
+            &run_id,
+            fallback_id,
+            "--status",
+            "succeeded",
+        ])
+        .arg("--output-file")
+        .arg(&file)
+        .args(["--model", "  host-model-x  "])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let model = poll("the submission event", || {
+        read_all(&run_dir(root, &run_id))
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::HostTaskSubmitted { task_id, model, .. }
+                    if task_id == fallback_id =>
+                {
+                    Some(model)
+                }
+                _ => None,
+            })
+    });
+    assert_eq!(model.as_deref(), Some("host-model-x"));
+}
+
 fn kill_driver(root: &Path, run_id: &str) {
     let dir = run_dir(root, run_id);
     let pid = poll("driver.pid", || apb_engine::driver::read_driver_pid(&dir));

@@ -772,10 +772,18 @@ fn supervisor_wait_event_surfaces_a_host_task_of_the_supervised_run() {
         None,
         "host",
         Some("test".into()),
+        Some("host-model-x".into()),
     )
     .unwrap();
     assert_eq!(submitted["node"], "work");
     wait_for_status(dir.path(), &run_id, "succeeded");
+    // The `model` argument lands on the submission event as reported.
+    let events = apb_engine::event::read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    let model = events.iter().find_map(|e| match &e.payload {
+        apb_engine::event::EventPayload::HostTaskSubmitted { model, .. } => Some(model.clone()),
+        _ => None,
+    });
+    assert_eq!(model, Some(Some("host-model-x".to_string())));
     // With nothing left to do, the host run's status keeps its execution
     // block but carries no `pending_tasks`, the same as `run_wait`.
     let status = apb_mcp::tools::run_status(dir.path(), &run_id).unwrap();
