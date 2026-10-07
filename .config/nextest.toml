@@ -49,7 +49,7 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 3 }
 # Twice the cores of the 3 and 4 vCPU hosted runners this profile runs on (CI,
-# the release gate, every release build leg). Most tests wait on child
+# and every leg of the release gate). Most tests wait on child
 # processes, sockets and timers rather than compute: at one worker per core a
 # 4-core run kept only about 1.4 cores busy. Measured locally, pinned to 4
 # cores, the suite took 72s with 4 workers and 40s with 8, with no failures;

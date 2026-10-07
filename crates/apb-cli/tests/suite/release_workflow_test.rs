@@ -195,6 +195,47 @@ fn a_release_is_published_only_after_the_test_gate_succeeded() {
 }
 
 #[test]
+fn the_release_gate_runs_on_every_shipped_os() {
+    // The build legs only build, so the gate alone carries the per-platform
+    // checks. Its matrix must keep a Linux leg and a leg on each macOS runner
+    // dist builds on (dist 0.32 defaults: macos-14 for arm, macos-15-intel
+    // for Intel); dropping one would let a platform-only break ship.
+    let doc = load(&repo_root().join(".github/workflows/test-gate.yml"));
+    let gate = doc
+        .get("jobs")
+        .and_then(|j| j.get("gate"))
+        .expect("test-gate.yml has a `gate` job");
+    let legs = gate
+        .get("strategy")
+        .and_then(|s| s.get("matrix"))
+        .and_then(|m| m.get("include"))
+        .and_then(Value::as_sequence)
+        .expect("gate matrix include list");
+    let runners: Vec<&str> = legs
+        .iter()
+        .filter_map(|l| l.get("runner").and_then(Value::as_str))
+        .collect();
+    assert!(
+        runners.iter().any(|r| r.starts_with("ubuntu-")),
+        "no Linux gate leg: {runners:?}"
+    );
+    for want in ["macos-14", "macos-15-intel"] {
+        assert!(
+            runners.contains(&want),
+            "no gate leg on {want}: {runners:?}"
+        );
+    }
+
+    // Every tag must ship with its reviewed release notes.
+    let notes_checked = Release::steps(gate).iter().any(|s| {
+        s.get("run")
+            .and_then(Value::as_str)
+            .is_some_and(|r| r.contains("docs/release-notes/${GITHUB_REF_NAME}.md"))
+    });
+    assert!(notes_checked, "the gate must check the tag's release notes");
+}
+
+#[test]
 fn published_artifacts_get_a_build_provenance_attestation_first() {
     let release = Release::load();
     let (publisher_id, publisher) = release.publisher();

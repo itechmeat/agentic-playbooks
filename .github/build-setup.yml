@@ -8,29 +8,8 @@
     cd web
     bun install --frozen-lockfile
     bun run build
-# In-build test gate: the same checks, run on every release platform (the
-# ./test-gate job runs on Linux only). The hard publish gate is that job: it is
-# a local-artifacts job (dist-workspace.toml), so the generated host job needs
-# it and refuses to publish unless it succeeded. These steps add the per-
-# platform run; a failure here fails the build leg, which host also refuses.
-- name: Ensure rustfmt and clippy components
-  shell: bash
-  run: rustup component add rustfmt clippy
-- name: Install cargo-nextest
-  uses: taiki-e/install-action@45fceba0fc176f41d2aee1ca9d6598ba628eea62 # nextest
-- name: Gate - format check
-  shell: bash
-  run: cargo fmt --all -- --check
-- name: Gate - clippy
-  shell: bash
-  run: cargo clippy --workspace --all-targets -- -D warnings
-- name: Gate - test
-  shell: bash
-  run: cargo nextest run --profile ci --workspace
-- name: Gate - doctests
-  shell: bash
-  run: cargo test --workspace --doc
-- name: Gate - release notes must exist for this tag
-  if: github.ref_type == 'tag'
-  shell: bash
-  run: test -f "docs/release-notes/${GITHUB_REF_NAME}.md"
+# Build legs only build. The release test gate (fmt, clippy, tests, doctests,
+# the release-notes check) runs in .github/workflows/test-gate.yml, one leg per
+# shipped OS, beside these builds. It is a local-artifacts job
+# (dist-workspace.toml), so the generated host job needs it and refuses to
+# publish unless every gate leg succeeded.

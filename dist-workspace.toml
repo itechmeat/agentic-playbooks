@@ -18,10 +18,12 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 # Whether to install an updater program
 install-updater = true
 github-build-setup = "../build-setup.yml"
-# The release test gate. As a local-artifacts job it runs next to the
-# platform builds on every publishing run, and the generated host job refuses
-# to publish unless it finished with success (a failed gate is not "skipped").
-# As a plan job its failure only skipped the builds, which host tolerates.
+# The release test gate, one matrix leg per shipped OS (Linux, macOS arm,
+# macOS Intel). As a local-artifacts job it runs next to the platform builds
+# on every publishing run, and the generated host job refuses to publish
+# unless it finished with success (a failed leg fails the job; a failed gate
+# is not "skipped"). As a plan job its failure only skipped the builds, which
+# host tolerates. The build legs themselves only build (build-setup.yml).
 local-artifacts-jobs = ["./test-gate"]
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./release-notes"]
@@ -34,6 +36,18 @@ github-attestations = true
 github-attestations-phase = "host"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+
+# Runner images, pinned so a moving `ubuntu-latest` never changes a release.
+# `global` covers the jobs that compile nothing (plan, global artifacts, host,
+# the Homebrew publish, announce). The gnu build stays on ubuntu-22.04 (dist's
+# default, not listed) on purpose: the binary links against the build host's
+# glibc, and the oldest image keeps it running on the most distributions.
+# Ubuntu 22.04 images are deprecated (retired 2027-04-17), so that leg must
+# move before then. The musl binary is static, so its build host does not
+# matter to users.
+[dist.github-custom-runners]
+global = "ubuntu-26.04"
+x86_64-unknown-linux-musl = "ubuntu-26.04"
 
 # Actions the generated release.yml uses, pinned to full commit SHAs
 # (tag in the comment). Dependabot's github-actions ecosystem bumps these.

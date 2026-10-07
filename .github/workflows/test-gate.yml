@@ -17,14 +17,52 @@ permissions:
   contents: read
 
 jobs:
+  # The whole release test gate, one leg per OS the release ships for. The
+  # build legs in release.yml only build; every check that blocks publishing
+  # runs here, in parallel to them. release.yml calls this workflow as the
+  # local-artifacts job `custom-test-gate`, and a failed leg fails that job,
+  # so the generated host job (which requires it to be `success`) does not
+  # publish.
+  #
+  # Linux: one leg covers both Linux targets. The gnu and musl build legs ran
+  # the same host tests on the same OS, so they only repeated this leg.
+  # macOS: the arm and Intel legs run on the runners dist builds on
+  # (macos-14 and macos-15-intel), so a platform-specific break still stops
+  # the release, now without delaying the build next to it.
   gate:
-    runs-on: ubuntu-latest
-    # The gate that a tagged release actually ships through, so it gets the
-    # same ceiling as CI. Without one the default is 360 minutes, and a hung
-    # test would hold a release for six hours reporting nothing. A stuck TEST
-    # is caught far earlier, and by name, by nextest's per-test terminate-after
-    # (.config/nextest.toml).
-    timeout-minutes: 30
+    name: gate (${{ matrix.name }})
+    strategy:
+      # Every leg reports: one platform failing still shows whether the
+      # others pass. The gate fails either way.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-26.04
+            # Same OS and tests as CI's test-linux job, so its cache on main
+            # is a near-complete warm start here.
+            cache-key: linux-test
+            # fmt and the release-notes check are platform-independent: run
+            # them once.
+            linux: true
+            # The gate a tagged release ships through gets the same ceiling
+            # as CI. Without one the default is 360 minutes.
+            timeout: 30
+          - name: macos-arm
+            runner: macos-14
+            linux: false
+            # No cache saved on main matches this runner: a cold build plus
+            # clippy and the suite. The ceiling is headroom; a stuck TEST is
+            # caught far earlier, and by name, by nextest's per-test
+            # terminate-after (.config/nextest.toml).
+            timeout: 45
+          - name: macos-intel
+            runner: macos-15-intel
+            linux: false
+            # The slowest leg (measured about 17 minutes of checks, cold).
+            timeout: 45
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,13 +86,14 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
-      # Restores what CI's test-linux job saved on main (same tests, same
-      # OS). Nothing is saved: a cache written on a tag ref is visible only to
-      # that tag, so no later run could ever read it.
+      # Linux only: restores what CI's test-linux job saved on main (same
+      # tests, same OS). Nothing is saved: a cache written on a tag ref is
+      # visible only to that tag, so no later run could ever read it.
       - name: Cache cargo
+        if: matrix.cache-key
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: linux-test
+          shared-key: ${{ matrix.cache-key }}
           save-if: false
 
       # Prebuilt binary: seconds to install, nothing compiled into target/, so
@@ -63,8 +102,11 @@ jobs:
         uses: taiki-e/install-action@45fceba0fc176f41d2aee1ca9d6598ba628eea62 # nextest
 
       - name: Format check
+        if: matrix.linux
         run: cargo fmt --all -- --check
 
+      # On every leg: cfg(target_os) code only compiles, and so only lints,
+      # on its own platform.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -82,5 +124,5 @@ jobs:
       # Only a tag ref ships, so PR plan runs skip this; failing here on a tag
       # is deliberate - no silent fallback to an empty or auto-generated body.
       - name: Release notes must exist for this tag
-        if: github.ref_type == 'tag'
+        if: matrix.linux && github.ref_type == 'tag'
         run: test -f "docs/release-notes/${GITHUB_REF_NAME}.md"
