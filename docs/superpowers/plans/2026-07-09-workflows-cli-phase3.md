@@ -18,7 +18,7 @@
 - Project version stays at `0.1.0` (in development); it is not bumped per phase.
 - Check dependency versions online at the time of `cargo add` and pin them (project rule). For `rmcp`, take the current stable version, check its current API (via Context7/docs) before writing the binding; the macro/trait API shown below is schematic and must be brought in line with the actual API of the installed version.
 - Do not call the real `claude` in tests: test the run tools on a workflow without agent_task (start -> prompt -> finish).
-- Run code-ranker before marking a task done; navigate the code via codegraph.
+- Run code-ranker before marking a task done; search the code with zg (`zg query --rg -F <symbol> <path>`).
 - Single engine: if `wf serve` is already running in this folder, `wf mcp` becoming a full thin client of its API comes later (Phase 4+); Phase 3 is boot-core mode, so this doc should warn against running `wf mcp` and `wf serve` in the same folder at the same time for write runs (the working-folder lock serializes them regardless, but this avoids confusion).
 
 ---

@@ -213,13 +213,16 @@ published release body via a post-announce job.
   materialized snapshot copies for isolated nodes).
 - Profile and skill names: `[a-z0-9][a-z0-9-]*`, at most 64 chars; path segments
   are validated with `is_safe_segment` / `validate_profile_name`.
-- Navigate the code through codegraph (symbol/edge index) rather than ad-hoc
-  grep where possible.
+- Search the code with zg (zvec-grep) over the live files:
+  `zg query --rg -F <symbol> <path>` or `zg query --fts <name>` annotate each
+  ripgrep hit with its enclosing symbol and line range; the semantic
+  `zg query "<question>"` is for orientation in unfamiliar code only. The index
+  lives in `.zvec-grep/` (git-ignored); rebuild it with `zg index` after a
+  merge. Verify an edit (no `oldName` left) with plain `rg`/`git grep`, never
+  through an index.
 
 ## Claude-specific
 
-- This project has a CodeGraph MCP server (`codegraph_*` tools): prefer it for
-  structural questions (definitions, callers, impact) over grep.
 - Commit messages end with the Co-Authored-By trailer for the acting model;
   never add a visible AI-authorship marker to public prose.
 

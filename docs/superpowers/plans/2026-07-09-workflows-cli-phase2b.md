@@ -17,7 +17,7 @@
 - Server error messages are in English; comments/documentation are in Russian.
 - No em dashes and no exclamation marks in documentation or UI text.
 - The workflow/run web page occupies the full area: a 40px control header, no side panels or footer (as in Phase 1). The graph lays out horizontally (LR).
-- Run code-ranker before marking a task done; navigate the code via codegraph.
+- Run code-ranker before marking a task done; search the code with zg (`zg query --rg -F <symbol> <path>`).
 - Tests never invoke the real `claude`: to seed runs, use a workflow without agent_task (start -> prompt -> finish), or write `events.jsonl` by hand in the `wf_engine::event::Event` format.
 
 ---

@@ -19,7 +19,7 @@
 - Any client-supplied `run_id`/`token` that ends up in a path goes through `wf_core::registry::is_safe_segment`.
 - Autonomous runs and all existing tests stay green; the behavior of Phase 3's non-supervisor tools does not change (except for the new optional `supervise` field on `workflow_run`).
 - `workflow_patch` and patch versions are NOT part of 4b (Phase 6). Of the capabilities, 4b applies `observe` and `retry`; there is no `patch_workflow` tool, `edit_workspace` is declarative only.
-- Run code-ranker before marking a task done; navigate via codegraph. Do not invoke a real `claude` in tests: verify the supervisor logic on a workflow with an agent_task using a `WF_AGENT_CMD` stub (failing, or failing-then-succeeding) or with no agent at all.
+- Run code-ranker before marking a task done; search with zg (`zg query --rg -F <symbol> <path>`). Do not invoke a real `claude` in tests: verify the supervisor logic on a workflow with an agent_task using a `WF_AGENT_CMD` stub (failing, or failing-then-succeeding) or with no agent at all.
 
 ---
 
