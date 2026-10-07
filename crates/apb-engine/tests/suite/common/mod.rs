@@ -194,22 +194,24 @@ pub fn spawn_http(
 }
 
 /// Reads one HTTP request (request line + headers, then a `Content-Length`
-/// body when present) and returns the raw text.
+/// or `Transfer-Encoding: chunked` body when present) and returns the raw
+/// text: the head followed by the decoded body.
 fn read_http_request(stream: &mut TcpStream) -> String {
     let mut reader = BufReader::new(stream);
     let mut head = String::new();
     let mut content_length = 0usize;
+    let mut chunked = false;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
             break;
         }
-        if let Some(rest) = line
-            .to_ascii_lowercase()
-            .strip_prefix("content-length:")
-            .map(str::trim)
-        {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:").map(str::trim) {
             content_length = rest.parse().unwrap_or(0);
+        }
+        if let Some(rest) = lower.strip_prefix("transfer-encoding:") {
+            chunked = rest.split(',').any(|t| t.trim() == "chunked");
         }
         let done = line == "\r\n" || line == "\n";
         head.push_str(&line);
@@ -217,11 +219,74 @@ fn read_http_request(stream: &mut TcpStream) -> String {
             break;
         }
     }
-    if content_length > 0 {
+    if chunked {
+        // ureq 3 sends a body-less POST as `transfer-encoding: chunked` and
+        // writes the `0\r\n\r\n` terminator as a separate write. Replying and
+        // closing with those bytes still unread makes the kernel send an RST,
+        // and on macOS the client's next `setsockopt` then fails with EINVAL
+        // ("Invalid argument (os error 22)"). Drain every chunk, the zero
+        // chunk and the trailers before replying.
+        head.push_str(&read_chunked_body(&mut reader));
+    } else if content_length > 0 {
         let mut body = vec![0u8; content_length];
         if reader.read_exact(&mut body).is_ok() {
             head.push_str(&String::from_utf8_lossy(&body));
         }
     }
     head
+}
+
+/// Decodes a chunked request body up to and including the zero-size chunk
+/// and the trailer section, returning the concatenated chunk data. Stops
+/// early (best-effort) on EOF or a malformed size line.
+fn read_chunked_body(reader: &mut impl BufRead) -> String {
+    let mut body = Vec::new();
+    loop {
+        let mut size_line = String::new();
+        if reader.read_line(&mut size_line).unwrap_or(0) == 0 {
+            return String::from_utf8_lossy(&body).into_owned();
+        }
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let Ok(size) = usize::from_str_radix(size_hex, 16) else {
+            return String::from_utf8_lossy(&body).into_owned();
+        };
+        if size == 0 {
+            break;
+        }
+        let mut data = vec![0u8; size + 2];
+        if reader.read_exact(&mut data).is_err() {
+            return String::from_utf8_lossy(&body).into_owned();
+        }
+        body.extend_from_slice(&data[..size]);
+    }
+    // Optional trailers, ended by an empty line.
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+/// The stub must drain a chunked request body through the zero chunk and the
+/// trailers before it replies, and record the decoded data after the head.
+#[test]
+fn http_stub_consumes_chunked_request_body() {
+    let server = spawn_http(200, "OK", &[], "{}".to_string());
+    let mut client = TcpStream::connect(server.addr).unwrap();
+    client
+        .write_all(b"POST /x HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: Chunked\r\n\r\n")
+        .unwrap();
+    client.write_all(b"5;ext=1\r\nhello\r\n").unwrap();
+    client.write_all(b"6\r\n world\r\n").unwrap();
+    client.write_all(b"0\r\nX-Trailer: y\r\n\r\n").unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let captured = server.captured_request().unwrap();
+    assert!(
+        captured.ends_with("Transfer-Encoding: Chunked\r\n\r\nhello world"),
+        "{captured:?}"
+    );
 }

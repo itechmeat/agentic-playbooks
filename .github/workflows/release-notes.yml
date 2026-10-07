@@ -7,14 +7,21 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+# Nothing by default; the one job that edits the release gets write access.
+permissions: {}
 
 jobs:
   apply-notes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
+      # `gh` below authenticates through GH_TOKEN, so the checkout does not
+      # need to leave the token in .git/config.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Apply release notes as the release body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

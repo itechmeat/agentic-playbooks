@@ -10,6 +10,12 @@ on:
         required: false
         type: string
 
+# release.yml grants `contents: write` to the whole workflow (dist generates
+# that), and a called workflow inherits it. The gate only reads the checkout,
+# so it drops the token to read-only.
+permissions:
+  contents: read
+
 jobs:
   gate:
     runs-on: ubuntu-latest
@@ -21,6 +27,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -40,8 +48,14 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      # Restores what CI's test-linux job saved on main (same tests, same
+      # OS). Nothing is saved: a cache written on a tag ref is visible only to
+      # that tag, so no later run could ever read it.
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: linux-test
+          save-if: false
 
       # Prebuilt binary: seconds to install, nothing compiled into target/, so
       # the cargo cache above is untouched.
