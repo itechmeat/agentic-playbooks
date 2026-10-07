@@ -140,13 +140,14 @@ What is in place now:
   N such periods, SIGTERM first and then SIGKILL, failing it BY NAME.
 - Retries are off everywhere. A hang that a retry papers over is a defect
   that should be visible on the first run.
-- `ci.yml` and `release.yml` both run `cargo nextest run --profile ci
-  --workspace` plus `cargo test --workspace --doc`, because nextest does
-  not run doctests. Coverage matches the old `cargo test --workspace`:
-  same selection, and `#[ignore]`d tests stay ignored.
-- Every job in both workflows carries `timeout-minutes` (30 for test jobs,
-  45 per release build leg). Reaching a job ceiling now means something
-  outside the tests is wrong, since a hung test is caught earlier and by
+- `ci.yml` and the release gate (`test-gate.yml`, called by `release.yml`)
+  both run `cargo nextest run --profile ci --workspace` plus
+  `cargo test --workspace --doc`, because nextest does not run doctests.
+  Coverage matches the old `cargo test --workspace`: same selection, and
+  `#[ignore]`d tests stay ignored.
+- Every test job carries `timeout-minutes` (30 for the Linux jobs, 45 for
+  the macOS ones, including the macOS legs of the release gate). Reaching a
+  job ceiling now means something outside the tests is wrong, since a hung test is caught earlier and by
   name.
 
 Consequences for how tests are written:

@@ -28,7 +28,7 @@ permissions:
 # the three, because the main branch ruleset requires that check.
 jobs:
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +51,7 @@ jobs:
         run: bun run test
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,7 +94,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   test-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # There was no ceiling here, so the default 360 applied: a test that hung
     # burned half an hour before a human cancelled the job, and would have
     # burned six. It is the outer backstop only - a stuck TEST is caught far
@@ -158,7 +158,7 @@ jobs:
   build-and-test:
     needs: [web, lint, test-linux]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - name: Every Linux job passed
@@ -170,12 +170,12 @@ jobs:
           echo "web=$WEB lint=$LINT test-linux=$TEST"
           [ "$WEB" = "success" ] && [ "$LINT" = "success" ] && [ "$TEST" = "success" ]
 
-  # The release builds macOS archives and runs its test gate inside every
-  # build leg, so a Linux-only assumption in a test (a GNU tool, /proc, the
-  # util-linux `setsid` binary) used to surface first on the release tag.
-  # This leg runs the same tests on macOS for every PR. Web checks, cargo
-  # deny, fmt and clippy stay on the Linux jobs above; clippy on macOS still
-  # runs in the release gate.
+  # The release gate (test-gate.yml) runs the suite on macOS arm and Intel,
+  # so a Linux-only assumption in a test (a GNU tool, /proc, the util-linux
+  # `setsid` binary) used to surface first on the release tag. This leg runs
+  # the same tests on macOS for every PR. Web checks, cargo deny, fmt and
+  # clippy stay on the Linux jobs above; clippy on macOS still runs in the
+  # release gate.
   test-macos:
     runs-on: macos-latest
     # A cold macOS build plus the suite takes roughly 10 to 15 minutes; the
