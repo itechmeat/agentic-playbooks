@@ -1509,8 +1509,12 @@ entries and routed tiers. The hint is only the model the profile declares for
 that chain step, labelled by `hint_source` (`primary`, `fallback` with its
 index, or `tier`), `fallback_of` (the attempt that closed the previous step
 and how: `failed`, `expired`, ...) and the one-line `hint_note`; the host
-picks the model itself. Run each with a subagent (independent tasks may run
-concurrently) and submit its final reply verbatim with `run_task_submit`
+picks the model itself (`hint_note` opens with `advisory:`). Run each with your
+own subagent tool in the current session, never by launching another agent
+CLI or process such as `claude -p`, and never with permission-bypass flags:
+that is the execution contract each task carries verbatim as `execution_note`
+(see "The execution contract" in `docs/HOST-INTEGRATION.md`). Independent tasks may run
+concurrently. Submit each final reply verbatim with `run_task_submit`
 (`succeeded`, `failed`, or `blocked` with the question for the user). The
 engine treats the reply like a finished CLI attempt: report block, status
 file, `success_check`, `require_verdict` (the submission counts as the verdict

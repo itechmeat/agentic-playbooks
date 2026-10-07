@@ -93,7 +93,7 @@ function eventNote(e: WfEvent): string | undefined {
         typeof r.hint_note === 'string' && r.hint_note
           ? r.hint_note
           : r.model_hint
-            ? `model hint ${String(r.model_hint)} (declared by the profile)`
+            ? `advisory: model hint ${String(r.model_hint)} (declared by the profile)`
             : ''
       return `task ${String(r.task_id ?? '')}${hint ? `, ${hint}` : ''}`
     }

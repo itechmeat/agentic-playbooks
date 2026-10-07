@@ -139,7 +139,7 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
 
 // --- host execution mode (0.23.0) ---
 /// What a started host-mode run tells its caller to do next.
-pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI. Call run_wait: it returns pending_tasks; for each one spawn a subagent with role_prompt as its system context and prompt as its task, load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
+pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI, and neither do you (each task's execution_note is the contract). Call run_wait: it returns pending_tasks; for each one use your own subagent tool with role_prompt as its system context and prompt as its task, load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
 
 /// Adds the resolved execution of a run start to a successful response: the
 /// mode, whether the host fallback is on, and in host mode what to do next.

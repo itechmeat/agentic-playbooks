@@ -30,6 +30,25 @@ pub mod hint;
 pub(crate) use hint::describe as describe_hint;
 pub use hint::{FallbackOf, HintSource};
 
+/// The execution contract of every host task, as a string literal, so the
+/// MCP tool descriptions can `concat!` it into their static text. Use
+/// [`EXECUTION_CONTRACT`] everywhere else. This is the one place the
+/// wording lives: the `needs_input` instruction, each pending task's
+/// `execution_note`, `apb tasks` and the dashboard all render it from here.
+#[macro_export]
+macro_rules! host_task_contract {
+    () => {
+        "Execute this task in the current session with your own subagent tool, or do it yourself. \
+Do not launch another agent CLI or process to run it (such as claude -p, codex exec, opencode run, gemini or a ZCode CLI), and never with permission-bypass flags. \
+The profile's executor agent and model do not apply in host mode, and model_hint is advisory only: choose among the models your own subagent tool offers, use your session's model when none matches, and report the model actually used as run_task_submit model (apb tasks submit --model)."
+    };
+}
+
+/// How the host executes a host task: in its own session, never through an
+/// external agent CLI, with `model_hint` as advice only. Every surface that
+/// hands a task to the host carries this text verbatim.
+pub const EXECUTION_CONTRACT: &str = crate::host_task_contract!();
+
 /// The directory under a run that holds its host tasks.
 pub const TASKS_DIR: &str = "tasks";
 const PROMPT_FILE: &str = "prompt.md";
@@ -203,9 +222,13 @@ pub struct PendingHostTask {
     /// the previous step and how (`failed`, `expired`, ...).
     pub fallback_of: Option<FallbackOf>,
     /// `model_hint`, `hint_source` and `fallback_of` as one English line,
-    /// e.g. `model hint M (fallback 1 of 1 declared by profile P after
-    /// attempt 1 failed; the host picks its own model)`.
+    /// framed as advice, e.g. `advisory: model hint M (fallback 1 of 1
+    /// declared by profile P after attempt 1 failed; the host picks its own
+    /// model)`.
     pub hint_note: Option<String>,
+    /// How the host executes the task: [`EXECUTION_CONTRACT`], the same on
+    /// every task, so a host that reads only the task still sees it.
+    pub execution_note: String,
     /// Environment variables to set for the subagent.
     pub env: BTreeMap<String, String>,
     /// Milliseconds since epoch when the task was requested.
@@ -436,6 +459,7 @@ fn pending_task(run_dir: &Path, task_id: &str) -> Option<PendingHostTask> {
             record.hint_source.as_ref(),
             record.fallback_of.as_ref(),
         ),
+        execution_note: EXECUTION_CONTRACT.to_string(),
         model_hint: record.model_hint,
         hint_source: record.hint_source,
         fallback_of: record.fallback_of,
@@ -674,6 +698,31 @@ mod tests {
                 hint_note: None,
             },
         }
+    }
+
+    /// The contract keeps its load-bearing rules and stays short enough to
+    /// be read (two to four sentences, house prose rules).
+    #[test]
+    fn the_execution_contract_forbids_external_agent_clis() {
+        for phrase in [
+            "in the current session with your own subagent tool",
+            "Do not launch another agent CLI or process",
+            "claude -p",
+            "permission-bypass flags",
+            "executor agent and model do not apply in host mode",
+            "model_hint is advisory only",
+            "your session's model",
+            "run_task_submit model",
+            "apb tasks submit --model",
+        ] {
+            assert!(
+                EXECUTION_CONTRACT.contains(phrase),
+                "the contract lost `{phrase}`"
+            );
+        }
+        let sentences = EXECUTION_CONTRACT.matches(". ").count() + 1;
+        assert!((2..=4).contains(&sentences), "{sentences} sentences");
+        assert!(!EXECUTION_CONTRACT.contains(['\u{2014}', '!', '\n']));
     }
 
     #[test]

@@ -146,6 +146,8 @@ fn list(root: &Path, run_id: Option<&str>, full: bool, json: bool) -> ExitCode {
         println!("no pending host tasks");
         return ExitCode::SUCCESS;
     }
+    // How to execute them, once: the same contract on every task.
+    println!("execution: {}\n", host_task::EXECUTION_CONTRACT);
     for t in &tasks {
         println!(
             "{}  {}  node {}  attempt {}{}",

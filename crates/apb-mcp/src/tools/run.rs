@@ -245,8 +245,14 @@ fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
 pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
 
 // --- host execution mode (0.23.0) ---
-/// `run_wait`'s `next` when the run waits for the host to execute tasks.
-pub const HOST_TASK_NEXT: &str = "execute pending_tasks: for each task spawn a subagent with role_prompt as its system context and prompt as its task, have it load skills and work in workdir with env set. model_hint is only the model the profile declares for a fallback entry or a routed tier (hint_source says which, fallback_of why the previous step closed), not a measured fact: use it or pick your own model. Submit the final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user; model names the model you actually used), then call run_wait again. Independent tasks may run concurrently";
+/// `run_wait`'s and `supervisor_wait_event`'s `next` when the run waits for
+/// the host to execute tasks. It opens with the engine's execution contract
+/// (`apb_engine::host_task_contract`), the one wording every surface shares.
+pub const HOST_TASK_NEXT: &str = concat!(
+    "execute pending_tasks. ",
+    apb_engine::host_task_contract!(),
+    " For each task give your subagent role_prompt as its system context and prompt as its task, have it load skills and work in workdir with env set (hint_note labels model_hint; fallback_of says why the previous step closed). Submit the final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user), then call run_wait again. Independent tasks may run concurrently"
+);
 
 /// The execution block of a run's manifest, for `run_status`: `null` for a
 /// plain `cli` run.

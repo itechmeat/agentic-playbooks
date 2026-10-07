@@ -12,6 +12,7 @@ const task = (over: Partial<HostTaskEntry> = {}): HostTaskEntry => ({
   rolePrompt: null,
   modelHint: null,
   hintNote: null,
+  executionNote: 'CONTRACT',
   deadline: null,
   ...over,
 })
@@ -45,6 +46,9 @@ describe('HostTaskPanel', () => {
     // The hint is shown with the engine's label, once per labelled task.
     expect(body).toContain('HINT-NOTE')
     expect(body.match(/data-testid="host-task-hint"/g)).toHaveLength(1)
+    // The server's execution contract, verbatim and once for all tasks.
+    expect(body.match(/data-testid="host-task-contract"/g)).toHaveLength(1)
+    expect(body.match(/CONTRACT/g)).toHaveLength(1)
     expect(body).toContain('deadline in 60s')
     // The prompt is there but inside a closed <details>: hidden until opened.
     expect(body).toMatch(/<details[^>]*>\s*<summary[^>]*>Prompt<\/summary>/)

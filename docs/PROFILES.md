@@ -115,13 +115,17 @@ no agent CLI: the host session executes every agent step with its own
 subagents. Nothing in a profile has to change for it, but part of the
 profile no longer applies:
 
-- ignored: `executor.agent`, `executor.model` (the host picks its own model),
+- ignored: `executor.agent`, `executor.model` (the host runs every task with
+  its own subagent tool and picks its own model; it never launches the
+  profile's agent CLI for a task, see "The execution contract" in
+  `docs/HOST-INTEGRATION.md`),
   the `agent` of each fallback, `command` and every invocation setting of the
   agent (`transport`, `ui_sync`, `zcode_mode`), `environment: minimal` (a
   claude-only mechanism), and session continuation (`continue_session` starts
   cold with reason `host_mode`);
 - turned into hints: the `model` of each fallback entry and of a routed tier
-  becomes the host task's `model_hint` (the profile's own model gives none);
+  becomes the host task's `model_hint` (the profile's own model gives none),
+  which is advisory only:
   the host may honor it or not. The chain itself still engages, and each
   step is a new host task: an expired deadline or an unanswered question
   advances to the next fallback or tier at once, while a `failed`
@@ -135,7 +139,7 @@ profile no longer applies:
   of a `cli` run whose CLIs could not start) and, on the first task of a
   later step, with what closed the previous one (`fallback_of`: the attempt
   and `failed`, `expired`, `question_timeout`, ...). `apb tasks` prints it
-  as `model hint M (fallback 1 of 1 declared by profile P after attempt 1
+  as `advisory: model hint M (fallback 1 of 1 declared by profile P after attempt 1
   failed; the host picks its own model)`. With a tier routed above the
   executor, that tier is the engine's first step and the profile's executor
   behind it is labelled `primary` but reached like a fallback;

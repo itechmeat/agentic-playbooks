@@ -83,8 +83,11 @@ pub fn supervisor_wait_result(
     });
     // Host execution mode (0.23.0): the tasks this session executes, only
     // while one waits (absent, never null, exactly as in `run_status`).
+    // A host_task wake says how to execute them, the same instruction as
+    // run_wait's `next`.
     if let Some(tasks) = status.get("pending_tasks") {
         out["pending_tasks"] = tasks.clone();
+        out["next"] = json!(crate::tools::run::HOST_TASK_NEXT);
     }
     Ok(out)
 }

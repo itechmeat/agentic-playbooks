@@ -175,6 +175,16 @@ fn apb_tasks_lists_and_submits_until_the_run_succeeds() {
     let text = String::from_utf8_lossy(&listing.stdout);
     assert!(text.contains(plan["task_id"].as_str().unwrap()), "{text}");
     assert!(text.contains("apb tasks submit"), "{text}");
+    // `--full` (and `--json`) state how the host executes the task.
+    let contract = apb_engine::host_task::EXECUTION_CONTRACT;
+    let full = crate::common::apb_std()
+        .args(["tasks", "--full"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&full.stdout);
+    assert!(text.contains(&format!("execution: {contract}")), "{text}");
+    assert_eq!(plan["execution_note"], contract);
     submit(root, &run_id, plan["task_id"].as_str().unwrap(), "PLAN-7");
     let build = task_of(root, &run_id, "build");
     assert!(
@@ -265,7 +275,7 @@ fn apb_tasks_labels_a_fallback_hint_with_its_source_and_reason() {
         .unwrap();
     let text = String::from_utf8_lossy(&listing.stdout);
     let header = format!(
-        "{run_id}  {}  node plan  attempt 2  model hint sonnet (fallback 1 of 1 declared by profile main after attempt 1 failed; the host picks its own model)",
+        "{run_id}  {}  node plan  attempt 2  advisory: model hint sonnet (fallback 1 of 1 declared by profile main after attempt 1 failed; the host picks its own model)",
         fallback["task_id"].as_str().unwrap()
     );
     assert!(

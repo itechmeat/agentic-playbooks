@@ -320,9 +320,12 @@ its own subagents. `run_wait` returns `needs: host_task` with
 `pending_tasks` (`run_id`, `task_id`, `node`, `attempt`, `prompt` with the
 report contract, `role_prompt`, `skills`, `workdir`, `env`, `outputs`,
 `deadline`, `model_hint`, `hint_source`, `fallback_of`, `hint_note`,
-`requested_at`); the session runs each with a subagent and submits its final
+`execution_note`,
+`requested_at`); the session runs each with its own subagent tool, never by
+launching an agent CLI (the execution contract every task carries as
+`execution_note`, stated once in `docs/HOST-INTEGRATION.md`), and submits its final
 reply with `run_task_submit` (optionally with the `model` it ran on), then
-waits again. `model_hint` is only the model the profile declares for a
+waits again. `model_hint` is advisory only: the model the profile declares for a
 fallback entry or a routed tier; `hint_source` names the chain step and
 `fallback_of` what closed the previous one, so a fallback task reads as a
 declaration, not as the model that did the work. `run_status` carries the run's `execution` block (absent on a `cli`

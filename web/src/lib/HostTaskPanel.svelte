@@ -20,6 +20,8 @@
       <p class="text-xs text-muted-foreground">
         Waiting for the host session to run them with its own subagents.
       </p>
+      <!-- The engine's execution contract, the same on every task: shown once. -->
+      <p class="execution-note" data-testid="host-task-contract">{tasks[0].executionNote}</p>
       {#each tasks as t (`${t.runId}/${t.taskId}`)}
         <div class="flex flex-col gap-1" data-testid="host-task">
           <div class="flex flex-wrap items-center gap-1.5">
@@ -60,5 +62,12 @@
     margin: 0;
     font-size: 11px;
     color: var(--muted-foreground);
+  }
+  /* The execution contract: how the host runs every task. */
+  .execution-note {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--foreground);
   }
 </style>

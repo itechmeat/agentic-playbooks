@@ -441,6 +441,8 @@ fn assert_labelled(t: &PendingHostTask) {
     );
     assert!(note.is_some());
     assert_eq!(t.hint_note, note);
+    // Every task a host reads carries how to execute it.
+    assert_eq!(t.execution_note, host_task::EXECUTION_CONTRACT);
     let dir = t.env.get("APB_RUN_DIR").expect("APB_RUN_DIR");
     let events = read_all(Path::new(dir)).unwrap();
     assert_eq!(

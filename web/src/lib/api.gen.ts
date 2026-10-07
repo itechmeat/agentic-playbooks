@@ -123,10 +123,16 @@ hint_source: HintSource | null,
 fallback_of: FallbackOf | null, 
 /**
  * `model_hint`, `hint_source` and `fallback_of` as one English line,
- * e.g. `model hint M (fallback 1 of 1 declared by profile P after
- * attempt 1 failed; the host picks its own model)`.
+ * framed as advice, e.g. `advisory: model hint M (fallback 1 of 1
+ * declared by profile P after attempt 1 failed; the host picks its own
+ * model)`.
  */
 hint_note: string | null, 
+/**
+ * How the host executes the task: [`EXECUTION_CONTRACT`], the same on
+ * every task, so a host that reads only the task still sees it.
+ */
+execution_note: string, 
 /**
  * Environment variables to set for the subagent.
  */
