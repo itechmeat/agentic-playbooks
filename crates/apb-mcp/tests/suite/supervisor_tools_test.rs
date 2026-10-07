@@ -762,6 +762,21 @@ fn supervisor_wait_event_surfaces_a_host_task_of_the_supervised_run() {
     let tasks = woke["pending_tasks"].as_array().expect("pending_tasks");
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["node"], "work");
+    // The wake says how to execute the task, and the task itself carries it.
+    let contract = apb_engine::host_task::EXECUTION_CONTRACT;
+    assert!(woke["next"].as_str().unwrap().contains(contract), "{woke}");
+    assert_eq!(tasks[0]["execution_note"], contract);
+    // run_wait's needs_input instruction carries the same contract.
+    let res =
+        apb_engine::run_wait::wait_run(dir.path(), &run_id, std::time::Duration::from_secs(5))
+            .unwrap();
+    let waited = apb_mcp::tools::run_wait_result(dir.path(), &run_id, &res).unwrap();
+    assert_eq!(waited["needs"], "host_task", "{waited}");
+    assert!(
+        waited["next"].as_str().unwrap().contains(contract),
+        "{waited}"
+    );
+    assert_eq!(waited["pending_tasks"][0]["execution_note"], contract);
     let submitted = apb_mcp::tools::run_task_submit(
         dir.path(),
         &run_id,

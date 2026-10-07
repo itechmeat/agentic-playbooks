@@ -33,9 +33,12 @@ export interface HostTaskEntry {
   prompt: string
   rolePrompt: string | null
   modelHint: string | null
-  /** The hint with its label (`model hint M (fallback 1 of 1 declared by
-   * profile P ...)`, or the primary executor), from the server. */
+  /** The hint with its label (`advisory: model hint M (fallback 1 of 1
+   * declared by profile P ...)`, or the primary executor), from the server. */
   hintNote: string | null
+  /** How the host executes the task: the engine's execution contract,
+   * verbatim from the server (never worded on this side). */
+  executionNote: string
   /** Milliseconds since epoch by which the host must submit, or null. */
   deadline: number | null
 }
@@ -59,6 +62,7 @@ export function hostTaskEntry(t: PendingHostTask): HostTaskEntry {
     rolePrompt: t.role_prompt,
     modelHint: t.model_hint,
     hintNote: t.hint_note ?? null,
+    executionNote: t.execution_note,
     deadline: t.deadline,
   }
 }

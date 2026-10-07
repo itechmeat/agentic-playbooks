@@ -130,7 +130,7 @@ describe('host execution mode rows', () => {
     // An older event without a label still says the hint is a declaration.
     expect(rows[0]).toMatchObject({
       node: 'plan',
-      note: 'task plan-1, model hint sonnet (declared by the profile)',
+      note: 'task plan-1, advisory: model hint sonnet (declared by the profile)',
     })
     expect(rows[1].note).toBe('task plan-1: succeeded by host (claude-code), ran on opus (reported)')
     expect(rows[2].note).toBe('task build-1: expired by engine')

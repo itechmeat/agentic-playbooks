@@ -91,7 +91,9 @@ pub struct PlaybookRunArgs {
     /// "host" or "cli" (default "cli"). Pass "host" ONLY when the person
     /// asked for mono, host or single-agent mode, or for the run to use your
     /// own subagents: apb then spawns no agent CLI, and every agent step
-    /// becomes a host task YOU execute (see run_wait and run_task_submit).
+    /// becomes a host task YOU execute in this session with your own
+    /// subagent tool, never through an agent CLI (see run_wait and
+    /// run_task_submit).
     /// A host-mode run always starts in the background.
     #[serde(default)]
     pub execution: Option<String>,

@@ -81,11 +81,16 @@ fn closed_phrase(reason: &str) -> String {
 
 const HOST_PICKS: &str = "the host picks its own model";
 
+/// Every label opens with this, so a declared model never reads as an order
+/// to run that model (a host once shelled out to the profile's CLI on it).
+pub const ADVISORY: &str = "advisory: ";
+
 /// The one-line label of a task's executor, for `apb tasks`, MCP, the
-/// journal and the dashboard: `model hint M (fallback 1 of 1 declared by
-/// profile P after attempt 1 failed; the host picks its own model)`, or for
-/// the profile's own executor `primary executor of profile P (no model
-/// hint; the host picks its own model)`. `None` for a task with neither a
+/// journal and the dashboard: `advisory: model hint M (fallback 1 of 1
+/// declared by profile P after attempt 1 failed; the host picks its own
+/// model)`, or for the profile's own executor `advisory: primary executor
+/// of profile P (no model hint; the host picks its own model)`. How the host
+/// executes the task is [`super::EXECUTION_CONTRACT`]. `None` for a task with neither a
 /// hint nor a source (an older run's task).
 pub fn describe(
     model_hint: Option<&str>,
@@ -99,12 +104,12 @@ pub fn describe(
         // Neither carries a hint: the host picks the model.
         Some(HintSource::Primary { profile }) => {
             return Some(format!(
-                "primary executor of profile {profile}{after} (no model hint; {HOST_PICKS})"
+                "{ADVISORY}primary executor of profile {profile}{after} (no model hint; {HOST_PICKS})"
             ));
         }
         Some(HintSource::HostFallback { profile }) => {
             return Some(format!(
-                "host fallback for profile {profile} after the agent CLI steps{after} (no model hint; {HOST_PICKS})"
+                "{ADVISORY}host fallback for profile {profile} after the agent CLI steps{after} (no model hint; {HOST_PICKS})"
             ));
         }
         Some(HintSource::Fallback { index, of, profile }) => {
@@ -116,7 +121,9 @@ pub fn describe(
         None => "declared by the profile".to_string(),
     };
     let m = model_hint?;
-    Some(format!("model hint {m} ({declared}{after}; {HOST_PICKS})"))
+    Some(format!(
+        "{ADVISORY}model hint {m} ({declared}{after}; {HOST_PICKS})"
+    ))
 }
 
 #[cfg(test)]
@@ -140,7 +147,7 @@ mod tests {
         assert_eq!(
             describe(Some("haiku"), Some(&fallback), Some(&after(1, "failed"))).as_deref(),
             Some(
-                "model hint haiku (fallback 1 of 1 declared by profile site-fixer after attempt 1 failed; the host picks its own model)"
+                "advisory: model hint haiku (fallback 1 of 1 declared by profile site-fixer after attempt 1 failed; the host picks its own model)"
             )
         );
         let primary = HintSource::Primary {
@@ -149,7 +156,7 @@ mod tests {
         assert_eq!(
             describe(None, Some(&primary), None).as_deref(),
             Some(
-                "primary executor of profile site-fixer (no model hint; the host picks its own model)"
+                "advisory: primary executor of profile site-fixer (no model hint; the host picks its own model)"
             )
         );
         let host = HintSource::HostFallback {
@@ -158,7 +165,7 @@ mod tests {
         assert_eq!(
             describe(None, Some(&host), Some(&after(1, "unstartable"))).as_deref(),
             Some(
-                "host fallback for profile site-fixer after the agent CLI steps after attempt 1 could not start (no model hint; the host picks its own model)"
+                "advisory: host fallback for profile site-fixer after the agent CLI steps after attempt 1 could not start (no model hint; the host picks its own model)"
             )
         );
         let tier = HintSource::Tier {
@@ -168,13 +175,13 @@ mod tests {
         assert_eq!(
             describe(Some("m"), Some(&tier), None).as_deref(),
             Some(
-                "model hint m (routed tier light declared by profile p; the host picks its own model)"
+                "advisory: model hint m (routed tier light declared by profile p; the host picks its own model)"
             )
         );
         // An older run's task: a bare hint still says it is a declaration.
         assert_eq!(
             describe(Some("m"), None, None).as_deref(),
-            Some("model hint m (declared by the profile; the host picks its own model)")
+            Some("advisory: model hint m (declared by the profile; the host picks its own model)")
         );
         assert_eq!(describe(None, None, None), None);
     }
@@ -201,7 +208,7 @@ mod tests {
                 describe(Some("m"), Some(&source), Some(&after(3, reason))).as_deref(),
                 Some(
                     format!(
-                        "model hint m (fallback 2 of 2 declared by profile p after attempt 3 {phrase}; the host picks its own model)"
+                        "advisory: model hint m (fallback 2 of 2 declared by profile p after attempt 3 {phrase}; the host picks its own model)"
                     )
                     .as_str()
                 ),
@@ -238,5 +245,34 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(close_reason(interrupted), "interrupted");
+    }
+
+    /// A declared model read as an order once made a host shell out to the
+    /// profile's agent CLI on it: every label is framed as advice.
+    #[test]
+    fn every_label_is_framed_as_advisory() {
+        let p = || "p".to_string();
+        let sources = [
+            HintSource::Primary { profile: p() },
+            HintSource::HostFallback { profile: p() },
+            HintSource::Fallback {
+                index: 1,
+                of: 1,
+                profile: p(),
+            },
+            HintSource::Tier {
+                tier: "light".into(),
+                profile: p(),
+            },
+        ];
+        for source in &sources {
+            for hint in [None, Some("m")] {
+                if let Some(label) = describe(hint, Some(source), None) {
+                    assert!(label.starts_with(ADVISORY), "{label}");
+                }
+            }
+        }
+        let bare = describe(Some("m"), None, None).unwrap();
+        assert!(bare.starts_with(ADVISORY), "{bare}");
     }
 }

@@ -214,6 +214,40 @@ fn wait_bounds_are_stated_as_the_server_applies_them() {
     assert!(doc.contains(&stated), "docs/MCP.md must state `{stated}`");
 }
 
+/// A host once ran every host task by launching `claude -p` with the
+/// profile's model: the tools that hand a task over state the engine's
+/// execution contract verbatim, and the run start points at it.
+#[test]
+fn host_task_tools_state_the_execution_contract() {
+    let contract = apb_engine::host_task::EXECUTION_CONTRACT;
+    let tools = WfMcp::new(PathBuf::from(".")).tool_router.list_all();
+    for name in ["run_wait", "run_task_submit"] {
+        let tool = tools.iter().find(|t| t.name == name).expect(name);
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(description.contains(contract), "{name}: {description}");
+    }
+    let run = tools.iter().find(|t| t.name == "playbook_run").unwrap();
+    assert!(
+        run.description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("never by launching an agent CLI")
+    );
+    assert!(super::HOST_MODE_NEXT.contains("execution_note"));
+    assert!(crate::tools::run::HOST_TASK_NEXT.contains(contract));
+    // The docs quote it once, verbatim, and the authoring guide points to it.
+    let doc = include_str!("../../../../docs/HOST-INTEGRATION.md");
+    assert!(
+        doc.contains(&format!("> {contract}")),
+        "HOST-INTEGRATION.md"
+    );
+    let howto = crate::tools::playbook_howto().unwrap()["howto"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(howto.contains("`execution_note`"));
+}
+
 /// F18: `playbook_howto` hands agents docs/HOWTO-authoring.md; its node type
 /// list must name every node type the schema accepts.
 #[test]

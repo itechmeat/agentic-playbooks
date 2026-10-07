@@ -141,6 +141,7 @@ describe('review recommendation', () => {
       hint_source: { kind: 'fallback' as const, index: 1, of: 1, profile: 'main' },
       fallback_of: { attempt: 1, reason: 'failed' },
       hint_note: 'NOTE',
+      execution_note: 'CONTRACT',
       env: {},
       requested_at: 1,
     }
@@ -155,6 +156,7 @@ describe('review recommendation', () => {
         rolePrompt: 'You plan.',
         modelHint: 'sonnet',
         hintNote: 'NOTE',
+        executionNote: 'CONTRACT',
         deadline: null,
       },
     ])
