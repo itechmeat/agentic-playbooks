@@ -629,6 +629,25 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "Retrospective numbers of a run, for improving its playbook: per node the time against expected_duration, executions, attempts, retries, fallbacks, re-entries, tokens and cost, the model each attempt actually ran on (host mode: the model the host reported), the host wait and the status-file verdicts; per run the goal results and the medians of the last compare_last finished runs of the same version. Works on a live run (as of now) and a finished one. The same report renders into a prompt as {{run.retro}}.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_retro_context(
+        &self,
+        Parameters(RunRetroContextArgs {
+            run_id,
+            compare_last,
+            workspace,
+        }): Parameters<RunRetroContextArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_retro_context(&root, &run_id, compare_last))
+    }
+
+    #[tool(
         description = "Get a summary report of a run",
         annotations(read_only_hint = true)
     )]

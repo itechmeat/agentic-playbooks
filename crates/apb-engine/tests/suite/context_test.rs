@@ -9,6 +9,7 @@ fn unlimited_outputs() -> OutputClip<'static> {
     OutputClip {
         run_dir: std::path::Path::new("/run"),
         max_bytes: 0,
+        retro: None,
     }
 }
 

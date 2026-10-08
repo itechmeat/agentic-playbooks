@@ -239,6 +239,8 @@ mod review_state_test;
 mod review_test;
 #[path = "suite/run_provenance_test.rs"]
 mod run_provenance_test;
+#[path = "suite/run_retro_test.rs"]
+mod run_retro_test;
 #[path = "suite/run_wait_test.rs"]
 mod run_wait_test;
 #[path = "suite/runner_registry_test.rs"]

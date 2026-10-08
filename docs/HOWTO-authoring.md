@@ -627,6 +627,15 @@ a V13 validation error:
   `APB_RUN_DIR` and `APB_NODE_ID` (see "Run provenance" below). A prompt that
   reads it renders differently on every run, so such a node never hits the
   node cache.
+- `run.retro` - the run's retrospective as of the moment the node starts:
+  per node its time against `expected_duration`, executions, attempts,
+  retries, fallbacks, re-entries, tokens and cost, the model each attempt
+  actually ran on, the host wait and the status-file verdicts; the goal
+  results; and the comparison with the medians of the last 10 finished runs
+  of the same version. Compact text, at most 8 KiB (a longer report is cut
+  with a note). The same report as data is MCP `run_retro_context`. See
+  "Retrospective node" below. It renders differently on every run, so such a
+  node never hits the node cache.
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
   Bounded by the node's context budget (see "Context budget" below).
@@ -1775,6 +1784,51 @@ docs node with `human_review` when rules need an owner's approval. A rule
 in memory advises; if it must always hold, add a deterministic check behind
 it (a `success_check` script, a `goal` criterion, `protect`; see
 GUARDRAILS.md).
+
+## Retrospective node (learning across runs)
+
+A run that succeeds slowly or wastefully raises nothing, so nothing improves
+by itself. A final `retro` node hands the next runs what this one learned:
+
+```yaml
+nodes:
+  # ... the playbook's own steps ...
+  - id: retro
+    type: agent_task
+    profile: reviewer
+    prompt: |
+      Review this run of the playbook and write retro.md.
+
+      {{run.retro}}
+
+      Read the run's artefacts as well (the files the nodes wrote, the
+      attempt transcripts under .apb/runs/{{run.id}}/attempts/). Write each
+      finding as: what happened, the evidence (node ids, durations, attempt
+      numbers, file paths), and the target to change (a node prompt, a
+      profile, a script, an expected_duration). Only findings the next run
+      can act on; no general advice.
+  - { id: done, type: finish, outcome: success }
+edges:
+  # ... -> retro -> done
+  - { from: retro, to: done }
+```
+
+- `{{run.retro}}` gives the node the numbers, so it does not re-derive them
+  from the journal: which node was slow against its `expected_duration` and
+  against the median of the last runs of the version, which ones retried or
+  fell back, what each attempt cost and which model actually ran it (in host
+  mode, the model the host reported on submission).
+- Keep `retro` the last node before `finish`, so every other node has
+  finished when its prompt renders. Its `expected_duration` should be short;
+  it reads, it does not redo the work.
+- `retro.md` changes nothing on its own. A supervisor (`supervise: "self"`)
+  reads it, or calls `run_retro_context` for the same numbers as data, and
+  turns the findings it accepts into a forward patch for the next runs with
+  `supervisor_patch_playbook` and `scope: next_runs` (see MCP.md). Findings
+  about the project's own files (skills, scripts, libraries) belong to the
+  project: a later step or a person changes them.
+- Gate the node with `human_review` after it when an owner should see the
+  findings before anything is patched.
 
 ## Linking runs, commits and tracker records
 

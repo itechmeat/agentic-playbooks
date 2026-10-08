@@ -40,6 +40,8 @@ mod profile_e2e_test;
 mod profile_tools_test;
 #[path = "suite/read_tools_test.rs"]
 mod read_tools_test;
+#[path = "suite/retro_tool_test.rs"]
+mod retro_tool_test;
 #[path = "suite/review_tool_test.rs"]
 mod review_tool_test;
 #[path = "suite/run_answer_test.rs"]

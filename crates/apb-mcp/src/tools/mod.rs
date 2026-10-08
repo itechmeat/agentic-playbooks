@@ -5,6 +5,7 @@
 pub mod capture;
 pub mod meta;
 pub mod playbook;
+pub mod retro;
 pub mod run;
 pub mod supervisor;
 pub mod trial;
@@ -12,6 +13,7 @@ pub mod trial;
 pub use capture::*;
 pub use meta::*;
 pub use playbook::*;
+pub use retro::*;
 pub use run::*;
 pub use supervisor::*;
 pub use trial::*;
