@@ -822,10 +822,14 @@ fn fail_fast_closes_the_sibling_host_task() {
         "the sibling's task stays open"
     );
     let closed_b = events.iter().any(|e| {
-        matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, submitted_by, .. }
-            if task_id == &b && status == "cancelled" && submitted_by == "engine")
+        matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, submitted_by, note, .. }
+            if task_id == &b && status == "cancelled" && submitted_by == "engine"
+                && note.as_deref().is_some_and(|n| n.contains("fork `start`") && n.contains("`a` failed")))
     });
-    assert!(closed_b, "the engine closes b's task as cancelled");
+    assert!(
+        closed_b,
+        "the engine closes b's task as cancelled by the fork policy"
+    );
     assert_eq!(
         count(
             &events,

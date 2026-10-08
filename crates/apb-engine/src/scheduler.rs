@@ -489,6 +489,17 @@ fn drive_inner(
     if !reap_dead_attempts(&entry_events, log)?.is_empty() {
         entry_events = read_all(run_dir)?;
     }
+    // A fork policy a previous drive left half done (issue #195) is finished
+    // before anything reads the starting state. A start node it cancelled is
+    // advanced past instead of re-run.
+    let recovered = fork::recover(&playbook, run_dir, log, mode)?;
+    let start_mode = match start_mode {
+        StartMode::Rerun if recovered.contains(&start_node) => StartMode::After,
+        m => m,
+    };
+    if !recovered.is_empty() || entry_events.len() != read_all(run_dir)?.len() {
+        entry_events = read_all(run_dir)?;
+    }
     // The run's decision runner (issue #165), only when its manifest carries
     // a decisions block. Seeded from the journal: the budget spent so far and
     // the answers a resumed attempt replays instead of asking again.
@@ -1220,9 +1231,22 @@ fn drive_inner(
                             // A failure a fork's policy takes over (issue
                             // #195) interrupts the other members of that
                             // fork's branches now, instead of waiting them out.
-                            if let Some(f) = fork::detect(&playbook, &node, status, mode) {
+                            let failed_now =
+                                matches!(status, NodeStatus::Failed | NodeStatus::TimedOut);
+                            let detected = match failed_now {
+                                true => fork::detect(
+                                    &playbook,
+                                    &node,
+                                    status,
+                                    mode,
+                                    &RunState::fold(&read_all(run_dir)?),
+                                ),
+                                false => None,
+                            };
+                            if let Some(f) = detected {
                                 for m in batch.iter().filter(|m| f.in_scope(m)) {
                                     if batch_results.iter().all(|(n, _, _)| n != m) {
+                                        fork::note_cancel(run_dir, &f, m);
                                         member_flags[m.as_str()].store(true, Ordering::Relaxed);
                                         fork_killed.insert(m.clone());
                                     }
@@ -1301,6 +1325,43 @@ fn drive_inner(
                     batch_stop_short_circuited = true;
                     continue;
                 }
+                // Fork branch-failure policies (issue #195), in batch order:
+                // journaled before the routing below reads the state.
+                // Journaled before the pause check below, so a run that pauses
+                // here still carries the policy's decision into its resume.
+                let state_failed = RunState::fold(&read_all(run_dir)?);
+                let fork_failures: Vec<fork::ForkFailure> = batch
+                    .iter()
+                    .filter_map(|n| {
+                        let (_, st, _) = batch_results.iter().find(|(bn, _, _)| bn == n)?;
+                        fork::detect(&playbook, n, *st, mode, &state_failed)
+                    })
+                    .collect();
+                // The members the policies interrupted, each journaled with the
+                // first failure whose fork covers it.
+                let mut interrupted: Vec<String> = batch
+                    .iter()
+                    .filter(|n| {
+                        fork_killed.contains(*n)
+                            && batch_results
+                                .iter()
+                                .any(|(bn, s, _)| bn == *n && *s == NodeStatus::Cancelled)
+                    })
+                    .cloned()
+                    .collect();
+                for f in &fork_failures {
+                    fork::begin(log, f)?;
+                    let mine: Vec<String> = interrupted
+                        .iter()
+                        .filter(|n| f.in_scope(n))
+                        .cloned()
+                        .collect();
+                    interrupted.retain(|n| !mine.contains(n));
+                    fork::mark_interrupted(run_dir, log, f, &mine)?;
+                }
+                for n in &fork_killed {
+                    fork::clear_cancel_note(run_dir, n);
+                }
                 // unknown/interrupted in any branch - pause the run (as in the
                 // sequential path).
                 if batch_results
@@ -1365,37 +1426,6 @@ fn drive_inner(
                     }
                 }
 
-                // Fork branch-failure policies (issue #195), in batch order:
-                // journaled before the routing below reads the state.
-                let fork_failures: Vec<fork::ForkFailure> = batch
-                    .iter()
-                    .filter_map(|n| {
-                        let (_, st, _) = batch_results.iter().find(|(bn, _, _)| bn == n)?;
-                        fork::detect(&playbook, n, *st, mode)
-                    })
-                    .collect();
-                // The members the policies interrupted, each journaled with the
-                // first failure whose fork covers it.
-                let mut interrupted: Vec<String> = batch
-                    .iter()
-                    .filter(|n| {
-                        fork_killed.contains(*n)
-                            && batch_results
-                                .iter()
-                                .any(|(bn, s, _)| bn == *n && *s == NodeStatus::Cancelled)
-                    })
-                    .cloned()
-                    .collect();
-                for f in &fork_failures {
-                    fork::begin(log, f)?;
-                    let mine: Vec<String> = interrupted
-                        .iter()
-                        .filter(|n| f.in_scope(n))
-                        .cloned()
-                        .collect();
-                    interrupted.retain(|n| !mine.contains(n));
-                    fork::mark_interrupted(log, f, &mine)?;
-                }
                 let state_now = RunState::fold(&read_all(run_dir)?);
 
                 // The declared failure policy (spec 2026-07-26), the batch
@@ -2380,7 +2410,16 @@ fn drive_inner(
 
         // A fork's branch-failure policy (issue #195) takes this failure over:
         // journaled before the routing below reads the state.
-        let fork_failure = fork::detect(&playbook, &current, status, mode);
+        let fork_failure = match matches!(status, NodeStatus::Failed | NodeStatus::TimedOut) {
+            true => fork::detect(
+                &playbook,
+                &current,
+                status,
+                mode,
+                &RunState::fold(&read_all(run_dir)?),
+            ),
+            false => None,
+        };
         if let Some(f) = &fork_failure {
             fork::begin(log, f)?;
         }
@@ -2392,6 +2431,9 @@ fn drive_inner(
         // whatever `defaults.on_failure` says short of naming a handler.
         if !routes
             && state_now.refused_joins.contains(&current)
+            && !fork_failure
+                .as_ref()
+                .is_some_and(fork::ForkFailure::fails_fast)
             && playbook.defaults.on_failure.target_for(&current).is_none()
         {
             return Ok(RunResult {

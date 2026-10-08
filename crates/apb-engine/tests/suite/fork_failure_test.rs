@@ -364,3 +364,337 @@ fn fail_fast_on_the_sequential_path_cancels_the_unstarted_sibling() {
     assert_eq!(count_runs(root), 1);
     assert!(!started(&events, "j") && !started(&events, "b2"));
 }
+
+/// Seeds `yaml` with extra scripts: `slowfail.sh` fails after a second, and
+/// `hold.sh` sleeps five seconds before leaving the marker.
+fn seed_with(root: &Path, yaml: &str) {
+    seed(root, yaml, 5);
+    let scripts = root.join(".apb/playbooks/fk/1.0.0/scripts");
+    fs::write(
+        scripts.join("slowfail.sh"),
+        "sleep 1\necho broken\nexit 1\n",
+    )
+    .unwrap();
+}
+
+/// The reviewer's rework shape: `review` can send `design` back, which made
+/// `design` look shared between both branches.
+const REWORK: &str = r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: split, type: script, script: "scripts/ok.sh", runner: sh, fork: { on_branch_failure: fail_fast, on_failure: rejected } }
+  - { id: design, type: script, script: "scripts/fail.sh", runner: sh }
+  - { id: content, type: script, script: "scripts/slow.sh", runner: sh }
+  - { id: assemble, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: review, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: rejected, type: script, script: "scripts/count.sh", runner: sh }
+  - { id: lost, type: finish, outcome: failure }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: split }
+  - { from: split, to: design }
+  - { from: split, to: content }
+  - { from: design, to: assemble, join: all }
+  - { from: content, to: assemble, join: all }
+  - { from: assemble, to: review }
+  - { from: review, to: design, max_traversals: 2, condition: { type: output_match, node: review, pattern: rejected } }
+  - { from: review, to: done, fallback: true }
+  - { from: rejected, to: lost }
+"#;
+
+#[test]
+fn fail_fast_holds_with_a_rework_loop_into_a_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(root, REWORK);
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert!(!root.join(MARKER).exists(), "content was not interrupted");
+    assert_eq!(
+        cancelled_by_fork(&events),
+        [("content".into(), "design".into())]
+    );
+    assert_eq!(count_runs(root), 1);
+    assert!(!started(&events, "assemble") && !started(&events, "done"));
+}
+
+/// `content -> notify -> done` never reaches the join: that dead end belongs to
+/// `content`'s branch and is cancelled with it.
+const DEAD_END: &str = r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start, fork: { on_branch_failure: fail_fast, on_failure: rejected } }
+  - { id: design, type: script, script: "scripts/slowfail.sh", runner: sh }
+  - { id: content, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: notify, type: script, script: "scripts/slow.sh", runner: sh }
+  - { id: assemble, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: rejected, type: script, script: "scripts/count.sh", runner: sh }
+  - { id: lost, type: finish, outcome: failure }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: design }
+  - { from: start, to: content }
+  - { from: design, to: assemble }
+  - { from: content, to: notify }
+  - { from: notify, to: done }
+  - { from: assemble, to: done }
+  - { from: rejected, to: lost }
+"#;
+
+#[test]
+fn fail_fast_cancels_a_dead_end_only_the_sibling_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(root, DEAD_END);
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert_eq!(finished(&events, "content"), ["succeeded"]);
+    assert!(!root.join(MARKER).exists(), "notify ran");
+    assert_eq!(finished(&events, "notify"), ["cancelled"]);
+    assert!(!started(&events, "done"));
+    assert_eq!(count_runs(root), 1);
+}
+
+/// An outer `fail_fast` fork around an inner `cancel_siblings` fork. `x1`'s
+/// edges out are spliced in as `{x1_out}`.
+fn nested(x1_out: &str) -> String {
+    format!(
+        r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start, fork: {{ on_branch_failure: fail_fast, on_failure: rejected }} }}
+  - {{ id: x, type: script, script: "scripts/ok.sh", runner: sh, fork: {{ on_branch_failure: cancel_siblings }} }}
+  - {{ id: x1, type: script, script: "scripts/fail.sh", runner: sh }}
+  - {{ id: x2, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: x_fix, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: xj, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: y, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: y2, type: script, script: "scripts/slow.sh", runner: sh }}
+  - {{ id: oj, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: rejected, type: script, script: "scripts/count.sh", runner: sh }}
+  - {{ id: lost, type: finish, outcome: failure }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: x }}
+  - {{ from: start, to: y }}
+  - {{ from: x, to: x1 }}
+  - {{ from: x, to: x2 }}
+{x1_out}  - {{ from: x_fix, to: xj }}
+  - {{ from: x2, to: xj, condition: {{ type: node_status, node: x2, equals: success }} }}
+  - {{ from: xj, to: oj }}
+  - {{ from: y, to: y2 }}
+  - {{ from: y2, to: oj }}
+  - {{ from: oj, to: done }}
+  - {{ from: rejected, to: lost }}
+"#
+    )
+}
+
+#[test]
+fn an_inner_failure_with_no_route_escalates_to_the_outer_fail_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // x1 reaches xj only on success; x_fix hangs off x2 so it stays reachable.
+    let yaml = nested(
+        "  - { from: x1, to: xj, condition: { type: node_status, node: x1, equals: success } }\n  - { from: x2, to: x_fix, condition: { type: node_status, node: x2, equals: failure } }\n",
+    );
+    seed_with(root, &yaml);
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert!(
+        !root.join(MARKER).exists(),
+        "the outer sibling y was not interrupted"
+    );
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::BranchFailed { fork, node, policy, .. }
+            if fork == "start" && node == "x1" && policy == "fail_fast"
+    )));
+    assert_eq!(count_runs(root), 1);
+    assert!(!started(&events, "oj"));
+}
+
+#[test]
+fn an_inner_failure_handled_inside_leaves_the_outer_siblings_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // x1 fails into x_fix, a node of its own branch: handled inside.
+    let yaml = nested(
+        "  - { from: x1, to: xj, condition: { type: node_status, node: x1, equals: success } }\n  - { from: x1, to: x_fix, condition: { type: node_status, node: x1, equals: failure } }\n",
+    );
+    let yaml = yaml.replace("scripts/slow.sh", "scripts/hold1.sh");
+    seed_with(root, &yaml);
+    fs::write(
+        root.join(".apb/playbooks/fk/1.0.0/scripts/hold1.sh"),
+        format!("sleep 1\n: > '{}'\necho ok\n", root.join(MARKER).display()),
+    )
+    .unwrap();
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(
+        outcome,
+        RunStatus::Succeeded,
+        "{:?}",
+        events.iter().map(|e| &e.payload).collect::<Vec<_>>()
+    );
+    assert!(root.join(MARKER).exists(), "the outer sibling must finish");
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::BranchFailed { fork, node, .. } if fork == "x" && node == "x1"
+    )));
+    assert_eq!(count_runs(root), 0);
+    assert_eq!(finished(&events, "oj"), ["succeeded"]);
+}
+
+/// Keeps the journal up to and including the first line `keep` accepts, then
+/// appends `extra` lines.
+fn cut_journal(run_dir: &Path, keep: impl Fn(&str) -> bool, extra: &[&str]) {
+    let path = run_dir.join("events.jsonl");
+    let text = fs::read_to_string(&path).unwrap();
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        out.push(line.to_string());
+        if keep(line) {
+            break;
+        }
+    }
+    let base = out.len();
+    for (i, x) in extra.iter().enumerate() {
+        out.push(x.replace("SEQ", &(base + i).to_string()));
+    }
+    fs::write(&path, out.join("\n") + "\n").unwrap();
+    let _ = fs::remove_file(run_dir.join("driver.pid"));
+}
+
+#[test]
+fn a_resume_applies_the_policy_a_dead_driver_never_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = fork_playbook(", fork: { on_branch_failure: fail_fast, on_failure: rejected }");
+    seed(root, &yaml, 5);
+    let (_, run_id, _) = run_events(root);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    // The driver died right after `a` finished failed, while `b` was still
+    // running: `b`'s attempt is left open, and the resume restarts it.
+    cut_journal(
+        &run_dir,
+        |l| l.contains(r#""type":"node_finished""#) && l.contains(r#""node":"a""#),
+        &[],
+    );
+    let _ = fs::remove_file(root.join(COUNT));
+
+    let res = resume(root, &run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let events = read_all(&run_dir).unwrap();
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::BranchFailed { node, .. } if node == "a"
+    )));
+    assert_eq!(finished(&events, "b"), ["cancelled"]);
+    assert!(!root.join(MARKER).exists());
+    assert_eq!(count_runs(root), 1);
+    assert!(!started(&events, "j"));
+}
+
+#[test]
+fn a_resume_finishes_a_cancellation_a_paused_batch_left_undone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // `b` succeeds into the join at once; `a` fails a second later.
+    let yaml = fork_playbook(", fork: { on_branch_failure: fail_fast, on_failure: rejected }")
+        .replace("scripts/fail.sh", "scripts/slowfail.sh")
+        .replace("scripts/slow.sh", "scripts/ok.sh")
+        .replace(
+            "  - { from: b, to: b2 }\n  - { from: b2, to: j }\n",
+            "  - { from: b, to: j }\n  - { from: b2, to: j }\n",
+        )
+        .replace(
+            "  - { from: start, to: b }\n",
+            "  - { from: start, to: b }\n  - { from: start, to: b2 }\n",
+        );
+    seed_with(root, &yaml);
+    let (_, run_id, _) = run_events(root);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    // Paused right after the policy was journaled, before any cancellation.
+    cut_journal(
+        &run_dir,
+        |l| l.contains(r#""type":"edge_traversed""#) && l.contains(r#""to":"rejected""#),
+        &[r#"{"seq":SEQ,"ts":1,"type":"run_paused","reason":"test"}"#],
+    );
+    let _ = fs::remove_file(root.join(COUNT));
+
+    let res = resume(root, &run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let events = read_all(&run_dir).unwrap();
+    // `j` had `b`'s delivery and `a` dead: without the recovery it would run.
+    assert!(!finished(&events, "j").iter().any(|s| s != "cancelled"));
+    assert_eq!(count_runs(root), 1);
+}
+
+/// A `require` join inside a `fail_fast` fork's branches refuses: the fork's
+/// policy routes the refusal to `on_failure` instead of stopping the run.
+const REFUSED_IN_FORK: &str = r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start, fork: { on_branch_failure: fail_fast, on_failure: rejected } }
+  - { id: x, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: x1, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: x2, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: side, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: xj, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: y, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: oj, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: rejected, type: script, script: "scripts/count.sh", runner: sh }
+  - { id: lost, type: finish, outcome: failure }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: x }
+  - { from: start, to: y }
+  - { from: x, to: x1 }
+  - { from: x, to: x2 }
+  - { from: x1, to: xj, condition: { type: output_match, node: x1, pattern: go } }
+  - { from: x1, to: side, fallback: true }
+  - { from: x2, to: xj, require: all_succeeded }
+  - { from: side, to: oj }
+  - { from: xj, to: oj }
+  - { from: y, to: oj }
+  - { from: oj, to: done }
+  - { from: rejected, to: lost }
+"#;
+
+#[test]
+fn a_refused_join_inside_a_fail_fast_fork_goes_to_the_failure_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REFUSED_IN_FORK, 1);
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::JoinRefused { node, .. } if node == "xj"
+    )));
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::BranchFailed { node, policy, .. } if node == "xj" && policy == "fail_fast"
+    )));
+    assert_eq!(count_runs(root), 1, "the failure target must run once");
+    assert_eq!(finished(&events, "lost"), ["succeeded"]);
+    assert!(!started(&events, "done"));
+}

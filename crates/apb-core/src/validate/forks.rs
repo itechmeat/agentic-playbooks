@@ -66,9 +66,21 @@ fn check_failure_target(playbook: &Playbook, fork: &str, target: &str, r: &mut V
         );
         return;
     }
-    if let Some(region) = fork_region(playbook, fork)
-        && region.contains(target)
+    if playbook
+        .node(target)
+        .is_some_and(|n| matches!(n.kind, crate::schema::NodeKind::Start))
     {
+        r.error(
+            "V78",
+            Some(fork),
+            format!("fork `{fork}` routes branch failures to the start node `{target}`"),
+        );
+        return;
+    }
+    let Some(region) = fork_region(playbook, fork) else {
+        return;
+    };
+    if region.contains(target) {
         r.error(
             "V78",
             Some(fork),
@@ -77,6 +89,32 @@ fn check_failure_target(playbook: &Playbook, fork: &str, target: &str, r: &mut V
                  branches, which a failure cancels"
             ),
         );
+    } else if region.joins.contains(target) {
+        r.error(
+            "V78",
+            Some(fork),
+            format!(
+                "fork `{fork}` routes branch failures to `{target}`, one of its own joins, \
+                 which `fail_fast` never runs"
+            ),
+        );
+    }
+    // `fail_fast` ends the fork at the first failure, while a `join: any`
+    // waits for the first success: the two contradict each other.
+    for join in &region.joins {
+        let any = playbook.edges.iter().any(|e| {
+            &e.to == join && e.join.as_deref().and_then(JoinMode::parse) == Some(JoinMode::Any)
+        });
+        if any {
+            r.error(
+                "V78",
+                Some(fork),
+                format!(
+                    "fork `{fork}` uses `fail_fast`, but its join `{join}` is a `join: any`, \
+                     which proceeds on the first success; use `cancel_siblings` or `wait`"
+                ),
+            );
+        }
     }
 }
 

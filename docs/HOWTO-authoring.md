@@ -1068,21 +1068,45 @@ nodes:
   longer waits for the cancelled sibling: it runs as soon as the failed node
   routes into it.
 
-The fork's branches are the nodes reachable from its branch heads, without
-passing back through the fork, that are not reachable from every head, and that
-lead into a merge point (a node every head reaches). A node only one branch
-leaves through, such as a failure sink only that branch feeds, is outside the
-branches; so are the merge points themselves. When forks nest, the innermost
-fork whose branches contain the failed node and whose policy is not `wait`
-decides.
+A node belongs to the branch of a head when every path from the fork to it
+passes through that head (the head dominates it); edges back into the fork are
+ignored. So a rework loop from below the merge (`assemble -> review -> design`
+on a rejection) keeps `design` in its own branch and `review` outside both,
+and a node only one branch reaches, such as `content -> notify -> done` or a
+failure sink only that branch feeds, is part of that branch and is cancelled
+with it. The fork's joins are the nodes outside the branches that a branch
+node reaches along its normal path. A shared failure sink that only failure
+edges (`node_status: failure` on the source) and `fallback` edges lead into is
+not a join: it is the natural `on_failure` target.
+
+When forks nest, the innermost fork whose branches contain the failed node and
+whose policy is not `wait` decides first. If the routing that leaves the
+failure with (its `on_failure`, or the failed node's own targets under
+`cancel_siblings`) has no target inside an enclosing fork's branches, the
+failure was not handled inside that fork either and escalates: the enclosing
+fork's branches are cancelled too, and an enclosing `fail_fast` routes to its
+own `on_failure`. A failure handled inside (a failure edge into a fix-up node
+of the same branch) leaves the enclosing fork's other branches running.
 
 Every cancelled node is journaled `cancelled` with a `branch_cancelled` event
 naming the fork and the node whose failure triggered it, and the decision itself
 is a `branch_failed` event. A cancelled node routes nowhere, so a resumed run
 does not run what lies behind it. A running host task of a cancelled branch is
-closed as cancelled, as on a stop. The policies apply to autonomous runs; a
-supervised run parks a failed branch node for its supervisor like any other
-failure, and the supervisor decides what happens to the other branches.
+closed as cancelled with a note naming the fork and the failed node. A resume
+also finishes a policy a previous drive left half done: a cancellation that a
+pause or a crash cut short is completed, and a branch failure whose driver died
+before journaling `branch_failed` gets its policy applied, as long as nothing
+ran after it. Resume such a run with the same apb or a newer one: an older apb
+does not know `fork`, `require` or these events and would route the run as if
+they were not there. The policies apply to autonomous runs; a supervised run
+parks a failed branch node for its supervisor like any other failure, and the
+supervisor decides what happens to the other branches.
+
+The interruption reaches the branch nodes running alongside the failed one.
+Ready branch nodes run together in one scheduling pass, and a pass ends only
+when all its members have ended, so a long node in one branch can hold back the
+next step of a sibling branch; a failure in that later step happens only after
+the long node finished.
 
 ### Validating a join
 
@@ -1095,9 +1119,11 @@ branches is validator warning **V38** (see "Template variables").
 
 `fork` on a node that does not fork is error **V77**. `fork.on_failure` is
 error **V78** when it is missing under `fail_fast`, present under `wait` or
-`cancel_siblings`, names an unknown node or the fork itself, or names a node
-inside the fork's own branches. A node reached only through `on_failure` is not
-unreachable. `require` on an edge into a node that is not a join, or together
+`cancel_siblings`, names an unknown node, the fork itself or the start node,
+names a node inside the fork's own branches or one of its joins, and when a
+`fail_fast` fork has a `join: any` join (the first success and the first
+failure would both claim the fork; use `cancel_siblings` or `wait` there). A
+node reached only through `on_failure` is not unreachable. `require` on an edge into a node that is not a join, or together
 with `join: any`, is error **V79**; a `require` value other than `all_succeeded`
 does not parse.
 

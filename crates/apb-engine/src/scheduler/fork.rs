@@ -15,7 +15,7 @@
 
 use super::*;
 
-use apb_core::fork::{ForkRegion, governing_fork};
+use apb_core::fork::{ForkRegion, enclosing_forks, fork_region};
 use apb_core::schema::BranchFailurePolicy;
 
 /// A branch failure a fork's policy takes over.
@@ -41,32 +41,106 @@ impl ForkFailure {
     }
 }
 
+fn on_failure_of(playbook: &Playbook, fork: &str) -> Option<String> {
+    playbook
+        .node(fork)
+        .and_then(|n| n.fork.as_ref())
+        .and_then(|f| f.on_failure.clone())
+}
+
 /// The policy that governs `node`'s failure, if any. Only an autonomous run
 /// applies one: a supervised run parks every failure for its supervisor, who
 /// decides what happens to the other branches.
+///
+/// The innermost fork with a policy decides first. When the routing it leaves
+/// the failure with (its `on_failure`, or the failed node's own successors
+/// under `cancel_siblings`) has no target inside an enclosing fork's branches,
+/// the failure was not handled inside that fork either, and it escalates: the
+/// enclosing fork's branches are cancelled too, and an enclosing `fail_fast`
+/// takes over the routing with its own `on_failure`. `state` must already
+/// carry the failed node's finish.
 pub(crate) fn detect(
     playbook: &Playbook,
     node: &str,
     status: NodeStatus,
     mode: RunMode,
+    state: &RunState,
 ) -> Option<ForkFailure> {
     if mode.parks_on_failure() || !matches!(status, NodeStatus::Failed | NodeStatus::TimedOut) {
         return None;
     }
-    let (region, policy) = governing_fork(playbook, node)?;
+    let mut chain = enclosing_forks(playbook, node).into_iter();
+    let (region, policy) = chain.next()?;
     let target = match policy {
-        BranchFailurePolicy::FailFast => playbook
-            .node(&region.fork)
-            .and_then(|n| n.fork.as_ref())
-            .and_then(|f| f.on_failure.clone()),
+        BranchFailurePolicy::FailFast => on_failure_of(playbook, &region.fork),
         _ => None,
     };
-    Some(ForkFailure {
+    let mut f = ForkFailure {
         region,
         policy,
         node: node.to_string(),
         target,
-    })
+    };
+    for (outer, outer_policy) in chain {
+        let routes: Vec<String> = match &f.target {
+            Some(t) => vec![t.clone()],
+            None => parallel::successors(playbook, node, state),
+        };
+        if routes.iter().any(|t| outer.contains(t)) {
+            break;
+        }
+        let target = match outer_policy {
+            BranchFailurePolicy::FailFast => on_failure_of(playbook, &outer.fork),
+            _ => f.target.take(),
+        };
+        f = ForkFailure {
+            region: outer,
+            policy: match target.is_some() {
+                true => BranchFailurePolicy::FailFast,
+                false => BranchFailurePolicy::CancelSiblings,
+            },
+            node: node.to_string(),
+            target,
+        };
+    }
+    Some(f)
+}
+
+/// Where the drive leaves the reason a fork policy is about to interrupt a
+/// running node, for the host adapter's closing note (`fork_cancel/<node>`).
+fn cancel_note_path(run_dir: &Path, node: &str) -> Option<PathBuf> {
+    apb_core::registry::is_safe_segment(node).then(|| run_dir.join("fork_cancel").join(node))
+}
+
+/// Records why `node` is about to be interrupted, before its cancel flag is
+/// set. Best effort: a missing note only makes the host task's closing note
+/// generic.
+pub(crate) fn note_cancel(run_dir: &Path, f: &ForkFailure, node: &str) {
+    if let Some(path) = cancel_note_path(run_dir, node) {
+        let note = format!(
+            "cancelled by fork `{}` (on_branch_failure: {}) after `{}` failed",
+            f.region.fork,
+            f.policy.as_str(),
+            f.node
+        );
+        let _ = std::fs::create_dir_all(run_dir.join("fork_cancel"));
+        let _ = apb_core::fsutil::atomic_write_private(&path, note.as_bytes());
+    }
+}
+
+/// The note a cancelled host task closes with: the fork policy's reason when
+/// one was recorded for `node`, otherwise the stop.
+pub(crate) fn cancel_note(run_dir: &Path, node: &str) -> String {
+    cancel_note_path(run_dir, node)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_else(|| "the run was stopped".to_string())
+}
+
+/// Drops a recorded cancel reason once the member it was for has returned.
+pub(crate) fn clear_cancel_note(run_dir: &Path, node: &str) {
+    if let Some(path) = cancel_note_path(run_dir, node) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Step 1: journals the policy's decision.
@@ -99,12 +173,14 @@ fn cancel_one(log: &mut EventLog, f: &ForkFailure, node: &str) -> Result<(), Eng
 /// their `branch_cancelled`, which takes their own edges off the table before
 /// the advance weighs the joins they fed.
 pub(crate) fn mark_interrupted(
+    run_dir: &Path,
     log: &mut EventLog,
     f: &ForkFailure,
     interrupted: &[String],
 ) -> Result<(), EngineError> {
     for n in interrupted {
         cancel_one(log, f, n)?;
+        clear_cancel_note(run_dir, n);
     }
     Ok(())
 }
@@ -121,6 +197,32 @@ pub(crate) fn settle(
     f: &ForkFailure,
     frontier: &mut Vec<String>,
 ) -> Result<(), EngineError> {
+    cancel_waiting(playbook, run_dir, log, f, frontier)?;
+    match &f.target {
+        Some(target) => {
+            if !frontier.contains(target) {
+                frontier.push(target.clone());
+            }
+        }
+        None => {
+            // A failure sink fed by the cancelled siblings too was not ready at
+            // the ordinary advance; with them cancelled it is now.
+            let after = RunState::fold(&read_all(run_dir)?);
+            advance_frontier(playbook, &f.node, &after, frontier, &[], log)?;
+        }
+    }
+    Ok(())
+}
+
+/// The cancellation half of [`settle`]: writes off every branch or join node
+/// still waiting, never a routing target. Returns the nodes written off.
+fn cancel_waiting(
+    playbook: &Playbook,
+    run_dir: &Path,
+    log: &mut EventLog,
+    f: &ForkFailure,
+    frontier: &mut Vec<String>,
+) -> Result<Vec<String>, EngineError> {
     let state = RunState::fold(&read_all(run_dir)?);
     let keep: Vec<String> = match &f.target {
         Some(t) => vec![t.clone()],
@@ -151,20 +253,97 @@ pub(crate) fn settle(
         })?;
         cancel_one(log, f, n)?;
     }
-    match &f.target {
-        Some(target) => {
-            if !frontier.contains(target) {
-                frontier.push(target.clone());
-            }
-        }
-        None => {
-            // A failure sink fed by the cancelled siblings too was not ready at
-            // the ordinary advance; with them cancelled it is now.
-            let after = RunState::fold(&read_all(run_dir)?);
-            advance_frontier(playbook, &f.node, &after, frontier, &[], log)?;
+    Ok(cancel)
+}
+
+/// Finishes a fork policy a previous drive left half done, before a drive
+/// over an existing run reads its starting state (issue #195). Two shapes:
+///
+/// - a branch node finished failed under a fork policy and the driver died
+///   before `branch_failed` was journaled: the policy is applied now, as long
+///   as nothing ran after the failure (no node started, no wake raised for it);
+/// - `branch_failed` is journaled but the cancellation never completed (a
+///   batch that paused, or a driver that died): nothing but cancellations ran
+///   since, so the branch and join nodes still waiting are written off now.
+///   The routing needs no help: the `on_failure` hop is journaled and the
+///   failed node's own targets are pending heads.
+///
+/// Returns the nodes written off.
+pub(crate) fn recover(
+    playbook: &Playbook,
+    run_dir: &Path,
+    log: &mut EventLog,
+    mode: RunMode,
+) -> Result<Vec<String>, EngineError> {
+    let events = read_all(run_dir)?;
+    let state = RunState::fold(&events);
+    for (node, status) in &state.nodes {
+        let Some(at) = last_finish(&events, node) else {
+            continue;
+        };
+        let untouched = events[at + 1..].iter().all(|e| match &e.payload {
+            EventPayload::NodeStarted { .. } => false,
+            EventPayload::WakeRaised { node: n, .. } => n != node,
+            EventPayload::BranchFailed { node: n, .. } => n != node,
+            _ => true,
+        });
+        if untouched && let Some(f) = detect(playbook, node, *status, mode, &state) {
+            begin(log, &f)?;
         }
     }
-    Ok(())
+    let events = read_all(run_dir)?;
+    let mut written_off: Vec<String> = Vec::new();
+    for (i, e) in events.iter().enumerate() {
+        let EventPayload::BranchFailed {
+            fork,
+            node,
+            policy,
+            target,
+        } = &e.payload
+        else {
+            continue;
+        };
+        if last_finish(&events, node).is_some_and(|at| at > i) || !unsettled(&events, i) {
+            continue;
+        }
+        let Some(region) = fork_region(playbook, fork) else {
+            continue;
+        };
+        let f = ForkFailure {
+            region,
+            policy: match policy.as_str() {
+                "fail_fast" => BranchFailurePolicy::FailFast,
+                _ => BranchFailurePolicy::CancelSiblings,
+            },
+            node: node.clone(),
+            target: target.clone(),
+        };
+        written_off.extend(cancel_waiting(playbook, run_dir, log, &f, &mut Vec::new())?);
+    }
+    Ok(written_off)
+}
+
+fn last_finish(events: &[Event], node: &str) -> Option<usize> {
+    events.iter().rposition(
+        |e| matches!(&e.payload, EventPayload::NodeFinished { node: n, .. } if n == node),
+    )
+}
+
+/// Whether only cancellations ran after the `branch_failed` at `at`: every
+/// node started since finished `cancelled`.
+fn unsettled(events: &[Event], at: usize) -> bool {
+    let rest = &events[at + 1..];
+    rest.iter().enumerate().all(|(i, e)| match &e.payload {
+        EventPayload::NodeStarted { node, .. } => {
+            rest[i + 1..].iter().find_map(|x| match &x.payload {
+                EventPayload::NodeFinished {
+                    node: n, status, ..
+                } if n == node => Some(status == NodeStatus::Cancelled.as_str()),
+                _ => None,
+            }) == Some(true)
+        }
+        _ => true,
+    })
 }
 
 /// The barrier verdict of a join about to run as `current`, when it must not

@@ -29,7 +29,8 @@ pub enum ModelIssue {
     /// Not on apb's closed list for this agent (`detail` names the list).
     Unknown(String),
     /// Not on apb's closed claude list, but a well-formed id of a known
-    /// Claude family (`claude-<family>-<major>-<minor>`, optionally with a
+    /// Claude family (`claude-<family>-<major>-<minor>` or
+    /// `claude-<family>-<major>`, optionally with a
     /// `-YYYYMMDD` date): most likely a model released after this binary.
     /// Informational only, never a warning.
     NewInFamily,
@@ -149,19 +150,28 @@ pub fn check(agent: &str, model: &str, cx: &ModelContext) -> Option<ModelIssue> 
         return Some(issue);
     }
     let closed = models_table::static_models_for_agent(probe, &cx.table);
+    // An unlisted id of a known Claude family is a newer model: noted, but
+    // only after the installed-agent check, which still has the last word.
+    let mut new_in_family = false;
     if let Some(list) = &closed
         && !on_closed_list(probe, &bare, list)
     {
-        if probe == "claude" && is_claude_family_id(bare.strip_suffix("[1m]").unwrap_or(&bare)) {
-            return Some(ModelIssue::NewInFamily);
+        if probe != "claude" || !is_claude_family_id(bare.strip_suffix("[1m]").unwrap_or(&bare)) {
+            return Some(ModelIssue::Unknown(list.join(", ")));
         }
-        return Some(ModelIssue::Unknown(list.join(", ")));
+        new_in_family = true;
     }
     let Some(info) = cx.agents.iter().find(|a| a.agent == probe) else {
+        if new_in_family {
+            return Some(ModelIssue::NewInFamily);
+        }
         return closed.is_none().then_some(ModelIssue::Unverifiable);
     };
     if !info.installed {
         return Some(ModelIssue::AgentNotInstalled);
+    }
+    if new_in_family {
+        return Some(ModelIssue::NewInFamily);
     }
     let listed = |m: &detect::ModelsInventory| m.items.iter().any(|x| x == &bare);
     match &info.models {
@@ -190,9 +200,10 @@ fn on_closed_list(probe: &str, bare: &str, list: &[String]) -> bool {
     }
 }
 
-/// Whether `id` is `claude-<family>-<major>-<minor>` with a known family and
-/// one- or two-digit version parts, optionally followed by a `-YYYYMMDD` date
-/// (`claude-sonnet-6-0`, `claude-haiku-5-5-20261007`).
+/// Whether `id` is `claude-<family>-<major>-<minor>` or
+/// `claude-<family>-<major>` with a known family and one- or two-digit
+/// version parts, optionally followed by a `-YYYYMMDD` date
+/// (`claude-sonnet-6-0`, `claude-opus-6`, `claude-haiku-5-5-20261007`).
 fn is_claude_family_id(id: &str) -> bool {
     let Some(rest) = id.strip_prefix("claude-") else {
         return false;
@@ -201,15 +212,18 @@ fn is_claude_family_id(id: &str) -> bool {
     let digits = |s: &str, min: usize, max: usize| {
         (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
     };
-    match parts.as_slice() {
-        [family, major, minor, date @ ..] if date.len() <= 1 => {
-            CLAUDE_FAMILIES.contains(family)
-                && digits(major, 1, 2)
-                && digits(minor, 1, 2)
-                && date.iter().all(|d| digits(d, 8, 8))
-        }
-        _ => false,
+    let Some((family, version)) = parts.split_first() else {
+        return false;
+    };
+    if !CLAUDE_FAMILIES.contains(family) {
+        return false;
     }
+    // The version: a major, an optional minor, then an optional date.
+    let numbers = match version.split_last() {
+        Some((last, rest)) if digits(last, 8, 8) => rest,
+        _ => version,
+    };
+    (1..=2).contains(&numbers.len()) && numbers.iter().all(|n| digits(n, 1, 2))
 }
 
 /// The first `model_policy` rule that covers this model and does not allow it.
@@ -314,6 +328,9 @@ mod tests {
             "claude-opus-6-1[1m]",
             "claude-haiku-5-5-20261007",
             "claude-fable-10-12",
+            "claude-opus-6",
+            "claude-sonnet-6[1m]",
+            "claude-opus-6-20261201",
         ] {
             let issue = check("claude", newer, &c);
             assert_eq!(issue, Some(ModelIssue::NewInFamily), "{newer}");
@@ -321,7 +338,7 @@ mod tests {
         }
         for wrong in [
             "claude-foo-5-5",
-            "claude-sonnet-6",
+            "claude-sonnet",
             "claude-sonnet-6-0-1",
             "claude-sonnet-six-0",
             "claude-sonnet-6-0-2026107",
@@ -336,6 +353,29 @@ mod tests {
             check("codex", "claude-sonnet-6-0", &c),
             Some(ModelIssue::Unknown(_))
         ));
+    }
+
+    /// A newer id of a known family does not skip the installed-agent check:
+    /// with claude detected but not installed, the verdict is still
+    /// `agent_not_installed`.
+    #[test]
+    fn a_newer_family_id_still_reports_a_missing_agent() {
+        let mut c = cx(Vec::new());
+        c.agents = vec![detect::AgentInfo {
+            agent: "claude".into(),
+            installed: false,
+            canonical_path: None,
+            version: None,
+            category: detect::AgentCategory::Vendor,
+            models: None,
+            providers: None,
+            auth: None,
+            notes: Vec::new(),
+        }];
+        assert_eq!(
+            check("claude", "claude-opus-6", &c),
+            Some(ModelIssue::AgentNotInstalled)
+        );
     }
 
     /// A policy covers its agent, optionally only the models `when` matches,

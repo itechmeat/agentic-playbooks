@@ -363,7 +363,7 @@ executor chain with one function, `apb_core::model_check`:
 | `model_not_allowed` | a zcode model outside `GLM-5.3` / `GLM-5.3-Flash` | error (`zcode_model_not_allowed`) | fail | finding |
 | `model_policy_violation` | the config's `model_policy` does not allow it | error | fail | finding |
 | `model_unknown` | outside apb's closed list for claude, codex or zcode (a typo, a retired id); claude's own aliases (`opus`, `sonnet`, `haiku`, `fable`, `opusplan`, `default`) and `[1m]` variants count as known | warning | warn | finding |
-| `model_new_in_family` | not on apb's claude list, but a well-formed id of a known Claude family: `claude-<family>-<major>-<minor>` with family `opus`, `sonnet`, `haiku` or `fable`, optionally a `-YYYYMMDD` date or `[1m]` (`claude-sonnet-6-0`); most likely a model newer than this apb, so it is accepted | info | ok | finding |
+| `model_new_in_family` | not on apb's claude list, but a well-formed id of a known Claude family: `claude-<family>-<major>-<minor>` or `claude-<family>-<major>` with family `opus`, `sonnet`, `haiku` or `fable`, optionally a `-YYYYMMDD` date or `[1m]` (`claude-sonnet-6-0`, `claude-opus-6`); most likely a model newer than this apb, so it is accepted (a claude that is not installed still reads `agent_not_installed`) | info | ok | finding |
 | `model_not_available` | the installed agent lists its models with Full authority (`opencode models`) and this one is missing | warning | warn | finding |
 | `agent_not_installed`, `model_unverifiable` | nothing on this machine can confirm it | - | agent check | finding |
 
