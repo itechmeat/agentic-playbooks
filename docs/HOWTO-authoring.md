@@ -989,6 +989,124 @@ edges:
 `merge` above waits for both `fetch_a` and `fetch_b` with no `join:` written
 anywhere.
 
+### Dead arrivals: what a join does with a failed branch
+
+Every incoming branch of a join ends up in one of three states when the join is
+weighed:
+
+- **delivered**: its source finished and routed into the join, with the
+  source's status (succeeded or failed);
+- **pending**: its source can still run, so the join waits;
+- **dead**: its source can never deliver into the join. Either the source is
+  no longer reachable from anything still active, or it finished and routed
+  somewhere else.
+
+A dead branch is ignored, not counted as a failure. That is what keeps an
+either-or merge from deadlocking, and it has a consequence that surprises
+authors: a branch node that fails and takes its failure edge (`design -> rejected
+on failure`) routed away from the join, so at the join it is a dead arrival.
+The join runs as soon as the other branches arrive, as if the failed branch had
+never existed. An explicit `join: all` fails only on a branch that DELIVERED a
+failure (an unconditional edge carried the failed node into the join); a failure
+that left through a failure edge is invisible to it. Two options make a failed
+branch stop the fork instead: `require: all_succeeded` on the join, and
+`fork.on_branch_failure` on the forking node.
+
+### A join that requires every branch (require: all_succeeded)
+
+`require: all_succeeded` on any incoming edge of a join makes the join refuse
+to run unless every incoming branch delivered a success. A branch that delivered
+a failure, or arrived dead, refuses it:
+
+```yaml
+edges:
+  - { from: design,  to: assemble, condition: { type: node_status, node: design, equals: success } }
+  - { from: design,  to: rejected, condition: { type: node_status, node: design, equals: failure } }
+  - { from: content, to: assemble, require: all_succeeded }
+  - { from: assemble, to: done,     condition: { type: node_status, node: assemble, equals: success } }
+  - { from: assemble, to: fix_up,   condition: { type: node_status, node: assemble, equals: failure } }
+```
+
+A refused join does not execute. The run journals `join_refused` with the
+inputs it refused on and records the join `failed`. The join then takes only a
+failure route: a conditional edge that matches its failure, a `fallback` edge,
+or a `defaults.on_failure` handler. It never takes an unconditional edge, so a
+refusal cannot slip past to the next step. Without a failure route the run ends
+failed with the refusal as its reason. The option works on an implicit join and
+on an explicit `join: all`; a join with `require` never runs in a concurrent
+batch, because only the sequential path records a refusal.
+
+`require` refuses only once nothing can still arrive, so it does not cut a
+running sibling short: in the example `content` still runs to the end before
+`assemble` refuses. For that, use a fork policy.
+
+### Failing a fork early (fork.on_branch_failure)
+
+A forking node (two or more unconditional outgoing edges) may declare what a
+failure inside one of its branches does to the others:
+
+```yaml
+nodes:
+  - id: split
+    type: agent_task
+    prompt: "Plan the site"
+    fork: { on_branch_failure: fail_fast, on_failure: rejected }
+```
+
+- `wait` (the default, and the behavior before this option): the other branches
+  keep running and the failed node follows its own routing.
+- `fail_fast`: the first branch node that fails (after its retries and
+  fallbacks) interrupts every other running node of the fork's branches the way
+  `supervisor_interrupt_attempt` does, cancels the branch nodes that have not
+  started, and sends the run to `on_failure`. The failed node's own edges are
+  not taken, and the fork's join never runs. `on_failure` runs exactly once,
+  even when two branches fail at the same moment.
+- `cancel_siblings`: the same cancellation, but the failed node follows its own
+  routing (its failure edge, or an unconditional edge that moves past the
+  failure). A failure sink that both branches feed (`design -> rejected` and
+  `content -> rejected` on failure, which makes `rejected` an implicit join) no
+  longer waits for the cancelled sibling: it runs as soon as the failed node
+  routes into it.
+
+A node belongs to the branch of a head when every path from the fork to it
+passes through that head (the head dominates it); edges back into the fork are
+ignored. So a rework loop from below the merge (`assemble -> review -> design`
+on a rejection) keeps `design` in its own branch and `review` outside both,
+and a node only one branch reaches, such as `content -> notify -> done` or a
+failure sink only that branch feeds, is part of that branch and is cancelled
+with it. The fork's joins are the nodes outside the branches that a branch
+node reaches along its normal path. A shared failure sink that only failure
+edges (`node_status: failure` on the source) and `fallback` edges lead into is
+not a join: it is the natural `on_failure` target.
+
+When forks nest, the innermost fork whose branches contain the failed node and
+whose policy is not `wait` decides first. If the routing that leaves the
+failure with (its `on_failure`, or the failed node's own targets under
+`cancel_siblings`) has no target inside an enclosing fork's branches, the
+failure was not handled inside that fork either and escalates: the enclosing
+fork's branches are cancelled too, and an enclosing `fail_fast` routes to its
+own `on_failure`. A failure handled inside (a failure edge into a fix-up node
+of the same branch) leaves the enclosing fork's other branches running.
+
+Every cancelled node is journaled `cancelled` with a `branch_cancelled` event
+naming the fork and the node whose failure triggered it, and the decision itself
+is a `branch_failed` event. A cancelled node routes nowhere, so a resumed run
+does not run what lies behind it. A running host task of a cancelled branch is
+closed as cancelled with a note naming the fork and the failed node. A resume
+also finishes a policy a previous drive left half done: a cancellation that a
+pause or a crash cut short is completed, and a branch failure whose driver died
+before journaling `branch_failed` gets its policy applied, as long as nothing
+ran after it. Resume such a run with the same apb or a newer one: an older apb
+does not know `fork`, `require` or these events and would route the run as if
+they were not there. The policies apply to autonomous runs; a supervised run
+parks a failed branch node for its supervisor like any other failure, and the
+supervisor decides what happens to the other branches.
+
+Because branch nodes are scheduled continuously (see "Concurrency limit"
+below), a branch's next step starts as soon as its previous step succeeds, even
+while a long node in a sibling branch is still running, so a failure in that
+later step interrupts the long node within seconds.
+
 ### Validating a join
 
 `join` values are validated, not silently coerced. A value other than `all` or
@@ -998,11 +1116,49 @@ first `join` in file order and ignores the rest, which is easy to do by accident
 when edges are edited independently. A template that reads across un-joined
 branches is validator warning **V38** (see "Template variables").
 
+`fork` on a node that does not fork is error **V77**. `fork.on_failure` is
+error **V78** when it is missing under `fail_fast`, present under `wait` or
+`cancel_siblings`, names an unknown node, the fork itself or the start node,
+names a node inside the fork's own branches or one of its joins, and when a
+`fail_fast` fork has a `join: any` join (the first success and the first
+failure would both claim the fork; use `cancel_siblings` or `wait` there). A
+node reached only through `on_failure` is not unreachable. `require` on an edge into a node that is not a join, or together
+with `join: any`, is error **V79**; a `require` value other than `all_succeeded`
+does not parse.
+
 ### Concurrency limit (max_parallel)
 
 A fork's ready branches run concurrently in every run mode, supervised as well as
 autonomous, bounded by `max_parallel`: at most that many branch nodes run at once,
 and the rest are admitted as slots free up.
+
+Scheduling is continuous: the moment a branch node succeeds, the engine records it,
+routes it, and starts the successors that became ready (up to `max_parallel`)
+while other branch nodes are still running. A fast branch therefore moves on while
+a slow one is still working, and a join still waits for every branch it
+synchronizes. A successor starts beside the running nodes only while at least one
+other branch node is still at work; the node that finishes last hands its
+successors to the ordinary one-at-a-time path, so the chain after a join runs
+node by node with the control scan, the supervisor watch, context compaction and
+commit attribution between nodes, as before. These successors also wait until the
+running branch nodes have ended:
+
+- nodes that cannot run alongside others: a `human_review`, `wait`,
+  `condition`, `prompt` or `finish` node, a sub-playbook node, an explicit
+  `join:` barrier, a join with `require`, an interactive node, a node with
+  `protect`;
+- a successor that leads back to a branch node still running (a loop through
+  the fork, `fork -> {a, b} -> c -> fork`), so a new pass of a loop never starts
+  beside the old one, and a fan-in inside its own cycle still runs once per pass;
+- everything after the node that publishes the run's working tree (a
+  `worktree` template over a node's output), so the next node starts in that
+  tree.
+
+Once a branch node ends failed, timed out, unknown or interrupted, no new node is
+started alongside the running ones: the nodes already queued still run, and the
+failure is handled when they end (a supervised run parks there, and the failure
+policies apply there), except that a fork's `on_branch_failure` policy reacts at
+once. A branch node gets its commits recorded only when it ran alone.
 
 ```yaml
 defaults:
@@ -1025,7 +1181,7 @@ calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
 
 One shape never joins a batch at all, whatever the cap says: a node with an
-explicit `join:` edge. Only an explicit barrier can be recorded failed with the
+explicit `join:` edge (and a join with `require: all_succeeded`). Only an explicit barrier can be recorded failed with the
 barrier's own reason when one of its inputs failed, and raise a wake for a
 supervisor, and that verdict belongs to the sequential path. An implicit fan-in
 (two or more incoming edges and no `join:` field, outside any cycle) only
@@ -1034,8 +1190,8 @@ read the same pair of producers therefore run alongside each other, in one
 scheduling pass, when slots are free.
 
 In a supervised run the execution is concurrent but the supervision stays serial:
-the whole batch runs, then failures are presented one at a time, in batch order,
-at the batch tail. A `join: any` satisfied by an earlier group cancels the
+the running branch nodes end, then failures are presented one at a time, in batch
+order. A `join: any` satisfied by an earlier group cancels the
 branches still waiting for a slot, and those are journaled cancelled like any
 other cancelled branch.
 

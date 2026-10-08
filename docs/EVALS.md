@@ -219,7 +219,7 @@ apb eval <id> [--case NAME ...] [--tag TAG ...] [--version X.Y.Z]
 apb eval <id> --compare [--json]
 ```
 
-- `--model claude:claude-haiku-4-5-20251001` puts one ephemeral executor on
+- `--model claude:claude-haiku-5-5` puts one ephemeral executor on
   every agent node; `--profile-override review=reviewer` swaps one node's
   profile; `--overrides` is the `apb run` overrides file. They combine in
   that order.

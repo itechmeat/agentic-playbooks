@@ -203,6 +203,16 @@ pub struct RunState {
     /// How many times each node has finished, folded from `NodeFinished`: a
     /// judge-edge answer belongs to the execution it was asked after.
     pub finished_counts: BTreeMap<String, u32>,
+    /// Nodes whose own outgoing edges a fork's branch-failure policy took off
+    /// the table (issue #195): the failed node under `fail_fast` and every node
+    /// the policy cancelled. Edge selection gives them no successor, so a
+    /// resume does not follow a route the run decided against. A node leaves
+    /// the set when it starts again.
+    pub route_suppressed: BTreeSet<String>,
+    /// Joins that refused under `require: all_succeeded` (issue #195): they
+    /// take only a failure route, never an unconditional edge. A node leaves
+    /// the set when it starts again.
+    pub refused_joins: BTreeSet<String>,
 }
 
 /// One node's judge-edge answers, as journaled by the `judge_edge` decision
@@ -228,6 +238,8 @@ impl RunState {
                 EventPayload::RunProvenance { .. } => {}
                 EventPayload::NodeStarted { node, .. } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
+                    s.route_suppressed.remove(node);
+                    s.refused_joins.remove(node);
                 }
                 EventPayload::AttemptStarted { node, attempt, .. } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
@@ -350,6 +362,19 @@ impl RunState {
                 // verdict (spec 2026-08-05, Task 4): the run-state effect is the
                 // join's own execution, journaled right after it.
                 EventPayload::JoinInputDead { .. } => {}
+                // Fork and join failure options (issue #195): the routing they
+                // decided against is folded so edge selection stays pure.
+                EventPayload::BranchFailed { node, policy, .. } => {
+                    if policy == apb_core::schema::BranchFailurePolicy::FailFast.as_str() {
+                        s.route_suppressed.insert(node.clone());
+                    }
+                }
+                EventPayload::BranchCancelled { node, .. } => {
+                    s.route_suppressed.insert(node.clone());
+                }
+                EventPayload::JoinRefused { node, .. } => {
+                    s.refused_joins.insert(node.clone());
+                }
                 // A declared deliverable that was not captured is a warning about
                 // the workspace, not a run-state transition: the node succeeded
                 // and its `NodeFinished` (with whatever WAS captured) carries the

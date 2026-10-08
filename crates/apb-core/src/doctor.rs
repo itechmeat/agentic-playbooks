@@ -225,10 +225,12 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                         continue;
                     };
                     // Installation is the agent check's job below, and an
-                    // unverifiable model is not a finding.
+                    // unverifiable model is not a finding. A newer id of a
+                    // known Claude family is a note: it passes.
                     let status = match issue {
                         _ if issue.is_blocking() => CheckStatus::Fail,
                         ModelIssue::Unknown(_) | ModelIssue::NotAvailable => CheckStatus::Warn,
+                        ModelIssue::NewInFamily => CheckStatus::Ok,
                         _ => continue,
                     };
                     r.push(

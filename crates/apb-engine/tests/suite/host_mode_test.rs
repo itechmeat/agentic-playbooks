@@ -791,6 +791,95 @@ fn parallel_branches_expose_two_tasks_at_once() {
     assert_eq!(status, RunStatus::Succeeded);
 }
 
+/// Issue #195: batches are pipelined, so once `a1` is submitted its successor
+/// `a2` is offered while `b` is still pending: two branch tasks at once, from
+/// different depths of the fork.
+#[test]
+fn a_finished_branch_step_offers_its_successor_while_the_sibling_is_pending() {
+    let h = Host::new(
+        &playbook(
+            "",
+            "  - { id: a1, type: agent_task, prompt: \"A1\" }\n  - { id: a2, type: agent_task, prompt: \"A2\" }\n  - { id: b, type: agent_task, prompt: \"B\" }\n",
+            "  - { from: start, to: a1 }\n  - { from: start, to: b }\n  - { from: a1, to: a2 }\n  - { from: a2, to: done }\n  - { from: b, to: done }\n",
+        ),
+        &[],
+    );
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let a1 = h.task(&run_id, "a1");
+    let b = h.task(&run_id, "b");
+    h.submit(&run_id, &a1.task_id, SubmitStatus::Succeeded, "a1 done");
+    let both = poll("a2 and b pending together", || {
+        let p = h.pending(&run_id);
+        let mut nodes: Vec<String> = p.iter().map(|t| t.node.clone()).collect();
+        nodes.sort();
+        (nodes == ["a2", "b"]).then_some(p)
+    });
+    for t in &both {
+        h.submit(&run_id, &t.task_id, SubmitStatus::Succeeded, "ok");
+    }
+    let _ = b;
+    let (status, _) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+/// Issue #195: a `fail_fast` fork closes the sibling's pending host task as
+/// cancelled the moment one branch fails, and the run ends without the join.
+#[test]
+fn fail_fast_closes_the_sibling_host_task() {
+    let yaml = playbook(
+        "",
+        "  - { id: a, type: agent_task, prompt: \"A\", max_retries: 0 }\n  - { id: b, type: agent_task, prompt: \"B\" }\n  - { id: j, type: agent_task, prompt: \"J\" }\n  - { id: lost, type: finish, outcome: failure }\n",
+        "  - { from: start, to: a }\n  - { from: start, to: b }\n  - { from: a, to: j }\n  - { from: b, to: j }\n  - { from: j, to: done }\n",
+    )
+    .replace(
+        "{ id: start, type: start }",
+        "{ id: start, type: start, fork: { on_branch_failure: fail_fast, on_failure: lost } }",
+    );
+    let h = Host::new(&yaml, &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let both = poll("two pending tasks", || {
+        let p = h.pending(&run_id);
+        (p.len() == 2).then_some(p)
+    });
+    let a = both.iter().find(|t| t.node == "a").unwrap();
+    let b = both.iter().find(|t| t.node == "b").unwrap().task_id.clone();
+    h.submit(&run_id, &a.task_id, SubmitStatus::Failed, "broken");
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Failed);
+    assert!(
+        h.pending(&run_id).is_empty(),
+        "the sibling's task stays open"
+    );
+    let closed_b = events.iter().any(|e| {
+        matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, submitted_by, note, .. }
+            if task_id == &b && status == "cancelled" && submitted_by == "engine"
+                && note.as_deref().is_some_and(|n| n.contains("fork `start`") && n.contains("`a` failed")))
+    });
+    assert!(
+        closed_b,
+        "the engine closes b's task as cancelled by the fork policy"
+    );
+    assert_eq!(
+        count(
+            &events,
+            |p| matches!(p, EventPayload::BranchCancelled { node, .. } if node == "b")
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &events,
+            |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "j")
+        ),
+        0
+    );
+    assert!(!h.cli_ran());
+}
+
 #[test]
 fn continue_session_starts_cold_with_reason_host_mode() {
     let h = Host::new(

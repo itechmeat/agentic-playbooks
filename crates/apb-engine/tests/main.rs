@@ -149,6 +149,9 @@ mod finish_answer_test;
 #[cfg(unix)]
 #[path = "suite/finish_context_test.rs"]
 mod finish_context_test;
+#[cfg(unix)]
+#[path = "suite/fork_failure_test.rs"]
+mod fork_failure_test;
 #[path = "suite/global_config_test.rs"]
 mod global_config_test;
 #[path = "suite/global_scope_run_test.rs"]

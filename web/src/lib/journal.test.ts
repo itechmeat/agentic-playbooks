@@ -84,6 +84,21 @@ describe('runEventJournal notes', () => {
       undefined,
     ])
   })
+
+  it('says what a fork policy cancelled and why a join refused (issue #195)', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'branch_failed', node: 'a', fork: 'start', policy: 'fail_fast', target: 'rejected' },
+      { seq: 2, ts: 2, type: 'branch_failed', node: 'a', fork: 'start', policy: 'cancel_siblings' },
+      { seq: 3, ts: 3, type: 'branch_cancelled', node: 'b', fork: 'start', failed_node: 'a' },
+      { seq: 4, ts: 4, type: 'join_refused', node: 'j', sources: ['a'], reason: 'join `j` refused' },
+    ] as never)
+    expect(entries.map((e) => e.note)).toEqual([
+      'fork start fail_fast: failed, the run goes to rejected',
+      'fork start cancel_siblings: failed, the other branches are cancelled',
+      'fork start: cancelled after a failed',
+      'join `j` refused',
+    ])
+  })
 })
 
 describe('wake triage note', () => {

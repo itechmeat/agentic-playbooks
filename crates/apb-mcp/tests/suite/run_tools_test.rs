@@ -1295,3 +1295,51 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
     assert!(plain.get("goal").is_none());
     assert!(plain.get("commits").is_none());
 }
+
+/// Issue #195: `run_status` lists what a fork's branch-failure policy did and
+/// which joins refused, and leaves `branch_failures` out when nothing did.
+#[test]
+fn run_status_lists_branch_failures_only_when_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join(".apb/runs/r1");
+    fs::create_dir_all(&run_dir).unwrap();
+    let lines = [
+        r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":1,"type":"node_finished","node":"a","status":"failed","attempt":1,"output":"boom"}"#,
+        r#"{"seq":2,"ts":2,"type":"branch_failed","fork":"start","node":"a","policy":"fail_fast","target":"rejected"}"#,
+        r#"{"seq":3,"ts":3,"type":"node_finished","node":"b","status":"cancelled","attempt":1,"output":"cancelled"}"#,
+        r#"{"seq":4,"ts":4,"type":"branch_cancelled","fork":"start","node":"b","failed_node":"a"}"#,
+        r#"{"seq":5,"ts":5,"type":"node_started","node":"j","attempt":1}"#,
+        r#"{"seq":6,"ts":6,"type":"join_refused","node":"j","sources":["a"],"reason":"join `j` refused (require: all_succeeded): `a` did not arrive succeeded"}"#,
+        r#"{"seq":7,"ts":7,"type":"node_finished","node":"j","status":"failed","attempt":1,"output":"refused"}"#,
+        r#"{"seq":8,"ts":8,"type":"run_finished","outcome":"failed"}"#,
+    ];
+    fs::write(run_dir.join("events.jsonl"), lines.join("\n") + "\n").unwrap();
+    let out = run_status(dir.path(), "r1").unwrap();
+    let kinds: Vec<(&str, &str)> = out["branch_failures"]
+        .as_array()
+        .expect("branch_failures is listed")
+        .iter()
+        .map(|b| (b["kind"].as_str().unwrap(), b["node"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("branch_failed", "a"),
+            ("branch_cancelled", "b"),
+            ("join_refused", "j")
+        ]
+    );
+    assert!(
+        out["branch_failures"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("`rejected`")
+    );
+
+    let plain = dir.path().join(".apb/runs/r2");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("events.jsonl"), format!("{}\n", lines[0])).unwrap();
+    let out = run_status(dir.path(), "r2").unwrap();
+    assert!(out.get("branch_failures").is_none());
+}

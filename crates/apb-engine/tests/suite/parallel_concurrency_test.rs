@@ -300,8 +300,9 @@ fn a_non_batchable_head_is_not_dropped_by_a_batch_of_its_siblings() {
     }
 }
 
-// Three branches, two slots: admission is chunked in batch order, so the third
-// branch waits for the first chunk to drain.
+// Three branches, two slots: admission is pipelined in batch order, so the
+// third branch starts as soon as one of the first two releases its slot, and
+// never while both still run.
 const CAPPED_FANOUT: &str = r#"
 schema: 1
 id: cappb
@@ -327,7 +328,7 @@ edges:
 "#;
 
 #[test]
-fn max_parallel_two_admits_the_third_branch_after_the_first_chunk() {
+fn max_parallel_two_admits_the_third_branch_when_a_slot_frees() {
     let dir = tempfile::tempdir().unwrap();
     seed_nap(dir.path(), "cappb", CAPPED_FANOUT);
     let res = run(dir.path(), "cappb", None, RunOptions::default()).unwrap();
@@ -339,13 +340,13 @@ fn max_parallel_two_admits_the_third_branch_after_the_first_chunk() {
         started_at(&events, "b") < finished_at(&events, "a"),
         "the first chunk must run its two branches concurrently"
     );
-    // Second chunk: c is admitted only once a slot is free.
-    for earlier in ["a", "b"] {
-        assert!(
-            finished_at(&events, earlier) < started_at(&events, "c"),
-            "branch c must wait for branch {earlier} to release its slot"
-        );
-    }
+    // c is admitted only once a slot is free: after the first of a and b
+    // ended, never while both still run.
+    let first_free = finished_at(&events, "a").min(finished_at(&events, "b"));
+    assert!(
+        first_free < started_at(&events, "c"),
+        "branch c must wait for a slot"
+    );
     // The barrier still collected all three inputs.
     finished_at(&events, "m");
 }

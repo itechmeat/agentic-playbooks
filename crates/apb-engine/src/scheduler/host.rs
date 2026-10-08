@@ -469,7 +469,8 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
             }
             if cancel.load(Ordering::Relaxed) {
                 self.mark("cancelled");
-                let _ = self.close(&task_id, "cancelled", "the run was stopped".into());
+                let note = super::fork::cancel_note(self.run_dir, task.node);
+                let _ = self.close(&task_id, "cancelled", note);
                 return Err(AgentFailure::new(ErrorClass::Transport, "cancelled"));
             }
             if let Some(c) = control {

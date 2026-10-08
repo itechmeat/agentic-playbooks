@@ -9,6 +9,7 @@
 
 mod connectors;
 mod decisions;
+mod forks;
 mod graph;
 mod judge;
 mod node_io;
@@ -30,6 +31,7 @@ pub use decisions::{
     auto_decide_refusal, auto_decide_refusal_with, auto_decide_run_refusal, downstream_nodes,
     granted as granted_functions, node_shipping_reason,
 };
+use forks::{check_forks, check_join_requires};
 use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,
@@ -172,6 +174,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_conditions(playbook, &mut r); // V09, V10
         check_cycles(playbook, &mut r); // V11
         check_joins(playbook, &mut r); // V36, V37
+        check_forks(playbook, &mut r); // V77, V78 (issue #195)
+        check_join_requires(playbook, &mut r); // V79 (issue #195)
         check_scripts(playbook, &mut r); // V12
         check_templates(playbook, &mut r); // V13
         check_cross_branch_reads(playbook, &mut r); // V38

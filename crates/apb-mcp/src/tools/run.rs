@@ -209,6 +209,12 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     add_journal_extras(&mut out, &view);
     add_outcome_blocks(&mut out, &view, &dir);
     add_candidate_trial(&mut out, &view, &dir);
+    // Issue #195: what a fork's branch-failure policy cancelled and which
+    // joins refused; absent when nothing did.
+    let branch_failures = apb_engine::fork_view::entries(&view.events);
+    if !branch_failures.is_empty() {
+        out["branch_failures"] = json!(branch_failures);
+    }
     Ok(out)
 }
 

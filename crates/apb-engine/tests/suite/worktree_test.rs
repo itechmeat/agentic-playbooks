@@ -387,3 +387,52 @@ fn a_start_never_writes_into_a_run_directory_that_is_already_taken() {
         "no taken run directory was written to"
     );
 }
+
+/// Issue #195 (pipelined batches): the node that publishes the tree finishes
+/// while a sibling branch still runs. Its successor must not start in the
+/// execution root beside the sibling: it starts after the drive moved the run
+/// into the tree.
+#[test]
+fn a_tree_published_inside_a_parallel_batch_is_used_by_the_next_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = r#"schema: 2
+id: tree
+name: Tree
+version: 1.0.0
+worktree: "{{nodes.probe.output.working_tree}}"
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: probe, type: agent_task, prompt: "Find the tree.", outputs: { fields: [working_tree] } }
+  - { id: slow, type: agent_task, prompt: "Take a while." }
+  - { id: work, type: agent_task, prompt: "Work in the tree." }
+  - { id: j, type: agent_task, prompt: "Join." }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: probe }
+  - { from: start, to: slow }
+  - { from: probe, to: work }
+  - { from: work, to: j }
+  - { from: slow, to: j }
+  - { from: j, to: done }
+"#;
+    init_project(root).unwrap();
+    seed_playbook(root, "tree", yaml);
+    common::seed_main(root);
+    worktrees(root, &["wt"]);
+    let part = format!(
+        "if [ \"$NODE\" = slow ]; then sleep 1; fi; {}",
+        stub_part("wt")
+    );
+    let stub = recording_stub(root, &part);
+    let (_, outcome) = start(root, &stub, RunOptions::default()).unwrap();
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let tree = root.join("wt").canonicalize().unwrap();
+    assert_eq!(pwd_of(root, "work"), tree);
+    let locks = fs::read_to_string(root.join("locks-work")).unwrap();
+    assert!(
+        !locks.contains("root") && locks.contains("tree-"),
+        "{locks}"
+    );
+}
