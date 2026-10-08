@@ -269,11 +269,33 @@ pub fn home_binary(home: &Path) -> Option<PathBuf> {
     crate::config::program_in_path(&p.to_string_lossy()).then_some(p)
 }
 
+/// Whether `path` is the ZCode desktop app (an Electron bundle) rather than
+/// the headless CLI. The Linux desktop package links `/usr/bin/zcode` to the
+/// app, and running it, even with `--version`, boots or wakes the desktop
+/// (which then starts its MCP servers in the caller's directory). The
+/// bundle is recognised by Electron's files next to the real binary.
+pub fn is_desktop_app(path: &Path) -> bool {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    real.parent().is_some_and(|dir| {
+        dir.join("resources").join("app.asar").exists() || dir.join("chrome-sandbox").exists()
+    })
+}
+
+/// The PATH `zcode`, unless it is the desktop app ([`is_desktop_app`]).
+fn path_cli() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(PATH_BIN))
+        .find(|cand| crate::config::program_in_path(&cand.to_string_lossy()))
+        .filter(|cand| !is_desktop_app(cand))
+}
+
 /// The program apb launches for zcode when the config does not name one:
-/// `zcode` when it is on PATH, else the known home location when it exists,
-/// else plain `zcode` (so the spawn error names the agent).
+/// `zcode` when it is on PATH and is not the desktop app, else the known
+/// home location when it exists, else plain `zcode` (so the spawn error
+/// names the agent).
 pub fn default_program() -> String {
-    if crate::config::program_in_path(PATH_BIN) {
+    if path_cli().is_some() {
         return PATH_BIN.to_string();
     }
     home_dir()

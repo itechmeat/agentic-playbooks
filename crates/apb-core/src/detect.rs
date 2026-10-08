@@ -7,8 +7,9 @@
 //! controlled by the playbook.
 //!
 //! Probes are sanitized: spawned by an absolute canonical path, argv without
-//! a shell, `env_clear()` plus a minimal PATH/HOME, a timeout, and an output
-//! limit. Probes run in parallel.
+//! a shell, `env_clear()` plus a minimal PATH/HOME (and `APB_NO_REGISTRY`),
+//! the filesystem root as the working directory (see [`run_probe`]), a
+//! timeout, and an output limit. Probes run in parallel.
 //!
 //! This module only gathers EXTERNAL facts (installed, version, the
 //! `opencode models` output, auth/provider hints). The model lists apb owns
@@ -435,7 +436,11 @@ fn find_in_path(bins: &[String]) -> Option<PathBuf> {
 /// Finds the agent binary: PATH first ([`find_in_path`]), then each known
 /// `$HOME`-relative install location that is an executable file.
 fn find_binary(p: &Probe, home: Option<&Path>) -> Option<PathBuf> {
-    if let Some(found) = find_in_path(&p.bins) {
+    // The zcode desktop app on PATH is not the headless CLI, and probing it
+    // would boot the desktop: fall through to the CLI's home location.
+    if let Some(found) = find_in_path(&p.bins)
+        .filter(|f| p.id != crate::zcode::AGENT_ID || !crate::zcode::is_desktop_app(f))
+    {
         return Some(found);
     }
     let home = home?;
@@ -520,6 +525,19 @@ fn group_target(pid: u32) -> Option<i32> {
     }
 }
 
+/// The working directory of every probe: the filesystem root, which holds no
+/// project config and no `.apb`.
+fn probe_cwd() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/")
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir()
+    }
+}
+
 /// Runs `program args...` in a sanitized environment. Child PATH - trusted
 /// system directories plus `extra_path` (the canonical parent of the found
 /// binary), so a CLI with a `#!/usr/bin/env node` shebang finds its
@@ -556,6 +574,19 @@ fn run_probe(
         .stderr(Stdio::piped());
     if let Ok(home) = std::env::var("HOME") {
         cmd.env("HOME", home);
+    }
+    // A probe runs outside the workspace. A probed agent may read project
+    // config from its working directory and start the MCP servers it names
+    // (`opencode models` does), apb among them: in the workspace, that would
+    // run an untrusted repository's commands, and the nested apb would
+    // register the workspace in the machine-wide registry. The results are
+    // memoized machine-wide anyway, so they must not depend on the project.
+    // Agents that pass their environment on also get APB_NO_REGISTRY and our
+    // config dir.
+    cmd.current_dir(probe_cwd());
+    cmd.env("APB_NO_REGISTRY", "1");
+    if let Some(cfg) = std::env::var_os("APB_CONFIG_DIR") {
+        cmd.env("APB_CONFIG_DIR", cfg);
     }
     // The probe runs its own process group: on timeout we kill the WHOLE
     // group (not just the direct child), otherwise a daemonized descendant
