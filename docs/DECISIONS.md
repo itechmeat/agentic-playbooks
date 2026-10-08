@@ -26,7 +26,7 @@ The full design is issue #165; every use below ships in the same release.
 | `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | enforce: the higher of the stored threshold and the gate's `auto_decide.min_confidence` |
 | `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | `uses.routing.thresholds.hysteresis` (default 0.75); enforce needs a stored threshold |
 | `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) | v0.22.0 | `uses.catalog_rank.thresholds.covered` (default 0.8); advisory by design |
-| `host_task` | a bounded question a host task, a script or an agent step asks itself (`apb decide`, MCP `decision_ask`): choose, rank, filter, map, yes/no, score | `off`, any other mode (the asker reads the answer; the engine never acts on it) | unreleased | none: the asker applies its own cut; on by default once a provider is configured |
+| `host_task` | a bounded question a host task, a script or an agent step asks itself (`apb decide`, MCP `decision_ask`): choose, rank, filter, map, yes/no, score | `off`, any other mode (the asker reads the answer; the engine never acts on it) | v0.24.3 | none: the asker applies its own cut; on by default once a provider is configured |
 
 Shadow means journal only: the answer is recorded in the run's journal and
 nothing acts on it. Advise shows the answer where a person or supervisor
