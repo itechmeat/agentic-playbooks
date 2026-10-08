@@ -13,3 +13,4 @@ web/dist
 .ai-notes/
 # per-run scratch file overwritten by every branch-quality review run
 docs/reviews/_date_time_review.md
+.zvec-grep/

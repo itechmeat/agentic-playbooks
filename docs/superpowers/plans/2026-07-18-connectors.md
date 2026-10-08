@@ -509,7 +509,7 @@ Also adjust `is_empty()` to `self.profiles.is_empty() && self.connectors.is_empt
 
 **Files:**
 - Create: `crates/apb-engine/src/connector_run.rs`
-- Modify: `crates/apb-engine/src/lib.rs` (export), `crates/apb-engine/src/run_config.rs` (expected maps), and the run-start path that builds the manifest (locate with `codegraph_search "build_run_manifest"` - extend where profiles are snapshotted)
+- Modify: `crates/apb-engine/src/lib.rs` (export), `crates/apb-engine/src/run_config.rs` (expected maps), and the run-start path that builds the manifest (locate with `zg query --rg -F build_run_manifest` - extend where profiles are snapshotted)
 - Test: `crates/apb-engine/tests/suite/connector_run.rs` (+ `mod` line in `tests/main.rs`)
 
 **Interfaces:**
@@ -568,7 +568,7 @@ pub struct ConnectorEnvPolicy {
 pub fn instruction_block(grants: &[ManifestConnectorGrant], connectors: &[ManifestConnector]) -> String;
 ```
 
-Find where the node prompt is assembled (skills/SOUL delivery in scheduler or adapter; `codegraph_search "prompt"` in apb-engine) and append `instruction_block` when `manifest.grants_for(node_id)` is non-empty.
+Find where the node prompt is assembled (skills/SOUL delivery in scheduler or adapter; `zg query --rg -F prompt` in apb-engine) and append `instruction_block` when `manifest.grants_for(node_id)` is non-empty.
 
 - [ ] **Step 1: Write failing tests**: `instruction_block` lists granted functions only (not ungranted ones), includes account names and never any `{{env.*}}` value or resolved secret, marks deprecated functions; adapter test: spawn `/usr/bin/env` as the fake agent program with a scrub list and assert the captured output lacks the scrubbed var and has `APB_RUN_DIR`/`APB_NODE_ID` (follow the existing adapter tests' fake-program pattern in `adapter.rs` tests or `tests/`).
 - [ ] **Step 2: Verify failure**, **Step 3: Implement**, **Step 4: Verify pass + fmt + clippy**.

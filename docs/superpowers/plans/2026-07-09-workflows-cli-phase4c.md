@@ -23,7 +23,7 @@
 - Any client-supplied `run_id`/`token` that ends up in a path goes through `is_safe_segment`.
 - Do not break what already works: autonomous runs, supervise:self (4b), Phase 3 tools, the whole workspace stays green.
 - Do not invoke a real `claude` in tests: verify spawn/heartbeat/lost with a stub; verify the web logic with vitest + an API test.
-- Run code-ranker before marking a task done; navigate via codegraph.
+- Run code-ranker before marking a task done; search with zg (`zg query --rg -F <symbol> <path>`).
 
 ---
 

@@ -18,7 +18,7 @@
 - Frontend (`web/`): `bun run test` and `bun run check` must be clean; `bun run build` before anything considered release-ready.
 - Before code is ready to commit: run code-ranker and fix any violation. First warm the cargo cache: `cargo metadata --format-version 1 >/dev/null`, then `code-ranker check .`; for a violation read `code-ranker docs base <ID>` before fixing, fix, and re-run until clean.
 - Commit only after the owner approves; commits use `git commit --signoff` and end with a `Co-Authored-By` trailer for the acting model; never add a visible AI-authorship marker to public prose.
-- Navigate the code through codegraph rather than ad-hoc grep where possible.
+- Search the code with zg (`zg query --rg -F <symbol> <path>` / `--fts <name>`) before ad-hoc grep.
 
 ## Shared interface contract (from the wave-1 master plan)
 

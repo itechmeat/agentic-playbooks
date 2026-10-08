@@ -18,7 +18,7 @@
 - Event-sourcing invariant: `events.jsonl` is written ONLY by the drive stream. Supervisor commands go to `control.jsonl` (written by the supervisor side, drive only reads it). Do not violate this.
 - Existing behavior is unchanged: an unsupervised run (`RunMode::Autonomous`) must behave exactly as it does today; all existing engine tests stay green.
 - `run_id` in any new paths/commands goes through `wf_core::registry::is_safe_segment` (path-traversal protection, same as in `resume`/MCP tools).
-- Run code-ranker before marking a task done; navigate the code via codegraph.
+- Run code-ranker before marking a task done; search the code with zg (`zg query --rg -F <symbol> <path>`).
 - No real `claude` in tests: test agent_task nodes via the `WF_AGENT_CMD` stub (see existing engine tests), or use a workflow without agent_task to verify the control logic. Set an always-failing stub via env to trigger node_failed deterministically.
 
 ---

@@ -16,7 +16,7 @@ Run code-ranker NOT on every change, but once before marking a task done
 
 Check the report, draw conclusions, fix as needed. Goal: correct code structure: dependency cycles (ADP), cohesion (HK), complexity, SOLID/DRY/KISS. Artifacts in `.code-ranker/` (baseline for `--baseline` diffs).
 
-Navigate the code through **codegraph** (symbol/edge index) - use it actively instead of manual grep/reading.
+Search the code with **zg** (zvec-grep) over the live files - `zg query --rg -F <symbol> <path>` / `zg query --fts <name>` before manual grep/reading.
 
 ## Phase 1 - core and viewer (done, tag v0.1.0)
 

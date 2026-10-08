@@ -146,8 +146,8 @@ model_reasoning_effort = \"medium\"\n\
 base_url = \"https://example.test\"\n\
 env_key = \"CUSTOM_KEY\"\n\
 \n\
-[mcp_servers.codegraph]\n\
-command = \"codegraph\"\n\
+[mcp_servers.example-index]\n\
+command = \"example-index\"\n\
 args = [ \"serve\", \"--mcp\" ]\n\
 \n\
 [mcp_servers.open-second-brain.env]\n\
@@ -164,7 +164,7 @@ ambient-suggestions-enabled = true\n";
             "no mcp_servers table survives: {out}"
         );
         assert!(
-            !out.contains("codegraph"),
+            !out.contains("example-index"),
             "an mcp server body must be gone: {out}"
         );
         assert!(

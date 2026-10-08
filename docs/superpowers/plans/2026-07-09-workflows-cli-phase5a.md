@@ -18,7 +18,7 @@
 - Immutability invariant: existing version folders are NEVER rewritten. Only new ones are created. Existing tests and behavior (load/list/run/resume/supervisor) stay green.
 - Any `id`/`version` coming from the client that ends up in a path goes through `wf_core::registry::is_safe_segment` (path-traversal protection - as in the registry and the MCP/server handlers).
 - Atomic writes of control files (`current`, layouts) go through `wf_core::fsutil::atomic_write`. Version creation finishes with an atomic `rename` from a temp folder.
-- Run code-ranker before marking a task done; navigate the code via codegraph.
+- Run code-ranker before marking a task done; search the code with zg (`zg query --rg -F <symbol> <path>`).
 
 ## Current setup (for the implementer, mirror it, don't break it)
 

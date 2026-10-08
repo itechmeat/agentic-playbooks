@@ -112,7 +112,7 @@
 
 **Files:**
 - Modify: `crates/apb-core/src/schema.rs` (`max_traversals` per Global Constraints), `crates/apb-core/src/validate.rs` (`check_cycles` V11 relaxation, V30; register V30 in whatever code table exists)
-- Modify: `crates/apb-engine/src/event.rs` (`EdgeTraversed`), `crates/apb-engine/src/state.rs` (`edge_counts` fold), `crates/apb-engine/src/scheduler.rs` (`advance_frontier` cap check + journaling; result-cache lookup skip for nodes with a folded `node_finished` - find the cache lookup site via codegraph `node result cache`)
+- Modify: `crates/apb-engine/src/event.rs` (`EdgeTraversed`), `crates/apb-engine/src/state.rs` (`edge_counts` fold), `crates/apb-engine/src/scheduler.rs` (`advance_frontier` cap check + journaling; result-cache lookup skip for nodes with a folded `node_finished` - find the cache lookup site with `zg query "node result cache"`)
 - Test: `crates/apb-core/tests/suite/` validate suite, `crates/apb-engine/tests/suite/` scheduler suite
 
 **Interfaces:**

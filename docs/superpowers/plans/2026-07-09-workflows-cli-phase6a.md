@@ -19,7 +19,7 @@
 - Event-sourcing invariant: `events.jsonl` is written only by the drive loop (including patch/migrate/promote events). The supervisor side writes `control.jsonl` and version folders, but NOT `events.jsonl`.
 - `id`/`version`/`continue_from` coming from the client go through `is_safe_segment`.
 - Existing behavior is unchanged: autonomous and supervised runs without patches, the 5a minor versions, all tests stay green.
-- code-ranker before marking a task done; navigation via codegraph.
+- code-ranker before marking a task done; search via zg.
 
 ## Current setup (mirror it)
 
