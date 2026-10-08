@@ -185,6 +185,18 @@ pub struct RunEventsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunRetroContextArgs {
+    pub run_id: String,
+    /// Compare with the median of this many earlier finished runs of the same
+    /// playbook version (default 10, at most 100, 0 for no comparison).
+    #[serde(default)]
+    pub compare_last: Option<usize>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunResumeArgs {
     pub run_id: String,
     /// Node to resume from (determined automatically by default).

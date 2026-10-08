@@ -140,6 +140,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_wait",
         "run_events",
         "run_report",
+        "run_retro_context",
         "run_resume",
         "run_stop",
         "review_decide",
@@ -311,6 +312,7 @@ fn tools_carry_safety_annotations() {
         "run_wait",
         "run_events",
         "run_report",
+        "run_retro_context",
         "supervisor_wait_event",
         "supervisor_run_inspect",
     ] {

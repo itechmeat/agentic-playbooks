@@ -537,6 +537,10 @@ pub struct OutputClip<'a> {
     pub run_dir: &'a Path,
     /// `0` means unlimited.
     pub max_bytes: usize,
+    /// Renders `{{run.retro}}` for `run_dir` (the drive passes
+    /// `crate::run_retro::text::prompt_text`; handed in so this module does not
+    /// depend on the run readers). `None` renders it empty.
+    pub retro: Option<fn(&Path) -> String>,
 }
 
 /// Manual scan for `{{ ... }}` without regex; substitutes known references, unknown ones -> "".
@@ -676,6 +680,11 @@ fn resolve(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
         ["run", "hooks", key] => hooks.get(*key).cloned().unwrap_or_default(),
+        // The run's retrospective as of now (issue #192 part 3), bounded.
+        ["run", "retro"] => clip_outputs
+            .retro
+            .map(|f| f(clip_outputs.run_dir))
+            .unwrap_or_default(),
         ["nodes", id, "output"] | ["nodes", id, "report"] => {
             clipped(id, outputs.get(*id).cloned().unwrap_or_default())
         }

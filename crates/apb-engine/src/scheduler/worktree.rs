@@ -94,6 +94,7 @@ pub(crate) fn resolve_at_start(
         &crate::context::OutputClip {
             run_dir: root,
             max_bytes: 0,
+            retro: None,
         },
     );
     let path = resolve_dir(root, &rendered, &format!("from `{template}`"))

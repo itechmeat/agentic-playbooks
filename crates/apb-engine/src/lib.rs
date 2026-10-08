@@ -31,6 +31,9 @@ pub mod run_config;
 pub mod run_doctor;
 mod run_lineage;
 pub mod run_outcome;
+// --- run retrospective (#192 part 3) ---
+pub mod run_retro;
+// --- end of run retrospective ---
 // --- 0.23.0 stats (C3) ---
 pub mod run_stats;
 // --- end of 0.23.0 stats ---
