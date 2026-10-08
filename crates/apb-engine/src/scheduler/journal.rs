@@ -77,8 +77,8 @@ impl<'a> Journal<'a> {
 /// Decisions are journaled mid-node through the attempt journal, the same
 /// handle as `attempt_finished` (issue #165 Part 3), never the post-node batch.
 impl crate::decision::DecisionJournal for Journal<'_> {
-    fn append_decision(&self, payload: EventPayload) -> Result<u64, EngineError> {
-        self.append_seq(payload)
+    fn append_decision(&self, payload: EventPayload) -> Result<Option<u64>, EngineError> {
+        self.append_seq(payload).map(Some)
     }
 }
 

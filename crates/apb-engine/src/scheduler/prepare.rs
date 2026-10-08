@@ -803,6 +803,10 @@ pub(crate) fn prepare_run_target(
     manifest.consent = consent;
     // Issue #192: a top-level run (not an eval run) that starts on the
     // playbook's candidate version is a trial of it.
+    manifest.candidate_skipped = opts
+        .candidate_skipped
+        .clone()
+        .filter(|_| opts.depth == 0 && opts.parent_run.is_none());
     manifest.candidate_trial = opts.depth == 0
         && opts.parent_run.is_none()
         && opts.eval.is_none()

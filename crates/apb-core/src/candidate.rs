@@ -16,8 +16,10 @@ use crate::versioning::{
     write_provenance,
 };
 
-pub use crate::candidate_pointer::{CANDIDATE_FILE, clear_candidate_if, read_candidate};
-const LOCK_FILE: &str = ".candidate.lock";
+use crate::candidate_pointer::CANDIDATE_LOCK_FILE as LOCK_FILE;
+pub use crate::candidate_pointer::{
+    CANDIDATE_FILE, OUTCOME_SUPERSEDED, clear_candidate_if, read_candidate,
+};
 
 /// `scope` of a forward patch in its provenance and in the MCP tool.
 pub const SCOPE_NEXT_RUNS: &str = "next_runs";
@@ -27,7 +29,6 @@ pub const SCOPE_CURRENT_RUN: &str = "current_run";
 /// Trial outcomes recorded in [`TrialRecord::outcome`].
 pub const OUTCOME_PROMOTED: &str = "promoted";
 pub const OUTCOME_REJECTED: &str = "rejected";
-pub const OUTCOME_SUPERSEDED: &str = "superseded";
 
 /// `supervisor.policy.trial_candidates`: whether a run started without an
 /// explicit version runs the candidate.
@@ -83,9 +84,37 @@ pub fn random_draw() -> f64 {
     bits as f64 / (1u64 << 53) as f64
 }
 
+/// How many forward-patch generations [`lineage_reaches`] follows.
+const MAX_LINEAGE: usize = 64;
+
+/// Whether the forward patch `version` descends from `current_version`: its
+/// provenance's `base_version` is `current_version`, or is itself a forward
+/// patch (`scope: next_runs`) that descends from it. A candidate whose
+/// lineage no longer reaches `current` was made from a line a person (or an
+/// in-run promotion) has since moved past; running or promoting it would
+/// undo that newer version.
+pub fn lineage_reaches(playbook_dir: &Path, version: &str, current_version: &str) -> bool {
+    let mut at = version.to_string();
+    for _ in 0..MAX_LINEAGE {
+        let Some(p) = crate::versioning::read_provenance_in(playbook_dir, &at) else {
+            return false;
+        };
+        if at != version && p.scope.as_deref() != Some(SCOPE_NEXT_RUNS) {
+            return false;
+        }
+        match p.base_version {
+            Some(b) if b == current_version => return true,
+            Some(b) => at = b,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// The candidate a start without an explicit version runs: the pointer's
-/// version when it differs from `current`, still holds a definition, and the
-/// current version's `trial_candidates` policy admits the start for `draw`.
+/// version when it differs from `current`, still holds a definition,
+/// descends from `current` ([`lineage_reaches`]), and the current version's
+/// `trial_candidates` policy admits the start for `draw`.
 /// The current version's policy decides: it is the person-approved line, and
 /// a forward patch cannot change the `supervisor` block anyway.
 pub fn choose_for_start(
@@ -100,6 +129,7 @@ pub fn choose_for_start(
             .join(&candidate)
             .join("playbook.yaml")
             .is_file()
+        || !lineage_reaches(playbook_dir, &candidate, current_version)
     {
         return None;
     }
@@ -112,7 +142,8 @@ pub fn lock(playbook_dir: &Path) -> io::Result<DirLock> {
     lock_dir(playbook_dir, LOCK_FILE)
 }
 
-fn playbook_dir(root: &Path, id: &str) -> PathBuf {
+/// The directory of playbook `id` under the project `root`.
+pub fn playbook_dir(root: &Path, id: &str) -> PathBuf {
     root.join(".apb/playbooks").join(id)
 }
 
@@ -137,13 +168,16 @@ pub struct CreatedCandidate {
 /// same validation and immutability as an in-run patch, provenance with
 /// `scope: next_runs`) and makes it the candidate. A candidate it replaces
 /// gets the `superseded` outcome naming the new version; the lineage stays
-/// in the new version's `base_version`.
+/// in the new version's `base_version`. The caller holds the playbook's
+/// candidate [`lock`] (`_held`), so its own checks (the base is still the
+/// line on trial, the run's patch budget) and this write are one step.
 pub fn create_forward_patch(
     root: &Path,
     id: &str,
     base_version: &str,
     yaml: &str,
     patch: &ForwardPatch,
+    _held: &DirLock,
 ) -> Result<CreatedCandidate, VersioningError> {
     let version = create_patch_version_with(
         root,
@@ -162,7 +196,6 @@ pub fn create_forward_patch(
         },
     )?;
     let dir = playbook_dir(root, id);
-    let _lock = lock(&dir)?;
     let replaced = read_candidate(&dir).filter(|c| *c != version);
     atomic_write(&dir.join(CANDIDATE_FILE), version.as_bytes())?;
     if let Some(old) = &replaced {

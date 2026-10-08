@@ -320,6 +320,16 @@ full answer distributions of each decision are kept in
 request of the run, resumes included. Past either, a decision is journaled
 with `error: budget` and nothing is sent.
 
+The budget is reserved before a request goes out, not checked after the
+reply: the caller takes a slot under the journal's append lock against a
+fresh read of the journal's decisions plus every request still in flight
+(a marker under `runs/<id>/decisions-inflight/`, one per request, from any
+process). So the drive's own uses, parallel branches and host tasks asking
+at the same time (`decision_ask`, `apb decide`) share one cap and never send
+past it. A marker is removed once its decision is journaled; one older than
+15 minutes belongs to a caller that died and no longer counts. The cost cap
+compares with what was journaled, since a request in flight has no cost yet.
+
 ## Cost and latency on run surfaces
 
 Every read-only run surface reports the run's decisions as one compact object
@@ -545,11 +555,15 @@ reads the machine's file).
 It counts against the run's `budget` (every `decision_made` the run journaled
 counts), and the decision is appended to the run's journal as `decision_made`
 with `use_site: host_task`, the node, its latest attempt, the provider, cost
-and latency (`join.kind` names the kind). The drive re-reads the journal's
-high-water mark before its next append, so the foreign line never shares a
-seq. The same question asked again in the same attempt is answered from the
+and latency (`join.kind` names the kind). Every append to a run's journal
+settles its seq and writes its line under an advisory lock on the file, in
+one write, so the foreign line never shares a seq or tears a line of the
+drive. The same question asked again in the same attempt is answered from the
 journal (`cached: true`, no request). A run that has ended is refused
-(`run_ended`): nothing is appended after its terminal event.
+(`run_ended`): nothing is appended after its terminal event. A run that ends
+while the provider answers is checked again under the lock, right before the
+append: the answer is returned with `not_journaled` naming why, and nothing
+is appended.
 
 **Outside a run** the call works like the catalog ranking: one line in
 `<root>/.apb/decisions.jsonl` and a per-day cap,

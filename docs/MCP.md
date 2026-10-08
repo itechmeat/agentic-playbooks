@@ -264,19 +264,36 @@ continue_from?, rationale?, evidence? }` has two scopes:
   into the version's provenance (`meta/<version>.yaml`, with `created_by:
   supervisor`, `run_id`, `classification`, `scope: next_runs` and
   `base_version`). The answer is `{ version, scope, base_version, candidate:
-  true, replaced_candidate }`. Refusals name a code: `window_closed`,
-  `max_patches` (`max_patches_per_run` counts both scopes), `goal_changed`,
-  `effects_changed` (declared or inferred effects, `secrets` included),
-  `irreversible_added`, `trust_fields_changed` (`requires`, the `supervisor`
-  block, connector grants, sub-playbooks), `schema`, `invalid` (the
-  validator, a frozen playbook).
+  true, replaced_candidate }`. Refusals name a code: `window_closed` (also
+  30 minutes after the last journal line of a run whose driver died),
+  `max_patches` (`max_patches_per_run` counts both scopes), `stale_base`
+  (the run's version is neither `current` nor the candidate on trial),
+  `goal_changed`, `effects_changed` (declared or inferred effects, `secrets`
+  included), `irreversible_added`, `trust_fields_changed` (`requires`, the
+  `supervisor` block, `defaults.host_decisions`, `defaults.retry_advice`,
+  `worktree`, connector grants, sub-playbooks), `schema`, `invalid` (the
+  validator, a frozen playbook). Binding another profile is allowed: the run
+  gate checks the candidate's profile bundles on their own.
 
 A run that was a candidate trial carries `candidate_trial: { version,
 verdict, reason? }` in `run_status` (`verdict`: `running`, `passed`,
 `promoted`, `rejected` or `undecided`), and `playbook_get` names the current
-candidate (`candidate: { version, provenance }`). A `playbook_run` refused
-for trust while it would run the candidate carries `candidate_trial` with
-that version: ask the person about the candidate, not about `current`.
+candidate (`candidate: { version, provenance }`).
+
+Candidate trust: the candidate inherits the trust of `current`, the way an
+in-run supervisor patch runs under the trust of the version its run started
+on (it passed the definition guard and its lineage reaches `current`). A
+`playbook_run` without a version runs it, with no acknowledgement, when
+`current` is approved and the candidate's profiles, connectors and
+sub-playbooks pass the gate; the start response then carries
+`candidate_trial: "<version>"`. Otherwise the start falls back to `current`
+and carries `candidate_skipped: "untrusted"` (or `"refused: <policy>"`); a
+trust refusal of `current` itself names it too. `acknowledge_untrusted`
+never covers an untrusted candidate (nor does a CLI or dashboard start);
+pass the candidate's `version` to run it anyway. `run_status` repeats
+`candidate_skipped` for such a run. A version a person saves or promotes
+ends the trial (`superseded`), and a candidate whose lineage no longer
+reaches `current` is dropped at the next start.
 
 `supervisor_node_retry` and `supervisor_run_continue_from` also act while the
 run is parked on an undecided `human_review` gate, the moment a supervisor

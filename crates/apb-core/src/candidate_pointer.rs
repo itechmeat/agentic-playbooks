@@ -11,6 +11,11 @@ use crate::registry::is_safe_segment;
 
 /// The pointer file next to `current`.
 pub const CANDIDATE_FILE: &str = "candidate";
+/// The lock every read-modify-write of the pointer and a candidate's trial
+/// record takes (in the playbook directory).
+pub const CANDIDATE_LOCK_FILE: &str = ".candidate.lock";
+/// The trial outcome of a candidate a newer version replaced.
+pub const OUTCOME_SUPERSEDED: &str = "superseded";
 
 /// The candidate version of the playbook in `playbook_dir`, if one is set.
 pub fn read_candidate(playbook_dir: &Path) -> Option<String> {

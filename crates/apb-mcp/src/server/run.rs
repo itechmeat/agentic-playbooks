@@ -363,6 +363,7 @@ impl WfMcp {
         // Issue #192: the candidate version the gate chose (and pinned) for
         // a start without an explicit version is the one that runs.
         let version = permit.run_version(version.as_deref());
+        let candidate = super::StartCandidate::of(&permit);
         // --- 0.24.0 irreversible consent ---
         // `confirm_irreversible` is the consent, checked against the nonce of
         // the refusal the person saw; `acknowledge_untrusted` answers trust
@@ -408,9 +409,11 @@ impl WfMcp {
                     warnings,
                     execution,
                     consent,
+                    candidate.skipped.clone(),
                 ),
                 &resolved,
                 deprecation,
+                &candidate,
             );
         }
 
@@ -431,6 +434,7 @@ impl WfMcp {
                 worktree,
                 execution,
                 consent,
+                candidate_skipped: candidate.skipped.clone(),
                 ..Default::default()
             };
             if background == Some(true) {
@@ -444,6 +448,7 @@ impl WfMcp {
                     },
                     &resolved,
                     deprecation,
+                    &candidate,
                 );
             }
             return with_execution(
@@ -458,6 +463,7 @@ impl WfMcp {
                 },
                 &resolved,
                 deprecation,
+                &candidate,
             );
         }
         if background == Some(true) {
@@ -478,11 +484,13 @@ impl WfMcp {
                         worktree,
                         execution,
                         consent,
+                        candidate.skipped.clone(),
                     ),
                     &warnings,
                 )),
                 &resolved,
                 deprecation,
+                &candidate,
             );
         }
         with_execution(
@@ -502,11 +510,13 @@ impl WfMcp {
                     worktree,
                     execution,
                     consent,
+                    candidate.skipped.clone(),
                 ),
                 &warnings,
             )),
             &resolved,
             deprecation,
+            &candidate,
         )
     }
 

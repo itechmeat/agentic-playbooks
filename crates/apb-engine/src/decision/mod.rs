@@ -23,6 +23,7 @@
 //! 9. With `privacy.debug_state`, the redacted state and the full answers go
 //!    to `runs/<id>/decisions/<seq>.json`.
 
+mod budget;
 pub(crate) mod completion;
 pub mod host_task;
 pub(crate) mod judge;
@@ -81,8 +82,10 @@ pub(crate) fn snapshot(root: &Path) -> Option<EffectiveDecisions> {
 /// Where a journaled decision goes: the attempt journal, written in place
 /// while the node runs (not the post-node batch).
 pub(crate) trait DecisionJournal {
-    /// Appends and returns the event's seq.
-    fn append_decision(&self, payload: EventPayload) -> Result<u64, EngineError>;
+    /// Appends and returns the event's seq, or `None` when the journal
+    /// declined it because the run ended meanwhile (a writer outside the
+    /// drive): the answer stands, it is just not journaled.
+    fn append_decision(&self, payload: EventPayload) -> Result<Option<u64>, EngineError>;
 }
 
 /// Which material class a state field belongs to.
@@ -228,7 +231,10 @@ struct Replay {
 
 #[derive(Debug, Default)]
 struct Ledger {
+    /// Requests this runner saw sent (seeded from the journal, then its own).
     requests: u32,
+    /// This runner's requests in flight (each holds a budget reservation).
+    inflight: u32,
     cost_usd: f64,
     replay: Vec<Replay>,
     /// Automatic actions taken per use this run (the enforce cap).
@@ -599,19 +605,26 @@ impl DecisionRunner {
         }
     }
 
-    /// Takes a request slot from the run's budget, or `false` when it is
-    /// spent. Checked and taken under one lock: parallel branches share the
-    /// runner, and a slot raised only after the reply would let each of
-    /// them past the last one.
-    fn reserve_request(&self) -> bool {
+    /// Takes a request slot from the run's budget, or `None` when it is
+    /// spent. The slot is reserved before the request goes out, against a
+    /// fresh read of the journal under its append lock plus every request
+    /// in flight in any process ([`budget`]): parallel branches and host
+    /// tasks asking at the same time share one cap, and a slot raised only
+    /// after the reply would let each of them past the last one.
+    fn reserve_request(&self) -> Option<budget::Reservation> {
         let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
-        if ledger.requests >= self.settings.budget.max_requests_per_run
-            || ledger.cost_usd >= self.settings.budget.max_usd_per_run
-        {
-            return false;
-        }
-        ledger.requests += 1;
-        true
+        let slot = budget::reserve(
+            &self.run_dir,
+            self.settings.budget.max_requests_per_run,
+            self.settings.budget.max_usd_per_run,
+            budget::Spent {
+                requests: ledger.requests,
+                cost_usd: ledger.cost_usd,
+            },
+            ledger.inflight,
+        )?;
+        ledger.inflight += 1;
+        Some(slot)
     }
 
     /// Asks one decision. See the module docs for the steps.
@@ -733,14 +746,14 @@ impl DecisionRunner {
             enforce_refused: None,
             join: call.join.clone(),
         };
-        if !self.reserve_request() {
+        let Some(slot) = self.reserve_request() else {
             let mut event = base;
             if let EventPayload::DecisionMade { error, .. } = &mut event {
                 *error = Some("budget".into());
             }
             let _ = journal.append_decision(event);
             return (DecisionOutcome::Skipped { reason: "budget" }, None);
-        }
+        };
         let request = DecisionRequest {
             use_site: call.site,
             state: state.clone(),
@@ -876,7 +889,26 @@ impl DecisionRunner {
             _ => (0.0, false),
         };
         let source = meta.source();
-        let seq = match journal.append_decision(event) {
+        let appended = journal.append_decision(event);
+        {
+            let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.inflight = ledger.inflight.saturating_sub(1);
+            // A request that went out counts whether or not it was
+            // journaled; a cache hit or an empty chain sent none.
+            if counted {
+                ledger.requests += 1;
+            }
+            ledger.cost_usd += cost;
+            if appended.is_ok() && applied_now && !reserved {
+                *ledger
+                    .actions
+                    .entry(call.site.as_str().to_string())
+                    .or_default() += 1;
+            }
+        }
+        // The event (or the local count) holds the slot now.
+        drop(slot);
+        let seq = match appended {
             Ok(seq) => seq,
             Err(_) => {
                 if reserved {
@@ -890,22 +922,9 @@ impl DecisionRunner {
                 );
             }
         };
+        if self.settings.privacy.debug_state
+            && let Some(seq) = seq
         {
-            let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
-            // The slot taken before asking is given back when no request
-            // went out (a cache hit, an empty chain).
-            if !counted {
-                ledger.requests = ledger.requests.saturating_sub(1);
-            }
-            ledger.cost_usd += cost;
-            if applied_now && !reserved {
-                *ledger
-                    .actions
-                    .entry(call.site.as_str().to_string())
-                    .or_default() += 1;
-            }
-        }
-        if self.settings.privacy.debug_state {
             self.write_debug_state(
                 seq,
                 &state,
@@ -919,10 +938,7 @@ impl DecisionRunner {
                 answers,
                 mode,
                 replayed: false,
-                meta: AnswerMeta {
-                    seq: Some(seq),
-                    ..meta
-                },
+                meta: AnswerMeta { seq, ..meta },
             },
             (None, Err(e)) => DecisionOutcome::Failed {
                 error_kind: e.kind().to_string(),
@@ -1309,9 +1325,9 @@ mod tests {
     }
 
     impl DecisionJournal for BarrierJournal {
-        fn append_decision(&self, _payload: EventPayload) -> Result<u64, EngineError> {
+        fn append_decision(&self, _payload: EventPayload) -> Result<Option<u64>, EngineError> {
             self.barrier.wait();
-            Ok(self.seq.fetch_add(1, Ordering::SeqCst))
+            Ok(Some(self.seq.fetch_add(1, Ordering::SeqCst)))
         }
     }
 
@@ -1320,7 +1336,7 @@ mod tests {
     struct Recorder(Mutex<Vec<Event>>);
 
     impl DecisionJournal for Recorder {
-        fn append_decision(&self, payload: EventPayload) -> Result<u64, EngineError> {
+        fn append_decision(&self, payload: EventPayload) -> Result<Option<u64>, EngineError> {
             let mut events = self.0.lock().unwrap();
             let seq = events.len() as u64 + 1;
             events.push(Event {
@@ -1328,7 +1344,7 @@ mod tests {
                 ts: 0,
                 payload,
             });
-            Ok(seq)
+            Ok(Some(seq))
         }
     }
 

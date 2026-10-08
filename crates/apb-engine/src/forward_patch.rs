@@ -90,11 +90,10 @@ pub fn create(
         return Err(EngineError::NotFound(run_id.to_string()));
     }
     let events = read_all(&run_dir)?;
-    check_window(&events, apb_core::clock::now_ms())?;
+    let driver_dead = crate::liveness::driver_alive(&run_dir, run_id) == Some(false);
+    check_window(&events, driver_dead, apb_core::clock::now_ms())?;
 
     let (id, base_version) = crate::scheduler::run_playbook_ref(root, run_id)?;
-    check_patch_budget(root, &run_dir, &events, &id, run_id)?;
-
     let base = Registry::open(root)?
         .load(&id, Some(&base_version))?
         .playbook;
@@ -102,6 +101,13 @@ pub fn create(
         .map_err(|e| refused("schema", format!("the patched YAML does not parse: {e}")))?;
     definition_guard(root, &base, &patched)?;
 
+    // The base check, the patch budget and the write are one step under the
+    // candidate lock: two concurrent forward patches from one run cannot
+    // both pass a budget of one, and the base cannot move in between.
+    let playbook_dir = apb_core::candidate::playbook_dir(root, &id);
+    let lock = apb_core::candidate::lock(&playbook_dir)?;
+    check_base(&playbook_dir, &base_version)?;
+    check_patch_budget(root, &run_dir, &events, &id, run_id)?;
     let CreatedCandidate { version, replaced } = create_forward_patch(
         root,
         &id,
@@ -113,6 +119,7 @@ pub fn create(
             rationale: req.rationale.clone(),
             evidence: req.evidence.clone(),
         },
+        &lock,
     )
     .map_err(|e| refused("invalid", e))?;
     Ok(ForwardPatchResult {
@@ -122,23 +129,57 @@ pub fn create(
     })
 }
 
-/// A live run is open; an ended one only within [`FORWARD_PATCH_WINDOW_MS`]
-/// of its terminal event.
-fn check_window(events: &[crate::event::Event], now_ms: u128) -> Result<(), EngineError> {
-    if !RunState::fold(events).run_status.is_terminal() {
+/// A forward patch builds on the line a person approved: its base (the
+/// run's version) must be `current`, or the candidate now on trial (the
+/// new patch then replaces it, and its lineage still reaches `current`). A
+/// run of an older version may not plant a candidate that would undo a
+/// newer one: `stale_base`.
+fn check_base(playbook_dir: &Path, base_version: &str) -> Result<(), EngineError> {
+    let current = std::fs::read_to_string(playbook_dir.join("current"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if base_version == current {
         return Ok(());
     }
-    let ended = events
-        .iter()
-        .rev()
-        .find(|e| {
-            matches!(
-                e.payload,
-                EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. }
-            )
-        })
-        .map(|e| e.ts)
-        .unwrap_or(0);
+    let candidate = apb_core::candidate::read_candidate(playbook_dir);
+    if candidate.as_deref() == Some(base_version)
+        && apb_core::candidate::lineage_reaches(playbook_dir, base_version, &current)
+    {
+        return Ok(());
+    }
+    Err(refused(
+        "stale_base",
+        format!(
+            "the run ran {base_version}, but `current` is {current}: a forward patch builds on `current` or the candidate on trial"
+        ),
+    ))
+}
+
+/// A live run is open; an ended one only within [`FORWARD_PATCH_WINDOW_MS`]
+/// of its terminal event. A run whose driver died never journals its end:
+/// it counts as ended at its last journal line (`driver_dead`).
+fn check_window(
+    events: &[crate::event::Event],
+    driver_dead: bool,
+    now_ms: u128,
+) -> Result<(), EngineError> {
+    let ended = if RunState::fold(events).run_status.is_terminal() {
+        events
+            .iter()
+            .rev()
+            .find(|e| {
+                matches!(
+                    e.payload,
+                    EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. }
+                )
+            })
+            .map(|e| e.ts)
+            .unwrap_or(0)
+    } else if driver_dead {
+        events.last().map(|e| e.ts).unwrap_or(0)
+    } else {
+        return Ok(());
+    };
     if now_ms.saturating_sub(ended) > FORWARD_PATCH_WINDOW_MS {
         return Err(refused(
             "window_closed",
@@ -205,8 +246,13 @@ fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
 /// `irreversible` and the rest; a patch may drop effects, never add them),
 /// the irreversible sources a run start asks consent for, and the fields
 /// trust and policy rest on: `requires`, the `supervisor` block (its
-/// capabilities and promotion and trial policies), each node's connector
-/// grants and each sub-playbook a node runs.
+/// capabilities and promotion and trial policies), the decision opt-ins in
+/// `defaults` (`host_decisions`, `retry_advice`), the run's `worktree`,
+/// each node's connector grants and each sub-playbook a node runs.
+///
+/// A node may still bind another profile: profile trust is not inherited
+/// from the base version, the run gate checks every profile bundle of the
+/// candidate on its own.
 pub fn definition_guard(
     root: &Path,
     base: &Playbook,
@@ -262,6 +308,17 @@ pub fn definition_guard(
     if json(&base.requires) != json(&patched.requires) {
         return Err(refused("trust_fields_changed", "`requires` changed"));
     }
+    if json(&base.defaults.host_decisions) != json(&patched.defaults.host_decisions)
+        || json(&base.defaults.retry_advice) != json(&patched.defaults.retry_advice)
+    {
+        return Err(refused(
+            "trust_fields_changed",
+            "the decision opt-ins in `defaults` (`host_decisions`, `retry_advice`) changed",
+        ));
+    }
+    if base.worktree != patched.worktree {
+        return Err(refused("trust_fields_changed", "`worktree` changed"));
+    }
     if json(&base.supervisor) != json(&patched.supervisor) {
         return Err(refused(
             "trust_fields_changed",
@@ -315,7 +372,11 @@ mod tests {
             },
         );
         let live = vec![started.clone()];
-        assert!(check_window(&live, u128::MAX).is_ok());
+        assert!(check_window(&live, false, u128::MAX).is_ok());
+        // A run whose driver died counts as ended at its last journal line.
+        assert!(check_window(&live, true, FORWARD_PATCH_WINDOW_MS).is_ok());
+        let err = check_window(&live, true, 1 + FORWARD_PATCH_WINDOW_MS).unwrap_err();
+        assert!(err.to_string().contains("window_closed"), "{err}");
         let ended = vec![
             started,
             ev(
@@ -326,8 +387,8 @@ mod tests {
                 },
             ),
         ];
-        assert!(check_window(&ended, 1_000 + FORWARD_PATCH_WINDOW_MS).is_ok());
-        let err = check_window(&ended, 1_001 + FORWARD_PATCH_WINDOW_MS).unwrap_err();
+        assert!(check_window(&ended, false, 1_000 + FORWARD_PATCH_WINDOW_MS).is_ok());
+        let err = check_window(&ended, false, 1_001 + FORWARD_PATCH_WINDOW_MS).unwrap_err();
         assert!(err.to_string().contains("window_closed"), "{err}");
     }
 }

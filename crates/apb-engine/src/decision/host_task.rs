@@ -164,6 +164,10 @@ pub struct AskAnswer {
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    /// Why an in-run answer was not journaled (the run ended before it
+    /// could be appended); absent when it was, or for a call outside a run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_journaled: Option<String>,
 }
 
 /// What a call came to. Every variant serializes with `answered`.
@@ -382,6 +386,7 @@ fn shape(req: &AskRequest, answers: &BTreeMap<String, DecisionAnswer>) -> AskAns
         cost_usd: None,
         run_id: None,
         seq: None,
+        not_journaled: None,
     };
     let one = answers.get("answer");
     match req.kind {
@@ -580,15 +585,31 @@ fn standalone_refusal(reason: &'static str) -> AskOutcome {
 }
 
 /// Appends a decision to a run's journal from outside its drive: the same
-/// path `apb connector call` takes. The drive re-reads the high-water mark
-/// before its next append ([`EventLog::append`]), so no seq is reused.
+/// path `apb connector call` takes. The log opens tolerant of a line the
+/// drive is still writing, and the append settles its seq under the
+/// journal's lock ([`EventLog::append`]), so no seq is reused. The run must
+/// still be live at that moment: a decision whose run ended while the
+/// provider answered is returned but not journaled (an ended run's journal
+/// stays closed).
 struct RunJournalAppender {
     run_dir: PathBuf,
 }
 
+/// Whether the run of `events` has ended.
+fn run_ended(events: &[crate::event::Event]) -> bool {
+    matches!(
+        crate::state::RunState::fold(events).run_status,
+        crate::state::RunStatus::Succeeded
+            | crate::state::RunStatus::Failed
+            | crate::state::RunStatus::Aborted
+    )
+}
+
 impl DecisionJournal for RunJournalAppender {
-    fn append_decision(&self, payload: EventPayload) -> Result<u64, EngineError> {
-        Ok(EventLog::open(&self.run_dir)?.append(payload)?.seq)
+    fn append_decision(&self, payload: EventPayload) -> Result<Option<u64>, EngineError> {
+        Ok(EventLog::open_foreign(&self.run_dir)?
+            .append_checked(payload, |events| !run_ended(events))?
+            .map(|e| e.seq))
     }
 }
 
@@ -600,14 +621,9 @@ fn ask_in_run(root: &Path, run_id: &str, req: &AskRequest) -> Result<AskOutcome,
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let events = crate::event::read_all(&run_dir)?;
+    let events = crate::event::read_all_lossy_tail(&run_dir)?;
     let status = crate::state::RunState::fold(&events).run_status;
-    if matches!(
-        status,
-        crate::state::RunStatus::Succeeded
-            | crate::state::RunStatus::Failed
-            | crate::state::RunStatus::Aborted
-    ) {
+    if run_ended(&events) {
         return Ok(refused(
             "run_ended",
             format!(
@@ -724,6 +740,11 @@ fn ask_in_run(root: &Path, run_id: &str, req: &AskRequest) -> Result<AskOutcome,
             out.cached = replayed;
             out.run_id = Some(run_id.to_string());
             out.seq = meta.seq;
+            if meta.seq.is_none() && !replayed {
+                out.not_journaled = Some(format!(
+                    "run `{run_id}` ended while the provider answered; the answer stands but is not in the run's journal"
+                ));
+            }
             if let Some(seq) = meta.seq
                 && let Some((latency, cost)) = journaled_cost(&run_dir, seq)
             {

@@ -271,6 +271,11 @@ pub fn create_version_with_override(
     if is_new || make_current {
         atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
     }
+    // A version a person writes ends the trial of a forward patch made from
+    // an older line: promoting that candidate later would undo this one.
+    if !is_new {
+        supersede_candidate(&playbook_dir, None, &format!("a person created {version}"))?;
+    }
 
     Ok(version)
 }
@@ -523,6 +528,80 @@ pub fn write_provenance(
     let yaml =
         serde_yaml_ng::to_string(provenance).map_err(|e| VersioningError::Schema(e.to_string()))?;
     atomic_write(&path, yaml.as_bytes())?;
+    Ok(())
+}
+
+/// The provenance of `version` of the playbook in `playbook_dir`, `None`
+/// when it has none or it does not read.
+pub fn read_provenance_in(playbook_dir: &Path, version: &str) -> Option<VersionProvenance> {
+    if !is_safe_segment(version) {
+        return None;
+    }
+    let yaml =
+        fs::read_to_string(playbook_dir.join("meta").join(format!("{version}.yaml"))).ok()?;
+    serde_yaml_ng::from_str(&yaml).ok()
+}
+
+/// Ends the trial of the candidate of the playbook in `playbook_dir`,
+/// unless it is `keep`: removes the pointer and records the `superseded`
+/// outcome with `reason` on its trial record. Returns the version it ended.
+/// The caller holds the candidate lock (`_held`).
+pub fn supersede_candidate_locked(
+    playbook_dir: &Path,
+    keep: Option<&str>,
+    reason: &str,
+    _held: &crate::fsutil::DirLock,
+) -> Result<Option<String>, VersioningError> {
+    let Some(candidate) = crate::candidate_pointer::read_candidate(playbook_dir) else {
+        return Ok(None);
+    };
+    if keep == Some(candidate.as_str()) {
+        return Ok(None);
+    }
+    crate::candidate_pointer::clear_candidate_if(playbook_dir, &candidate)?;
+    let path = playbook_dir.join("meta").join(format!("{candidate}.yaml"));
+    if path.is_file() {
+        let mut provenance = read_provenance_in(playbook_dir, &candidate).unwrap_or_default();
+        let mut trial = provenance.trial.take().unwrap_or_default();
+        trial.outcome = Some(crate::candidate_pointer::OUTCOME_SUPERSEDED.to_string());
+        trial.reason = Some(reason.to_string());
+        provenance.trial = Some(trial);
+        let yaml = serde_yaml_ng::to_string(&provenance)
+            .map_err(|e| VersioningError::Schema(e.to_string()))?;
+        atomic_write(&path, yaml.as_bytes())?;
+    }
+    Ok(Some(candidate))
+}
+
+/// [`supersede_candidate_locked`] under the playbook's candidate lock.
+pub fn supersede_candidate(
+    playbook_dir: &Path,
+    keep: Option<&str>,
+    reason: &str,
+) -> Result<Option<String>, VersioningError> {
+    if crate::candidate_pointer::read_candidate(playbook_dir).is_none() {
+        return Ok(None);
+    }
+    let lock =
+        crate::fsutil::lock_dir(playbook_dir, crate::candidate_pointer::CANDIDATE_LOCK_FILE)?;
+    supersede_candidate_locked(playbook_dir, keep, reason, &lock)
+}
+
+/// A person promotes `version` by hand (the dashboard): [`promote_version`],
+/// and any other candidate on trial ends as `superseded`, so a forward
+/// patch made from the line the person just moved past never runs or
+/// promotes over their choice.
+pub fn promote_version_by_person(
+    root: &Path,
+    id: &str,
+    version: &str,
+) -> Result<(), VersioningError> {
+    promote_version(root, id, version)?;
+    supersede_candidate(
+        &playbooks_dir(root).join(id),
+        None,
+        &format!("a person promoted {version}"),
+    )?;
     Ok(())
 }
 

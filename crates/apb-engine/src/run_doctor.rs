@@ -836,6 +836,7 @@ mod tests {
             execution: None,
             consent: None,
             candidate_trial: false,
+            candidate_skipped: None,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

@@ -1,8 +1,8 @@
 pub mod adapter;
 mod agent_home;
 // candidate trials (issue #192)
-pub mod candidate;
 pub mod attempt_models;
+pub mod candidate;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;

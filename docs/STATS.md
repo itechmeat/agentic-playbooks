@@ -70,8 +70,14 @@ Per playbook version:
   fallback) on the model the host reported in `host_task_submitted.model`,
   or `unreported` when it named none. In host mode the profile's model is
   only a hint, so this is where a run that went entirely to another model
-  shows. Two names count as the same model when, lowercased without
-  separators, one contains the other (`opus` and `claude-opus-4-1`).
+  shows. Two names count as the same model when their lowercase tokens
+  (split on every non-alphanumeric character) are equal, or the shorter
+  name's tokens appear in order in the longer one and every extra token is
+  a version or date number or a vendor or channel word (`claude`,
+  `anthropic`, `openai`, `google`, `gemini`, `latest`, `preview`, `exp`,
+  `experimental`, `stable`). So `opus` matches `claude-opus-4-1` and
+  `sonnet` matches `claude-sonnet-4-5-20250929`, while `glm-5.3` and
+  `glm-5.3-flash`, or `gpt-5` and `gpt-5-mini`, are different models.
 
 Per node: the runs it ran in; first pass (its first result was a success on
 attempt 1, with no retry, fallback or later re-entry); retries, fallbacks and

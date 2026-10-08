@@ -14,11 +14,13 @@
 use std::path::Path;
 
 use apb_core::candidate::{
-    OUTCOME_PROMOTED, OUTCOME_REJECTED, choose_for_start, clear_candidate_if, random_draw,
-    read_candidate, update_trial,
+    OUTCOME_PROMOTED, OUTCOME_REJECTED, choose_for_start, clear_candidate_if, lineage_reaches,
+    random_draw, read_candidate, update_trial,
 };
 use apb_core::registry::{LoadedPlaybook, Registry};
-use apb_core::versioning::{PromotePolicy, promote_policy, promote_version};
+use apb_core::versioning::{
+    PromotePolicy, promote_policy, promote_version, supersede_candidate, supersede_candidate_locked,
+};
 use serde::Serialize;
 
 use crate::error::EngineError;
@@ -26,26 +28,35 @@ use crate::event::{Event, EventLog, EventPayload, read_all};
 use crate::state::{RunState, RunStatus};
 
 /// The gate's choice for a start without an explicit version: the candidate
-/// (loaded in place of `current`) when the policy admits it, else `current`
-/// as loaded. A candidate that does not load leaves the start on `current`.
+/// and its definition when the policy admits it, else `None` (the start
+/// runs `current`). A candidate that does not load leaves the start on
+/// `current`. A candidate whose lineage no longer reaches `current` (a
+/// person or an in-run promotion moved `current` past its base) is dropped
+/// on the way, marked `superseded`.
 pub(crate) fn choose_at_gate(
     reg: &Registry,
     playbook_dir: &Path,
     id: &str,
-    current: LoadedPlaybook,
-) -> (LoadedPlaybook, Option<String>) {
-    let Some(version) = choose_for_start(
+    current: &LoadedPlaybook,
+) -> Option<(String, LoadedPlaybook)> {
+    if let Some(c) = read_candidate(playbook_dir)
+        && c != current.version
+        && !lineage_reaches(playbook_dir, &c, &current.version)
+        && let Err(e) = supersede_candidate(
+            playbook_dir,
+            None,
+            &format!("`current` moved to {} past its base", current.version),
+        )
+    {
+        eprintln!("apb: could not drop the stale candidate {c}: {e}");
+    }
+    let version = choose_for_start(
         playbook_dir,
         &current.playbook,
         &current.version,
         random_draw(),
-    ) else {
-        return (current, None);
-    };
-    match reg.load(id, Some(&version)) {
-        Ok(candidate) => (candidate, Some(version)),
-        Err(_) => (current, None),
-    }
+    )?;
+    reg.load(id, Some(&version)).ok().map(|l| (version, l))
 }
 
 /// Whether a top-level run starting on `version` of the playbook in
@@ -104,9 +115,24 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
         return Ok(());
     };
     let playbook_dir = apb_dir.join("playbooks").join(&id);
-    let _lock = apb_core::candidate::lock(&playbook_dir)?;
+    let lock = apb_core::candidate::lock(&playbook_dir)?;
     // Replaced by a newer forward patch or already decided: not ours to judge.
     if read_candidate(&playbook_dir).as_deref() != Some(version.as_str()) {
+        return Ok(());
+    }
+    // `current` moved past the candidate's base while the trial ran: the
+    // trial judged a line a person left, so it neither promotes nor
+    // rejects; the candidate ends as superseded.
+    let current = std::fs::read_to_string(playbook_dir.join("current"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !lineage_reaches(&playbook_dir, &version, &current) {
+        supersede_candidate_locked(
+            &playbook_dir,
+            None,
+            &format!("`current` moved to {current} during the trial"),
+            &lock,
+        )?;
         return Ok(());
     }
     let goal_failed = events.iter().find_map(|e| match &e.payload {
@@ -183,6 +209,15 @@ pub struct CandidateTrial {
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Why the start of the run in `run_dir` left a waiting candidate out and
+/// ran `current` (`untrusted`, or `refused: <policy>`); `None` otherwise.
+pub fn skipped_of(run_dir: &Path) -> Option<String> {
+    crate::manifest::read(run_dir)
+        .ok()
+        .flatten()?
+        .candidate_skipped
 }
 
 /// The candidate trial of the run in `run_dir`, `None` for a run that was

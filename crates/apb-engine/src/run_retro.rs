@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::attempt_models::{AttemptModel, AttemptWalk, EXECUTED_BY_HOST};
 use crate::decision::report::stats::median;
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
@@ -251,11 +252,11 @@ pub(crate) fn project_root_of(run_dir: &Path) -> Option<PathBuf> {
         .flatten()
 }
 
-/// One open attempt while the journal is walked.
+/// One attempt while the journal is walked; its actual model comes from
+/// the shared `AttemptWalk` slot of the same index.
 struct Open {
     node: String,
     rec: AttemptRetro,
-    host_model: Option<String>,
     host_hint: Option<String>,
 }
 
@@ -296,13 +297,16 @@ fn round6(x: f64) -> f64 {
 }
 
 /// The journal walk: per-node counters and the attempts in journal order.
+/// `attempts[i]` is slot `i` of `models`, the fold every run surface reads
+/// an attempt's actual model from.
 #[derive(Default)]
 struct Walk {
     order: Vec<String>,
     nodes: BTreeMap<String, NodeAcc>,
     attempts: Vec<Open>,
-    /// Host task id -> (index into `attempts`, request ts).
-    tasks: BTreeMap<String, (usize, u128)>,
+    models: AttemptWalk,
+    /// Host task id -> its request ts.
+    requested: BTreeMap<String, u128>,
 }
 
 impl Walk {
@@ -313,27 +317,24 @@ impl Walk {
         self.nodes.entry(node.to_string()).or_default()
     }
 
-    /// The latest attempt record of `node` numbered `attempt`.
-    fn latest(&self, node: &str, attempt: u32) -> Option<usize> {
-        self.attempts
-            .iter()
-            .rposition(|o| o.node == node && o.rec.attempt == attempt)
-    }
-
-    fn open_attempt(&mut self, node: &str, attempt: u32) -> usize {
-        self.attempts.push(Open {
-            node: node.to_string(),
-            rec: AttemptRetro {
-                attempt,
-                ..Default::default()
-            },
-            host_model: None,
-            host_hint: None,
-        });
-        self.attempts.len() - 1
+    /// The attempt record of the model slot `i`, created on first sight.
+    fn attempt(&mut self, i: usize) -> &mut Open {
+        while self.attempts.len() <= i {
+            let m = self.models.get(self.attempts.len());
+            self.attempts.push(Open {
+                node: m.node.clone(),
+                rec: AttemptRetro {
+                    attempt: m.attempt,
+                    ..Default::default()
+                },
+                host_hint: None,
+            });
+        }
+        &mut self.attempts[i]
     }
 
     fn step(&mut self, e: &Event) {
+        let slot = self.models.step(e);
         match &e.payload {
             EventPayload::NodeStarted { node, .. } => {
                 let n = self.node(node);
@@ -352,21 +353,16 @@ impl Walk {
             EventPayload::FallbackTriggered { node, .. }
             | EventPayload::ExecutionFallback { node, .. } => self.node(node).fallbacks += 1,
             EventPayload::AttemptStarted {
-                node,
-                attempt,
-                agent,
-                model,
-                ..
+                node, agent, model, ..
             } => {
                 self.node(node);
-                let i = self.open_attempt(node, *attempt);
-                let rec = &mut self.attempts[i].rec;
+                let Some(i) = slot else { return };
+                let rec = &mut self.attempt(i).rec;
                 rec.agent = Some(agent.clone());
                 rec.declared_model.clone_from(model);
             }
             EventPayload::AttemptFinished {
                 node,
-                attempt,
                 status,
                 duration_ms,
                 failure_kind,
@@ -374,11 +370,8 @@ impl Walk {
                 ..
             } => {
                 self.node(node);
-                let i = match self.latest(node, *attempt) {
-                    Some(i) if self.attempts[i].rec.status.is_none() => i,
-                    _ => self.open_attempt(node, *attempt),
-                };
-                let rec = &mut self.attempts[i].rec;
+                let Some(i) = slot else { return };
+                let rec = &mut self.attempt(i).rec;
                 rec.status = Some(status.clone());
                 rec.duration_ms = *duration_ms;
                 rec.failure_kind.clone_from(failure_kind);
@@ -388,62 +381,59 @@ impl Walk {
             EventPayload::HostTaskRequested {
                 task_id,
                 node,
-                attempt,
                 model_hint,
                 ..
             } => {
                 self.node(node);
-                let i = self
-                    .latest(node, *attempt)
-                    .unwrap_or_else(|| self.open_attempt(node, *attempt));
-                let o = &mut self.attempts[i];
+                let Some(i) = slot else { return };
+                let o = self.attempt(i);
                 o.rec.host_tasks += 1;
                 if o.host_hint.is_none() {
                     o.host_hint.clone_from(model_hint);
                 }
-                self.tasks.insert(task_id.clone(), (i, e.ts));
+                self.requested.insert(task_id.clone(), e.ts);
             }
             EventPayload::HostTaskSubmitted {
                 task_id,
                 submitted_by,
-                model,
                 ..
             } => {
-                let Some((i, at)) = self.tasks.remove(task_id) else {
+                let (Some(i), Some(at)) = (slot, self.requested.remove(task_id)) else {
                     return;
                 };
                 // An engine closure (expired, cancelled, ...) is no host reply.
                 if submitted_by == "engine" {
                     return;
                 }
-                let o = &mut self.attempts[i];
+                let o = self.attempt(i);
                 o.rec.host_wait_ms = add_opt_u64(o.rec.host_wait_ms, Some(ms(at, e.ts)));
-                if model.is_some() {
-                    o.host_model.clone_from(model);
-                }
             }
             _ => {}
         }
     }
 }
 
-/// Settles where an attempt's model comes from.
-fn settle_model(o: &mut Open) {
-    if o.rec.host_tasks == 0 {
-        o.rec.model = o.rec.declared_model.take();
+/// Settles an attempt's model from its shared slot `m`: a CLI attempt ran
+/// on the model it was started with, a host attempt on the one its host
+/// reported (`unreported` when it named none), and the declared model of a
+/// host attempt is the hint it was handed, else the profile's.
+fn settle_model(o: &mut Open, m: &AttemptModel) {
+    if m.executed_by != EXECUTED_BY_HOST {
+        o.rec.model = m.model.clone();
+        o.rec.declared_model = None;
         o.rec.model_source = "cli".to_string();
         return;
     }
     if o.host_hint.is_some() {
         o.rec.declared_model.clone_from(&o.host_hint);
     }
-    match o.host_model.take() {
-        Some(m) => {
-            o.rec.model = Some(m);
-            o.rec.model_source = "host".to_string();
-        }
-        None => o.rec.model_source = "unreported".to_string(),
+    o.rec.model = m.model.clone();
+    o.rec.model_source = if m.model.is_some() {
+        "host"
+    } else {
+        "unreported"
     }
+    .to_string();
 }
 
 /// Run outcome and the ts it ended at, from the journal.
@@ -533,8 +523,9 @@ pub fn build(run: &RetroRun, history: &[StatsRun], compare_last: usize) -> Retro
 }
 
 fn node_reports(run: &RetroRun, mut w: Walk) -> Vec<NodeRetro> {
-    for o in &mut w.attempts {
-        settle_model(o);
+    let models = std::mem::take(&mut w.models).finish(&BTreeMap::new());
+    for (o, m) in w.attempts.iter_mut().zip(&models) {
+        settle_model(o, m);
         o.rec.verdict = run.verdicts.get(&(o.node.clone(), o.rec.attempt)).cloned();
     }
     // A status file holds the latest execution of its attempt number only.

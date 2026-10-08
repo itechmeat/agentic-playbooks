@@ -100,6 +100,10 @@ pub struct RunOptions {
     /// scripts and the run's wall-clock deadline (see
     /// [`crate::run_config::EvalRunSettings`]).
     pub eval: Option<crate::run_config::EvalRunSettings>,
+    /// Why the gate left the playbook's candidate out of this start
+    /// (issue #192, [`crate::gate::RunPermit::candidate_skipped`]); the
+    /// manifest records it so `run_status` reports it.
+    pub candidate_skipped: Option<String>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry

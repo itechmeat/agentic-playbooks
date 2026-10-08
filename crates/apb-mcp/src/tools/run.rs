@@ -33,6 +33,9 @@ pub fn playbook_run(
     execution: apb_core::execution::ExecutionRequest,
     // 0.24.0: the irreversible consent the caller obtained from the person.
     consent: Option<apb_engine::consent::RunConsent>,
+    // Issue #192: why the gate left a waiting candidate out (the permit's
+    // `candidate_skipped`), recorded in the manifest for `run_status`.
+    candidate_skipped: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -61,6 +64,7 @@ pub fn playbook_run(
         execution,
         consent,
         eval: None,
+        candidate_skipped,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -94,6 +98,9 @@ pub fn playbook_run_background(
     execution: apb_core::execution::ExecutionRequest,
     // 0.24.0: the irreversible consent the caller obtained from the person.
     consent: Option<apb_engine::consent::RunConsent>,
+    // Issue #192: why the gate left a waiting candidate out (the permit's
+    // `candidate_skipped`), recorded in the manifest for `run_status`.
+    candidate_skipped: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -122,6 +129,7 @@ pub fn playbook_run_background(
         execution,
         consent,
         eval: None,
+        candidate_skipped,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -209,6 +217,9 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
 fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
     if let Some(t) = apb_engine::candidate::trial_of(dir, &view.events) {
         out["candidate_trial"] = json!(t);
+    }
+    if let Some(why) = apb_engine::candidate::skipped_of(dir) {
+        out["candidate_skipped"] = json!(why);
     }
 }
 
@@ -593,6 +604,9 @@ pub fn playbook_run_supervised(
     execution: apb_core::execution::ExecutionRequest,
     // 0.24.0: the irreversible consent the caller obtained from the person.
     consent: Option<apb_engine::consent::RunConsent>,
+    // Issue #192: why the gate left a waiting candidate out (the permit's
+    // `candidate_skipped`), recorded in the manifest for `run_status`.
+    candidate_skipped: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -624,6 +638,7 @@ pub fn playbook_run_supervised(
         execution,
         consent,
         eval: None,
+        candidate_skipped,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

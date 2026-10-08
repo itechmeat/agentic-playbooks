@@ -54,21 +54,48 @@ fn seed(root: &Path, policy: &str) {
     .unwrap();
 }
 
+/// Approves the digest of the person-made version 1.0.0, as a save
+/// through apb or `playbook_approve` would: the line a candidate inherits
+/// its trust from.
+fn approve_base(root: &Path) {
+    let loaded = apb_core::registry::Registry::open(root)
+        .unwrap()
+        .load(ID, Some("1.0.0"))
+        .unwrap();
+    apb_core::trust::TrustStore::load()
+        .approve(
+            &loaded.trust_digest().unwrap(),
+            ID,
+            apb_core::trust::OriginKind::LocallyApproved,
+        )
+        .unwrap();
+}
+
 /// Starts a run the way every surface does: the gate (which may pick the
-/// candidate), its permit applied, the version it chose.
+/// candidate), its permit applied, the version it chose. The base version
+/// is trusted.
 fn start(root: &Path) -> (String, RunStatus, Option<String>) {
+    approve_base(root);
+    start_as_is(root, true).0
+}
+
+/// [`start`] without approving anything; `ack` is the surface's
+/// acknowledgement (the CLI and the dashboard pass `true`). Also returns
+/// the permit's `candidate_skipped`.
+fn start_as_is(root: &Path, ack: bool) -> ((String, RunStatus, Option<String>), Option<String>) {
     let wref = PlaybookRef {
         origin: Origin::Project { workspace_id: None },
         id: ID.into(),
         version: None,
     };
-    let permit = apb_engine::gate::check_run(root, &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(root, &wref, ack, false).unwrap();
+    let skipped = permit.candidate_skipped.clone();
     let chosen = permit.candidate.clone();
     let version = permit.run_version(None);
     let mut opts = RunOptions::default();
     permit.apply(&mut opts);
     let res = run(root, ID, version.as_deref(), opts).unwrap();
-    (res.run_id, res.outcome, chosen)
+    ((res.run_id, res.outcome, chosen), skipped)
 }
 
 fn pointer(root: &Path, name: &str) -> Option<String> {
@@ -337,4 +364,143 @@ fn a_goal_criterion_that_does_not_hold_rejects_the_candidate() {
     )));
     assert_eq!(pointer(root, "candidate"), None);
     assert_eq!(pointer(root, "current").as_deref(), Some("1.0.0"));
+}
+
+fn forward_err(root: &Path, run_id: &str, yaml: &str) -> String {
+    create(
+        root,
+        run_id,
+        &ForwardPatchRequest {
+            yaml: yaml.to_string(),
+            classification: "improvement".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string()
+}
+
+#[test]
+fn a_candidate_of_an_untrusted_base_is_skipped_on_every_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // A policy no other test uses, so its digest is approved nowhere.
+    let policy = "    promote_supervisor_patches: on_success\n    trial_candidates: next_run";
+    seed(root, policy);
+    let ((first, _, _), skipped) = start_as_is(root, true);
+    assert_eq!(skipped, None, "no candidate yet");
+    forward(root, &first, &playbook(policy, "also-ok.sh"));
+
+    // The CLI's and the dashboard's implicit acknowledgement does not stand
+    // in for a candidate nobody approved: the start runs `current`.
+    let ((second, outcome, chosen), skipped) = start_as_is(root, true);
+    assert_eq!(chosen, None);
+    assert_eq!(skipped.as_deref(), Some("untrusted"));
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let run_dir = root.join(".apb/runs").join(&second);
+    assert!(matches!(
+        &events_of(root, &second)[0],
+        EventPayload::RunStarted { version, .. } if version == "1.0.0"
+    ));
+    assert_eq!(
+        apb_engine::candidate::skipped_of(&run_dir).as_deref(),
+        Some("untrusted")
+    );
+    assert!(apb_engine::candidate::trial_of(&run_dir, &read_all(&run_dir).unwrap()).is_none());
+    // An MCP start without acknowledgement is refused on `current` (itself
+    // untrusted), and the refusal says the candidate was skipped too.
+    let wref = PlaybookRef {
+        origin: Origin::Project { workspace_id: None },
+        id: ID.into(),
+        version: None,
+    };
+    let refusal = apb_engine::gate::check_run(root, &wref, false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
+    assert_eq!(refusal["candidate_skipped"], "untrusted");
+    assert!(refusal.get("candidate_trial").is_none());
+    // The candidate stays on trial for when the base is approved.
+    assert_eq!(pointer(root, "candidate").as_deref(), Some("1.0.1"));
+
+    // Once the base is approved, the candidate inherits its trust: even an
+    // MCP start without acknowledgement runs it.
+    approve_base(root);
+    let permit = apb_engine::gate::check_run(root, &wref, false, false).unwrap();
+    assert_eq!(permit.candidate.as_deref(), Some("1.0.1"));
+    assert_eq!(permit.candidate_skipped, None);
+}
+
+#[test]
+fn a_forward_patch_from_a_run_of_an_older_version_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let policy = "    promote_supervisor_patches: manual";
+    seed(root, policy);
+    let (first, _, _) = start(root);
+    // A person saves a new version, now `current`; `first` ran 1.0.0.
+    apb_core::versioning::save_definition(root, ID, &playbook(policy, "also-ok.sh"), None, true)
+        .unwrap();
+    assert_eq!(pointer(root, "current").as_deref(), Some("1.1.0"));
+    let err = forward_err(root, &first, &playbook(policy, "fail.sh"));
+    assert!(err.contains("stale_base"), "{err}");
+    assert_eq!(pointer(root, "candidate"), None);
+}
+
+#[test]
+fn a_person_moving_current_ends_the_candidate_trial() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let policy = "    promote_supervisor_patches: manual";
+    seed(root, policy);
+    let (first, _, _) = start(root);
+    forward(root, &first, &playbook(policy, "fail.sh"));
+    assert_eq!(pointer(root, "candidate").as_deref(), Some("1.0.1"));
+
+    // A person's new version supersedes the candidate made from 1.0.0.
+    apb_core::versioning::save_definition(root, ID, &playbook(policy, "also-ok.sh"), None, true)
+        .unwrap();
+    assert_eq!(pointer(root, "candidate"), None);
+    let trial = read_provenance(root, ID, "1.0.1")
+        .unwrap()
+        .unwrap()
+        .trial
+        .unwrap();
+    assert_eq!(trial.outcome.as_deref(), Some("superseded"));
+
+    // A stale pointer left behind (an older apb, a hand edit) is dropped at
+    // the next start instead of running over the person's version.
+    fs::write(
+        root.join(".apb/playbooks").join(ID).join("candidate"),
+        "1.0.1",
+    )
+    .unwrap();
+    let ((_, outcome, chosen), _) = start_as_is(root, true);
+    assert_eq!(chosen, None);
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(pointer(root, "candidate"), None);
+}
+
+#[test]
+fn a_forward_patch_may_not_change_decision_opt_ins_or_the_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let policy = "    promote_supervisor_patches: manual";
+    seed(root, policy);
+    let (first, _, _) = start(root);
+    let base = playbook(policy, "ok.sh");
+    let with_defaults = base.replace(
+        "supervisor:\n",
+        "defaults:\n  host_decisions: \"off\"\nsupervisor:\n",
+    );
+    let err = forward_err(root, &first, &with_defaults);
+    assert!(
+        err.contains("trust_fields_changed") && err.contains("host_decisions"),
+        "{err}"
+    );
+    let with_worktree = base.replace("supervisor:\n", "worktree: \"feat/x\"\nsupervisor:\n");
+    let err = forward_err(root, &first, &with_worktree);
+    assert!(
+        err.contains("trust_fields_changed") && err.contains("worktree"),
+        "{err}"
+    );
+    assert_eq!(pointer(root, "candidate"), None);
 }

@@ -11,9 +11,10 @@
 //!
 //! The expected model of a node is the primary model of the profile the run
 //! bound it to (the run manifest's `node_bindings`, first chain step). An
-//! attempt is a mismatch when both are known and neither names the other
+//! attempt is a mismatch when both are known and name different models
 //! (see [`same_model`]): a fallback step on another model counts too, which
-//! is what a reader comparing runs wants to see.
+//! is what a reader comparing runs wants to see. The run retro reads the
+//! same fold (`AttemptWalk`), so every surface agrees on the model.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -48,19 +49,60 @@ pub struct AttemptModel {
     pub mismatch: bool,
 }
 
-/// Whether two model names name the same model: equal once lowercased with
-/// separators (`-`, `_`, `.`, `/`, spaces) removed, or one contains the
-/// other (`opus` against `claude-opus-4-1`), so an alias never reads as a
-/// mismatch.
+/// Words a model id may carry beside the model itself: the vendor or the
+/// release channel. `claude-opus-4-1` and `opus` name one model; a word
+/// outside this list (`flash`, `mini`, `haiku`) names another one.
+const NEUTRAL_WORDS: &[&str] = &[
+    "claude",
+    "anthropic",
+    "openai",
+    "google",
+    "gemini",
+    "latest",
+    "preview",
+    "exp",
+    "experimental",
+    "stable",
+];
+
+fn tokens(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether two model names name the same model. Both are split into
+/// lowercase tokens on every non-alphanumeric character. They match when
+/// the token lists are equal, or when the shorter list is a subsequence of
+/// the longer one and every extra token of the longer one is a version or
+/// date number (all digits) or a vendor or channel word ([`NEUTRAL_WORDS`]).
+/// So `opus` matches `claude-opus-4-1` and `sonnet` matches
+/// `claude-sonnet-4-5-20250929`, while `glm-5.3` does not match
+/// `glm-5.3-flash` and `gpt-5` does not match `gpt-5-mini`: a variant word
+/// is a different model, which is what the mismatch flag is for.
 pub fn same_model(a: &str, b: &str) -> bool {
-    let norm = |s: &str| -> String {
-        s.chars()
-            .filter(|c| !matches!(c, '-' | '_' | '.' | '/' | ' '))
-            .flat_map(char::to_lowercase)
-            .collect()
+    let (a, b) = (tokens(a), tokens(b));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.len() <= b.len() {
+        (&a, &b)
+    } else {
+        (&b, &a)
     };
-    let (a, b) = (norm(a), norm(b));
-    !a.is_empty() && !b.is_empty() && (a == b || a.contains(&b) || b.contains(&a))
+    let mut want = short.iter().peekable();
+    for t in long {
+        if want.peek() == Some(&t) {
+            want.next();
+        } else if !(t.chars().all(|c| c.is_ascii_digit()) || NEUTRAL_WORDS.contains(&t.as_str())) {
+            return false;
+        }
+    }
+    want.peek().is_none()
 }
 
 /// The primary model of each node's profile, from the run manifest
@@ -80,33 +122,61 @@ pub fn primary_models(run_dir: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Every attempt of `events` in the order it started, with the model it ran
-/// on, checked against `expected` (node to model, see [`primary_models`]).
-pub fn attempt_models(events: &[Event], expected: &BTreeMap<String, String>) -> Vec<AttemptModel> {
-    let mut out: Vec<AttemptModel> = Vec::new();
-    let mut tasks: BTreeMap<&str, (String, u32)> = BTreeMap::new();
-    fn slot<'a>(out: &'a mut Vec<AttemptModel>, node: &str, attempt: u32) -> &'a mut AttemptModel {
-        let i = match out
+/// The journal fold behind [`attempt_models`], shared with the run retro
+/// (`run_retro`), so both read an attempt's actual model one way.
+///
+/// One slot per attempt execution: a loop back into a node numbers its
+/// attempts from 1 again, so a `(node, attempt)` whose latest slot already
+/// started (or finished) opens a new slot. A host attempt's first
+/// `host_task_requested` comes before its `attempt_started`, a blocked
+/// task's follow-up after it; both land on the same slot.
+#[derive(Debug, Default)]
+pub(crate) struct AttemptWalk {
+    slots: Vec<Slot>,
+    /// Host task id -> slot index.
+    tasks: BTreeMap<String, usize>,
+}
+
+#[derive(Debug)]
+struct Slot {
+    model: AttemptModel,
+    started: bool,
+    finished: bool,
+}
+
+impl AttemptWalk {
+    /// The open slot of `(node, attempt)`, or a new one. `starting`: the
+    /// event is the attempt's `attempt_started`, so a slot that already
+    /// started belongs to an earlier execution.
+    fn slot(&mut self, node: &str, attempt: u32, starting: bool) -> usize {
+        let open = self
+            .slots
             .iter()
-            .position(|a| a.node == node && a.attempt == attempt)
-        {
-            Some(i) => i,
-            None => {
-                out.push(AttemptModel {
-                    node: node.to_string(),
-                    attempt,
-                    executed_by: EXECUTED_BY_CLI.to_string(),
-                    agent: None,
-                    model: None,
-                    expected: None,
-                    mismatch: false,
-                });
-                out.len() - 1
-            }
-        };
-        &mut out[i]
+            .rposition(|s| s.model.node == node && s.model.attempt == attempt)
+            .filter(|&i| !self.slots[i].finished && !(starting && self.slots[i].started));
+        if let Some(i) = open {
+            return i;
+        }
+        self.slots.push(Slot {
+            model: AttemptModel {
+                node: node.to_string(),
+                attempt,
+                executed_by: EXECUTED_BY_CLI.to_string(),
+                agent: None,
+                model: None,
+                expected: None,
+                mismatch: false,
+            },
+            started: false,
+            finished: false,
+        });
+        self.slots.len() - 1
     }
-    for e in events {
+
+    /// Folds one event; returns the index of the slot it belongs to, when
+    /// it is an attempt event (started, finished, host task requested or
+    /// submitted).
+    pub(crate) fn step(&mut self, e: &Event) -> Option<usize> {
         match &e.payload {
             EventPayload::HostTaskRequested {
                 task_id,
@@ -114,13 +184,15 @@ pub fn attempt_models(events: &[Event], expected: &BTreeMap<String, String>) -> 
                 attempt,
                 ..
             } => {
-                tasks.insert(task_id, (node.clone(), *attempt));
-                let s = slot(&mut out, node, *attempt);
+                let i = self.slot(node, *attempt, false);
+                self.tasks.insert(task_id.clone(), i);
+                let s = &mut self.slots[i].model;
                 if s.executed_by != EXECUTED_BY_HOST {
                     s.executed_by = EXECUTED_BY_HOST.to_string();
                     s.agent = None;
                     s.model = None;
                 }
+                Some(i)
             }
             EventPayload::AttemptStarted {
                 node,
@@ -129,32 +201,70 @@ pub fn attempt_models(events: &[Event], expected: &BTreeMap<String, String>) -> 
                 model,
                 ..
             } => {
-                let s = slot(&mut out, node, *attempt);
+                let i = self.slot(node, *attempt, true);
+                self.slots[i].started = true;
+                let s = &mut self.slots[i].model;
                 if agent == HOST_AGENT {
                     s.executed_by = EXECUTED_BY_HOST.to_string();
                 } else if s.executed_by == EXECUTED_BY_CLI {
                     s.agent = Some(agent.clone());
                     s.model = model.clone().filter(|m| !m.trim().is_empty());
                 }
+                Some(i)
+            }
+            EventPayload::AttemptFinished { node, attempt, .. } => {
+                let i = self.slot(node, *attempt, false);
+                self.slots[i].finished = true;
+                Some(i)
             }
             EventPayload::HostTaskSubmitted {
                 task_id,
-                model: Some(model),
+                model,
                 submitted_by,
                 ..
-            } if submitted_by != "engine" && !model.trim().is_empty() => {
-                if let Some((node, attempt)) = tasks.get(task_id.as_str()) {
-                    slot(&mut out, node, *attempt).model = Some(model.clone());
+            } => {
+                let i = *self.tasks.get(task_id)?;
+                // An engine closure (expired, cancelled, ...) is no host reply.
+                if let Some(m) = model
+                    && submitted_by != "engine"
+                    && !m.trim().is_empty()
+                {
+                    self.slots[i].model.model = Some(m.clone());
                 }
+                Some(i)
             }
-            _ => {}
+            _ => None,
         }
     }
-    for a in &mut out {
-        a.expected = expected.get(&a.node).cloned();
-        a.mismatch = matches!((&a.model, &a.expected), (Some(m), Some(x)) if !same_model(m, x));
+
+    /// The attempt at `i`, as folded so far.
+    pub(crate) fn get(&self, i: usize) -> &AttemptModel {
+        &self.slots[i].model
     }
-    out
+
+    /// Every attempt in the order it started, checked against `expected`.
+    pub(crate) fn finish(self, expected: &BTreeMap<String, String>) -> Vec<AttemptModel> {
+        self.slots
+            .into_iter()
+            .map(|s| {
+                let mut a = s.model;
+                a.expected = expected.get(&a.node).cloned();
+                a.mismatch =
+                    matches!((&a.model, &a.expected), (Some(m), Some(x)) if !same_model(m, x));
+                a
+            })
+            .collect()
+    }
+}
+
+/// Every attempt of `events` in the order it started, with the model it ran
+/// on, checked against `expected` (node to model, see [`primary_models`]).
+pub fn attempt_models(events: &[Event], expected: &BTreeMap<String, String>) -> Vec<AttemptModel> {
+    let mut walk = AttemptWalk::default();
+    for e in events {
+        walk.step(e);
+    }
+    walk.finish(expected)
 }
 
 /// [`attempt_models`] of the run at `run_dir`, its expected models read
@@ -186,11 +296,74 @@ pub fn mismatch_lines(models: &[AttemptModel]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn ev(seq: u64, v: serde_json::Value) -> Event {
+        let mut v = v;
+        v["seq"] = seq.into();
+        v["ts"] = seq.into();
+        serde_json::from_value(v).expect("event")
+    }
+
     #[test]
-    fn aliases_are_the_same_model_and_other_families_are_not() {
+    fn a_reentered_node_and_a_host_attempt_each_get_their_own_slot() {
+        let events = [
+            ev(
+                1,
+                serde_json::json!({"type": "attempt_started", "node": "a", "attempt": 1, "agent": "claude", "model": "sonnet"}),
+            ),
+            ev(
+                2,
+                serde_json::json!({"type": "attempt_finished", "node": "a", "attempt": 1, "status": "succeeded"}),
+            ),
+            // The loop back into `a` numbers its attempts from 1 again; its
+            // host task is requested before the attempt starts.
+            ev(
+                3,
+                serde_json::json!({"type": "host_task_requested", "task_id": "t1", "node": "a", "attempt": 1}),
+            ),
+            ev(
+                4,
+                serde_json::json!({"type": "attempt_started", "node": "a", "attempt": 1, "agent": "host", "model": "sonnet"}),
+            ),
+            ev(
+                5,
+                serde_json::json!({"type": "host_task_submitted", "task_id": "t1", "status": "succeeded", "submitted_by": "host", "model": "glm-5.3-flash"}),
+            ),
+            ev(
+                6,
+                serde_json::json!({"type": "attempt_finished", "node": "a", "attempt": 1, "status": "succeeded"}),
+            ),
+        ];
+        let expected = BTreeMap::from([("a".to_string(), "claude-sonnet-4-5".to_string())]);
+        let models = attempt_models(&events, &expected);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].executed_by, EXECUTED_BY_CLI);
+        assert_eq!(models[0].model.as_deref(), Some("sonnet"));
+        assert!(!models[0].mismatch);
+        assert_eq!(models[1].executed_by, EXECUTED_BY_HOST);
+        assert_eq!(models[1].model.as_deref(), Some("glm-5.3-flash"));
+        assert!(models[1].mismatch);
+    }
+
+    #[test]
+    fn aliases_and_dated_ids_are_the_same_model() {
         assert!(same_model("opus", "claude-opus-4-1"));
+        assert!(same_model("sonnet", "claude-sonnet-4-5-20250929"));
+        assert!(same_model(
+            "claude-sonnet-4-5",
+            "anthropic/claude-sonnet-4-5-latest"
+        ));
         assert!(same_model("GLM-5.3-Flash", "glm_5.3_flash"));
+        assert!(same_model("gpt-5", "openai/gpt-5"));
+    }
+
+    #[test]
+    fn a_variant_word_or_another_family_is_another_model() {
+        assert!(!same_model("glm-5.3", "glm-5.3-flash"));
+        assert!(!same_model("gpt-5", "gpt-5-mini"));
+        assert!(!same_model("sonnet", "haiku"));
+        assert!(!same_model("sonnet", "claude-haiku-4-5"));
         assert!(!same_model("GLM-5.3-Flash", "opus"));
         assert!(!same_model("", "opus"));
+        assert!(!same_model("-", "opus"));
     }
 }

@@ -71,6 +71,11 @@ fn gate_run(
             "note: running candidate version {v} as a trial (supervisor.policy.trial_candidates)"
         );
     }
+    if let Some(why) = &permit.candidate_skipped {
+        eprintln!(
+            "note: the candidate version was skipped ({why}); running `current`. Run the candidate by its version to try it anyway"
+        );
+    }
     permit.apply(opts);
     Ok((granted, start_version))
 }
@@ -1108,6 +1113,12 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             t.version,
             t.verdict,
             sanitize_for_terminal(&reason, QUESTION_TEXT_MAX)
+        );
+    }
+    if let Some(why) = apb_engine::candidate::skipped_of(&run_dir) {
+        println!(
+            "  candidate skipped: {}",
+            sanitize_for_terminal(&why, QUESTION_TEXT_MAX)
         );
     }
     // --- 0.23.0: run outcome blocks (C1, C7) ---

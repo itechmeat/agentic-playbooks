@@ -1618,13 +1618,22 @@ candidate by version counts as a trial too; eval runs and sub-playbook
 children never do.
 
 A forward patch may not change the goal, the declared or effective effects,
-the irreversible steps, `requires`, the `supervisor` block, a node's
-connector grants or the sub-playbook a node runs; it must pass the validator
-and be classified `improvement`. The candidate is a supervisor-made version,
-so it is untrusted until a person approves it: an MCP start that picks it is
-refused with `untrusted_requires_acknowledge` and `candidate_trial`, so the
-host asks the person first (a person starting the run from the CLI or the
-dashboard is the confirmation, as for any run).
+the irreversible steps, `requires`, the `supervisor` block, the decision
+opt-ins in `defaults` (`host_decisions`, `retry_advice`), `worktree`, a
+node's connector grants or the sub-playbook a node runs; it must pass the
+validator and be classified `improvement`. It may bind another profile: the
+run gate checks the candidate's profiles on their own. Its base must be
+`current` or the candidate on trial (`stale_base` otherwise).
+
+The candidate inherits the trust of `current`, like an in-run supervisor
+patch inherits the trust of the version its run started on. When `current`
+is approved, a start without a version runs the candidate with no extra
+question; when it is not (or a profile, connector or sub-playbook of the
+candidate is not trusted), the start runs `current` and reports
+`candidate_skipped: untrusted` instead of refusing. A person's
+acknowledgement never covers an untrusted candidate; start it by its version
+to try it anyway. A version a person saves or promotes by hand ends the
+trial (`superseded`).
 
 ## trigger (matching contract)
 

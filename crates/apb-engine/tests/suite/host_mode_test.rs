@@ -1406,6 +1406,109 @@ fn host_task_decisions_refuse_with_a_reason() {
     assert_eq!(refusal(&h.ask_font(None)), "use_off");
 }
 
+/// Host tasks asking at the same time share the run's request budget: the
+/// slot is reserved against the journal and every request in flight before
+/// anything is sent, so no parallel burst gets past the cap.
+#[test]
+fn parallel_host_task_decisions_never_exceed_the_run_budget() {
+    let h = Host::new(&one_node(""), &[]);
+    let stub = StubServer::start_with_fallback(
+        vec![],
+        choice_reply("sans").delayed(Duration::from_millis(300)),
+    );
+    h.decisions(&stub.base_url, "budget: { max_requests_per_run: 2 }\n");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    let clients = [
+        "a bakery", "a bank", "a band", "a bistro", "a barber", "a bridge",
+    ];
+    let outcomes: Vec<AskOutcome> = std::thread::scope(|s| {
+        let handles: Vec<_> = clients
+            .iter()
+            .map(|c| s.spawn(|| h.ask_about(Some(&run_id), c)))
+            .collect();
+        handles.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    let answered = outcomes
+        .iter()
+        .filter(|o| matches!(o, AskOutcome::Answered(_)))
+        .count();
+    assert_eq!(answered, 2, "{outcomes:?}");
+    assert_eq!(stub.count(), 2, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .filter(|o| !matches!(o, AskOutcome::Answered(_)))
+            .all(|o| refusal(o) == "budget"),
+        "{outcomes:?}"
+    );
+    h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+    let (_, events) = h.finish(&run_id);
+    let sent = count(&events, |p| {
+        matches!(
+            p,
+            EventPayload::DecisionMade {
+                provider: Some(_),
+                cached: false,
+                ..
+            }
+        )
+    });
+    assert_eq!(sent, 2);
+    let mut seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+    seqs.dedup();
+    assert_eq!(seqs.len(), events.len(), "a seq was reused");
+}
+
+/// A run that ends while the provider answers keeps its journal closed:
+/// the answer is returned, says it was not journaled, and no
+/// `decision_made` lands after the run's end.
+#[test]
+fn a_decision_answered_after_the_run_ended_is_returned_but_not_journaled() {
+    let h = Host::new(&one_node(""), &[]);
+    let stub = StubServer::start(vec![
+        choice_reply("sans").delayed(Duration::from_millis(1500)),
+    ]);
+    h.decisions(&stub.base_url, "");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    h.task(&run_id, "w");
+    let outcome = std::thread::scope(|s| {
+        let asking = s.spawn(|| h.ask_font(Some(&run_id)));
+        poll("the request reaching the provider", || {
+            (stub.count() == 1).then_some(())
+        });
+        apb_engine::stop::stop_run(h.root.path(), &run_id).unwrap();
+        poll("the run to end", || {
+            let events = read_all(&h.run_dir(&run_id)).ok()?;
+            RunState::fold(&events)
+                .run_status
+                .is_terminal()
+                .then_some(())
+        });
+        asking.join().unwrap()
+    });
+    let AskOutcome::Answered(a) = outcome else {
+        panic!("not answered: {outcome:?}")
+    };
+    assert_eq!(a.answer.as_deref(), Some("sans"));
+    assert_eq!(a.seq, None);
+    assert!(
+        a.not_journaled
+            .as_deref()
+            .is_some_and(|n| n.contains("ended")),
+        "{a:?}"
+    );
+    let events = read_all(&h.run_dir(&run_id)).unwrap();
+    assert_eq!(
+        count(&events, |p| matches!(p, EventPayload::DecisionMade { .. })),
+        0
+    );
+}
+
 #[test]
 fn a_playbook_can_switch_host_task_decisions_off() {
     let h = Host::new(
