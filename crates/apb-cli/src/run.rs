@@ -1069,6 +1069,26 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     for (node, status) in view.nodes() {
         println!("  {node}\t{status}");
     }
+    // Issue #193: the model each attempt actually ran on.
+    for a in apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events) {
+        let mut line = format!(
+            "{} attempt {}: {} ({})",
+            a.node,
+            a.attempt,
+            a.model.as_deref().unwrap_or("model not reported"),
+            a.executed_by
+        );
+        if a.mismatch {
+            line.push_str(&format!(
+                ", profile names {}: mismatch",
+                a.expected.as_deref().unwrap_or("?")
+            ));
+        }
+        println!(
+            "  model {}",
+            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+        );
+    }
     if let Some(reason) = view.failure_reason() {
         println!(
             "  failure: {}",

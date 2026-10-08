@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render } from 'svelte/server'
 import PlaybookStatsCard from './PlaybookStatsCard.svelte'
-import { perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
+import { modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
 import type { StatsReport, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
@@ -21,6 +21,8 @@ const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => 
   deliverable_missing: 0,
   output_fields_missing: 0,
   goal: [],
+  models: {},
+  model_mismatch: 0,
   nodes: [],
   note: '3 runs: fewer than 10, the rates are indicative only',
   ...extra,
@@ -80,5 +82,14 @@ describe('PlaybookStatsCard', () => {
     expect(html({})).toContain('playbook-stats-empty')
     // A reload keeps the previous report on screen instead of a spinner.
     expect(html({ report, loading: true })).not.toContain('playbook-stats-loading')
+  })
+})
+
+describe('modelsText', () => {
+  it('lists the models attempts ran on and how many differ from the profile', () => {
+    expect(modelsText({ models: {}, model_mismatch: 0 })).toBeNull()
+    expect(modelsText({ models: { opus: 1, 'glm-5.3-flash': 5 }, model_mismatch: 5 })).toBe(
+      'glm-5.3-flash x5, opus x1 (5 differ from the profile)',
+    )
   })
 })

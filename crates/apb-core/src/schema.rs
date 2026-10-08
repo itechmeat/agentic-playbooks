@@ -639,6 +639,24 @@ pub struct Defaults {
     /// Additive to schema 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_advice: Option<DecisionOptIn>,
+    /// Whether this playbook's host tasks (and scripts) may ask the
+    /// configured decision providers through `apb decide` or the MCP tool
+    /// `decision_ask` (issue #193). Absent means `allow` whenever a provider
+    /// is configured. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_decisions: Option<HostDecisions>,
+}
+
+/// `defaults.host_decisions` (issue #193).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostDecisions {
+    /// Decision calls inside the run are allowed when a provider is
+    /// configured.
+    #[default]
+    Allow,
+    /// Every decision call that names this playbook's run is refused.
+    Off,
 }
 
 /// For `skip_serializing_if` on additive boolean flags: a `false` value is

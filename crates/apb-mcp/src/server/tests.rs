@@ -146,6 +146,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "review_decide",
         "run_answer",
         "run_task_submit",
+        "decision_ask",
         "supervisor_wait_event",
         "supervisor_run_inspect",
         "supervisor_node_retry",

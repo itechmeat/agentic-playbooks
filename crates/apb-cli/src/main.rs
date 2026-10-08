@@ -2,6 +2,9 @@ mod cache;
 mod connector;
 mod consent;
 mod dashboard_check;
+// --- issue #193 host-task decisions ---
+mod decide;
+// --- end issue #193 ---
 mod decisions;
 // --- 0.24.0 eval suites ---
 mod eval;
@@ -295,6 +298,10 @@ enum Command {
         node: Option<String>,
         text: String,
     },
+    /// Ask the configured decision providers a bounded question (choose,
+    /// rank, filter, map, is, score), from a host task or a script; inside a
+    /// run (APB_RUN_ID) it is journaled there and the run's budget applies
+    Decide(crate::decide::DecideArgs),
     /// Measure decision-model uses (issue #165): the report, the stored
     /// thresholds, replay against another provider
     Decisions {
@@ -638,6 +645,7 @@ fn main() -> ExitCode {
         Some(Command::Profile { action }) => profile_cmd(&root, action),
         Some(Command::Connector { action }) => connector_cmd(&root, action),
         Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
+        Some(Command::Decide(args)) => crate::decide::decide_cmd(&root, args),
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Stats {

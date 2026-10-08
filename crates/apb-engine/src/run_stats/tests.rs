@@ -31,6 +31,7 @@ fn run(
         events,
         snapshot: snapshot.map(|y| apb_core::schema::Playbook::from_yaml(y).unwrap()),
         candidate_trial: false,
+        expected_models: BTreeMap::new(),
     }
 }
 

@@ -14,6 +14,7 @@
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
+  import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -317,6 +318,7 @@
 
     {#if detail}
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
+      <AttemptModelsPanel models={detail.attempt_models} />
     {/if}
 
     {#if detail?.candidate_trial}

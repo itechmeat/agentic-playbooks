@@ -133,6 +133,8 @@ describe('review recommendation', () => {
       attempt: 2,
       prompt: 'Plan it',
       role_prompt: 'You plan.',
+      prompt_path: '/r/tasks/plan-1/prompt.md',
+      role_path: '/r/tasks/plan-1/role.md',
       skills: [],
       workdir: '/w',
       outputs: null,

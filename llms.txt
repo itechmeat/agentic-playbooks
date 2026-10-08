@@ -105,6 +105,7 @@ apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2
 apb doctor          diagnose environment, or one run with --run
 apb cache           inspect and manage the node result cache
+apb decide          ask the configured decision providers a bounded question (host tasks, scripts)
 apb decisions       decision-model report, stored thresholds, replay
 apb stats           cross-run metrics per playbook version and node (read-only)
 apb eval <id>       run a playbook's eval cases in scratch repositories, store and compare pass counts

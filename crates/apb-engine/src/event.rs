@@ -1017,6 +1017,12 @@ pub struct EventLog {
     path: PathBuf,
     file: File,
     next_seq: u64,
+    /// The file's length after this handle's last write (or at open). A
+    /// longer file means another process appended in between (an `apb
+    /// connector call` or `apb decide` subprocess of an attempt, issue
+    /// #193), so the next append re-reads the high-water mark first instead
+    /// of reusing a seq.
+    known_len: u64,
 }
 
 impl EventLog {
@@ -1057,10 +1063,12 @@ impl EventLog {
             .max()
             .map_or(0, |s| s + 1);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let known_len = file.metadata().map_or(0, |m| m.len());
         Ok(Self {
             path,
             file,
             next_seq,
+            known_len,
         })
     }
 
@@ -1084,6 +1092,15 @@ impl EventLog {
     }
 
     pub fn append(&mut self, payload: EventPayload) -> Result<Event, EngineError> {
+        // Best effort: a foreign line still being written cannot fail this
+        // append; the seq then stays as it was.
+        if self
+            .file
+            .metadata()
+            .is_ok_and(|m| m.len() != self.known_len)
+        {
+            let _ = self.resync_seq();
+        }
         let event = Event {
             seq: self.next_seq,
             ts: apb_core::clock::now_ms(),
@@ -1093,6 +1110,7 @@ impl EventLog {
         writeln!(self.file, "{line}")?;
         self.file.flush()?;
         self.next_seq += 1;
+        self.known_len = self.file.metadata().map_or(0, |m| m.len());
         Ok(event)
     }
 }

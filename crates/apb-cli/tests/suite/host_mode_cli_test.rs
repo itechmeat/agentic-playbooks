@@ -760,3 +760,165 @@ fn a_stub_mcp_host_drives_a_host_mode_run_end_to_end() {
         vec![Some("stub-host".to_string()), Some("stub-host".to_string())]
     );
 }
+
+// --- issue #193: `apb decide` from a host task, and the actual model ---
+
+/// `apb tasks submit` with the model the host ran the task on.
+fn submit_on(root: &Path, run_id: &str, task_id: &str, reply: &str, model: &str) {
+    let file = root.join(format!("reply-{task_id}.md"));
+    fs::write(&file, reply).unwrap();
+    let out = crate::common::apb_std()
+        .args(["tasks", "submit", run_id, task_id, "--status", "succeeded"])
+        .arg("--output-file")
+        .arg(&file)
+        .args(["--model", model])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A subagent of a host task runs `apb decide` with the task's env from
+/// another directory: the decision is journaled in the run. The host reports
+/// another model than the profile's; `apb runs`, `apb doctor --run` and
+/// `apb stats` show it.
+#[test]
+fn apb_decide_from_a_host_task_is_journaled_and_the_actual_model_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let run_id = start_detached(root);
+    let plan = task_of(root, &run_id, "plan");
+    let prompt_path = plan["prompt_path"].as_str().expect("prompt_path");
+    assert_eq!(
+        fs::read_to_string(prompt_path).unwrap(),
+        plan["prompt"].as_str().unwrap()
+    );
+
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(
+        cfg.path().join("decisions.yaml"),
+        "mode: advise\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      answer: { type: choice, choice: serif, probabilities: { serif: 0.9, sans: 0.1 } }\n",
+    )
+    .unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let mut decide = crate::common::apb_std();
+    decide
+        .args(["decide", "choose", "Which font family fits a law firm?"])
+        .args(["--option", "serif", "--option", "sans"])
+        .current_dir(elsewhere.path())
+        .env("APB_CONFIG_DIR", cfg.path())
+        .env("APB_DECISIONS_ALLOW_FAKE", "1");
+    for (k, v) in plan["env"].as_object().unwrap() {
+        decide.env(k, v.as_str().unwrap());
+    }
+    let out = decide.output().unwrap();
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{answer}");
+    assert_eq!(answer["answer"], "serif", "{answer}");
+    assert_eq!(answer["run_id"], run_id.as_str());
+
+    // The kill switch refuses with exit 1 and a reason.
+    let mut off = crate::common::apb_std();
+    off.args(["decide", "is", "Is it ready?", "--no-run"])
+        .current_dir(root)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .env("APB_DECISIONS_ALLOW_FAKE", "1")
+        .env("APB_DECISIONS", "off");
+    let out = off.output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(refused["refused"], "off", "{refused}");
+
+    submit_on(
+        root,
+        &run_id,
+        plan["task_id"].as_str().unwrap(),
+        "PLAN",
+        "GLM-5.3-Flash",
+    );
+    let build = task_of(root, &run_id, "build");
+    submit_on(
+        root,
+        &run_id,
+        build["task_id"].as_str().unwrap(),
+        "built",
+        "haiku-4",
+    );
+    assert_eq!(wait_outcome(root, &run_id), "succeeded");
+    let events = read_all(&run_dir(root, &run_id)).unwrap();
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::DecisionMade { use_site, node: Some(n), provider: Some(p), .. }
+            if use_site == "host_task" && n == "plan" && p == "fake"
+    )));
+
+    let text = |args: &[&str]| {
+        let out = crate::common::apb_std()
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let runs = text(&["runs", &run_id]);
+    assert!(
+        runs.contains("model plan attempt 1: GLM-5.3-Flash (host), profile names haiku: mismatch"),
+        "{runs}"
+    );
+    assert!(
+        runs.contains("model build attempt 1: haiku-4 (host)"),
+        "{runs}"
+    );
+    assert!(!runs.contains("haiku-4 (host), profile"), "{runs}");
+    let doctor = text(&["doctor", "--run", &run_id]);
+    assert!(doctor.contains("GLM-5.3-Flash"), "{doctor}");
+    let stats: Value = serde_json::from_str(&text(&["stats", "--json"])).unwrap();
+    let v = &stats["versions"][0];
+    assert_eq!(v["models"]["GLM-5.3-Flash"], 1, "{v}");
+    assert_eq!(v["model_mismatch"], 1, "{v}");
+    let plan_node = v["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["node"] == "plan")
+        .unwrap();
+    assert_eq!(plan_node["model_mismatch"], 1, "{plan_node}");
+}
+
+/// `run_wait { inline_prompt: false }` hands each task over by path only.
+#[test]
+fn run_wait_without_inline_prompts_hands_tasks_over_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let mut mcp = Mcp::start(root);
+    let started = mcp.call(
+        "playbook_run",
+        json!({"id": "hm", "execution": "host", "acknowledge_untrusted": true}),
+    );
+    let run_id = started["run_id"].as_str().unwrap().to_string();
+    let waited = mcp.call(
+        "run_wait",
+        json!({"run_id": run_id, "timeout_ms": 30000, "inline_prompt": false}),
+    );
+    assert_eq!(waited["needs"], "host_task", "{waited}");
+    let task = &waited["pending_tasks"][0];
+    assert!(task.get("prompt").is_none(), "{task}");
+    assert!(task.get("role_prompt").is_none(), "{task}");
+    let prompt = fs::read_to_string(task["prompt_path"].as_str().unwrap()).unwrap();
+    assert!(prompt.starts_with("Plan it"), "{prompt}");
+    assert_eq!(
+        fs::read_to_string(task["role_path"].as_str().unwrap()).unwrap(),
+        "You plan and build."
+    );
+    assert!(waited["next"].as_str().unwrap().contains("prompt_path"));
+    // The default keeps the inline texts.
+    let again = mcp.call("run_wait", json!({"run_id": run_id, "timeout_ms": 30000}));
+    assert!(again["pending_tasks"][0]["prompt"].is_string(), "{again}");
+    mcp.call("run_stop", json!({"run_id": run_id}));
+}

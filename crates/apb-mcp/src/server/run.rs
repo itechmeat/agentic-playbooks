@@ -544,7 +544,7 @@ impl WfMcp {
         description = concat!(
             "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
             apb_engine::host_task_contract!(),
-            " For each pending task give your subagent `role_prompt` as its system context and `prompt` as its task, have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
+            " For each pending task tell your subagent to read `prompt_path` as its task and `role_path` as its system context (`prompt` and `role_prompt` carry the same text inline; pass inline_prompt: false to drop them), have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
         ),
         annotations(read_only_hint = true)
     )]
@@ -554,6 +554,7 @@ impl WfMcp {
             run_id,
             workspace,
             timeout_ms,
+            inline_prompt,
         }): Parameters<RunWaitArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -582,7 +583,13 @@ impl WfMcp {
             },
         )
         .await;
-        to_call_tool_result(res.and_then(|res| tools::run_wait_result(&root, &run_id, &res)))
+        to_call_tool_result(res.and_then(|res| {
+            let mut out = tools::run_wait_result(&root, &run_id, &res)?;
+            if inline_prompt == Some(false) {
+                tools::drop_inline_prompts(&mut out);
+            }
+            Ok(out)
+        }))
     }
 
     #[tool(

@@ -226,6 +226,15 @@ fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir
     if !commits.is_empty() {
         out["commits"] = json!(commits);
     }
+    // Issue #193: the model each attempt actually ran on.
+    let models = apb_engine::attempt_models::run_attempt_models(dir, &view.events);
+    if !models.is_empty() {
+        let mismatches = models.iter().filter(|a| a.mismatch).count();
+        out["attempt_models"] = json!(models);
+        if mismatches > 0 {
+            out["model_mismatch"] = json!(mismatches);
+        }
+    }
 }
 
 // --- end of the 0.23.0 blocks ---
@@ -260,8 +269,21 @@ pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
 pub const HOST_TASK_NEXT: &str = concat!(
     "execute pending_tasks. ",
     apb_engine::host_task_contract!(),
-    " For each task give your subagent role_prompt as its system context and prompt as its task, have it load skills and work in workdir with env set (hint_note labels model_hint; fallback_of says why the previous step closed). Submit the final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user), then call run_wait again. Independent tasks may run concurrently"
+    " For each task tell your subagent to read prompt_path as its task and role_path as its system context (role_prompt and prompt carry the same text inline unless you passed inline_prompt: false), have it load skills and work in workdir with env set (hint_note labels model_hint; fallback_of says why the previous step closed). Submit the final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user), then call run_wait again. Independent tasks may run concurrently"
 );
+
+/// Drops the inline `prompt` and `role_prompt` of every pending task in a
+/// `run_wait` or `supervisor_wait_event` answer, for a host that passes
+/// `inline_prompt: false` and reads `prompt_path` and `role_path` instead
+/// (issue #193).
+pub fn drop_inline_prompts(out: &mut Value) {
+    if let Some(tasks) = out.get_mut("pending_tasks").and_then(Value::as_array_mut) {
+        for t in tasks.iter_mut().filter_map(Value::as_object_mut) {
+            t.remove("prompt");
+            t.remove("role_prompt");
+        }
+    }
+}
 
 /// The execution block of a run's manifest, for `run_status`: `null` for a
 /// plain `cli` run.

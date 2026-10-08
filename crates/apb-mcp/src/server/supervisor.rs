@@ -26,6 +26,7 @@ impl WfMcp {
             token,
             after_seq,
             timeout_ms,
+            inline_prompt,
         }): Parameters<SupervisorWaitArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -47,9 +48,13 @@ impl WfMcp {
             },
         )
         .await;
-        to_call_tool_result(
-            outcome.and_then(|o| tools::supervisor_wait_result(&root, &run_id, after_seq, &o)),
-        )
+        to_call_tool_result(outcome.and_then(|o| {
+            let mut out = tools::supervisor_wait_result(&root, &run_id, after_seq, &o)?;
+            if inline_prompt == Some(false) {
+                tools::drop_inline_prompts(&mut out);
+            }
+            Ok(out)
+        }))
     }
 
     #[tool(

@@ -175,7 +175,10 @@ impl StandaloneDecider {
             .uses
             .get(site.as_str())
             .and_then(|u| u.max_requests_per_day)
-            .unwrap_or(CATALOG_RANK_MAX_REQUESTS_PER_DAY)
+            .unwrap_or(match site {
+                UseSite::HostTask => apb_core::decisions::HOST_TASK_MAX_REQUESTS_PER_DAY,
+                _ => CATALOG_RANK_MAX_REQUESTS_PER_DAY,
+            })
     }
 
     /// Opens the log without following a link, and only as a regular file:
