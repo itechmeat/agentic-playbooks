@@ -791,6 +791,39 @@ fn parallel_branches_expose_two_tasks_at_once() {
     assert_eq!(status, RunStatus::Succeeded);
 }
 
+/// Issue #195: batches are pipelined, so once `a1` is submitted its successor
+/// `a2` is offered while `b` is still pending: two branch tasks at once, from
+/// different depths of the fork.
+#[test]
+fn a_finished_branch_step_offers_its_successor_while_the_sibling_is_pending() {
+    let h = Host::new(
+        &playbook(
+            "",
+            "  - { id: a1, type: agent_task, prompt: \"A1\" }\n  - { id: a2, type: agent_task, prompt: \"A2\" }\n  - { id: b, type: agent_task, prompt: \"B\" }\n",
+            "  - { from: start, to: a1 }\n  - { from: start, to: b }\n  - { from: a1, to: a2 }\n  - { from: a2, to: done }\n  - { from: b, to: done }\n",
+        ),
+        &[],
+    );
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let a1 = h.task(&run_id, "a1");
+    let b = h.task(&run_id, "b");
+    h.submit(&run_id, &a1.task_id, SubmitStatus::Succeeded, "a1 done");
+    let both = poll("a2 and b pending together", || {
+        let p = h.pending(&run_id);
+        let mut nodes: Vec<String> = p.iter().map(|t| t.node.clone()).collect();
+        nodes.sort();
+        (nodes == ["a2", "b"]).then_some(p)
+    });
+    for t in &both {
+        h.submit(&run_id, &t.task_id, SubmitStatus::Succeeded, "ok");
+    }
+    let _ = b;
+    let (status, _) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
 /// Issue #195: a `fail_fast` fork closes the sibling's pending host task as
 /// cancelled the moment one branch fails, and the run ends without the join.
 #[test]

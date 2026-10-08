@@ -698,3 +698,234 @@ fn a_refused_join_inside_a_fail_fast_fork_goes_to_the_failure_target() {
     assert_eq!(finished(&events, "lost"), ["succeeded"]);
     assert!(!started(&events, "done"));
 }
+
+// --- pipelined batches (issue #195) ---
+
+/// The agency-site shape: `design1 -> design2` against one long `content`
+/// step. `{policy}` is the fork option; `{d2_out}` the edges out of `design2`
+/// and `{c_out}` those out of `content`.
+fn agency(fork: &str, d2_out: &str, c_out: &str) -> String {
+    format!(
+        r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start{fork} }}
+  - {{ id: design1, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: design2, type: script, script: "scripts/fail.sh", runner: sh }}
+  - {{ id: content, type: script, script: "scripts/slow.sh", runner: sh }}
+  - {{ id: assemble, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: rejected, type: script, script: "scripts/count.sh", runner: sh }}
+  - {{ id: lost, type: finish, outcome: failure }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: design1 }}
+  - {{ from: start, to: content }}
+  - {{ from: design1, to: design2 }}
+{d2_out}{c_out}  - {{ from: assemble, to: done }}
+  - {{ from: rejected, to: lost }}
+"#
+    )
+}
+
+fn position(events: &[Event], pred: impl Fn(&EventPayload) -> bool) -> usize {
+    events
+        .iter()
+        .position(|e| pred(&e.payload))
+        .expect("event present")
+}
+
+#[test]
+fn fail_fast_kills_a_long_sibling_when_a_later_branch_step_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(
+        root,
+        &agency(
+            ", fork: { on_branch_failure: fail_fast, on_failure: rejected }",
+            "  - { from: design2, to: assemble }\n",
+            "  - { from: content, to: assemble }\n",
+        ),
+        5,
+    );
+    let clock = std::time::Instant::now();
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert!(!root.join(MARKER).exists(), "content was waited out");
+    assert!(clock.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(finished(&events, "design2"), ["failed"]);
+    assert_eq!(finished(&events, "content"), ["cancelled"]);
+    assert_eq!(
+        cancelled_by_fork(&events),
+        [("content".into(), "design2".into())]
+    );
+    assert_eq!(count_runs(root), 1);
+    assert!(!started(&events, "assemble"));
+}
+
+#[test]
+fn cancel_siblings_kills_a_long_sibling_when_a_later_branch_step_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(
+        root,
+        &agency(
+            ", fork: { on_branch_failure: cancel_siblings }",
+            "  - { from: design2, to: assemble, condition: { type: node_status, node: design2, equals: success } }\n  - { from: design2, to: rejected, condition: { type: node_status, node: design2, equals: failure } }\n",
+            "  - { from: content, to: assemble, condition: { type: node_status, node: content, equals: success } }\n  - { from: content, to: rejected, condition: { type: node_status, node: content, equals: failure } }\n",
+        ),
+        5,
+    );
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert!(!root.join(MARKER).exists(), "content was waited out");
+    assert_eq!(
+        cancelled_by_fork(&events),
+        [("content".into(), "design2".into())]
+    );
+    assert_eq!(count_runs(root), 1);
+    assert!(!started(&events, "assemble"));
+}
+
+#[test]
+fn a_fast_branch_takes_its_next_step_while_the_slow_branch_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = agency("", "  - { from: design2, to: assemble }\n", "  - { from: content, to: assemble }\n")
+        .replace("scripts/fail.sh", "scripts/ok.sh")
+        .replace("  - { id: rejected, type: script, script: \"scripts/count.sh\", runner: sh }\n  - { id: lost, type: finish, outcome: failure }\n", "")
+        .replace("  - { from: rejected, to: lost }\n", "");
+    seed(root, &yaml, 1);
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let d2_start = position(
+        &events,
+        |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "design2"),
+    );
+    let content_end = position(
+        &events,
+        |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "content"),
+    );
+    assert!(d2_start < content_end, "design2 waited for content");
+    // The join still waited for both branches.
+    let assemble_start = position(
+        &events,
+        |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "assemble"),
+    );
+    assert!(content_end < assemble_start);
+}
+
+#[test]
+fn pipelining_respects_max_parallel() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Three branches, two of them two steps long, and two slots.
+    let yaml = r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+defaults:
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: a1, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: a2, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: b1, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: b2, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: c, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a1 }
+  - { from: start, to: b1 }
+  - { from: start, to: c }
+  - { from: a1, to: a2 }
+  - { from: b1, to: b2 }
+  - { from: a2, to: j }
+  - { from: b2, to: j }
+  - { from: c, to: j }
+  - { from: j, to: done }
+"#;
+    seed(root, yaml, 1);
+    fs::write(
+        root.join(".apb/playbooks/fk/1.0.0/scripts/nap.sh"),
+        "sleep 0.3\necho ok\n",
+    )
+    .unwrap();
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let mut running = 0i32;
+    let mut peak = 0i32;
+    for e in &events {
+        match &e.payload {
+            EventPayload::NodeStarted { node, .. } if node != "start" && node != "done" => {
+                running += 1
+            }
+            EventPayload::NodeFinished { node, .. } if node != "start" && node != "done" => {
+                running -= 1
+            }
+            _ => {}
+        }
+        peak = peak.max(running);
+    }
+    assert_eq!(peak, 2, "never more than two members at once");
+    assert_eq!(finished(&events, "j"), ["succeeded"]);
+}
+
+#[test]
+fn a_resume_mid_pipeline_completes_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = agency("", "  - { from: design2, to: assemble }\n", "  - { from: content, to: assemble }\n")
+        .replace("scripts/fail.sh", "scripts/ok.sh")
+        .replace("  - { id: rejected, type: script, script: \"scripts/count.sh\", runner: sh }\n  - { id: lost, type: finish, outcome: failure }\n", "")
+        .replace("  - { from: rejected, to: lost }\n", "");
+    seed(root, &yaml, 1);
+    let (_, run_id, _) = run_events(root);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    // The driver died after design2 was admitted mid-batch, with content
+    // still running.
+    cut_journal(
+        &run_dir,
+        |l| l.contains(r#""type":"node_started""#) && l.contains(r#""node":"design2""#),
+        &[],
+    );
+    let _ = fs::remove_file(root.join(MARKER));
+
+    let res = resume(root, &run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(finished(&events, "assemble"), ["succeeded"]);
+    assert_eq!(finished(&events, "done"), ["succeeded"]);
+}
+
+/// `b` reaches the `require` join while `a` still runs (the join is not ready
+/// then); `a` fails a second later. The join is re-offered once the batch
+/// ends and refuses, instead of being forgotten.
+#[test]
+fn a_join_a_sibling_reached_early_is_reoffered_when_the_late_branch_dies() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(
+        root,
+        &require_playbook(
+            "slowfail.sh",
+            "  - { from: j, to: done, condition: { type: node_status, node: j, equals: success } }\n  - { from: j, to: handled, condition: { type: node_status, node: j, equals: failure } }\n",
+        ),
+    );
+    let (outcome, _, events) = run_events(root);
+
+    assert_eq!(outcome, RunStatus::Failed);
+    assert!(events.iter().any(|e| matches!(
+        &e.payload,
+        EventPayload::JoinRefused { node, .. } if node == "j"
+    )));
+    assert_eq!(finished(&events, "handled"), ["succeeded"]);
+}

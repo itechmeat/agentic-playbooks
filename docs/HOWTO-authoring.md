@@ -1102,11 +1102,10 @@ they were not there. The policies apply to autonomous runs; a supervised run
 parks a failed branch node for its supervisor like any other failure, and the
 supervisor decides what happens to the other branches.
 
-The interruption reaches the branch nodes running alongside the failed one.
-Ready branch nodes run together in one scheduling pass, and a pass ends only
-when all its members have ended, so a long node in one branch can hold back the
-next step of a sibling branch; a failure in that later step happens only after
-the long node finished.
+Because branch nodes are scheduled continuously (see "Concurrency limit"
+below), a branch's next step starts as soon as its previous step succeeds, even
+while a long node in a sibling branch is still running, so a failure in that
+later step interrupts the long node within seconds.
 
 ### Validating a join
 
@@ -1132,6 +1131,20 @@ does not parse.
 A fork's ready branches run concurrently in every run mode, supervised as well as
 autonomous, bounded by `max_parallel`: at most that many branch nodes run at once,
 and the rest are admitted as slots free up.
+
+Scheduling is continuous: the moment a branch node succeeds, the engine records it,
+routes it, and starts the successors that became ready (up to `max_parallel`)
+without waiting for the other running branch nodes. A fast branch therefore moves
+on while a slow one is still working, and a join still waits for every branch it
+synchronizes. Successors that cannot run alongside others (a `human_review`,
+`wait`, `condition`, `prompt` or `finish` node, a sub-playbook node, an explicit
+`join:` barrier, a join with `require`, an interactive node, a node with
+`protect`) wait until the running branch nodes have ended, as before. Once a
+branch node ends failed, timed out, unknown or interrupted, no new node is
+started alongside the running ones: the nodes already queued still run, and the
+failure is handled when they end (a supervised run parks there, and the failure
+policies apply there), except that a fork's `on_branch_failure` policy reacts at
+once.
 
 ```yaml
 defaults:
@@ -1163,8 +1176,8 @@ read the same pair of producers therefore run alongside each other, in one
 scheduling pass, when slots are free.
 
 In a supervised run the execution is concurrent but the supervision stays serial:
-the whole batch runs, then failures are presented one at a time, in batch order,
-at the batch tail. A `join: any` satisfied by an earlier group cancels the
+the running branch nodes end, then failures are presented one at a time, in batch
+order. A `join: any` satisfied by an earlier group cancels the
 branches still waiting for a slot, and those are journaled cancelled like any
 other cancelled branch.
 

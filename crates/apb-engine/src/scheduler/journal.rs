@@ -42,6 +42,14 @@ impl<'a> Journal<'a> {
         Ok(())
     }
 
+    /// Runs `f` with the log itself, under the lock: for the drive-thread
+    /// writers that take `&mut EventLog` (frontier advance, write-offs) while
+    /// a concurrent batch's workers share this journal (issue #195).
+    pub(crate) fn with_log<R>(&self, f: impl FnOnce(&mut EventLog) -> R) -> R {
+        let mut guard = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
     /// Appends one event and returns its seq (the decision runner names its
     /// debug-state file after it).
     pub(crate) fn append_seq(&self, payload: EventPayload) -> Result<u64, EngineError> {

@@ -3747,7 +3747,7 @@ pub(crate) fn restore_frontier(
 /// would be a false "looping supervisor" on `SupervisorAction`. A wake is
 /// deliberately NOT raised either: this is routine graph bookkeeping, not an
 /// anomaly that needs a supervisor's attention.
-fn journal_dead_inputs(
+pub(crate) fn journal_dead_inputs(
     log: &mut EventLog,
     playbook: &Playbook,
     node: &str,
