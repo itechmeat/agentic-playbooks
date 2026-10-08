@@ -929,3 +929,226 @@ fn a_join_a_sibling_reached_early_is_reoffered_when_the_late_branch_dies() {
     )));
     assert_eq!(finished(&events, "handled"), ["succeeded"]);
 }
+
+/// Issue #195: the chain after a fork's join leaves the batch, so the control
+/// scan runs between its nodes again: a context note posted while `j` runs is
+/// applied before `k` starts.
+#[test]
+fn the_control_scan_runs_between_the_nodes_after_a_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: k, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: k }
+  - { from: k, to: done }
+"#;
+    seed(root, yaml, 1);
+    fs::write(
+        root.join(".apb/playbooks/fk/1.0.0/scripts/nap.sh"),
+        "sleep 1\necho ok\n",
+    )
+    .unwrap();
+    let runs = root.join(".apb/runs");
+    let poster = {
+        let runs = runs.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while std::time::Instant::now() < deadline {
+                if let Some(run_dir) = fs::read_dir(&runs)
+                    .ok()
+                    .and_then(|mut d| d.next())
+                    .and_then(|e| e.ok())
+                    .map(|e| e.path())
+                    && let Ok(events) = read_all(&run_dir)
+                    && started(&events, "j")
+                {
+                    apb_engine::control::post_control(
+                        &run_dir,
+                        apb_engine::control::Control::ContextAppend {
+                            note: "for k".into(),
+                        },
+                    )
+                    .unwrap();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        })
+    };
+    let (outcome, _, events) = run_events(root);
+    poster.join().unwrap();
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let applied = position(
+        &events,
+        |p| matches!(p, EventPayload::SupervisorAction { action, .. } if action == "context_append"),
+    );
+    let k_start = position(
+        &events,
+        |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "k"),
+    );
+    assert!(
+        applied < k_start,
+        "the note reached k only after it started"
+    );
+}
+
+/// Issue #195: a member that is a cache hit and wins a `join: any` cancels
+/// the running sibling exactly as an executed member does: the sibling is
+/// killed and finishes once, `cancelled`, never journaled twice.
+#[test]
+fn a_cache_hit_that_wins_a_join_any_cancels_the_running_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: fast, type: script, script: "scripts/fast.sh", runner: sh, cache: auto }
+  - { id: slow, type: script, script: "scripts/slow.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/fast.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: fast }
+  - { from: start, to: slow }
+  - { from: fast, to: j, join: any }
+  - { from: slow, to: j, join: any }
+  - { from: j, to: done }
+"#;
+    init_project(root).unwrap();
+    fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+    fs::write(root.join("work.txt"), "hello\n").unwrap();
+    let vdir = root.join(".apb/playbooks/fk/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(root.join(".apb/playbooks/fk/current"), "1.0.0").unwrap();
+    fs::write(vdir.join("scripts/fast.sh"), "echo fast\n").unwrap();
+    let marker = root.join(".apb").join(MARKER);
+    fs::write(
+        vdir.join("scripts/slow.sh"),
+        format!("sleep 3\n: > '{}'\necho slow\n", marker.display()),
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "c1",
+        ],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(&args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    // The first run stores `fast`; the second hits it.
+    let (first, _, _) = run_events(root);
+    assert_eq!(first, RunStatus::Succeeded);
+    let (outcome, _, events) = run_events(root);
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert!(
+        events.iter().any(
+            |e| matches!(&e.payload, EventPayload::NodeCacheHit { node, .. } if node == "fast")
+        ),
+        "the second run must hit the cache"
+    );
+    assert_eq!(finished(&events, "slow"), ["cancelled"]);
+    assert!(!marker.exists(), "the sibling ran to completion");
+    assert_eq!(finished(&events, "j"), ["succeeded"]);
+}
+
+/// A fan-in inside its own cycle (`f -> {a, b} -> c -> f`, `c` first-arrival)
+/// runs `c` once per pass whichever branch ends first, and the next pass never
+/// starts beside the old one (issue #195, pipelined batches).
+fn cycle_fan_in(a_script: &str, b_script: &str) -> String {
+    format!(
+        r#"
+schema: 2
+id: fk
+name: Fork
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - {{ id: f, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: a, type: script, script: "scripts/{a_script}", runner: sh }}
+  - {{ id: b, type: script, script: "scripts/{b_script}", runner: sh }}
+  - {{ id: c, type: script, script: "scripts/count.sh", runner: sh }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: f }}
+  - {{ from: f, to: a }}
+  - {{ from: f, to: b }}
+  - {{ from: a, to: c }}
+  - {{ from: b, to: c }}
+  - {{ from: c, to: f, max_traversals: 1, condition: {{ type: node_status, node: c, equals: success }} }}
+  - {{ from: c, to: done, fallback: true }}
+"#
+    )
+}
+
+#[test]
+fn a_fan_in_inside_a_cycle_runs_once_per_pass_in_either_order() {
+    for (a, b) in [("ok.sh", "nap.sh"), ("nap.sh", "ok.sh")] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed(root, &cycle_fan_in(a, b), 1);
+        fs::write(
+            root.join(".apb/playbooks/fk/1.0.0/scripts/nap.sh"),
+            "sleep 0.5\necho ok\n",
+        )
+        .unwrap();
+        let (outcome, _, events) = run_events(root);
+        assert_eq!(outcome, RunStatus::Succeeded, "{a}/{b}");
+        assert_eq!(count_runs(root), 2, "c once per pass ({a}/{b})");
+        assert_eq!(finished(&events, "a").len(), 2, "{a}/{b}");
+        assert_eq!(finished(&events, "b").len(), 2, "{a}/{b}");
+        // The second pass starts only after both branches of the first ended.
+        let second_f = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "f"))
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap();
+        let first_ends: Vec<usize> = ["a", "b"]
+            .iter()
+            .map(|n| {
+                position(
+                    &events,
+                    |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == *n),
+                )
+            })
+            .collect();
+        assert!(first_ends.iter().all(|e| *e < second_f), "{a}/{b}");
+    }
+}

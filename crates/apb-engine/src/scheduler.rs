@@ -89,7 +89,7 @@ pub(crate) use live::{observe_live_channels, tick_live_observation};
 pub(crate) use node::parent_run_origin;
 use node::*;
 use patch::*;
-use pipeline::{finished_members, pipeline_member, reoffer_joins};
+use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
 use prepare::*;
 use rebind::*;
 pub(crate) use resume::{ResumeChoice, build_reprompt_override, resume_decision, resume_inner};
@@ -973,316 +973,363 @@ fn drive_inner(
                 // Members routed mid-batch; the tail does not advance them again.
                 let mut advanced: BTreeSet<String> = BTreeSet::new();
                 let mut pipelining = true;
+                // The run's working tree is resolved from a node's output: when
+                // that node succeeds inside the batch, nothing new is admitted,
+                // so the next node starts only after the drive moved the run
+                // into the tree (top of the loop).
+                let worktree_source = match state.worktree {
+                    Some(_) => None,
+                    None => playbook.worktree_source_node(),
+                };
                 let journal = Journal::new(&mut *log);
                 let (tx, rx) = mpsc::channel();
-                std::thread::scope(|scope| -> Result<(), EngineError> {
+                let scoped = std::thread::scope(|scope| -> Result<(), EngineError> {
                     let mut running: usize = 0;
-                    loop {
-                        // Admission. `cancel` is snapshotted before `run_cancel`
-                        // is tested: both flags are registered with the same
-                        // fanout, and `fire()` stores `run_cancel` before this
-                        // batch's flags, so this order narrows the window in
-                        // which an abort could read as a join:any win. The batch
-                        // tail reads both stop flags itself, so a write-off that
-                        // took the wrong shape here still ends the run stopped.
-                        let mut hits: Vec<String> = Vec::new();
-                        while running < max_parallel {
-                            let Some(n) = queue.pop_front() else { break };
-                            let cancel_now = cancel.load(Ordering::Relaxed);
-                            // A run-level Abort, a batch-local join:any already
-                            // won, or a fork policy that cancelled this member:
-                            // it never starts and is journaled cancelled, like
-                            // its killed siblings.
-                            if run_cancel.load(Ordering::SeqCst)
-                                || cancel_now
-                                || fork_killed.contains(&n)
-                            {
-                                journal.with_log(|log| {
-                                    write_off_cancelled(
-                                        log,
-                                        &mut batch_results,
-                                        std::slice::from_ref(&n),
+                    // The member running alone (nothing else running or queued
+                    // when it started): it gets commit attribution, and nothing
+                    // is admitted beside it.
+                    let mut solo: Option<String> = None;
+                    let body = (|| -> Result<(), EngineError> {
+                        loop {
+                            // Admission. `cancel` is snapshotted before
+                            // `run_cancel` is tested: both flags are registered
+                            // with the same fanout, and `fire()` stores
+                            // `run_cancel` before this batch's flags, so this
+                            // order narrows the window in which an abort could
+                            // read as a join:any win. The batch tail reads both
+                            // stop flags itself, so a write-off that took the
+                            // wrong shape here still ends the run stopped.
+                            let mut done: Vec<(String, NodeStatus)> = Vec::new();
+                            while running < max_parallel {
+                                let Some(n) = queue.pop_front() else { break };
+                                let cancel_now = cancel.load(Ordering::Relaxed);
+                                // A run-level Abort, a batch-local join:any
+                                // already won, or a fork policy that cancelled
+                                // this member: it never starts and is journaled
+                                // cancelled, like its killed siblings.
+                                if run_cancel.load(Ordering::SeqCst)
+                                    || cancel_now
+                                    || fork_killed.contains(&n)
+                                {
+                                    journal.with_log(|log| {
+                                        write_off_cancelled(
+                                            log,
+                                            &mut batch_results,
+                                            std::slice::from_ref(&n),
+                                        )
+                                    })?;
+                                    continue;
+                                }
+                                // A pause: no NEW work, and NOTHING is written
+                                // off. A paused run is resumable and `Cancelled`
+                                // is terminal for `NodeStatus::is_finished`, so
+                                // journaling a queued member here would make
+                                // `pending_heads` skip it forever and the resume
+                                // would drop that branch.
+                                if halt.load(Ordering::SeqCst) {
+                                    queue.clear();
+                                    break;
+                                }
+                                // Started before the cache lookup, exactly as in
+                                // the sequential arm: a hit is a node that ran,
+                                // it just ran once before. The lookup, the
+                                // artifact restore and the store stay on this
+                                // (the drive) thread.
+                                journal.append(EventPayload::NodeStarted {
+                                    node: n.clone(),
+                                    attempt: 1,
+                                })?;
+                                // The state as it stands now: a member admitted
+                                // mid-batch renders the outputs of the members
+                                // that ended before it.
+                                let state_now = RunState::fold(&read_all(run_dir)?);
+                                // A member admitted mid-batch takes its workspace
+                                // fingerprint now, against the tree it starts on,
+                                // as a sequential node does; admission still
+                                // requires the tree unchanged when it ends, so a
+                                // sibling's write rejects the store.
+                                let late_fp = match pre_fps.get(n.as_str()) {
+                                    Some(_) => None,
+                                    None => cache::pre_fingerprint(&playbook, &n, &workdir, cfg),
+                                };
+                                let probe = cache::probe(
+                                    &playbook,
+                                    &n,
+                                    run_dir,
+                                    &workdir,
+                                    &run_id,
+                                    &state_now,
+                                    cfg,
+                                    cache::ProbeContext {
+                                        pre_fingerprint: pre_fps
+                                            .get(n.as_str())
+                                            .or(late_fp.as_ref())
+                                            .map(String::as_str),
+                                        batch_member: true,
+                                        store_root: Some(root),
+                                        declared_key: None,
+                                    },
+                                )?;
+                                match probe {
+                                    cache::CacheProbe::Hit {
+                                        output,
+                                        artifacts,
+                                        events,
+                                    } => {
+                                        for ev in events {
+                                            journal.append(ev)?;
+                                        }
+                                        journal.append(EventPayload::NodeFinished {
+                                            node: n.clone(),
+                                            status: NodeStatus::Succeeded.as_str().into(),
+                                            attempt: 1,
+                                            output: output.clone(),
+                                            artifacts,
+                                        })?;
+                                        batch_results.push((
+                                            n.clone(),
+                                            NodeStatus::Succeeded,
+                                            output,
+                                        ));
+                                        done.push((n, NodeStatus::Succeeded));
+                                    }
+                                    cache::CacheProbe::Miss { ctx, events } => {
+                                        for ev in events {
+                                            journal.append(ev)?;
+                                        }
+                                        if let Some(c) = ctx {
+                                            ctxs.insert(n.clone(), c);
+                                        }
+                                        // Siblings running at the same time move
+                                        // the same HEAD: a commit is attributed
+                                        // only to a member that runs alone.
+                                        let alone =
+                                            running == 0 && queue.is_empty() && done.is_empty();
+                                        if alone {
+                                            solo = Some(n.clone());
+                                        }
+                                        let playbook_c = playbook.clone();
+                                        let rd = run_dir.to_path_buf();
+                                        let wd = workdir.clone();
+                                        let rid = run_id.clone();
+                                        let cfg_c = cfg.clone();
+                                        let node = n.clone();
+                                        let op = prompt_overrides.remove(n.as_str());
+                                        let tx = tx.clone();
+                                        let cancel_c = Arc::clone(&member_flags[n.as_str()]);
+                                        let scrub_c = env_scrub.clone();
+                                        let journal_ref = &journal;
+                                        let decisions_ref = decisions.as_ref();
+                                        running += 1;
+                                        scope.spawn(move || {
+                                            // A panic becomes an error the drive
+                                            // reports, instead of a member that
+                                            // never answers and a hung drive.
+                                            let res = std::panic::catch_unwind(
+                                                std::panic::AssertUnwindSafe(|| {
+                                                    execute_node(
+                                                        &playbook_c,
+                                                        &rd,
+                                                        &wd,
+                                                        &node,
+                                                        &rid,
+                                                        &state_now,
+                                                        &cfg_c,
+                                                        op,
+                                                        &cancel_c,
+                                                        &scrub_c,
+                                                        journal_ref,
+                                                        decisions_ref,
+                                                        // Interactive nodes are
+                                                        // excluded from the
+                                                        // batch, so neither a
+                                                        // resume nor the live
+                                                        // sidecar originates
+                                                        // here.
+                                                        None,
+                                                        None,
+                                                        alone,
+                                                    )
+                                                }),
+                                            )
+                                            .unwrap_or_else(|_| {
+                                                Err(EngineError::Invalid(format!(
+                                                    "batch member `{node}` panicked"
+                                                )))
+                                            });
+                                            let _ = tx.send((node, res));
+                                        });
+                                    }
+                                }
+                            }
+                            if done.is_empty() {
+                                if running == 0 {
+                                    if queue.is_empty() || halt.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                let (node, res) = rx.recv().map_err(|_| {
+                                    EngineError::Invalid(
+                                        "a batch member ended without reporting".into(),
                                     )
                                 })?;
-                                continue;
-                            }
-                            // A pause: no NEW work, and NOTHING is written off. A
-                            // paused run is resumable and `Cancelled` is terminal
-                            // for `NodeStatus::is_finished`, so journaling a queued
-                            // member here would make `pending_heads` skip it
-                            // forever and the resume would drop that branch.
-                            if halt.load(Ordering::SeqCst) {
-                                queue.clear();
-                                break;
-                            }
-                            // Started before the cache lookup, exactly as in the
-                            // sequential arm: a hit is a node that ran, it just
-                            // ran once before. The lookup, the artifact restore
-                            // and the store stay on this (the drive) thread.
-                            journal.append(EventPayload::NodeStarted {
-                                node: n.clone(),
-                                attempt: 1,
-                            })?;
-                            // The state as it stands now: a member admitted
-                            // mid-batch renders the outputs of the members that
-                            // ended before it.
-                            let state_now = RunState::fold(&read_all(run_dir)?);
-                            let probe = cache::probe(
-                                &playbook,
-                                &n,
-                                run_dir,
-                                &workdir,
-                                &run_id,
-                                &state_now,
-                                cfg,
-                                cache::ProbeContext {
-                                    pre_fingerprint: pre_fps.get(n.as_str()).map(String::as_str),
-                                    batch_member: true,
-                                    store_root: Some(root),
-                                    declared_key: None,
-                                },
-                            )?;
-                            match probe {
-                                cache::CacheProbe::Hit {
+                                running -= 1;
+                                if solo.as_deref() == Some(node.as_str()) {
+                                    solo = None;
+                                }
+                                let (status, output, evs) = match res? {
+                                    AttemptOutcome::Finished {
+                                        status,
+                                        output,
+                                        events,
+                                    } => (status, output, events),
+                                    // Interactive nodes are excluded from the
+                                    // batch above, so a suspension here is
+                                    // impossible; be explicit rather than
+                                    // silently mishandle it.
+                                    AttemptOutcome::Suspended { .. } => {
+                                        return Err(EngineError::Invalid(format!(
+                                            "interactive node `{node}` must not run in a concurrent batch"
+                                        )));
+                                    }
+                                };
+                                for ev in evs {
+                                    journal.append(ev)?;
+                                }
+                                // Declared-artifact capture and cache admission,
+                                // the same unit the sequential arm uses, on THIS
+                                // (the drive) thread as each member returns.
+                                let (artifacts, settle_events) = cache::settle(
+                                    ctxs.get(node.as_str()),
+                                    &playbook,
+                                    run_dir,
+                                    &workdir,
+                                    &run_id,
+                                    &node,
+                                    status,
+                                    &output,
+                                );
+                                for ev in settle_events {
+                                    journal.append(ev)?;
+                                }
+                                batch_results.push((node.clone(), status, output.clone()));
+                                journal.append(EventPayload::NodeFinished {
+                                    node: node.clone(),
+                                    status: status.as_str().into(),
+                                    attempt: 1,
                                     output,
                                     artifacts,
-                                    events,
-                                } => {
-                                    for ev in events {
-                                        journal.append(ev)?;
+                                })?;
+                                // Judge edges (issue #165 Part 7), before routing.
+                                judge::decide_edges(
+                                    &playbook,
+                                    run_dir,
+                                    &node,
+                                    status,
+                                    decisions.as_ref(),
+                                    &journal,
+                                )?;
+                                // A failure a fork's policy takes over (issue
+                                // #195) interrupts the other members of that
+                                // fork's branches now.
+                                if matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+                                    && let Some(f) = fork::detect(
+                                        &playbook,
+                                        &node,
+                                        status,
+                                        mode,
+                                        &RunState::fold(&read_all(run_dir)?),
+                                    )
+                                {
+                                    for m in batch.iter().filter(|m| f.in_scope(m)) {
+                                        if batch_results.iter().all(|(n, _, _)| n != m) {
+                                            fork::note_cancel(run_dir, &f, m);
+                                            member_flags[m.as_str()].store(true, Ordering::Relaxed);
+                                            fork_killed.insert(m.clone());
+                                        }
                                     }
-                                    journal.append(EventPayload::NodeFinished {
-                                        node: n.clone(),
-                                        status: NodeStatus::Succeeded.as_str().into(),
-                                        attempt: 1,
-                                        output: output.clone(),
-                                        artifacts,
-                                    })?;
-                                    batch_results.push((n.clone(), NodeStatus::Succeeded, output));
-                                    hits.push(n);
                                 }
-                                cache::CacheProbe::Miss { ctx, events } => {
-                                    for ev in events {
-                                        journal.append(ev)?;
-                                    }
-                                    if let Some(c) = ctx {
-                                        ctxs.insert(n.clone(), c);
-                                    }
-                                    let playbook_c = playbook.clone();
-                                    let rd = run_dir.to_path_buf();
-                                    let wd = workdir.clone();
-                                    let rid = run_id.clone();
-                                    let cfg_c = cfg.clone();
-                                    let node = n.clone();
-                                    let op = prompt_overrides.remove(n.as_str());
-                                    let tx = tx.clone();
-                                    let cancel_c = Arc::clone(&member_flags[n.as_str()]);
-                                    let scrub_c = env_scrub.clone();
-                                    let journal_ref = &journal;
-                                    let decisions_ref = decisions.as_ref();
-                                    running += 1;
-                                    scope.spawn(move || {
-                                        let res = execute_node(
-                                            &playbook_c,
-                                            &rd,
-                                            &wd,
-                                            &node,
-                                            &rid,
-                                            &state_now,
-                                            &cfg_c,
-                                            op,
-                                            &cancel_c,
-                                            &scrub_c,
-                                            journal_ref,
-                                            decisions_ref,
-                                            // Interactive nodes are excluded from
-                                            // the concurrent batch, so neither a
-                                            // resume nor the live sidecar ever
-                                            // originates here.
-                                            None,
-                                            None,
-                                            // Siblings running at the same time
-                                            // move the same HEAD: no commit is
-                                            // attributed to a batch member.
-                                            false,
-                                        );
-                                        let _ = tx.send((node, res));
-                                    });
-                                }
+                                done.push((node, status));
                             }
-                        }
-                        // A cache hit is routed like any member that succeeded.
-                        // It does NOT get the in-batch any-join cancel treatment
-                        // its executed siblings get; the tail still resolves the
-                        // join.
-                        for n in hits {
-                            if pipelining {
-                                pipeline_member(
+                            // Every member that just ended, executed or a cache
+                            // hit, goes through the same routing.
+                            for (node, status) in done {
+                                if !matches!(status, NodeStatus::Succeeded | NodeStatus::Cancelled)
+                                {
+                                    pipelining = false;
+                                }
+                                if status != NodeStatus::Succeeded {
+                                    continue;
+                                }
+                                let state_peek = RunState::fold(&read_all(run_dir)?);
+                                // If this branch fed a won join:any, cancel the
+                                // others; the tail routes it.
+                                if feeds_ready_any(&playbook, &node, &state_peek, &frontier, &batch)
+                                {
+                                    cancel.store(true, Ordering::Relaxed);
+                                    for f in member_flags.values() {
+                                        f.store(true, Ordering::Relaxed);
+                                    }
+                                    continue;
+                                }
+                                if worktree_source.as_deref() == Some(node.as_str()) {
+                                    pipelining = false;
+                                }
+                                // Route a success at once, unless the batch is
+                                // being torn down (a stop, a pause, a join:any
+                                // won), which the tail handles as before.
+                                if !pipelining
+                                    || cancel.load(Ordering::Relaxed)
+                                    || run_cancel.load(Ordering::SeqCst)
+                                    || halt.load(Ordering::SeqCst)
+                                {
+                                    continue;
+                                }
+                                rebuild_context_md(run_dir)?;
+                                // A successor joins the batch only while another
+                                // member is still at work (and none runs alone);
+                                // otherwise the batch ends and the sequential arm,
+                                // with its control scan, heartbeat and compaction,
+                                // takes it.
+                                let admit = (running > 0 || !queue.is_empty()) && solo.is_none();
+                                let routed = pipeline_member(
                                     &playbook,
                                     run_dir,
                                     &journal,
-                                    &n,
-                                    &finished_members(&batch_results),
+                                    &node,
                                     &mut frontier,
-                                    &mut batch,
-                                    &mut queue,
-                                    &mut member_flags,
-                                    &mut member_fans,
-                                    &fanout,
-                                    &mut steps,
+                                    BatchSlots {
+                                        finished: &batch_results
+                                            .iter()
+                                            .map(|(n, _, _)| n.clone())
+                                            .collect::<Vec<_>>(),
+                                        batch: &mut batch,
+                                        queue: &mut queue,
+                                        member_flags: &mut member_flags,
+                                        member_fans: &mut member_fans,
+                                        fanout: &fanout,
+                                        steps: &mut steps,
+                                    },
+                                    admit,
                                 )?;
-                                advanced.insert(n);
-                            }
-                        }
-                        if running == 0 {
-                            if queue.is_empty() || halt.load(Ordering::SeqCst) {
-                                break;
-                            }
-                            continue;
-                        }
-                        let Ok((node, res)) = rx.recv() else { break };
-                        running -= 1;
-                        let (status, output, evs) = match res? {
-                            AttemptOutcome::Finished {
-                                status,
-                                output,
-                                events,
-                            } => (status, output, events),
-                            // Interactive nodes are excluded from the batch
-                            // above, so a suspension here is impossible; be
-                            // explicit rather than silently mishandle it.
-                            AttemptOutcome::Suspended { .. } => {
-                                return Err(EngineError::Invalid(format!(
-                                    "interactive node `{node}` must not run in a concurrent batch"
-                                )));
-                            }
-                        };
-                        for ev in evs {
-                            journal.append(ev)?;
-                        }
-                        // Declared-artifact capture and cache admission, the
-                        // same unit the sequential arm uses. It runs on THIS
-                        // (the drive) thread as each member returns, so the
-                        // workspace fingerprint comparison and the store
-                        // write stay single-threaded and the artifacts are in
-                        // hand for the member's NodeFinished below.
-                        let (artifacts, settle_events) = cache::settle(
-                            ctxs.get(node.as_str()),
-                            &playbook,
-                            run_dir,
-                            &workdir,
-                            &run_id,
-                            &node,
-                            status,
-                            &output,
-                        );
-                        for ev in settle_events {
-                            journal.append(ev)?;
-                        }
-                        batch_results.push((node.clone(), status, output.clone()));
-                        journal.append(EventPayload::NodeFinished {
-                            node: node.clone(),
-                            status: status.as_str().into(),
-                            attempt: 1,
-                            output,
-                            artifacts,
-                        })?;
-                        // Judge edges (issue #165 Part 7), before routing.
-                        judge::decide_edges(
-                            &playbook,
-                            run_dir,
-                            &node,
-                            status,
-                            decisions.as_ref(),
-                            &journal,
-                        )?;
-                        // A failure a fork's policy takes over (issue
-                        // #195) interrupts the other members of that
-                        // fork's branches now, instead of waiting them out.
-                        let failed_now =
-                            matches!(status, NodeStatus::Failed | NodeStatus::TimedOut);
-                        let detected = match failed_now {
-                            true => fork::detect(
-                                &playbook,
-                                &node,
-                                status,
-                                mode,
-                                &RunState::fold(&read_all(run_dir)?),
-                            ),
-                            false => None,
-                        };
-                        if let Some(f) = detected {
-                            for m in batch.iter().filter(|m| f.in_scope(m)) {
-                                if batch_results.iter().all(|(n, _, _)| n != m) {
-                                    fork::note_cancel(run_dir, &f, m);
-                                    member_flags[m.as_str()].store(true, Ordering::Relaxed);
-                                    fork_killed.insert(m.clone());
+                                if routed {
+                                    advanced.insert(node);
                                 }
                             }
                         }
-                        // If this branch successfully fed a join:any - cancel the others.
-                        if status == NodeStatus::Succeeded {
-                            let state_peek = RunState::fold(&read_all(run_dir)?);
-                            // Every batch member counts as active: the
-                            // siblings may still be running, so nothing they
-                            // can still reach may be written off as dead.
-                            let active = active_set(&node, &frontier, &batch);
-                            let feeds_ready_any =
-                                parallel::successors(&playbook, &node, &state_peek)
-                                    .into_iter()
-                                    .any(|s| {
-                                        parallel::is_join(&playbook, &s)
-                                            && parallel::join_mode(&playbook, &s)
-                                                == parallel::JoinMode::Any
-                                            && matches!(
-                                                parallel::join_readiness(
-                                                    &playbook,
-                                                    &s,
-                                                    &state_peek,
-                                                    &active
-                                                ),
-                                                JoinReadiness::ReadySuccess
-                                            )
-                                    });
-                            if feeds_ready_any {
-                                cancel.store(true, Ordering::Relaxed);
-                                for f in member_flags.values() {
-                                    f.store(true, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                        if !matches!(status, NodeStatus::Succeeded | NodeStatus::Cancelled) {
-                            pipelining = false;
-                        }
-                        // Route a success at once, unless the batch is being
-                        // torn down (a stop, a pause, a join:any won), which the
-                        // tail handles as before.
-                        if pipelining
-                            && status == NodeStatus::Succeeded
-                            && !cancel.load(Ordering::Relaxed)
-                            && !run_cancel.load(Ordering::SeqCst)
-                            && !halt.load(Ordering::SeqCst)
-                        {
-                            rebuild_context_md(run_dir)?;
-                            pipeline_member(
-                                &playbook,
-                                run_dir,
-                                &journal,
-                                &node,
-                                &finished_members(&batch_results),
-                                &mut frontier,
-                                &mut batch,
-                                &mut queue,
-                                &mut member_flags,
-                                &mut member_fans,
-                                &fanout,
-                                &mut steps,
-                            )?;
-                            advanced.insert(node);
+                        Ok(())
+                    })();
+                    // A failure inside the batch stops the members still
+                    // running instead of leaving them to their timeouts.
+                    if body.is_err() {
+                        for f in member_flags.values() {
+                            f.store(true, Ordering::Relaxed);
                         }
                     }
-                    Ok(())
-                })?;
+                    body
+                });
+                scoped?;
                 rebuild_context_md(run_dir)?;
                 // Attribute progress the members posted while the batch was in
                 // flight, before the tail can return terminally. The batch can

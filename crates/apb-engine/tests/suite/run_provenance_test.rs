@@ -441,3 +441,60 @@ edges:
         [("ask".into(), vec!["before the question".into()])]
     );
 }
+
+/// Issue #195 (pipelined batches): the chain after a fork's join runs in the
+/// sequential arm, one node at a time, so each of its nodes is credited with
+/// its own commits again (and the control scan runs between them).
+#[test]
+fn the_chain_after_a_join_runs_alone_and_keeps_its_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let commit = |name: &str, delay: &str| {
+        format!(
+            "sleep {delay}\necho {name} > {name}.txt\ngit add {name}.txt\n\
+             git -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false \
+             commit -q -m 'by {name}'\n"
+        )
+    };
+    seed_other(
+        root,
+        r#"
+schema: 2
+id: p2
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/a.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/b.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/j.sh", runner: sh }
+  - { id: k, type: script, script: "scripts/k.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: k }
+  - { from: k, to: done }
+"#,
+        &[
+            ("a.sh", &commit("a", "0.1")),
+            ("b.sh", &commit("b", "0.5")),
+            ("j.sh", &commit("j", "0")),
+            ("k.sh", &commit("k", "0")),
+        ],
+    );
+    git_repo(root);
+    let res = run(root, "p2", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    let got = listed(&events);
+    for node in ["j", "k"] {
+        assert!(
+            got.iter()
+                .any(|(n, s)| n == node && s == &vec![format!("by {node}")]),
+            "{node} is credited with its commit: {got:?}"
+        );
+    }
+}

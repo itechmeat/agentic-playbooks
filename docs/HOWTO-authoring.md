@@ -1134,17 +1134,31 @@ and the rest are admitted as slots free up.
 
 Scheduling is continuous: the moment a branch node succeeds, the engine records it,
 routes it, and starts the successors that became ready (up to `max_parallel`)
-without waiting for the other running branch nodes. A fast branch therefore moves
-on while a slow one is still working, and a join still waits for every branch it
-synchronizes. Successors that cannot run alongside others (a `human_review`,
-`wait`, `condition`, `prompt` or `finish` node, a sub-playbook node, an explicit
-`join:` barrier, a join with `require`, an interactive node, a node with
-`protect`) wait until the running branch nodes have ended, as before. Once a
-branch node ends failed, timed out, unknown or interrupted, no new node is
+while other branch nodes are still running. A fast branch therefore moves on while
+a slow one is still working, and a join still waits for every branch it
+synchronizes. A successor starts beside the running nodes only while at least one
+other branch node is still at work; the node that finishes last hands its
+successors to the ordinary one-at-a-time path, so the chain after a join runs
+node by node with the control scan, the supervisor watch, context compaction and
+commit attribution between nodes, as before. These successors also wait until the
+running branch nodes have ended:
+
+- nodes that cannot run alongside others: a `human_review`, `wait`,
+  `condition`, `prompt` or `finish` node, a sub-playbook node, an explicit
+  `join:` barrier, a join with `require`, an interactive node, a node with
+  `protect`;
+- a successor that leads back to a branch node still running (a loop through
+  the fork, `fork -> {a, b} -> c -> fork`), so a new pass of a loop never starts
+  beside the old one, and a fan-in inside its own cycle still runs once per pass;
+- everything after the node that publishes the run's working tree (a
+  `worktree` template over a node's output), so the next node starts in that
+  tree.
+
+Once a branch node ends failed, timed out, unknown or interrupted, no new node is
 started alongside the running ones: the nodes already queued still run, and the
 failure is handled when they end (a supervised run parks there, and the failure
 policies apply there), except that a fork's `on_branch_failure` policy reacts at
-once.
+once. A branch node gets its commits recorded only when it ran alone.
 
 ```yaml
 defaults:
