@@ -705,9 +705,19 @@ fn eventually(secs: u64, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
-fn read_pid(path: &Path) -> i32 {
-    fs::read_to_string(path).unwrap().trim().parse().unwrap()
+/// The pid recorded in `path`, once the file holds a whole one; `None`
+/// while it is missing or still being written.
+fn read_pid(path: &Path) -> Option<i32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
 }
+
+/// The wall clock of a repetition (or a run's deadline, in seconds) that
+/// must not fire before the stub agent is up. The clock starts before the
+/// driver spawns the agent, and on a loaded CI runner that start alone has
+/// taken over a second, so a short clock could stop the run before the stub
+/// wrote its pid or detached its helper. The tests wait out the full clock,
+/// so this costs time on every run: generous, not unbounded.
+const AGENT_UP_SECS: u64 = 10;
 
 /// A stub agent that records its pid in `$PROBE_DIR/agent.pid`, then runs
 /// `tail` (the rest of the script).
@@ -743,7 +753,7 @@ fn with_limits(env: &Env, timeout: &str) -> PathBuf {
 #[test]
 fn a_run_past_its_timeout_is_stopped_and_its_agent_is_gone() {
     let env = setup(PLAYBOOK);
-    let probe = with_limits(&env, "2s");
+    let probe = with_limits(&env, &format!("{AGENT_UP_SECS}s"));
     slow_stub(&env, "exec sleep 30");
     let (code, v) = env.eval_json(&[]);
     assert_eq!(code, 1, "{v:#}");
@@ -753,11 +763,11 @@ fn a_run_past_its_timeout_is_stopped_and_its_agent_is_gone() {
         rep["stopped"]
             .as_str()
             .unwrap()
-            .starts_with("timeout after 2s"),
+            .starts_with(&format!("timeout after {AGENT_UP_SECS}s")),
         "{rep:#}"
     );
     assert!(rep["kept_worktree"].is_null(), "{rep:#}");
-    let agent = read_pid(&probe.join("agent.pid"));
+    let agent = read_pid(&probe.join("agent.pid")).expect("the agent never started");
     assert!(
         eventually(10, || !alive(agent)),
         "the agent outlived the eval"
@@ -772,7 +782,10 @@ fn a_run_past_its_timeout_is_stopped_and_its_agent_is_gone() {
 #[test]
 fn a_kept_tree_survives_the_scratch_cleanup() {
     let env = setup(PLAYBOOK);
-    let probe = with_limits(&env, "1s");
+    // The helper must hold the driver's place before the clock stops the
+    // run: a stop that comes first takes the agent, and the helper with it
+    // when it has not detached yet, so the tree is never kept.
+    let probe = with_limits(&env, &format!("{AGENT_UP_SECS}s"));
     // A detached helper that reads as the apb driver of this run: argv[0]
     // `apb`, its pid in the run's `driver.pid`, and the run directory made
     // read-only so the real driver cannot remove that file when it exits.
@@ -790,15 +803,20 @@ fn a_kept_tree_survives_the_scratch_cleanup() {
     let (code, v) = env.eval_json(&[]);
     let rep = v["result"]["cases"][0]["repetitions"][0].clone();
     // Clean up before asserting: the helper and the agent outlive the eval.
-    for f in ["helper.pid", "agent.pid"] {
+    let [helper, agent] = ["helper.pid", "agent.pid"].map(|f| read_pid(&probe.join(f)));
+    for pid in [helper, agent].into_iter().flatten() {
         // SAFETY: plain kill(2).
-        unsafe { libc::kill(read_pid(&probe.join(f)), libc::SIGKILL) };
+        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     let run_dir = rep["run_dir"].as_str().map(PathBuf::from);
     if let Some(d) = &run_dir {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(d, fs::Permissions::from_mode(0o755));
     }
+    assert!(
+        helper.is_some(),
+        "the helper never took the driver's place before the stop: {v:#}"
+    );
     assert_eq!(code, 1, "{v:#}");
     let kept = PathBuf::from(rep["kept_worktree"].as_str().expect("kept_worktree"));
     assert!(
@@ -876,7 +894,7 @@ fn the_driver_aborts_an_eval_run_at_its_deadline() {
         &settings,
         &serde_json::json!({
             "spawn_env": { "PROBE_DIR": probe },
-            "deadline_ms": now + 1500,
+            "deadline_ms": now + AGENT_UP_SECS * 1000,
         })
         .to_string(),
     );
@@ -916,7 +934,7 @@ fn the_driver_aborts_an_eval_run_at_its_deadline() {
         journal.contains(apb_engine::scheduler::DEADLINE_REASON),
         "{journal}"
     );
-    let agent = read_pid(&probe.join("agent.pid"));
+    let agent = read_pid(&probe.join("agent.pid")).expect("the agent never started");
     assert!(
         eventually(10, || !alive(agent)),
         "the agent outlived the deadline"
@@ -941,11 +959,17 @@ fn an_interrupted_eval_stops_its_run_and_cleans_up() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    // The pid, not just the file: the stub creates the file before it
+    // writes to it.
+    let mut agent = None;
     assert!(
-        eventually(20, || probe.join("agent.pid").is_file()),
+        eventually(20, || {
+            agent = read_pid(&probe.join("agent.pid"));
+            agent.is_some()
+        }),
         "the agent never started"
     );
-    let agent = read_pid(&probe.join("agent.pid"));
+    let agent = agent.unwrap();
     // SAFETY: plain kill(2) on our own child.
     unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
     let finished = eventually(40, || child.try_wait().unwrap().is_some());
