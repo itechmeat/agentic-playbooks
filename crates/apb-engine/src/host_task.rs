@@ -40,7 +40,9 @@ macro_rules! host_task_contract {
     () => {
         "Execute this task in the current session with your own subagent tool, or do it yourself. \
 Do not launch another agent CLI or process to run it (such as claude -p, codex exec, opencode run, gemini or a ZCode CLI), and never with permission-bypass flags. \
-The profile's executor agent and model do not apply in host mode, and model_hint is advisory only: choose among the models your own subagent tool offers, use your session's model when none matches, and report the model actually used as run_task_submit model (apb tasks submit --model)."
+The profile's executor agent and model do not apply in host mode, and model_hint is advisory only: choose among the models your own subagent tool offers, use your session's model when none matches, and report the model actually used as run_task_submit model (apb tasks submit --model). \
+Pass the prompt to your subagent by path (tell it to read prompt_path, and role_path as its role) instead of copying it. \
+Bounded decisions inside the task (choose, rank, filter, map, yes/no) may be asked of the configured decision providers with `apb decide` or the MCP tool `decision_ask`; that is not running the task elsewhere."
     };
 }
 
@@ -202,6 +204,12 @@ pub struct PendingHostTask {
     /// The subagent's system context (the profile's role prompt), when the
     /// profile has one.
     pub role_prompt: Option<String>,
+    /// The absolute path of `prompt`'s file (`tasks/<id>/prompt.md`): a host
+    /// tells its subagent to read it instead of copying the text (issue
+    /// #193).
+    pub prompt_path: String,
+    /// The absolute path of `role_prompt`'s file, when the profile has one.
+    pub role_path: Option<String>,
     /// Paths of the skills the subagent should load.
     pub skills: Vec<String>,
     /// The directory the subagent works in.
@@ -440,6 +448,10 @@ fn child_runs(events: &[Event]) -> Vec<String> {
 fn pending_task(run_dir: &Path, task_id: &str) -> Option<PendingHostTask> {
     let record = read_record(run_dir, task_id)?;
     let prompt = read_prompt(run_dir, task_id)?;
+    let role_prompt = read_role(run_dir, task_id);
+    let dir = task_dir(run_dir, task_id);
+    let dir = std::path::absolute(&dir).unwrap_or(dir);
+    let path_of = |file: &str| dir.join(file).to_string_lossy().into_owned();
     Some(PendingHostTask {
         run_id: run_dir
             .file_name()
@@ -449,7 +461,9 @@ fn pending_task(run_dir: &Path, task_id: &str) -> Option<PendingHostTask> {
         node: record.node,
         attempt: record.attempt,
         prompt,
-        role_prompt: read_role(run_dir, task_id),
+        prompt_path: path_of(PROMPT_FILE),
+        role_path: role_prompt.as_ref().map(|_| path_of(ROLE_FILE)),
+        role_prompt,
         skills: record.skills,
         workdir: record.workdir,
         outputs: record.outputs,
@@ -701,7 +715,7 @@ mod tests {
     }
 
     /// The contract keeps its load-bearing rules and stays short enough to
-    /// be read (two to four sentences, house prose rules).
+    /// be read (two to five sentences, house prose rules).
     #[test]
     fn the_execution_contract_forbids_external_agent_clis() {
         for phrase in [
@@ -714,6 +728,12 @@ mod tests {
             "your session's model",
             "run_task_submit model",
             "apb tasks submit --model",
+            // Issue #193: prompt by reference and sanctioned decision calls.
+            "by path",
+            "prompt_path",
+            "`apb decide`",
+            "`decision_ask`",
+            "that is not running the task elsewhere",
         ] {
             assert!(
                 EXECUTION_CONTRACT.contains(phrase),
@@ -721,7 +741,7 @@ mod tests {
             );
         }
         let sentences = EXECUTION_CONTRACT.matches(". ").count() + 1;
-        assert!((2..=4).contains(&sentences), "{sentences} sentences");
+        assert!((2..=5).contains(&sentences), "{sentences} sentences");
         assert!(!EXECUTION_CONTRACT.contains(['\u{2014}', '!', '\n']));
     }
 

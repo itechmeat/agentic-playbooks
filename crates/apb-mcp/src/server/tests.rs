@@ -140,11 +140,13 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_wait",
         "run_events",
         "run_report",
+        "run_retro_context",
         "run_resume",
         "run_stop",
         "review_decide",
         "run_answer",
         "run_task_submit",
+        "decision_ask",
         "supervisor_wait_event",
         "supervisor_run_inspect",
         "supervisor_node_retry",
@@ -311,6 +313,7 @@ fn tools_carry_safety_annotations() {
         "run_wait",
         "run_events",
         "run_report",
+        "run_retro_context",
         "supervisor_wait_event",
         "supervisor_run_inspect",
     ] {
@@ -904,6 +907,7 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         None,
         Default::default(),
         None,
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -970,6 +974,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         None,
         Default::default(),
         None,
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -1031,6 +1036,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         None,
         None,
         Default::default(),
+        None,
         None,
     )
     .expect("playbook_run_supervised");

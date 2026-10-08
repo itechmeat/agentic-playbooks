@@ -51,6 +51,11 @@ pub struct StatsRun {
     pub events: Vec<Event>,
     /// The run's playbook snapshot, for `expected_duration`.
     pub snapshot: Option<apb_core::schema::Playbook>,
+    /// The run was a candidate trial (issue #192, from its manifest).
+    pub candidate_trial: bool,
+    /// Each node's profile primary model, from the run manifest (issue
+    /// #193).
+    pub expected_models: BTreeMap<String, String>,
 }
 
 impl StatsRun {
@@ -71,6 +76,11 @@ impl StatsRun {
             version,
             events: j.events,
             snapshot: crate::legacy_snapshot::load_run_playbook(run_dir),
+            candidate_trial: crate::manifest::read(run_dir)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.candidate_trial),
+            expected_models: crate::attempt_models::primary_models(run_dir),
         })
     }
 
@@ -224,6 +234,10 @@ pub struct NodeStats {
     pub over_expected: Option<Rate>,
     pub deliverable_missing: usize,
     pub output_fields_missing: usize,
+    /// The models its attempts actually ran on (issue #193).
+    #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
+    pub model_use: models::ModelUse,
 }
 
 /// One playbook version over its runs.
@@ -251,10 +265,23 @@ pub struct VersionStats {
     pub output_fields_missing: usize,
     /// Empty when the runs checked no goal.
     pub goal: Vec<GoalStats>,
+    /// The models its attempts actually ran on (issue #193).
+    #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
+    pub model_use: models::ModelUse,
     pub nodes: Vec<NodeStats>,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Runs of this version that were candidate trials (issue #192): the
+    /// version was a forward patch on trial when they ran.
+    #[cfg_attr(feature = "ts", ts(as = "Option<usize>", optional))]
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub candidate_trials: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// `--compare`: the base version against the latest other version seen,
@@ -672,6 +699,10 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         .then(|| ((cost / spend.runs_with_cost as f64) * 1e6).round() / 1e6);
     // The expected durations from the newest snapshot of the version.
     let snapshot = runs.iter().rev().find_map(|r| r.snapshot.as_ref());
+    let (model_use, mut node_models) = models::model_use(
+        runs.iter()
+            .map(|r| (r.events.as_slice(), &r.expected_models)),
+    );
     let nodes: Vec<NodeStats> = nodes
         .into_iter()
         .map(|(node, a)| {
@@ -697,6 +728,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
                 over_expected,
                 deliverable_missing: a.deliverable_missing,
                 output_fields_missing: a.output_fields_missing,
+                model_use: node_models.remove(&node).unwrap_or_default(),
                 node,
             }
         })
@@ -716,6 +748,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         })
         .collect();
     VersionStats {
+        candidate_trials: runs.iter().filter(|r| r.candidate_trial).count(),
         playbook: playbook.to_string(),
         version: version.to_string(),
         runs: runs.len(),
@@ -732,6 +765,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         deliverable_missing: dm,
         output_fields_missing: ofm,
         goal,
+        model_use,
         nodes,
         note: (runs.len() < MIN_RUNS).then(|| {
             format!(
@@ -786,6 +820,12 @@ pub fn render_text(r: &StatsReport) -> String {
         if let Some(note) = &v.note {
             out.push_str(&format!("  note: {note}\n"));
         }
+        if v.candidate_trials > 0 {
+            out.push_str(&format!(
+                "  candidate trials: {} of {} runs\n",
+                v.candidate_trials, v.runs
+            ));
+        }
         let o = &v.outcomes;
         out.push_str(&format!(
             "  outcome: {} succeeded ({} succeeded, {} failed, {} aborted, {} other)\n",
@@ -808,6 +848,9 @@ pub fn render_text(r: &StatsReport) -> String {
             waits_text(&v.question_wait)
         ));
         out.push_str(&format!("  run duration: {}\n", waits_text(&v.duration)));
+        if let Some(m) = v.model_use.text() {
+            out.push_str(&format!("  models: {m}\n"));
+        }
         let s = &v.spend;
         if s.runs_with_usage > 0 {
             let mut line = format!("  tokens: {}", per_run_text(&s.tokens));
@@ -866,6 +909,9 @@ pub fn render_text(r: &StatsReport) -> String {
                     over.text()
                 ));
             }
+            if let Some(m) = n.model_use.text() {
+                line.push_str(&format!(", models {m}"));
+            }
             out.push_str(&line);
             out.push('\n');
         }
@@ -910,6 +956,8 @@ pub fn render_text(r: &StatsReport) -> String {
     }
     out
 }
+
+pub mod models;
 
 #[cfg(test)]
 mod tests;

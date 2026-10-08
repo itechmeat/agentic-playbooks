@@ -1,5 +1,8 @@
 pub mod adapter;
 mod agent_home;
+// candidate trials (issue #192)
+pub mod attempt_models;
+pub mod candidate;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;
@@ -13,6 +16,8 @@ pub mod event;
 pub mod eval;
 // --- end 0.24.0 eval suites ---
 pub mod failure_class;
+// forward patches (issue #192)
+pub mod forward_patch;
 pub mod gate;
 pub mod hooks;
 pub mod inspect;
@@ -31,6 +36,9 @@ pub mod run_config;
 pub mod run_doctor;
 mod run_lineage;
 pub mod run_outcome;
+// --- run retrospective (#192 part 3) ---
+pub mod run_retro;
+// --- end of run retrospective ---
 // --- 0.23.0 stats (C3) ---
 pub mod run_stats;
 // --- end of 0.23.0 stats ---

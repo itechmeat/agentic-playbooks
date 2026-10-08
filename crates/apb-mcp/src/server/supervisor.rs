@@ -26,6 +26,7 @@ impl WfMcp {
             token,
             after_seq,
             timeout_ms,
+            inline_prompt,
         }): Parameters<SupervisorWaitArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -47,9 +48,13 @@ impl WfMcp {
             },
         )
         .await;
-        to_call_tool_result(
-            outcome.and_then(|o| tools::supervisor_wait_result(&root, &run_id, after_seq, &o)),
-        )
+        to_call_tool_result(outcome.and_then(|o| {
+            let mut out = tools::supervisor_wait_result(&root, &run_id, after_seq, &o)?;
+            if inline_prompt == Some(false) {
+                tools::drop_inline_prompts(&mut out);
+            }
+            Ok(out)
+        }))
     }
 
     #[tool(
@@ -250,7 +255,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Patch the playbook of a supervised run: create a patch version from the given YAML and migrate the run onto it, continuing from the given node. classification is `improvement` or `workaround`. Requires the `patch_playbook` capability",
+        description = "Patch the playbook of a supervised run. scope current_run (default): create a patch version from the given YAML and migrate the run onto it, continuing from continue_from (required); classification is `improvement` or `workaround`. scope next_runs: a forward patch for later runs, allowed while the run is live and up to 30 minutes after it ended; it may change nodes that already ran, the run keeps its version, and the version becomes the playbook's candidate, which the next runs try before it is promoted (classification must be `improvement`; pass a rationale and evidence such as journal seqs, node ids and durations). A next_runs patch must build on `current` or the candidate on trial and may not change the goal, effects, irreversible steps, requires, the supervisor block, the decision opt-ins in defaults, worktree, connector grants or sub-playbooks. Requires the `patch_playbook` capability",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn supervisor_patch_playbook(
@@ -260,18 +265,43 @@ impl WfMcp {
             yaml,
             classification,
             continue_from,
+            scope,
+            rationale,
+            evidence,
         }): Parameters<SupervisorPatchArgs>,
     ) -> CallToolResult {
         let run_id = match self.resolve_session(&token, "supervisor_patch_playbook") {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        to_call_tool_result(tools::playbook_patch(
-            &self.root,
-            &run_id,
-            &yaml,
-            &classification,
-            &continue_from,
-        ))
+        match scope.as_deref() {
+            None | Some("current_run") => {
+                let Some(continue_from) = continue_from else {
+                    return to_call_tool_result(Err(tools::ToolError::Engine(
+                        "continue_from is required for scope current_run".into(),
+                    )));
+                };
+                to_call_tool_result(tools::playbook_patch(
+                    &self.root,
+                    &run_id,
+                    &yaml,
+                    &classification,
+                    &continue_from,
+                ))
+            }
+            Some("next_runs") => to_call_tool_result(tools::playbook_forward_patch(
+                &self.root,
+                &run_id,
+                &apb_engine::forward_patch::ForwardPatchRequest {
+                    yaml,
+                    classification,
+                    rationale,
+                    evidence: evidence.unwrap_or_default(),
+                },
+            )),
+            Some(other) => to_call_tool_result(Err(tools::ToolError::Engine(format!(
+                "scope must be `current_run` or `next_runs`, got `{other}`"
+            )))),
+        }
     }
 }

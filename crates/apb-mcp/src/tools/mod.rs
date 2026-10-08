@@ -3,15 +3,19 @@
 //! the shared error type and the two lookups every domain starts from.
 
 pub mod capture;
+pub mod decision;
 pub mod meta;
 pub mod playbook;
+pub mod retro;
 pub mod run;
 pub mod supervisor;
 pub mod trial;
 
 pub use capture::*;
+pub use decision::*;
 pub use meta::*;
 pub use playbook::*;
+pub use retro::*;
 pub use run::*;
 pub use supervisor::*;
 pub use trial::*;

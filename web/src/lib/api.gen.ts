@@ -90,6 +90,16 @@ prompt: string,
  */
 role_prompt: string | null, 
 /**
+ * The absolute path of `prompt`'s file (`tasks/<id>/prompt.md`): a host
+ * tells its subagent to read it instead of copying the text (issue
+ * #193).
+ */
+prompt_path: string, 
+/**
+ * The absolute path of `role_prompt`'s file, when the profile has one.
+ */
+role_path: string | null, 
+/**
  * Paths of the skills the subagent should load.
  */
 skills: Array<string>, 
@@ -327,6 +337,29 @@ applied: number,
  */
 shadow_would_change: number, };
 
+export type AttemptModel = { node: string, attempt: number, 
+/**
+ * [`EXECUTED_BY_CLI`] or [`EXECUTED_BY_HOST`].
+ */
+executed_by: string, 
+/**
+ * The agent CLI of a CLI attempt.
+ */
+agent: string | null, 
+/**
+ * The model the attempt actually ran on; `None` when a host did not
+ * report it.
+ */
+model: string | null, 
+/**
+ * The primary model of the node's profile, from the run manifest.
+ */
+expected: string | null, 
+/**
+ * Both models are known and differ.
+ */
+mismatch: boolean, };
+
 export type Rate = { count: number, of: number, rate?: number, };
 
 export type PerRun = { total: number, runs: number, per_run?: number, };
@@ -352,6 +385,17 @@ tokens: PerRun,
  * Runs that reported a cost.
  */
 runs_with_cost: number, cost_usd: number, cost_per_run_usd?: number, };
+
+export type ModelUse = { 
+/**
+ * Attempts per model actually used ([`UNREPORTED`] when a host said
+ * nothing).
+ */
+models: { [key in string]: number }, 
+/**
+ * Attempts whose model differs from the node profile's primary model.
+ */
+model_mismatch: number, };
 
 export type GoalStats = { index: number, description: string, 
 /**
@@ -388,7 +432,16 @@ expected_s?: number,
 /**
  * Finished executions that took longer than `expected_s`.
  */
-over_expected?: Rate, deliverable_missing: number, output_fields_missing: number, };
+over_expected?: Rate, deliverable_missing: number, output_fields_missing: number, 
+/**
+ * Attempts per model actually used ([`UNREPORTED`] when a host said
+ * nothing).
+ */
+models: { [key in string]: number }, 
+/**
+ * Attempts whose model differs from the node profile's primary model.
+ */
+model_mismatch: number, };
 
 export type VersionStats = { playbook: string, version: string, runs: number, outcomes: Outcomes, 
 /**
@@ -407,7 +460,21 @@ duration: Waits, spend: Spend, deliverable_missing: number, output_fields_missin
 /**
  * Empty when the runs checked no goal.
  */
-goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, };
+goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, 
+/**
+ * Runs of this version that were candidate trials (issue #192): the
+ * version was a forward patch on trial when they ran.
+ */
+candidate_trials?: number, 
+/**
+ * Attempts per model actually used ([`UNREPORTED`] when a host said
+ * nothing).
+ */
+models: { [key in string]: number }, 
+/**
+ * Attempts whose model differs from the node profile's primary model.
+ */
+model_mismatch: number, };
 
 export type Comparison = { playbook: string, base: string, 
 /**
@@ -442,6 +509,19 @@ output_tokens: number, cache_read_tokens: number, cache_write_tokens: number,
  */
 cost_usd?: number, source: UsageSource, };
 
+export type CandidateTrial = { 
+/**
+ * The candidate version the run tried.
+ */
+version: string, 
+/**
+ * `running`; `promoted` or `rejected` once the run decided it; `passed`
+ * for a success that did not promote yet (`after_n_successes`,
+ * `manual`); `undecided` for an end that judges nothing (a stop, a
+ * replaced candidate).
+ */
+verdict: string, reason?: string, };
+
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
@@ -457,7 +537,12 @@ driver_dead?: boolean,
  * was read: a newer apb wrote them. Zero (and absent) for a journal this
  * binary reads in full.
  */
-unknown_events?: number, };
+unknown_events?: number, 
+/**
+ * The run was a trial of the playbook's candidate version (issue #192),
+ * with its verdict; absent for every other run.
+ */
+candidate_trial?: CandidateTrial, };
 
 export type RunListEntry = { 
 /**
@@ -478,7 +563,12 @@ driver_dead?: boolean,
  * was read: a newer apb wrote them. Zero (and absent) for a journal this
  * binary reads in full.
  */
-unknown_events?: number, };
+unknown_events?: number, 
+/**
+ * The run was a trial of the playbook's candidate version (issue #192),
+ * with its verdict; absent for every other run.
+ */
+candidate_trial?: CandidateTrial, };
 
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
@@ -515,6 +605,16 @@ goal?: RunGoal,
  * The commits the run's nodes made on a git tree (C7); empty when none.
  */
 commits?: Array<NodeCommits>, 
+/**
+ * The candidate trial this run was (issue #192), with its verdict;
+ * absent for every other run.
+ */
+candidate_trial?: CandidateTrial, 
+/**
+ * The model each attempt actually ran on, against the profile's primary
+ * model (issue #193); empty before the first attempt.
+ */
+attempt_models?: Array<AttemptModel>, 
 /**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.

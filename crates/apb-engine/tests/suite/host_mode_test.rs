@@ -1212,3 +1212,344 @@ fn a_host_fallback_output_is_never_cached_for_the_cli_agent() {
     assert!(h.cli_ran(), "the CLI run is not served the host's output");
     assert_eq!(node_output(&events, "w"), "ok");
 }
+
+// --- issue #193: decisions from host tasks, prompt by path, actual model ---
+
+use apb_decide::testing::{StubResponse, StubServer};
+use apb_engine::decision::host_task::{AskKind, AskOutcome, AskRequest, ask};
+
+/// A choice reply naming `choice` (the stub plays the provider).
+fn choice_reply(choice: &str) -> StubResponse {
+    StubResponse::json(
+        200,
+        serde_json::json!({
+            "model": "jev-1.13.0",
+            "answers": {"answer": {"type": "choice", "choice": choice, "probabilities": {"serif": 0.1, "sans": 0.9}, "confidence": 0.8}},
+            "usage": {"input_tokens": 1000, "output_tokens": 1}
+        })
+        .to_string(),
+    )
+}
+
+impl Host {
+    fn decisions(&self, base_url: &str, extra: &str) {
+        fs::write(
+            self.cfg.path().join("decisions.yaml"),
+            format!("version: 1\nmode: advise\nproviders:\n  - {{ id: stub, kind: systemone, base_url: \"{base_url}\", model: jev-1.13.0 }}\n{extra}"),
+        )
+        .unwrap();
+    }
+
+    fn ask_font(&self, run_id: Option<&str>) -> AskOutcome {
+        self.ask_about(run_id, "a law firm")
+    }
+
+    fn ask_about(&self, run_id: Option<&str>, client: &str) -> AskOutcome {
+        ask(
+            self.root.path(),
+            &AskRequest {
+                kind: AskKind::Choose,
+                question: format!("Which font family fits {client}?"),
+                options: vec!["serif".into(), "sans".into()],
+                items: vec![],
+                criteria: None,
+                run_id: run_id.map(str::to_string),
+                node_id: Some("w".into()),
+            },
+        )
+        .unwrap()
+    }
+}
+
+fn refusal(o: &AskOutcome) -> &'static str {
+    match o {
+        AskOutcome::Refused { code, .. } => code,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// The host task reads its prompt by path, asks a decision in the middle of
+/// the task, and reports the model it ran on: the decision is journaled in
+/// the run (use host_task, node, attempt, provider, cost), the drive keeps
+/// its journal consistent after the foreign append, and the attempt shows
+/// the reported model against the profile's.
+#[test]
+fn a_host_task_asks_a_decision_journaled_in_the_run_and_reports_its_model() {
+    let h = Host::new(&one_node(""), &[]);
+    let stub = StubServer::start(vec![choice_reply("sans")]);
+    h.decisions(&stub.base_url, "");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+
+    // Prompt by reference: absolute paths to the very texts shown inline.
+    let prompt_path = Path::new(&task.prompt_path);
+    assert!(prompt_path.is_absolute(), "{}", task.prompt_path);
+    assert_eq!(fs::read_to_string(prompt_path).unwrap(), task.prompt);
+    let role_path = task.role_path.as_deref().expect("the profile has a role");
+    assert_eq!(
+        fs::read_to_string(role_path).unwrap(),
+        "You are a careful engineer."
+    );
+    assert!(task.execution_note.contains("by path"));
+    assert!(task.execution_note.contains("`apb decide`"));
+
+    let AskOutcome::Answered(a) = h.ask_font(Some(&run_id)) else {
+        panic!("not answered")
+    };
+    assert_eq!(a.answer.as_deref(), Some("sans"));
+    assert_eq!(a.provider, "stub");
+    assert_eq!(a.run_id.as_deref(), Some(run_id.as_str()));
+    assert!(a.cost_usd.is_some_and(|c| c > 0.0), "{a:?}");
+    assert_eq!(stub.count(), 1);
+
+    host_task::submit_to_run(
+        h.root.path(),
+        &run_id,
+        SubmitRequest {
+            task_id: task.task_id.clone(),
+            status: SubmitStatus::Succeeded,
+            output: "done".into(),
+            usage: None,
+            note: None,
+            submitted_by: "host".into(),
+            client: None,
+            model: Some("GLM-5.3-Flash".into()),
+        },
+    )
+    .unwrap();
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    let decision = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::DecisionMade {
+                use_site,
+                node,
+                attempt,
+                provider,
+                cost_usd,
+                ..
+            } => Some((
+                use_site.clone(),
+                node.clone(),
+                *attempt,
+                provider.clone(),
+                *cost_usd,
+            )),
+            _ => None,
+        })
+        .expect("a decision_made");
+    assert_eq!(decision.0, "host_task");
+    assert_eq!(decision.1.as_deref(), Some("w"));
+    assert_eq!(decision.2, Some(1));
+    assert_eq!(decision.3.as_deref(), Some("stub"));
+    assert!(decision.4.is_some());
+    // The drive re-read the high-water mark after the foreign append.
+    let mut seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+    seqs.dedup();
+    assert_eq!(seqs.len(), events.len(), "a seq was reused");
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
+
+    let models = apb_engine::attempt_models::run_attempt_models(&h.run_dir(&run_id), &events);
+    assert_eq!(models.len(), 1, "{models:?}");
+    let m = &models[0];
+    assert_eq!(m.executed_by, "host");
+    assert_eq!(m.model.as_deref(), Some("GLM-5.3-Flash"));
+    assert_eq!(m.expected.as_deref(), Some("haiku"));
+    assert!(m.mismatch);
+    let doctor = apb_engine::run_doctor::diagnose_run(h.root.path(), &run_id).unwrap();
+    assert!(
+        doctor.iter().any(|c| c.status == "warn"
+            && c.subject == "model"
+            && c.detail.contains("GLM-5.3-Flash")),
+        "{doctor:?}"
+    );
+    // A finished run journals nothing more.
+    assert_eq!(refusal(&h.ask_font(Some(&run_id))), "run_ended");
+}
+
+/// Every refusal names its reason: no provider, the kill switch, the
+/// playbook's opt-out, the run's spent budget.
+#[test]
+fn host_task_decisions_refuse_with_a_reason() {
+    let h = Host::new(&one_node(""), &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    // No decisions.yaml on the machine.
+    assert_eq!(refusal(&h.ask_font(None)), "no_provider");
+
+    let stub = StubServer::start(vec![choice_reply("sans")]);
+    h.decisions(&stub.base_url, "budget: { max_requests_per_run: 1 }\n");
+    {
+        let _off = Env::set(&[("APB_DECISIONS", "off")]);
+        assert_eq!(refusal(&h.ask_font(None)), "off");
+    }
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    assert!(matches!(h.ask_font(Some(&run_id)), AskOutcome::Answered(_)));
+    // The same question again in the same attempt is answered from the
+    // journal: no request, no budget.
+    let AskOutcome::Answered(again) = h.ask_font(Some(&run_id)) else {
+        panic!("the repeated question was not answered from the journal")
+    };
+    assert!(again.cached);
+    assert_eq!(again.answer.as_deref(), Some("sans"));
+    assert_eq!(refusal(&h.ask_about(Some(&run_id), "a bakery")), "budget");
+    assert_eq!(stub.count(), 1, "a spent budget sends nothing");
+    h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+    h.finish(&run_id);
+
+    // The machine file can switch the use off.
+    h.decisions(&stub.base_url, "uses: { host_task: { mode: off } }\n");
+    assert_eq!(refusal(&h.ask_font(None)), "use_off");
+}
+
+/// Host tasks asking at the same time share the run's request budget: the
+/// slot is reserved against the journal and every request in flight before
+/// anything is sent, so no parallel burst gets past the cap.
+#[test]
+fn parallel_host_task_decisions_never_exceed_the_run_budget() {
+    let h = Host::new(&one_node(""), &[]);
+    let stub = StubServer::start_with_fallback(
+        vec![],
+        choice_reply("sans").delayed(Duration::from_millis(300)),
+    );
+    h.decisions(&stub.base_url, "budget: { max_requests_per_run: 2 }\n");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    let clients = [
+        "a bakery", "a bank", "a band", "a bistro", "a barber", "a bridge",
+    ];
+    let outcomes: Vec<AskOutcome> = std::thread::scope(|s| {
+        let handles: Vec<_> = clients
+            .iter()
+            .map(|c| s.spawn(|| h.ask_about(Some(&run_id), c)))
+            .collect();
+        handles.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    let answered = outcomes
+        .iter()
+        .filter(|o| matches!(o, AskOutcome::Answered(_)))
+        .count();
+    assert_eq!(answered, 2, "{outcomes:?}");
+    assert_eq!(stub.count(), 2, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .filter(|o| !matches!(o, AskOutcome::Answered(_)))
+            .all(|o| refusal(o) == "budget"),
+        "{outcomes:?}"
+    );
+    h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+    let (_, events) = h.finish(&run_id);
+    let sent = count(&events, |p| {
+        matches!(
+            p,
+            EventPayload::DecisionMade {
+                provider: Some(_),
+                cached: false,
+                ..
+            }
+        )
+    });
+    assert_eq!(sent, 2);
+    let mut seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+    seqs.dedup();
+    assert_eq!(seqs.len(), events.len(), "a seq was reused");
+}
+
+/// A run that ends while the provider answers keeps its journal closed:
+/// the answer is returned, says it was not journaled, and no
+/// `decision_made` lands after the run's end.
+#[test]
+fn a_decision_answered_after_the_run_ended_is_returned_but_not_journaled() {
+    let h = Host::new(&one_node(""), &[]);
+    let stub = StubServer::start(vec![
+        choice_reply("sans").delayed(Duration::from_millis(1500)),
+    ]);
+    h.decisions(&stub.base_url, "");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    h.task(&run_id, "w");
+    let outcome = std::thread::scope(|s| {
+        let asking = s.spawn(|| h.ask_font(Some(&run_id)));
+        poll("the request reaching the provider", || {
+            (stub.count() == 1).then_some(())
+        });
+        apb_engine::stop::stop_run(h.root.path(), &run_id).unwrap();
+        poll("the run to end", || {
+            let events = read_all(&h.run_dir(&run_id)).ok()?;
+            RunState::fold(&events)
+                .run_status
+                .is_terminal()
+                .then_some(())
+        });
+        asking.join().unwrap()
+    });
+    let AskOutcome::Answered(a) = outcome else {
+        panic!("not answered: {outcome:?}")
+    };
+    assert_eq!(a.answer.as_deref(), Some("sans"));
+    assert_eq!(a.seq, None);
+    assert!(
+        a.not_journaled
+            .as_deref()
+            .is_some_and(|n| n.contains("ended")),
+        "{a:?}"
+    );
+    let events = read_all(&h.run_dir(&run_id)).unwrap();
+    assert_eq!(
+        count(&events, |p| matches!(p, EventPayload::DecisionMade { .. })),
+        0
+    );
+}
+
+#[test]
+fn a_playbook_can_switch_host_task_decisions_off() {
+    let h = Host::new(
+        &playbook(
+            "  host_decisions: off\n",
+            "  - { id: w, type: agent_task, prompt: \"Do the work\" }\n",
+            "  - { from: start, to: w }\n  - { from: w, to: done }\n",
+        ),
+        &[],
+    );
+    let stub = StubServer::start(vec![]);
+    h.decisions(&stub.base_url, "");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    assert_eq!(refusal(&h.ask_font(Some(&run_id))), "playbook_off");
+    assert_eq!(stub.count(), 0);
+    h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+    h.finish(&run_id);
+}
+
+/// A CLI attempt runs on the model the engine passed to the agent CLI, and
+/// that is the profile's primary model: no mismatch.
+#[test]
+fn a_cli_attempt_shows_the_model_it_ran_on() {
+    let h = Host::new(&one_node(""), &[]);
+    h.agent("echo ok");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(ExecutionRequest {
+        mode: Some(ExecutionMode::Cli),
+        host_session: false,
+        client: None,
+        inherited: false,
+    });
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    let models = apb_engine::attempt_models::run_attempt_models(&h.run_dir(&run_id), &events);
+    assert_eq!(models.len(), 1, "{models:?}");
+    assert_eq!(models[0].executed_by, "cli");
+    assert_eq!(models[0].model.as_deref(), Some("haiku"));
+    assert!(!models[0].mismatch);
+}

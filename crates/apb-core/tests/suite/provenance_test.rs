@@ -31,6 +31,7 @@ fn provenance_round_trip() {
         created_by: "supervisor".into(),
         run_id: Some("run-42".into()),
         classification: Some("improvement".into()),
+        ..Default::default()
     };
     write_provenance(dir.path(), "implement-task", "1.0.0", &provenance).unwrap();
     assert_eq!(
@@ -62,6 +63,7 @@ fn provenance_rejects_unsafe_segments() {
         created_by: "user".into(),
         run_id: None,
         classification: None,
+        ..Default::default()
     };
 
     let err = write_provenance(dir.path(), "../evil", "1.0.0", &provenance).unwrap_err();
@@ -91,6 +93,7 @@ fn create_version_records_user_provenance() {
             created_by: "user".into(),
             run_id: None,
             classification: None,
+            ..Default::default()
         })
     );
 }

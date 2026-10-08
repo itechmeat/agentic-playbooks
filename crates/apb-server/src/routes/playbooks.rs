@@ -3,8 +3,8 @@ use crate::state::*;
 use apb_core::registry::{PlaybookSummary, Registry, RegistryError};
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{
-    delete_playbook, list_versions_with_provenance, promote_version, save_definition, save_layout,
-    version_diff,
+    delete_playbook, list_versions_with_provenance, promote_version_by_person, save_definition,
+    save_layout, version_diff,
 };
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
@@ -307,11 +307,23 @@ pub(crate) async fn run_playbook_handler(
         opts.consent = Some(apb_engine::consent::RunConsent::irreversible("dashboard"));
     }
     let warnings = permit.warnings.clone();
+    // Issue #192: the candidate the gate chose (and pinned) is what runs.
+    let version = permit.run_version(None);
+    let candidate_trial = permit.candidate.clone();
+    let candidate_skipped = permit.candidate_skipped.clone();
     permit.apply(&mut opts);
 
-    match apb_engine::start_detached(&root, &id, None, opts) {
+    match apb_engine::start_detached(&root, &id, version.as_deref(), opts) {
         Ok(run_id) => {
             let mut answer = serde_json::json!({ "run_id": run_id, "warnings": warnings });
+            // Issue #192: the candidate this start tries, or why it was left
+            // out (a person clicking Run does not stand in for its trust).
+            if let Some(v) = candidate_trial {
+                answer["candidate_trial"] = serde_json::json!(v);
+            }
+            if let Some(why) = candidate_skipped {
+                answer["candidate_skipped"] = serde_json::json!(why);
+            }
             if let Some(note) = deprecation {
                 answer["deprecation"] = serde_json::json!(note);
             }
@@ -442,7 +454,7 @@ pub(crate) async fn promote_version_handler(
         Ok(r) => r,
         Err(e) => return e,
     };
-    match promote_version(&root, &id, &version) {
+    match promote_version_by_person(&root, &id, &version) {
         Ok(()) => Json(serde_json::json!({ "promoted": version })).into_response(),
         Err(e) => versioning_error(e),
     }

@@ -7,12 +7,14 @@
   import { cachedNodeIds } from '../lib/runcache'
   import { runGates } from '../lib/rungates'
   import { runUsageSummary, unknownEventsNote } from '../lib/runusage'
+  import { candidateTrialLabel } from '../lib/versioninfo'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
+  import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -316,6 +318,19 @@
 
     {#if detail}
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
+      <AttemptModelsPanel models={detail.attempt_models} />
+    {/if}
+
+    {#if detail?.candidate_trial}
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Candidate trial</Card.Title></Card.Header>
+        <Card.Content class="text-xs">
+          <span>{candidateTrialLabel(detail.candidate_trial)}</span>
+          {#if detail.candidate_trial.reason}
+            <span class="text-muted-foreground"> · {detail.candidate_trial.reason}</span>
+          {/if}
+        </Card.Content>
+      </Card.Root>
     {/if}
 
     {#if detail}

@@ -39,10 +39,11 @@ Reads (read-only):
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
-| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `pending_tasks` and `execution`: see Host execution mode below |
-| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below) |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `pending_tasks` and `execution`: see Host execution mode below |
+| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below); `inline_prompt: false` drops each task's inline `prompt` and `role_prompt` (default `true`) for a host whose subagents read `prompt_path` and `role_path` |
 | `run_events` | Run events, optionally from a given seq |
 | `run_report` | Short run summary; carries `usage`, `decisions`, `goal`, `commits` and `unknown_events` like `run_status` |
+| `run_retro_context` | The retrospective numbers of a run for whoever improves its playbook: `{ run_id, compare_last? }`. Per node (in the order the nodes first started): `duration_ms` (finished executions summed), `expected_s` and `over_expected` (the declared `expected_duration`), `executions`, `reentries`, `retries`, `fallbacks`, `tokens` and `cost_usd` (as the agents or the host reported them), `models` (the models the attempts actually ran on), `host_wait_ms`, `profile` (the manifest binding), `baseline_median_ms`, and `attempts`: per attempt `model` with `model_source` (`cli`: the binding the CLI started with; `host`: the model the host reported in its submission; `unreported`: a host task whose host named none, never inferred), `declared_model` (the profile's model or fallback hint a host may ignore), `status`, `duration_ms`, `failure_kind`, `verdict` (the status file: `success`, `failure` or `invalid`), `tokens`, `cost_usd`, `host_tasks` and `host_wait_ms` (from `host_task_requested` to the host's `host_task_submitted`). Per run: `outcome` (absent while live; the report is as of the last journal line), `execution`, `duration_ms`, `tokens`, `cost_usd`, `goal` (as in `run_status`) and `baseline`: the last `compare_last` (default 10, at most 100, 0 for none) finished runs of the same playbook version that apb created on this machine (`run_ids` newest first, `success`, `median_duration_ms`, `duration_delta_ms`, `median_tokens`, `median_cost_usd`), absent when there is none. A prompt gets the same report as text through `{{run.retro}}` (HOWTO-authoring, "Retrospective node") |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
 | `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names, configured account names and `account_commands` (per account, each secret read from a command, with the command line); never other account fields or secrets |
@@ -90,6 +91,7 @@ Mutations (destructive):
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
 | `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`, or a host task submitted as `blocked`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
 | `run_task_submit` | Host execution mode: submit a subagent's reply to a pending host task (`run_id`, `task_id`, `status` `succeeded`, `failed` or `blocked`, `output` verbatim, optional `usage` and `note`); attributed `submitted_by: host` with the MCP client name. A parent run accepts its sub-playbook runs' tasks |
+| `decision_ask` | Ask the configured decision providers a bounded question (`kind` `choose`, `rank`, `filter`, `map`, `is` or `score`, `question`, `options`, `items`, `criteria`), from a host task or a script; with `run_id` (and `node_id`) it is journaled in the run as `decision_made` with `use_site: host_task` and the run's budget applies. Returns `answered: true` with the answer, or `answered: false` with `refused` and a `reason` (see `docs/DECISIONS.md`, "Host-task decisions") |
 | `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
 | `profile_move` | Copy a profile between scopes (the source remains) |
 | `profile_delete` | Delete a profile (blocked on references unless forced) |
@@ -241,6 +243,58 @@ grants; the default when the key is absent is all of them
 `supervisor_context_append`, `supervisor_interrupt_attempt`); `patch_playbook`
 gates `supervisor_patch_playbook`.
 
+<!-- issue #192: forward patches -->
+`supervisor_patch_playbook { token, yaml, classification, scope?,
+continue_from?, rationale?, evidence? }` has two scopes:
+
+- `current_run` (default): a patch version of the run's active version that
+  the run migrates onto, continuing from `continue_from` (required). Only
+  nodes the run will (re-)execute may change (spec 10.3). `classification`
+  is `improvement` or `workaround`; the run's success promotes an
+  improvement per `promote_supervisor_patches`.
+- `next_runs`: a forward patch for later runs. It may change any node,
+  executed or not; nothing migrates, the run keeps its version, and nothing
+  is journaled into it. The version becomes the playbook's candidate, which
+  the next starts without an explicit version run as trials
+  (`supervisor.policy.trial_candidates`) until a trial promotes or rejects it
+  (see HOWTO-authoring, "Supervisor policy"). It is allowed while the run is
+  live and up to 30 minutes after it ended, with the run's supervisor token.
+  `classification` must be `improvement` (`workaround_refused` otherwise);
+  `rationale` and `evidence` (a list: journal seqs, node ids, durations) go
+  into the version's provenance (`meta/<version>.yaml`, with `created_by:
+  supervisor`, `run_id`, `classification`, `scope: next_runs` and
+  `base_version`). The answer is `{ version, scope, base_version, candidate:
+  true, replaced_candidate }`. Refusals name a code: `window_closed` (also
+  30 minutes after the last journal line of a run whose driver died),
+  `max_patches` (`max_patches_per_run` counts both scopes), `stale_base`
+  (the run's version is neither `current` nor the candidate on trial),
+  `goal_changed`, `effects_changed` (declared or inferred effects, `secrets`
+  included), `irreversible_added`, `trust_fields_changed` (`requires`, the
+  `supervisor` block, `defaults.host_decisions`, `defaults.retry_advice`,
+  `worktree`, connector grants, sub-playbooks), `schema`, `invalid` (the
+  validator, a frozen playbook). Binding another profile is allowed: the run
+  gate checks the candidate's profile bundles on their own.
+
+A run that was a candidate trial carries `candidate_trial: { version,
+verdict, reason? }` in `run_status` (`verdict`: `running`, `passed`,
+`promoted`, `rejected` or `undecided`), and `playbook_get` names the current
+candidate (`candidate: { version, provenance }`).
+
+Candidate trust: the candidate inherits the trust of `current`, the way an
+in-run supervisor patch runs under the trust of the version its run started
+on (it passed the definition guard and its lineage reaches `current`). A
+`playbook_run` without a version runs it, with no acknowledgement, when
+`current` is approved and the candidate's profiles, connectors and
+sub-playbooks pass the gate; the start response then carries
+`candidate_trial: "<version>"`. Otherwise the start falls back to `current`
+and carries `candidate_skipped: "untrusted"` (or `"refused: <policy>"`); a
+trust refusal of `current` itself names it too. `acknowledge_untrusted`
+never covers an untrusted candidate (nor does a CLI or dashboard start);
+pass the candidate's `version` to run it anyway. `run_status` repeats
+`candidate_skipped` for such a run. A version a person saves or promotes
+ends the trial (`superseded`), and a candidate whose lineage no longer
+reaches `current` is dropped at the next start.
+
 `supervisor_node_retry` and `supervisor_run_continue_from` also act while the
 run is parked on an undecided `human_review` gate, the moment a supervisor
 often notices that an earlier node went wrong: the driver withdraws the open
@@ -318,14 +372,20 @@ until someone answers it.
 CLI: every agent step becomes a host task the calling session executes with
 its own subagents. `run_wait` returns `needs: host_task` with
 `pending_tasks` (`run_id`, `task_id`, `node`, `attempt`, `prompt` with the
-report contract, `role_prompt`, `skills`, `workdir`, `env`, `outputs`,
+report contract, `role_prompt`, `prompt_path` and `role_path` (the absolute
+paths of the same texts: the host tells its subagent to read them instead of
+copying the prompt; `inline_prompt: false` on `run_wait` or
+`supervisor_wait_event` then drops the inline texts), `skills`, `workdir`, `env`, `outputs`,
 `deadline`, `model_hint`, `hint_source`, `fallback_of`, `hint_note`,
 `execution_note`,
 `requested_at`); the session runs each with its own subagent tool, never by
 launching an agent CLI (the execution contract every task carries as
 `execution_note`, stated once in `docs/HOST-INTEGRATION.md`), and submits its final
-reply with `run_task_submit` (optionally with the `model` it ran on), then
-waits again. `model_hint` is advisory only: the model the profile declares for a
+reply with `run_task_submit` (optionally with the `model` it ran on, which
+`run_status` `attempt_models` then shows against the profile's), then
+waits again. A task may ask bounded decisions of the configured providers
+with `decision_ask` (or `apb decide`): that is not running the task
+elsewhere. `model_hint` is advisory only: the model the profile declares for a
 fallback entry or a routed tier; `hint_source` names the chain step and
 `fallback_of` what closed the previous one, so a fallback task reads as a
 declaration, not as the model that did the work. `run_status` carries the run's `execution` block (absent on a `cli`

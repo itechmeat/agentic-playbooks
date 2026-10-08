@@ -44,6 +44,7 @@ pub(crate) fn render_node_prompt(
         &crate::context::OutputClip {
             run_dir,
             max_bytes: budget.output_max_bytes,
+            retro: Some(crate::run_retro::text::prompt_text),
         },
     ))
 }
@@ -2785,6 +2786,7 @@ pub(crate) fn execute_finish_answer(
         &crate::context::OutputClip {
             run_dir,
             max_bytes: budget.output_max_bytes,
+            retro: Some(crate::run_retro::text::prompt_text),
         },
     );
     // Finish-with-prompt scopes its composer prompt (issue #70 item 1): the run
@@ -3268,6 +3270,7 @@ pub(crate) fn run_playbook_node(
                 &crate::context::OutputClip {
                     run_dir,
                     max_bytes: budget.output_max_bytes,
+                    retro: Some(crate::run_retro::text::prompt_text),
                 },
             ))
         }

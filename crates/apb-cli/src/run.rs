@@ -32,6 +32,9 @@ use crate::util::open_registry;
 /// 0.24.0: a tree that declares `irreversible` also needs the consent `how`
 /// obtains (see [`crate::consent`]); it is written into `opts.consent` and
 /// returned, so `apb run --supervise` can forward it to its detached child.
+///
+/// Issue #192: also returns the version to start - the one asked for, or the
+/// candidate the gate chose (and pinned) for a start without one.
 fn gate_run(
     root: &Path,
     name: &str,
@@ -39,7 +42,7 @@ fn gate_run(
     supervised: bool,
     opts: &mut RunOptions,
     how: &crate::consent::CliConsent,
-) -> Result<Option<crate::consent::Granted>, String> {
+) -> Result<(Option<crate::consent::Granted>, Option<String>), String> {
     let wref = apb_core::scope::PlaybookRef {
         origin: apb_core::scope::Origin::Project { workspace_id: None },
         id: name.to_string(),
@@ -60,8 +63,21 @@ fn gate_run(
     for w in &permit.warnings {
         eprintln!("warning: {w}");
     }
+    let start_version = permit.run_version(version);
+    if version.is_none()
+        && let Some(v) = &start_version
+    {
+        eprintln!(
+            "note: running candidate version {v} as a trial (supervisor.policy.trial_candidates)"
+        );
+    }
+    if let Some(why) = &permit.candidate_skipped {
+        eprintln!(
+            "note: the candidate version was skipped ({why}); running `current`. Run the candidate by its version to try it anyway"
+        );
+    }
     permit.apply(opts);
-    Ok(granted)
+    Ok((granted, start_version))
 }
 
 /// Turns a run-gate refusal (see `apb_engine::gate::check_run`) into an
@@ -548,13 +564,16 @@ pub(crate) fn run_cmd(
         // here, against the same gate the child runs, and forwarded with the
         // nonce of the tree it was given for.
         let mut probe = RunOptions::default();
-        let granted = match gate_run(root, name, version, true, &mut probe, &how) {
+        let (granted, start_version) = match gate_run(root, name, version, true, &mut probe, &how) {
             Ok(g) => g,
             Err(msg) => {
                 eprintln!("run failed: {msg}");
                 return ExitCode::from(2);
             }
         };
+        // The child runs the version this gate chose, so its own gate pins
+        // the same tree the consent above was given for.
+        let version = start_version.as_deref();
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
         // itself cannot stay in the current process - std::thread does not
@@ -606,10 +625,14 @@ pub(crate) fn run_cmd(
         // (`gate_run`).
         ..Default::default()
     };
-    if let Err(msg) = gate_run(root, name, version, false, &mut opts, &how) {
-        eprintln!("run failed: {msg}");
-        return ExitCode::from(2);
-    }
+    let start_version = match gate_run(root, name, version, false, &mut opts, &how) {
+        Ok((_, v)) => v,
+        Err(msg) => {
+            eprintln!("run failed: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+    let version = start_version.as_deref();
     let resolved = apb_core::execution::resolve_for(root, &opts.execution);
     // What the resolution ignored (APB_EXECUTION=cli over --execution host,
     // a project that tried to set the mode) is said, never silent.
@@ -864,10 +887,14 @@ pub(crate) fn drive_supervised_child(
         Some((by, nonce)) => crate::consent::CliConsent::Forwarded { by, nonce },
         None => crate::consent::CliConsent::None,
     };
-    if let Err(msg) = gate_run(root, name, version, true, &mut opts, &how) {
-        let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
-        return ExitCode::from(2);
-    }
+    let start_version = match gate_run(root, name, version, true, &mut opts, &how) {
+        Ok((_, v)) => v,
+        Err(msg) => {
+            let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
+            return ExitCode::from(2);
+        }
+    };
+    let version = start_version.as_deref();
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,
         Err(e) => {
@@ -966,6 +993,9 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
                 }
+                if let Some(t) = &r.candidate_trial {
+                    line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
+                }
                 if r.unknown_events > 0 {
                     line.push('\t');
                     line.push_str(&unknown_events_note(r.unknown_events));
@@ -1044,6 +1074,26 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     for (node, status) in view.nodes() {
         println!("  {node}\t{status}");
     }
+    // Issue #193: the model each attempt actually ran on.
+    for a in apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events) {
+        let mut line = format!(
+            "{} attempt {}: {} ({})",
+            a.node,
+            a.attempt,
+            a.model.as_deref().unwrap_or("model not reported"),
+            a.executed_by
+        );
+        if a.mismatch {
+            line.push_str(&format!(
+                ", profile names {}: mismatch",
+                a.expected.as_deref().unwrap_or("?")
+            ));
+        }
+        println!(
+            "  model {}",
+            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+        );
+    }
     if let Some(reason) = view.failure_reason() {
         println!(
             "  failure: {}",
@@ -1055,6 +1105,21 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     }
     if let Some(d) = view.decisions() {
         println!("  decisions: {}", d.line());
+    }
+    if let Some(t) = apb_engine::candidate::trial_of(&run_dir, &view.events) {
+        let reason = t.reason.map(|r| format!(": {r}")).unwrap_or_default();
+        println!(
+            "  candidate trial: {} {}{}",
+            t.version,
+            t.verdict,
+            sanitize_for_terminal(&reason, QUESTION_TEXT_MAX)
+        );
+    }
+    if let Some(why) = apb_engine::candidate::skipped_of(&run_dir) {
+        println!(
+            "  candidate skipped: {}",
+            sanitize_for_terminal(&why, QUESTION_TEXT_MAX)
+        );
     }
     // --- 0.23.0: run outcome blocks (C1, C7) ---
     if let Some(goal) = view.goal(&run_dir) {

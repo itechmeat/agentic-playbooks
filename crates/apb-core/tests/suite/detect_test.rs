@@ -862,3 +862,52 @@ fn a_builtin_agent_is_detected_at_its_configured_program() {
         "a memo written for the old program was reused"
     );
 }
+
+#[test]
+fn probe_keeps_a_nested_apb_out_of_the_project_registry() {
+    let _l = lock();
+    let e = setup();
+    let seen = e.bin.join("_env");
+    write_agent(
+        &e.bin,
+        "opencode",
+        &e.counter,
+        &format!(
+            "case \"$1\" in\n  --version) printf '%s|%s|%s' \"$APB_NO_REGISTRY\" \"$APB_CONFIG_DIR\" \"$(pwd)\" > {}; echo 1.0.0 ;;\nesac",
+            seen.display()
+        ),
+    );
+
+    agent_catalog::agents(true);
+    let env = std::fs::read_to_string(&seen).unwrap();
+    // Outside the workspace (no project config, no `.apb` to register).
+    assert_eq!(env, format!("1|{}|/", e.cfg.display()));
+}
+
+#[test]
+fn zcode_desktop_app_on_path_is_skipped_for_the_home_cli() {
+    let _l = lock();
+    let e = setup();
+    // The Linux desktop package: PATH `zcode` is the Electron app.
+    // Not `ZCode`: on a case-insensitive file system (macOS) it would be the
+    // same entry as the `zcode` link below.
+    let desktop = e.bin.join("desktop-app");
+    std::fs::create_dir_all(desktop.join("resources")).unwrap();
+    std::fs::write(desktop.join("resources/app.asar"), "").unwrap();
+    let ran = e.bin.join("_desktop_ran");
+    write_agent(&desktop, "zcode", &ran, "echo 9.9.9-desktop");
+    std::os::unix::fs::symlink(desktop.join("zcode"), e.bin.join("zcode")).unwrap();
+    let glm = e.home.join(".zcode/server/agents/glm");
+    std::fs::create_dir_all(&glm).unwrap();
+    write_agent(&glm, "zcode-agent", &e.counter, "echo 0.16.9");
+
+    let agents = agent_catalog::agents(true);
+    let z = agents.iter().find(|a| a.agent == "zcode").unwrap();
+    assert_eq!(z.version.as_deref(), Some("0.16.9"), "{z:?}");
+    assert!(!ran.exists(), "the desktop app must never be run");
+    assert!(apb_core::zcode::is_desktop_app(&e.bin.join("zcode")));
+    assert_eq!(
+        apb_core::zcode::default_program(),
+        glm.join("zcode-agent").to_string_lossy()
+    );
+}

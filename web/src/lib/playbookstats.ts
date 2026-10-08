@@ -40,6 +40,17 @@ export function spendText(v: VersionStats): string | null {
   return line
 }
 
+// `glm-5.3-flash x5, opus x1 (5 differ from the profile)`: the models the
+// version's attempts actually ran on (issue #193), as `apb stats` prints
+// them, or null before any attempt.
+export function modelsText(v: Pick<VersionStats, 'models' | 'model_mismatch'>): string | null {
+  const entries = Object.entries(v.models ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  if (!entries.length) return null
+  let line = entries.map(([m, n]) => `${m} x${n}`).join(', ')
+  if (v.model_mismatch > 0) line += ` (${v.model_mismatch} differ from the profile)`
+  return line
+}
+
 // The versions newest first (the API lists them oldest first).
 export function versionsNewestFirst(r: StatsReport | null): VersionStats[] {
   return r ? [...r.versions].reverse() : []

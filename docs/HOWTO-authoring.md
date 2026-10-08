@@ -235,6 +235,10 @@ without a `decisions.yaml` that enables the use (validator V74 notes them).
   same-executor retries.
 - `supervisor: { pre_triage: enforce }`: let wake pre-triage post a retry
   itself (at most three per run by default).
+- `defaults.host_decisions: off`: refuse `apb decide` and `decision_ask`
+  calls that name this playbook's runs (the default `allow` lets a host task,
+  a script or an agent step ask the configured decision providers a bounded
+  question; see `docs/DECISIONS.md`, "Host-task decisions").
 
 ### Run provenance
 
@@ -627,6 +631,15 @@ a V13 validation error:
   `APB_RUN_DIR` and `APB_NODE_ID` (see "Run provenance" below). A prompt that
   reads it renders differently on every run, so such a node never hits the
   node cache.
+- `run.retro` - the run's retrospective as of the moment the node starts:
+  per node its time against `expected_duration`, executions, attempts,
+  retries, fallbacks, re-entries, tokens and cost, the model each attempt
+  actually ran on, the host wait and the status-file verdicts; the goal
+  results; and the comparison with the medians of the last 10 finished runs
+  of the same version. Compact text, at most 8 KiB (a longer report is cut
+  with a note). The same report as data is MCP `run_retro_context`. See
+  "Retrospective node" below. It renders differently on every run, so such a
+  node never hits the node cache.
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
   Bounded by the node's context budget (see "Context budget" below).
@@ -1561,6 +1574,67 @@ an untrusted child blocks the parent, and a reference cycle is refused. Nesting
 is limited to 5 levels. Set expected_duration explicitly on a playbook node
 (validator V19 nudges you): the parent cannot sum the child's own estimates.
 
+<!-- issue #192: forward patches and candidate trials -->
+## Supervisor policy (supervisor.policy)
+
+`supervisor.policy` tunes what a run's supervisor may do and how its playbook
+patches become the norm:
+
+```yaml
+supervisor:
+  policy:
+    capabilities: [observe, retry, rebind, patch_playbook]  # default: all
+    promote_supervisor_patches: on_success  # | always | manual | { after_n_successes: 3 }
+    trial_candidates: next_run              # | off | { share: 0.3 }
+```
+
+- `capabilities`: the supervisor tools the run grants (see MCP.md).
+- `promote_supervisor_patches`: when a supervisor patch moves `current`.
+  For an in-run patch (`scope: current_run`, the run migrates onto it) it is
+  decided by the run it was made in; a `workaround` is never promoted. For a
+  forward patch (`scope: next_runs`) it is decided by the candidate's trial
+  runs: `on_success` and `always` promote on the first successful trial,
+  `{ after_n_successes: N }` on the N-th, `manual` never (a person promotes it
+  with the dashboard's "Use"; the trials still count and still reject).
+- `trial_candidates`: whether a run started without an explicit version runs
+  the playbook's candidate version. `next_run` (default): every such start
+  does; `off`: none (the candidate runs only when asked for by version);
+  `{ share: p }`: a random share `p` (0 to 1) of starts, drawn per start.
+  The policy of the `current` version decides.
+
+A forward patch is how a supervisor improves the playbook for later runs
+from what it saw in this one, including nodes that already ran: the run
+keeps its version, and the new patch version becomes the playbook's
+**candidate** (a `candidate` pointer next to `current`, one at a time; a newer
+forward patch replaces it, and its provenance names the version it was based
+on). A trial run that succeeds with every goal criterion holding counts
+towards promotion; a failed trial, or one where a goal criterion did not
+hold, drops the candidate (the journal's `candidate_rejected`), and the next
+runs use `current` again. A promotion journals `candidate_promoted`.
+`run_status`, `apb runs`, the dashboard run page and `apb stats` mark the
+trial runs; the version history marks the candidate and each version's
+outcome (`promoted`, `rejected`, `superseded`). A start that asks for the
+candidate by version counts as a trial too; eval runs and sub-playbook
+children never do.
+
+A forward patch may not change the goal, the declared or effective effects,
+the irreversible steps, `requires`, the `supervisor` block, the decision
+opt-ins in `defaults` (`host_decisions`, `retry_advice`), `worktree`, a
+node's connector grants or the sub-playbook a node runs; it must pass the
+validator and be classified `improvement`. It may bind another profile: the
+run gate checks the candidate's profiles on their own. Its base must be
+`current` or the candidate on trial (`stale_base` otherwise).
+
+The candidate inherits the trust of `current`, like an in-run supervisor
+patch inherits the trust of the version its run started on. When `current`
+is approved, a start without a version runs the candidate with no extra
+question; when it is not (or a profile, connector or sub-playbook of the
+candidate is not trusted), the start runs `current` and reports
+`candidate_skipped: untrusted` instead of refusing. A person's
+acknowledgement never covers an untrusted candidate; start it by its version
+to try it anyway. A version a person saves or promotes by hand ends the
+trial (`superseded`).
+
 ## trigger (matching contract)
 
 `trigger` is the only thing used for matching. Keep fields machine-oriented and
@@ -1723,6 +1797,51 @@ docs node with `human_review` when rules need an owner's approval. A rule
 in memory advises; if it must always hold, add a deterministic check behind
 it (a `success_check` script, a `goal` criterion, `protect`; see
 GUARDRAILS.md).
+
+## Retrospective node (learning across runs)
+
+A run that succeeds slowly or wastefully raises nothing, so nothing improves
+by itself. A final `retro` node hands the next runs what this one learned:
+
+```yaml
+nodes:
+  # ... the playbook's own steps ...
+  - id: retro
+    type: agent_task
+    profile: reviewer
+    prompt: |
+      Review this run of the playbook and write retro.md.
+
+      {{run.retro}}
+
+      Read the run's artefacts as well (the files the nodes wrote, the
+      attempt transcripts under .apb/runs/{{run.id}}/attempts/). Write each
+      finding as: what happened, the evidence (node ids, durations, attempt
+      numbers, file paths), and the target to change (a node prompt, a
+      profile, a script, an expected_duration). Only findings the next run
+      can act on; no general advice.
+  - { id: done, type: finish, outcome: success }
+edges:
+  # ... -> retro -> done
+  - { from: retro, to: done }
+```
+
+- `{{run.retro}}` gives the node the numbers, so it does not re-derive them
+  from the journal: which node was slow against its `expected_duration` and
+  against the median of the last runs of the version, which ones retried or
+  fell back, what each attempt cost and which model actually ran it (in host
+  mode, the model the host reported on submission).
+- Keep `retro` the last node before `finish`, so every other node has
+  finished when its prompt renders. Its `expected_duration` should be short;
+  it reads, it does not redo the work.
+- `retro.md` changes nothing on its own. A supervisor (`supervise: "self"`)
+  reads it, or calls `run_retro_context` for the same numbers as data, and
+  turns the findings it accepts into a forward patch for the next runs with
+  `supervisor_patch_playbook` and `scope: next_runs` (see MCP.md). Findings
+  about the project's own files (skills, scripts, libraries) belong to the
+  project: a later step or a person changes them.
+- Gate the node with `human_review` after it when an owner should see the
+  findings before anything is patched.
 
 ## Linking runs, commits and tracker records
 

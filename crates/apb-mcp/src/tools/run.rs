@@ -33,6 +33,9 @@ pub fn playbook_run(
     execution: apb_core::execution::ExecutionRequest,
     // 0.24.0: the irreversible consent the caller obtained from the person.
     consent: Option<apb_engine::consent::RunConsent>,
+    // Issue #192: why the gate left a waiting candidate out (the permit's
+    // `candidate_skipped`), recorded in the manifest for `run_status`.
+    candidate_skipped: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -61,6 +64,7 @@ pub fn playbook_run(
         execution,
         consent,
         eval: None,
+        candidate_skipped,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -94,6 +98,9 @@ pub fn playbook_run_background(
     execution: apb_core::execution::ExecutionRequest,
     // 0.24.0: the irreversible consent the caller obtained from the person.
     consent: Option<apb_engine::consent::RunConsent>,
+    // Issue #192: why the gate left a waiting candidate out (the permit's
+    // `candidate_skipped`), recorded in the manifest for `run_status`.
+    candidate_skipped: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -122,6 +129,7 @@ pub fn playbook_run_background(
         execution,
         consent,
         eval: None,
+        candidate_skipped,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -200,7 +208,19 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }
     add_journal_extras(&mut out, &view);
     add_outcome_blocks(&mut out, &view, &dir);
+    add_candidate_trial(&mut out, &view, &dir);
     Ok(out)
+}
+
+/// Issue #192: the candidate trial this run was, with its verdict; absent
+/// for every other run.
+fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
+    if let Some(t) = apb_engine::candidate::trial_of(dir, &view.events) {
+        out["candidate_trial"] = json!(t);
+    }
+    if let Some(why) = apb_engine::candidate::skipped_of(dir) {
+        out["candidate_skipped"] = json!(why);
+    }
 }
 
 // --- 0.23.0: run outcome blocks (C1, C7) ---
@@ -216,6 +236,15 @@ fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir
     let commits = view.commits();
     if !commits.is_empty() {
         out["commits"] = json!(commits);
+    }
+    // Issue #193: the model each attempt actually ran on.
+    let models = apb_engine::attempt_models::run_attempt_models(dir, &view.events);
+    if !models.is_empty() {
+        let mismatches = models.iter().filter(|a| a.mismatch).count();
+        out["attempt_models"] = json!(models);
+        if mismatches > 0 {
+            out["model_mismatch"] = json!(mismatches);
+        }
     }
 }
 
@@ -251,8 +280,21 @@ pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
 pub const HOST_TASK_NEXT: &str = concat!(
     "execute pending_tasks. ",
     apb_engine::host_task_contract!(),
-    " For each task give your subagent role_prompt as its system context and prompt as its task, have it load skills and work in workdir with env set (hint_note labels model_hint; fallback_of says why the previous step closed). Submit the final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user), then call run_wait again. Independent tasks may run concurrently"
+    " For each task tell your subagent to read prompt_path as its task and role_path as its system context (role_prompt and prompt carry the same text inline unless you passed inline_prompt: false), have it load skills and work in workdir with env set (hint_note labels model_hint; fallback_of says why the previous step closed). Submit the final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user), then call run_wait again. Independent tasks may run concurrently"
 );
+
+/// Drops the inline `prompt` and `role_prompt` of every pending task in a
+/// `run_wait` or `supervisor_wait_event` answer, for a host that passes
+/// `inline_prompt: false` and reads `prompt_path` and `role_path` instead
+/// (issue #193).
+pub fn drop_inline_prompts(out: &mut Value) {
+    if let Some(tasks) = out.get_mut("pending_tasks").and_then(Value::as_array_mut) {
+        for t in tasks.iter_mut().filter_map(Value::as_object_mut) {
+            t.remove("prompt");
+            t.remove("role_prompt");
+        }
+    }
+}
 
 /// The execution block of a run's manifest, for `run_status`: `null` for a
 /// plain `cli` run.
@@ -562,6 +604,9 @@ pub fn playbook_run_supervised(
     execution: apb_core::execution::ExecutionRequest,
     // 0.24.0: the irreversible consent the caller obtained from the person.
     consent: Option<apb_engine::consent::RunConsent>,
+    // Issue #192: why the gate left a waiting candidate out (the permit's
+    // `candidate_skipped`), recorded in the manifest for `run_status`.
+    candidate_skipped: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -593,6 +638,7 @@ pub fn playbook_run_supervised(
         execution,
         consent,
         eval: None,
+        candidate_skipped,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

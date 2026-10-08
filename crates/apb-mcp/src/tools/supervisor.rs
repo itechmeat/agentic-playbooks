@@ -275,6 +275,25 @@ pub fn playbook_patch(
     Ok(json!({ "version": version, "posted_seq": seq }))
 }
 
+/// A forward patch (`scope: next_runs`, issue #192): creates a patch version
+/// for the next runs and makes it the playbook's candidate. Nothing is posted
+/// to the run, which keeps its version; see `apb_engine::forward_patch` for
+/// the guards.
+pub fn playbook_forward_patch(
+    root: &Path,
+    run_id: &str,
+    req: &apb_engine::forward_patch::ForwardPatchRequest,
+) -> Result<Value, ToolError> {
+    let created = apb_engine::forward_patch::create(root, run_id, req)?;
+    Ok(json!({
+        "version": created.version,
+        "scope": apb_core::candidate::SCOPE_NEXT_RUNS,
+        "base_version": created.base_version,
+        "candidate": true,
+        "replaced_candidate": created.replaced,
+    }))
+}
+
 /// Writes the supervisor's final report to `runs/<run_id>/supervisor/report.md`.
 pub fn supervisor_report(root: &Path, run_id: &str, text: &str) -> Result<Value, ToolError> {
     write_supervisor_report(root, run_id, text)?;

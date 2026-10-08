@@ -356,6 +356,33 @@ pub enum EventPayload {
     VersionPromoted {
         version: String,
     },
+    // --- candidate trials (issue #192) ---
+    /// This run was a trial of the playbook's candidate version (a forward
+    /// patch) and its success promoted the candidate per
+    /// `promote_supervisor_patches`: `current` now points at `version`.
+    /// `successes` counts the trial runs it passed. Written right before
+    /// `run_finished`, so it is safe to skip up to that checkpoint.
+    CandidatePromoted {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        successes: u32,
+    },
+    /// This trial run of the candidate `version` failed (or a goal criterion
+    /// did not hold): the candidate pointer was dropped, so the next runs use
+    /// `current` again. Written right before `run_finished`, safe to skip up
+    /// to that checkpoint.
+    CandidateRejected {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        reason: String,
+    },
+    // --- end candidate trials ---
     ReviewRequested {
         node: String,
         options: Vec<String>,
@@ -990,16 +1017,36 @@ pub struct EventLog {
     path: PathBuf,
     file: File,
     next_seq: u64,
+    /// The file's length after this handle's last write (`u64::MAX` before
+    /// its first). Any other length means another writer appended in between
+    /// (an `apb connector call` or `apb decide` subprocess of an attempt,
+    /// issue #193), so the next append re-reads the high-water mark first
+    /// instead of reusing a seq.
+    known_len: u64,
 }
 
 impl EventLog {
+    /// The run directory this log writes into (the parent of `events.jsonl`).
+    pub fn run_dir(&self) -> Option<PathBuf> {
+        self.path.parent().map(Path::to_path_buf)
+    }
+
     pub fn create(run_dir: &Path) -> Result<Self, EngineError> {
         std::fs::create_dir_all(run_dir)?;
         Self::open(run_dir)
     }
 
     pub fn open(run_dir: &Path) -> Result<Self, EngineError> {
-        Self::open_with(run_dir, UnknownPolicy::Refuse)
+        Self::open_with(run_dir, UnknownPolicy::Refuse, false)
+    }
+
+    /// [`Self::open`] for a writer outside the drive (an `apb decide` or
+    /// `apb connector call` subprocess, the MCP server): the drive may be
+    /// in the middle of an append while the journal is read, so a torn last
+    /// line is forgiven here. The seq is settled again under the append
+    /// lock, where every line is whole ([`Self::append`]).
+    pub(crate) fn open_foreign(run_dir: &Path) -> Result<Self, EngineError> {
+        Self::open_with(run_dir, UnknownPolicy::Refuse, true)
     }
 
     /// [`Self::open`] for the stop path, which only ever appends the
@@ -1007,15 +1054,19 @@ impl EventLog {
     /// checkpoint does not refuse (see [`read_all_for_stop`], which already
     /// warned about it).
     pub(crate) fn open_for_stop(run_dir: &Path) -> Result<Self, EngineError> {
-        Self::open_with(run_dir, UnknownPolicy::Allow)
+        Self::open_with(run_dir, UnknownPolicy::Allow, false)
     }
 
-    fn open_with(run_dir: &Path, policy: UnknownPolicy) -> Result<Self, EngineError> {
+    fn open_with(
+        run_dir: &Path,
+        policy: UnknownPolicy,
+        tolerate_torn_tail: bool,
+    ) -> Result<Self, EngineError> {
         let path = run_dir.join("events.jsonl");
         // Appending is deciding on the journal, so the engine's rule for
         // unknown events applies (see [`read_all`]); the next seq also clears
         // the skipped ones, so an appended event never reuses their seq.
-        let journal = read_journal_with(run_dir, false)?;
+        let journal = read_journal_with(run_dir, tolerate_torn_tail)?;
         settle_unknown(&journal, policy)?;
         let next_seq = journal
             .events
@@ -1025,10 +1076,16 @@ impl EventLog {
             .max()
             .map_or(0, |s| s + 1);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        // Unknown until the first append: another writer may have appended
+        // between the read above and this open, and the length now would
+        // hide it. The first append therefore settles the seq from the file
+        // under the lock.
+        let known_len = u64::MAX;
         Ok(Self {
             path,
             file,
             next_seq,
+            known_len,
         })
     }
 
@@ -1051,18 +1108,109 @@ impl EventLog {
         Ok(())
     }
 
+    /// Appends one event. Safe across processes and handles: the seq is
+    /// settled and the line written under an advisory lock on the log file
+    /// ([`JournalLock`]), and the JSON and its newline go out in one write
+    /// from one buffer, so two writers never interleave into one torn line
+    /// or share a seq. The lock is held only for that write (never across a
+    /// model call or an agent run), so the drive is never blocked for long.
     pub fn append(&mut self, payload: EventPayload) -> Result<Event, EngineError> {
+        match self.append_inner(payload, None)? {
+            Some(event) => Ok(event),
+            None => unreachable!("an unconditional append always writes"),
+        }
+    }
+
+    /// [`Self::append`] when `admit` holds for the journal as it stands
+    /// under the append lock (read fresh, a torn tail forgiven), else
+    /// nothing is written and `None` comes back. A writer outside the drive
+    /// uses it to check that the run is still live at the very moment it
+    /// appends.
+    pub(crate) fn append_checked(
+        &mut self,
+        payload: EventPayload,
+        admit: impl FnOnce(&[Event]) -> bool,
+    ) -> Result<Option<Event>, EngineError> {
+        self.append_inner(payload, Some(Box::new(admit)))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn append_inner(
+        &mut self,
+        payload: EventPayload,
+        admit: Option<Box<dyn FnOnce(&[Event]) -> bool + '_>>,
+    ) -> Result<Option<Event>, EngineError> {
+        let file = self.file.try_clone()?;
+        let _lock = JournalLock::on(&file);
+        // Only a checked append re-reads the journal; the drive's own
+        // appends stay O(1).
+        if let Some(admit) = admit
+            && let Some(dir) = self.run_dir()
+            && !admit(&read_all_lossy_tail(&dir)?)
+        {
+            return Ok(None);
+        }
+        // Another handle appended since this one last wrote: settle the seq
+        // from the file, which is whole under the lock.
+        if self
+            .file
+            .metadata()
+            .is_ok_and(|m| m.len() != self.known_len)
+        {
+            self.resync_seq()?;
+        }
         let event = Event {
             seq: self.next_seq,
             ts: apb_core::clock::now_ms(),
             payload,
         };
-        let line = serde_json::to_string(&event).map_err(|e| EngineError::Yaml(e.to_string()))?;
-        writeln!(self.file, "{line}")?;
+        let mut buf = serde_json::to_vec(&event).map_err(|e| EngineError::Yaml(e.to_string()))?;
+        buf.push(b'\n');
+        self.file.write_all(&buf)?;
         self.file.flush()?;
         self.next_seq += 1;
-        Ok(event)
+        self.known_len = self.file.metadata().map_or(0, |m| m.len());
+        Ok(Some(event))
     }
+}
+
+/// An advisory exclusive lock on a run's `events.jsonl` (`flock` on unix),
+/// released on drop. Every append holds it from the seq check to the end
+/// of its write; a decision's budget reservation holds it while it reads
+/// the journal's decisions (see `decision::budget`). Separate handles of
+/// one process exclude each other too. A file system without locks makes
+/// it a no-op: the single-buffer write still keeps lines whole.
+pub(crate) struct JournalLock<'a> {
+    file: Option<&'a File>,
+}
+
+impl<'a> JournalLock<'a> {
+    pub(crate) fn on(file: &'a File) -> Self {
+        JournalLock {
+            file: file.lock().ok().map(|()| file),
+        }
+    }
+}
+
+impl Drop for JournalLock<'_> {
+    fn drop(&mut self) {
+        if let Some(f) = self.file {
+            let _ = f.unlock();
+        }
+    }
+}
+
+/// Runs `f` under the append lock of the journal in `run_dir`.
+pub(crate) fn with_journal_lock<T>(
+    run_dir: &Path,
+    f: impl FnOnce() -> T,
+) -> Result<T, EngineError> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_dir.join("events.jsonl"))?;
+    let _lock = JournalLock::on(&file);
+    Ok(f())
 }
 
 /// Last seq recorded in an events.jsonl file, if any.
@@ -1071,16 +1219,23 @@ fn last_seq_on_disk(path: &Path) -> Result<Option<u64>, EngineError> {
         return Ok(None);
     }
     let mut last: Option<u64> = None;
+    // A line torn by a writer that died mid-write is forgiven at the tail
+    // only, as in [`read_all_lossy_tail`].
+    let mut torn: Option<EngineError> = None;
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
+        if let Some(e) = torn.take() {
+            return Err(e);
+        }
         if line.trim().is_empty() {
             continue;
         }
         // Only the seq is needed, so an event of a type this binary does not
         // know still counts: its seq is taken all the same.
-        let ev: EventHeader =
-            serde_json::from_str(&line).map_err(|e| EngineError::Yaml(e.to_string()))?;
-        last = Some(ev.seq);
+        match serde_json::from_str::<EventHeader>(&line) {
+            Ok(ev) => last = Some(ev.seq),
+            Err(e) => torn = Some(EngineError::Yaml(e.to_string())),
+        }
     }
     Ok(last)
 }
@@ -1589,6 +1744,57 @@ fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Journal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writers on separate handles (as separate processes would be) never
+    /// share a seq and never tear a line, however their appends interleave.
+    #[test]
+    fn concurrent_appends_from_separate_handles_keep_seqs_unique_and_lines_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        EventLog::create(dir.path()).unwrap();
+        const WRITERS: usize = 6;
+        const EACH: usize = 40;
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let run_dir = dir.path();
+                s.spawn(move || {
+                    // A long payload makes a split write likelier.
+                    let detail = format!("writer {w} ").repeat(200);
+                    let mut log = EventLog::open_foreign(run_dir).unwrap();
+                    for _ in 0..EACH {
+                        log.append(EventPayload::SupervisorLost {
+                            detail: detail.clone(),
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        let raw = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
+        let mut seqs: Vec<u64> = raw
+            .lines()
+            .map(|l| serde_json::from_str::<Event>(l).expect("a whole line").seq)
+            .collect();
+        assert_eq!(seqs.len(), WRITERS * EACH);
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), WRITERS * EACH, "a seq was shared");
+    }
+
+    /// A writer outside the drive opens a journal whose last line is still
+    /// being written, and settles its seq after it under the lock.
+    #[test]
+    fn a_foreign_writer_opens_past_a_torn_last_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        log.append(EventPayload::SupervisorLost { detail: "a".into() })
+            .unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"seq\":1,\"ts\":1,\"type\":\"super")
+            .unwrap();
+        assert!(EventLog::open(dir.path()).is_err());
+        assert!(EventLog::open_foreign(dir.path()).is_ok());
+    }
 
     #[test]
     fn question_asked_round_trips_with_snake_case_tag() {

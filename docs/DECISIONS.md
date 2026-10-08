@@ -26,6 +26,7 @@ The full design is issue #165; every use below ships in the same release.
 | `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | enforce: the higher of the stored threshold and the gate's `auto_decide.min_confidence` |
 | `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | `uses.routing.thresholds.hysteresis` (default 0.75); enforce needs a stored threshold |
 | `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) | v0.22.0 | `uses.catalog_rank.thresholds.covered` (default 0.8); advisory by design |
+| `host_task` | a bounded question a host task, a script or an agent step asks itself (`apb decide`, MCP `decision_ask`): choose, rank, filter, map, yes/no, score | `off`, any other mode (the asker reads the answer; the engine never acts on it) | v0.24.3 | none: the asker applies its own cut; on by default once a provider is configured |
 
 Shadow means journal only: the answer is recorded in the run's journal and
 nothing acts on it. Advise shows the answer where a person or supervisor
@@ -319,6 +320,16 @@ full answer distributions of each decision are kept in
 request of the run, resumes included. Past either, a decision is journaled
 with `error: budget` and nothing is sent.
 
+The budget is reserved before a request goes out, not checked after the
+reply: the caller takes a slot under the journal's append lock against a
+fresh read of the journal's decisions plus every request still in flight
+(a marker under `runs/<id>/decisions-inflight/`, one per request, from any
+process). So the drive's own uses, parallel branches and host tasks asking
+at the same time (`decision_ask`, `apb decide`) share one cap and never send
+past it. A marker is removed once its decision is journaled; one older than
+15 minutes belongs to a caller that died and no longer counts. The cost cap
+compares with what was journaled, since a request in flight has no cost yet.
+
 ## Cost and latency on run surfaces
 
 Every read-only run surface reports the run's decisions as one compact object
@@ -395,8 +406,8 @@ reason.
 exactly this provider and model (for the Part 14 paths: completion, retry
 advice, supervisor triage, review triage and routing; a judge node or edge
 enforces with the thresholds its playbook declares and reads none, and
-`apb decisions thresholds set` refuses `judge_node`, `judge_edge` and
-`catalog_rank`), at least 50 labelled decisions (20 per
+`apb decisions thresholds set` refuses `judge_node`, `judge_edge`,
+`catalog_rank` and `host_task`), at least 50 labelled decisions (20 per
 option for a `choice` use), accuracy above both the majority class and
 today's behaviour, and a false-action rate under the use's target (default
 5%, `uses.<name>.thresholds.false_action_target`).
@@ -504,6 +515,75 @@ a spent cap (nothing is sent and nothing written), and only its last 8 MiB
 are read to count the day's requests. The task, the triggers and a suggestion's synopsis
 are redacted like a run's state (including the variables installed
 connectors reference) before anything is clipped or sent.
+
+## Host-task decisions (`host_task`)
+
+A host task (host execution mode), a script node or an agent step can ask a
+bounded question of the configured providers instead of spending a model turn
+on it. The host execution contract allows it explicitly: a decision call is
+not running the task elsewhere. There are two entry points over one engine
+function (`apb_engine::decision::host_task::ask`):
+
+```text
+apb decide <choose|rank|filter|map|is|score> "<question>"
+           [--option TEXT]... [--item TEXT]... [--criteria TEXT]
+           [--run ID] [--node ID] [--no-run]
+```
+
+and the MCP tool `decision_ask { kind, question, options?, items?, criteria?,
+run_id?, node_id? }`. The kinds:
+
+| Kind | Asks | Answer |
+|---|---|---|
+| `choose` | one `choice` over `options` (2 to 255) | `answer`, `p`, `confidence` |
+| `is` | one `noul` | `answer` (`yes` at p 0.5 or more), `p` |
+| `score` | one `score` over `options` as levels, lowest first (2 to 10) | `score` (the expected level index), `answer` (the nearest level), `confidence` |
+| `rank` | one `noul` per item (1 to 100) | `items` best first, each with `p` |
+| `filter` | one `noul` per item | `items` with `p`, `kept` (p 0.5 or more, in the given order) |
+| `map` | one `choice` over `options` per item | `items`, each with `value`, `p`, `confidence` |
+
+The question and `criteria` travel in the state (class `prompts`), the items
+and options in the questions; all of them are redacted like a run's state.
+Every answer also names `provider`, `model`, `calibrated`, `mode`,
+`latency_ms` and, in a run, `cost_usd`, `run_id` and `seq`.
+
+**Inside a run** (`run_id`, or `APB_RUN_ID` for `apb decide`, which a host
+task carries in its `env`; `APB_NODE_ID` names the node): the call uses the
+run's snapshot capped by the machine's file now, exactly like an engine use
+(a run whose engine uses were all off at start has no snapshot, and the call
+reads the machine's file).
+It counts against the run's `budget` (every `decision_made` the run journaled
+counts), and the decision is appended to the run's journal as `decision_made`
+with `use_site: host_task`, the node, its latest attempt, the provider, cost
+and latency (`join.kind` names the kind). Every append to a run's journal
+settles its seq and writes its line under an advisory lock on the file, in
+one write, so the foreign line never shares a seq or tears a line of the
+drive. The same question asked again in the same attempt is answered from the
+journal (`cached: true`, no request). A run that has ended is refused
+(`run_ended`): nothing is appended after its terminal event. A run that ends
+while the provider answers is checked again under the lock, right before the
+append: the answer is returned with `not_journaled` naming why, and nothing
+is appended.
+
+**Outside a run** the call works like the catalog ranking: one line in
+`<root>/.apb/decisions.jsonl` and a per-day cap,
+`uses.host_task.max_requests_per_day` (default 200).
+
+**On and off.** The use is on (`advise`, capped by the file's `mode`) as soon
+as `decisions.yaml` configures a provider; `uses.host_task: { mode: off }`
+switches it off on the machine, a project's `decisions:` section can switch it
+off (`uses: { host_task: { mode: off } }`), and a playbook can refuse it for
+its runs with `defaults.host_decisions: off` (the default is `allow`).
+Refusals are `answered: false` with `refused` and a `reason`: `off`
+(`APB_DECISIONS=off`), `no_provider` (no file, an invalid file, or no
+provider key resolves), `use_off`, `playbook_off`, `budget`, `privacy`
+(`privacy.send` excludes `prompts`), `run_ended`, and outside a run `busy` or
+`too_large`. A provider failure is `answered: false` with `error`. The asker
+then decides on its own.
+
+`apb decisions report --use host_task` lists these decisions with their
+counts, latency and cost; they carry no labels (the asker acts on the answer
+itself), and `apb decisions thresholds set` refuses the use.
 
 ## Judge node (`judge_node`)
 

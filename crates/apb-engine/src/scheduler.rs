@@ -166,6 +166,9 @@ fn stop_on_unhandled_failure(
         node: Some(node.to_string()),
         reason: failure_detail(output),
     })?;
+    if let Some(run_dir) = log.run_dir() {
+        crate::candidate::settle(log, &run_dir, false);
+    }
     log.append(EventPayload::RunFinished {
         outcome: "failed".into(),
     })?;
@@ -373,6 +376,7 @@ fn drive(
                 node: None,
                 reason: e.to_string(),
             });
+            crate::candidate::settle(log, run_dir, false);
             let _ = log.append(EventPayload::RunFinished {
                 outcome: "failed".into(),
             });
@@ -826,6 +830,7 @@ fn drive_inner(
             {
                 promote_applied_patch(root, run_dir, log, &playbook, applied)?;
             }
+            crate::candidate::settle(log, run_dir, outcome == RunStatus::Succeeded);
             log.append(EventPayload::RunFinished { outcome: s.into() })?;
             return Ok(RunResult { run_id, outcome });
         }
@@ -2281,6 +2286,7 @@ fn drive_inner(
                     None => {
                         // No fallback path - the run fails without waiting for
                         // the hard max_steps limit.
+                        crate::candidate::settle(log, run_dir, false);
                         log.append(EventPayload::RunFinished {
                             outcome: "failed".into(),
                         })?;

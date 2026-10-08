@@ -20,6 +20,7 @@ use crate::tools::{self, ToolError};
 mod args;
 pub use args::*;
 
+mod decision;
 mod playbook;
 mod profile;
 mod run;
@@ -139,14 +140,43 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
 
 // --- host execution mode (0.23.0) ---
 /// What a started host-mode run tells its caller to do next.
-pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI, and neither do you (each task's execution_note is the contract). Call run_wait: it returns pending_tasks; for each one use your own subagent tool with role_prompt as its system context and prompt as its task, load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
+pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI, and neither do you (each task's execution_note is the contract). Call run_wait: it returns pending_tasks; for each one use your own subagent tool, telling it to read role_path as its system context and prompt_path as its task (or pass role_prompt and prompt inline), load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
 
 /// Adds the resolved execution of a run start to a successful response: the
 /// mode, whether the host fallback is on, and in host mode what to do next.
+/// What a run start reports about the playbook's candidate (issue #192):
+/// the candidate version the start runs as a trial, or why it was left out.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StartCandidate {
+    pub(crate) trial: Option<String>,
+    pub(crate) skipped: Option<String>,
+}
+
+impl StartCandidate {
+    pub(crate) fn of(permit: &apb_engine::gate::RunPermit) -> Self {
+        StartCandidate {
+            trial: permit.candidate.clone(),
+            skipped: permit.candidate_skipped.clone(),
+        }
+    }
+
+    /// Adds `candidate_trial` (the version) or `candidate_skipped` (the
+    /// reason) to a start response.
+    fn annotate(&self, obj: &mut serde_json::Map<String, Value>) {
+        if let Some(v) = &self.trial {
+            obj.insert("candidate_trial".into(), json!(v));
+        }
+        if let Some(why) = &self.skipped {
+            obj.insert("candidate_skipped".into(), json!(why));
+        }
+    }
+}
+
 fn with_execution(
     result: CallToolResult,
     resolved: &apb_core::execution::ResolvedExecution,
     deprecation: Option<&str>,
+    candidate: &StartCandidate,
 ) -> CallToolResult {
     let result = with_deprecation(result, deprecation);
     if result.is_error == Some(true) {
@@ -155,6 +185,7 @@ fn with_execution(
     let mut result = result;
     if let Some(Value::Object(obj)) = result.structured_content.as_mut() {
         annotate_execution(obj, resolved);
+        candidate.annotate(obj);
         return result;
     }
     if let Some(block) = result.content.first_mut()
@@ -163,6 +194,7 @@ fn with_execution(
         && obj.contains_key("run_id")
     {
         annotate_execution(&mut obj, resolved);
+        candidate.annotate(&mut obj);
         if let Ok(new) = ContentBlock::json(Value::Object(obj)) {
             *block = new;
         }
@@ -458,6 +490,8 @@ impl WfMcp {
         execution: apb_core::execution::ExecutionRequest,
         // 0.24.0: the irreversible consent.
         consent: Option<apb_engine::consent::RunConsent>,
+        // Issue #192: the permit's `candidate_skipped`.
+        candidate_skipped: Option<String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -479,6 +513,7 @@ impl WfMcp {
             worktree,
             execution,
             consent,
+            candidate_skipped,
         );
         let value = match started {
             Ok(v) => v,
@@ -514,6 +549,7 @@ impl WfMcp {
             + Self::run_router()
             + Self::profile_router()
             + Self::supervisor_router()
+            + Self::decision_router()
     }
 }
 

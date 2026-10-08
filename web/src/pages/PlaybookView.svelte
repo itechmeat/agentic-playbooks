@@ -14,7 +14,7 @@
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
-  import { provenanceLabel } from '../lib/versioninfo'
+  import { provenanceLabel, trialBadge } from '../lib/versioninfo'
   import type { VersionInfo, PlaybookNode as PlaybookNodeType } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
@@ -444,6 +444,11 @@
                 <span class="font-mono text-sm" class:font-semibold={v.is_current}>{v.version}</span>
                 {#if v.is_current}
                   <Badge variant="secondary" class="text-[10px]">current</Badge>
+                {/if}
+                {#if trialBadge(v)}
+                  <Badge variant="outline" class="text-[10px]" title={v.provenance?.trial?.reason ?? ''}>
+                    {trialBadge(v)}
+                  </Badge>
                 {/if}
               </div>
               <div class="mt-0.5 text-xs text-muted-foreground">{provenanceLabel(v)}</div>

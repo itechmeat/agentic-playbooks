@@ -602,6 +602,10 @@ impl PendingLabeller {
                 "pending: later human corrections (weakest labels)",
             ),
             "catalog_rank" => ("catalog_rank", "pending: the playbook the agent ran"),
+            "host_task" => (
+                "host_task",
+                "none: the host task that asked acts on the answer itself (counts, latency and cost only)",
+            ),
             _ => ("unknown", "no labeller for this use"),
         };
         PendingLabeller { use_site, source }

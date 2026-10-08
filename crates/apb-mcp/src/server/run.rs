@@ -360,6 +360,10 @@ impl WfMcp {
             Ok(p) => p,
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
+        // Issue #192: the candidate version the gate chose (and pinned) for
+        // a start without an explicit version is the one that runs.
+        let version = permit.run_version(version.as_deref());
+        let candidate = super::StartCandidate::of(&permit);
         // --- 0.24.0 irreversible consent ---
         // `confirm_irreversible` is the consent, checked against the nonce of
         // the refusal the person saw; `acknowledge_untrusted` answers trust
@@ -405,9 +409,11 @@ impl WfMcp {
                     warnings,
                     execution,
                     consent,
+                    candidate.skipped.clone(),
                 ),
                 &resolved,
                 deprecation,
+                &candidate,
             );
         }
 
@@ -428,6 +434,7 @@ impl WfMcp {
                 worktree,
                 execution,
                 consent,
+                candidate_skipped: candidate.skipped.clone(),
                 ..Default::default()
             };
             if background == Some(true) {
@@ -441,6 +448,7 @@ impl WfMcp {
                     },
                     &resolved,
                     deprecation,
+                    &candidate,
                 );
             }
             return with_execution(
@@ -455,6 +463,7 @@ impl WfMcp {
                 },
                 &resolved,
                 deprecation,
+                &candidate,
             );
         }
         if background == Some(true) {
@@ -475,11 +484,13 @@ impl WfMcp {
                         worktree,
                         execution,
                         consent,
+                        candidate.skipped.clone(),
                     ),
                     &warnings,
                 )),
                 &resolved,
                 deprecation,
+                &candidate,
             );
         }
         with_execution(
@@ -499,11 +510,13 @@ impl WfMcp {
                     worktree,
                     execution,
                     consent,
+                    candidate.skipped.clone(),
                 ),
                 &warnings,
             )),
             &resolved,
             deprecation,
+            &candidate,
         )
     }
 
@@ -541,7 +554,7 @@ impl WfMcp {
         description = concat!(
             "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
             apb_engine::host_task_contract!(),
-            " For each pending task give your subagent `role_prompt` as its system context and `prompt` as its task, have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
+            " For each pending task tell your subagent to read `prompt_path` as its task and `role_path` as its system context (`prompt` and `role_prompt` carry the same text inline; pass inline_prompt: false to drop them), have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
         ),
         annotations(read_only_hint = true)
     )]
@@ -551,6 +564,7 @@ impl WfMcp {
             run_id,
             workspace,
             timeout_ms,
+            inline_prompt,
         }): Parameters<RunWaitArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -579,7 +593,13 @@ impl WfMcp {
             },
         )
         .await;
-        to_call_tool_result(res.and_then(|res| tools::run_wait_result(&root, &run_id, &res)))
+        to_call_tool_result(res.and_then(|res| {
+            let mut out = tools::run_wait_result(&root, &run_id, &res)?;
+            if inline_prompt == Some(false) {
+                tools::drop_inline_prompts(&mut out);
+            }
+            Ok(out)
+        }))
     }
 
     #[tool(
@@ -623,6 +643,25 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::run_events(&root, &run_id, from_seq))
+    }
+
+    #[tool(
+        description = "Retrospective numbers of a run, for improving its playbook: per node the time against expected_duration, executions, attempts, retries, fallbacks, re-entries, tokens and cost, the model each attempt actually ran on (host mode: the model the host reported), the host wait and the status-file verdicts; per run the goal results and the medians of the last compare_last finished runs of the same version. Works on a live run (as of now) and a finished one. The same report renders into a prompt as {{run.retro}}.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_retro_context(
+        &self,
+        Parameters(RunRetroContextArgs {
+            run_id,
+            compare_last,
+            workspace,
+        }): Parameters<RunRetroContextArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_retro_context(&root, &run_id, compare_last))
     }
 
     #[tool(

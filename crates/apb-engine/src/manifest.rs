@@ -185,6 +185,17 @@ pub struct RunExecutionManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consent: Option<crate::consent::RunConsent>,
     // --- end 0.24.0 irreversible consent ---
+    /// The run is a trial of the playbook's candidate version (issue #192):
+    /// it started on the version the `candidate` pointer named. Its outcome
+    /// promotes or rejects the candidate (see [`crate::candidate`]). Absent
+    /// (false) for every other run, so their manifests read as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub candidate_trial: bool,
+    /// Why the start ran `current` although a candidate was waiting
+    /// (`untrusted`: its trust is not inherited, see
+    /// [`crate::gate::RunPermit::candidate_skipped`]). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_skipped: Option<String>,
 }
 
 // --- host execution mode (0.23.0) ---
@@ -286,6 +297,8 @@ impl RunExecutionManifest {
             && self.execution.is_none()
             // 0.24.0: the consent a sub-playbook inherits.
             && self.consent.is_none()
+            && !self.candidate_trial
+            && self.candidate_skipped.is_none()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {

@@ -123,16 +123,31 @@ pub fn playbook_get(
 ) -> Result<Value, ToolError> {
     let reg = open(root)?;
     let loaded = reg.load(id, version)?;
-    match detail {
-        DetailMode::Full => Ok(json!({
+    let mut out = match detail {
+        DetailMode::Full => json!({
             "id": id,
             "version": loaded.version,
             "yaml": loaded.yaml,
             "playbook": loaded.playbook,
             "layout": loaded.layout,
-        })),
-        DetailMode::Summary => Ok(playbook_summary(id, &loaded)),
-    }
+        }),
+        DetailMode::Summary => playbook_summary(id, &loaded),
+    };
+    add_candidate(root, id, &mut out);
+    Ok(out)
+}
+
+/// Issue #192: the playbook's candidate version (a forward patch on trial)
+/// with its provenance, when there is one; absent otherwise.
+fn add_candidate(root: &Path, id: &str, out: &mut Value) {
+    let dir = root.join(".apb/playbooks").join(id);
+    let Some(version) = apb_core::candidate::read_candidate(&dir) else {
+        return;
+    };
+    let provenance = apb_core::versioning::read_provenance(root, id, &version)
+        .ok()
+        .flatten();
+    out["candidate"] = json!({ "version": version, "provenance": provenance });
 }
 
 /// Builds the compact summary of a playbook: its interface without any node

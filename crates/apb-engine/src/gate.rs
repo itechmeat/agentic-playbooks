@@ -128,6 +128,16 @@ pub struct RunPermit {
     /// The playbook id, for the refusal text.
     pub playbook_id: String,
     // --- end 0.24.0 irreversible consent ---
+    /// The candidate version (issue #192) this start without an explicit
+    /// version runs, chosen by the gate per `trial_candidates` and checked in
+    /// place of `current`: every pin above is the candidate's. The surface
+    /// starts exactly this version ([`RunPermit::run_version`]).
+    pub candidate: Option<String>,
+    /// Why a waiting candidate was left out and `current` runs instead
+    /// (`untrusted`, or `refused: <policy>`); `None` when no candidate was
+    /// waiting or it runs. Surfaces report it in the start response, and
+    /// [`RunPermit::apply`] hands it to the manifest for `run_status`.
+    pub candidate_skipped: Option<String>,
 }
 
 /// The gate for an agent resuming an existing run (MCP `run_resume`). A
@@ -576,6 +586,14 @@ impl RunPermit {
     /// the definition, not the ephemeral executor, so combining the two would
     /// be a false key-set mismatch (see the invariant in `build_run_manifest`);
     /// such a run keeps every other pin.
+    /// The version a surface starts: the one the caller asked for, else the
+    /// candidate the gate chose, else `None` (`current`).
+    pub fn run_version(&self, requested: Option<&str>) -> Option<String> {
+        requested
+            .map(str::to_string)
+            .or_else(|| self.candidate.clone())
+    }
+
     pub fn apply(self, opts: &mut crate::RunOptions) {
         let has_overrides = opts.overrides.as_ref().is_some_and(|o| !o.is_empty());
         opts.expected_digest = Some(self.playbook_digest);
@@ -583,6 +601,7 @@ impl RunPermit {
         opts.expected_children = Some(self.children);
         opts.expected_connectors = self.connectors;
         opts.expected_connector_accounts = self.connector_accounts;
+        opts.candidate_skipped = self.candidate_skipped;
     }
 
     // --- 0.24.0 irreversible consent ---
@@ -696,35 +715,126 @@ pub fn check_run(
     let playbook_dir = definition_parent.join("playbooks").join(&wref.id);
     check_lifecycle(&playbook_dir, &wref.id)?;
 
+    // Candidate trials (issue #192): a start without an explicit version may
+    // run the candidate instead of `current`. Chosen here, before the permit
+    // is computed, so every pin is the candidate's (anti-TOCTOU).
+    //
+    // Trust: the candidate inherits the trust of `current`, the way an
+    // in-run supervisor patch runs under the trust of the version the run
+    // started on. That holds because a forward patch passed the definition
+    // guard (no effects, irreversible steps, `requires`, `supervisor`,
+    // decision opt-ins, `worktree`, connector grants or sub-playbooks
+    // changed) and its lineage reaches `current`. So the candidate runs when
+    // `current`'s digest is approved and the rest of its tree (profile
+    // bundles, connectors, sub-playbooks) passes like any start. Otherwise
+    // the start runs `current` and says why (`candidate_skipped`): no launch
+    // surface's acknowledgement, implicit (CLI, dashboard) or explicit (MCP),
+    // stands in for a candidate nobody approved. Asking for the candidate by
+    // version stays the way to run it anyway.
+    let mut candidate_skipped: Option<String> = None;
+    if wref.version.is_none()
+        && let Some((version, cand)) =
+            crate::candidate::choose_at_gate(&reg, &playbook_dir, &wref.id, &loaded)
+    {
+        let current_trusted = loaded
+            .trust_digest()
+            .is_ok_and(|d| TrustStore::load().is_approved(&d));
+        let digest = cand
+            .trust_digest()
+            .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
+        if current_trusted {
+            match check_run_loaded(
+                root,
+                wref,
+                &cand,
+                digest,
+                RunTrust {
+                    playbook_trusted: true,
+                    acknowledge_untrusted,
+                },
+                supervised,
+            ) {
+                Ok(mut permit) => {
+                    permit.candidate = Some(version);
+                    return Ok(permit);
+                }
+                Err(refusal) => {
+                    candidate_skipped = Some(skip_reason(&refusal));
+                }
+            }
+        } else {
+            candidate_skipped = Some(CANDIDATE_SKIPPED_UNTRUSTED.to_string());
+        }
+    }
+
     // Digest-based trust: unapproved content requires an explicit acknowledge.
     let digest = loaded
         .trust_digest()
         .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
-    check_run_loaded(
-        root,
-        wref,
-        &loaded,
-        digest.clone(),
+    let trust = RunTrust {
+        playbook_trusted: false,
         acknowledge_untrusted,
-        supervised,
-    )
-    .map_err(|refusal| {
-        with_consent_hint(refusal, || {
-            // The hint must be the nonce the retry is checked against: the
-            // same check with trust acknowledged yields the permit whose
-            // pins (and so whose nonce) the retry computes.
-            match check_run_loaded(root, wref, &loaded, digest.clone(), true, supervised) {
-                Ok(permit) => (permit.irreversible.clone(), permit.consent_nonce()),
-                // Another refusal would stop the retry anyway: the live
-                // sources over the playbook digest, a best effort.
-                Err(_) => {
-                    let sources = consent_sources(root, &loaded.playbook, &wref.origin, None);
-                    let nonce = crate::consent::consent_nonce(&digest, &sources);
-                    (sources, nonce)
+    };
+    check_run_loaded(root, wref, &loaded, digest.clone(), trust, supervised)
+        .map_err(|refusal| {
+            with_consent_hint(refusal, || {
+                // The hint must be the nonce the retry is checked against: the
+                // same check with trust acknowledged yields the permit whose
+                // pins (and so whose nonce) the retry computes.
+                let acked = RunTrust {
+                    playbook_trusted: false,
+                    acknowledge_untrusted: true,
+                };
+                match check_run_loaded(root, wref, &loaded, digest.clone(), acked, supervised) {
+                    Ok(permit) => (permit.irreversible.clone(), permit.consent_nonce()),
+                    // Another refusal would stop the retry anyway: the live
+                    // sources over the playbook digest, a best effort.
+                    Err(_) => {
+                        let sources = consent_sources(root, &loaded.playbook, &wref.origin, None);
+                        let nonce = crate::consent::consent_nonce(&digest, &sources);
+                        (sources, nonce)
+                    }
                 }
-            }
+            })
         })
-    })
+        .map(|mut permit| {
+            permit.candidate_skipped = candidate_skipped.clone();
+            permit
+        })
+        .map_err(|mut refusal| {
+            if let Some(why) = &candidate_skipped {
+                refusal["candidate_skipped"] = json!(why);
+            }
+            refusal
+        })
+}
+
+/// `candidate_skipped` of a start whose candidate does not inherit trust.
+pub const CANDIDATE_SKIPPED_UNTRUSTED: &str = "untrusted";
+
+/// Why the candidate's own check refused: `untrusted` for a trust refusal
+/// (a profile bundle, a connector or a sub-playbook nobody approved), else
+/// `refused: <policy>`.
+fn skip_reason(refusal: &Value) -> String {
+    let policy = refusal
+        .get("policy")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if policy.starts_with("untrusted_") {
+        CANDIDATE_SKIPPED_UNTRUSTED.to_string()
+    } else {
+        format!("refused: {policy}")
+    }
+}
+
+/// How the run gate treats unapproved content for one check.
+#[derive(Debug, Clone, Copy)]
+struct RunTrust {
+    /// The playbook's own digest counts as approved without an approval
+    /// of its own (a candidate inheriting `current`'s trust).
+    playbook_trusted: bool,
+    /// The launch surface's acknowledgement of unapproved content.
+    acknowledge_untrusted: bool,
 }
 
 /// A trust refusal of a tree that also needs consent to irreversible
@@ -755,10 +865,14 @@ fn check_run_loaded(
     wref: &PlaybookRef,
     loaded: &apb_core::registry::LoadedPlaybook,
     digest: String,
-    acknowledge_untrusted: bool,
+    trust: RunTrust,
     supervised: bool,
 ) -> Result<RunPermit, Value> {
-    check_digest_trust(&wref.id, &digest, acknowledge_untrusted)?;
+    let RunTrust {
+        playbook_trusted,
+        acknowledge_untrusted,
+    } = trust;
+    check_digest_trust(&wref.id, &digest, acknowledge_untrusted || playbook_trusted)?;
 
     // Profile bundle trust (spec 5.1): the profile plus the actual content of its
     // skills are trusted as a unit. An unapproved bundle requires acknowledge.
@@ -808,6 +922,8 @@ fn check_run_loaded(
         warnings: connector_warnings,
         irreversible,
         playbook_id: wref.id.clone(),
+        candidate: None,
+        candidate_skipped: None,
     })
 }
 

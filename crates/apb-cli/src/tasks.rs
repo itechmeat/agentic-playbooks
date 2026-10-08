@@ -163,6 +163,11 @@ fn list(root: &Path, run_id: Option<&str>, full: bool, json: bool) -> ExitCode {
                 .unwrap_or_default()
         );
         println!("  workdir: {}", one_line(&t.workdir));
+        // Issue #193: a subagent reads the prompt from the file.
+        println!("  prompt file: {}", one_line(&t.prompt_path));
+        if let Some(role) = &t.role_path {
+            println!("  role file: {}", one_line(role));
+        }
         if let Some(d) = t.deadline {
             let left = (d as i128 - apb_core::clock::now_ms() as i128) / 1000;
             println!("  deadline: in {}s", left.max(0));
