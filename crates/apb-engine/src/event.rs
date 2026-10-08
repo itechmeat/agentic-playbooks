@@ -1017,11 +1017,11 @@ pub struct EventLog {
     path: PathBuf,
     file: File,
     next_seq: u64,
-    /// The file's length after this handle's last write (or at open). A
-    /// longer file means another process appended in between (an `apb
-    /// connector call` or `apb decide` subprocess of an attempt, issue
-    /// #193), so the next append re-reads the high-water mark first instead
-    /// of reusing a seq.
+    /// The file's length after this handle's last write (`u64::MAX` before
+    /// its first). Any other length means another writer appended in between
+    /// (an `apb connector call` or `apb decide` subprocess of an attempt,
+    /// issue #193), so the next append re-reads the high-water mark first
+    /// instead of reusing a seq.
     known_len: u64,
 }
 
@@ -1076,7 +1076,11 @@ impl EventLog {
             .max()
             .map_or(0, |s| s + 1);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        let known_len = file.metadata().map_or(0, |m| m.len());
+        // Unknown until the first append: another writer may have appended
+        // between the read above and this open, and the length now would
+        // hide it. The first append therefore settles the seq from the file
+        // under the lock.
+        let known_len = u64::MAX;
         Ok(Self {
             path,
             file,
