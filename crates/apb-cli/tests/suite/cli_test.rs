@@ -271,6 +271,47 @@ fn validate_refuses_a_profile_model_the_config_policy_forbids() {
         .success();
 }
 
+/// A current Claude id validates without a finding; an unlisted id of a
+/// known Claude family (a model newer than this binary) passes with an info
+/// note in `apb validate` and `apb doctor`; an unknown family still warns.
+#[test]
+fn validate_accepts_current_and_newer_claude_family_ids() {
+    let dir = seeded_dir();
+    let cfg = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".apb/profiles/architect/profile.yaml");
+    let profile =
+        |model: &str| format!("name: architect\nexecutor:\n  agent: claude\n  model: {model}\n");
+    let validate = || {
+        playbook()
+            .arg("validate")
+            .env("APB_CONFIG_DIR", cfg.path())
+            .current_dir(dir.path())
+            .assert()
+            .success()
+    };
+    fs::write(&path, profile("claude-haiku-5-5")).unwrap();
+    validate().stdout(predicate::str::contains("profile architect").not());
+
+    fs::write(&path, profile("claude-sonnet-6-0")).unwrap();
+    validate()
+        .stdout(predicate::str::contains(
+            "profile architect: info model_new_in_family",
+        ))
+        .stdout(predicate::str::contains("warning model_unknown").not());
+    playbook()
+        .arg("doctor")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .stdout(predicate::str::contains("model_new_in_family"))
+        .stdout(predicate::str::contains("model_unknown").not());
+
+    fs::write(&path, profile("claude-foo-5-5")).unwrap();
+    validate().stdout(predicate::str::contains(
+        "profile architect: warning model_unknown",
+    ));
+}
+
 #[test]
 fn list_without_apb_dir_fails() {
     let dir = tempfile::tempdir().unwrap();
