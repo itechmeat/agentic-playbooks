@@ -384,7 +384,8 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
 /// ([`apb_core::model_check`]): a model zcode's allowlist or the config's
 /// `model_policy` refuses is an error (`zcode_model_not_allowed`,
 /// `model_policy_violation`); one outside apb's list for its agent, or one the
-/// installed agent does not list, is a warning; an agent with no invocation
+/// installed agent does not list, is a warning; an unlisted id of a known
+/// Claude family is an info note (`model_new_in_family`); an agent with no invocation
 /// form is an error (`agent_no_invocation`). Returns whether no profile had
 /// an error. An unreadable profile is left to the run-time resolver, which
 /// reports it with its own error.
@@ -444,6 +445,11 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
                 ),
                 ModelIssue::Unknown(_) | ModelIssue::NotAvailable => println!(
                     "profile {name}: warning {} {}",
+                    issue.code(),
+                    issue.describe(agent, model)
+                ),
+                ModelIssue::NewInFamily => println!(
+                    "profile {name}: info {} {}",
                     issue.code(),
                     issue.describe(agent, model)
                 ),

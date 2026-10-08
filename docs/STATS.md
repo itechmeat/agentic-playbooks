@@ -75,8 +75,8 @@ Per playbook version:
   name's tokens appear in order in the longer one and every extra token is
   a version or date number or a vendor or channel word (`claude`,
   `anthropic`, `openai`, `google`, `gemini`, `latest`, `preview`, `exp`,
-  `experimental`, `stable`). So `opus` matches `claude-opus-4-1` and
-  `sonnet` matches `claude-sonnet-4-5-20250929`, while `glm-5.3` and
+  `experimental`, `stable`). So `opus` matches `claude-opus-5-5` and
+  `sonnet` matches `claude-sonnet-5-5`, while `glm-5.3` and
   `glm-5.3-flash`, or `gpt-5` and `gpt-5-mini`, are different models.
 
 Per node: the runs it ran in; first pass (its first result was a success on

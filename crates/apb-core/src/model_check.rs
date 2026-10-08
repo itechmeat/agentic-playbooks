@@ -8,7 +8,9 @@
 //! - the global config's `model_policy` ([`ModelRule`]);
 //! - apb's closed model lists (claude, codex, zcode; see
 //!   [`models_table::static_models_for_agent`]): an id outside the list is
-//!   probably a typo or a retired model;
+//!   probably a typo or a retired model, except a claude id that follows a
+//!   known family's pattern (`claude-sonnet-6-0`), most likely a model newer
+//!   than this binary, which passes with an info note;
 //! - detection: an installed agent whose list has Full authority
 //!   (`opencode models`) names exactly what it can run.
 
@@ -26,6 +28,11 @@ pub enum ModelIssue {
     PolicyViolation(String),
     /// Not on apb's closed list for this agent (`detail` names the list).
     Unknown(String),
+    /// Not on apb's closed claude list, but a well-formed id of a known
+    /// Claude family (`claude-<family>-<major>-<minor>`, optionally with a
+    /// `-YYYYMMDD` date): most likely a model released after this binary.
+    /// Informational only, never a warning.
+    NewInFamily,
     /// The installed agent lists its models with Full authority and this one
     /// is not among them.
     NotAvailable,
@@ -43,6 +50,7 @@ impl ModelIssue {
             ModelIssue::NotAllowed(_) => "model_not_allowed",
             ModelIssue::PolicyViolation(_) => "model_policy_violation",
             ModelIssue::Unknown(_) => "model_unknown",
+            ModelIssue::NewInFamily => "model_new_in_family",
             ModelIssue::NotAvailable => "model_not_available",
             ModelIssue::AgentNotInstalled => "agent_not_installed",
             ModelIssue::Unverifiable => "model_unverifiable",
@@ -58,6 +66,12 @@ impl ModelIssue {
         )
     }
 
+    /// Whether this is only a note: the model is accepted and nothing needs
+    /// fixing.
+    pub fn is_info(&self) -> bool {
+        matches!(self, ModelIssue::NewInFamily)
+    }
+
     /// A one-line explanation naming the agent and model.
     pub fn describe(&self, agent: &str, model: &str) -> String {
         match self {
@@ -66,6 +80,9 @@ impl ModelIssue {
             }
             ModelIssue::Unknown(list) => format!(
                 "{agent} model `{model}` is not one apb knows for {agent} ({list}); check the id"
+            ),
+            ModelIssue::NewInFamily => format!(
+                "{agent} model `{model}` is not on apb's list yet; it matches a known Claude family's id pattern, so it is accepted as a newer model"
             ),
             ModelIssue::NotAvailable => {
                 format!("{agent} does not list model `{model}` on this machine")
@@ -109,6 +126,10 @@ impl ModelContext {
 /// them itself, so they are known models, not typos.
 const CLAUDE_ALIASES: &[&str] = &["default", "opus", "sonnet", "haiku", "fable", "opusplan"];
 
+/// The Claude model families apb knows. An unlisted id of one of them in
+/// Anthropic's id pattern is accepted with a note ([`ModelIssue::NewInFamily`]).
+const CLAUDE_FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable"];
+
 /// The first issue with running `model` on `agent`, or `None` when nothing is
 /// wrong as far as this machine can tell.
 pub fn check(agent: &str, model: &str, cx: &ModelContext) -> Option<ModelIssue> {
@@ -131,6 +152,9 @@ pub fn check(agent: &str, model: &str, cx: &ModelContext) -> Option<ModelIssue> 
     if let Some(list) = &closed
         && !on_closed_list(probe, &bare, list)
     {
+        if probe == "claude" && is_claude_family_id(bare.strip_suffix("[1m]").unwrap_or(&bare)) {
+            return Some(ModelIssue::NewInFamily);
+        }
         return Some(ModelIssue::Unknown(list.join(", ")));
     }
     let Some(info) = cx.agents.iter().find(|a| a.agent == probe) else {
@@ -163,6 +187,28 @@ fn on_closed_list(probe: &str, bare: &str, list: &[String]) -> bool {
     probe == "claude" && {
         let base = bare.strip_suffix("[1m]").unwrap_or(bare);
         CLAUDE_ALIASES.contains(&base) || list.iter().any(|m| m == base)
+    }
+}
+
+/// Whether `id` is `claude-<family>-<major>-<minor>` with a known family and
+/// one- or two-digit version parts, optionally followed by a `-YYYYMMDD` date
+/// (`claude-sonnet-6-0`, `claude-haiku-5-5-20261007`).
+fn is_claude_family_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("claude-") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('-').collect();
+    let digits = |s: &str, min: usize, max: usize| {
+        (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+    };
+    match parts.as_slice() {
+        [family, major, minor, date @ ..] if date.len() <= 1 => {
+            CLAUDE_FAMILIES.contains(family)
+                && digits(major, 1, 2)
+                && digits(minor, 1, 2)
+                && date.iter().all(|d| digits(d, 8, 8))
+        }
+        _ => false,
     }
 }
 
@@ -235,6 +281,10 @@ mod tests {
         let c = cx(Vec::new());
         for ok in [
             "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-haiku-5-5[1m]",
             "haiku",
             "opus[1m]",
             "claude-opus-5-5[1m]",
@@ -251,6 +301,41 @@ mod tests {
             Some(ModelIssue::Unknown(_))
         ));
         assert_eq!(check("customx", "m1", &c), Some(ModelIssue::Unverifiable));
+    }
+
+    /// An unlisted claude id of a known family in Anthropic's id pattern is a
+    /// newer model, accepted with a note; an unknown family or a malformed id
+    /// stays `model_unknown`, and other agents get no family pass.
+    #[test]
+    fn unlisted_ids_of_a_known_claude_family_pass_with_a_note() {
+        let c = cx(Vec::new());
+        for newer in [
+            "claude-sonnet-6-0",
+            "claude-opus-6-1[1m]",
+            "claude-haiku-5-5-20261007",
+            "claude-fable-10-12",
+        ] {
+            let issue = check("claude", newer, &c);
+            assert_eq!(issue, Some(ModelIssue::NewInFamily), "{newer}");
+            assert!(issue.unwrap().is_info());
+        }
+        for wrong in [
+            "claude-foo-5-5",
+            "claude-sonnet-6",
+            "claude-sonnet-6-0-1",
+            "claude-sonnet-six-0",
+            "claude-sonnet-6-0-2026107",
+            "claude-sonnet-6-0-preview",
+            "sonnet-6-0",
+        ] {
+            let issue = check("claude", wrong, &c);
+            assert!(matches!(issue, Some(ModelIssue::Unknown(_))), "{wrong}");
+            assert!(!issue.unwrap().is_info());
+        }
+        assert!(matches!(
+            check("codex", "claude-sonnet-6-0", &c),
+            Some(ModelIssue::Unknown(_))
+        ));
     }
 
     /// A policy covers its agent, optionally only the models `when` matches,
