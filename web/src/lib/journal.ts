@@ -61,8 +61,9 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
 // attempt's transcript is, the tokens an attempt reported (issue #167),
-// which working tree the run moved into, and what a decision model answered
-// (issue #165). Every other kind has none.
+// which working tree the run moved into, what a decision model answered
+// (issue #165), and what a fork's branch-failure policy or a refusing join did
+// (issue #195). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -101,6 +102,15 @@ function eventNote(e: WfEvent): string | undefined {
       return `task ${String(r.task_id ?? '')}: ${String(r.status ?? '')} by ${String(r.submitted_by ?? '')}${r.client ? ` (${String(r.client)})` : ''}${r.model ? `, ran on ${String(r.model)} (reported)` : ''}`
     case 'execution_fallback':
       return `no CLI could start, running as a host task${r.reason ? `: ${String(r.reason)}` : ''}`
+    // Issue #195: fork branch-failure policies and refused joins.
+    case 'branch_failed':
+      return r.target
+        ? `fork ${String(r.fork ?? '')} ${String(r.policy ?? '')}: failed, the run goes to ${String(r.target)}`
+        : `fork ${String(r.fork ?? '')} ${String(r.policy ?? '')}: failed, the other branches are cancelled`
+    case 'branch_cancelled':
+      return `fork ${String(r.fork ?? '')}: cancelled after ${String(r.failed_node ?? '')} failed`
+    case 'join_refused':
+      return typeof r.reason === 'string' && r.reason ? r.reason : undefined
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

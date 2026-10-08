@@ -115,6 +115,14 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
     {
         q.push_back(target.as_str());
     }
+    // A fork's `on_failure` (issue #195) is a route with no edge drawn too.
+    for n in &playbook.nodes {
+        if let Some(target) = n.fork.as_ref().and_then(|f| f.on_failure.as_deref())
+            && playbook.node(target).is_some()
+        {
+            q.push_back(target);
+        }
+    }
     while let Some(id) = q.pop_front() {
         if seen.insert(id) {
             for next in adj.get(id).into_iter().flatten() {

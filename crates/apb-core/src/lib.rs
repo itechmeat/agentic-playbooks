@@ -22,6 +22,7 @@ pub mod eval;
 // host execution mode (0.23.0)
 pub mod execution;
 pub mod fingerprint;
+pub mod fork;
 pub mod fsutil;
 pub mod graphutil;
 pub mod judge;

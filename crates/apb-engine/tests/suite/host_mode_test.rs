@@ -791,6 +791,58 @@ fn parallel_branches_expose_two_tasks_at_once() {
     assert_eq!(status, RunStatus::Succeeded);
 }
 
+/// Issue #195: a `fail_fast` fork closes the sibling's pending host task as
+/// cancelled the moment one branch fails, and the run ends without the join.
+#[test]
+fn fail_fast_closes_the_sibling_host_task() {
+    let yaml = playbook(
+        "",
+        "  - { id: a, type: agent_task, prompt: \"A\", max_retries: 0 }\n  - { id: b, type: agent_task, prompt: \"B\" }\n  - { id: j, type: agent_task, prompt: \"J\" }\n  - { id: lost, type: finish, outcome: failure }\n",
+        "  - { from: start, to: a }\n  - { from: start, to: b }\n  - { from: a, to: j }\n  - { from: b, to: j }\n  - { from: j, to: done }\n",
+    )
+    .replace(
+        "{ id: start, type: start }",
+        "{ id: start, type: start, fork: { on_branch_failure: fail_fast, on_failure: lost } }",
+    );
+    let h = Host::new(&yaml, &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let both = poll("two pending tasks", || {
+        let p = h.pending(&run_id);
+        (p.len() == 2).then_some(p)
+    });
+    let a = both.iter().find(|t| t.node == "a").unwrap();
+    let b = both.iter().find(|t| t.node == "b").unwrap().task_id.clone();
+    h.submit(&run_id, &a.task_id, SubmitStatus::Failed, "broken");
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Failed);
+    assert!(
+        h.pending(&run_id).is_empty(),
+        "the sibling's task stays open"
+    );
+    let closed_b = events.iter().any(|e| {
+        matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, submitted_by, .. }
+            if task_id == &b && status == "cancelled" && submitted_by == "engine")
+    });
+    assert!(closed_b, "the engine closes b's task as cancelled");
+    assert_eq!(
+        count(
+            &events,
+            |p| matches!(p, EventPayload::BranchCancelled { node, .. } if node == "b")
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &events,
+            |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "j")
+        ),
+        0
+    );
+    assert!(!h.cli_ran());
+}
+
 #[test]
 fn continue_session_starts_cold_with_reason_host_mode() {
     let h = Host::new(

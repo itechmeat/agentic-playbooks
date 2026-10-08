@@ -69,6 +69,8 @@ mod schema_test;
 mod server_auth_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
+#[path = "suite/validate_fork_test.rs"]
+mod validate_fork_test;
 #[path = "suite/validate_goal_test.rs"]
 mod validate_goal_test;
 #[path = "suite/validate_inbox_test.rs"]

@@ -939,6 +939,55 @@ pub enum EventPayload {
         #[serde(default)]
         sources: Vec<String>,
     },
+    /// A node inside the branches of a fork that declares
+    /// `fork.on_branch_failure` (issue #195) finished failed, and the fork's
+    /// policy took over: `fail_fast` cancels the other branches and routes to
+    /// `target` (the fork's `on_failure`), `cancel_siblings` cancels them and
+    /// lets the failed node follow its own routing (`target` absent). Written
+    /// right after the failed node's `NodeFinished`. Under `fail_fast` the
+    /// failed node's own outgoing edges are not taken (the fold records that),
+    /// so a resume does not follow them either. Additive: old logs never carry
+    /// it, and a checkpoint (the cancellations' `NodeFinished`, the next node's)
+    /// follows it.
+    BranchFailed {
+        #[serde(default)]
+        fork: String,
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        policy: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    /// One node a fork's branch-failure policy cancelled (issue #195): a
+    /// running branch node that was interrupted, a branch head that never
+    /// started, or a fork join that will now never run. Written after that
+    /// node's `cancelled` `NodeFinished`; the cancelled node routes nowhere, so
+    /// a resume does not run what lies behind it. Additive.
+    BranchCancelled {
+        #[serde(default)]
+        fork: String,
+        #[serde(default)]
+        node: String,
+        /// The branch node whose failure triggered the cancellation.
+        #[serde(default)]
+        failed_node: String,
+    },
+    /// A join with `require: all_succeeded` (issue #195) refused to run
+    /// because an incoming branch arrived failed or can never arrive (a dead
+    /// arrival). Written between the join's `NodeStarted` and its failed
+    /// `NodeFinished`; the join then follows only a failure route (a
+    /// conditional or fallback edge, or `defaults.on_failure`), and without one
+    /// the run fails with `reason`. Additive.
+    JoinRefused {
+        #[serde(default)]
+        node: String,
+        /// The inputs that did not arrive succeeded, in incoming-edge order.
+        #[serde(default)]
+        sources: Vec<String>,
+        #[serde(default)]
+        reason: String,
+    },
     /// An interactive node's agent asked the user a question (spec
     /// 2026-07-20-interactive-nodes). Written by drive when it observes a new
     /// `questions.jsonl` entry for the node (single-writer, like

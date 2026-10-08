@@ -21,6 +21,10 @@ pub enum JoinReadiness {
     ReadySuccess,
     /// Ready, but one or more branches failed - the join is considered failed (spec 8.4).
     ReadyFailure,
+    /// Ready, but the join requires every branch to succeed (`require:
+    /// all_succeeded`, issue #195) and at least one arrived failed or can never
+    /// arrive: the node does not run and fails with a `join_refused` record.
+    Refused,
 }
 
 fn succeeded(s: NodeStatus) -> bool {
@@ -212,18 +216,30 @@ pub fn unhandled_failure(playbook: &Playbook, events: &[crate::event::Event]) ->
 /// a caller that takes these edges can see which carry `max_traversals` and
 /// journal a traversal. A bounded edge that has reached its cap is excluded
 /// (treated as non-matching), exactly as it is dropped from `successors`.
+///
+/// A node whose routing a fork's branch-failure policy decided against
+/// (`state.route_suppressed`, issue #195) selects nothing, and a join that
+/// refused under `require: all_succeeded` (`state.refused_joins`) selects only
+/// a failure route, never an unconditional edge.
 pub fn selected_edges<'a>(playbook: &'a Playbook, from: &str, state: &RunState) -> Vec<&'a Edge> {
+    if state.route_suppressed.contains(from) {
+        return Vec::new();
+    }
     let out: Vec<&Edge> = playbook.edges.iter().filter(|e| e.from == from).collect();
+    let refused = state.refused_joins.contains(from);
     let unconditional: Vec<&Edge> = out
         .iter()
         .copied()
         .filter(|e| e.condition.is_none() && !e.fallback && edge_available(e, state))
         .collect();
-    if !unconditional.is_empty() {
+    if !unconditional.is_empty() && !refused {
         return unconditional;
     }
     if let Some((_, e)) = out.iter().copied().enumerate().find(|(i, e)| {
-        !e.fallback && edge_available(e, state) && edge_matches_at(e, Some(*i), from, state)
+        !e.fallback
+            && e.condition.is_some()
+            && edge_available(e, state)
+            && edge_matches_at(e, Some(*i), from, state)
     }) {
         return vec![e];
     }
@@ -507,6 +523,13 @@ pub fn join_readiness(
         .map(|e| arrival(playbook, node, &e.from, state, &live))
         .collect();
     let waiting = arrivals.iter().any(|a| matches!(a, Arrival::Pending));
+    // `require: all_succeeded` (issue #195): once nothing can still arrive,
+    // every input must have arrived succeeded. A dead arrival is exactly what
+    // this option exists to refuse, so it is weighed before the vacuous
+    // nothing-arrived rule below.
+    if requires_all_succeeded(playbook, node) && !waiting && !all_arrived_succeeded(&arrivals) {
+        return JoinReadiness::Refused;
+    }
     let delivered = || {
         arrivals.iter().filter_map(|a| match a {
             Arrival::Delivered(s) => Some(*s),
@@ -545,6 +568,41 @@ pub fn join_readiness(
             }
         }
     }
+}
+
+/// Whether a join carries `require: all_succeeded` on any incoming edge (issue
+/// #195).
+pub fn requires_all_succeeded(playbook: &Playbook, node: &str) -> bool {
+    incoming(playbook, node).iter().any(|e| e.require.is_some())
+}
+
+fn all_arrived_succeeded(arrivals: &[Arrival]) -> bool {
+    arrivals
+        .iter()
+        .all(|a| matches!(a, Arrival::Delivered(s) if succeeded(*s)))
+}
+
+/// The incoming sources of a `require: all_succeeded` join that did not arrive
+/// succeeded (dead, or delivered failed), in incoming-edge order: what a
+/// `join_refused` record names. Same arrivals as [`join_readiness`].
+pub fn refused_inputs(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Vec<String> {
+    let live = live_nodes(playbook, state, active);
+    let mut out: Vec<String> = Vec::new();
+    for e in incoming(playbook, node) {
+        let ok = matches!(
+            arrival(playbook, node, &e.from, state, &live),
+            Arrival::Delivered(s) if succeeded(s)
+        );
+        if !ok && !out.contains(&e.from) {
+            out.push(e.from.clone());
+        }
+    }
+    out
 }
 
 /// The incoming sources of `node` that can never arrive, in incoming-edge order:
@@ -1113,6 +1171,7 @@ edges:
             fallback: false,
             join: None,
             max_traversals: None,
+            require: None,
         };
         let mut state = RunState::default();
         if let Some(text) = output {

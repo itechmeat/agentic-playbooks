@@ -65,6 +65,58 @@ impl JoinMode {
     }
 }
 
+/// What a fork does when a node inside one of its branches fails (issue
+/// #195): the `fork.on_branch_failure` value of a forking node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchFailurePolicy {
+    /// Today's behavior: the other branches keep running and the failed
+    /// node follows its own routing.
+    #[default]
+    Wait,
+    /// The first failed branch node cancels every other branch and the run
+    /// goes to `fork.on_failure`; the fork's join never runs.
+    FailFast,
+    /// The other branches are cancelled, and the failed node follows its own
+    /// routing (its failure edge).
+    CancelSiblings,
+}
+
+impl BranchFailurePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BranchFailurePolicy::Wait => "wait",
+            BranchFailurePolicy::FailFast => "fail_fast",
+            BranchFailurePolicy::CancelSiblings => "cancel_siblings",
+        }
+    }
+}
+
+/// A forking node's branch-failure behavior (issue #195). Only meaningful
+/// on a node with two or more unconditional outgoing edges (validator V77).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkSpec {
+    #[serde(default)]
+    pub on_branch_failure: BranchFailurePolicy,
+    /// Where `fail_fast` routes the run: required with `fail_fast`, refused
+    /// with any other policy, and never a node of the fork's own branches
+    /// (validator V78).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<String>,
+}
+
+/// What a join demands of its incoming branches beyond its `join` mode
+/// (issue #195): the `require` value of an incoming edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinRequire {
+    /// Every incoming branch must arrive succeeded. A branch that arrived
+    /// failed, or can never arrive (a dead arrival), refuses the join: the
+    /// node does not run and fails instead.
+    AllSucceeded,
+}
+
 /// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
 /// from it, so this is the one list of node types (the dashboard's generated
 /// types, the authoring guide's doc test).
@@ -1035,6 +1087,10 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "is_false")]
     pub auto_decide_ok: bool,
     // --- end decision-model opt-ins ---
+    /// Branch-failure behavior of a forking node (issue #195). Absent: the
+    /// `wait` default. Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkSpec>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }
@@ -1394,6 +1450,11 @@ pub struct Edge {
     /// of 0 is rejected (validator V30).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_traversals: Option<u32>,
+    /// What the join this edge feeds requires of its branches (issue #195).
+    /// Only valid on an edge into a node that synchronizes, and not with
+    /// `join: any` (validator V79). Absent: the join judges by its mode alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require: Option<JoinRequire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]

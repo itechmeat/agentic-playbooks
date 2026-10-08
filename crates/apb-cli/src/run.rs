@@ -1094,6 +1094,15 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
+    // Issue #195: fork branch-failure policies and refused joins.
+    for b in apb_engine::fork_view::entries(&view.events) {
+        println!(
+            "  {} {}: {}",
+            b.kind,
+            sanitize_for_terminal(&b.node, QUESTION_TEXT_MAX),
+            sanitize_for_terminal(&b.detail, QUESTION_TEXT_MAX)
+        );
+    }
     if let Some(reason) = view.failure_reason() {
         println!(
             "  failure: {}",

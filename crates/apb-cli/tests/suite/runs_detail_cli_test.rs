@@ -240,3 +240,32 @@ fn runs_json_is_the_run_status_object() {
     assert_eq!(v["execution"]["mode"], "host");
     assert_eq!(v["run_status"], "succeeded");
 }
+
+/// Issue #195: `apb runs <id>` lists what a fork's branch-failure policy did
+/// and which joins refused.
+#[test]
+fn runs_with_an_id_lists_branch_failures() {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/fork-1");
+    fs::create_dir_all(&run).unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1790000002000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":1790000002001,"type":"node_finished","node":"a","status":"failed","attempt":1,"output":"boom","artifacts":[]}"#,
+        r#"{"seq":2,"ts":1790000002002,"type":"branch_failed","fork":"start","node":"a","policy":"fail_fast","target":"rejected"}"#,
+        r#"{"seq":3,"ts":1790000002003,"type":"node_finished","node":"b","status":"cancelled","attempt":1,"output":"cancelled","artifacts":[]}"#,
+        r#"{"seq":4,"ts":1790000002004,"type":"branch_cancelled","fork":"start","node":"b","failed_node":"a"}"#,
+        r#"{"seq":5,"ts":1790000002005,"type":"run_finished","outcome":"failed"}"#,
+    ];
+    fs::write(run.join("events.jsonl"), journal.join("\n") + "\n").unwrap();
+    apb()
+        .args(["runs", "fork-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  branch_failed a: fork `start` fail_fast: failed, the run goes to `rejected`\n",
+        ))
+        .stdout(predicate::str::contains(
+            "  branch_cancelled b: fork `start`: cancelled after `a` failed\n",
+        ));
+}

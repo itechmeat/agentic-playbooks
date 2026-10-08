@@ -194,6 +194,9 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
             if let Some(profile) = declared_profile(&n.kind) {
                 o["profile"] = ref_value(profile);
             }
+            if let Some(fork) = &n.fork {
+                o["fork"] = json!(fork);
+            }
             o
         })
         .collect();
@@ -213,6 +216,9 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
             }
             if let Some(max) = e.max_traversals {
                 o["max_traversals"] = json!(max);
+            }
+            if let Some(require) = &e.require {
+                o["require"] = json!(require);
             }
             o
         })

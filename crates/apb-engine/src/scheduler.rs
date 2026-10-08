@@ -43,6 +43,7 @@ pub use crate::run_config::RunMode;
 mod cache;
 mod control_apply;
 mod entry;
+mod fork;
 mod goal;
 mod handoff;
 // host execution mode (0.23.0)
@@ -901,6 +902,19 @@ fn drive_inner(
                 // exactly the sequential semantics (Cancelled, output
                 // "cancelled"). The guard unregisters at the end of the batch.
                 let _fan = fanout.register(&cancel);
+                // One flag per member as well (issue #195): a fork's
+                // branch-failure policy interrupts the members of ITS branches
+                // only, not an unrelated branch running in the same batch. A
+                // member polls its own flag; the batch-wide `cancel` above and
+                // the run-level stop reach it through `member_flags` too.
+                let member_flags: BTreeMap<String, Arc<AtomicBool>> = batch
+                    .iter()
+                    .map(|n| (n.clone(), Arc::new(AtomicBool::new(false))))
+                    .collect();
+                let _member_fans: Vec<_> =
+                    member_flags.values().map(|f| fanout.register(f)).collect();
+                // Members a fork's policy interrupted or kept from starting.
+                let mut fork_killed: BTreeSet<String> = BTreeSet::new();
                 // Node, terminal status and output per branch. The output is
                 // kept (not just the status) because `defaults.on_failure:
                 // stop` reports the failing node's own words as the run's
@@ -1003,6 +1017,15 @@ fn drive_inner(
                         write_off_cancelled(log, &mut batch_results, chunk)?;
                         continue;
                     }
+                    // Members a fork's branch-failure policy (issue #195)
+                    // already cancelled never start; the rest of the chunk is
+                    // admitted as usual.
+                    let (fork_off, chunk): (Vec<String>, Vec<String>) =
+                        chunk.iter().cloned().partition(|n| fork_killed.contains(n));
+                    write_off_cancelled(log, &mut batch_results, &fork_off)?;
+                    if chunk.is_empty() {
+                        continue;
+                    }
                     // A pause: no NEW work, and NOTHING is written off. A paused
                     // run is resumable and `Cancelled` is terminal for
                     // `NodeStatus::is_finished`, so journaling a queued member
@@ -1028,7 +1051,7 @@ fn drive_inner(
                     // it always was - an optimization, not the semantics.
                     let mut spawn: Vec<&String> = Vec::new();
                     let mut ctxs: BTreeMap<String, cache::NodeCacheCtx> = BTreeMap::new();
-                    for n in chunk {
+                    for n in &chunk {
                         // Started before the lookup, exactly as in the sequential
                         // arm: a hit is a node that ran, it just ran once before.
                         log.append(EventPayload::NodeStarted {
@@ -1106,7 +1129,7 @@ fn drive_inner(
                             let node = n.clone();
                             let op = prompt_overrides.remove(n.as_str());
                             let tx = tx.clone();
-                            let cancel_c = Arc::clone(&cancel);
+                            let cancel_c = Arc::clone(&member_flags[n.as_str()]);
                             let scrub_c = env_scrub.clone();
                             let journal_ref = &journal;
                             let decisions_ref = decisions.as_ref();
@@ -1194,6 +1217,17 @@ fn drive_inner(
                                 decisions.as_ref(),
                                 &journal,
                             )?;
+                            // A failure a fork's policy takes over (issue
+                            // #195) interrupts the other members of that
+                            // fork's branches now, instead of waiting them out.
+                            if let Some(f) = fork::detect(&playbook, &node, status, mode) {
+                                for m in batch.iter().filter(|m| f.in_scope(m)) {
+                                    if batch_results.iter().all(|(n, _, _)| n != m) {
+                                        member_flags[m.as_str()].store(true, Ordering::Relaxed);
+                                        fork_killed.insert(m.clone());
+                                    }
+                                }
+                            }
                             // If this branch successfully fed a join:any - cancel the others.
                             if status == NodeStatus::Succeeded {
                                 let state_peek = RunState::fold(&read_all(run_dir)?);
@@ -1220,6 +1254,9 @@ fn drive_inner(
                                         });
                                 if feeds_ready_any {
                                     cancel.store(true, Ordering::Relaxed);
+                                    for f in member_flags.values() {
+                                        f.store(true, Ordering::Relaxed);
+                                    }
                                 }
                             }
                         }
@@ -1328,12 +1365,44 @@ fn drive_inner(
                     }
                 }
 
+                // Fork branch-failure policies (issue #195), in batch order:
+                // journaled before the routing below reads the state.
+                let fork_failures: Vec<fork::ForkFailure> = batch
+                    .iter()
+                    .filter_map(|n| {
+                        let (_, st, _) = batch_results.iter().find(|(bn, _, _)| bn == n)?;
+                        fork::detect(&playbook, n, *st, mode)
+                    })
+                    .collect();
+                // The members the policies interrupted, each journaled with the
+                // first failure whose fork covers it.
+                let mut interrupted: Vec<String> = batch
+                    .iter()
+                    .filter(|n| {
+                        fork_killed.contains(*n)
+                            && batch_results
+                                .iter()
+                                .any(|(bn, s, _)| bn == *n && *s == NodeStatus::Cancelled)
+                    })
+                    .cloned()
+                    .collect();
+                for f in &fork_failures {
+                    fork::begin(log, f)?;
+                    let mine: Vec<String> = interrupted
+                        .iter()
+                        .filter(|n| f.in_scope(n))
+                        .cloned()
+                        .collect();
+                    interrupted.retain(|n| !mine.contains(n));
+                    fork::mark_interrupted(log, f, &mine)?;
+                }
                 let state_now = RunState::fold(&read_all(run_dir)?);
 
                 // The declared failure policy (spec 2026-07-26), the batch
                 // counterpart of the sequential check below. Scanned in batch
                 // order, not completion order, so two failing branches always
-                // name the same one.
+                // name the same one. A `fail_fast` fork already routed its
+                // failures.
                 let unhandled: Vec<&(String, NodeStatus, String)> = batch
                     .iter()
                     .filter_map(|n| {
@@ -1341,6 +1410,9 @@ fn drive_inner(
                             bn == n
                                 && matches!(s, NodeStatus::Failed | NodeStatus::TimedOut)
                                 && parallel::successors(&playbook, bn, &state_now).is_empty()
+                                && !fork_failures
+                                    .iter()
+                                    .any(|f| &f.node == bn && f.fails_fast())
                         })
                     })
                     .collect();
@@ -1372,6 +1444,9 @@ fn drive_inner(
                         Some(_) => {}
                     }
                     advance_frontier(&playbook, node, &state_now, &mut frontier, &batch, log)?;
+                }
+                for f in &fork_failures {
+                    fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
                 }
                 match frontier.is_empty() {
                     true => {
@@ -1564,29 +1639,33 @@ fn drive_inner(
                 std::thread::sleep(AWAIT_CONTROL_POLL);
                 continue;
             }
-        } else if parallel::is_join(&playbook, &current)
-            && matches!(
-                parallel::join_readiness(
-                    &playbook,
-                    &current,
-                    &state,
-                    &active_set(&current, &frontier, &[])
-                ),
-                JoinReadiness::ReadyFailure
-            )
-        {
-            // A join node whose input branch has failed (spec 8.4): we do not
-            // execute the node, we mark it a failure and route it into the usual failure
-            // handling (autonomous branching / supervised wake).
+        } else if let Some(verdict) = fork::failing_barrier(
+            &playbook,
+            &current,
+            &state,
+            &active_set(&current, &frontier, &[]),
+        ) {
+            // A join node whose input branch has failed (spec 8.4), or that
+            // requires every branch to succeed and one did not (issue #195): we
+            // do not execute the node, we mark it a failure and route it into
+            // the usual failure handling (autonomous branching / supervised
+            // wake). A refusal is journaled with the inputs it refused on.
             steps += 1;
             log.append(EventPayload::NodeStarted {
                 node: current.clone(),
                 attempt: 1,
             })?;
-            (
-                NodeStatus::Failed,
-                "join: upstream branch failed".to_string(),
-            )
+            let output = match verdict {
+                JoinReadiness::Refused => fork::refuse_join(
+                    log,
+                    &playbook,
+                    &current,
+                    &state,
+                    &active_set(&current, &frontier, &[]),
+                )?,
+                _ => "join: upstream branch failed".to_string(),
+            };
+            (NodeStatus::Failed, output)
         } else if let NodeKind::Playbook {
             playbook: child_ref,
             instruction: node_instr,
@@ -2299,12 +2378,36 @@ fn drive_inner(
             }
         }
 
+        // A fork's branch-failure policy (issue #195) takes this failure over:
+        // journaled before the routing below reads the state.
+        let fork_failure = fork::detect(&playbook, &current, status, mode);
+        if let Some(f) = &fork_failure {
+            fork::begin(log, f)?;
+        }
         let state_now = RunState::fold(&read_all(run_dir)?);
         let routes = !parallel::successors(&playbook, &current, &state_now).is_empty();
 
+        // A join refused under `require: all_succeeded` (issue #195) with no
+        // failure route to take: the run fails with the refusal as its reason,
+        // whatever `defaults.on_failure` says short of naming a handler.
+        if !routes
+            && state_now.refused_joins.contains(&current)
+            && playbook.defaults.on_failure.target_for(&current).is_none()
+        {
+            return Ok(RunResult {
+                run_id,
+                outcome: stop_on_unhandled_failure(log, &current, &output, &mut frontier)?,
+            });
+        }
+
         // The declared failure policy (spec 2026-07-26): the node failed and
-        // nothing takes that failure.
-        if !routes && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut) {
+        // nothing takes that failure. A `fail_fast` fork already routed it.
+        if !routes
+            && !fork_failure
+                .as_ref()
+                .is_some_and(fork::ForkFailure::fails_fast)
+            && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+        {
             // A declared stop fires even when another branch is still in the
             // frontier: a failure the author called fatal must not be outlived
             // by a sibling and reported as success.
@@ -2326,6 +2429,9 @@ fn drive_inner(
         }
 
         advance_frontier(&playbook, &current, &state_now, &mut frontier, &[], log)?;
+        if let Some(f) = &fork_failure {
+            fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
+        }
         if frontier.is_empty() {
             // Branch completed with no ready successors and no other active
             // branches: dead-end (or unready join with no chance) - not finish.

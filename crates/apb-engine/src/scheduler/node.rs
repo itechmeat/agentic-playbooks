@@ -3513,6 +3513,9 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))
         )
+        // A `require: all_succeeded` join (issue #195) may refuse, and only the
+        // sequential path journals a refusal.
+        && !(parallel::is_join(playbook, node) && parallel::requires_all_succeeded(playbook, node))
 }
 
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
