@@ -24,6 +24,7 @@
 //!    to `runs/<id>/decisions/<seq>.json`.
 
 pub(crate) mod completion;
+pub mod host_task;
 pub(crate) mod judge;
 mod providers;
 mod redact;
@@ -54,6 +55,17 @@ use providers::Chains;
 pub(crate) fn snapshot(root: &Path) -> Option<EffectiveDecisions> {
     use apb_core::decisions::Resolution;
     match apb_core::decisions::resolve(root) {
+        // Host-task decisions alone (on by default with any provider) need
+        // no snapshot: they read the live file when asked (issue #193), and
+        // a run with every engine use off keeps the manifest it always had.
+        Resolution::Active(eff)
+            if eff
+                .uses
+                .keys()
+                .all(|k| k == apb_core::decisions::HOST_TASK_USE) =>
+        {
+            None
+        }
         Resolution::Active(eff) => Some(eff),
         Resolution::Invalid(e) => {
             eprintln!(

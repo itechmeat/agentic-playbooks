@@ -1,5 +1,6 @@
 pub mod adapter;
 mod agent_home;
+pub mod attempt_models;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;

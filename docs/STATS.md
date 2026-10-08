@@ -63,11 +63,21 @@ Per playbook version:
 - **goal**: per criterion, how often it passed over the runs that checked it
   automatically, failed, could not run (`error`), or was left to a person
   (`manual`), from the `goal_checked` events.
+- **models**: how many attempts ran on each model, and `model_mismatch`, how
+  many of them ran on another model than the node profile's primary model
+  (from the run manifest). A CLI attempt ran on the model its
+  `attempt_started` names; a host attempt (host execution mode, or the host
+  fallback) on the model the host reported in `host_task_submitted.model`,
+  or `unreported` when it named none. In host mode the profile's model is
+  only a hint, so this is where a run that went entirely to another model
+  shows. Two names count as the same model when, lowercased without
+  separators, one contains the other (`opus` and `claude-opus-4-1`).
 
 Per node: the runs it ran in; first pass (its first result was a success on
 attempt 1, with no retry, fallback or later re-entry); retries, fallbacks and
 re-entries; the median duration (`node_started` to `node_finished`) and, when
-the node declares `expected_duration`, how many executions took longer.
+the node declares `expected_duration`, how many executions took longer; the
+models its attempts ran on and `model_mismatch`.
 
 Every rate is printed with its count (`7/9 (78%)`), and a version with fewer
 than 10 runs carries a note: small samples mislead.
@@ -92,6 +102,7 @@ than 10 runs carries a note: small samples mislead.
       "spend": { "runs_with_usage": 0, "tokens": { "total": 0, "runs": 0 },
                  "runs_with_cost": 0, "cost_usd": 0.0 },
       "deliverable_missing": 0, "output_fields_missing": 0,
+      "models": { "GLM-5.3-Flash": 3 }, "model_mismatch": 3,
       "goal": [ { "index": 0, "description": "tests pass", "check": "script",
                   "checked": 2, "passed": { "count": 1, "of": 2, "rate": 0.5 },
                   "failed": 1, "errors": 0, "manual": 0 } ],
@@ -99,7 +110,8 @@ than 10 runs carries a note: small samples mislead.
                    "retries": 1, "fallbacks": 0, "reentries": 0,
                    "duration": { "count": 2, "median_ms": 4000, "max_ms": 4000 },
                    "expected_s": 10, "over_expected": { "count": 0, "of": 2, "rate": 0.0 },
-                   "deliverable_missing": 0, "output_fields_missing": 0 } ],
+                   "deliverable_missing": 0, "output_fields_missing": 0,
+                   "models": { "GLM-5.3-Flash": 3 }, "model_mismatch": 3 } ],
       "note": "2 runs: fewer than 10, the rates are indicative only"
     }
   ],

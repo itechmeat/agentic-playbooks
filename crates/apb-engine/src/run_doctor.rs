@@ -50,7 +50,7 @@ impl RunCheck {
 /// Diagnoses run `run_id` under project `root`.
 ///
 /// Returns the checks in a fixed order - run, nodes, attempts, autonomy,
-/// driver, workdir lock, control backlog, supervisor actions - so two reports
+/// models, driver, workdir lock, control backlog, supervisor actions - so two reports
 /// of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
@@ -68,6 +68,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(supervisor_wait_check(events));
     checks.extend(attempt_checks(events));
     checks.extend(autonomy_check(&run_dir));
+    checks.extend(model_check(&run_dir, events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(
         root,
@@ -76,6 +77,18 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.push(control_check(&run_dir)?);
     checks.push(supervisor_action_check(events));
     Ok(checks)
+}
+
+/// Issue #193: one warning per attempt that ran on another model than its
+/// node's profile names (a host picks its own model; a fallback step runs
+/// another), so a run whose figures look off says why. Nothing when every
+/// attempt matches or no model is known.
+fn model_check(run_dir: &Path, events: &[Event]) -> Vec<RunCheck> {
+    let models = crate::attempt_models::run_attempt_models(run_dir, events);
+    crate::attempt_models::mismatch_lines(&models)
+        .into_iter()
+        .map(|line| RunCheck::new(WARN, "model", line))
+        .collect()
 }
 
 /// Whether any check is blocking, for the caller's exit code.

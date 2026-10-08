@@ -61,12 +61,15 @@ fn render_types() -> String {
         apb_engine::run_view::RunUsage::decl(&cfg),
         apb_engine::run_view::RunDecisions::decl(&cfg),
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
+        // Issue #193: the model each attempt actually ran on.
+        apb_engine::attempt_models::AttemptModel::decl(&cfg),
         // --- 0.23.0 stats (C3) ---
         apb_engine::run_stats::Rate::decl(&cfg),
         apb_engine::run_stats::PerRun::decl(&cfg),
         apb_engine::run_stats::Waits::decl(&cfg),
         apb_engine::run_stats::Outcomes::decl(&cfg),
         apb_engine::run_stats::Spend::decl(&cfg),
+        apb_engine::run_stats::models::ModelUse::decl(&cfg),
         apb_engine::run_stats::GoalStats::decl(&cfg),
         apb_engine::run_stats::NodeStats::decl(&cfg),
         apb_engine::run_stats::VersionStats::decl(&cfg),

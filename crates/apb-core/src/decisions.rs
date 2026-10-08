@@ -39,8 +39,16 @@ pub const CATALOG_RANK_MAX_REQUESTS_PER_DAY: u32 = 200;
 /// the task at `p` at or above it (`uses.catalog_rank.thresholds.covered`).
 /// A starting point to be measured, like every default threshold.
 pub const CATALOG_COVERED_CUT: f64 = 0.8;
+/// `uses.host_task.max_requests_per_day` when the file sets none: the cap
+/// on decisions a host task or a script asks outside any run, per project
+/// and UTC day (inside a run the run's budget applies).
+pub const HOST_TASK_MAX_REQUESTS_PER_DAY: u32 = 200;
+/// The use of `apb decide` and the MCP tool `decision_ask` (issue #193). On
+/// by default (`advise`) whenever the file configures a provider; the file
+/// can switch it off with `uses.host_task: { mode: off }`.
+pub const HOST_TASK_USE: &str = "host_task";
 /// The known use names (`uses.<name>`).
-pub const USE_NAMES: [&str; 8] = [
+pub const USE_NAMES: [&str; 9] = [
     "judge_node",
     "judge_edge",
     "completion_check",
@@ -49,6 +57,7 @@ pub const USE_NAMES: [&str; 8] = [
     "review_triage",
     "routing",
     "catalog_rank",
+    "host_task",
 ];
 
 /// A use's mode, ordered from least to most effect.
@@ -294,8 +303,10 @@ pub struct UseSettings {
     pub mode: DecisionMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub thresholds: BTreeMap<String, f64>,
-    /// `catalog_rank` only (issue #165 Part 16): the most requests per
-    /// project and UTC day (default [`CATALOG_RANK_MAX_REQUESTS_PER_DAY`]).
+    /// `catalog_rank` and `host_task` only (issue #165 Part 16, issue
+    /// #193): the most requests per project and UTC day outside a run
+    /// (default [`CATALOG_RANK_MAX_REQUESTS_PER_DAY`],
+    /// [`HOST_TASK_MAX_REQUESTS_PER_DAY`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_requests_per_day: Option<u32>,
     // --- enforce settings (issue #165 Part 14) ---
@@ -542,13 +553,11 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
     if let Some(name) = doc.uses.keys().find(|k| !USE_NAMES.contains(&k.as_str())) {
         return Err(format!("unknown use `{name}` under uses"));
     }
-    if let Some((name, _)) = doc
-        .uses
-        .iter()
-        .find(|(k, u)| u.max_requests_per_day.is_some() && k.as_str() != "catalog_rank")
-    {
+    if let Some((name, _)) = doc.uses.iter().find(|(k, u)| {
+        u.max_requests_per_day.is_some() && !matches!(k.as_str(), "catalog_rank" | "host_task")
+    }) {
         return Err(format!(
-            "uses.{name}.max_requests_per_day is only for catalog_rank"
+            "uses.{name}.max_requests_per_day is only for catalog_rank and host_task"
         ));
     }
     let mut providers = Vec::new();
@@ -673,6 +682,17 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         return Err("no providers configured".into());
     }
     let mut uses = doc.uses;
+    // Host-task decisions are allowed by default once a provider is
+    // configured (issue #193): the asker reads the answer, the engine never
+    // acts on it. `uses.host_task: { mode: off }` switches them off.
+    uses.entry(HOST_TASK_USE.to_string())
+        .or_insert_with(|| UseSettings {
+            mode: DecisionMode::Advise,
+            thresholds: BTreeMap::new(),
+            max_requests_per_day: None,
+            allow_uncalibrated: false,
+            max_actions: None,
+        });
     if let Some(cc) = uses.get_mut("completion_check") {
         cc.thresholds
             .entry("final_result".into())
@@ -1248,9 +1268,18 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
         assert_eq!(eff.budget, Budget::default());
         assert_eq!(eff.privacy, Privacy::default());
         assert_eq!(eff.threshold("completion_check", "final_result"), Some(0.2));
+        // A provider alone turns on host-task decisions (issue #193) and
+        // nothing else; switching that use off leaves every use off.
         write(
             cfg.path(),
             "providers: [{ id: a, kind: systemone, base_url: 'http://127.0.0.1:1', model: m }]\n",
+        );
+        let eff = resolve_in(cfg.path(), root.path()).active().unwrap();
+        assert_eq!(eff.uses.keys().collect::<Vec<_>>(), [HOST_TASK_USE]);
+        assert_eq!(eff.mode_for(HOST_TASK_USE), DecisionMode::Shadow);
+        write(
+            cfg.path(),
+            "providers: [{ id: a, kind: systemone, base_url: 'http://127.0.0.1:1', model: m }]\nuses: { host_task: { mode: off } }\n",
         );
         assert_eq!(resolve_in(cfg.path(), root.path()), Resolution::AllOff);
     }
@@ -1325,7 +1354,7 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
 
         project(
             root.path(),
-            "decisions: { uses: { completion_check: { mode: off } } }\n",
+            "decisions: { uses: { completion_check: { mode: off }, host_task: { mode: off } } }\n",
         );
         assert_eq!(resolve_in(cfg.path(), root.path()), Resolution::AllOff);
 

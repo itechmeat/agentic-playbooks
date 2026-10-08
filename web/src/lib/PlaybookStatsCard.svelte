@@ -2,7 +2,7 @@
   import type { StatsReport } from './api.gen'
   import { Badge } from '$lib/components/ui/badge'
   import { Spinner } from '$lib/components/ui/spinner'
-  import { perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
+  import { modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
 
   // Cross-run metrics of one playbook (C3), per version, newest first, from
   // `GET /api/stats`. The page loads the report; this card only shows it and
@@ -51,6 +51,10 @@
           {#if spendText(v)}
             <dt class="text-muted-foreground">spend</dt>
             <dd>{spendText(v)}</dd>
+          {/if}
+          {#if modelsText(v)}
+            <dt class="text-muted-foreground">models</dt>
+            <dd data-testid="playbook-stats-models">{modelsText(v)}</dd>
           {/if}
         </dl>
         {#if v.goal.length}

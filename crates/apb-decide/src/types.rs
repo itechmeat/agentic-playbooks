@@ -18,6 +18,9 @@ pub enum UseSite {
     ReviewTriage,
     Routing,
     CatalogRank,
+    /// A bounded decision a host task (or a script) asked through `apb
+    /// decide` or the MCP tool `decision_ask` (issue #193).
+    HostTask,
 }
 
 impl UseSite {
@@ -32,6 +35,7 @@ impl UseSite {
             UseSite::ReviewTriage => "review_triage",
             UseSite::Routing => "routing",
             UseSite::CatalogRank => "catalog_rank",
+            UseSite::HostTask => "host_task",
         }
     }
 }

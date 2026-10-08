@@ -39,8 +39,8 @@ Reads (read-only):
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
-| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `pending_tasks` and `execution`: see Host execution mode below |
-| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below) |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `pending_tasks` and `execution`: see Host execution mode below |
+| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below); `inline_prompt: false` drops each task's inline `prompt` and `role_prompt` (default `true`) for a host whose subagents read `prompt_path` and `role_path` |
 | `run_events` | Run events, optionally from a given seq |
 | `run_report` | Short run summary; carries `usage`, `decisions`, `goal`, `commits` and `unknown_events` like `run_status` |
 | `profile_list` | Profiles (project + global) with bundle trust status |
@@ -90,6 +90,7 @@ Mutations (destructive):
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
 | `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`, or a host task submitted as `blocked`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
 | `run_task_submit` | Host execution mode: submit a subagent's reply to a pending host task (`run_id`, `task_id`, `status` `succeeded`, `failed` or `blocked`, `output` verbatim, optional `usage` and `note`); attributed `submitted_by: host` with the MCP client name. A parent run accepts its sub-playbook runs' tasks |
+| `decision_ask` | Ask the configured decision providers a bounded question (`kind` `choose`, `rank`, `filter`, `map`, `is` or `score`, `question`, `options`, `items`, `criteria`), from a host task or a script; with `run_id` (and `node_id`) it is journaled in the run as `decision_made` with `use_site: host_task` and the run's budget applies. Returns `answered: true` with the answer, or `answered: false` with `refused` and a `reason` (see `docs/DECISIONS.md`, "Host-task decisions") |
 | `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
 | `profile_move` | Copy a profile between scopes (the source remains) |
 | `profile_delete` | Delete a profile (blocked on references unless forced) |
@@ -318,14 +319,20 @@ until someone answers it.
 CLI: every agent step becomes a host task the calling session executes with
 its own subagents. `run_wait` returns `needs: host_task` with
 `pending_tasks` (`run_id`, `task_id`, `node`, `attempt`, `prompt` with the
-report contract, `role_prompt`, `skills`, `workdir`, `env`, `outputs`,
+report contract, `role_prompt`, `prompt_path` and `role_path` (the absolute
+paths of the same texts: the host tells its subagent to read them instead of
+copying the prompt; `inline_prompt: false` on `run_wait` or
+`supervisor_wait_event` then drops the inline texts), `skills`, `workdir`, `env`, `outputs`,
 `deadline`, `model_hint`, `hint_source`, `fallback_of`, `hint_note`,
 `execution_note`,
 `requested_at`); the session runs each with its own subagent tool, never by
 launching an agent CLI (the execution contract every task carries as
 `execution_note`, stated once in `docs/HOST-INTEGRATION.md`), and submits its final
-reply with `run_task_submit` (optionally with the `model` it ran on), then
-waits again. `model_hint` is advisory only: the model the profile declares for a
+reply with `run_task_submit` (optionally with the `model` it ran on, which
+`run_status` `attempt_models` then shows against the profile's), then
+waits again. A task may ask bounded decisions of the configured providers
+with `decision_ask` (or `apb decide`): that is not running the task
+elsewhere. `model_hint` is advisory only: the model the profile declares for a
 fallback entry or a routed tier; `hint_source` names the chain step and
 `fallback_of` what closed the previous one, so a fallback task reads as a
 declaration, not as the model that did the work. `run_status` carries the run's `execution` block (absent on a `cli`

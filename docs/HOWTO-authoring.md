@@ -235,6 +235,10 @@ without a `decisions.yaml` that enables the use (validator V74 notes them).
   same-executor retries.
 - `supervisor: { pre_triage: enforce }`: let wake pre-triage post a retry
   itself (at most three per run by default).
+- `defaults.host_decisions: off`: refuse `apb decide` and `decision_ask`
+  calls that name this playbook's runs (the default `allow` lets a host task,
+  a script or an agent step ask the configured decision providers a bounded
+  question; see `docs/DECISIONS.md`, "Host-task decisions").
 
 ### Run provenance
 

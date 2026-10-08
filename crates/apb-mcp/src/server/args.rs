@@ -151,6 +151,11 @@ pub struct RunWaitArgs {
     /// return costs a model turn.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Keep each pending task's `prompt` and `role_prompt` text inline
+    /// (default true). Pass false when your subagents read files: each task
+    /// carries `prompt_path` and `role_path` either way.
+    #[serde(default)]
+    pub inline_prompt: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -263,6 +268,11 @@ pub struct SupervisorWaitArgs {
     /// (default 50000, max 1800000). Longer is cheaper: each return is a
     /// model turn.
     pub timeout_ms: Option<u64>,
+    /// Keep each pending host task's `prompt` and `role_prompt` text inline
+    /// (default true). Pass false when your subagents read files: each task
+    /// carries `prompt_path` and `role_path` either way.
+    #[serde(default)]
+    pub inline_prompt: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -639,3 +649,34 @@ pub struct RunTaskSubmitArgs {
     pub workspace: Option<String>,
 }
 // --- end host execution mode ---
+
+// --- issue #193: host-task decisions ---
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DecisionAskArgs {
+    /// choose (one of options), rank (items best first), filter (the items
+    /// that pass), map (one of options per item), is (yes or no), score (a
+    /// position on options, the levels lowest first).
+    pub kind: String,
+    /// The question, in plain words.
+    pub question: String,
+    /// choose and map: the options; score: the levels, lowest first.
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
+    /// rank, filter and map: the items (at most 100).
+    #[serde(default)]
+    pub items: Option<Vec<String>>,
+    /// What a good answer looks like, sent with every question.
+    #[serde(default)]
+    pub criteria: Option<String>,
+    /// The run the task belongs to (APB_RUN_ID): the decision is journaled
+    /// in it and the run's decision budget applies.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// The node that asks (APB_NODE_ID), journaled with the decision.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+// --- end issue #193 ---

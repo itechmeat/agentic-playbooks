@@ -68,6 +68,14 @@ pub struct RunDetail {
     )]
     pub commits: Vec<apb_engine::run_outcome::NodeCommits>,
     // --- end of the 0.23.0 blocks ---
+    /// The model each attempt actually ran on, against the profile's primary
+    /// model (issue #193); empty before the first attempt.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::attempt_models::AttemptModel>>", optional)
+    )]
+    pub attempt_models: Vec<apb_engine::attempt_models::AttemptModel>,
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -188,6 +196,7 @@ pub(crate) async fn get_run_handler(
     let usage = view.usage();
     let decisions = view.decisions();
     let commits = view.commits();
+    let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
     let goal = view.goal(&run_dir);
     let nodes = view.nodes();
     let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
@@ -215,6 +224,7 @@ pub(crate) async fn get_run_handler(
         hooks,
         children,
         commits,
+        attempt_models,
         goal,
         usage,
         decisions,
