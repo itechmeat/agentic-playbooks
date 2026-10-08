@@ -326,9 +326,26 @@ pub struct SupervisorPatchArgs {
     /// Full YAML of the patched playbook (will become the patch version).
     pub yaml: String,
     /// Classification of the fix: `improvement` or `workaround` (see 10.5).
+    /// A `next_runs` patch must be an `improvement`.
     pub classification: String,
-    /// Node the run will resume from after the migration.
-    pub continue_from: String,
+    /// Node the run will resume from after the migration. Required for
+    /// `scope: current_run`, ignored for `next_runs`.
+    #[serde(default)]
+    pub continue_from: Option<String>,
+    /// `current_run` (default): migrate this run onto the patch.
+    /// `next_runs`: a forward patch for later runs; may change nodes that
+    /// already ran, this run keeps its version, and the patch becomes the
+    /// playbook's candidate, tried by the next runs before it is promoted.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// `next_runs`: why the patch improves the playbook (kept in the
+    /// version's provenance).
+    #[serde(default)]
+    pub rationale: Option<String>,
+    /// `next_runs`: what the rationale rests on, one entry each: journal
+    /// seqs, node ids, durations.
+    #[serde(default)]
+    pub evidence: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

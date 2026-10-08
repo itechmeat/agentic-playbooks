@@ -27,6 +27,8 @@ mod catalog_rank_test;
 mod catalog_tools_test;
 #[path = "suite/connector_policy.rs"]
 mod connector_policy;
+#[path = "suite/forward_patch_tool_test.rs"]
+mod forward_patch_tool_test;
 #[path = "suite/patch_tool_test.rs"]
 mod patch_tool_test;
 #[path = "suite/policy_test.rs"]

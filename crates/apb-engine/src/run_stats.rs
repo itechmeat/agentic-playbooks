@@ -51,6 +51,8 @@ pub struct StatsRun {
     pub events: Vec<Event>,
     /// The run's playbook snapshot, for `expected_duration`.
     pub snapshot: Option<apb_core::schema::Playbook>,
+    /// The run was a candidate trial (issue #192, from its manifest).
+    pub candidate_trial: bool,
 }
 
 impl StatsRun {
@@ -71,6 +73,10 @@ impl StatsRun {
             version,
             events: j.events,
             snapshot: crate::legacy_snapshot::load_run_playbook(run_dir),
+            candidate_trial: crate::manifest::read(run_dir)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.candidate_trial),
         })
     }
 
@@ -255,6 +261,15 @@ pub struct VersionStats {
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Runs of this version that were candidate trials (issue #192): the
+    /// version was a forward patch on trial when they ran.
+    #[cfg_attr(feature = "ts", ts(as = "Option<usize>", optional))]
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub candidate_trials: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// `--compare`: the base version against the latest other version seen,
@@ -716,6 +731,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         })
         .collect();
     VersionStats {
+        candidate_trials: runs.iter().filter(|r| r.candidate_trial).count(),
         playbook: playbook.to_string(),
         version: version.to_string(),
         runs: runs.len(),
@@ -785,6 +801,12 @@ pub fn render_text(r: &StatsReport) -> String {
         ));
         if let Some(note) = &v.note {
             out.push_str(&format!("  note: {note}\n"));
+        }
+        if v.candidate_trials > 0 {
+            out.push_str(&format!(
+                "  candidate trials: {} of {} runs\n",
+                v.candidate_trials, v.runs
+            ));
         }
         let o = &v.outcomes;
         out.push_str(&format!(

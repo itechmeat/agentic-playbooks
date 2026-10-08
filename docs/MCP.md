@@ -241,6 +241,41 @@ grants; the default when the key is absent is all of them
 `supervisor_context_append`, `supervisor_interrupt_attempt`); `patch_playbook`
 gates `supervisor_patch_playbook`.
 
+<!-- issue #192: forward patches -->
+`supervisor_patch_playbook { token, yaml, classification, scope?,
+continue_from?, rationale?, evidence? }` has two scopes:
+
+- `current_run` (default): a patch version of the run's active version that
+  the run migrates onto, continuing from `continue_from` (required). Only
+  nodes the run will (re-)execute may change (spec 10.3). `classification`
+  is `improvement` or `workaround`; the run's success promotes an
+  improvement per `promote_supervisor_patches`.
+- `next_runs`: a forward patch for later runs. It may change any node,
+  executed or not; nothing migrates, the run keeps its version, and nothing
+  is journaled into it. The version becomes the playbook's candidate, which
+  the next starts without an explicit version run as trials
+  (`supervisor.policy.trial_candidates`) until a trial promotes or rejects it
+  (see HOWTO-authoring, "Supervisor policy"). It is allowed while the run is
+  live and up to 30 minutes after it ended, with the run's supervisor token.
+  `classification` must be `improvement` (`workaround_refused` otherwise);
+  `rationale` and `evidence` (a list: journal seqs, node ids, durations) go
+  into the version's provenance (`meta/<version>.yaml`, with `created_by:
+  supervisor`, `run_id`, `classification`, `scope: next_runs` and
+  `base_version`). The answer is `{ version, scope, base_version, candidate:
+  true, replaced_candidate }`. Refusals name a code: `window_closed`,
+  `max_patches` (`max_patches_per_run` counts both scopes), `goal_changed`,
+  `effects_changed` (declared or inferred effects, `secrets` included),
+  `irreversible_added`, `trust_fields_changed` (`requires`, the `supervisor`
+  block, connector grants, sub-playbooks), `schema`, `invalid` (the
+  validator, a frozen playbook).
+
+A run that was a candidate trial carries `candidate_trial: { version,
+verdict, reason? }` in `run_status` (`verdict`: `running`, `passed`,
+`promoted`, `rejected` or `undecided`), and `playbook_get` names the current
+candidate (`candidate: { version, provenance }`). A `playbook_run` refused
+for trust while it would run the candidate carries `candidate_trial` with
+that version: ask the person about the candidate, not about `current`.
+
 `supervisor_node_retry` and `supervisor_run_continue_from` also act while the
 run is parked on an undecided `human_review` gate, the moment a supervisor
 often notices that an earlier node went wrong: the driver withdraws the open

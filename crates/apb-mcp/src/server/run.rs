@@ -360,6 +360,9 @@ impl WfMcp {
             Ok(p) => p,
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
+        // Issue #192: the candidate version the gate chose (and pinned) for
+        // a start without an explicit version is the one that runs.
+        let version = permit.run_version(version.as_deref());
         // --- 0.24.0 irreversible consent ---
         // `confirm_irreversible` is the consent, checked against the nonce of
         // the refusal the person saw; `acknowledge_untrusted` answers trust

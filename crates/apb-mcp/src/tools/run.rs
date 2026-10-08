@@ -200,7 +200,16 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }
     add_journal_extras(&mut out, &view);
     add_outcome_blocks(&mut out, &view, &dir);
+    add_candidate_trial(&mut out, &view, &dir);
     Ok(out)
+}
+
+/// Issue #192: the candidate trial this run was, with its verdict; absent
+/// for every other run.
+fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
+    if let Some(t) = apb_engine::candidate::trial_of(dir, &view.events) {
+        out["candidate_trial"] = json!(t);
+    }
 }
 
 // --- 0.23.0: run outcome blocks (C1, C7) ---

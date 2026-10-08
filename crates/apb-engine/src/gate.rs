@@ -128,6 +128,11 @@ pub struct RunPermit {
     /// The playbook id, for the refusal text.
     pub playbook_id: String,
     // --- end 0.24.0 irreversible consent ---
+    /// The candidate version (issue #192) this start without an explicit
+    /// version runs, chosen by the gate per `trial_candidates` and checked in
+    /// place of `current`: every pin above is the candidate's. The surface
+    /// starts exactly this version ([`RunPermit::run_version`]).
+    pub candidate: Option<String>,
 }
 
 /// The gate for an agent resuming an existing run (MCP `run_resume`). A
@@ -576,6 +581,14 @@ impl RunPermit {
     /// the definition, not the ephemeral executor, so combining the two would
     /// be a false key-set mismatch (see the invariant in `build_run_manifest`);
     /// such a run keeps every other pin.
+    /// The version a surface starts: the one the caller asked for, else the
+    /// candidate the gate chose, else `None` (`current`).
+    pub fn run_version(&self, requested: Option<&str>) -> Option<String> {
+        requested
+            .map(str::to_string)
+            .or_else(|| self.candidate.clone())
+    }
+
     pub fn apply(self, opts: &mut crate::RunOptions) {
         let has_overrides = opts.overrides.as_ref().is_some_and(|o| !o.is_empty());
         opts.expected_digest = Some(self.playbook_digest);
@@ -696,6 +709,14 @@ pub fn check_run(
     let playbook_dir = definition_parent.join("playbooks").join(&wref.id);
     check_lifecycle(&playbook_dir, &wref.id)?;
 
+    // Candidate trials (issue #192): a start without an explicit version may
+    // run the candidate instead of `current`. Chosen here, before the permit
+    // is computed, so every pin below is the candidate's (anti-TOCTOU).
+    let (loaded, candidate) = match wref.version {
+        Some(_) => (loaded, None),
+        None => crate::candidate::choose_at_gate(&reg, &playbook_dir, &wref.id, loaded),
+    };
+
     // Digest-based trust: unapproved content requires an explicit acknowledge.
     let digest = loaded
         .trust_digest()
@@ -724,6 +745,18 @@ pub fn check_run(
                 }
             }
         })
+    })
+    .map(|mut permit| {
+        permit.candidate = candidate.clone();
+        permit
+    })
+    .map_err(|mut refusal| {
+        // A refusal of the candidate says so: the person is asked about the
+        // version the start would run, not about `current`.
+        if let Some(v) = &candidate {
+            refusal["candidate_trial"] = json!(v);
+        }
+        refusal
     })
 }
 
@@ -808,6 +841,7 @@ fn check_run_loaded(
         warnings: connector_warnings,
         irreversible,
         playbook_id: wref.id.clone(),
+        candidate: None,
     })
 }
 

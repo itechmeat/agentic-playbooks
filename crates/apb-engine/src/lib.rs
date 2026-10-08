@@ -1,5 +1,7 @@
 pub mod adapter;
 mod agent_home;
+// candidate trials (issue #192)
+pub mod candidate;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;
@@ -13,6 +15,8 @@ pub mod event;
 pub mod eval;
 // --- end 0.24.0 eval suites ---
 pub mod failure_class;
+// forward patches (issue #192)
+pub mod forward_patch;
 pub mod gate;
 pub mod hooks;
 pub mod inspect;

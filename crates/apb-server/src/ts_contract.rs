@@ -75,6 +75,8 @@ fn render_types() -> String {
         // --- end of 0.23.0 stats ---
         apb_core::agent_output::UsageSource::decl(&cfg),
         apb_core::agent_output::AgentUsage::decl(&cfg),
+        // Issue #192: candidate trials.
+        apb_engine::candidate::CandidateTrial::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),

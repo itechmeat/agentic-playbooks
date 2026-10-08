@@ -240,6 +240,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         decisions: None,
         execution: None,
         consent: None,
+        candidate_trial: false,
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 

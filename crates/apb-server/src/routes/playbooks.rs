@@ -307,9 +307,11 @@ pub(crate) async fn run_playbook_handler(
         opts.consent = Some(apb_engine::consent::RunConsent::irreversible("dashboard"));
     }
     let warnings = permit.warnings.clone();
+    // Issue #192: the candidate the gate chose (and pinned) is what runs.
+    let version = permit.run_version(None);
     permit.apply(&mut opts);
 
-    match apb_engine::start_detached(&root, &id, None, opts) {
+    match apb_engine::start_detached(&root, &id, version.as_deref(), opts) {
         Ok(run_id) => {
             let mut answer = serde_json::json!({ "run_id": run_id, "warnings": warnings });
             if let Some(note) = deprecation {

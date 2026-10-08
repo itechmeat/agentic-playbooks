@@ -75,6 +75,9 @@ mod background_run_test;
 mod background_supervisor_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
+#[cfg(unix)]
+#[path = "suite/candidate_trial_test.rs"]
+mod candidate_trial_test;
 #[path = "suite/child_connector_prepare.rs"]
 mod child_connector_prepare;
 #[path = "suite/child_run_event_test.rs"]

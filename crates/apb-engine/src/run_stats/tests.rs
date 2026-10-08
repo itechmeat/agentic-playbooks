@@ -30,6 +30,7 @@ fn run(
         version: version.into(),
         events,
         snapshot: snapshot.map(|y| apb_core::schema::Playbook::from_yaml(y).unwrap()),
+        candidate_trial: false,
     }
 }
 

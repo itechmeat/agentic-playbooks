@@ -110,6 +110,21 @@ export interface VersionProvenance {
   created_by: string
   run_id: string | null
   classification: string | null
+  /** `next_runs` for a forward patch (issue #192). */
+  scope?: string
+  base_version?: string
+  rationale?: string
+  evidence?: string[]
+  trial?: TrialRecord
+}
+
+/** How a candidate fared in its trial runs (issue #192). */
+export interface TrialRecord {
+  successes: number
+  /** `promoted`, `rejected` or `superseded`; absent while on trial. */
+  outcome?: string
+  run_id?: string
+  reason?: string
 }
 
 // Versions come from the API oldest first in semver order.
@@ -117,5 +132,7 @@ export interface VersionInfo {
   version: string
   /** `current` points here: the one source for the version in use. */
   is_current: boolean
+  /** The `candidate` pointer names it: a forward patch on trial. */
+  is_candidate?: boolean
   provenance: VersionProvenance | null
 }

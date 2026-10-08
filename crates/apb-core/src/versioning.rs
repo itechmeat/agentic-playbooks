@@ -44,11 +44,51 @@ pub enum VersioningError {
 /// older builds carry a `promoted` flag that drifted from `current` (a
 /// rollback or a save that did not move `current` left it set); it is
 /// ignored on read.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct VersionProvenance {
     pub created_by: String,
     pub run_id: Option<String>,
     pub classification: Option<String>,
+    // --- forward patches and candidate trials (issue #192) ---
+    /// `next_runs` for a forward patch (a candidate for the next runs);
+    /// absent for a patch the run migrated onto (`current_run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The version the patch was made from: the lineage of a candidate that
+    /// replaced an earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_version: Option<String>,
+    /// Why the supervisor made the forward patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// What the rationale rests on: journal seqs, node ids, durations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// How the candidate fared in its trials; absent until a trial run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial: Option<TrialRecord>,
+    // --- end forward patches ---
+}
+
+/// The trial record of a candidate version (issue #192): how many trial runs
+/// it passed, and its fate once decided. A historical fact like the rest of
+/// the sidecar: whether the version is in use is still `current` alone.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct TrialRecord {
+    /// Trial runs that succeeded with every goal criterion holding.
+    #[serde(default)]
+    pub successes: u32,
+    /// `promoted`, `rejected` or `superseded`; absent while it is still on
+    /// trial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The trial run that decided the outcome (for `superseded`: the run
+    /// whose forward patch replaced it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Why it was rejected, or the version that superseded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,8 +264,7 @@ pub fn create_version_with_override(
         &version,
         &VersionProvenance {
             created_by: "user".to_string(),
-            run_id: None,
-            classification: None,
+            ..Default::default()
         },
     )?;
 
@@ -390,6 +429,31 @@ pub fn create_patch_version(
     run_id: &str,
     classification: &str,
 ) -> Result<String, VersioningError> {
+    create_patch_version_with(
+        root,
+        id,
+        base_version,
+        new_yaml,
+        VersionProvenance {
+            created_by: "supervisor".to_string(),
+            run_id: Some(run_id.to_string()),
+            classification: Some(classification.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// [`create_patch_version`] with the provenance the caller composed: the
+/// supervisor's in-run patch and its forward patch (`crate::candidate`)
+/// share every step but the sidecar.
+pub(crate) fn create_patch_version_with(
+    root: &Path,
+    id: &str,
+    base_version: &str,
+    new_yaml: &str,
+    provenance: VersionProvenance,
+) -> Result<String, VersioningError> {
+    let classification = provenance.classification.as_deref().unwrap_or_default();
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
@@ -443,16 +507,7 @@ pub fn create_patch_version(
         .to_string();
 
     copy_parent_layout(&playbook_dir, base_version, &version)?;
-    write_provenance(
-        root,
-        id,
-        &version,
-        &VersionProvenance {
-            created_by: "supervisor".to_string(),
-            run_id: Some(run_id.to_string()),
-            classification: Some(classification.to_string()),
-        },
-    )?;
+    write_provenance(root, id, &version, &provenance)?;
 
     Ok(version)
 }
@@ -493,6 +548,10 @@ pub struct VersionInfo {
     /// Whether `current` points at this version: the one source for "in use"
     /// (promoted) and the only one the listings report.
     pub is_current: bool,
+    /// Whether the `candidate` pointer names this version: a forward patch
+    /// on trial in the next runs (issue #192, see `crate::candidate`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_candidate: bool,
     pub provenance: Option<VersionProvenance>,
 }
 
@@ -513,13 +572,16 @@ pub fn list_versions_with_provenance(
     let current = fs::read_to_string(playbook_dir.join("current"))
         .ok()
         .map(|s| s.trim().to_string());
+    let candidate = crate::candidate_pointer::read_candidate(&playbook_dir);
     let mut out = Vec::new();
     for version in list_versions(&playbook_dir)? {
         let is_current = current.as_deref() == Some(version.as_str());
+        let is_candidate = candidate.as_deref() == Some(version.as_str());
         let provenance = read_provenance(root, id, &version)?;
         out.push(VersionInfo {
             version,
             is_current,
+            is_candidate,
             provenance,
         });
     }
@@ -544,6 +606,8 @@ pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), Versi
         return Err(VersioningError::NotFound(format!("{id}@{version}")));
     }
     atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
+    // A candidate a person promotes by hand is no longer on trial.
+    crate::candidate_pointer::clear_candidate_if(&playbook_dir, version)?;
     Ok(())
 }
 

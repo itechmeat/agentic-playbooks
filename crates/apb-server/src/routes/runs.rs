@@ -68,6 +68,11 @@ pub struct RunDetail {
     )]
     pub commits: Vec<apb_engine::run_outcome::NodeCommits>,
     // --- end of the 0.23.0 blocks ---
+    /// The candidate trial this run was (issue #192), with its verdict;
+    /// absent for every other run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub candidate_trial: Option<apb_engine::candidate::CandidateTrial>,
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -189,6 +194,7 @@ pub(crate) async fn get_run_handler(
     let decisions = view.decisions();
     let commits = view.commits();
     let goal = view.goal(&run_dir);
+    let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
     let nodes = view.nodes();
     let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
     let execution = manifest
@@ -216,6 +222,7 @@ pub(crate) async fn get_run_handler(
         children,
         commits,
         goal,
+        candidate_trial,
         usage,
         decisions,
         unknown_events: view.unknown.len(),

@@ -7,6 +7,7 @@
   import { cachedNodeIds } from '../lib/runcache'
   import { runGates } from '../lib/rungates'
   import { runUsageSummary, unknownEventsNote } from '../lib/runusage'
+  import { candidateTrialLabel } from '../lib/versioninfo'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
@@ -316,6 +317,18 @@
 
     {#if detail}
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
+    {/if}
+
+    {#if detail?.candidate_trial}
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Candidate trial</Card.Title></Card.Header>
+        <Card.Content class="text-xs">
+          <span>{candidateTrialLabel(detail.candidate_trial)}</span>
+          {#if detail.candidate_trial.reason}
+            <span class="text-muted-foreground"> · {detail.candidate_trial.reason}</span>
+          {/if}
+        </Card.Content>
+      </Card.Root>
     {/if}
 
     {#if detail}

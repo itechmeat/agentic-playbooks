@@ -407,7 +407,12 @@ duration: Waits, spend: Spend, deliverable_missing: number, output_fields_missin
 /**
  * Empty when the runs checked no goal.
  */
-goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, };
+goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, 
+/**
+ * Runs of this version that were candidate trials (issue #192): the
+ * version was a forward patch on trial when they ran.
+ */
+candidate_trials?: number, };
 
 export type Comparison = { playbook: string, base: string, 
 /**
@@ -442,6 +447,19 @@ output_tokens: number, cache_read_tokens: number, cache_write_tokens: number,
  */
 cost_usd?: number, source: UsageSource, };
 
+export type CandidateTrial = { 
+/**
+ * The candidate version the run tried.
+ */
+version: string, 
+/**
+ * `running`; `promoted` or `rejected` once the run decided it; `passed`
+ * for a success that did not promote yet (`after_n_successes`,
+ * `manual`); `undecided` for an end that judges nothing (a stop, a
+ * replaced candidate).
+ */
+verdict: string, reason?: string, };
+
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
@@ -457,7 +475,12 @@ driver_dead?: boolean,
  * was read: a newer apb wrote them. Zero (and absent) for a journal this
  * binary reads in full.
  */
-unknown_events?: number, };
+unknown_events?: number, 
+/**
+ * The run was a trial of the playbook's candidate version (issue #192),
+ * with its verdict; absent for every other run.
+ */
+candidate_trial?: CandidateTrial, };
 
 export type RunListEntry = { 
 /**
@@ -478,7 +501,12 @@ driver_dead?: boolean,
  * was read: a newer apb wrote them. Zero (and absent) for a journal this
  * binary reads in full.
  */
-unknown_events?: number, };
+unknown_events?: number, 
+/**
+ * The run was a trial of the playbook's candidate version (issue #192),
+ * with its verdict; absent for every other run.
+ */
+candidate_trial?: CandidateTrial, };
 
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
@@ -515,6 +543,11 @@ goal?: RunGoal,
  * The commits the run's nodes made on a git tree (C7); empty when none.
  */
 commits?: Array<NodeCommits>, 
+/**
+ * The candidate trial this run was (issue #192), with its verdict;
+ * absent for every other run.
+ */
+candidate_trial?: CandidateTrial, 
 /**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.

@@ -720,6 +720,8 @@ The migration validator applies three rules to keep the run's history consistent
 
 An invalid patch is rejected with diagnostics for the SA; a rejected attempt still counts against `max_patches_per_run`.
 
+These rules bind an in-run patch (`scope: current_run`, the default). A forward patch (`scope: next_runs`, 10.7) migrates nothing, so rule 1 does not apply to it: it may change nodes that already ran.
+
 ### 10.4. Layout outside versions
 
 The canvas layout is stored not in `workflow.yaml` but in `layouts/<version>.yaml` next to the `current` pointer. Version folders remain strictly immutable, with no exceptions; the layout is mutable and has no effect on execution, diff, or replay. When a new version is created, the layout is copied from the parent. On workflow export, the engine can assemble `ui.xyflow` back into a single file; on import, it extracts it into `layouts/`.
@@ -743,6 +745,23 @@ Promotion IS the move of `current`, so `current` is the one record of it: the ve
 - Deleting a workflow from the web UI or MCP moves its folder into `.wf/trash/` (recoverable); physical deletion is a separate, explicit action.
 - Runs are never deleted automatically.
 - A version referenced by existing runs cannot be physically deleted without a force flag.
+
+### 10.7. Forward patches and candidate trials (issue #192)
+
+An in-run patch can only improve what the run has not executed yet, and the nodes worth improving after a run are usually the ones that already ran. A forward patch (`supervisor_patch_playbook` with `scope: next_runs`) improves the playbook for the next runs instead:
+
+- It may change any node, executed or not. Nothing migrates: the run keeps its version and nothing is journaled into it. It is allowed while the run is live and for 30 minutes after it ended, with the run's supervisor token.
+- Guards: `max_patches_per_run` (in-run patches handled plus forward patches created), the validator and the frozen flag, and a definition guard: no change to the goal (the run's contract), the declared or effective effects (`secrets`, `irreversible` and the rest), the irreversible sources a start asks consent for, `requires`, the `supervisor` block, connector grants, or the sub-playbook a node runs. `workaround` is refused: it fits one run's circumstances, not the next runs.
+- It creates a patch version of the run's active version with provenance in `meta/<version>.yaml`: `created_by: supervisor`, `run_id`, `classification`, `scope: next_runs`, `base_version`, `rationale` and an `evidence` list (journal seqs, node ids, durations).
+- The version becomes the playbook's **candidate**: a `candidate` pointer file next to `current`, written atomically under a lock, one at a time. A newer forward patch replaces it (the replaced one is recorded `superseded`); the lineage stays in `base_version`.
+
+The candidate proves itself in trial runs before it becomes the norm:
+
+- `supervisor.policy.trial_candidates: next_run (default) | off | { share: p }` decides whether a start without an explicit version runs the candidate; `share` draws a random number per start. The run gate makes the choice before it computes the permit, so every pin of the permit is the candidate's (anti-TOCTOU), and the surface starts exactly the version the permit names. A run that starts on the candidate (top-level, not an eval run; an explicit start of the candidate version included) records `candidate_trial: true` in its manifest.
+- At the end of a trial, right before `run_finished`: a failed run, or a goal criterion that did not hold, drops the pointer (the next runs use `current` again) and journals `candidate_rejected`. A success counts towards `promote_supervisor_patches`: `on_success` and `always` promote on the first successful trial, `after_n_successes: N` on the N-th (the count lives in the candidate's provenance), `manual` never; a promotion moves `current`, drops the pointer and journals `candidate_promoted`. A trial that migrated onto an in-run patch proves nothing about the candidate on success. A stopped run decides nothing.
+- Both events are new types, skippable up to the `run_finished` checkpoint that follows them.
+- The candidate is untrusted until a person approves its digest, like any supervisor patch version: an MCP start that picks it is refused with `untrusted_requires_acknowledge` and `candidate_trial`, so the host asks the person; a CLI or dashboard start is itself the confirmation.
+- Surfaces: `run_status`, `apb runs` and the dashboard run page and run list show `candidate_trial { version, verdict }`; `apb stats` counts the trial runs per version; `playbook_get` names the current candidate; the version history marks the candidate and each version's trial outcome (`promoted`, `rejected`, `superseded`). Promoting a candidate by hand (the dashboard's "Use") drops the pointer too.
 
 ## 11. Per-run modifications without new versions (implemented)
 

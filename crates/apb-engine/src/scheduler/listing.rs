@@ -33,6 +33,11 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<usize>", optional))]
     pub unknown_events: usize,
+    /// The run was a trial of the playbook's candidate version (issue #192),
+    /// with its verdict; absent for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub candidate_trial: Option<crate::candidate::CandidateTrial>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -77,6 +82,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let driver_dead = matches!(view.driver_alive, Some(false));
         let unknown_events = view.unknown.len();
         let status = view.run_status.as_str().into();
+        let candidate_trial = crate::candidate::trial_of(&entry.path(), &view.events);
         let progress = view.progress;
         out.push(RunSummary {
             run_id,
@@ -89,6 +95,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             superseded_by,
             driver_dead,
             unknown_events,
+            candidate_trial,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));

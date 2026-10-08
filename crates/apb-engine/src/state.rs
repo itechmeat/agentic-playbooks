@@ -293,7 +293,9 @@ impl RunState {
                 | EventPayload::ProfileRebound { .. }
                 | EventPayload::RebindRejected { .. }
                 | EventPayload::RunMigrated { .. }
-                | EventPayload::VersionPromoted { .. } => {}
+                | EventPayload::VersionPromoted { .. }
+                | EventPayload::CandidatePromoted { .. }
+                | EventPayload::CandidateRejected { .. } => {}
                 EventPayload::WaitStarted { .. }
                 | EventPayload::WaitSignalled { .. }
                 | EventPayload::WaitTimeout { .. } => {}

@@ -356,6 +356,33 @@ pub enum EventPayload {
     VersionPromoted {
         version: String,
     },
+    // --- candidate trials (issue #192) ---
+    /// This run was a trial of the playbook's candidate version (a forward
+    /// patch) and its success promoted the candidate per
+    /// `promote_supervisor_patches`: `current` now points at `version`.
+    /// `successes` counts the trial runs it passed. Written right before
+    /// `run_finished`, so it is safe to skip up to that checkpoint.
+    CandidatePromoted {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        successes: u32,
+    },
+    /// This trial run of the candidate `version` failed (or a goal criterion
+    /// did not hold): the candidate pointer was dropped, so the next runs use
+    /// `current` again. Written right before `run_finished`, safe to skip up
+    /// to that checkpoint.
+    CandidateRejected {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        reason: String,
+    },
+    // --- end candidate trials ---
     ReviewRequested {
         node: String,
         options: Vec<String>,
@@ -993,6 +1020,11 @@ pub struct EventLog {
 }
 
 impl EventLog {
+    /// The run directory this log writes into (the parent of `events.jsonl`).
+    pub fn run_dir(&self) -> Option<PathBuf> {
+        self.path.parent().map(Path::to_path_buf)
+    }
+
     pub fn create(run_dir: &Path) -> Result<Self, EngineError> {
         std::fs::create_dir_all(run_dir)?;
         Self::open(run_dir)

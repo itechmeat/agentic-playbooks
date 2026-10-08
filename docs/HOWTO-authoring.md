@@ -1561,6 +1561,58 @@ an untrusted child blocks the parent, and a reference cycle is refused. Nesting
 is limited to 5 levels. Set expected_duration explicitly on a playbook node
 (validator V19 nudges you): the parent cannot sum the child's own estimates.
 
+<!-- issue #192: forward patches and candidate trials -->
+## Supervisor policy (supervisor.policy)
+
+`supervisor.policy` tunes what a run's supervisor may do and how its playbook
+patches become the norm:
+
+```yaml
+supervisor:
+  policy:
+    capabilities: [observe, retry, rebind, patch_playbook]  # default: all
+    promote_supervisor_patches: on_success  # | always | manual | { after_n_successes: 3 }
+    trial_candidates: next_run              # | off | { share: 0.3 }
+```
+
+- `capabilities`: the supervisor tools the run grants (see MCP.md).
+- `promote_supervisor_patches`: when a supervisor patch moves `current`.
+  For an in-run patch (`scope: current_run`, the run migrates onto it) it is
+  decided by the run it was made in; a `workaround` is never promoted. For a
+  forward patch (`scope: next_runs`) it is decided by the candidate's trial
+  runs: `on_success` and `always` promote on the first successful trial,
+  `{ after_n_successes: N }` on the N-th, `manual` never (a person promotes it
+  with the dashboard's "Use"; the trials still count and still reject).
+- `trial_candidates`: whether a run started without an explicit version runs
+  the playbook's candidate version. `next_run` (default): every such start
+  does; `off`: none (the candidate runs only when asked for by version);
+  `{ share: p }`: a random share `p` (0 to 1) of starts, drawn per start.
+  The policy of the `current` version decides.
+
+A forward patch is how a supervisor improves the playbook for later runs
+from what it saw in this one, including nodes that already ran: the run
+keeps its version, and the new patch version becomes the playbook's
+**candidate** (a `candidate` pointer next to `current`, one at a time; a newer
+forward patch replaces it, and its provenance names the version it was based
+on). A trial run that succeeds with every goal criterion holding counts
+towards promotion; a failed trial, or one where a goal criterion did not
+hold, drops the candidate (the journal's `candidate_rejected`), and the next
+runs use `current` again. A promotion journals `candidate_promoted`.
+`run_status`, `apb runs`, the dashboard run page and `apb stats` mark the
+trial runs; the version history marks the candidate and each version's
+outcome (`promoted`, `rejected`, `superseded`). A start that asks for the
+candidate by version counts as a trial too; eval runs and sub-playbook
+children never do.
+
+A forward patch may not change the goal, the declared or effective effects,
+the irreversible steps, `requires`, the `supervisor` block, a node's
+connector grants or the sub-playbook a node runs; it must pass the validator
+and be classified `improvement`. The candidate is a supervisor-made version,
+so it is untrusted until a person approves it: an MCP start that picks it is
+refused with `untrusted_requires_acknowledge` and `candidate_trial`, so the
+host asks the person first (a person starting the run from the CLI or the
+dashboard is the confirmation, as for any run).
+
 ## trigger (matching contract)
 
 `trigger` is the only thing used for matching. Keep fields machine-oriented and
