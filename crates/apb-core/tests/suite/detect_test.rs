@@ -889,7 +889,9 @@ fn zcode_desktop_app_on_path_is_skipped_for_the_home_cli() {
     let _l = lock();
     let e = setup();
     // The Linux desktop package: PATH `zcode` is the Electron app.
-    let desktop = e.bin.join("ZCode");
+    // Not `ZCode`: on a case-insensitive file system (macOS) it would be the
+    // same entry as the `zcode` link below.
+    let desktop = e.bin.join("desktop-app");
     std::fs::create_dir_all(desktop.join("resources")).unwrap();
     std::fs::write(desktop.join("resources/app.asar"), "").unwrap();
     let ran = e.bin.join("_desktop_ran");
