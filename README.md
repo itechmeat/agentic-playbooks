@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/brand/banner.png" alt="apb - Agentic Playbooks: repeatable playbooks that a team of AI agents runs for you" width="100%"></p>
+
 # Agentic Playbooks - `apb`
 
 Repeatable multi-step workflows for coding agents, defined in YAML and executed
