@@ -2,7 +2,7 @@
 //!
 //! The live cycle of a background agent against a real `claude` is not
 //! reproducible in a headless CI environment (it needs a real coding agent) -
-//! only a manual check covers that (see docs/tasks.md and
+//! only a manual check covers that (see docs/superpowers/progress-log.md and
 //! `.superpowers/sdd/task-5-report.md`). This test is an automated proxy: it
 //! drives exactly the same CLI path (`apb run <id> --supervise`), but swaps
 //! the executed agent via `APB_AGENT_CMD` for a stub that just records its

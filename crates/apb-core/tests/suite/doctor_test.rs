@@ -135,6 +135,41 @@ fn doctor_reports_clean_then_flags_invalid_playbook() {
         "expected a V92 failure: {:?}",
         report.checks
     );
+    // The playbook's summary line agrees with that failure: it counts the
+    // missing script as an error instead of saying "valid".
+    let summary: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|c| c.name == "playbook vs" && !c.detail.starts_with('V'))
+        .collect();
+    assert_eq!(summary.len(), 1, "one summary line: {:?}", report.checks);
+    assert_eq!(summary[0].status, CheckStatus::Fail, "{:?}", summary[0]);
+    assert!(
+        summary[0].detail.starts_with("1 error(s)"),
+        "summary counts the missing script: {:?}",
+        summary[0]
+    );
+    // Same for a profile that does not resolve (V91, reported on the
+    // `profile main` line): the playbook is not "valid" either.
+    let no_profile = tempfile::tempdir().unwrap();
+    init_project(no_profile.path()).unwrap();
+    seed_playbook(no_profile.path(), "va", VALID_AGENT);
+    let report = diagnose(no_profile.path());
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.name == "profile main" && c.status == CheckStatus::Fail),
+        "{:?}",
+        report.checks
+    );
+    assert!(
+        report.checks.iter().any(|c| c.name == "playbook va"
+            && c.status == CheckStatus::Fail
+            && c.detail.starts_with("1 error(s)")),
+        "summary counts the unresolved profile: {:?}",
+        report.checks
+    );
 
     // 3. Invalid playbook -> has_failure.
     let bad = tempfile::tempdir().unwrap();
@@ -157,6 +192,7 @@ fn doctor_reports_clean_then_flags_invalid_playbook() {
     let broken = tempfile::tempdir().unwrap();
     init_project(broken.path()).unwrap();
     seed_playbook(broken.path(), "va", VALID_AGENT);
+    seed_profile(broken.path(), "main", "claude-code");
     seed_playbook(broken.path(), "broke", "this: is: not: valid: yaml: ][");
     let report = diagnose(broken.path());
     assert!(report.has_failure(), "broken playbook must fail");

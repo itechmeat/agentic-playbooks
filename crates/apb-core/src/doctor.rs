@@ -387,31 +387,35 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     }
     // A script a run would not find (V92) fails every run of the playbook.
     // An unresolvable profile (V91) is already the `profile <name>` line above.
+    // Both count as errors of the playbook's summary line below, so it never
+    // says "valid" next to a failing finding for the same playbook.
+    let mut reference_errors: Vec<usize> = Vec::with_capacity(loaded.len());
     for ((id, playbook), version_dir) in loaded.iter().zip(&version_dirs) {
-        for issue in crate::preflight::missing_references(
+        let issues = crate::preflight::missing_references(
             root,
             PlaybookOrigin::Project,
             version_dir,
             playbook,
-        ) {
-            if issue.code == "V92" {
-                r.push(
-                    CheckStatus::Fail,
-                    format!("playbook {id}"),
-                    format!("{}: {}", issue.code, issue.message),
-                );
-            }
+        );
+        for issue in issues.iter().filter(|i| i.code == "V92") {
+            r.push(
+                CheckStatus::Fail,
+                format!("playbook {id}"),
+                format!("{}: {}", issue.code, issue.message),
+            );
         }
+        reference_errors.push(issues.len());
     }
 
     let ctx = ValidationContext::for_registry(&reg, PlaybookOrigin::Project);
-    for (id, playbook) in &loaded {
+    for ((id, playbook), missing) in loaded.iter().zip(&reference_errors) {
         let report = validate(playbook, &ctx);
-        let errors = report
-            .issues
-            .iter()
-            .filter(|i| i.severity == Severity::Error)
-            .count();
+        let errors = missing
+            + report
+                .issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .count();
         let warnings = report
             .issues
             .iter()
