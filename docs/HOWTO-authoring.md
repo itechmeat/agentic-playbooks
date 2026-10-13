@@ -77,11 +77,16 @@ edit`, or the web profile API (`/api/profiles`); see PROFILES.md. Legacy
 migrated reference to a global executor becomes a global-scope profile).
 
 A reference that resolves in no scope a run would look in (project, then
-global, for a project playbook) is error **V91** in `apb validate` and MCP
-`playbook_validate`, and a `[fail] profile <name>` line in `apb doctor`: every
-run fails at start until the profile exists. A save does not check it, so a
-playbook can be saved first and its profile created afterwards; the
-dashboard's playbook view shows it as a warning.
+global, for a project playbook) is finding **V91** in `apb validate` and MCP
+`playbook_validate`. It is an error when only the project can provide the
+profile: a project profile that exists but cannot be loaded (a missing
+`scope: project` profile is already error V14). When the global store was the
+last place looked (`scope: global`, or `auto` falling through to it), it is a
+warning: the global store is machine-local, and CI or another machine may
+have the profile there. `apb doctor` shows the same as a `profile <name>` line
+(`[fail]` or `[warn]`). A run on a machine without the profile fails at start.
+A save does not check it, so a playbook can be saved first and its profile
+created afterwards; the dashboard's playbook view shows it as a warning.
 
 ## Connectors (external services)
 
@@ -607,7 +612,8 @@ output (`judge`).
 A `script` node's `script` is a path relative to the version directory, and
 it must live under `scripts/`: a run copies only the version's `scripts/`
 next to its snapshot and runs the script from there. A script file that is
-missing, or that sits outside `scripts/`, is error **V92** in `apb validate`,
+missing, that sits outside `scripts/`, or that is a symlink which is absolute
+or leaves `scripts/` (a run copies the link, not its target), is error **V92** in `apb validate`,
 MCP `playbook_validate` and `apb doctor` (the same check covers a
 `success_check` script and a goal criterion's script). As with V91, a save
 does not check it, so the YAML can be saved before the scripts are added.

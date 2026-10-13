@@ -73,6 +73,8 @@ async fn playbooks_list() {
 
 #[tokio::test]
 async fn playbook_detail_includes_model_and_validation() {
+    // The global profile store is read too: keep the real one out.
+    let _cfg = crate::common::config_sandbox().await;
     let dir = seed();
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, json) = get_json(app, "/api/playbooks/implement-task").await;

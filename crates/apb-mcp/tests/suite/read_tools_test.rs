@@ -78,6 +78,26 @@ fn validate_reports_a_missing_profile_and_script() {
         })
         .collect();
     assert_eq!(found, vec![("V91", "plan"), ("V92", "lint")], "{v}");
+    // The empty project `architect` directory fails to load: only the
+    // project can fix it, so V91 is an error here.
+    assert_eq!(v["issues"][0]["severity"], "error", "{v}");
+}
+
+#[test]
+fn validate_stays_valid_when_only_the_global_store_could_provide_a_profile() {
+    // No project profile and none in this machine's global store: the global
+    // store was the last place looked, so V91 is a warning (CI or another
+    // machine may have the profile there) and the playbook stays valid.
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed_runnable(dir.path());
+    fs::remove_dir_all(dir.path().join(".apb/profiles/architect")).unwrap();
+    let v = playbook_validate(dir.path(), "implement-task").unwrap();
+    assert_eq!(v["valid"], true, "{v}");
+    let issues = v["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{v}");
+    assert_eq!(issues[0]["code"], "V91", "{v}");
+    assert_eq!(issues[0]["severity"], "warning", "{v}");
 }
 
 #[test]

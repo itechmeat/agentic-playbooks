@@ -245,8 +245,17 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     );
                 }
             }
+            // Not found where the global store was the last place looked: a
+            // warning, since the global store is machine-local (V91 is a
+            // warning for the same reason). Every other failure is a Fail.
             Err(e) => r.push(
-                CheckStatus::Fail,
+                if matches!(e, crate::profile::ProfileError::NotFound(_))
+                    && pref.scope != ProfileScope::Project
+                {
+                    CheckStatus::Warn
+                } else {
+                    CheckStatus::Fail
+                },
                 format!("profile {}", pref.name),
                 format!("cannot resolve: {e}"),
             ),
@@ -387,9 +396,9 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     }
     // A script a run would not find (V92) fails every run of the playbook.
     // An unresolvable profile (V91) is already the `profile <name>` line above.
-    // Both count as errors of the playbook's summary line below, so it never
-    // says "valid" next to a failing finding for the same playbook.
-    let mut reference_errors: Vec<usize> = Vec::with_capacity(loaded.len());
+    // Both count in the playbook's summary line below with their severity, so
+    // it never says "valid" next to a finding for the same playbook.
+    let mut reference_counts: Vec<(usize, usize)> = Vec::with_capacity(loaded.len());
     for ((id, playbook), version_dir) in loaded.iter().zip(&version_dirs) {
         let issues = crate::preflight::missing_references(
             root,
@@ -404,23 +413,28 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                 format!("{}: {}", issue.code, issue.message),
             );
         }
-        reference_errors.push(issues.len());
+        let errors = issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .count();
+        reference_counts.push((errors, issues.len() - errors));
     }
 
     let ctx = ValidationContext::for_registry(&reg, PlaybookOrigin::Project);
-    for ((id, playbook), missing) in loaded.iter().zip(&reference_errors) {
+    for ((id, playbook), (ref_errors, ref_warnings)) in loaded.iter().zip(&reference_counts) {
         let report = validate(playbook, &ctx);
-        let errors = missing
+        let errors = ref_errors
             + report
                 .issues
                 .iter()
                 .filter(|i| i.severity == Severity::Error)
                 .count();
-        let warnings = report
-            .issues
-            .iter()
-            .filter(|i| i.severity == Severity::Warning)
-            .count();
+        let warnings = ref_warnings
+            + report
+                .issues
+                .iter()
+                .filter(|i| i.severity == Severity::Warning)
+                .count();
         if errors > 0 {
             r.push(
                 CheckStatus::Fail,

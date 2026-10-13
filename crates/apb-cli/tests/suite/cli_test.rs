@@ -78,6 +78,8 @@ fn validate_ok_playbook() {
 fn validate_fails_on_a_profile_and_a_script_a_run_would_not_find() {
     // A fresh project with only the playbook: `architect` resolves in no
     // scope and `scripts/node-lint.sh` was never added, so every run fails.
+    // The profile is a warning (the global store, the last place looked, is
+    // machine-local), the script an error that sets the exit code.
     let dir = seeded_dir();
     fs::remove_dir_all(dir.path().join(".apb/profiles/architect")).unwrap();
     fs::remove_dir_all(
@@ -91,7 +93,7 @@ fn validate_fails_on_a_profile_and_a_script_a_run_would_not_find() {
         .assert()
         .code(1)
         .stdout(predicate::str::contains(
-            "implement-task: error V91 profile `architect` is not found",
+            "implement-task: warning V91 profile `architect` is not found",
         ))
         .stdout(predicate::str::contains(
             "implement-task: error V92 script `scripts/node-lint.sh` does not exist",

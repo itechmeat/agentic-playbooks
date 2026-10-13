@@ -149,24 +149,27 @@ fn doctor_reports_clean_then_flags_invalid_playbook() {
         "summary counts the missing script: {:?}",
         summary[0]
     );
-    // Same for a profile that does not resolve (V91, reported on the
-    // `profile main` line): the playbook is not "valid" either.
+    // A profile found nowhere on this machine, with the global store the
+    // last place looked (V91 as a warning: CI or another machine may have
+    // it): a warning on the `profile main` line, and the playbook's summary
+    // counts it as a warning instead of saying "valid".
     let no_profile = tempfile::tempdir().unwrap();
     init_project(no_profile.path()).unwrap();
     seed_playbook(no_profile.path(), "va", VALID_AGENT);
     let report = diagnose(no_profile.path());
+    assert!(!report.has_failure(), "{:?}", report.checks);
     assert!(
         report
             .checks
             .iter()
-            .any(|c| c.name == "profile main" && c.status == CheckStatus::Fail),
+            .any(|c| c.name == "profile main" && c.status == CheckStatus::Warn),
         "{:?}",
         report.checks
     );
     assert!(
         report.checks.iter().any(|c| c.name == "playbook va"
-            && c.status == CheckStatus::Fail
-            && c.detail.starts_with("1 error(s)")),
+            && c.status == CheckStatus::Warn
+            && c.detail == "1 warning(s)"),
         "summary counts the unresolved profile: {:?}",
         report.checks
     );

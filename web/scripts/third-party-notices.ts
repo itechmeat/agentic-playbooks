@@ -134,6 +134,40 @@ for (const root of roots) {
     })
   pkgs.push({ name: meta.name, version: meta.version, license: license || licenseFromText(texts), repo: repoUrl(meta.repository), texts })
 }
+// The license allowlist is about.toml's `accepted` (the same list as
+// deny.toml), read from that file so the two sides cannot drift, plus
+// OFL-1.1, which only fonts use and no crate does. A package under any other
+// license, or one whose license could not be determined (UNKNOWN), fails
+// generation, so a new license is reviewed before it ships.
+const WEB_ONLY_LICENSES = ['OFL-1.1']
+function acceptedLicenses(): Set<string> {
+  const toml = readFileSync(path.join(webDir, '..', 'about.toml'), 'utf8')
+  const list = toml.match(/^accepted\s*=\s*\[([^\]]*)\]/m)
+  if (!list) throw new Error('about.toml has no `accepted` list')
+  const names = [...list[1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+  return new Set([...names, ...WEB_ONLY_LICENSES])
+}
+
+// An SPDX expression is acceptable when one of its OR alternatives has every
+// AND term on the allowlist. `WITH` exceptions stay part of the term, as in
+// about.toml ("Apache-2.0 WITH LLVM-exception").
+function licenseAccepted(expr: string, accepted: Set<string>): boolean {
+  const flat = expr.replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!flat || flat === 'UNKNOWN') return false
+  return flat
+    .split(/ OR /i)
+    .some((alt) => alt.split(/ AND /i).every((term) => accepted.has(term.trim())))
+}
+
+const accepted = acceptedLicenses()
+const refused = pkgs.filter((p) => !licenseAccepted(p.license, accepted))
+if (refused.length > 0) {
+  for (const p of refused) {
+    process.stderr.write(`${p.name} ${p.version}: license "${p.license}" is not on the allowlist (about.toml accepted)\n`)
+  }
+  process.exit(1)
+}
+
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 pkgs.sort((a, b) => byText(a.name, b.name) || byText(a.version, b.version))
 

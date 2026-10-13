@@ -39,7 +39,9 @@ The binary embeds the web frontend, so build `web/` first:
 cargo build
 ```
 
-Gates a pull request must pass (CI runs the same):
+Gates a pull request must pass (CI runs equivalent checks: the tests through
+`cargo nextest`, the dependency check through `cargo-deny-action`, plus the
+notices check below):
 
 ```sh
 cargo fmt --all -- --check
@@ -87,8 +89,10 @@ scripts/third-party-notices.sh
 It needs `cargo-about` (`scripts/install-cargo-about.sh` installs the pinned
 release on x86_64 Linux, or `cargo install --locked cargo-about --features cli
 --version 0.9.2`) and `bun`. CI runs `scripts/third-party-notices.sh --check`
-and fails when the committed file is stale. A crate under a license outside
-the `about.toml` allowlist fails generation until the license is reviewed.
+and fails when the committed file is stale. A crate or an npm package under
+a license outside the `about.toml` allowlist (for npm packages also
+`OFL-1.1`, which fonts use), or one whose license cannot be determined, fails
+generation until the license is reviewed.
 
 ## Security-sensitive changes
 

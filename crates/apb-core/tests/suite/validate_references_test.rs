@@ -63,7 +63,7 @@ fn found(root: &Path, version_dir: &Path, p: &Playbook) -> Vec<Issue> {
 }
 
 #[test]
-fn unresolvable_profile_and_missing_script_are_errors() {
+fn an_unresolvable_auto_profile_warns_and_a_missing_script_errors() {
     let _cfg = config_sandbox();
     let root = tempfile::tempdir().unwrap();
     let version_dir = root.path().join(".apb/playbooks/implement-task/1.0.0");
@@ -73,15 +73,21 @@ fn unresolvable_profile_and_missing_script_are_errors() {
         &version_dir,
         &playbook("architect", "scripts/lint.sh"),
     );
-    let summary: Vec<(&str, Option<&str>)> =
-        issues.iter().map(|i| (i.code, i.node.as_deref())).collect();
-    // One V91 for the shared default, on the first node that uses it.
+    let summary: Vec<(&str, Option<&str>, Severity)> = issues
+        .iter()
+        .map(|i| (i.code, i.node.as_deref(), i.severity))
+        .collect();
+    // One V91 for the shared default, on the first node that uses it. A
+    // warning: the global store was the last place looked, and another
+    // machine (CI, a fresh clone) may have the profile there.
     assert_eq!(
         summary,
-        vec![("V91", Some("plan")), ("V92", Some("lint"))],
+        vec![
+            ("V91", Some("plan"), Severity::Warning),
+            ("V92", Some("lint"), Severity::Error)
+        ],
         "{issues:?}"
     );
-    assert!(issues.iter().all(|i| i.severity == Severity::Error));
     assert!(
         issues[0].message.contains("`architect`"),
         "{}",
@@ -92,6 +98,58 @@ fn unresolvable_profile_and_missing_script_are_errors() {
         "{}",
         issues[1].message
     );
+}
+
+#[test]
+fn a_missing_global_scope_profile_is_a_warning() {
+    let _cfg = config_sandbox();
+    let root = tempfile::tempdir().unwrap();
+    let version_dir = root.path().join(".apb/playbooks/implement-task/1.0.0");
+    seed_script(&version_dir, "scripts/lint.sh");
+    let issues = found(
+        root.path(),
+        &version_dir,
+        &playbook("{ name: architect, scope: global }", "scripts/lint.sh"),
+    );
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(
+        (issues[0].code, issues[0].severity),
+        ("V91", Severity::Warning)
+    );
+    assert!(
+        issues[0].message.contains("the global store"),
+        "{}",
+        issues[0].message
+    );
+}
+
+#[test]
+fn a_project_profile_that_cannot_be_loaded_is_an_error() {
+    // Only the project can fix its own broken profile: an error, for an
+    // `auto` reference too (the project is looked in first and wins).
+    let _cfg = config_sandbox();
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join(".apb/profiles/architect")).unwrap();
+    let version_dir = root.path().join(".apb/playbooks/implement-task/1.0.0");
+    seed_script(&version_dir, "scripts/lint.sh");
+    for reference in ["architect", "{ name: architect, scope: project }"] {
+        let issues = found(
+            root.path(),
+            &version_dir,
+            &playbook(reference, "scripts/lint.sh"),
+        );
+        assert_eq!(issues.len(), 1, "{reference}: {issues:?}");
+        assert_eq!(
+            (issues[0].code, issues[0].severity),
+            ("V91", Severity::Error),
+            "{reference}"
+        );
+        assert!(
+            issues[0].message.contains("cannot be loaded"),
+            "{}",
+            issues[0].message
+        );
+    }
 }
 
 #[test]
@@ -123,14 +181,47 @@ fn a_global_profile_resolves_an_auto_reference() {
         &playbook("architect", "scripts/lint.sh"),
     );
     assert!(issues.is_empty(), "{issues:?}");
-    // A `scope: project` reference does not fall back to the global store.
+    // A `scope: project` reference does not fall back to the global store,
+    // but its absence is V14's finding (the validator), not repeated here.
     let issues = found(
         root.path(),
         &version_dir,
         &playbook("{ name: architect, scope: project }", "scripts/lint.sh"),
     );
-    assert_eq!(issues.len(), 1, "{issues:?}");
-    assert_eq!(issues[0].code, "V91");
+    assert!(issues.is_empty(), "{issues:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_script_symlink_counts_only_inside_scripts() {
+    // A run copies `scripts/` keeping each symlink as is: a relative link to
+    // a file inside `scripts/` still resolves there, one that leaves it (or
+    // an absolute one) does not.
+    let _cfg = config_sandbox();
+    let root = tempfile::tempdir().unwrap();
+    seed_profile(&root.path().join(".apb/profiles"), "architect");
+    let version_dir = root.path().join(".apb/playbooks/implement-task/1.0.0");
+    seed_script(&version_dir, "scripts/real.sh");
+    seed_script(&version_dir, "outside.sh");
+    let scripts = version_dir.join("scripts");
+    std::os::unix::fs::symlink("real.sh", scripts.join("inside.sh")).unwrap();
+    std::os::unix::fs::symlink("../outside.sh", scripts.join("escape.sh")).unwrap();
+    std::os::unix::fs::symlink(scripts.join("real.sh"), scripts.join("absolute.sh")).unwrap();
+    let p = |s: &str| playbook("architect", s);
+    assert!(
+        found(root.path(), &version_dir, &p("scripts/inside.sh")).is_empty(),
+        "a link inside scripts/ is found"
+    );
+    for link in ["scripts/escape.sh", "scripts/absolute.sh"] {
+        let issues = found(root.path(), &version_dir, &p(link));
+        assert_eq!(issues.len(), 1, "{link}: {issues:?}");
+        assert_eq!(issues[0].code, "V92");
+        assert!(
+            issues[0].message.contains("symlink"),
+            "{}",
+            issues[0].message
+        );
+    }
 }
 
 #[test]
