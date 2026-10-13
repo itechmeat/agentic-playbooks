@@ -1,22 +1,10 @@
-# Playbooks CLI - task status
+# Progress log of the early phases
 
-Quick progress assessment. Spec: `docs/superpowers/specs/2026-07-08-workflows-cli-design.md`.
-Phase plans: `docs/superpowers/plans/`.
+Historical record of how the first phases of apb were built and reordered.
+Current work is tracked in GitHub issues; release changes are in
+`docs/release-notes/`.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` not started.
-
-## Workflow (for self, mandatory)
-
-Run code-ranker NOT on every change, but once before marking a task done
-(`[x]`) in this file (offline, already installed):
-
-1. `cargo metadata --format-version 1 >/dev/null` - warm the cargo cache (needed by the rust plugin, otherwise an offline error).
-2. `code-ranker check .` - gate: exit != 0 on a violation, auto-detects languages.
-3. If there are violations: `code-ranker report . --output.scorecard --focus ADP --top 1` (worst-first), read `code-ranker docs base <ID>` BEFORE fixing, fix, repeat from step 2.
-
-Check the report, draw conclusions, fix as needed. Goal: correct code structure: dependency cycles (ADP), cohesion (HK), complexity, SOLID/DRY/KISS. Artifacts in `.code-ranker/` (baseline for `--baseline` diffs).
-
-Search the code with **zg** (zvec-grep) over the live files - `zg query --rg -F <symbol> <path>` / `zg query --fts <name>` before manual grep/reading.
 
 ## Phase 1 - core and viewer (done, tag v0.1.0)
 

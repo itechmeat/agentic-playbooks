@@ -209,7 +209,7 @@ impl Expectation {
 impl TestsDoc {
     /// Parses a `tests.yaml` document.
     pub fn from_yaml(yaml: &str) -> Result<Self, ConnectorError> {
-        serde_yaml_ng::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))
+        yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))
     }
 }
 

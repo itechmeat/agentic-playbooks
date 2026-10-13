@@ -14,7 +14,7 @@ The adapter is a self-contained Node package: plain ESM, zero runtime dependenci
 
 ## Prerequisites
 
-- apb installed and running in server mode, reachable over HTTP from the Paperclip process. The adapter was verified against apb 0.20.2.
+- apb installed and running in server mode, reachable over HTTP from the Paperclip process. The adapter needs apb 0.20.2 or newer (it was first verified against 0.20.2).
 - At least one apb project (`apb projects list`) and one trusted playbook in it. Trust is granted in the project, not from Paperclip.
 - A Paperclip instance that loads external server adapters. The adapter was verified against paperclipai 2026.824.1.
 - Node 24 or newer for the Paperclip process, since the adapter is ESM and uses a modern `fetch`.

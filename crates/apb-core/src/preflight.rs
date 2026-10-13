@@ -186,3 +186,206 @@ pub fn cold_handoffs(root: &Path, playbook: &Playbook) -> Vec<String> {
     }
     out
 }
+
+/// The references a run of `playbook` would fail on at start because the
+/// file they name is not there, as [`Issue`]s:
+///
+/// - V91: an agent-running node's profile (its own or `defaults.profile`)
+///   resolves in no scope the run would look in (project, then global, for
+///   a project playbook), or its files cannot be read. One issue per
+///   distinct reference, on the first node that uses it. An error only when
+///   the project alone could provide the profile: a project profile that
+///   exists but cannot be loaded. When the global store was the last place
+///   looked (`scope: global`, or `auto` falling through to it), it is a
+///   warning, since the global store is machine-local and another machine
+///   (CI, a fresh clone) may well have the profile. A missing
+///   `scope: project` profile is V14's finding and is not repeated here.
+/// - V92 (error): a `script` node's script, an `agent_task`'s
+///   `success_check` script or a goal criterion's script is missing. A run
+///   copies only the version's `scripts/` directory next to its snapshot and
+///   runs every script from there, so a path counts as present only when it
+///   is a regular file (not a symlink) under `scripts/` in `version_dir`. A
+///   path V12 or V41 already refuses is left to them.
+///
+/// Not checked: the profiles and scripts of sub-playbook children (each is
+/// validated on its own) and the supervisor profile of `apb run --supervise`
+/// (chosen at run start).
+///
+/// The validator itself stays free of the filesystem, and a save does not
+/// call this: the dashboard and MCP write the YAML first and add the
+/// profile or the scripts afterwards. `apb validate` and MCP
+/// `playbook_validate` report these with the severity above, the
+/// dashboard's playbook view always as warnings.
+pub fn missing_references(
+    root: &Path,
+    origin: crate::profile_store::PlaybookOrigin,
+    version_dir: &Path,
+    playbook: &Playbook,
+) -> Vec<crate::validate::Issue> {
+    let mut out = unresolved_profiles(root, origin, playbook);
+    out.extend(missing_scripts(version_dir, playbook));
+    out
+}
+
+fn reference_issue(
+    code: &'static str,
+    severity: crate::validate::Severity,
+    node: &str,
+    message: String,
+) -> crate::validate::Issue {
+    crate::validate::Issue {
+        code,
+        severity,
+        message,
+        node: Some(node.to_string()),
+    }
+}
+
+fn unresolved_profiles(
+    root: &Path,
+    origin: crate::profile_store::PlaybookOrigin,
+    playbook: &Playbook,
+) -> Vec<crate::validate::Issue> {
+    use crate::profile::{ProfileError, ProfileScope};
+    use crate::profile_store::PlaybookOrigin;
+    use crate::validate::Severity;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for node in &playbook.nodes {
+        let Some(reference) = node.kind.effective_profile_ref(&playbook.defaults) else {
+            continue;
+        };
+        if !seen.insert((
+            crate::profile_store::scope_str(reference.scope),
+            reference.name.clone(),
+        )) {
+            continue;
+        }
+        // Whether the project's own profile directory is what failed: then
+        // only the project can fix it and the finding is an error.
+        let project_only = reference.scope == ProfileScope::Project
+            || (reference.scope == ProfileScope::Auto
+                && origin == PlaybookOrigin::Project
+                && crate::profile_store::project_dir(root)
+                    .join(&reference.name)
+                    .exists());
+        let (severity, message) = match crate::profile_store::resolve_profile(
+            root, origin, &reference,
+        ) {
+            Ok(_) | Err(ProfileError::ScopeForbidden(_)) => continue, // V14's finding
+            // A missing project-scope profile is V14's finding too.
+            Err(ProfileError::NotFound(_)) if reference.scope == ProfileScope::Project => {
+                continue;
+            }
+            Err(ProfileError::NotFound(_)) => {
+                let scopes = match (reference.scope, origin) {
+                    (ProfileScope::Auto, PlaybookOrigin::Project) => {
+                        "the project or the global store"
+                    }
+                    _ => "the global store",
+                };
+                (
+                    Severity::Warning,
+                    format!(
+                        "profile `{}` is not found in {scopes}; a run on this machine fails at start until it exists (create it with `apb profile write` or MCP `profile_write`)",
+                        reference.name
+                    ),
+                )
+            }
+            Err(e) => (
+                if project_only {
+                    Severity::Error
+                } else {
+                    Severity::Warning
+                },
+                format!(
+                    "profile `{}` cannot be loaded: {e}; a run fails at start",
+                    reference.name
+                ),
+            ),
+        };
+        out.push(reference_issue("V91", severity, &node.id, message));
+    }
+    out
+}
+
+/// Whether `file` (under `version_dir/scripts/`) is a script the run would
+/// find in its copy of `scripts/`. The copy (`fsutil::copy_tree`) keeps a
+/// symlink as a symlink with the same target, and the definition digest
+/// refuses an absolute or escaping one, so a symlink counts only when it is
+/// relative and resolves to a regular file inside `scripts/`.
+fn script_in_run_copy(version_dir: &Path, file: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(file) else {
+        return false;
+    };
+    if meta.is_file() {
+        return true;
+    }
+    if !meta.file_type().is_symlink() || !std::fs::read_link(file).is_ok_and(|t| t.is_relative()) {
+        return false;
+    }
+    let (Ok(target), Ok(scripts)) = (
+        std::fs::canonicalize(file),
+        std::fs::canonicalize(version_dir.join("scripts")),
+    ) else {
+        return false;
+    };
+    target.starts_with(&scripts) && target.is_file()
+}
+
+fn missing_scripts(version_dir: &Path, playbook: &Playbook) -> Vec<crate::validate::Issue> {
+    use crate::schema::{GoalCheck, NodeKind, SuccessCheck};
+    let mut out = Vec::new();
+    let mut check = |node: &str, what: &str, path: &str| {
+        if !is_safe_relative(path) {
+            return; // V12 / V41
+        }
+        let in_scripts = Path::new(path)
+            .components()
+            .find(|c| !matches!(c, std::path::Component::CurDir))
+            .is_some_and(|c| c.as_os_str() == "scripts");
+        let file = version_dir.join(path);
+        if in_scripts && script_in_run_copy(version_dir, &file) {
+            return;
+        }
+        let message = if file.is_file() && !in_scripts {
+            format!(
+                "{what} `{path}` is outside `scripts/`; a run copies only the version's `scripts/` directory, so it cannot find the file (move it under `scripts/`)"
+            )
+        } else if file.is_file() {
+            format!(
+                "{what} `{path}` is a symlink that is absolute or leaves `scripts/`; a run copies the link, not its target, so it cannot find the file (replace it with the file)"
+            )
+        } else {
+            format!(
+                "{what} `{path}` does not exist in the version directory; a run fails on this node until it is added"
+            )
+        };
+        out.push(reference_issue(
+            "V92",
+            crate::validate::Severity::Error,
+            node,
+            message,
+        ));
+    };
+    for node in &playbook.nodes {
+        if let NodeKind::Script { script, .. } = &node.kind {
+            check(&node.id, "script", script);
+        }
+        if let Some(path) = node
+            .success_check
+            .as_ref()
+            .and_then(SuccessCheck::script_path)
+        {
+            check(&node.id, "success_check script", path);
+        }
+    }
+    if let Some(goal) = &playbook.goal {
+        for criterion in &goal.criteria {
+            if let GoalCheck::Script { path } = &criterion.check {
+                check("goal", "goal criterion script", path);
+            }
+        }
+    }
+    out
+}

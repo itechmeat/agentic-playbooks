@@ -126,3 +126,11 @@ jobs:
       - name: Release notes must exist for this tag
         if: matrix.linux && github.ref_type == 'tag'
         run: test -f "docs/release-notes/${GITHUB_REF_NAME}.md"
+
+      # The archives ship THIRD-PARTY-NOTICES.txt as committed; ci.yml checks
+      # it on every pull request, this refuses a tag whose file went stale.
+      - name: Third-party notices are current
+        if: matrix.linux
+        run: |
+          scripts/install-cargo-about.sh
+          scripts/third-party-notices.sh --check

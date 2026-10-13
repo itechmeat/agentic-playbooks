@@ -832,7 +832,7 @@ fn resolve_target(connector: &str, account: &str) -> Option<(ConnectorDoc, Accou
     // verifies a signature.
     let path = global_config_path(connector)?;
     let raw = std::fs::read_to_string(path).ok()?;
-    let file: AccountsFile = serde_yaml_ng::from_str(&raw).ok()?;
+    let file: AccountsFile = yaml_serde::from_str(&raw).ok()?;
     let acct = file.accounts.into_iter().find(|a| a.name == account)?;
     Some((doc, acct))
 }

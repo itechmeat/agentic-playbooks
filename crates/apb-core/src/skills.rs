@@ -38,7 +38,7 @@ pub fn project_skills_dir(root: &Path) -> Result<PathBuf, ProfileError> {
     let Ok(raw) = std::fs::read_to_string(&cfg) else {
         return Ok(root.join(".agents/skills"));
     };
-    let Some(dir) = serde_yaml_ng::from_str::<ProjectConfigSkills>(&raw)
+    let Some(dir) = yaml_serde::from_str::<ProjectConfigSkills>(&raw)
         .ok()
         .and_then(|c| c.skills_dir)
     else {

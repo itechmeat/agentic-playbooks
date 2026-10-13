@@ -38,10 +38,10 @@ fn v75_refuses_globs_that_leave_the_tree_or_do_not_parse() {
 fn protect_round_trips_and_is_left_out_when_empty() {
     let p = Playbook::from_yaml(&playbook(r#"["tests/**"]"#)).unwrap();
     assert_eq!(p.nodes[1].kind.protect_globs(), ["tests/**".to_string()]);
-    let yaml = serde_yaml_ng::to_string(&p).unwrap();
+    let yaml = yaml_serde::to_string(&p).unwrap();
     assert!(yaml.contains("protect"));
     let none = Playbook::from_yaml(&playbook("[]")).unwrap();
-    assert!(!serde_yaml_ng::to_string(&none).unwrap().contains("protect"));
+    assert!(!yaml_serde::to_string(&none).unwrap().contains("protect"));
 }
 
 #[test]

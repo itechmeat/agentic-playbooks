@@ -64,8 +64,8 @@ pub fn load_in(config_dir: &Path) -> Result<Vec<StoredThreshold>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("cannot read {THRESHOLDS_FILE}: {e}")),
     };
-    let doc: FileDoc = serde_yaml_ng::from_str(&raw)
-        .map_err(|e| format!("{THRESHOLDS_FILE} does not parse: {e}"))?;
+    let doc: FileDoc =
+        yaml_serde::from_str(&raw).map_err(|e| format!("{THRESHOLDS_FILE} does not parse: {e}"))?;
     if doc.version != 1 {
         return Err(format!(
             "{THRESHOLDS_FILE}: unsupported version {}",
@@ -158,7 +158,7 @@ pub fn set_threshold_in(
         version: 1,
         thresholds: all,
     };
-    let text = serde_yaml_ng::to_string(&doc).map_err(|e| e.to_string())?;
+    let text = yaml_serde::to_string(&doc).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
     crate::fsutil::atomic_write(&config_dir.join(THRESHOLDS_FILE), text.as_bytes())
         .map_err(|e| format!("cannot write {THRESHOLDS_FILE}: {e}"))

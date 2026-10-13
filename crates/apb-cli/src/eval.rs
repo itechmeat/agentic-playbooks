@@ -137,7 +137,7 @@ fn build_overrides(args: &EvalArgs, playbook: &Playbook) -> Result<Option<RunOve
             .split_once('=')
             .ok_or_else(|| format!("bad --profile-override `{spec}` (expected NODE=PROFILE)"))?;
         let pref: apb_core::profile::QualifiedProfileRef =
-            serde_yaml_ng::from_str(&serde_json::to_string(profile).unwrap_or_default())
+            yaml_serde::from_str(&serde_json::to_string(profile).unwrap_or_default())
                 .map_err(|e| format!("bad --profile-override `{spec}`: {e}"))?;
         ov.nodes.entry(node.to_string()).or_default().profile = Some(pref);
     }
@@ -1794,7 +1794,7 @@ fn run_eval(
     let overrides_file = match overrides {
         Some(o) => {
             let f = scratch.join("overrides.yaml");
-            match serde_yaml_ng::to_string(o)
+            match yaml_serde::to_string(o)
                 .map_err(|e| e.to_string())
                 .and_then(|y| std::fs::write(&f, y).map_err(|e| e.to_string()))
             {
@@ -1997,7 +1997,7 @@ mod tests {
         std::fs::create_dir_all(evals.join("fixtures/base")).unwrap();
         std::fs::write(evals.join("fixtures/base/a.txt"), "a").unwrap();
         std::fs::write(evals.join("good.yaml"), SUITE_CASE).unwrap();
-        let playbook: Playbook = serde_yaml_ng::from_str(SUITE_PB).unwrap();
+        let playbook: Playbook = yaml_serde::from_str(SUITE_PB).unwrap();
         let bad = SUITE_CASE.replace("fixtures/base", "fixtures/missing");
 
         let scratch = t.path().join("scratch-1");

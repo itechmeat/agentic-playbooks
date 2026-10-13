@@ -3,6 +3,34 @@
 `apb` is a single-binary CLI: the playbook engine, a web UI (embedded), and an
 MCP server in one executable.
 
+## Supported platforms
+
+Prebuilt binaries are published for:
+
+| Platform | Archive target |
+|---|---|
+| macOS, Apple silicon | `aarch64-apple-darwin` |
+| macOS, Intel | `x86_64-apple-darwin` |
+| Linux x86_64, glibc | `x86_64-unknown-linux-gnu` |
+| Linux x86_64, static | `x86_64-unknown-linux-musl` |
+
+The glibc build is made on Ubuntu 22.04 and needs glibc 2.35 or newer. On an
+older distribution, or on Alpine and other musl systems, download the static
+`musl` archive (Section 4). Windows and Linux on ARM have no prebuilt binary;
+on Linux ARM you can build from source (Section 5). On Windows, use WSL2 with
+the Linux build.
+
+## Requirements
+
+- At least one coding agent CLI that apb can drive, installed and signed in on
+  its own: Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`),
+  Cursor Agent (`cursor-agent`), Grok (`grok`), Hermes (`hermes`), Qoder
+  (`qoder`), Antigravity (`agy`), Pi (`pi`) or ZCode (`zcode`). `apb detect`
+  lists the ones it finds. Playbooks made only of `script` nodes need none.
+- `git`, and `sh` for script nodes. Other runners (`bun`, `deno`,
+  `python3`) are needed only by playbooks that use them.
+- No Rust or Bun toolchain, unless you build from source.
+
 ## 1. One-liner install (macOS, Linux)
 
 ```sh
@@ -11,7 +39,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playb
 
 This downloads the shell installer generated for the latest tagged release,
 verifies it, and places the `apb` binary in `CARGO_HOME` (`~/.cargo/bin` by
-default). It also writes an environment script and an install receipt under
+default), together with `apb-update`, a standalone updater that does the same
+job as `apb self-update`. It also writes an environment script and an install receipt under
 `~/.config/apb/`; the receipt is what `apb self-update` reads later to update
 in place.
 
@@ -33,7 +62,11 @@ brew install itechmeat/agentic-playbooks/apb
 ```
 
 This taps `itechmeat/homebrew-agentic-playbooks` and installs the `apb`
-formula.
+formula. The formula covers macOS (Apple silicon and Intel) and Linux x86_64.
+
+Note: the `apb` crate on crates.io is an unrelated project, so
+`cargo install apb` does not install this tool. Use one of the methods on
+this page.
 
 ## 3. Updating
 
@@ -51,9 +84,13 @@ formula.
 
 ## 4. Manual download and verify
 
-Pick the archive that matches your platform from the
+Pick the archive that matches your platform (see
+[Supported platforms](#supported-platforms)) from the
 [Releases page](https://github.com/itechmeat/agentic-playbooks/releases),
-then verify and unpack it:
+then verify and unpack it. On Linux, take `x86_64-unknown-linux-gnu` when
+your glibc is 2.35 or newer (`ldd --version` prints it) and
+`x86_64-unknown-linux-musl` otherwise; the musl binary is fully static and
+runs on any x86_64 Linux. The example below uses the Apple silicon archive:
 
 ```sh
 if command -v shasum >/dev/null 2>&1; then
@@ -67,8 +104,8 @@ apb --version
 ```
 
 Each archive unpacks into a directory named after the platform (for example
-`apb-aarch64-apple-darwin/`) holding the `apb` binary and a copy of
-`LICENSE`; a companion `.sha256` checksum file sits next to the archive on
+`apb-aarch64-apple-darwin/`) holding the `apb` binary, `LICENSE`, the
+README, the changelog and the third-party license notices; a companion `.sha256` checksum file sits next to the archive on
 the Releases page.
 
 A checksum only proves the download matches the file on the Releases page.
@@ -81,7 +118,7 @@ gh attestation verify apb-aarch64-apple-darwin.tar.xz --repo itechmeat/agentic-p
 ```
 
 Every release artifact (archives, checksums, the shell installer) is attested
-this way, from releases made after this was introduced.
+this way, from v0.22.0 on.
 
 ## 5. Build from source (contributor path)
 
@@ -110,8 +147,8 @@ To update a source install: `git pull`, rebuild `web/`, re-run
 
 Remove the binary for your install method:
 
-- Installer-based install: `rm ~/.cargo/bin/apb` (or wherever `CARGO_HOME`
-  points).
+- Installer-based install: `rm ~/.cargo/bin/apb ~/.cargo/bin/apb-update` (or
+  wherever `CARGO_HOME` points).
 - Homebrew: `brew uninstall apb`.
 - Source (`cargo install`): `cargo uninstall apb`.
 

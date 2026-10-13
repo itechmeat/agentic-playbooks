@@ -6,14 +6,24 @@ The MCP server (started with `apb mcp`) identifies itself as `agentic-playbooks`
 
 ## Install
 
-Prefer the one-liner installer:
+Prebuilt binaries: macOS (Apple silicon, Intel) and Linux x86_64 (glibc 2.35+ or a static musl build). No Windows or Linux ARM binaries. apb drives coding agent CLIs you install separately (Claude Code, Codex, OpenCode, Cursor Agent, Grok, Hermes, Qoder, Antigravity, Pi, ZCode).
+
+The one-liner installer works everywhere a prebuilt binary exists:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playbooks/releases/latest/download/apb-installer.sh | sh
 ```
 
 This installs the `apb` binary to `CARGO_HOME` (`~/.cargo/bin` by default), no
-build tools required.
+build tools required. Update with `apb self-update`.
+
+Homebrew (macOS, Linux x86_64) is equivalent; update with `brew upgrade apb`:
+
+```sh
+brew install itechmeat/agentic-playbooks/apb
+```
+
+The `apb` crate on crates.io is an unrelated project: `cargo install apb` does not install this tool.
 
 Fall back to a source build only if the installer is not usable in your
 environment (for example, no network access to GitHub Releases). This
@@ -82,7 +92,7 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 ```text
 apb init            create the .apb structure
 apb list            playbooks and versions
-apb validate        validate playbooks, profile models, requires and connectors
+apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
 apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal)
 apb runs            list runs (apb runs <id> [--json]: one run with its execution mode)
 apb wait <run>      block until a run finishes, needs input or stops
@@ -120,9 +130,10 @@ apb self-update     update apb to the latest release
 
 ## Architecture
 
-Five crates under `crates/` with dependency direction core <- engine <- mcp, and cli and server on top:
+Six crates under `crates/` with dependency direction core <- engine <- mcp, cli and server on top, and `apb-decide` (no workspace dependency) <- engine, mcp:
 
 - `apb-core`: domain layer (no async). Playbook schema, validator, profiles, registry, versioning, trust store, atomic state IO.
+- `apb-decide`: blocking, provider-agnostic decision-model client (typed questions, provider chain, cache).
 - `apb-engine`: execution. Drive loop, node execution, immutable run manifest, agent adapters, append-only event log, background supervisor.
 - `apb-mcp`: rmcp stdio MCP server, policy gate, profile and supervisor tools.
 - `apb-cli`: package name `apb` (bin `apb`); thin dispatch.
@@ -130,17 +141,23 @@ Five crates under `crates/` with dependency direction core <- engine <- mcp, and
 
 ## Docs
 
-- [Install guide](docs/INSTALL.md): detailed installation methods and environment checks
-- [MCP tools reference](docs/MCP.md): full tool surface, annotations, safety model
-- [Run stats](docs/STATS.md): `apb stats`, cross-run metrics from the run journals
-- [Eval suites](docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
-- [Host integration](docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
-- [Profile authoring](docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
-- [Playbook authoring guide](docs/HOWTO-authoring.md): node types, edges, conditions, params, templating
-- [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
-- [Running apb in CI](docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
+- [Install guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INSTALL.md): detailed installation methods and environment checks
+- [MCP tools reference](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/MCP.md): full tool surface, annotations, safety model
+- [Run stats](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/STATS.md): `apb stats`, cross-run metrics from the run journals
+- [Eval suites](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
+- [Host integration](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
+- [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
+- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating
+- [Guardrails](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
+- [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
+- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust
+- [Deployment](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DEPLOYMENT.md): running the dashboard on a server behind a TLS proxy with API keys
+- [Decision models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DECISIONS.md): optional small models for completion checks, judge nodes, retry advice and catalog ranking
+- [Interactive agents](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INTERACTIVE-AGENTS.md): `interactive: true` nodes that ask the user a question mid-run
+- [Playbook interview](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-interview.md): how an agent interviews a user to capture a process as a playbook
+- [Feedback loop](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/FEEDBACK-LOOP.md): how agents report apb defects found during supervised runs
 
 ## Optional
 
-- [Design spec](docs/superpowers/specs/2026-07-08-workflows-cli-design.md): full system design and rationale
-- [Agent profiles spec](docs/superpowers/specs/2026-07-12-agent-profiles-design.md): profiles, trust, skills, scope resolution
+- [Design spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-07-08-workflows-cli-design.md): full system design and rationale
+- [Agent profiles spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-07-12-agent-profiles-design.md): profiles, trust, skills, scope resolution

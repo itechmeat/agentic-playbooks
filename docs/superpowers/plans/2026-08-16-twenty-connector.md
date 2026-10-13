@@ -12,8 +12,8 @@
 
 - **No git commits and no git staging in this work. None.** The deliverable is reviewed locally; the owner commits after explicit approval.
 - Endpoint facts come ONLY from the two research reports (they agree; the live probe wins on any conflict since it ran against the real target version v2.30.0):
-  - `/private/tmp/claude-501/-Users-techmeat-www-projects-omniteamhq-agentic-playbooks/31c72b8b-8939-492e-a627-a2ae8b80bf24/scratchpad/twenty-api-research.md` (docs plus source reading)
-  - `/private/tmp/claude-501/-Users-techmeat-www-projects-omniteamhq-agentic-playbooks/31c72b8b-8939-492e-a627-a2ae8b80bf24/scratchpad/twenty-live-probe.md` (empirical, Twenty v2.30.0)
+  - `<session scratchpad>/twenty-api-research.md` (docs plus source reading)
+  - `<session scratchpad>/twenty-live-probe.md` (empirical, Twenty v2.30.0)
   - Saved OpenAPI specs in the same directory: `twenty-openapi-core.json`, `metadata_openapi.json` (grep these for enum literals such as order_by directions and the `is` operator values before documenting them; anything not found there or in the reports stays out of connector.yaml and is at most a README caveat).
 - Never invent an endpoint, parameter, or default not present in those sources.
 - Secrets: never a literal credential anywhere in the repo; `{{secret.api_key}}` appears ONLY inside the `auth` block; `{{env.*}}` references are documentation examples only. The live demo credentials live in `.../scratchpad/twenty-demo.env` (TWENTY_BASE_URL, TWENTY_API_KEY) — Task 3 only; the key value must never be printed, logged, or written into any file under the repo.
@@ -87,7 +87,7 @@
 ### Task 3: live smoke test against the demo instance
 
 **Files:**
-- Create: `/private/tmp/claude-501/-Users-techmeat-www-projects-omniteamhq-agentic-playbooks/31c72b8b-8939-492e-a627-a2ae8b80bf24/scratchpad/twenty-smoke-report.md` (report only; nothing under the repo)
+- Create: `<session scratchpad>/twenty-smoke-report.md` (report only; nothing under the repo)
 
 **Interfaces:**
 - Consumes: the finished connector folder, the demo credentials env file (path in Global Constraints), the apb CLI.

@@ -77,7 +77,7 @@ fn every_official_connector_folder_is_complete() {
         );
         let public = read(&public_path);
         let fm = frontmatter(&public, &name);
-        let meta: PublicMeta = serde_yaml_ng::from_str(&fm)
+        let meta: PublicMeta = yaml_serde::from_str(&fm)
             .unwrap_or_else(|e| panic!("connectors/{name}/PUBLIC.md frontmatter: {e}"));
         assert!(
             !meta.display_name.is_empty(),
@@ -163,7 +163,7 @@ fn every_official_connector_folder_is_complete() {
         // 6. Every function has at least one tests.yaml case.
         let tests_path = dir.join("tests.yaml");
         let tests_yaml = read(&tests_path);
-        let tests: serde_json::Value = serde_yaml_ng::from_str(&tests_yaml)
+        let tests: serde_json::Value = yaml_serde::from_str(&tests_yaml)
             .unwrap_or_else(|e| panic!("connectors/{name}/tests.yaml: {e}"));
         let cases = tests["cases"]
             .as_array()

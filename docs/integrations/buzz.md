@@ -13,7 +13,7 @@ Design background and the longer-term plan live in `docs/superpowers/specs/2026-
 ## Prerequisites
 
 - Buzz Desktop installed, with an agent harness configured that supports MCP over ACP (Claude Code or goose). This pack was authored against the persona pack spec as of Buzz v0.5.x; Buzz is pre-1.0 and moves fast, so re-validate the pack after Buzz upgrades.
-- apb installed and on PATH (`apb --version` should print 0.12.0 or newer).
+- apb installed and on PATH (0.12.0 or newer; any current release works).
 - An apb project with at least one trusted playbook. Trust is granted in the project (by you), not from the channel.
 
 ## Setup

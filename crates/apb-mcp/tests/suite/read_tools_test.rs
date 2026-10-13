@@ -32,13 +32,72 @@ fn get_returns_yaml_and_model() {
     assert!(v["yaml"].as_str().unwrap().contains("implement-task"));
 }
 
+/// Completes [`seed`] with what a run of the fixture needs on disk: a
+/// loadable `architect` profile and the `lint` node's script.
+fn seed_runnable(root: &Path) {
+    seed(root);
+    let profile = root.join(".apb/profiles/architect");
+    fs::write(
+        profile.join("profile.yaml"),
+        "name: architect\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-5-5\n",
+    )
+    .unwrap();
+    fs::write(profile.join("SOUL.md"), "role").unwrap();
+    let scripts = root.join(".apb/playbooks/implement-task/1.0.0/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("node-lint.sh"), "true\n").unwrap();
+}
+
 #[test]
 fn validate_reports_ok() {
     let dir = tempfile::tempdir().unwrap();
-    seed(dir.path());
+    seed_runnable(dir.path());
     let v = playbook_validate(dir.path(), "implement-task").unwrap();
     assert_eq!(v["valid"], true);
-    assert!(v["issues"].as_array().unwrap().is_empty());
+    assert!(v["issues"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[test]
+fn validate_reports_a_missing_profile_and_script() {
+    // The fixture's `architect` directory holds no profile, and its script
+    // was never added: a run would fail at start and on `lint`.
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let v = playbook_validate(dir.path(), "implement-task").unwrap();
+    assert_eq!(v["valid"], false, "{v}");
+    let found: Vec<(&str, &str)> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["code"].as_str().unwrap(),
+                i["node"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(found, vec![("V91", "plan"), ("V92", "lint")], "{v}");
+    // The empty project `architect` directory fails to load: only the
+    // project can fix it, so V91 is an error here.
+    assert_eq!(v["issues"][0]["severity"], "error", "{v}");
+}
+
+#[test]
+fn validate_stays_valid_when_only_the_global_store_could_provide_a_profile() {
+    // No project profile and none in this machine's global store: the global
+    // store was the last place looked, so V91 is a warning (CI or another
+    // machine may have the profile there) and the playbook stays valid.
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed_runnable(dir.path());
+    fs::remove_dir_all(dir.path().join(".apb/profiles/architect")).unwrap();
+    let v = playbook_validate(dir.path(), "implement-task").unwrap();
+    assert_eq!(v["valid"], true, "{v}");
+    let issues = v["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{v}");
+    assert_eq!(issues[0]["code"], "V91", "{v}");
+    assert_eq!(issues[0]["severity"], "warning", "{v}");
 }
 
 #[test]

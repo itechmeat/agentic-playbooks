@@ -37,11 +37,11 @@ pub(crate) fn read_overlay(run_dir: &Path) -> Result<RebindOverlay, EngineError>
         return Ok(RebindOverlay::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))
+    yaml_serde::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))
 }
 
 pub(crate) fn write_overlay(run_dir: &Path, overlay: &RebindOverlay) -> Result<(), EngineError> {
-    let yaml = serde_yaml_ng::to_string(overlay).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let yaml = yaml_serde::to_string(overlay).map_err(|e| EngineError::Yaml(e.to_string()))?;
     apb_core::fsutil::atomic_write_under(run_dir, &overlay_path(run_dir), yaml.as_bytes())?;
     Ok(())
 }

@@ -237,7 +237,7 @@ pub fn public_meta_from_str(content: &str, name: &str) -> PublicMeta {
         return fallback_meta(name);
     };
     let mut meta: PublicMeta =
-        serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(name));
+        yaml_serde::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(name));
     // Frontmatter that parses but omits `display_name` (or sets it to an
     // empty/whitespace-only string) deserializes to `""` via the field's
     // serde default, not the folder name - fall back the same way the

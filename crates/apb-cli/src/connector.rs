@@ -827,7 +827,7 @@ fn global_account_names(name: &str) -> Vec<String> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let Ok(file) = serde_yaml_ng::from_str::<config::AccountsFile>(&raw) else {
+    let Ok(file) = yaml_serde::from_str::<config::AccountsFile>(&raw) else {
         return Vec::new();
     };
     file.accounts.into_iter().map(|a| a.name).collect()

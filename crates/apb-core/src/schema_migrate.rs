@@ -80,7 +80,7 @@ fn read_legacy_global() -> Result<LegacyGlobal, MigError> {
             )));
         }
     };
-    serde_yaml_ng::from_str(&raw)
+    yaml_serde::from_str(&raw)
         .map_err(|e| MigError::Yaml(format!("legacy global config.yaml: {e}")))
 }
 
@@ -159,7 +159,7 @@ fn profile_yaml_for(name: &str, ex: &LegacyExec) -> String {
         zcode_mode: None,
         tiers: Default::default(),
     };
-    serde_yaml_ng::to_string(&doc).unwrap_or_default()
+    yaml_serde::to_string(&doc).unwrap_or_default()
 }
 
 /// Converts an arbitrary legacy name (executor mapping key, `<id>-<node>`)
@@ -290,10 +290,10 @@ impl Reg {
 /// `{ name, scope: global }` (otherwise `scope: auto` would resolve to a
 /// project profile first); project scope uses the short string form
 /// (`scope: auto` will find the project profile).
-fn profile_ref_value(name: &str, scope: &str) -> serde_yaml_ng::Value {
-    use serde_yaml_ng::Value;
+fn profile_ref_value(name: &str, scope: &str) -> yaml_serde::Value {
+    use yaml_serde::Value;
     if scope == "global" {
-        let mut m = serde_yaml_ng::Mapping::new();
+        let mut m = yaml_serde::Mapping::new();
         m.insert(Value::from("name"), Value::from(name));
         m.insert(Value::from("scope"), Value::from("global"));
         Value::Mapping(m)
@@ -357,8 +357,8 @@ pub fn plan(root: &Path) -> Result<MigrationPlan, MigError> {
         let Ok(raw) = std::fs::read_to_string(&playbook_yaml_path) else {
             continue;
         };
-        let mut doc: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&raw).map_err(|e| MigError::Yaml(e.to_string()))?;
+        let mut doc: yaml_serde::Value =
+            yaml_serde::from_str(&raw).map_err(|e| MigError::Yaml(e.to_string()))?;
 
         let has_executors = doc.get("executors").is_some()
             || doc
@@ -385,7 +385,7 @@ pub fn plan(root: &Path) -> Result<MigrationPlan, MigError> {
         if let Some(execs) = doc.get("executors").and_then(|v| v.as_mapping()).cloned() {
             for (k, v) in &execs {
                 let ename = k.as_str().unwrap_or("exec").to_string();
-                if let Ok(ex) = serde_yaml_ng::from_value::<LegacyExec>(v.clone()) {
+                if let Ok(ex) = yaml_serde::from_value::<LegacyExec>(v.clone()) {
                     let pname = reg.register(
                         &ename,
                         &ex,
@@ -451,11 +451,11 @@ pub fn plan(root: &Path) -> Result<MigrationPlan, MigError> {
         rewrite_doc(&mut doc, &id, &name_map, default_profile, &mut reg, &mut mp)?;
         if let Some(map) = doc.as_mapping_mut() {
             map.insert(
-                serde_yaml_ng::Value::from("version"),
-                serde_yaml_ng::Value::from(new_version.clone()),
+                yaml_serde::Value::from("version"),
+                yaml_serde::Value::from(new_version.clone()),
             );
         }
-        let new_yaml = serde_yaml_ng::to_string(&doc).map_err(|e| MigError::Yaml(e.to_string()))?;
+        let new_yaml = yaml_serde::to_string(&doc).map_err(|e| MigError::Yaml(e.to_string()))?;
 
         mp.diagnostics.push(format!(
             "playbook `{id}` migrates to schema 2 (SOUL.md files created empty - fill role text)"
@@ -478,14 +478,14 @@ pub fn plan(root: &Path) -> Result<MigrationPlan, MigError> {
 /// `executors` and `defaults.executor`, sets `defaults.profile`, converts
 /// node references (name -> profile; inline executor -> generated profile).
 fn rewrite_doc(
-    doc: &mut serde_yaml_ng::Value,
+    doc: &mut yaml_serde::Value,
     id: &str,
     name_map: &BTreeMap<String, (String, String)>,
     default_profile: Option<(String, String)>,
     reg: &mut Reg,
     mp: &mut MigrationPlan,
 ) -> Result<(), MigError> {
-    use serde_yaml_ng::Value;
+    use yaml_serde::Value;
     let Some(map) = doc.as_mapping_mut() else {
         return Ok(());
     };
@@ -508,7 +508,7 @@ fn rewrite_doc(
             defaults.insert(Value::from("profile"), profile_ref_value(pname, pscope));
         }
     } else if let Some((pname, pscope)) = &default_profile {
-        let mut d = serde_yaml_ng::Mapping::new();
+        let mut d = yaml_serde::Mapping::new();
         d.insert(Value::from("profile"), profile_ref_value(pname, pscope));
         map.insert(Value::from("defaults"), Value::Mapping(d));
     }
@@ -564,7 +564,7 @@ fn rewrite_doc(
 /// form or unknown name is an error (not a silent skip that drops the
 /// field).
 fn resolve_exec_ref(
-    exec: serde_yaml_ng::Value,
+    exec: yaml_serde::Value,
     id: &str,
     name_map: &BTreeMap<String, (String, String)>,
     reg: &mut Reg,
@@ -577,7 +577,7 @@ fn resolve_exec_ref(
             .get(name)
             .cloned()
             .ok_or_else(|| MigError::UnresolvedExecutor(id.to_string(), name.to_string()))
-    } else if let Ok(ex) = serde_yaml_ng::from_value::<LegacyExec>(exec) {
+    } else if let Ok(ex) = yaml_serde::from_value::<LegacyExec>(exec) {
         // Inline executor defined in a project playbook - a project profile.
         Ok((
             reg.register(inline_hint, &ex, mp, from, "project"),
@@ -591,7 +591,7 @@ fn resolve_exec_ref(
 /// Whether any node has an `executor` (either a string reference OR an
 /// inline object) - both require migration (the schema loader would
 /// otherwise reject them).
-fn node_has_executor(doc: &serde_yaml_ng::Value) -> bool {
+fn node_has_executor(doc: &yaml_serde::Value) -> bool {
     doc.get("nodes")
         .and_then(|n| n.as_sequence())
         .is_some_and(|nodes| {
@@ -604,9 +604,9 @@ fn node_has_executor(doc: &serde_yaml_ng::Value) -> bool {
 
 /// Names referenced by executors as strings (defaults/supervisor/node) - used
 /// to materialize the corresponding GLOBAL executors into profiles.
-fn referenced_executor_names(doc: &serde_yaml_ng::Value) -> Vec<String> {
+fn referenced_executor_names(doc: &yaml_serde::Value) -> Vec<String> {
     let mut out = Vec::new();
-    let mut push_str = |v: Option<&serde_yaml_ng::Value>| {
+    let mut push_str = |v: Option<&yaml_serde::Value>| {
         if let Some(s) = v.and_then(|x| x.as_str()) {
             out.push(s.to_string());
         }
@@ -623,7 +623,7 @@ fn referenced_executor_names(doc: &serde_yaml_ng::Value) -> Vec<String> {
     out
 }
 
-fn node_needs_default(doc: &serde_yaml_ng::Value) -> bool {
+fn node_needs_default(doc: &yaml_serde::Value) -> bool {
     doc.get("nodes")
         .and_then(|n| n.as_sequence())
         .is_some_and(|nodes| {

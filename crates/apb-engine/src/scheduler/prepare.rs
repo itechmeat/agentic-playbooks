@@ -38,12 +38,12 @@ pub(crate) fn prepare_run(
 /// non-scalar its trimmed YAML serialization. This matches how callers already
 /// hand params in as strings, so a defaulted param and an explicitly passed one
 /// render identically.
-fn stringify_param_default(v: &serde_yaml_ng::Value) -> String {
+fn stringify_param_default(v: &yaml_serde::Value) -> String {
     match v {
-        serde_yaml_ng::Value::String(s) => s.clone(),
-        serde_yaml_ng::Value::Bool(b) => b.to_string(),
-        serde_yaml_ng::Value::Number(n) => n.to_string(),
-        other => serde_yaml_ng::to_string(other)
+        yaml_serde::Value::String(s) => s.clone(),
+        yaml_serde::Value::Bool(b) => b.to_string(),
+        yaml_serde::Value::Number(n) => n.to_string(),
+        other => yaml_serde::to_string(other)
             .unwrap_or_default()
             .trim_end()
             .to_string(),
@@ -651,7 +651,7 @@ pub(crate) fn prepare_run_target(
         prep_try_unstarted(
             &mut log,
             &unstarted,
-            serde_yaml_ng::to_string(&playbook).map_err(|e| EngineError::Yaml(e.to_string())),
+            yaml_serde::to_string(&playbook).map_err(|e| EngineError::Yaml(e.to_string())),
         )?
     } else {
         loaded.yaml.clone()

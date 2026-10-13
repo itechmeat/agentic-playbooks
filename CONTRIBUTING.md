@@ -30,6 +30,39 @@ Use your real name and an email address you are entitled to use. The sign-off
 means that you wrote the contribution, or otherwise have the right to submit it
 under the project's Apache-2.0 license. It is not a copyright assignment.
 
+## Building and testing
+
+The binary embeds the web frontend, so build `web/` first:
+
+```sh
+(cd web && bun install && bun run build)
+cargo build
+```
+
+Gates a pull request must pass (CI runs equivalent checks: the tests through
+`cargo nextest`, the dependency check through `cargo-deny-action`, plus the
+notices check below):
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd web && bun run check && bun run test)
+cargo deny --all-features check
+```
+
+Run one test with `cargo test -p <crate> --test main <module>::<test_name>`
+(each crate has one integration test binary, `main`; the CLI package is
+named `apb`). After changing a Rust type or constant mirrored into
+TypeScript, regenerate `web/src/lib/api.gen.ts` and
+`web/src/lib/consts.gen.ts` with
+`APB_WRITE_TS=1 cargo test -p apb-server --lib ts_contract`.
+
+More: [docs/TESTING-GUIDELINES.md](docs/TESTING-GUIDELINES.md) for how tests
+are written here, and
+[docs/BUILD-OPTIMIZATION.md](docs/BUILD-OPTIMIZATION.md) for faster local
+builds.
+
 ## Before opening a pull request
 
 - Keep each pull request focused and explain why the change is needed.
@@ -41,6 +74,25 @@ under the project's Apache-2.0 license. It is not a copyright assignment.
 - If AI tools materially assisted the contribution, disclose that in the pull
   request. You remain responsible for reviewing, testing, and having the right to
   submit all resulting material.
+
+## Third-party notices
+
+Release archives ship `THIRD-PARTY-NOTICES.txt`, the license texts of every
+Rust crate compiled into `apb` and every npm package the web dashboard
+bundles. The file is generated; never edit it by hand. After changing
+`Cargo.lock` or `web/bun.lock`, regenerate it and commit the result:
+
+```sh
+scripts/third-party-notices.sh
+```
+
+It needs `cargo-about` (`scripts/install-cargo-about.sh` installs the pinned
+release on x86_64 Linux, or `cargo install --locked cargo-about --features cli
+--version 0.9.2`) and `bun`. CI runs `scripts/third-party-notices.sh --check`
+and fails when the committed file is stale. A crate or an npm package under
+a license outside the `about.toml` allowlist (for npm packages also
+`OFL-1.1`, which fonts use), or one whose license cannot be determined, fails
+generation until the license is reviewed.
 
 ## Security-sensitive changes
 

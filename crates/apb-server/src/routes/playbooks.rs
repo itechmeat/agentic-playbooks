@@ -389,7 +389,7 @@ pub(crate) async fn put_layout(
     };
     let layout_yaml = match body.layout {
         serde_json::Value::String(s) => s,
-        other => match serde_yaml_ng::to_string(&other) {
+        other => match yaml_serde::to_string(&other) {
             Ok(s) => s,
             Err(e) => {
                 return (
@@ -508,7 +508,22 @@ pub(crate) async fn get_playbook(
                 &reg,
                 apb_core::profile_store::PlaybookOrigin::Project,
             );
-            let report = validate(&loaded.playbook, &ctx);
+            let mut report = validate(&loaded.playbook, &ctx);
+            // V91, V92 as warnings: the editor saves the YAML first and the
+            // profile or the scripts may follow; `apb validate` errors.
+            report.issues.extend(
+                apb_core::preflight::missing_references(
+                    &root,
+                    apb_core::profile_store::PlaybookOrigin::Project,
+                    &reg.version_dir(&id, &loaded.version),
+                    &loaded.playbook,
+                )
+                .into_iter()
+                .map(|i| apb_core::validate::Issue {
+                    severity: Severity::Warning,
+                    ..i
+                }),
+            );
             let validation: Vec<serde_json::Value> = report.issues.iter().map(|i| serde_json::json!({
                 "code": i.code,
                 "severity": match i.severity { Severity::Error => "error", Severity::Warning => "warning" },

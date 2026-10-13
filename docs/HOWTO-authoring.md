@@ -8,7 +8,7 @@ matching or running.
 
 A playbook is a YAML document with these top-level fields:
 
-- `schema` (int, default 1)
+- `schema` (int, default 2; schema 1 playbooks are converted with `apb migrate`)
 - `id` (string, machine id, English, kebab or snake)
 - `name` (string, display name, any language)
 - `description` (string, free text, any language; not used for matching)
@@ -75,6 +75,18 @@ edit profiles with the `profile_*` MCP tools, `apb profile write` / `apb profile
 edit`, or the web profile API (`/api/profiles`); see PROFILES.md. Legacy
 `schema: 1` playbooks with `executors` are migrated with `apb migrate` (a
 migrated reference to a global executor becomes a global-scope profile).
+
+A reference that resolves in no scope a run would look in (project, then
+global, for a project playbook) is finding **V91** in `apb validate` and MCP
+`playbook_validate`. It is an error when only the project can provide the
+profile: a project profile that exists but cannot be loaded (a missing
+`scope: project` profile is already error V14). When the global store was the
+last place looked (`scope: global`, or `auto` falling through to it), it is a
+warning: the global store is machine-local, and CI or another machine may
+have the profile there. `apb doctor` shows the same as a `profile <name>` line
+(`[fail]` or `[warn]`). A run on a machine without the profile fails at start.
+A save does not check it, so a playbook can be saved first and its profile
+created afterwards; the dashboard's playbook view shows it as a warning.
 
 ## Connectors (external services)
 
@@ -596,6 +608,15 @@ at least one `finish`. Edges connect node ids; conditional edges gate on node
 status, review status, an output substring match, one structured field of a
 node's output, or a decision model's yes/no answer about the source node's
 output (`judge`).
+
+A `script` node's `script` is a path relative to the version directory, and
+it must live under `scripts/`: a run copies only the version's `scripts/`
+next to its snapshot and runs the script from there. A script file that is
+missing, that sits outside `scripts/`, or that is a symlink which is absolute
+or leaves `scripts/` (a run copies the link, not its target), is error **V92** in `apb validate`,
+MCP `playbook_validate` and `apb doctor` (the same check covers a
+`success_check` script and a goal criterion's script). As with V91, a save
+does not check it, so the YAML can be saved before the scripts are added.
 
 ## Template variables
 

@@ -106,7 +106,7 @@ pub fn import_bundle(
     .version;
     if let Some(layout) = &bundle.layout {
         let layout_yaml =
-            serde_yaml_ng::to_string(layout).map_err(|e| BundleError::Yaml(e.to_string()))?;
+            yaml_serde::to_string(layout).map_err(|e| BundleError::Yaml(e.to_string()))?;
         save_layout(root, &bundle.id, &assigned, &layout_yaml)?;
     }
     Ok(assigned)

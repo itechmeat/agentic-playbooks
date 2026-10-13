@@ -25,8 +25,8 @@
 ## Task 1: Core store schema 2 (records, two scopes, merge, prune, migration)
 
 **Files:**
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-core/src/dismiss.rs` (the whole v1 store is replaced in place; the module path stays so `apb_core::dismiss` callers keep working)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-core/src/dismiss.rs` (`#[cfg(test)] mod tests` at the bottom of the same file, using `crate::env_test_lock()` exactly as the v1 tests do)
+- Modify: `crates/apb-core/src/dismiss.rs` (the whole v1 store is replaced in place; the module path stays so `apb_core::dismiss` callers keep working)
+- Test: `crates/apb-core/src/dismiss.rs` (`#[cfg(test)] mod tests` at the bottom of the same file, using `crate::env_test_lock()` exactly as the v1 tests do)
 
 **Interfaces:**
 - Consumes: `apb_core::fsutil::{atomic_write_private, lock_dir}`, `apb_core::clock::now_ms_u64`, `apb_core::config::config_dir`.
@@ -776,10 +776,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 2: Backoff engine and the optional `suggestions:` config section
 
 **Files:**
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-core/src/config.rs` (add `SuggestionSettings`, hang it off `GlobalConfig`, add the project-config reader)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-core/src/dismiss.rs` (add `SuggestionTiming`, `timing`, `next_snooze_ms`, `record_decision`, `reset_records`)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-core/src/dismiss.rs` (`mod tests`)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-core/tests/suite/config_test.rs` (the `suggestions:` section on the global config)
+- Modify: `crates/apb-core/src/config.rs` (add `SuggestionSettings`, hang it off `GlobalConfig`, add the project-config reader)
+- Modify: `crates/apb-core/src/dismiss.rs` (add `SuggestionTiming`, `timing`, `next_snooze_ms`, `record_decision`, `reset_records`)
+- Test: `crates/apb-core/src/dismiss.rs` (`mod tests`)
+- Test: `crates/apb-core/tests/suite/config_test.rs` (the `suggestions:` section on the global config)
 
 **Interfaces:**
 - Consumes: `apb_core::dismiss::{SOFT_BACKOFF_DAYS, HARD_TTL_DAYS, DecisionKind, DecisionScope, SuggestionRecord, write_record, stored_record}`, `apb_core::config::{GlobalConfig, config_dir}`, `apb_core::clock::now_ms_u64`.
@@ -1319,10 +1319,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 3: MCP `suggestion_dismiss` with kind, synopsis and scope
 
 **Files:**
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/server/args.rs` (`SuggestionDismissArgs`)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/tools/capture.rs` (`suggestion_dismiss`)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/server/playbook.rs` (handler and tool description)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/tests/suite/capture_tools_test.rs`
+- Modify: `crates/apb-mcp/src/server/args.rs` (`SuggestionDismissArgs`)
+- Modify: `crates/apb-mcp/src/tools/capture.rs` (`suggestion_dismiss`)
+- Modify: `crates/apb-mcp/src/server/playbook.rs` (handler and tool description)
+- Test: `crates/apb-mcp/tests/suite/capture_tools_test.rs`
 
 **Interfaces:**
 - Consumes: `apb_core::dismiss::{DecisionInput, DecisionKind, DecisionScope, record_decision, iso_utc}` (Task 1 and Task 2).
@@ -1608,10 +1608,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 4: Catalog `suppressed_suggestions` and the revision fold
 
 **Files:**
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/catalog.rs` (`build`, `compute_revision`, the new payload field)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/tools/playbook.rs` (`playbook_catalog` passes the merged records)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/tools/capture.rs` (the dedup call to `catalog::build`)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/tests/suite/catalog_tools_test.rs`
+- Modify: `crates/apb-mcp/src/catalog.rs` (`build`, `compute_revision`, the new payload field)
+- Modify: `crates/apb-mcp/src/tools/playbook.rs` (`playbook_catalog` passes the merged records)
+- Modify: `crates/apb-mcp/src/tools/capture.rs` (the dedup call to `catalog::build`)
+- Test: `crates/apb-mcp/tests/suite/catalog_tools_test.rs`
 
 **Interfaces:**
 - Consumes: `apb_core::dismiss::{ScopedRecord, active, iso_utc}` (Task 1), `apb_mcp::tools::{DismissRequest, suggestion_dismiss}` (Task 3).
@@ -1829,10 +1829,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 5: Instruction texts (tier 0 and the standing block)
 
 **Files:**
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/instructions.rs` (new TIER0 text plus a byte-cap unit test)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/assets/playbook-instructions.md` (new standing block)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-mcp/src/instructions.rs` (`#[cfg(test)] mod tests`, new)
-- Test: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/src/onboarding.rs` (extend `playbook_block_carries_the_discovery_and_capture_duties`)
+- Modify: `crates/apb-mcp/src/instructions.rs` (new TIER0 text plus a byte-cap unit test)
+- Modify: `crates/apb-cli/assets/playbook-instructions.md` (new standing block)
+- Test: `crates/apb-mcp/src/instructions.rs` (`#[cfg(test)] mod tests`, new)
+- Test: `crates/apb-cli/src/onboarding.rs` (extend `playbook_block_carries_the_discovery_and_capture_duties`)
 
 **Interfaces:**
 - Consumes: nothing new. Nothing pins TIER0 today (its only reader is `crates/apb-mcp/src/server/mod.rs` via `.with_instructions(crate::instructions::TIER0)`), so this task adds the pin.
@@ -1983,12 +1983,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 6: CLI `apb suggestions list|allow|reset`
 
 **Files:**
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/src/suggestions.rs`
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/src/main.rs` (module, `Command::Suggestions`, dispatch arm)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/src/util.rs` (shared `print_table`)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/src/connector.rs` (drop the private `print_table`, use the shared one)
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/tests/suite/suggestions_cli_test.rs`
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-cli/tests/main.rs` (register the new suite module)
+- Create: `crates/apb-cli/src/suggestions.rs`
+- Modify: `crates/apb-cli/src/main.rs` (module, `Command::Suggestions`, dispatch arm)
+- Modify: `crates/apb-cli/src/util.rs` (shared `print_table`)
+- Modify: `crates/apb-cli/src/connector.rs` (drop the private `print_table`, use the shared one)
+- Create: `crates/apb-cli/tests/suite/suggestions_cli_test.rs`
+- Modify: `crates/apb-cli/tests/main.rs` (register the new suite module)
 
 **Interfaces:**
 - Consumes: `apb_core::dismiss::{DecisionKind, DecisionScope, ResetOutcome, active, iso_utc, remove_record, reset_records}` (Tasks 1 and 2), `crate::util::print_json`.
@@ -2406,11 +2406,11 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 7: Server routes `GET` and `DELETE /api/suggestions`
 
 **Files:**
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-server/src/routes/suggestions.rs`
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-server/src/routes/mod.rs` (module list)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-server/src/lib.rs` (two routes)
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-server/tests/suite/suggestions_api_test.rs`
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/crates/apb-server/tests/main.rs` (register the new suite module)
+- Create: `crates/apb-server/src/routes/suggestions.rs`
+- Modify: `crates/apb-server/src/routes/mod.rs` (module list)
+- Modify: `crates/apb-server/src/lib.rs` (two routes)
+- Create: `crates/apb-server/tests/suite/suggestions_api_test.rs`
+- Modify: `crates/apb-server/tests/main.rs` (register the new suite module)
 
 **Interfaces:**
 - Consumes: `apb_core::dismiss::{active, iso_utc, remove_record, DecisionScope}` (Task 1), `crate::state::{AppState, WorkspaceQuery, is_safe_id, resolve_root}`.
@@ -2696,11 +2696,11 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 8: Dashboard section on the playbooks page
 
 **Files:**
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/web/src/lib/suggestions.ts`
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/web/src/lib/suggestions.test.ts`
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/web/src/lib/api/core.ts` (two endpoint functions)
-- Create: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/web/src/lib/components/SuggestionsSection.svelte`
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/web/src/pages/PlaybookList.svelte` (render the section)
+- Create: `web/src/lib/suggestions.ts`
+- Create: `web/src/lib/suggestions.test.ts`
+- Modify: `web/src/lib/api/core.ts` (two endpoint functions)
+- Create: `web/src/lib/components/SuggestionsSection.svelte`
+- Modify: `web/src/pages/PlaybookList.svelte` (render the section)
 
 **Interfaces:**
 - Consumes: `GET /api/suggestions?workspace=<id>` and `DELETE /api/suggestions/{pattern}?workspace=<id>&scope=<scope>` (Task 7), `fetchProjects` from `web/src/lib/api/core.ts`, `getJson`/`requestJson`/`qs` from `web/src/lib/api/http.ts`.
@@ -2980,10 +2980,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Task 9: Documentation
 
 **Files:**
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/docs/MCP.md` (`suggestion_dismiss` row, catalog payload sentence)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/docs/HOST-INTEGRATION.md` (the standing-block scope sentence)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/docs/superpowers/specs/2026-07-11-agent-transparent-workflows-design.md` (section 8.2 pointer)
-- Modify: `/Users/techmeat/www/projects/omniteamhq/agentic-playbooks/docs/superpowers/specs/2026-07-29-suggestion-decisions-design.md` (status line points at this plan)
+- Modify: `docs/MCP.md` (`suggestion_dismiss` row, catalog payload sentence)
+- Modify: `docs/HOST-INTEGRATION.md` (the standing-block scope sentence)
+- Modify: `docs/superpowers/specs/2026-07-11-agent-transparent-workflows-design.md` (section 8.2 pointer)
+- Modify: `docs/superpowers/specs/2026-07-29-suggestion-decisions-design.md` (status line points at this plan)
 
 **Interfaces:**
 - Consumes: the shipped behavior from Tasks 1 through 8. No code.

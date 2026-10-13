@@ -605,7 +605,7 @@ impl Inbox {
     fn read_cursors(&self) -> Result<Cursors, InboxError> {
         let path = self.dir.join(CURSORS_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_yaml_ng::from_str(&raw)
+            Ok(raw) => yaml_serde::from_str(&raw)
                 .map_err(|e| InboxError::Corrupt(path.display().to_string(), e.to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Cursors::default()),
             Err(e) => Err(self.io(&e)),
@@ -613,7 +613,7 @@ impl Inbox {
     }
 
     fn write_cursors(&self, cursors: &Cursors) -> Result<(), InboxError> {
-        let yaml = serde_yaml_ng::to_string(cursors)
+        let yaml = yaml_serde::to_string(cursors)
             .map_err(|e| InboxError::Corrupt(self.path_str(CURSORS_FILE), e.to_string()))?;
         atomic_write_private(&self.dir.join(CURSORS_FILE), yaml.as_bytes()).map_err(|e| self.io(&e))
     }

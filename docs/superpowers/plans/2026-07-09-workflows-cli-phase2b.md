@@ -700,7 +700,7 @@ Expected: all tests are green, the frontend build succeeds.
 cargo build -p wf-cli
 DEMO=$(mktemp -d)
 cd "$DEMO"
-/Users/techmeat/www/projects/omniteamhq/workflows/target/debug/wf init
+target/debug/wf init
 mkdir -p .wf/workflows/noagent/1.0.0
 cat > .wf/workflows/noagent/1.0.0/workflow.yaml <<'YAML'
 schema: 1
@@ -718,8 +718,8 @@ edges:
   - { from: note, to: done }
 YAML
 printf "1.0.0" > .wf/workflows/noagent/current
-/Users/techmeat/www/projects/omniteamhq/workflows/target/debug/wf run noagent --param who=world
-/Users/techmeat/www/projects/omniteamhq/workflows/target/debug/wf serve --no-open &
+target/debug/wf run noagent --param who=world
+target/debug/wf serve --no-open &
 sleep 1
 curl -s http://127.0.0.1:7321/api/runs | head -c 300
 echo
@@ -732,7 +732,7 @@ Expected: `/api/runs` returns the noagent run with status succeeded; the detail 
 - [ ] **Step 2b: Run code-ranker**
 
 ```bash
-cd /Users/techmeat/www/projects/omniteamhq/workflows
+cd <repo root>
 cargo metadata --format-version 1 >/dev/null
 code-ranker check .
 ```

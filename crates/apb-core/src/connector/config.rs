@@ -66,7 +66,7 @@ fn load_file(path: &Path) -> Result<Vec<Account>, ConnectorError> {
     match std::fs::read_to_string(path) {
         Ok(raw) => {
             let file: AccountsFile =
-                serde_yaml_ng::from_str(&raw).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
+                yaml_serde::from_str(&raw).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
             Ok(file.accounts)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),

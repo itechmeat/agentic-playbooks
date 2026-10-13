@@ -84,13 +84,13 @@ struct LegacyFallback {
 #[derive(Debug, Default, Deserialize)]
 struct LegacyDefaults {
     #[serde(default)]
-    executor: Option<serde_yaml_ng::Value>,
+    executor: Option<yaml_serde::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct LegacySupervisor {
     #[serde(default)]
-    executor: Option<serde_yaml_ng::Value>,
+    executor: Option<yaml_serde::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,7 +99,7 @@ struct LegacyNode {
     #[serde(rename = "type", default)]
     node_type: Option<String>,
     #[serde(default)]
-    executor: Option<serde_yaml_ng::Value>,
+    executor: Option<yaml_serde::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,7 +117,7 @@ struct LegacyPlaybook {
 /// Whether the snapshot has traces of schema-1 executors (the same criterion
 /// as `Playbook::from_yaml`, but local to the run snapshot).
 pub fn has_legacy_executors(snapshot_yaml: &str) -> bool {
-    let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(snapshot_yaml) else {
+    let Ok(v) = yaml_serde::from_str::<yaml_serde::Value>(snapshot_yaml) else {
         return false;
     };
     if v.get("executors")
@@ -125,7 +125,7 @@ pub fn has_legacy_executors(snapshot_yaml: &str) -> bool {
     {
         return true;
     }
-    let has_exec = |m: Option<&serde_yaml_ng::Value>| m.and_then(|x| x.get("executor")).is_some();
+    let has_exec = |m: Option<&yaml_serde::Value>| m.and_then(|x| x.get("executor")).is_some();
     if has_exec(v.get("defaults")) || has_exec(v.get("supervisor")) {
         return true;
     }
@@ -143,7 +143,7 @@ pub fn has_legacy_executors(snapshot_yaml: &str) -> bool {
 /// migration.
 pub fn parse_snapshot_playbook(snapshot_yaml: &str) -> Result<Playbook, EngineError> {
     if has_legacy_executors(snapshot_yaml) {
-        serde_yaml_ng::from_str::<Playbook>(snapshot_yaml)
+        yaml_serde::from_str::<Playbook>(snapshot_yaml)
             .map_err(|e| EngineError::Yaml(format!("legacy snapshot playbook: {e}")))
     } else {
         Playbook::from_yaml(snapshot_yaml).map_err(|e| EngineError::Yaml(e.to_string()))
@@ -154,7 +154,7 @@ pub fn parse_snapshot_playbook(snapshot_yaml: &str) -> Result<Playbook, EngineEr
 /// name from the `executors` map; an object is an inline definition.
 /// Anything unrecognized is an error.
 fn resolve_exec(
-    val: &serde_yaml_ng::Value,
+    val: &yaml_serde::Value,
     executors: &BTreeMap<String, LegacyExec>,
 ) -> Result<LegacyExec, EngineError> {
     if let Some(name) = val.as_str() {
@@ -163,7 +163,7 @@ fn resolve_exec(
                 "legacy snapshot references executor `{name}` not defined in the snapshot"
             ))
         })
-    } else if let Ok(ex) = serde_yaml_ng::from_value::<LegacyExec>(val.clone()) {
+    } else if let Ok(ex) = yaml_serde::from_value::<LegacyExec>(val.clone()) {
         Ok(ex)
     } else {
         Err(EngineError::Invalid(
@@ -253,7 +253,7 @@ pub fn build_ephemeral_manifest(
     _run_dir: &Path,
     snapshot_yaml: &str,
 ) -> Result<RunExecutionManifest, EngineError> {
-    let playbook: LegacyPlaybook = serde_yaml_ng::from_str(snapshot_yaml)
+    let playbook: LegacyPlaybook = yaml_serde::from_str(snapshot_yaml)
         .map_err(|e| EngineError::Yaml(format!("legacy snapshot: {e}")))?;
     let global = GlobalConfig::load().map_err(EngineError::Invalid)?;
 

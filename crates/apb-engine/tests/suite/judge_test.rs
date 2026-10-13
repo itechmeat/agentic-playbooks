@@ -53,7 +53,7 @@ impl Project {
         let root = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
         init_project(root.path()).unwrap();
-        let id = serde_yaml_ng::from_str::<Value>(playbook_yaml).unwrap()["id"]
+        let id = yaml_serde::from_str::<Value>(playbook_yaml).unwrap()["id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -136,7 +136,7 @@ fn example() -> String {
 /// The example with its human review gate replaced by a finish node, so an
 /// autonomous test run ends where the gate would wait.
 fn without_gate(yaml: &str) -> String {
-    let mut doc: Value = serde_yaml_ng::from_str(yaml).unwrap();
+    let mut doc: Value = yaml_serde::from_str(yaml).unwrap();
     for n in doc["nodes"].as_array_mut().unwrap() {
         if n["id"] == "human_review" {
             *n = json!({"id": "human_review", "type": "finish", "outcome": "success"});
@@ -146,7 +146,7 @@ fn without_gate(yaml: &str) -> String {
         .as_array_mut()
         .unwrap()
         .retain(|e| e["from"] != "human_review");
-    serde_yaml_ng::to_string(&doc).unwrap()
+    yaml_serde::to_string(&doc).unwrap()
 }
 
 fn choice(value: &str, p: f64) -> Value {

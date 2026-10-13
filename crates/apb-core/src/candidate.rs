@@ -59,7 +59,7 @@ pub fn trial_policy(playbook: &Playbook) -> TrialPolicy {
             _ => TrialPolicy::NextRun,
         };
     }
-    match value.get("share").and_then(serde_yaml_ng::Value::as_f64) {
+    match value.get("share").and_then(yaml_serde::Value::as_f64) {
         Some(p) if p.is_finite() => TrialPolicy::Share(p.clamp(0.0, 1.0)),
         _ => TrialPolicy::NextRun,
     }

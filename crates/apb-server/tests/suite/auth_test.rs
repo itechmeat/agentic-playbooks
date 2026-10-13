@@ -31,7 +31,7 @@ use tower::ServiceExt;
 fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
     loop {
         let (key, record) = server_auth::issue_into(path).unwrap();
-        if serde_yaml_ng::to_string(&record.id).unwrap().trim_end() == record.id {
+        if yaml_serde::to_string(&record.id).unwrap().trim_end() == record.id {
             return (key, record);
         }
         server_auth::revoke_in(path, &record.id).unwrap();

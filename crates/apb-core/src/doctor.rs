@@ -161,9 +161,14 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     );
 
     let mut loaded: Vec<(String, Playbook)> = Vec::new();
+    // The version directory of each loaded playbook, for the script check.
+    let mut version_dirs: Vec<std::path::PathBuf> = Vec::new();
     for id in &ids {
         match reg.load(id, None) {
-            Ok(l) => loaded.push((id.clone(), l.playbook)),
+            Ok(l) => {
+                version_dirs.push(reg.version_dir(id, &l.version));
+                loaded.push((id.clone(), l.playbook));
+            }
             Err(e) => r.push(
                 CheckStatus::Fail,
                 format!("playbook {id}"),
@@ -240,8 +245,17 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     );
                 }
             }
+            // Not found where the global store was the last place looked: a
+            // warning, since the global store is machine-local (V91 is a
+            // warning for the same reason). Every other failure is a Fail.
             Err(e) => r.push(
-                CheckStatus::Fail,
+                if matches!(e, crate::profile::ProfileError::NotFound(_))
+                    && pref.scope != ProfileScope::Project
+                {
+                    CheckStatus::Warn
+                } else {
+                    CheckStatus::Fail
+                },
                 format!("profile {}", pref.name),
                 format!("cannot resolve: {e}"),
             ),
@@ -380,20 +394,47 @@ pub fn diagnose(root: &Path) -> DoctorReport {
             );
         }
     }
-
-    let ctx = ValidationContext::for_registry(&reg, PlaybookOrigin::Project);
-    for (id, playbook) in &loaded {
-        let report = validate(playbook, &ctx);
-        let errors = report
-            .issues
+    // A script a run would not find (V92) fails every run of the playbook.
+    // An unresolvable profile (V91) is already the `profile <name>` line above.
+    // Both count in the playbook's summary line below with their severity, so
+    // it never says "valid" next to a finding for the same playbook.
+    let mut reference_counts: Vec<(usize, usize)> = Vec::with_capacity(loaded.len());
+    for ((id, playbook), version_dir) in loaded.iter().zip(&version_dirs) {
+        let issues = crate::preflight::missing_references(
+            root,
+            PlaybookOrigin::Project,
+            version_dir,
+            playbook,
+        );
+        for issue in issues.iter().filter(|i| i.code == "V92") {
+            r.push(
+                CheckStatus::Fail,
+                format!("playbook {id}"),
+                format!("{}: {}", issue.code, issue.message),
+            );
+        }
+        let errors = issues
             .iter()
             .filter(|i| i.severity == Severity::Error)
             .count();
-        let warnings = report
-            .issues
-            .iter()
-            .filter(|i| i.severity == Severity::Warning)
-            .count();
+        reference_counts.push((errors, issues.len() - errors));
+    }
+
+    let ctx = ValidationContext::for_registry(&reg, PlaybookOrigin::Project);
+    for ((id, playbook), (ref_errors, ref_warnings)) in loaded.iter().zip(&reference_counts) {
+        let report = validate(playbook, &ctx);
+        let errors = ref_errors
+            + report
+                .issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .count();
+        let warnings = ref_warnings
+            + report
+                .issues
+                .iter()
+                .filter(|i| i.severity == Severity::Warning)
+                .count();
         if errors > 0 {
             r.push(
                 CheckStatus::Fail,

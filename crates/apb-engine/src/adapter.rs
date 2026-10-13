@@ -1205,7 +1205,7 @@ pub(crate) struct ReportOutcome {
 /// is deliberately NOT included so as not to break agents without the contract.
 pub(crate) fn interpret_report(text: &str) -> ReportOutcome {
     if let Some((start, end, block)) = last_yaml_block_span(text)
-        && let Ok(val) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&block)
+        && let Ok(val) = yaml_serde::from_str::<yaml_serde::Value>(&block)
     {
         let status = match val.get("status").and_then(|s| s.as_str()) {
             Some("failure") => Some(NodeStatus::Failed),

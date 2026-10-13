@@ -21,7 +21,7 @@ Research (2026-07, web survey of community recommendations and of what uv, ruff,
 Adopt dist as the release and installer generator. Ship three user-facing install paths in v0.9.0:
 
 1. Shell one-liner (macOS and Linux): `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playbooks/releases/latest/download/apb-installer.sh | sh`. The installer is a dist-generated release asset: it detects OS and arch, downloads the matching tarball, verifies the sha256 checksum, installs the binary, and writes an install receipt.
-2. Homebrew: `brew install itechmeat/agentic-playbooks/apb` via a new public tap repository `itechmeat/homebrew-agentic-playbooks` whose formula dist updates automatically on every release. The name follows the GitHub owner of the main repository; the local folder name omniteamhq is unrelated and must not appear in any user-facing name.
+2. Homebrew: `brew install itechmeat/agentic-playbooks/apb` via a new public tap repository `itechmeat/homebrew-agentic-playbooks` whose formula dist updates automatically on every release. The name follows the GitHub owner of the main repository.
 3. Self-update: `apb self-update` as a first-class subcommand built on the axoupdater library (the same mechanism as `uv self update`). It reads the dist install receipt, checks GitHub Releases, verifies checksums, and replaces the binary in place. When no receipt exists (Homebrew or source installs) it exits with a clear message pointing to the right update path instead of touching the binary.
 
 Source builds stay documented as the contributor path (clone, build web, `cargo install --path crates/apb-cli`).

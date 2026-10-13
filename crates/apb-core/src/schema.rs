@@ -7,7 +7,7 @@ use crate::profile::{ProfileScope, QualifiedProfileRef};
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
     #[error("yaml parse error: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
+    Yaml(#[from] yaml_serde::Error),
     #[error("playbook uses schema 1 executors: run `apb migrate` to convert them to profiles")]
     LegacyExecutors,
 }
@@ -314,11 +314,11 @@ pub struct NodeFiles {
 
 impl Playbook {
     pub fn from_yaml(s: &str) -> Result<Self, SchemaError> {
-        let playbook: Playbook = serde_yaml_ng::from_str(s)?;
+        let playbook: Playbook = yaml_serde::from_str(s)?;
         // schema 1 executors were removed from the schema (Task 9). serde
         // silently ignores those fields, so we detect them in the raw YAML and
         // route to migration instead of running a playbook without an executor.
-        if let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(s)
+        if let Ok(v) = yaml_serde::from_str::<yaml_serde::Value>(s)
             && has_legacy_executors(&v)
         {
             return Err(SchemaError::LegacyExecutors);
@@ -622,7 +622,7 @@ impl NodeKind {
 /// Whether the raw YAML has traces of schema-1 executors: a top-level
 /// `executors`, `defaults.executor`, `supervisor.executor`, or `executor` on
 /// any node.
-fn has_legacy_executors(v: &serde_yaml_ng::Value) -> bool {
+fn has_legacy_executors(v: &yaml_serde::Value) -> bool {
     // A non-empty `executors` (a mapping with entries, or any other non-null
     // value) is legacy; an empty/null `executors:` has nothing to migrate (V18
     // will catch a node without a binding).
@@ -631,7 +631,7 @@ fn has_legacy_executors(v: &serde_yaml_ng::Value) -> bool {
     {
         return true;
     }
-    let has_exec = |m: Option<&serde_yaml_ng::Value>| m.and_then(|x| x.get("executor")).is_some();
+    let has_exec = |m: Option<&yaml_serde::Value>| m.and_then(|x| x.get("executor")).is_some();
     if has_exec(v.get("defaults")) || has_exec(v.get("supervisor")) {
         return true;
     }
@@ -650,7 +650,7 @@ pub struct Param {
     #[serde(default)]
     pub options: Option<Vec<String>>,
     #[serde(default)]
-    pub default: Option<serde_yaml_ng::Value>,
+    pub default: Option<yaml_serde::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -799,7 +799,7 @@ pub struct Supervisor {
     #[serde(default)]
     pub profile: Option<QualifiedProfileRef>,
     #[serde(default)]
-    pub policy: Option<serde_yaml_ng::Value>, // details land in phase 3A
+    pub policy: Option<yaml_serde::Value>, // details land in phase 3A
     /// Supervisor wake pre-triage (issue #165 Part 14.3): `enforce` lets the
     /// engine post a `retry_same` or `retry_with_note` recommendation itself
     /// (at most `uses.supervisor_triage.max_actions` per run) when the
@@ -823,7 +823,7 @@ pub enum ExpectedDuration {
     /// at deserialization. MUST stay the LAST untagged variant so it only
     /// catches values that match neither `Seconds` nor `Text`. `parsed()`
     /// returns None, so callers fall back to the per-kind default.
-    Invalid(serde_yaml_ng::Value),
+    Invalid(yaml_serde::Value),
 }
 
 impl ExpectedDuration {
@@ -1810,7 +1810,7 @@ edges: []
             functions: FunctionsAllow::All,
             max_calls: None,
         };
-        let yaml = serde_yaml_ng::to_string(&bare).unwrap();
+        let yaml = yaml_serde::to_string(&bare).unwrap();
         assert_eq!(yaml.trim(), "jira");
     }
 
@@ -1822,7 +1822,7 @@ edges: []
             functions: FunctionsAllow::List(vec!["send_message".into()]),
             max_calls: Some(50),
         };
-        let yaml = serde_yaml_ng::to_string(&full).unwrap();
+        let yaml = yaml_serde::to_string(&full).unwrap();
         assert!(yaml.contains("name: telegram"));
         assert!(yaml.contains("team-bot"));
         assert!(yaml.contains("send_message"));
@@ -1837,7 +1837,7 @@ edges: []
             functions: FunctionsAllow::ReadOnly,
             max_calls: None,
         };
-        let yaml = serde_yaml_ng::to_string(&read_only).unwrap();
+        let yaml = yaml_serde::to_string(&read_only).unwrap();
         assert!(yaml.contains("functions: read_only"));
         assert!(!yaml.contains("accounts"));
         assert!(!yaml.contains("max_calls"));
@@ -1882,7 +1882,7 @@ edges: []
             }
         );
 
-        let back = serde_yaml_ng::to_string(&p).unwrap();
+        let back = yaml_serde::to_string(&p).unwrap();
         let again = Playbook::from_yaml(&back).unwrap();
         assert_eq!(again.goal, p.goal);
     }
@@ -1892,7 +1892,7 @@ edges: []
         let yaml = "schema: 2\nid: demo\nname: Demo\nversion: 1.0.0\nnodes: []\nedges: []\n";
         let p = Playbook::from_yaml(yaml).unwrap();
         assert!(p.goal.is_none());
-        let back = serde_yaml_ng::to_string(&p).unwrap();
+        let back = yaml_serde::to_string(&p).unwrap();
         assert!(
             !back.contains("goal"),
             "goal-less playbook grew a goal key: {back}"
@@ -1936,7 +1936,7 @@ edges: []
         }
 
         // Re-serialize and re-parse: the four fields survive the round trip.
-        let reserialized = serde_yaml_ng::to_string(&pb).unwrap();
+        let reserialized = yaml_serde::to_string(&pb).unwrap();
         let pb2 = Playbook::from_yaml(&reserialized).unwrap();
         match &pb2.node("a").unwrap().kind {
             NodeKind::AgentTask {
@@ -1987,7 +1987,7 @@ edges: []
         // The default `answer_by` (Human), an absent `question_timeout_seconds`,
         // and an absent `default_answer` are all omitted from the serialized
         // form (skip_serializing_if); only `interactive: false` is written.
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(!out.contains("answer_by"), "got: {out}");
         assert!(!out.contains("question_timeout_seconds"), "got: {out}");
         assert!(!out.contains("default_answer"), "got: {out}");
@@ -2011,13 +2011,13 @@ edges:
 "#;
         let pb = Playbook::from_yaml(without).unwrap();
         assert_eq!(pb.defaults.on_failure, FailurePolicy::Route);
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(!out.contains("on_failure"), "got: {out}");
 
         let with = without.replace("nodes:", "defaults:\n  on_failure: stop\nnodes:");
         let pb = Playbook::from_yaml(&with).unwrap();
         assert_eq!(pb.defaults.on_failure, FailurePolicy::Stop);
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(out.contains("on_failure: stop"), "got: {out}");
 
         // Anything that is not a reserved word is a node id, written back as
@@ -2028,7 +2028,7 @@ edges:
             pb.defaults.on_failure,
             FailurePolicy::Node("aborted".into())
         );
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(out.contains("on_failure: aborted"), "got: {out}");
     }
 
@@ -2055,7 +2055,7 @@ edges:
             } => assert!(!*require_verdict, "the node default must be false"),
             other => panic!("expected agent_task, got {other:?}"),
         }
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(!out.contains("require_verdict"), "got: {out}");
 
         // On the node.
@@ -2070,7 +2070,7 @@ edges:
             } => assert!(*require_verdict),
             other => panic!("expected agent_task, got {other:?}"),
         }
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(out.contains("require_verdict: true"), "got: {out}");
 
         // Playbook-wide, through defaults.
@@ -2118,7 +2118,7 @@ edges: []
         assert_eq!(sc.script_path(), Some("scripts/check.sh"));
         assert_eq!(sc.marker(), None);
 
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(
             out.contains("success_check: scripts/check.sh"),
             "got: {out}"
@@ -2147,7 +2147,7 @@ edges: []
         assert_eq!(sc.marker(), Some("WAVE-COMPLETE"));
         assert_eq!(sc.script_path(), None);
 
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         let pb2 = Playbook::from_yaml(&out).unwrap();
         assert_eq!(
             pb2.node("a").unwrap().success_check,
@@ -2172,7 +2172,7 @@ edges: []
         let pb = Playbook::from_yaml(yaml).unwrap();
         assert_eq!(pb.node("a").unwrap().success_check, None);
         // Omitted from the serialized form (skip_serializing_if).
-        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let out = yaml_serde::to_string(&pb).unwrap();
         assert!(!out.contains("success_check"), "got: {out}");
     }
 

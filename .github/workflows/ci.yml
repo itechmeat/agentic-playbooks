@@ -93,6 +93,16 @@ jobs:
       - name: Cargo deny (licenses, advisories, bans)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
+      # THIRD-PARTY-NOTICES.txt ships in every release archive. Regenerating
+      # it from Cargo.lock and web/bun.lock and diffing catches a dependency
+      # change that did not refresh it. cargo-about is a pinned, checksummed
+      # release binary (seconds, nothing compiled); the web dependencies are
+      # already installed by the web build step above.
+      - name: Third-party notices are current
+        run: |
+          scripts/install-cargo-about.sh
+          scripts/third-party-notices.sh --check
+
   test-linux:
     runs-on: ubuntu-26.04
     # There was no ceiling here, so the default 360 applied: a test that hung

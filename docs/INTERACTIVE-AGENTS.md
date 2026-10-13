@@ -107,7 +107,7 @@ closed source with community forums as the only channel; we file nothing
 until their headless MCP paths stabilize. Gemini CLI is being retired; no
 investment. Aider needs MCP itself first; out of scope.
 
-## Verification checklist (run after implementation)
+## Open verification items
 
 - [ ] hermes: `-z` plus `--resume <session>` restores state; flip
       `interaction` to `resume` if confirmed.

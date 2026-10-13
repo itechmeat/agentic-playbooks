@@ -230,7 +230,7 @@ impl RunConfig {
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {
-    let yaml = serde_yaml_ng::to_string(cfg).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let yaml = yaml_serde::to_string(cfg).map_err(|e| EngineError::Yaml(e.to_string()))?;
     atomic_write(&run_dir.join("run.yaml"), yaml.as_bytes())?;
     Ok(())
 }
@@ -241,17 +241,17 @@ pub fn read_run_config(run_dir: &Path) -> Result<RunConfig, EngineError> {
         return Ok(RunConfig::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    let value: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let value: yaml_serde::Value =
+        yaml_serde::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
     // A config written before `RunMode::AgentSupervised` carried the agent
     // half of the mode as `supervisor_expected: true` next to `mode:
     // supervised`; fold it in so such a run keeps its supervisor agent.
     let legacy_agent = value
         .get("supervisor_expected")
-        .and_then(serde_yaml_ng::Value::as_bool)
+        .and_then(yaml_serde::Value::as_bool)
         .unwrap_or(false);
     let mut cfg: RunConfig =
-        serde_yaml_ng::from_value(value).map_err(|e| EngineError::Yaml(e.to_string()))?;
+        yaml_serde::from_value(value).map_err(|e| EngineError::Yaml(e.to_string()))?;
     if legacy_agent && cfg.mode == RunMode::Supervised {
         cfg.mode = RunMode::AgentSupervised;
     }
@@ -300,7 +300,7 @@ mod tests {
             connector_accounts: BTreeMap::new(),
             children: BTreeMap::new(),
         };
-        let yaml = serde_yaml_ng::to_string(&child).unwrap();
+        let yaml = yaml_serde::to_string(&child).unwrap();
         assert!(
             yaml.contains("scope: project"),
             "project scope must serialize to the bare `project` string, got:\n{yaml}"
@@ -311,14 +311,14 @@ mod tests {
             ..child.clone()
         };
         assert!(
-            serde_yaml_ng::to_string(&global)
+            yaml_serde::to_string(&global)
                 .unwrap()
                 .contains("scope: global")
         );
 
         // Old configs (pre-typing) stored the same strings; they must still load.
         let legacy = "id: child\nscope: global\nversion: 1.0.0\nplaybook_digest: sha256:abc\n";
-        let parsed: ChildExpectation = serde_yaml_ng::from_str(legacy).unwrap();
+        let parsed: ChildExpectation = yaml_serde::from_str(legacy).unwrap();
         assert_eq!(parsed.scope, ProfileScope::Global);
         // A pre-finding-2 pin carried no connector map; it must still deserialize
         // with the field defaulting to empty (finding 2 of issue #42).
@@ -326,7 +326,7 @@ mod tests {
         assert!(parsed.connector_accounts.is_empty());
 
         // Full roundtrip preserves the value.
-        let round: ChildExpectation = serde_yaml_ng::from_str(&yaml).unwrap();
+        let round: ChildExpectation = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(round, child);
     }
 
@@ -349,8 +349,8 @@ mod tests {
             connector_accounts: accounts.clone(),
             children: BTreeMap::new(),
         };
-        let yaml = serde_yaml_ng::to_string(&child).unwrap();
-        let round: ChildExpectation = serde_yaml_ng::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&child).unwrap();
+        let round: ChildExpectation = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(round.connectors, connectors);
         assert_eq!(round.connector_accounts, accounts);
     }
