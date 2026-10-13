@@ -29,7 +29,7 @@ fn config_agent_overrides_the_interaction_ceiling() {
     // A config-defined invocation for `claude` sets `interaction: reprompt`,
     // which must win over the built-in `live` default.
     let yaml = "agents:\n  claude:\n    invocation:\n      argv: [-p, \"{prompt}\", --model, \"{model}\"]\n      interaction: reprompt\n";
-    let global: GlobalConfig = serde_yaml_ng::from_str(yaml).unwrap();
+    let global: GlobalConfig = yaml_serde::from_str(yaml).unwrap();
     let spec = spec_for("claude", &global).unwrap();
     assert_eq!(
         spec.interaction,
@@ -44,7 +44,7 @@ fn interaction_defaults_to_reprompt_when_unspecified() {
     // (`reprompt`), the safe floor.
     let yaml =
         "agents:\n  custom:\n    invocation:\n      argv: [run, \"{prompt}\", -m, \"{model}\"]\n";
-    let global: GlobalConfig = serde_yaml_ng::from_str(yaml).unwrap();
+    let global: GlobalConfig = yaml_serde::from_str(yaml).unwrap();
     let spec = spec_for("custom", &global).unwrap();
     assert_eq!(spec.interaction, Interaction::Reprompt);
 }

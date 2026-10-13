@@ -636,14 +636,14 @@ mod tests {
     }
 
     fn case(yaml: &str) -> EvalCase {
-        serde_yaml_ng::from_str(yaml).unwrap()
+        yaml_serde::from_str(yaml).unwrap()
     }
 
     const PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: prompt, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: f }\n";
 
     fn run(case_yaml: &str) -> Vec<CheckResult> {
         let c = case(case_yaml);
-        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let pb: Playbook = yaml_serde::from_str(PB).unwrap();
         let events = journal();
         let tree = tempfile::tempdir().unwrap();
         let input = CheckInput {
@@ -731,7 +731,7 @@ mod tests {
             "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  events: { absent: [run_eror, run_error], max: { retry_startd: 1 } }\n",
         )
         .unwrap();
-        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let pb: Playbook = yaml_serde::from_str(PB).unwrap();
         let got: Vec<String> = validate_suite(dir.path(), &pb)
             .into_iter()
             .map(|i| format!("{} {}", i.code, i.message))
@@ -785,7 +785,7 @@ mod tests {
         let c = case(
             "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  files:\n    - { path: kept.txt, unchanged_from_fixture: true }\n    - { path: edited.txt, unchanged_from_fixture: true }\n    - { path: present.txt, exists: false }\n    - { path: missing.txt, matches: \"^\" }\n    - { path: link.txt, matches: secret }\n",
         );
-        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let pb: Playbook = yaml_serde::from_str(PB).unwrap();
         let hooks = tempfile::tempdir().unwrap();
         let input = CheckInput {
             case: &c,

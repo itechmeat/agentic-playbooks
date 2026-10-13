@@ -8,7 +8,8 @@ pre-release versions may not receive fixes.
 
 ## Reporting a vulnerability
 
-Please use GitHub's private vulnerability reporting for this repository. Do not
+Please use GitHub's private vulnerability reporting for this repository:
+[report a vulnerability](https://github.com/itechmeat/agentic-playbooks/security/advisories/new). Do not
 open a public issue for a suspected vulnerability and do not include secrets,
 private repositories, or personal data in a report.
 

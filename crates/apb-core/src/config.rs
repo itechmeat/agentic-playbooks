@@ -27,10 +27,10 @@ pub struct GlobalConfig {
     /// runs until migration); `apb migrate` strips them from the file. Not
     /// serialized back out.
     #[serde(default, rename = "executors", skip_serializing)]
-    pub legacy_executors: Option<serde_yaml_ng::Value>,
+    pub legacy_executors: Option<yaml_serde::Value>,
     /// Deprecated (schema 1), see `legacy_executors`.
     #[serde(default, rename = "default_executor", skip_serializing)]
-    pub legacy_default_executor: Option<serde_yaml_ng::Value>,
+    pub legacy_default_executor: Option<yaml_serde::Value>,
     /// Runner registry for script nodes (8d): e.g. `ts: [bun, deno]`. The
     /// first one available on the machine is used.
     pub runners: BTreeMap<String, Vec<String>>,
@@ -370,7 +370,7 @@ impl GlobalConfig {
             return Ok(Self::default());
         }
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let cfg: Self = serde_yaml_ng::from_str(&raw)
+        let cfg: Self = yaml_serde::from_str(&raw)
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         // A policy glob that does not compile would match nothing and refuse
         // every model its rule covers: report it where it is written instead.
@@ -475,7 +475,7 @@ pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, St
         return Ok(SuggestionSettings::default());
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let parsed: ProjectSuggestionsFile = serde_yaml_ng::from_str(&raw)
+    let parsed: ProjectSuggestionsFile = yaml_serde::from_str(&raw)
         .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
     Ok(parsed.suggestions)
 }

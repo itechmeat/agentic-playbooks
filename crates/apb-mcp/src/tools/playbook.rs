@@ -283,7 +283,17 @@ pub fn playbook_validate(root: &Path, id: &str) -> Result<Value, ToolError> {
     let loaded = reg.load(id, None)?;
     let ctx =
         ValidationContext::for_registry(&reg, apb_core::profile_store::PlaybookOrigin::Project);
-    let report = validate(&loaded.playbook, &ctx);
+    let mut report = validate(&loaded.playbook, &ctx);
+    // V91, V92: a profile or a script a run would not find (the same
+    // findings as `apb validate`; a save does not report them).
+    report
+        .issues
+        .extend(apb_core::preflight::missing_references(
+            root,
+            apb_core::profile_store::PlaybookOrigin::Project,
+            &reg.version_dir(id, &loaded.version),
+            &loaded.playbook,
+        ));
     let issues: Vec<Value> = report.issues.iter().map(|i| json!({
         "code": i.code,
         "severity": match i.severity { Severity::Error => "error", Severity::Warning => "warning" },

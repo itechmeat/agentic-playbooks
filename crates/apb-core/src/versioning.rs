@@ -526,7 +526,7 @@ pub fn write_provenance(
 ) -> Result<(), VersioningError> {
     let path = provenance_path(root, id, version)?;
     let yaml =
-        serde_yaml_ng::to_string(provenance).map_err(|e| VersioningError::Schema(e.to_string()))?;
+        yaml_serde::to_string(provenance).map_err(|e| VersioningError::Schema(e.to_string()))?;
     atomic_write(&path, yaml.as_bytes())?;
     Ok(())
 }
@@ -539,7 +539,7 @@ pub fn read_provenance_in(playbook_dir: &Path, version: &str) -> Option<VersionP
     }
     let yaml =
         fs::read_to_string(playbook_dir.join("meta").join(format!("{version}.yaml"))).ok()?;
-    serde_yaml_ng::from_str(&yaml).ok()
+    yaml_serde::from_str(&yaml).ok()
 }
 
 /// Ends the trial of the candidate of the playbook in `playbook_dir`,
@@ -566,7 +566,7 @@ pub fn supersede_candidate_locked(
         trial.outcome = Some(crate::candidate_pointer::OUTCOME_SUPERSEDED.to_string());
         trial.reason = Some(reason.to_string());
         provenance.trial = Some(trial);
-        let yaml = serde_yaml_ng::to_string(&provenance)
+        let yaml = yaml_serde::to_string(&provenance)
             .map_err(|e| VersioningError::Schema(e.to_string()))?;
         atomic_write(&path, yaml.as_bytes())?;
     }
@@ -617,7 +617,7 @@ pub fn read_provenance(
     }
     let yaml = fs::read_to_string(path)?;
     let provenance =
-        serde_yaml_ng::from_str(&yaml).map_err(|e| VersioningError::Schema(e.to_string()))?;
+        yaml_serde::from_str(&yaml).map_err(|e| VersioningError::Schema(e.to_string()))?;
     Ok(Some(provenance))
 }
 
@@ -870,8 +870,8 @@ pub fn save_layout(
         return Err(VersioningError::NotFound(id.to_string()));
     }
 
-    let _: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(layout_yaml).map_err(|e| VersioningError::Schema(e.to_string()))?;
+    let _: yaml_serde::Value =
+        yaml_serde::from_str(layout_yaml).map_err(|e| VersioningError::Schema(e.to_string()))?;
 
     let path = playbook_dir.join("layouts").join(format!("{version}.yaml"));
     atomic_write(&path, layout_yaml.as_bytes())?;
@@ -1153,7 +1153,7 @@ pub fn create_draft_in(
     }
 
     let canonical =
-        serde_yaml_ng::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))?;
+        yaml_serde::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))?;
     let vdir = playbook_dir.join("1.0.0");
     fs::create_dir_all(&vdir)?;
     atomic_write(&vdir.join("playbook.yaml"), canonical.as_bytes())?;
@@ -1269,7 +1269,7 @@ fn playbook_yaml_for_version(
 ) -> Result<String, VersioningError> {
     let mut playbook = playbook.clone();
     playbook.version = version.to_string();
-    serde_yaml_ng::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))
+    yaml_serde::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))
 }
 
 #[derive(Clone, Copy)]

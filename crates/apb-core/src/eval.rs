@@ -327,7 +327,7 @@ pub fn has_suite(playbook_dir: &Path) -> bool {
 
 /// The field of a later release a case sets, if any.
 fn later_field(raw: &str) -> Option<String> {
-    let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(raw).ok()?;
+    let v: yaml_serde::Value = yaml_serde::from_str(raw).ok()?;
     let map = v.as_mapping()?;
     for f in LATER_FIELDS {
         if map.contains_key(f) {
@@ -348,7 +348,7 @@ fn parse_case(raw: &str, stem: &str) -> Result<EvalCase, String> {
             "{f} is not supported by this apb (it needs mock connectors, a later release)"
         ));
     }
-    let case: EvalCase = serde_yaml_ng::from_str(raw).map_err(|e| e.to_string())?;
+    let case: EvalCase = yaml_serde::from_str(raw).map_err(|e| e.to_string())?;
     if case.schema != CASE_SCHEMA {
         return Err(format!(
             "schema {} is not supported (expected {CASE_SCHEMA})",
@@ -409,7 +409,7 @@ pub fn load_suite(playbook_dir: &Path) -> LoadedSuite {
             }
         };
         if name == SUITE_FILE {
-            match serde_yaml_ng::from_str::<Suite>(&raw) {
+            match yaml_serde::from_str::<Suite>(&raw) {
                 Ok(s) => out.suite = s,
                 Err(e) => out.issues.push(issue(
                     "V80",
@@ -553,7 +553,7 @@ const OUTCOMES: [&str; 4] = ["succeeded", "failed", "aborted", "stopped"];
 /// Whether the case file sets `checks.goal` itself (the field defaults to
 /// `required`, which only a case that says so is held to).
 fn goal_set_explicitly(raw: &str) -> bool {
-    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw)
+    yaml_serde::from_str::<yaml_serde::Value>(raw)
         .ok()
         .and_then(|v| v.get("checks").and_then(|c| c.get("goal")).cloned())
         .is_some()
@@ -1044,7 +1044,7 @@ mod tests {
     const PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.2.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: prompt, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: f }\n";
 
     fn pb(yaml: &str) -> Playbook {
-        serde_yaml_ng::from_str(yaml).unwrap()
+        yaml_serde::from_str(yaml).unwrap()
     }
 
     fn suite_with(files: &[(&str, &str)]) -> tempfile::TempDir {

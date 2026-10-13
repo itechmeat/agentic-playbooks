@@ -432,7 +432,7 @@ struct ProviderDoc {
     /// Kept untyped so a wrongly typed literal never reaches a serde error
     /// message (which would quote it).
     #[serde(default)]
-    api_key: Option<serde_yaml_ng::Value>,
+    api_key: Option<yaml_serde::Value>,
     #[serde(default)]
     data_class: DataClass,
     #[serde(default)]
@@ -489,7 +489,7 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-fn key_ref(field: &str, value: &serde_yaml_ng::Value) -> Result<KeyRef, String> {
+fn key_ref(field: &str, value: &yaml_serde::Value) -> Result<KeyRef, String> {
     let refusal = || {
         format!(
             "{field} must be a reference ({{{{env.VAR}}}} or {{{{cmd:...}}}}), not a literal value"
@@ -508,7 +508,7 @@ fn key_ref(field: &str, value: &serde_yaml_ng::Value) -> Result<KeyRef, String> 
 /// A serde error message about the file, stripped of anything that could
 /// quote a value: only the message up to the first backtick-quoted value is
 /// kept when it mentions a value at all.
-fn describe_parse_error(e: &serde_yaml_ng::Error) -> String {
+fn describe_parse_error(e: &yaml_serde::Error) -> String {
     let text = e.to_string();
     // "unknown field `x`, expected one of ..." and "unknown variant `x`"
     // quote a key or a mode name, never a secret: the key field is untyped.
@@ -534,7 +534,7 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot read {DECISIONS_FILE}: {e}")),
     };
-    let doc: FileDoc = serde_yaml_ng::from_str(&raw).map_err(|e| describe_parse_error(&e))?;
+    let doc: FileDoc = yaml_serde::from_str(&raw).map_err(|e| describe_parse_error(&e))?;
     if doc.version != 1 {
         return Err(format!(
             "unsupported version {} (this apb reads 1)",
@@ -862,7 +862,7 @@ fn project_section(root: &Path) -> Result<Option<ProjectDecisions>, String> {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Ok(None);
     };
-    let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&raw) {
+    let doc: yaml_serde::Value = match yaml_serde::from_str(&raw) {
         Ok(v) => v,
         Err(_) => return Err("`.apb/config.yaml` is not valid YAML".into()),
     };
@@ -872,7 +872,7 @@ fn project_section(root: &Path) -> Result<Option<ProjectDecisions>, String> {
     if section.is_null() {
         return Ok(None);
     }
-    serde_yaml_ng::from_value::<ProjectDecisions>(section.clone())
+    yaml_serde::from_value::<ProjectDecisions>(section.clone())
         .map(Some)
         .map_err(|e| {
             format!(
@@ -1491,7 +1491,7 @@ uses: { catalog_rank: { mode: advise, max_requests_per_day: 10 } }
             zero_data_retention: false,
             structured_output: None,
         };
-        let yaml = serde_yaml_ng::to_string(&spec).unwrap();
+        let yaml = yaml_serde::to_string(&spec).unwrap();
         assert!(
             !yaml.contains("account_id") && !yaml.contains("zero_data_retention"),
             "{yaml}"

@@ -44,7 +44,7 @@ fn a_well_formed_fork_validates_and_round_trips() {
     let p = Playbook::from_yaml(&yaml).unwrap();
     let spec = p.nodes[0].fork.as_ref().unwrap();
     assert_eq!(spec.on_branch_failure, BranchFailurePolicy::FailFast);
-    let out = serde_yaml_ng::to_string(&p).unwrap();
+    let out = yaml_serde::to_string(&p).unwrap();
     assert!(out.contains("fail_fast") && out.contains("on_failure: rejected"));
     // `cancel_siblings` needs no target.
     let siblings = playbook(", fork: { on_branch_failure: cancel_siblings }", "");

@@ -25,6 +25,9 @@ fn seeded_dir() -> tempfile::TempDir {
     .unwrap();
     // valid.yaml references the architect profile - it must exist in the project.
     seed_architect(dir.path());
+    // ... and so must the `lint` node's script (V92).
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("scripts/node-lint.sh"), "true\n").unwrap();
     dir
 }
 

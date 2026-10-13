@@ -207,7 +207,7 @@ mod tests {
             questions: JudgeQuestions,
             thresholds: OrderedMap<JudgeThreshold>,
         }
-        let s: S = serde_yaml_ng::from_str(
+        let s: S = yaml_serde::from_str(
             r#"
 questions:
   verdict: { type: choice, instructions: i, criteria: { clean: a, needs_fix: b, unclear: c } }

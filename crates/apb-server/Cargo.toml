@@ -10,7 +10,7 @@ apb-core = { path = "../apb-core" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+yaml_serde.workspace = true
 thiserror.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5.3"

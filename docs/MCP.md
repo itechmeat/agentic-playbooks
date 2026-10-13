@@ -35,7 +35,7 @@ Reads (read-only):
 | `playbook_howto` | Tier 2: authoring detail (pull only when creating/reworking) |
 | `playbook_interview` | Tier 2: the interview guide for building a playbook from a user interview (pull only when the user describes a process to automate) |
 | `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
-| `playbook_validate` | Validate a playbook, list of issues |
+| `playbook_validate` | Validate a playbook, list of issues, including a profile or a script a run would not find (V91, V92) |
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
@@ -186,8 +186,24 @@ retired playbook, unmet `requires`, an unapproved connector or account, and a
 broken sub-playbook tree.
 
 Supervisor tools (`supervisor_*`) are only available inside a supervisor
-session (behind a session gate) and are not listed here as part of the normal
-surface. A supervisor's authority is its capability set
+session (behind a session gate) and are not part of the normal surface. Each
+takes the session `token`; the capability column names the grant it needs:
+
+| Tool | What it does | Capability |
+| --- | --- | --- |
+| `supervisor_wait_event` | Blocks until the next wake, a new `human_review` gate to relay, the end of the run, or `timeout_ms`, then returns it with fresh status; keeps the heartbeat alive | `observe` |
+| `supervisor_run_inspect` | Inspection report of the run: status, nodes, outputs, context, wakes, actions, events | `observe` |
+| `supervisor_report` | Writes the final supervisor report | `observe` |
+| `supervisor_node_retry` | Retries a failed node, optionally with a new prompt | `retry` |
+| `supervisor_run_continue_from` | Continues the run from a given node, skipping the failed one | `retry` |
+| `supervisor_run_pause` | Pauses the run | `retry` |
+| `supervisor_run_abort` | Aborts the run | `retry` |
+| `supervisor_context_append` | Adds a note delivered to every new agent attempt; overrides the node template and run instruction on conflict | `retry` |
+| `supervisor_interrupt_attempt` | Kills a wedged running attempt (one `node`, or all) so ordinary retry and fallback proceed; the run continues | `retry` |
+| `supervisor_rebind_profile` | Rebinds a node's profile mid-run when its agent is wedged; re-runs the trust gate; follow with `supervisor_node_retry` | `rebind` |
+| `supervisor_patch_playbook` | Patches the playbook for the current run (new patch version, run migrated) or for next runs | `patch_playbook` |
+
+The rest of this section covers how supervision works. A supervisor's authority is its capability set
 (`supervisor.policy.capabilities`) on those token-bearing tools. The background
 supervisor agent that `apb run --supervise` spawns gets
 `APB_MCP_ROLE=supervisor` in its environment; an `apb mcp` started under it

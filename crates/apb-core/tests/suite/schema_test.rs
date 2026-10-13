@@ -65,7 +65,7 @@ fn edge_max_traversals_round_trips_and_omits_when_absent() {
 
     // Serialize back to YAML: the field is preserved when set and omitted when
     // absent (skip_serializing_if).
-    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    let yaml = yaml_serde::to_string(&playbook).unwrap();
     assert!(
         yaml.contains("max_traversals: 3"),
         "set value must round-trip"
@@ -118,7 +118,7 @@ fn outputs_extract_parses_and_round_trips_and_omits_when_absent() {
 
     // Round-trip: the marker survives serialization and is omitted when absent
     // (skip_serializing_if), so existing playbooks stay byte-identical.
-    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    let yaml = yaml_serde::to_string(&playbook).unwrap();
     assert!(
         yaml.contains("extract: node_output"),
         "set value must round-trip"
@@ -167,7 +167,7 @@ fn human_review_prompt_parses_and_round_trips() {
         other => panic!("expected human_review, got {other:?}"),
     }
 
-    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    let yaml = yaml_serde::to_string(&playbook).unwrap();
     assert!(
         yaml.contains("Check the changelog before deciding."),
         "prompt must round-trip, got:\n{yaml}"
@@ -219,8 +219,8 @@ fn human_review_without_prompt_is_none() {
     // a `finish` node whose *own* `prompt` field (a distinct, pre-existing,
     // out-of-scope field) legitimately serializes as `prompt: null` today, so
     // a whole-document substring check would false-positive on that sibling.
-    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
-    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let yaml = yaml_serde::to_string(&playbook).unwrap();
+    let value: yaml_serde::Value = yaml_serde::from_str(&yaml).unwrap();
     let gate_node = value["nodes"]
         .as_sequence()
         .unwrap()

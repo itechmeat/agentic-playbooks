@@ -285,7 +285,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
             doc.tiers = stored.map(|d| d.tiers).unwrap_or_default();
         }
     }
-    let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let yaml = yaml_serde::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
     // The bundle as it stands before this write (old profile, live skills),
     // read under the lock: whether its skill content was approved decides
     // below whether the write may vouch for the skills it keeps.

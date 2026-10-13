@@ -36,7 +36,7 @@ name: Valid Script
 version: 1.0.0
 nodes:
   - { id: start, type: start }
-  - { id: s, type: script, script: "s.sh", runner: sh, expected_duration: 5m }
+  - { id: s, type: script, script: "scripts/s.sh", runner: sh, expected_duration: 5m }
   - { id: done, type: finish, outcome: success }
 edges:
   - { from: start, to: s }
@@ -85,6 +85,9 @@ fn doctor_reports_clean_then_flags_invalid_playbook() {
     init_project(good.path()).unwrap();
     seed_playbook(good.path(), "va", VALID_AGENT);
     seed_playbook(good.path(), "vs", VALID_SCRIPT);
+    let scripts = good.path().join(".apb/playbooks/vs/1.0.0/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("s.sh"), "true\n").unwrap();
     seed_profile(good.path(), "main", "claude-code");
 
     let report = diagnose(good.path());
@@ -121,7 +124,19 @@ fn doctor_reports_clean_then_flags_invalid_playbook() {
     // Agent claude-code is mentioned (Ok or Warn - depends on whether `claude` is present).
     assert!(report.checks.iter().any(|c| c.name == "agent claude-code"));
 
-    // 2. Invalid playbook -> has_failure.
+    // 2. A script node whose file is missing fails (V92): every run of it
+    //    would fail on that node.
+    fs::remove_file(scripts.join("s.sh")).unwrap();
+    let report = diagnose(good.path());
+    assert!(
+        report.checks.iter().any(|c| c.name == "playbook vs"
+            && c.status == CheckStatus::Fail
+            && c.detail.starts_with("V92")),
+        "expected a V92 failure: {:?}",
+        report.checks
+    );
+
+    // 3. Invalid playbook -> has_failure.
     let bad = tempfile::tempdir().unwrap();
     init_project(bad.path()).unwrap();
     seed_playbook(bad.path(), "bad", INVALID);

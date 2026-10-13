@@ -667,7 +667,7 @@ async fn run_handler_pins_the_connector_permit_of_a_playbook_child() {
     let cfg_yaml =
         std::fs::read_to_string(root.path().join(".apb/runs").join(run_id).join("run.yaml"))
             .expect("run.yaml written at prepare");
-    let run_cfg: apb_engine::run_config::RunConfig = serde_yaml_ng::from_str(&cfg_yaml).unwrap();
+    let run_cfg: apb_engine::run_config::RunConfig = yaml_serde::from_str(&cfg_yaml).unwrap();
     let children = run_cfg
         .expected_children
         .expect("the run permit must carry the child pins");

@@ -12,8 +12,8 @@ Evals are opt-in and paid: every repetition is a full agent run. Nothing
 starts one except an explicit `apb eval`; saving a version, writing a
 profile or promoting a patch never does.
 
-This page describes 0.24.0, the first half of the design. Not in this
-release: mock connectors (and so any playbook that binds a connector),
+`apb eval` shipped in 0.24.0 as the first half of the design. Not built
+yet: mock connectors (and so any playbook that binds a connector),
 scripted gate and question answers, `stop_before`, push checks, reporting
 which cases a `playbook_update` or `profile_write` invalidates, the
 `after_eval` promotion policy, a dashboard card, and an MCP tool. `apb eval`

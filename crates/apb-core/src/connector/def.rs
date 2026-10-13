@@ -428,7 +428,7 @@ impl ConnectorDoc {
     ///    combination has no legitimate use).
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
-            serde_yaml_ng::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
+            yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
 
         crate::profile::validate_profile_name(&doc.name).map_err(ConnectorError::Invalid)?;
         if doc.name != expected_name {
@@ -1320,7 +1320,7 @@ functions:
         let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: merge\n    description: d\n    method: PUT\n    url: http://a\n    irreversible: true\n  - name: list\n    description: d\n    method: GET\n    url: http://a\n";
         let doc = ConnectorDoc::from_yaml(y, "x").unwrap();
         assert_eq!(doc.irreversible_functions(), vec!["merge".to_string()]);
-        let list = serde_yaml_ng::to_string(doc.function("list").unwrap()).unwrap();
+        let list = yaml_serde::to_string(doc.function("list").unwrap()).unwrap();
         assert!(!list.contains("irreversible"), "{list}");
     }
 

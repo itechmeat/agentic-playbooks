@@ -1,0 +1,14 @@
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+{{#unless (eq crate.repository "https://github.com/itechmeat/agentic-playbooks")}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} {{{crate.repository}}}{{/if}}
+{{/unless}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

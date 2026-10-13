@@ -1,0 +1,41 @@
+# cargo-about configuration for THIRD-PARTY-NOTICES.txt.
+# Regenerate with scripts/third-party-notices.sh, never by hand.
+
+# Only what is compiled into the shipped binary: the release targets of
+# dist-workspace.toml, no build or dev dependencies.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Read license files from each crate's root only. Deeper scanning matched
+# source files that merely carry a license header (ring, schemars).
+max-depth = 1
+# cargo-about's built-in clarifications for crates whose license files need
+# special handling.
+workarounds = ["chrono", "clap", "ring", "rustix", "rustls", "prost"]
+# The apb workspace crates themselves are covered by LICENSE.
+private = { ignore = true }
+
+# The same allowlist as deny.toml. A crate under any other license makes
+# generation fail, so a new license is reviewed before it ships.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+]

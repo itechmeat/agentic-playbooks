@@ -405,7 +405,7 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
         let mut accounts = std::collections::BTreeMap::new();
         if let Some(path) = config::global_config_path(&name)
             && let Ok(raw) = std::fs::read_to_string(path)
-            && let Ok(file) = serde_yaml_ng::from_str::<config::AccountsFile>(&raw)
+            && let Ok(file) = yaml_serde::from_str::<config::AccountsFile>(&raw)
         {
             for account in file.accounts {
                 accounts.insert(

@@ -184,7 +184,7 @@ impl Serialize for JudgeQuestions {
 impl<'de> Deserialize<'de> for JudgeQuestions {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        use serde_yaml_ng::Value;
+        use yaml_serde::Value;
         // Buffered as a YAML value, whose maps admit any scalar key (a noul's
         // `true:` / `false:` criteria are booleans to a YAML parser).
         let raw = Value::deserialize(d)?;
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn questions_keep_their_order_and_noul_keys_load_as_strings() {
-        let h: Holder = serde_yaml_ng::from_str(
+        let h: Holder = yaml_serde::from_str(
             "questions:\n  zeta: { type: noul, instructions: z, criteria: { true: yes, false: no } }\n  alpha:\n    type: choice\n    instructions: a\n    criteria: { b: x, a: null }\n",
         )
         .unwrap();
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn a_list_of_questions_loads_marked_so_the_validator_can_refuse_it() {
-        let h: Holder = serde_yaml_ng::from_str(
+        let h: Holder = yaml_serde::from_str(
             "questions:\n  - { id: verdict, type: noul, instructions: x }\n  - { type: noul, instructions: y }\n",
         )
         .unwrap();
@@ -491,23 +491,21 @@ mod tests {
             ("maybe", JudgeFallback::Unknown("maybe".into())),
         ] {
             let h: Holder =
-                serde_yaml_ng::from_str(&format!("questions: {{}}\non_unavailable: {yaml}\n"))
+                yaml_serde::from_str(&format!("questions: {{}}\non_unavailable: {yaml}\n"))
                     .unwrap();
             assert_eq!(h.on_unavailable.as_ref(), Some(&want), "{yaml}");
             let back: Holder = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
             assert_eq!(back.on_unavailable, Some(want));
         }
         assert!(
-            serde_yaml_ng::from_str::<Holder>(
-                "questions: {}\non_unavailable: { route: a, x: 1 }\n"
-            )
-            .is_err()
+            yaml_serde::from_str::<Holder>("questions: {}\non_unavailable: { route: a, x: 1 }\n")
+                .is_err()
         );
     }
 
     #[test]
     fn output_fields_follow_the_question_types() {
-        let h: Holder = serde_yaml_ng::from_str(
+        let h: Holder = yaml_serde::from_str(
             "questions:\n  v: { type: choice, instructions: i, criteria: { a: x, b: y } }\n  r: { type: noul, instructions: i }\n  e: { type: score, instructions: i, levels: [low, high] }\n",
         )
         .unwrap();

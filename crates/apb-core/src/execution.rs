@@ -221,7 +221,7 @@ pub fn project_execution(root: &Path) -> Result<ProjectExecution, String> {
         return Ok(ProjectExecution::default());
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let parsed: ProjectFile = serde_yaml_ng::from_str(&raw)
+    let parsed: ProjectFile = yaml_serde::from_str(&raw)
         .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
     Ok(parsed.execution)
 }
@@ -456,8 +456,8 @@ mod tests {
     #[test]
     fn global_config_accepts_the_execution_section() {
         let g: crate::config::GlobalConfig =
-            serde_yaml_ng::from_str("execution:\n  fallback_to_host: false\n").unwrap();
+            yaml_serde::from_str("execution:\n  fallback_to_host: false\n").unwrap();
         assert_eq!(g.execution.fallback_to_host, Some(false));
-        assert!(serde_yaml_ng::from_str::<ExecutionSettings>("mode: host\n").is_err());
+        assert!(yaml_serde::from_str::<ExecutionSettings>("mode: host\n").is_err());
     }
 }

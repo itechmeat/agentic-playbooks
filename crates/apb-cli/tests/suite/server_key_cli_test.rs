@@ -89,7 +89,7 @@ fn issue_list_revoke_cycle() {
 /// The id of the first key in the store, read straight from the file.
 fn key_id(cfg: &Path) -> String {
     let raw = std::fs::read_to_string(cfg.join("server-auth.yaml")).unwrap();
-    let file: apb_core::server_auth::AuthFile = serde_yaml_ng::from_str(&raw).unwrap();
+    let file: apb_core::server_auth::AuthFile = yaml_serde::from_str(&raw).unwrap();
     file.keys[0].id.clone()
 }
 

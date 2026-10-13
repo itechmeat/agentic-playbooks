@@ -11,7 +11,7 @@ apb-engine = { path = "../apb-engine" }
 apb-decide = { path = "../apb-decide" }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+yaml_serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 anyhow = "1.0"

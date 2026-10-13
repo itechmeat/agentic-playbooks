@@ -537,7 +537,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn spec_send() -> SmtpSpec {
-        serde_yaml_ng::from_str(
+        yaml_serde::from_str(
             "connection:\n  host: \"{{account.host}}\"\n  port: \"{{account.port}}\"\n  use_tls: \"{{account.use_tls}}\"\n  username: \"{{account.username}}\"\n  password: \"{{secret.password}}\"\nmessage:\n  from_email: \"{{account.from_email}}\"\n  from_name: \"{{account.from_name}}\"\n  to: \"{{args.to}}\"\n  cc: \"{{args.cc}}\"\n  bcc: \"{{args.bcc}}\"\n  subject: \"{{args.subject}}\"\n  body_text: \"{{args.body_text}}\"\n  body_html: \"{{args.body_html}}\"\n",
         )
         .unwrap()

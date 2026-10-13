@@ -161,6 +161,13 @@ impl Registry {
         self.base.join("playbooks")
     }
 
+    /// The directory of one version of a playbook: `<base>/playbooks/<id>/<version>`,
+    /// holding its `playbook.yaml` and `scripts/`. Path arithmetic only; the
+    /// caller decides whether it must exist.
+    pub fn version_dir(&self, id: &str, version: &str) -> PathBuf {
+        self.playbooks_dir().join(id).join(version)
+    }
+
     pub fn list(&self) -> Result<Vec<PlaybookSummary>, RegistryError> {
         let mut out = Vec::new();
         let dir = self.playbooks_dir();
@@ -309,8 +316,8 @@ impl Registry {
         let layout_path = base.join("layouts").join(format!("{version}.yaml"));
         let layout = if layout_path.is_file() {
             let raw = fs::read_to_string(&layout_path)?;
-            let val: serde_yaml_ng::Value =
-                serde_yaml_ng::from_str(&raw).map_err(|e| RegistryError::Layout(e.to_string()))?;
+            let val: yaml_serde::Value =
+                yaml_serde::from_str(&raw).map_err(|e| RegistryError::Layout(e.to_string()))?;
             Some(serde_json::to_value(val).map_err(|e| RegistryError::Layout(e.to_string()))?)
         } else {
             None

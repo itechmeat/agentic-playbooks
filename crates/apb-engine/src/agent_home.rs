@@ -150,8 +150,8 @@ env_key = \"CUSTOM_KEY\"\n\
 command = \"example-index\"\n\
 args = [ \"serve\", \"--mcp\" ]\n\
 \n\
-[mcp_servers.open-second-brain.env]\n\
-VAULT_AGENT_NAME = \"codex\"\n\
+[mcp_servers.example-server.env]\n\
+EXAMPLE_AGENT_NAME = \"codex\"\n\
 \n\
 [desktop]\n\
 ambient-suggestions-enabled = true\n";
@@ -168,7 +168,7 @@ ambient-suggestions-enabled = true\n";
             "an mcp server body must be gone: {out}"
         );
         assert!(
-            !out.contains("VAULT_AGENT_NAME"),
+            !out.contains("EXAMPLE_AGENT_NAME"),
             "a nested mcp env table must be gone: {out}"
         );
         // Model-relevant top-level keys and unrelated tables are preserved.

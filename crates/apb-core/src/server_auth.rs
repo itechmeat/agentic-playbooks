@@ -140,7 +140,7 @@ pub fn load_from(path: &Path) -> Result<AuthFile, AuthError> {
 /// reasons (the server's content-hash reload, which hashes the raw text) can
 /// parse the bytes it already holds instead of reading the file a second time.
 pub fn parse_keys(raw: &str, path: &Path) -> Result<AuthFile, AuthError> {
-    let parsed: AuthFile = serde_yaml_ng::from_str(raw)
+    let parsed: AuthFile = yaml_serde::from_str(raw)
         .map_err(|e| AuthError::Invalid(path.display().to_string(), e.to_string()))?;
     for k in &parsed.keys {
         if k.sha256.len() != 64 || !k.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -154,7 +154,7 @@ pub fn parse_keys(raw: &str, path: &Path) -> Result<AuthFile, AuthError> {
 }
 
 fn save_to(path: &Path, file: &AuthFile) -> Result<(), AuthError> {
-    let yaml = serde_yaml_ng::to_string(file)
+    let yaml = yaml_serde::to_string(file)
         .map_err(|e| AuthError::Invalid(path.display().to_string(), e.to_string()))?;
     atomic_write_private(path, yaml.as_bytes())
         .map_err(|e| AuthError::Io(path.display().to_string(), e.to_string()))

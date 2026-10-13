@@ -283,8 +283,8 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize;
-    let v = Option::<serde_yaml_ng::Value>::deserialize(d)?;
-    Ok(v.and_then(|v| serde_yaml_ng::from_value(v).ok()))
+    let v = Option::<yaml_serde::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| yaml_serde::from_value(v).ok()))
 }
 
 impl RunExecutionManifest {
@@ -335,7 +335,7 @@ pub fn write(run_dir: &Path, manifest: &RunExecutionManifest) -> Result<(), Engi
     let path = manifest_path(run_dir);
     let dir = path.parent().unwrap_or(run_dir);
     std::fs::create_dir_all(dir)?;
-    let yaml = serde_yaml_ng::to_string(manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let yaml = yaml_serde::to_string(manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
     let tmp = dir.join(format!(".manifest.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
@@ -393,7 +393,7 @@ pub fn replace_consent(
     }
     let mut manifest = existing.unwrap_or_default();
     manifest.consent = consent;
-    let yaml = serde_yaml_ng::to_string(&manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let yaml = yaml_serde::to_string(&manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;
     apb_core::fsutil::atomic_write_private(&manifest_path(run_dir), yaml.as_bytes())?;
     if was_local {
         apb_core::run_origin::stamp(run_dir, run_id)?;
@@ -410,7 +410,7 @@ pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError>
         return Ok(None);
     }
     let raw = std::fs::read_to_string(&path)?;
-    let m = serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let m = yaml_serde::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
     Ok(Some(m))
 }
 
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_cli_manifest_carries_no_execution_block() {
         let m = RunExecutionManifest::default();
-        assert!(!serde_yaml_ng::to_string(&m).unwrap().contains("execution"));
+        assert!(!yaml_serde::to_string(&m).unwrap().contains("execution"));
         assert_eq!(
             m.execution_mode().unwrap(),
             apb_core::execution::ExecutionMode::Cli
@@ -482,12 +482,12 @@ mod tests {
             cmd: BTreeMap::from([("token".to_string(), "gh auth token".to_string())]),
             digest: "sha256:x".to_string(),
         };
-        let yaml = serde_yaml_ng::to_string(&acct).unwrap();
-        let back: ManifestAccount = serde_yaml_ng::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&acct).unwrap();
+        let back: ManifestAccount = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(back, acct);
         // An older manifest without `cmd` still parses (serde default).
         let legacy = "name: a\ndefault: false\nfields: {}\nenv: {}\ndigest: sha256:x\n";
-        let parsed: ManifestAccount = serde_yaml_ng::from_str(legacy).unwrap();
+        let parsed: ManifestAccount = yaml_serde::from_str(legacy).unwrap();
         assert!(parsed.cmd.is_empty());
     }
 
@@ -509,12 +509,12 @@ mod tests {
             routed_tier: None,
             cascade: 0,
         };
-        let yaml = serde_yaml_ng::to_string(&mp).unwrap();
-        let back: ManifestProfile = serde_yaml_ng::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&mp).unwrap();
+        let back: ManifestProfile = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(back, mp);
         // An older manifest without `hermetic` still parses (serde default).
         let legacy = "scope: project\nname: architect\nprofile_digest: sha256:a\nbundle_digest: sha256:b\nsoul: role\nsoul_requirement: any\nskills: []\nchain: []\n";
-        let parsed: ManifestProfile = serde_yaml_ng::from_str(legacy).unwrap();
+        let parsed: ManifestProfile = yaml_serde::from_str(legacy).unwrap();
         assert!(!parsed.hermetic);
     }
 }

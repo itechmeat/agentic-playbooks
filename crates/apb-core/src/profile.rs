@@ -416,7 +416,7 @@ impl ZcodeMode {
 
 impl ProfileDoc {
     pub fn from_yaml(s: &str) -> Result<Self, String> {
-        serde_yaml_ng::from_str(s).map_err(|e| e.to_string())
+        yaml_serde::from_str(s).map_err(|e| e.to_string())
     }
 }
 
@@ -489,10 +489,10 @@ mod tests {
 
     #[test]
     fn profile_ref_accepts_string_and_object() {
-        let s: QualifiedProfileRef = serde_yaml_ng::from_str("architect").unwrap();
+        let s: QualifiedProfileRef = yaml_serde::from_str("architect").unwrap();
         assert_eq!(s.scope, ProfileScope::Auto);
         let o: QualifiedProfileRef =
-            serde_yaml_ng::from_str("{ name: reviewer, scope: project }").unwrap();
+            yaml_serde::from_str("{ name: reviewer, scope: project }").unwrap();
         assert_eq!(o.scope, ProfileScope::Project);
         assert_eq!(o.name, "reviewer");
     }
@@ -526,7 +526,7 @@ mod tests {
         for legacy in ["hermetic: false", "hermetic: true"] {
             let doc = ProfileDoc::from_yaml(&format!("{P}{legacy}\n")).unwrap();
             assert_eq!(doc.environment(), AgentEnvironment::Minimal, "{legacy}");
-            let written = serde_yaml_ng::to_string(&doc).unwrap();
+            let written = yaml_serde::to_string(&doc).unwrap();
             assert!(
                 !written.contains("hermetic"),
                 "a rewrite drops the key: {written}"
@@ -548,9 +548,9 @@ mod tests {
         // A typo in the reference object's key is an error, not a silent
         // fallback to scope: auto.
         let r: Result<QualifiedProfileRef, _> =
-            serde_yaml_ng::from_str("{ name: architect, scpoe: project }");
+            yaml_serde::from_str("{ name: architect, scpoe: project }");
         assert!(r.is_err(), "misspelled `scpoe` must be rejected");
-        let s: Result<SkillRef, _> = serde_yaml_ng::from_str("{ name: x, scpoe: global }");
+        let s: Result<SkillRef, _> = yaml_serde::from_str("{ name: x, scpoe: global }");
         assert!(s.is_err(), "misspelled `scpoe` must be rejected for skills");
     }
 }
@@ -571,13 +571,13 @@ mod tier_tests {
             doc.executor_pairs(),
             [("claude", "sonnet"), ("opencode", "small")]
         );
-        let back = ProfileDoc::from_yaml(&serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+        let back = ProfileDoc::from_yaml(&yaml_serde::to_string(&doc).unwrap()).unwrap();
         assert_eq!(back, doc);
         let plain = "name: p\nexecutor: { agent: claude, model: sonnet }\n";
         assert_ne!(profile_digest(plain, ""), profile_digest(WITH_TIERS, ""));
         // Without tiers the document serializes as before.
         let doc = ProfileDoc::from_yaml(plain).unwrap();
-        assert!(!serde_yaml_ng::to_string(&doc).unwrap().contains("tiers"));
+        assert!(!yaml_serde::to_string(&doc).unwrap().contains("tiers"));
     }
 
     #[test]

@@ -267,7 +267,7 @@ fn spec_yaml(op: &str, params: &str) -> ImapSpec {
     let yaml = format!(
         "connection:\n  host: \"{{{{account.host}}}}\"\n  port: \"{{{{account.port}}}}\"\n  use_tls: \"{{{{account.use_tls}}}}\"\n  auth_method: \"{{{{account.auth_method}}}}\"\n  username: \"{{{{account.username}}}}\"\n  password: \"{{{{secret.password}}}}\"\nop: {op}\nparams:\n{params}",
     );
-    serde_yaml_ng::from_str(&yaml).unwrap()
+    yaml_serde::from_str(&yaml).unwrap()
 }
 
 fn account(host: &str, port: u16, auth_method: &str) -> BTreeMap<String, String> {

@@ -2163,7 +2163,7 @@ Expected: all tests green (Phase 1 + engine + CLI).
 - [ ] **Step 5: End-to-end check on real ping (manual, optional)**
 
 ```bash
-cd /Users/techmeat/www/projects/omniteamhq/workflows
+cd <repo root>
 cargo build -p wf-cli
 ./target/debug/wf run ping
 ```

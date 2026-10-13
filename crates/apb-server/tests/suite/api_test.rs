@@ -80,7 +80,21 @@ async fn playbook_detail_includes_model_and_validation() {
     assert_eq!(json["version"], "1.0.0");
     assert_eq!(json["playbook"]["nodes"][0]["type"], "start");
     assert!(json["yaml"].as_str().unwrap().contains("implement-task"));
-    assert!(json["validation"].as_array().is_some());
+    // The seed's `architect` directory holds no profile and the `lint`
+    // script was never added: shown as warnings (V91, V92), since the editor
+    // saves the YAML first and the profile or the scripts may follow.
+    let found: Vec<(&str, &str)> = json["validation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| matches!(i["code"].as_str(), Some("V91" | "V92")))
+        .map(|i| (i["code"].as_str().unwrap(), i["severity"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        found,
+        vec![("V91", "warning"), ("V92", "warning")],
+        "{json}"
+    );
 }
 
 #[tokio::test]

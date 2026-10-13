@@ -220,7 +220,7 @@ const BUILTIN_YAML: &str = include_str!("../../../assets/models.yaml");
 /// The built-in table. Parsing the baked-in asset must not fail at
 /// runtime - this is guaranteed by the CI test `builtin_parses`.
 pub fn builtin() -> ModelsTable {
-    serde_yaml_ng::from_str(BUILTIN_YAML).expect("builtin models.yaml must parse")
+    yaml_serde::from_str(BUILTIN_YAML).expect("builtin models.yaml must parse")
 }
 
 /// The table with the user overlay `<config_dir>/models.yaml` applied.
@@ -240,7 +240,7 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(table),
         Err(e) => return Err(ModelsError::Io(path.display().to_string(), e.to_string())),
     };
-    let overlay: ModelsOverlay = serde_yaml_ng::from_str(&raw)
+    let overlay: ModelsOverlay = yaml_serde::from_str(&raw)
         .map_err(|e| ModelsError::OverlayInvalid(path.display().to_string(), e.to_string()))?;
     if let Some(as_of) = overlay.as_of {
         table.as_of = as_of;
@@ -435,8 +435,8 @@ pub fn write_subscriptions(subs: &[Subscription]) -> std::io::Result<()> {
     // Parse the existing overlay and do NOT wipe it on error (otherwise
     // we'd lose the user's manual models/purposes); a missing file - an
     // empty map.
-    let mut doc: serde_yaml_ng::Value = match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_yaml_ng::from_str(&raw).map_err(|e| {
+    let mut doc: yaml_serde::Value = match std::fs::read_to_string(&path) {
+        Ok(raw) => yaml_serde::from_str(&raw).map_err(|e| {
             std::io::Error::other(format!(
                 "existing {} is not valid YAML: {e}",
                 path.display()
@@ -446,7 +446,7 @@ pub fn write_subscriptions(subs: &[Subscription]) -> std::io::Result<()> {
         // is NOT treated as "file missing", otherwise we'd blindly overwrite
         // an inaccessible file.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            serde_yaml_ng::Value::Mapping(Default::default())
+            yaml_serde::Value::Mapping(Default::default())
         }
         Err(e) => return Err(e),
     };
@@ -457,10 +457,10 @@ pub fn write_subscriptions(subs: &[Subscription]) -> std::io::Result<()> {
         )));
     }
     if let Some(map) = doc.as_mapping_mut() {
-        let val = serde_yaml_ng::to_value(subs).map_err(std::io::Error::other)?;
-        map.insert(serde_yaml_ng::Value::from("subscriptions"), val);
+        let val = yaml_serde::to_value(subs).map_err(std::io::Error::other)?;
+        map.insert(yaml_serde::Value::from("subscriptions"), val);
     }
-    let out = serde_yaml_ng::to_string(&doc).map_err(std::io::Error::other)?;
+    let out = yaml_serde::to_string(&doc).map_err(std::io::Error::other)?;
     crate::fsutil::atomic_write(&path, out.as_bytes())
 }
 

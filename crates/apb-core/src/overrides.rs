@@ -51,7 +51,7 @@ impl RunOverrides {
 
     /// Parses overrides from YAML (the `nodes` section at the top level of the file).
     pub fn from_yaml(yaml: &str) -> Result<Self, String> {
-        serde_yaml_ng::from_str(yaml).map_err(|e| e.to_string())
+        yaml_serde::from_str(yaml).map_err(|e| e.to_string())
     }
 
     /// Applies overrides to the playbook, producing the "effective playbook" -

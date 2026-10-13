@@ -174,6 +174,13 @@ on every PR (`pr-run-mode = "plan"`) to catch config drift before a tag is
 pushed. `docs/release-notes/<tag>.md` is required per tag and becomes the
 published release body via a post-announce job.
 
+Every archive also ships `THIRD-PARTY-NOTICES.txt` (`include` in
+`dist-workspace.toml`), generated from `Cargo.lock` and `web/bun.lock` by
+`scripts/third-party-notices.sh` (cargo-about with `about.toml`/`about.hbs`,
+and `web/scripts/third-party-notices.ts` for what Vite bundles). After a
+dependency change, regenerate and commit it; CI and the release test gate run
+`scripts/third-party-notices.sh --check`.
+
 ## Required gates
 
 - **Before code is ready to commit:** run code-ranker and fix any violation.

@@ -322,7 +322,17 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
     for id in names {
         match reg.load(&id, None) {
             Ok(loaded) => {
-                let report = validate(&loaded.playbook, &ctx);
+                let mut report = validate(&loaded.playbook, &ctx);
+                // Profiles and scripts a run would not find here (V91, V92):
+                // errors, since every run of this checkout fails at start.
+                report
+                    .issues
+                    .extend(apb_core::preflight::missing_references(
+                        root,
+                        apb_core::profile_store::PlaybookOrigin::Project,
+                        &reg.version_dir(&id, &loaded.version),
+                        &loaded.playbook,
+                    ));
                 for issue in &report.issues {
                     let sev = match issue.severity {
                         Severity::Error => "error",

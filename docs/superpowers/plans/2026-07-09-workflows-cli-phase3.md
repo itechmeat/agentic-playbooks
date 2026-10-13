@@ -630,7 +630,7 @@ git commit -m "feat(cli): wf mcp subcommand and Claude Code integration docs"
 ```bash
 cargo build -p wf-cli
 # in a temp project with .wf and the noagent workflow
-claude mcp add wf-test -- /Users/techmeat/www/projects/omniteamhq/workflows/target/debug/wf mcp
+claude mcp add wf-test -- target/debug/wf mcp
 ```
 From a Claude Code session in this folder, verify that the `wf` tools are visible and that `workflow_list` returns the workflow, `workflow_run` runs noagent and returns run_id + outcome. Detach: `claude mcp remove wf-test`. (This step is manual; if unavailable in a CI environment, document that and rely on the e2e test from Task 4.)
 

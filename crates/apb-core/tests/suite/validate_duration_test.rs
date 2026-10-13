@@ -218,6 +218,6 @@ edges:
 "#;
     let pb = Playbook::from_yaml(yaml).unwrap();
     let node = pb.node("a").unwrap();
-    let value = serde_yaml_ng::to_value(node.expected_duration.as_ref().unwrap()).unwrap();
-    assert_eq!(value, serde_yaml_ng::Value::from(1.5));
+    let value = yaml_serde::to_value(node.expected_duration.as_ref().unwrap()).unwrap();
+    assert_eq!(value, yaml_serde::Value::from(1.5));
 }

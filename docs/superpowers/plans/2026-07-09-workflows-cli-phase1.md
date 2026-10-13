@@ -33,7 +33,7 @@
 - [ ] **Step 1: Initialize git and .gitignore**
 
 ```bash
-cd /Users/techmeat/www/projects/omniteamhq/workflows
+cd <repo root>
 git init
 ```
 
@@ -2078,7 +2078,7 @@ git commit -m "feat(server): file watcher and websocket change stream"
 - [ ] **Step 1: Create the project and install dependencies**
 
 ```bash
-cd /Users/techmeat/www/projects/omniteamhq/workflows
+cd <repo root>
 bun create vite web --template svelte-ts
 cd web
 bun install
@@ -2622,10 +2622,10 @@ Expected: all tests green, build successful.
 
 ```bash
 mkdir -p /tmp/wf-demo && cd /tmp/wf-demo
-/Users/techmeat/www/projects/omniteamhq/workflows/target/debug/wf serve --no-open &
+target/debug/wf serve --no-open &
 sleep 1
 mkdir -p .wf/workflows/implement-task/1.0.0
-cp /Users/techmeat/www/projects/omniteamhq/workflows/crates/wf-core/tests/fixtures/valid.yaml \
+cp crates/wf-core/tests/fixtures/valid.yaml \
    .wf/workflows/implement-task/1.0.0/workflow.yaml
 echo -n "1.0.0" > .wf/workflows/implement-task/current
 mkdir -p .wf/profiles/architect

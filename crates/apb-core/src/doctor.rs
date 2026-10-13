@@ -161,9 +161,14 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     );
 
     let mut loaded: Vec<(String, Playbook)> = Vec::new();
+    // The version directory of each loaded playbook, for the script check.
+    let mut version_dirs: Vec<std::path::PathBuf> = Vec::new();
     for id in &ids {
         match reg.load(id, None) {
-            Ok(l) => loaded.push((id.clone(), l.playbook)),
+            Ok(l) => {
+                version_dirs.push(reg.version_dir(id, &l.version));
+                loaded.push((id.clone(), l.playbook));
+            }
             Err(e) => r.push(
                 CheckStatus::Fail,
                 format!("playbook {id}"),
@@ -378,6 +383,24 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                 format!("playbook {id}"),
                 format!("{code}: {message}"),
             );
+        }
+    }
+    // A script a run would not find (V92) fails every run of the playbook.
+    // An unresolvable profile (V91) is already the `profile <name>` line above.
+    for ((id, playbook), version_dir) in loaded.iter().zip(&version_dirs) {
+        for issue in crate::preflight::missing_references(
+            root,
+            PlaybookOrigin::Project,
+            version_dir,
+            playbook,
+        ) {
+            if issue.code == "V92" {
+                r.push(
+                    CheckStatus::Fail,
+                    format!("playbook {id}"),
+                    format!("{}: {}", issue.code, issue.message),
+                );
+            }
         }
     }
 

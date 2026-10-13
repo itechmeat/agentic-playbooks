@@ -138,7 +138,7 @@ fn serve(stream: &mut TcpStream, rec: &Arc<Mutex<Recorded>>, starttls: bool, aut
 }
 
 fn send_spec() -> SmtpSpec {
-    serde_yaml_ng::from_str(
+    yaml_serde::from_str(
         "connection:\n  host: \"{{account.host}}\"\n  port: \"{{account.port}}\"\n  use_tls: \"{{account.use_tls}}\"\n  username: \"{{account.username}}\"\n  password: \"{{secret.password}}\"\nmessage:\n  from_email: \"{{account.from_email}}\"\n  to: \"{{args.to}}\"\n  subject: \"{{args.subject}}\"\n  body_text: \"{{args.body_text}}\"\n  body_html: \"{{args.body_html}}\"\n",
     )
     .unwrap()
@@ -219,7 +219,7 @@ fn verify_connects_and_quits() {
     // Credential-less verify over plaintext: connects, EHLOs, and quits without
     // AUTH or mail. (Authenticated verify runs only under TLS, via live smokes.)
     let srv = spawn_smtp(false, true);
-    let spec: SmtpSpec = serde_yaml_ng::from_str(
+    let spec: SmtpSpec = yaml_serde::from_str(
         "connection:\n  host: \"{{account.host}}\"\n  port: \"{{account.port}}\"\n  use_tls: \"{{account.use_tls}}\"\n  username: \"{{account.username}}\"\n  password: \"{{secret.password}}\"\nverify: true\n",
     )
     .unwrap();

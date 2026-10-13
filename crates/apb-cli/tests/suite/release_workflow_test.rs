@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_yaml_ng::Value;
+use yaml_serde::Value;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -24,7 +24,7 @@ fn repo_root() -> PathBuf {
 fn load(path: &Path) -> Value {
     let text =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+    yaml_serde::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 /// Every workflow file plus the dist build-setup steps spliced into release.yml.
@@ -88,7 +88,7 @@ fn every_third_party_action_is_pinned_to_a_full_commit_sha() {
 }
 
 struct Release {
-    jobs: serde_yaml_ng::Mapping,
+    jobs: yaml_serde::Mapping,
 }
 
 impl Release {
@@ -274,4 +274,46 @@ fn published_artifacts_get_a_build_provenance_attestation_first() {
             "{publisher_id} needs {key}: {want} to attest"
         );
     }
+}
+
+#[test]
+fn archives_ship_third_party_notices_that_are_checked_for_staleness() {
+    // The binary statically links third-party crates and embeds npm packages
+    // whose licenses require their notices next to a binary distribution.
+    let root = repo_root();
+    assert!(
+        root.join("THIRD-PARTY-NOTICES.txt").is_file(),
+        "THIRD-PARTY-NOTICES.txt is missing; run scripts/third-party-notices.sh"
+    );
+    let dist = std::fs::read_to_string(root.join("dist-workspace.toml")).expect("dist config");
+    assert!(
+        dist.lines().any(|l| {
+            let l = l.trim();
+            l.starts_with("include") && l.contains("\"THIRD-PARTY-NOTICES.txt\"")
+        }),
+        "dist-workspace.toml must include THIRD-PARTY-NOTICES.txt in every archive"
+    );
+
+    let runs_check = |job: &Value| {
+        Release::steps(job).iter().any(|s| {
+            s.get("run")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r.contains("scripts/third-party-notices.sh --check"))
+        })
+    };
+    let ci = load(&root.join(".github/workflows/ci.yml"));
+    let pr_checked = ci
+        .get("jobs")
+        .and_then(Value::as_mapping)
+        .is_some_and(|jobs| jobs.values().any(runs_check));
+    assert!(
+        pr_checked,
+        "ci.yml must check the notices on every pull request"
+    );
+    let gate_doc = load(&root.join(".github/workflows/test-gate.yml"));
+    let gate = gate_doc
+        .get("jobs")
+        .and_then(|j| j.get("gate"))
+        .expect("test-gate.yml has a `gate` job");
+    assert!(runs_check(gate), "the release gate must check the notices");
 }

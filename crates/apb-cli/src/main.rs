@@ -109,7 +109,8 @@ enum Command {
     },
     /// List playbooks and versions
     List,
-    /// Validate playbooks, profile models, requires and connectors
+    /// Validate playbooks, the profiles and scripts they reference, profile
+    /// models, requires and connectors
     Validate { name: Option<String> },
     /// Diagnose environment (agents, executors, profiles, runners, playbooks),
     /// or one run's health with --run

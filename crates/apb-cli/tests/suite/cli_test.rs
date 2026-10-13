@@ -24,7 +24,18 @@ fn seeded_dir() -> tempfile::TempDir {
         "1.0.0",
     )
     .unwrap();
-    fs::create_dir_all(dir.path().join(".apb/profiles/architect")).unwrap();
+    // What a run of the fixture needs on disk, so `apb validate` reports no
+    // V91 or V92: a loadable `architect` profile and the `lint` script.
+    let profile = dir.path().join(".apb/profiles/architect");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(
+        profile.join("profile.yaml"),
+        "name: architect\nexecutor:\n  agent: claude\n  model: sonnet\n",
+    )
+    .unwrap();
+    fs::write(profile.join("SOUL.md"), "").unwrap();
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("scripts/node-lint.sh"), "true\n").unwrap();
     dir
 }
 
@@ -61,6 +72,31 @@ fn validate_ok_playbook() {
         .assert()
         .success()
         .stdout(predicate::str::contains("OK"));
+}
+
+#[test]
+fn validate_fails_on_a_profile_and_a_script_a_run_would_not_find() {
+    // A fresh project with only the playbook: `architect` resolves in no
+    // scope and `scripts/node-lint.sh` was never added, so every run fails.
+    let dir = seeded_dir();
+    fs::remove_dir_all(dir.path().join(".apb/profiles/architect")).unwrap();
+    fs::remove_dir_all(
+        dir.path()
+            .join(".apb/playbooks/implement-task/1.0.0/scripts"),
+    )
+    .unwrap();
+    playbook()
+        .args(["validate", "implement-task"])
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "implement-task: error V91 profile `architect` is not found",
+        ))
+        .stdout(predicate::str::contains(
+            "implement-task: error V92 script `scripts/node-lint.sh` does not exist",
+        ))
+        .stdout(predicate::str::contains("implement-task: OK").not());
 }
 
 #[test]
