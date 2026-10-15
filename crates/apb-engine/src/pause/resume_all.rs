@@ -6,6 +6,8 @@
 //! 1. a run that reads `running` with no live driver is resumed; when the
 //!    run gate refuses, it is journaled `run_paused { reason: "driverless",
 //!    by: engine }`, so `apb runs` shows it instead of a false `running`;
+//!    while another run holds the busy lock of its tree, it is left as it is
+//!    for a later pass;
 //! 2. a paused run whose `until` has passed is resumed (the waker that would
 //!    have done it died with the machine);
 //! 3. any other paused run is left alone.
@@ -46,8 +48,12 @@ pub enum ResumeAllAction {
     Resumed { cause: ResumeCause, pid: u32 },
     /// A driverless run the gate refused: journaled paused (`driverless`).
     MarkedDriverless { detail: String },
-    /// A due paused run the gate refused: it stays paused.
+    /// A due paused run the gate refused: it stays paused. Also a driverless
+    /// run that could not be journaled paused.
     Refused { detail: String },
+    /// Another run holds the busy lock of the run's tree: left as it is, a
+    /// later pass (or `apb resume`) continues it.
+    Busy { detail: String },
     /// A paused run whose `until` has not passed, or that has none.
     LeftPaused,
 }
@@ -104,12 +110,17 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                             ResumeAllAction::LeftPaused
                         }
                         super::WakeProbe::Superseded => ResumeAllAction::LeftPaused,
-                        _ => match super::waker::engine_resume(root, &run_id) {
+                        _ => match super::waker::try_engine_resume(root, &run_id, Some(seq)) {
                             Ok(pid) => ResumeAllAction::Resumed {
                                 cause: ResumeCause::Due,
                                 pid,
                             },
-                            Err(detail) => ResumeAllAction::Refused { detail },
+                            Err(EngineError::WorkdirBusy(detail)) => {
+                                ResumeAllAction::Busy { detail }
+                            }
+                            Err(e) => ResumeAllAction::Refused {
+                                detail: super::waker::refusal_text(e),
+                            },
                         },
                     }
                 }
@@ -119,14 +130,24 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                 if crate::liveness::driver_alive(&run_dir, &run_id) == Some(true) {
                     continue;
                 }
-                match super::waker::engine_resume(root, &run_id) {
+                match super::waker::try_engine_resume(root, &run_id, None) {
                     Ok(pid) => ResumeAllAction::Resumed {
                         cause: ResumeCause::Driverless,
                         pid,
                     },
-                    Err(detail) => {
-                        mark_driverless(&run_dir)?;
-                        ResumeAllAction::MarkedDriverless { detail }
+                    // Busy is not a refusal: the run is resumable once the
+                    // lock frees, so it is not marked.
+                    Err(EngineError::WorkdirBusy(detail)) => ResumeAllAction::Busy { detail },
+                    Err(e) => {
+                        let detail = super::waker::refusal_text(e);
+                        match mark_driverless(&run_dir) {
+                            Ok(()) => ResumeAllAction::MarkedDriverless { detail },
+                            Err(mark) => ResumeAllAction::Refused {
+                                detail: format!(
+                                    "{detail}; it could not be marked paused (driverless) either: {mark}"
+                                ),
+                            },
+                        }
                     }
                 }
             }
@@ -140,7 +161,10 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
 /// Journals `run_paused { reason: "driverless", by: engine }` on a run no
 /// driver will ever finish (design 7.2).
 fn mark_driverless(run_dir: &Path) -> Result<(), EngineError> {
-    let _lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK).ok();
+    // Unlike `stop_run`, which must never be kept from stopping a run, a
+    // pause journaled without the lock could race a stop or another pause;
+    // a lock that cannot be taken refuses (the caller reports it).
+    let _lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)?;
     let mut log = EventLog::open(run_dir)?;
     log.append(
         PauseRequest {

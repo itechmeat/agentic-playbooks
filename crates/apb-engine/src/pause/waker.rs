@@ -24,10 +24,6 @@ pub const POLL_ENV: &str = "APB_WAKER_POLL_MS";
 
 const DEFAULT_POLL: Duration = Duration::from_secs(5);
 
-/// The binary [`spawn_waker`] runs instead of this process's own executable
-/// (tests, which run inside a test binary rather than `apb`).
-pub const EXE_ENV: &str = "APB_WAKER_EXE";
-
 /// How a waker ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakeOutcome {
@@ -76,23 +72,34 @@ pub(crate) fn latest_pause(events: &[crate::event::Event]) -> Option<(u64, bool,
 /// The engine-side resume of the waker and `apb resume --all`: the run gate
 /// a person's `apb resume` stands for (a run directory this machine created,
 /// the consent a resume needs), then a detached driver whose `run_resumed`
-/// names `engine`. `Err` carries why the resume was refused.
-pub(crate) fn engine_resume(root: &Path, run_id: &str) -> Result<u32, String> {
-    try_engine_resume(root, run_id).map_err(|e| match e {
-        EngineError::Conflict(why) => why,
-        other => other.to_string(),
-    })
-}
-
-/// [`engine_resume`] keeping the error kind, so the waker can tell a busy
-/// lock (wait for it) from a refusal (give up). A gate refusal is `Conflict`.
-fn try_engine_resume(root: &Path, run_id: &str) -> Result<u32, EngineError> {
+/// names `engine`. With `pause_seq`, that driver journals `run_resumed` only
+/// while the pause at that journal sequence still holds the run. A gate
+/// refusal is `Conflict`; a busy lock is `WorkdirBusy`, so a caller can wait
+/// for it instead of giving up.
+pub(crate) fn try_engine_resume(
+    root: &Path,
+    run_id: &str,
+    pause_seq: Option<u64>,
+) -> Result<u32, EngineError> {
     // Acknowledged: like `apb resume`, the operator who set up the pause or
     // the boot unit is the confirmation; what still refuses is a run
     // directory this machine did not create.
     crate::gate::check_resume(root, run_id, true)
         .map_err(|v| EngineError::Conflict(v.to_string()))?;
-    crate::scheduler::resume_detached_by(root, run_id, None, false, super::PauseBy::Engine)
+    match pause_seq {
+        Some(seq) => crate::scheduler::resume_detached_pause(root, run_id, seq),
+        None => {
+            crate::scheduler::resume_detached_by(root, run_id, None, false, super::PauseBy::Engine)
+        }
+    }
+}
+
+/// A refusal of [`try_engine_resume`] as a line for the operator.
+pub(crate) fn refusal_text(e: EngineError) -> String {
+    match e {
+        EngineError::Conflict(why) => why,
+        other => other.to_string(),
+    }
 }
 
 /// The waker's body: sleeps until the pause at journal sequence `seq` of run
@@ -133,7 +140,7 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
             // refusal: the run stays paused and the waker retries until the
             // lock frees or another pause, resume or stop supersedes it.
             loop {
-                match try_engine_resume(root, run_id) {
+                match try_engine_resume(root, run_id, Some(seq)) {
                     Ok(pid) => return Ok(WakeOutcome::Resumed { pid }),
                     Err(EngineError::WorkdirBusy(_))
                         if run_dir.is_dir()
@@ -157,18 +164,12 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
 /// `run_id`. Best effort: a waker that cannot start leaves an ordinary
 /// paused run, which `apb resume` or `apb resume --all` continues. Only the
 /// `apb` binary can serve as the waker, so a host process that is not `apb`
-/// (a test binary) spawns nothing unless [`EXE_ENV`] names one.
+/// (a test binary) spawns nothing.
 pub fn spawn_waker(root: &Path, run_id: &str, seq: u64) -> Option<u32> {
-    let exe = match std::env::var_os(EXE_ENV) {
-        Some(p) => std::path::PathBuf::from(p),
-        None => {
-            let exe = apb_core::fsutil::reexec_exe().ok()?;
-            if exe.file_stem().and_then(|s| s.to_str()) != Some("apb") {
-                return None;
-            }
-            exe
-        }
-    };
+    let exe = apb_core::fsutil::reexec_exe().ok()?;
+    if exe.file_stem().and_then(|s| s.to_str()) != Some("apb") {
+        return None;
+    }
     let root = std::fs::canonicalize(root).ok()?;
     let mut cmd = Command::new(exe);
     cmd.arg("__pause-waker")

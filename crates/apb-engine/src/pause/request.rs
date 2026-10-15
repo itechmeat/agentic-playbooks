@@ -66,8 +66,11 @@ pub fn request_pause(
     }
     let mut req = req.clone();
     req.by.get_or_insert(PauseBy::Operator);
-    // Serialized against `stop_run` and another pause of a driverless run.
-    let _lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK).ok();
+    // Serialized against `stop_run`, another pause of a driverless run and
+    // the engine's resume of a pause. Unlike `stop_run`, which must never be
+    // kept from stopping a run, a pause that cannot take the lock refuses:
+    // journaled without it, it could race a stop or a resume.
+    let _lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK)?;
     let state = RunState::fold(&read_all(&run_dir)?);
     if state.run_status.is_terminal() {
         return Err(EngineError::Invalid(format!(

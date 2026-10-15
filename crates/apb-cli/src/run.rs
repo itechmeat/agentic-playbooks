@@ -913,8 +913,11 @@ pub(crate) fn drive_run_child(
     resume: bool,
     allow_environment_drift: bool,
     by: Option<&str>,
+    pause_seq: Option<u64>,
 ) -> ExitCode {
-    let res = if resume {
+    let res = if resume && let Some(seq) = pause_seq {
+        apb_engine::scheduler::resume_pause(root, run_id, seq)
+    } else if resume {
         let by = by
             .and_then(apb_engine::pause::PauseBy::parse)
             .unwrap_or(apb_engine::pause::PauseBy::Operator);
@@ -927,6 +930,13 @@ pub(crate) fn drive_run_child(
             RunStatus::Succeeded => ExitCode::SUCCESS,
             _ => ExitCode::from(1),
         },
+        // The engine's resume of a pause that a newer pause, resume or stop
+        // replaced in the meantime: nothing to do and nothing to record.
+        Err(apb_engine::error::EngineError::Conflict(why))
+            if why == apb_engine::scheduler::PAUSE_SUPERSEDED =>
+        {
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             // A detached driver's stdio is nulled by the spawner, so an error
             // here would vanish with the process. Record it as a RunError event
@@ -1327,6 +1337,9 @@ pub(crate) fn resume_all_cmd(root: &Path) -> ExitCode {
                     }
                     ResumeAllAction::Refused { detail } => {
                         format!("still paused: cannot resume: {detail}")
+                    }
+                    ResumeAllAction::Busy { detail } => {
+                        format!("left as is, the workdir is busy: {detail}")
                     }
                     ResumeAllAction::LeftPaused => "left paused".to_string(),
                 };

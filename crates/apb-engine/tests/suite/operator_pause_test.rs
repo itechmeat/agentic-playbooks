@@ -765,3 +765,107 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
     // handed the run to one is the property here.
     assert!(matches!(woke, WakeOutcome::Resumed { .. }), "{woke:?}");
 }
+
+/// `resume_all` leaves a driverless run as it is while another run holds the
+/// busy lock of its tree (a later pass resumes it), and a driverless run it
+/// can neither resume nor mark paused is reported refused while the pass
+/// goes on to the other runs.
+#[cfg(unix)]
+#[test]
+fn resume_all_waits_out_a_busy_workdir_and_reports_a_run_it_cannot_mark() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let cfg = tempfile::tempdir().unwrap();
+    let cfg_dir = cfg.path().to_string_lossy().into_owned();
+    let _env = Env::set(&[("APB_PAUSE_GRACE_MS", "200"), ("APB_CONFIG_DIR", &cfg_dir)]);
+    apb_core::run_origin::ensure_key().unwrap();
+
+    // A real run whose driver is gone after a resume: it reads running.
+    let busy_run = pause_script_run(root, false);
+    let mut log = EventLog::open(&root.join(".apb/runs").join(&busy_run)).unwrap();
+    log.append(EventPayload::RunResumed {
+        from_node: "s".into(),
+        by: Some(PauseBy::Operator),
+    })
+    .unwrap();
+    drop(log);
+    // A hand-written driverless run the gate refuses, whose journal cannot
+    // be written.
+    let orphan = seed_journal(root, "r-locked", &[]);
+    let journal = orphan.join("events.jsonl");
+    assert!(journal.is_file(), "the journal file name changed");
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let held = acquire_tree(root, None, false).unwrap();
+    let entries = resume_all(root).unwrap();
+    let action = |id: &str| {
+        entries
+            .iter()
+            .find(|e| e.run_id == id)
+            .map(|e| e.action.clone())
+    };
+    assert!(
+        matches!(action(&busy_run), Some(ResumeAllAction::Busy { .. })),
+        "{entries:?}"
+    );
+    assert!(
+        matches!(action("r-locked"), Some(ResumeAllAction::Refused { .. })),
+        "{entries:?}"
+    );
+    assert!(
+        !events(root, &busy_run).iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::RunPaused { reason, .. } if reason == "driverless"
+        )),
+        "a busy workdir does not mark the run driverless"
+    );
+    drop(held);
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// The engine's resume of one pause journals `run_resumed` only while that
+/// pause still holds the run: a newer pause in between makes it a no-op.
+#[cfg(unix)]
+#[test]
+fn the_engine_resume_of_a_replaced_pause_journals_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let _env = Env::set(&[("APB_PAUSE_GRACE_MS", "200")]);
+    let run_id = pause_script_run(root, false);
+    let first = latest_pause_seq(&events(root, &run_id));
+    let PauseOutcome::Journaled { seq: second } =
+        request_pause(root, &run_id, &operator(PauseMode::Drain)).unwrap()
+    else {
+        panic!("a paused run is updated in place");
+    };
+    let err = apb_engine::scheduler::resume_pause(root, &run_id, first).unwrap_err();
+    assert!(
+        matches!(&err, EngineError::Conflict(m) if m == apb_engine::scheduler::PAUSE_SUPERSEDED),
+        "{err:?}"
+    );
+    assert!(resumed_by(&events(root, &run_id)).is_none());
+    let res = apb_engine::scheduler::resume_pause(root, &run_id, second).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(resumed_by(&events(root, &run_id)), Some(PauseBy::Engine));
+}
+
+fn latest_pause_seq(events: &[Event]) -> u64 {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| matches!(e.payload, EventPayload::RunPaused { .. }).then_some(e.seq))
+        .expect("a run_paused event")
+}

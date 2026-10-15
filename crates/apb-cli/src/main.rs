@@ -540,6 +540,11 @@ enum Command {
         /// on `run_resumed` (issue #200). Only meaningful with `--resume`.
         #[arg(long)]
         by: Option<String>,
+        /// The engine's resume of one pause (the waker, `resume --all`): the
+        /// journal sequence of the `run_paused` that must still hold the run
+        /// when `run_resumed` is journaled. Only meaningful with `--resume`.
+        #[arg(long = "pause-seq")]
+        pause_seq: Option<u64>,
     },
     /// The waker of a paused run with an `until` (issue #200): sleeps until
     /// then and resumes the run only if the same pause still holds it. Spawned
@@ -806,6 +811,7 @@ fn main() -> ExitCode {
             resume,
             allow_environment_drift,
             by,
+            pause_seq,
         }) => drive_run_child(
             &run_root,
             &run_id,
@@ -813,6 +819,7 @@ fn main() -> ExitCode {
             resume,
             allow_environment_drift,
             by.as_deref(),
+            pause_seq,
         ),
         Some(Command::PauseWaker {
             root: run_root,

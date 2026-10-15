@@ -339,6 +339,29 @@ pub fn resume_detached_by(
     allow_environment_drift: bool,
     by: PauseBy,
 ) -> Result<u32, EngineError> {
+    resume_detached_inner(root, run_id, from_node, allow_environment_drift, by, None)
+}
+
+/// The engine's resume of a paused run (the waker, `apb resume --all`): a
+/// detached driver that journals its `run_resumed` only while the run is
+/// still paused by the `run_paused` at journal sequence `pause_seq`, checked
+/// under the run's event lock (see [`resume_pause`]).
+pub(crate) fn resume_detached_pause(
+    root: &Path,
+    run_id: &str,
+    pause_seq: u64,
+) -> Result<u32, EngineError> {
+    resume_detached_inner(root, run_id, None, false, PauseBy::Engine, Some(pause_seq))
+}
+
+fn resume_detached_inner(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    by: PauseBy,
+    pause_seq: Option<u64>,
+) -> Result<u32, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -371,6 +394,7 @@ pub fn resume_detached_by(
         true,
         allow_environment_drift,
         Some(by),
+        pause_seq,
     )
     .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
     // As in `hand_to_detached_driver`: name the driver before returning, so a
@@ -489,6 +513,29 @@ pub fn resume_by(
     )
 }
 
+/// The engine's resume of the pause at journal sequence `pause_seq` (issue
+/// #200): what the detached driver of [`resume_detached_pause`] runs.
+/// `run_resumed` is journaled only while that pause still holds the run,
+/// checked under the run's event lock, the lock `request_pause` and
+/// `stop_run` journal under: a pause, resume or stop that came after the
+/// waker's own check makes this a `Conflict` that journals nothing.
+pub fn resume_pause(root: &Path, run_id: &str, pause_seq: u64) -> Result<RunResult, EngineError> {
+    require_resume_consent(root, run_id)?;
+    resume_inner_checked(
+        root,
+        run_id,
+        None,
+        false,
+        false,
+        Some(PauseBy::Engine),
+        Some(pause_seq),
+    )
+}
+
+/// The error [`resume_pause`] returns when the pause it was for no longer
+/// holds the run.
+pub const PAUSE_SUPERSEDED: &str = "the pause this resume was for no longer holds the run";
+
 /// The engine's own irreversible-consent check on resume (0.24.0): a run
 /// whose snapshot needs a consent that its manifest does not record is
 /// refused here, whatever the caller, so no resume path skips the check the launch
@@ -545,6 +592,29 @@ pub(crate) fn resume_inner(
     allow_environment_drift: bool,
     allow_shared_workdir: bool,
     by: Option<PauseBy>,
+) -> Result<RunResult, EngineError> {
+    resume_inner_checked(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        allow_shared_workdir,
+        by,
+        None,
+    )
+}
+
+/// [`resume_inner`], journaling `run_resumed` only while the run is still
+/// paused by the `run_paused` at journal sequence `pause_seq` when one is
+/// given (see [`resume_pause`]).
+fn resume_inner_checked(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    allow_shared_workdir: bool,
+    by: Option<PauseBy>,
+    pause_seq: Option<u64>,
 ) -> Result<RunResult, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -650,10 +720,25 @@ pub(crate) fn resume_inner(
     // Journal a proper `run_resumed` marker (folds to running), replacing the
     // old `RunPaused { reason: "resume from X" }` write that used to leave the
     // folded status stuck on paused for the rest of the run.
-    log.append(EventPayload::RunResumed {
-        from_node: decision.start_node.clone(),
-        by,
-    })?;
+    {
+        // An engine resume of one pause checks, under the event lock, that
+        // the pause still holds the run; the workdir guard is released on
+        // the refusal.
+        let _event_lock = match pause_seq {
+            Some(seq) => {
+                let lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK)?;
+                if !crate::pause::probe::holds(&read_all(&run_dir)?, seq) {
+                    return Err(EngineError::Conflict(PAUSE_SUPERSEDED.into()));
+                }
+                Some(lock)
+            }
+            None => None,
+        };
+        log.append(EventPayload::RunResumed {
+            from_node: decision.start_node.clone(),
+            by,
+        })?;
+    }
     // The persisted mode, as a resume drives it (`RunMode::on_resume`): an
     // agent-supervised run keeps its supervisor agent (heartbeat monitoring
     // and parking both continue), a session-supervised one resumes

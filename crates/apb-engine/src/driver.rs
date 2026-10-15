@@ -238,6 +238,9 @@ impl DriveClaim {
 /// drift writes its `EnvironmentDriftAccepted` events instead of refusing.
 /// `by` (issue #200) names who resumes the run; it is forwarded as `--by` and
 /// journaled on the child's `run_resumed`. Only meaningful with `resume`.
+/// `pause_seq` (the engine's resume of one pause) is forwarded as
+/// `--pause-seq`: the child journals `run_resumed` only while that pause
+/// still holds the run.
 pub fn spawn_detached_driver(
     root: &Path,
     run_id: &str,
@@ -245,6 +248,7 @@ pub fn spawn_detached_driver(
     resume: bool,
     allow_environment_drift: bool,
     by: Option<crate::pause::PauseBy>,
+    pause_seq: Option<u64>,
 ) -> io::Result<u32> {
     let exe = apb_core::fsutil::reexec_exe()?;
     // The child gets an absolute root: it starts from a different working
@@ -268,6 +272,9 @@ pub fn spawn_detached_driver(
         }
         if let Some(by) = by {
             cmd.arg("--by").arg(by.as_str());
+        }
+        if let Some(seq) = pause_seq {
+            cmd.arg("--pause-seq").arg(seq.to_string());
         }
     }
     cmd.current_dir(&root);

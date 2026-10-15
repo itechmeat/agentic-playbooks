@@ -53,7 +53,7 @@ fn quota_executor(events: &[Event], seq: u64) -> Option<(String, String)> {
 }
 
 /// Whether the run is paused by the `run_paused` at journal sequence `seq`.
-fn holds(events: &[Event], seq: u64) -> bool {
+pub(crate) fn holds(events: &[Event], seq: u64) -> bool {
     crate::state::RunState::fold(events).run_status == crate::state::RunStatus::Paused
         && events
             .iter()
@@ -142,8 +142,10 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
         ),
     };
     // Serialized against `stop_run` and `request_pause`; the pause must
-    // still be the one this probe was for.
-    let _lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK).ok();
+    // still be the one this probe was for. A lock that cannot be taken is an
+    // error (as in `request_pause`): journaled without it, a re-pause could
+    // race a stop.
+    let _lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK)?;
     if !holds(&read_all(&run_dir)?, seq) {
         return Ok(WakeProbe::Superseded);
     }
