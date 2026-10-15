@@ -1507,9 +1507,10 @@ async fn resume_refuses_a_busy_workdir_and_leaves_the_run_paused() {
     let run_dir = dir.path().join(".apb/runs/busy-1");
     let events = apb_engine::event::read_all(&run_dir).unwrap();
     assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e.payload, apb_engine::event::EventPayload::RunResumed { .. })),
+        !events.iter().any(|e| matches!(
+            e.payload,
+            apb_engine::event::EventPayload::RunResumed { .. }
+        )),
         "a refused resume journals nothing"
     );
     assert_eq!(
