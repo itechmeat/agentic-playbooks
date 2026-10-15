@@ -143,3 +143,58 @@ fn pause_runs_wait_and_resume_report_the_pause() {
     assert!(out.contains("resuming early"), "{out}");
     assert!(out.contains("finished: succeeded"), "{out}");
 }
+
+/// A resume while another live run holds the busy lock of the tree fails
+/// with `workdir busy` and leaves the run paused: no `run_resumed` lands in
+/// the journal, so the run does not read running with a dead driver.
+#[test]
+fn resume_with_a_busy_workdir_fails_and_the_run_stays_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    fs::write(root.join("slow"), "").unwrap();
+    let (code, stdout, stderr) = apb(root, &["run", "pausable", "--detach"]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    let run_id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let _guard = RunGuard::new(root, &run_id);
+    poll("the script to start", || {
+        root.join("s_running").is_file().then_some(())
+    });
+    let (code, out, err) = apb(root, &["pause", &run_id, "--reason", "busy"]);
+    assert_eq!(code, 0, "{out} {err}");
+    fs::remove_file(root.join("slow")).unwrap();
+    poll("the run to read paused", || {
+        let (_, list, _) = apb(root, &["runs"]);
+        list.lines()
+            .any(|l| l.contains(&run_id) && l.split('\t').nth(2) == Some("paused"))
+            .then_some(())
+    });
+    // The driver released its lock on pause; a live process (this test)
+    // takes it, as another write-run would.
+    let lock = root.join(".apb/workdir.lock");
+    poll("the paused driver to release the lock", || {
+        (!lock.is_file()).then_some(())
+    });
+    fs::write(&lock, std::process::id().to_string()).unwrap();
+
+    let (code, out, err) = apb(root, &["resume", &run_id]);
+    assert_eq!(code, 2, "{out} {err}");
+    assert!(err.contains("workdir busy"), "{err}");
+    let journal = fs::read_to_string(root.join(".apb/runs").join(&run_id).join("events.jsonl"))
+        .unwrap_or_default();
+    assert!(!journal.contains("\"run_resumed\""), "{journal}");
+    let (_, list, _) = apb(root, &["runs"]);
+    let line = list.lines().find(|l| l.contains(&run_id)).unwrap();
+    assert_eq!(line.split('\t').nth(2), Some("paused"), "{line}");
+
+    // Once the lock frees, the same resume goes through.
+    fs::remove_file(&lock).unwrap();
+    let (code, out, err) = apb(root, &["resume", &run_id]);
+    assert_eq!(code, 0, "{out} {err}");
+    assert!(out.contains("finished: succeeded"), "{out}");
+}

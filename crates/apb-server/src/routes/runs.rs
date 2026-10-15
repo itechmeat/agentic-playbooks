@@ -515,6 +515,13 @@ fn resume_error(e: apb_engine::EngineError) -> axum::response::Response {
         apb_engine::EngineError::Invalid(what) | apb_engine::EngineError::Conflict(what) => {
             (StatusCode::CONFLICT, what).into_response()
         }
+        // Another run holds the busy lock of the tree this run works in: the
+        // resume is refused before a driver starts, so the run stays paused.
+        apb_engine::EngineError::WorkdirBusy(what) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "workdir_busy", "detail": what })),
+        )
+            .into_response(),
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
     }
 }

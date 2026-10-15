@@ -78,12 +78,21 @@ pub(crate) fn latest_pause(events: &[crate::event::Event]) -> Option<(u64, bool,
 /// the consent a resume needs), then a detached driver whose `run_resumed`
 /// names `engine`. `Err` carries why the resume was refused.
 pub(crate) fn engine_resume(root: &Path, run_id: &str) -> Result<u32, String> {
+    try_engine_resume(root, run_id).map_err(|e| match e {
+        EngineError::Conflict(why) => why,
+        other => other.to_string(),
+    })
+}
+
+/// [`engine_resume`] keeping the error kind, so the waker can tell a busy
+/// lock (wait for it) from a refusal (give up). A gate refusal is `Conflict`.
+fn try_engine_resume(root: &Path, run_id: &str) -> Result<u32, EngineError> {
     // Acknowledged: like `apb resume`, the operator who set up the pause or
     // the boot unit is the confirmation; what still refuses is a run
     // directory this machine did not create.
-    crate::gate::check_resume(root, run_id, true).map_err(|v| v.to_string())?;
+    crate::gate::check_resume(root, run_id, true)
+        .map_err(|v| EngineError::Conflict(v.to_string()))?;
     crate::scheduler::resume_detached_by(root, run_id, None, false, super::PauseBy::Engine)
-        .map_err(|e| e.to_string())
 }
 
 /// The waker's body: sleeps until the pause at journal sequence `seq` of run
@@ -120,10 +129,23 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
                 | super::WakeProbe::Skipped(_)
                 | super::WakeProbe::Passed => {}
             }
-            return Ok(match engine_resume(root, run_id) {
-                Ok(pid) => WakeOutcome::Resumed { pid },
-                Err(why) => WakeOutcome::Refused(why),
-            });
+            // Another run holding the busy lock of this run's tree is not a
+            // refusal: the run stays paused and the waker retries until the
+            // lock frees or another pause, resume or stop supersedes it.
+            loop {
+                match try_engine_resume(root, run_id) {
+                    Ok(pid) => return Ok(WakeOutcome::Resumed { pid }),
+                    Err(EngineError::WorkdirBusy(_))
+                        if run_dir.is_dir()
+                            && same_pause_until(&read_all(&run_dir)?, seq).is_some() =>
+                    {
+                        std::thread::sleep(poll());
+                    }
+                    Err(EngineError::WorkdirBusy(_)) => return Ok(WakeOutcome::Superseded),
+                    Err(EngineError::Conflict(why)) => return Ok(WakeOutcome::Refused(why)),
+                    Err(other) => return Ok(WakeOutcome::Refused(other.to_string())),
+                }
+            }
         }
         let left =
             Duration::from_millis(u64::try_from(u128::from(until) - now).unwrap_or(u64::MAX));

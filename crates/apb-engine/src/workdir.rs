@@ -295,24 +295,42 @@ pub fn acquire_tree_for(
     acquire_at(tree_lock_path(root, tree), Some(run_id))
 }
 
+/// Why the lock at `lock_path` is not free for `claimant`, or `None` when it
+/// is (no lock, a stale one, or one `claimant` itself parked).
+fn busy_reason(lock_path: &Path, claimant: Option<&str>) -> Option<String> {
+    match lock_owner(lock_path) {
+        Some(LockOwner::Pid(pid)) if pid_alive(pid) => Some(format!(
+            "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
+        )),
+        Some(LockOwner::PausedRun(id))
+            if claimant != Some(id.as_str()) && paused_run_holds(lock_path, &id) =>
+        {
+            Some(format!(
+                "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first, give this run its own worktree, or use --allow-shared-workdir"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Read-only preflight of [`acquire_tree_for`]: refuses with `WorkdirBusy`
+/// when resuming run `run_id` would find the busy lock of `tree` held by
+/// another live run, without taking the lock. A resume that hands the run to
+/// a detached driver calls it so the caller sees the refusal instead of a
+/// driver that dies right after the resume reported success.
+pub fn check_free_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<(), EngineError> {
+    match busy_reason(&tree_lock_path(root, tree), Some(run_id)) {
+        Some(msg) => Err(EngineError::WorkdirBusy(msg)),
+        None => Ok(()),
+    }
+}
+
 fn acquire_at(
     lock_path: PathBuf,
     claimant: Option<&str>,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
-    match lock_owner(&lock_path) {
-        Some(LockOwner::Pid(pid)) if pid_alive(pid) => {
-            return Err(EngineError::WorkdirBusy(format!(
-                "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
-            )));
-        }
-        Some(LockOwner::PausedRun(id))
-            if claimant != Some(id.as_str()) && paused_run_holds(&lock_path, &id) =>
-        {
-            return Err(EngineError::WorkdirBusy(format!(
-                "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first, give this run its own worktree, or use --allow-shared-workdir"
-            )));
-        }
-        _ => {}
+    if let Some(msg) = busy_reason(&lock_path, claimant) {
+        return Err(EngineError::WorkdirBusy(msg));
     }
     // No lock, or a stale one - overwrite it.
     write_lock(&lock_path, std::process::id())?;

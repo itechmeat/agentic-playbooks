@@ -527,6 +527,12 @@ run the run gate refuses is journaled `paused (driverless)` so `apb runs` does
 not show it as `running`. The dashboard has the same buttons:
 `POST /api/runs/{id}/pause` and `POST /api/runs/{id}/resume`, which goes
 through the run gate and the irreversible-consent check like `run_resume`.
+A resume is refused while another live run holds the busy lock of the run's
+working tree (or another paused run keeps it with `keep_lock`): `run_resume`
+returns the conflict, `apb resume` exits 2 with `workdir busy`, the dashboard
+endpoint answers 409 `{"error": "workdir_busy", "detail": ...}`, and the run
+stays paused. A waker whose `until` arrives while the tree is busy keeps
+waiting and resumes the run once the lock frees.
 
 ## Connecting (local agents, no relay)
 

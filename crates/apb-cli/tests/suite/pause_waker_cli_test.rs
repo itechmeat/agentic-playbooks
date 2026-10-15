@@ -68,10 +68,10 @@ fn finishes(events: &[Event], node: &str) -> usize {
         .count()
 }
 
-#[test]
-fn a_pause_with_until_is_resumed_by_its_waker() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
+/// Starts the run, pauses it with an `until` 1.5 s ahead and waits until
+/// the drained driver journals the pause. Returns the run id, its stop guard
+/// and `until`.
+fn start_and_pause(root: &Path) -> (String, RunGuard, u64) {
     seed(root);
     fs::write(root.join("slow"), "").unwrap();
     let out = crate::common::apb_std()
@@ -92,7 +92,7 @@ fn a_pause_with_until_is_resumed_by_its_waker() {
         .expect("run id")
         .trim()
         .to_string();
-    let _guard = RunGuard::new(root, &run_id);
+    let guard = RunGuard::new(root, &run_id);
     let run_dir = root.join(".apb/runs").join(&run_id);
     poll("the script to start", || {
         root.join("s_running").is_file().then_some(())
@@ -116,7 +116,15 @@ fn a_pause_with_until_is_resumed_by_its_waker() {
             .any(|e| matches!(e.payload, EventPayload::RunPaused { until: Some(_), .. }))
             .then_some(())
     });
+    (run_id, guard, until)
+}
 
+#[test]
+fn a_pause_with_until_is_resumed_by_its_waker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (run_id, _guard, until) = start_and_pause(root);
+    let run_dir = root.join(".apb/runs").join(&run_id);
     let events = poll("the waker to resume the run to its finish", || {
         let ev = read_all(&run_dir).ok()?;
         ev.iter()
@@ -134,6 +142,45 @@ fn a_pause_with_until_is_resumed_by_its_waker() {
         .unwrap()
         .ts;
     assert!(resumed_at >= u128::from(until), "not before `until`");
+    assert!(matches!(
+        events.last().map(|e| &e.payload),
+        Some(EventPayload::RunFinished { outcome }) if outcome == "succeeded"
+    ));
+    assert_eq!(finishes(&events, "s"), 1);
+    assert_eq!(finishes(&events, "t"), 1);
+}
+
+/// A waker whose `until` arrives while another live run holds the busy lock
+/// of the tree keeps the run paused and waits; once the lock frees it
+/// resumes the run, which then finishes.
+#[test]
+fn a_waker_waits_out_a_busy_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (run_id, _guard, until) = start_and_pause(root);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let lock = root.join(".apb/workdir.lock");
+    poll("the paused driver to release the lock", || {
+        (!lock.is_file()).then_some(())
+    });
+    fs::write(&lock, std::process::id().to_string()).unwrap();
+    poll("`until` to pass", || {
+        (apb_core::clock::now_ms() > u128::from(until) + 1_000).then_some(())
+    });
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunResumed { .. })),
+        "no resume while the lock is held"
+    );
+    fs::remove_file(&lock).unwrap();
+    let events = poll("the waker to resume the run to its finish", || {
+        let ev = read_all(&run_dir).ok()?;
+        ev.iter()
+            .any(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+            .then_some(ev)
+    });
     assert!(matches!(
         events.last().map(|e| &e.payload),
         Some(EventPayload::RunFinished { outcome }) if outcome == "succeeded"

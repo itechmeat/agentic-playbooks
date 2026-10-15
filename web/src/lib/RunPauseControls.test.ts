@@ -9,6 +9,7 @@ vi.mock('./api', async () => {
 })
 vi.mock('svelte-sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
+import { toast } from 'svelte-sonner'
 import { ApiError } from './api/http'
 import RunPauseControls from './RunPauseControls.svelte'
 import type { PauseInfo } from './types'
@@ -17,6 +18,8 @@ let app: ReturnType<typeof mount> | null = null
 beforeEach(() => {
   pauseRun.mockReset()
   resumeRun.mockReset()
+  vi.mocked(toast.success).mockClear()
+  vi.mocked(toast.error).mockClear()
 })
 afterEach(() => {
   if (app) unmount(app)
@@ -116,5 +119,23 @@ describe('RunPauseControls', () => {
     byTestId('irreversible-confirm')?.click()
     await tick()
     expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', 'consent-abc')
+  })
+
+  it('shows a busy-workdir error when another run holds the lock', async () => {
+    resumeRun.mockRejectedValueOnce(
+      new ApiError(
+        '/api/runs/run-1/resume: workdir_busy',
+        409,
+        'workdir_busy',
+        'another write-run holds the workdir (pid 42)',
+      ),
+    )
+    show({ status: 'paused', pause: paused })
+    byTestId('run-resume-button')?.click()
+    await tick()
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith('Cannot resume: the workdir is busy', {
+      description: expect.stringContaining('another write-run holds the workdir (pid 42)'),
+    })
   })
 })

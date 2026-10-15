@@ -81,8 +81,14 @@
           irreversibleNonce = step.nonce
           irreversibleOpen = true
         }
+      } else if (e instanceof ApiError && e.code === 'workdir_busy') {
+        // Another run holds the busy lock of this run's tree: nothing was
+        // started and the run stays paused.
+        toast.error('Cannot resume: the workdir is busy', {
+          description: `${e.detail ?? e.message}. The run stays paused; resume it once the other run finishes.`,
+        })
       } else {
-        toast.error('Resume failed', { description: String(e) })
+        toast.error('Resume failed', { description: e instanceof Error ? e.message : String(e) })
       }
     } finally {
       busy = false

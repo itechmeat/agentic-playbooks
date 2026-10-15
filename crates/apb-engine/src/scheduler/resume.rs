@@ -357,6 +357,13 @@ pub fn resume_detached_by(
     // know and cannot skip safely (see `event::read_all`): refuse here, where
     // the caller sees the version mismatch.
     read_all(&run_dir)?;
+    // And for a busy lock another run holds: the driver would die on it right
+    // after this call reported the resume started (issue #200).
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    if let Some(tree) = resume_lock_tree(&playbook, &run_dir)? {
+        crate::workdir::check_free_for(root, tree.as_deref(), run_id)?;
+    }
     let pid = crate::driver::spawn_detached_driver(
         root,
         run_id,
@@ -505,6 +512,27 @@ fn require_resume_consent(root: &Path, run_id: &str) -> Result<(), EngineError> 
     }
 }
 
+/// The tree whose busy lock a resume of this run takes, or `None` when the
+/// run takes no lock. Mirrors prepare's predicate
+/// (`NodeKind::takes_workdir_lock`): a resumed parent with a sub-playbook
+/// node (or a finish-with-prompt agent node) still takes the shared workdir
+/// lock. The lock covers the run's working tree once one is journaled (issue
+/// #67 item 8), so resuming a run over its own worktree does not wait on a
+/// run in the execution root; the inner `None` is the execution root.
+fn resume_lock_tree(
+    playbook: &Playbook,
+    run_dir: &Path,
+) -> Result<Option<Option<PathBuf>>, EngineError> {
+    if !playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock()) {
+        return Ok(None);
+    }
+    Ok(Some(
+        RunState::fold(&read_all(run_dir)?)
+            .worktree
+            .map(PathBuf::from),
+    ))
+}
+
 /// Shared implementation behind `resume`/`resume_with`. `allow_shared_workdir`
 /// mirrors `RunOptions::allow_shared_workdir`: a sub-playbook child reattached
 /// on resume runs on the parent's drive thread while the parent still holds the
@@ -610,6 +638,15 @@ pub(crate) fn resume_inner(
             )));
         }
     }
+    // The busy lock is taken BEFORE the `run_resumed` marker: a lock another
+    // run holds refuses the resume and leaves the run as it was (paused),
+    // instead of journaling a resume that dies on the spot.
+    let mut guard = match resume_lock_tree(&playbook, &run_dir)? {
+        Some(tree) => {
+            crate::workdir::acquire_tree_for(root, tree.as_deref(), allow_shared_workdir, run_id)?
+        }
+        None => None,
+    };
     // Journal a proper `run_resumed` marker (folds to running), replacing the
     // old `RunPaused { reason: "resume from X" }` write that used to leave the
     // folded status stuck on paused for the rest of the run.
@@ -617,21 +654,6 @@ pub(crate) fn resume_inner(
         from_node: decision.start_node.clone(),
         by,
     })?;
-    // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
-    // parent with a sub-playbook node (or a finish-with-prompt agent node)
-    // still takes the shared workdir lock.
-    // The lock covers the run's working tree once one is journaled (issue #67
-    // item 8), so resuming a run over its own worktree does not wait on a run
-    // in the execution root.
-    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
-    let tree = RunState::fold(&read_all(&run_dir)?)
-        .worktree
-        .map(PathBuf::from);
-    let mut guard = if is_write {
-        crate::workdir::acquire_tree_for(root, tree.as_deref(), allow_shared_workdir, run_id)?
-    } else {
-        None
-    };
     // The persisted mode, as a resume drives it (`RunMode::on_resume`): an
     // agent-supervised run keeps its supervisor agent (heartbeat monitoring
     // and parking both continue), a session-supervised one resumes

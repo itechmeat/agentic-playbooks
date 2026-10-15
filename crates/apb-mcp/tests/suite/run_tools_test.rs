@@ -1422,3 +1422,63 @@ fn run_status_lists_branch_failures_only_when_journaled() {
     let out = run_status(dir.path(), "r2").unwrap();
     assert!(out.get("branch_failures").is_none());
 }
+
+/// `run_resume` of a paused run whose tree another live run holds (issue
+/// #200): the tool returns the busy-lock conflict instead of a `detached`
+/// ack for a driver that would die at once, and journals nothing.
+#[test]
+fn run_resume_refuses_a_busy_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_scripted(root);
+    let run_dir = root.join(".apb/runs/busy-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), SCRIPTED).unwrap();
+    {
+        use apb_engine::event::{EventLog, EventPayload};
+        let mut log = EventLog::open(&run_dir).unwrap();
+        for p in [
+            EventPayload::RunStarted {
+                playbook: "scripted".into(),
+                version: "1.0.0".into(),
+            },
+            EventPayload::NodeStarted {
+                node: "start".into(),
+                attempt: 1,
+            },
+            EventPayload::NodeFinished {
+                node: "start".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: String::new(),
+                artifacts: Vec::new(),
+            },
+            EventPayload::RunPaused {
+                reason: "away".into(),
+                by: Some(apb_engine::pause::PauseBy::Operator),
+                mode: None,
+                until: None,
+                keep_lock: false,
+            },
+        ] {
+            log.append(p).unwrap();
+        }
+    }
+    fs::write(
+        root.join(".apb/workdir.lock"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let err = apb_mcp::tools::run_resume(root, "busy-1", None, false).unwrap_err();
+    assert!(
+        matches!(&err, apb_mcp::tools::ToolError::Conflict(m) if m.contains("another write-run holds the workdir")),
+        "expected the busy-lock conflict, got {err:?}"
+    );
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, apb_engine::event::EventPayload::RunResumed { .. })),
+        "a refused resume journals nothing"
+    );
+}

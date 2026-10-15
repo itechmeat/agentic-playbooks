@@ -1459,3 +1459,61 @@ async fn resume_of_an_irreversible_run_needs_the_consent_nonce() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{json}");
 }
+
+/// Resume while another live run holds the busy lock of the tree (issue
+/// #200): the answer is 409 `workdir_busy` before any driver starts, and the
+/// run stays paused (no `run_resumed` lands in its journal).
+#[tokio::test]
+async fn resume_refuses_a_busy_workdir_and_leaves_the_run_paused() {
+    let _cfg = common::config_sandbox().await;
+    apb_core::run_origin::ensure_key().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    seed_stamped_run(
+        dir.path(),
+        "busy-1",
+        SCRIPT_PLAYBOOK,
+        &[
+            apb_engine::event::EventPayload::NodeStarted {
+                node: "start".into(),
+                attempt: 1,
+            },
+            apb_engine::event::EventPayload::NodeFinished {
+                node: "start".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: String::new(),
+                artifacts: Vec::new(),
+            },
+            paused_event("away"),
+        ],
+    );
+    // A live process (this test) holds the execution root's lock.
+    fs::write(
+        dir.path().join(".apb/workdir.lock"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(app, "/api/runs/busy-1/resume", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "workdir_busy", "{json}");
+    assert!(
+        json["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("another write-run holds the workdir")),
+        "{json}"
+    );
+    let run_dir = dir.path().join(".apb/runs/busy-1");
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, apb_engine::event::EventPayload::RunResumed { .. })),
+        "a refused resume journals nothing"
+    );
+    assert_eq!(
+        apb_engine::state::RunState::fold(&events).run_status,
+        apb_engine::state::RunStatus::Paused
+    );
+}
