@@ -890,3 +890,72 @@ fn latest_pause_seq(events: &[Event]) -> u64 {
         .find_map(|e| matches!(e.payload, EventPayload::RunPaused { .. }).then_some(e.seq))
         .expect("a run_paused event")
 }
+
+/// AC2, agent session: the attempt a `--now` pause cuts short keeps the
+/// node's agent session, and the resumed attempt continues that same
+/// session. The first attempt fails (its session is captured), the retry
+/// continues it and is paused mid-work, and the resume continues it again.
+#[cfg(unix)]
+#[test]
+fn a_now_pause_keeps_the_agent_session_for_the_resume() {
+    use crate::token_economy_test::{invocations, recording_stub};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    init_project(root).unwrap();
+    crate::token_economy_test::seed_playbook(
+        root,
+        "sess",
+        "schema: 2\nid: sess\nname: Sess\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"do\", max_retries: 1 }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+    );
+    common::seed_profile(root, "main", "claude", "haiku", &[]);
+    let d = root.display();
+    let stub = recording_stub(
+        root,
+        &format!(
+            "if [ \"$N\" = 1 ]; then printf '\\n```yaml\\nstatus: failure\\nsummary: not yet\\n```\\n'; exit 0; fi\n\
+             if [ \"$N\" = 2 ]; then touch '{d}/agent_running'; while [ -f '{d}/gate' ]; do sleep 0.05; done; fi\n\
+             printf '\\n```yaml\\nstatus: success\\nsummary: ok\\n```\\n'"
+        ),
+    );
+    let _env = Env::set(&[
+        ("APB_AGENT_CMD", &stub),
+        ("APB_INFRA_BACKOFF_MS", "1,1"),
+        ("APB_PAUSE_GRACE_MS", "300"),
+    ]);
+    fs::write(root.join("gate"), "").unwrap();
+
+    let rx = spawn_run(root, "sess");
+    let run_id = find_run_id(root, "sess-");
+    poll_until("the retry to start", || {
+        root.join("agent_running").is_file().then_some(())
+    });
+    request_pause(root, &run_id, &operator(PauseMode::Now)).unwrap();
+    assert_eq!(finished(&rx).outcome, RunStatus::Paused);
+    fs::remove_file(root.join("gate")).unwrap();
+    let res = resume_by(root, &run_id, None, false, PauseBy::Operator).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let inv = invocations(root);
+    let work: Vec<_> = inv.iter().filter(|i| i.node == "work").collect();
+    assert_eq!(work.len(), 3, "fail, paused retry, resumed attempt");
+    let sid = work[0]
+        .flag("--session-id")
+        .expect("the first attempt opens a session");
+    assert_eq!(
+        work[1].flag("--resume"),
+        Some(sid),
+        "the retry continues it"
+    );
+    assert_eq!(
+        work[2].flag("--resume"),
+        Some(sid),
+        "the resumed attempt continues the same session"
+    );
+    assert!(
+        work[2].prompt().contains("stopped by a pause"),
+        "{}",
+        work[2].prompt()
+    );
+    let ev = events(root, &run_id);
+    assert_eq!(interrupted_attempts(&ev, "work"), 1);
+}

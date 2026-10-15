@@ -254,6 +254,46 @@ pub(crate) fn last_attempt_session(events: &[Event], node: &str) -> Option<Strin
         .flatten()
 }
 
+/// The `(agent, model, session)` of `node`'s most recent finished attempt
+/// when it was journaled `interrupted` with a session id: the attempt a
+/// `--now` pause cut short (issue #200), whose session the resume continues
+/// on the same binding. `None` for any other latest attempt, for one closed
+/// without a session (a reaped attempt) and for one with no recorded model.
+pub(crate) fn paused_attempt_session(
+    events: &[Event],
+    node: &str,
+) -> Option<(String, String, String)> {
+    let (at, attempt, session) = events.iter().enumerate().rev().find_map(|(i, e)| {
+        match &e.payload {
+            EventPayload::AttemptFinished {
+                node: n,
+                attempt,
+                status,
+                session,
+                ..
+            } if n == node => Some((i, *attempt, status, session)),
+            _ => None,
+        }
+        .map(|(i, attempt, status, session)| {
+            let id = (status.as_str() == NodeStatus::Interrupted.as_str())
+                .then(|| session.clone())
+                .flatten();
+            (i, attempt, id)
+        })
+    })?;
+    let id = session?;
+    events[..at].iter().rev().find_map(|e| match &e.payload {
+        EventPayload::AttemptStarted {
+            node: n,
+            attempt: a,
+            agent,
+            model: Some(model),
+            ..
+        } if n == node && *a == attempt => Some((agent.clone(), model.clone(), id.clone())),
+        _ => None,
+    })
+}
+
 /// Whether `node`'s MOST RECENT finished attempt was journaled `interrupted`
 /// (spec 2026-08-05 section 2.2 composed with 2.4), i.e. ended without recording
 /// a required verdict.

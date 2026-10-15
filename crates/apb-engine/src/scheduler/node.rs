@@ -128,6 +128,8 @@ const CONTINUATION_REASON_MAX_BYTES: usize = 2048;
 enum Continuation<'a> {
     /// The last attempt was stopped at its deadline.
     Deadline,
+    /// The last attempt was cut short by a `--now` pause (issue #200).
+    Paused,
     /// An attempt ended without recording a required verdict.
     Interrupted,
     /// The last attempt failed with this text (clipped when quoted).
@@ -145,6 +147,9 @@ fn continuation_prompt(why: Continuation<'_>, verdict_file: bool) -> String {
              Continue where you stopped; do not redo work that is already done."
                 .to_string()
         }
+        Continuation::Paused => "Your previous turn was stopped by a pause before it finished. \
+             Continue where you stopped; do not redo work that is already done."
+            .to_string(),
         Continuation::Interrupted => return super::status_file::INTERRUPTION_NOTE.to_string(),
         Continuation::Failed(reason) => {
             let reason = reason.trim();
@@ -1197,6 +1202,20 @@ fn execute_node_kind(
                     reason,
                 })?;
             }
+            // A `--now` pause (issue #200) keeps the node's session in the
+            // attempt it cut short (`journal_interrupted`): the first attempt
+            // after the resume continues it on the binding it ran on, like a
+            // retry would have. A host subagent has no session apb can see.
+            let mut pause_session = false;
+            if resume.is_none()
+                && !host_mode
+                && let Some((agent, model, id)) = journaled
+                    .as_deref()
+                    .and_then(|events| super::journal::paused_attempt_session(events, node_id))
+            {
+                sessions.insert((agent, model), KnownSession::Id { id, workdir: None });
+                pause_session = true;
+            }
             // This node's own successful sessions must be findable when a
             // later node continues them.
             let handoff_source = super::handoff::is_source(playbook, node_id);
@@ -1414,10 +1433,14 @@ fn execute_node_kind(
                     // only for an agent with a resume form.
                     let answer_round = resume.is_some() && attempt == 1;
                     let handoff_round = handoff_warm && attempt == 1;
+                    let pause_round = pause_session && attempt == 1;
                     let continued: Option<(String, Option<PathBuf>)> = match &base_spec {
                         Some((_, program))
                             if !step.host
-                                && (attempt > 1 || answer_round || handoff_round)
+                                && (attempt > 1
+                                    || answer_round
+                                    || handoff_round
+                                    || pause_round)
                                 && crate::invocation::resume_argv(&step.agent).is_some() =>
                         {
                             resolve_session(&mut sessions, &binding, program)
@@ -1609,7 +1632,9 @@ fn execute_node_kind(
                             super::handoff::HANDOFF_PREAMBLE
                         )),
                         Some(_) => {
-                            let why = if timeout_continuation {
+                            let why = if pause_round {
+                                Continuation::Paused
+                            } else if timeout_continuation {
                                 Continuation::Deadline
                             } else if was_interrupted {
                                 Continuation::Interrupted

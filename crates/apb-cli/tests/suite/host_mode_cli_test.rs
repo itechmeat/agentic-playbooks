@@ -946,3 +946,76 @@ fn run_wait_without_inline_prompts_hands_tasks_over_by_path() {
     assert!(again["pending_tasks"][0]["prompt"].is_string(), "{again}");
     mcp.call("run_stop", json!({"run_id": run_id}));
 }
+
+/// Two host tasks, the first with a 2 s deadline.
+const SHORT_DEADLINE: &str = r#"
+schema: 1
+id: hm
+name: Host mode
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 2 }
+  - { id: build, type: agent_task, prompt: "Build from {{nodes.plan.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: plan }
+  - { from: plan, to: build }
+  - { from: build, to: done }
+"#;
+
+/// Issue #200, AC3: a `--now` pause leaves an open host task open, and its
+/// deadline does not run while the run is paused. A pause longer than the
+/// deadline, a reply submitted while paused, then a resume: the task is
+/// still open before the submit, the reply is applied, and the run
+/// succeeds.
+#[test]
+fn a_host_task_outlives_a_pause_longer_than_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(root, SHORT_DEADLINE);
+    let run_id = start_detached(root);
+    let _guard = crate::common::RunGuard::new(root, &run_id);
+    let plan = task_of(root, &run_id, "plan");
+    let id = plan["task_id"].as_str().unwrap().to_string();
+
+    let out = crate::common::apb_std()
+        .args(["pause", &run_id, "--now", "--reason", "lunch"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pause failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll("the run to pause", || {
+        read_all(&run_dir(root, &run_id))
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+            .then_some(())
+    });
+    // Paused for longer than the task's whole deadline.
+    std::thread::sleep(Duration::from_secs(3));
+    let open = tasks_json(root, &run_id);
+    assert!(
+        open.iter().any(|t| t["task_id"] == id.as_str()),
+        "the task is still open after the pause outlasted its deadline: {open:?}"
+    );
+
+    submit(root, &run_id, &id, "PLAN-WHILE-PAUSED");
+    resume(root, &run_id);
+    let build = task_of(root, &run_id, "build");
+    assert!(
+        build["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Build from PLAN-WHILE-PAUSED"),
+        "{build}"
+    );
+    submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
+    assert_eq!(wait_outcome(root, &run_id), "succeeded");
+}
