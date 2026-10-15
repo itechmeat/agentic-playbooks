@@ -297,17 +297,35 @@ pub fn acquire_tree_for(
 
 /// Why the lock at `lock_path` is not free for `claimant`, or `None` when it
 /// is (no lock, a stale one, or one `claimant` itself parked).
+///
+/// The hint names what the caller can do: a new run (`claimant` is `None`)
+/// can take its own worktree or `--allow-shared-workdir`; an existing run
+/// (its resume, or a `--keep-lock` pause of it) has neither option on any
+/// surface, so it is told to wait for the other run or stop it.
 fn busy_reason(lock_path: &Path, claimant: Option<&str>) -> Option<String> {
+    let existing = claimant.is_some();
     match lock_owner(lock_path) {
-        Some(LockOwner::Pid(pid)) if pid_alive(pid) => Some(format!(
-            "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
-        )),
+        Some(LockOwner::Pid(pid)) if pid_alive(pid) => Some(if existing {
+            format!(
+                "another write-run holds the workdir (pid {pid}); try again once it finishes, or stop it first"
+            )
+        } else {
+            format!(
+                "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
+            )
+        }),
         Some(LockOwner::PausedRun(id))
             if claimant != Some(id.as_str()) && paused_run_holds(lock_path, &id) =>
         {
-            Some(format!(
-                "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first, give this run its own worktree, or use --allow-shared-workdir"
-            ))
+            Some(if existing {
+                format!(
+                    "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first"
+                )
+            } else {
+                format!(
+                    "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first, give this run its own worktree, or use --allow-shared-workdir"
+                )
+            })
         }
         _ => None,
     }
@@ -461,5 +479,31 @@ fn wait_for_workdir(
             }
             other => return other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn busy(r: Result<impl std::fmt::Debug, EngineError>) -> String {
+        match r {
+            Err(EngineError::WorkdirBusy(msg)) => msg,
+            other => panic!("expected WorkdirBusy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_resume_is_not_told_about_options_only_a_new_run_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let _held = acquire_tree(root, None, false).unwrap();
+        let start = busy(acquire_tree(root, None, false));
+        assert!(start.contains("--allow-shared-workdir"), "{start}");
+        let resume = busy(check_free_for(root, None, "r-1"));
+        assert!(!resume.contains("--allow-shared-workdir"), "{resume}");
+        assert!(!resume.contains("worktree"), "{resume}");
+        assert!(resume.contains("stop it first"), "{resume}");
     }
 }
