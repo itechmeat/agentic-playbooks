@@ -63,9 +63,43 @@ fn holds(events: &[Event], seq: u64) -> bool {
             == Some(seq)
 }
 
+/// The checks a resume makes before anything of the run executes, applied
+/// to the wake-up probe as well, which runs an executor of the run's
+/// manifest: a run directory this machine created (the run gate, the same
+/// call the waker's resume makes) and an executor binary unchanged since the
+/// run started (environment drift).
+fn verify_before_probe(root: &Path, run_id: &str, run_dir: &Path) -> Result<(), EngineError> {
+    crate::gate::check_resume(root, run_id, true)
+        .map_err(|v| EngineError::Conflict(v.to_string()))?;
+    crate::scheduler::check_environment_drift(run_dir, false)?;
+    Ok(())
+}
+
+/// Bytes of a probe failure message kept at its start and at its end.
+const MESSAGE_HEAD: usize = 400;
+const MESSAGE_TAIL: usize = 200;
+
+/// A probe failure message as the journal keeps it: secrets, tokens and
+/// personal paths redacted the way a decision request is (the connector
+/// secrets of the workspace at `root`), on one line, and clipped.
+fn journal_message(root: &Path, msg: &str) -> String {
+    let secrets = apb_core::connector::resolve::all_referenced_env_names(root)
+        .iter()
+        .filter_map(|n| apb_core::connector::secrets::resolve_var(root, n))
+        .collect();
+    let redacted = crate::decision::redact::Redactor::new(secrets, root).redact(msg);
+    let one_line = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::decision::redact::clip(&one_line, MESSAGE_HEAD, MESSAGE_TAIL).replace('\n', " ")
+}
+
 /// Probes the executor of the quota pause at journal sequence `seq` of run
-/// `run_id`, and journals the outcome (see [`WakeProbe`]).
+/// `run_id`, and journals the outcome (see [`WakeProbe`]). The run origin
+/// and environment drift are verified first, so a run a resume would refuse
+/// is never probed: that refusal is the `Err`.
 pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProbe, EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
     let run_dir = root.join(".apb/runs").join(run_id);
     let events = read_all(&run_dir)?;
     if !holds(&events, seq) {
@@ -83,6 +117,7 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
             "node `{node}` had {prior} quota pauses already"
         )));
     }
+    verify_before_probe(root, run_id, &run_dir)?;
     let run = crate::scheduler::run_quota_probe(&run_dir, &node, &agent, &model);
     let (detail, repause) = match &run {
         ProbeRun::Unavailable(why) => return Ok(WakeProbe::Skipped(why.clone())),
@@ -93,13 +128,16 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
             (
                 format!(
                     "{PROBE_QUOTA}: `{agent}/{model}` is still out of quota: {}",
-                    msg.trim()
+                    journal_message(root, msg)
                 ),
                 Some(until),
             )
         }
         ProbeRun::Failed(msg) => (
-            format!("{PROBE_ERROR}: `{agent}/{model}` failed: {}", msg.trim()),
+            format!(
+                "{PROBE_ERROR}: `{agent}/{model}` failed: {}",
+                journal_message(root, msg)
+            ),
             None,
         ),
     };
@@ -124,4 +162,29 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
         }
         None => WakeProbe::Passed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_failure_message_is_redacted_and_clipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+        let msg = format!(
+            "429 Too Many Requests\nAuthorization: Bearer {token}\n{}",
+            "x".repeat(10_000)
+        );
+        let out = journal_message(dir.path(), &msg);
+        assert!(!out.contains(token), "{out}");
+        assert!(!out.contains("abcdefghijklmnop"), "{out}");
+        assert!(out.starts_with("429 Too Many Requests"), "{out}");
+        assert!(!out.contains('\n'), "{out}");
+        assert!(
+            out.len() < MESSAGE_HEAD + MESSAGE_TAIL + 64,
+            "{}",
+            out.len()
+        );
+    }
 }

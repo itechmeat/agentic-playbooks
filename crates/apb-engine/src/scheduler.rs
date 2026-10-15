@@ -93,7 +93,9 @@ use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
 use prepare::*;
 pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
-pub(crate) use resume::{ResumeChoice, build_reprompt_override, resume_decision, resume_inner};
+pub(crate) use resume::{
+    ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
+};
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use resume::{
     record_run_error, resume, resume_by, resume_detached, resume_detached_by, resume_detached_with,

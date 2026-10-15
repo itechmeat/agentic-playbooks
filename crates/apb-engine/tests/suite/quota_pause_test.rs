@@ -90,20 +90,28 @@ fn calls(dir: &Path) -> usize {
 }
 
 /// Holds the shared env lock and this suite's variables, removing them on
-/// drop.
+/// drop. An installation key in its own config dir, so the runs started
+/// here are stamped as local (the wake-up probe verifies the run origin).
 struct Env {
     _lock: std::sync::MutexGuard<'static, ()>,
+    _cfg: tempfile::TempDir,
 }
 
 impl Env {
     fn set(prog: &str) -> Self {
         let lock = common::env_lock();
+        let cfg = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("APB_AGENT_CMD", prog);
             std::env::set_var("APB_INFRA_BACKOFF_MS", "20,20");
             std::env::set_var("APB_QUOTA_BACKOFF_MS", "600000,1200000");
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
         }
-        Self { _lock: lock }
+        apb_core::run_origin::ensure_key().unwrap();
+        Self {
+            _lock: lock,
+            _cfg: cfg,
+        }
     }
 }
 
@@ -113,6 +121,7 @@ impl Drop for Env {
             std::env::remove_var("APB_AGENT_CMD");
             std::env::remove_var("APB_INFRA_BACKOFF_MS");
             std::env::remove_var("APB_QUOTA_BACKOFF_MS");
+            std::env::remove_var("APB_CONFIG_DIR");
         }
     }
 }
@@ -507,4 +516,53 @@ fn a_quota_stop_in_a_parallel_batch_drains_the_siblings_and_reruns_only_its_node
     for n in ["a", "b", "j"] {
         assert_eq!(finished(&ev, n), 1, "node {n} finishes once");
     }
+}
+
+/// The wake-up probe runs an executor from the run's manifest, so it is held
+/// to the same checks a resume is: a run directory this machine did not
+/// create is neither probed nor resumed, by the probe itself, by
+/// `apb resume --all` or by the waker.
+#[cfg(unix)]
+#[test]
+fn the_run_origin_is_verified_before_the_wake_up_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quotaorigin");
+    common::seed_main(root);
+    let prog = stub(root, &[QUOTA_429]);
+    let _env = Env::set(&prog);
+
+    let res = run(root, "quotaorigin", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    assert_eq!(calls(root), 1, "the node's one attempt");
+    let (seq, _, _, _, until) = last_pause(&events(root, &res.run_id));
+    // The run directory loses its origin stamp, as one that came from
+    // elsewhere would have none.
+    let run_dir = root.join(".apb/runs").join(&res.run_id);
+    fs::remove_file(run_dir.join("origin.stamp")).unwrap();
+    // Let the 1 s Retry-After pass, so the pause is due.
+    let until = u128::from(until.unwrap());
+    while apb_core::clock::now_ms() <= until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(probe_before_wake(root, &res.run_id, seq).is_err());
+    let entries = apb_engine::pause::resume_all(root).unwrap();
+    assert!(
+        matches!(
+            entries.as_slice(),
+            [apb_engine::pause::ResumeAllEntry {
+                action: apb_engine::pause::ResumeAllAction::Refused { .. },
+                ..
+            }]
+        ),
+        "{entries:?}"
+    );
+    let woke = apb_engine::pause::waker::run_waker(root, &res.run_id, seq).unwrap();
+    assert!(
+        matches!(woke, apb_engine::pause::waker::WakeOutcome::Refused(_)),
+        "{woke:?}"
+    );
+    assert_eq!(calls(root), 1, "no probe ran");
+    assert!(probes(&events(root, &res.run_id)).is_empty());
 }
