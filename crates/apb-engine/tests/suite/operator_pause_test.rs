@@ -697,3 +697,71 @@ fn resume_all_picks_due_and_driverless_runs_and_skips_children() {
         "{again:?}"
     );
 }
+
+/// A run whose driver died mid-attempt leaves an open `attempt_started`. A
+/// pause with `until` journaled on it reads paused, not interrupted, so its
+/// waker resumes the run at `until`.
+#[cfg(unix)]
+#[test]
+fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let cfg = tempfile::tempdir().unwrap();
+    let cfg_dir = cfg.path().to_string_lossy().into_owned();
+    let _env = Env::set(&[
+        ("APB_PAUSE_GRACE_MS", "200"),
+        ("APB_WAKER_POLL_MS", "50"),
+        ("APB_CONFIG_DIR", &cfg_dir),
+    ]);
+    apb_core::run_origin::ensure_key().unwrap();
+    // A real run (stamped here), then the journal a driver that resumed it
+    // and died mid-attempt leaves: an attempt whose process is gone.
+    let run_id = pause_script_run(root, false);
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = gone.id();
+    gone.wait().unwrap();
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let mut log = EventLog::open(&run_dir).unwrap();
+    log.append(EventPayload::RunResumed {
+        from_node: "s".into(),
+        by: Some(PauseBy::Operator),
+    })
+    .unwrap();
+    log.append(EventPayload::AttemptStarted {
+        node: "s".into(),
+        attempt: 2,
+        agent: "script".into(),
+        soul_delivery: None,
+        skills_mode: None,
+        pid: Some(dead_pid),
+        spawn_ms: None,
+        model: None,
+        workdir: None,
+        transcript: None,
+    })
+    .unwrap();
+    drop(log);
+
+    let until = u64::try_from(apb_core::clock::now_ms()).unwrap() + 300;
+    let req = PauseRequest {
+        until: Some(until),
+        ..operator(PauseMode::Drain)
+    };
+    let PauseOutcome::Journaled { seq } = request_pause(root, &run_id, &req).unwrap() else {
+        panic!("a run nothing drives is paused on the spot");
+    };
+    assert_eq!(
+        apb_engine::state::RunState::fold(&events(root, &run_id)).run_status,
+        RunStatus::Paused
+    );
+    let woke = run_waker(root, &run_id, seq).unwrap();
+    // The detached driver needs the shipped `apb` binary; that the waker
+    // handed the run to one is the property here.
+    assert!(matches!(woke, WakeOutcome::Resumed { .. }), "{woke:?}");
+}

@@ -450,9 +450,16 @@ impl RunState {
             // `doctor --run` all still read interrupted) and a second stop
             // passed the terminal check again and appended a second
             // `RunAborted`.
+            //
+            // `Paused` is exempt for the same reason (issue #200): a driver
+            // closes its attempts before it journals `run_paused`, so an
+            // attempt still open under a pause is one whose driver died, and
+            // the pause was journaled for the driverless run afterwards
+            // (`request_pause`, `resume --all`). The run is paused; the node
+            // still reads interrupted and the resume reaps the attempt.
             if !matches!(
                 s.run_status,
-                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted | RunStatus::Paused
             ) {
                 s.run_status = RunStatus::Interrupted;
             }
