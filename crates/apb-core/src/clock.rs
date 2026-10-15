@@ -53,9 +53,32 @@ pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Days in month `m` (1..=12) of proleptic-Gregorian year `y`; 0 for a
+/// month out of range.
+pub fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn days_in_month_follows_leap_years() {
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(2025, 2), 28);
+        assert_eq!(days_in_month(1900, 2), 28);
+        assert_eq!(days_in_month(2000, 2), 29);
+        assert_eq!(days_in_month(2026, 4), 30);
+        assert_eq!(days_in_month(2026, 12), 31);
+        assert_eq!(days_in_month(2026, 13), 0);
+    }
 
     #[test]
     fn readings_are_consistent_across_units() {

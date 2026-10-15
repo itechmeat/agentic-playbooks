@@ -232,7 +232,8 @@ pub fn classify(detail: &str) -> FailureKind {
 /// The wait a `Retry-After` value in a failure detail asks for, measured from
 /// `now_ms`: a number of seconds (`Retry-After: 120`, `"retry_after": 30`) or
 /// an HTTP date (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`). A date in the
-/// past reads as no wait. `None` when the detail carries no readable value.
+/// past reads as no wait, and any wait is capped at [`RETRY_AFTER_CAP`].
+/// `None` when the detail carries no readable value.
 pub fn retry_after(detail: &str, now_ms: u128) -> Option<Duration> {
     let hay = detail.to_lowercase();
     for key in ["retry-after", "retry_after", "retry after"] {
@@ -249,6 +250,10 @@ pub fn retry_after(detail: &str, now_ms: u128) -> Option<Duration> {
     None
 }
 
+/// The longest wait a `Retry-After` value is taken at: seven days. A larger
+/// value (or a date further out) reads as this cap.
+pub const RETRY_AFTER_CAP: Duration = Duration::from_secs(7 * 24 * 3600);
+
 /// One `Retry-After` value at the start of `rest` (lowercased).
 fn retry_after_value(rest: &str, now_ms: u128) -> Option<Duration> {
     let digits: String = rest
@@ -257,12 +262,20 @@ fn retry_after_value(rest: &str, now_ms: u128) -> Option<Duration> {
         .collect();
     if !digits.is_empty() {
         let secs: f64 = digits.trim_end_matches('.').parse().ok()?;
-        return (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs));
+        if secs.is_nan() || secs < 0.0 {
+            return None;
+        }
+        return Some(
+            Duration::try_from_secs_f64(secs)
+                .unwrap_or(RETRY_AFTER_CAP)
+                .min(RETRY_AFTER_CAP),
+        );
     }
     let at = http_date_ms(rest)?;
-    Some(Duration::from_millis(
-        u64::try_from(at.saturating_sub(now_ms)).unwrap_or(u64::MAX),
-    ))
+    Some(
+        Duration::from_millis(u64::try_from(at.saturating_sub(now_ms)).unwrap_or(u64::MAX))
+            .min(RETRY_AFTER_CAP),
+    )
 }
 
 /// Epoch milliseconds of an IMF-fixdate (`sun, 06 nov 1994 08:49:37 gmt`,
@@ -279,12 +292,20 @@ fn http_date_ms(s: &str) -> Option<u128> {
     let year: i64 = parts.next()?.parse().ok()?;
     let mut hms = parts.next()?.split(':').map(|p| p.parse::<u64>().ok());
     let (h, m, sec) = (hms.next()??, hms.next()??, hms.next()??);
-    if !parts.next()?.starts_with("gmt") || !(1..=31).contains(&day) || h > 23 || m > 59 || sec > 60
+    // A four-digit year keeps the civil-date arithmetic far from overflow.
+    if !parts.next()?.starts_with("gmt")
+        || !(0..=9999).contains(&year)
+        || day == 0
+        || day > apb_core::clock::days_in_month(year, month)
+        || h > 23
+        || m > 59
+        || sec > 60
     {
         return None;
     }
-    let days = u64::try_from(apb_core::clock::days_from_civil(year, month, day)).ok()?;
-    Some(u128::from(((days * 24 + h) * 60 + m) * 60 + sec) * 1000)
+    let days = u128::try_from(apb_core::clock::days_from_civil(year, month, day)).ok()?;
+    let secs = ((days * 24 + u128::from(h)) * 60 + u128::from(m)) * 60 + u128::from(sec);
+    secs.checked_mul(1000)
 }
 
 /// Whether a failed resume said the session it was asked to continue does not
@@ -547,6 +568,49 @@ mod tests {
         );
         assert_eq!(
             retry_after("Retry-After: Wed, 99 Oct 2015 07:28:00 GMT", at),
+            None
+        );
+    }
+
+    #[test]
+    fn a_huge_retry_after_is_capped_instead_of_panicking() {
+        let now = 1_000_000;
+        assert_eq!(
+            retry_after(&format!("Retry-After: {}", "9".repeat(400)), now),
+            Some(RETRY_AFTER_CAP)
+        );
+        assert_eq!(
+            retry_after(&format!("Retry-After: {}", "9".repeat(40)), now),
+            Some(RETRY_AFTER_CAP)
+        );
+        assert_eq!(
+            retry_after("Retry-After: 99999999999999999999", now),
+            Some(RETRY_AFTER_CAP)
+        );
+        assert_eq!(
+            retry_after("Retry-After: 8640000", now),
+            Some(RETRY_AFTER_CAP)
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_http_date_is_rejected_or_capped() {
+        let now = 1_000_000;
+        assert_eq!(
+            retry_after("Retry-After: Wed, 21 Oct 999999999999999 07:28:00 GMT", now),
+            None
+        );
+        assert_eq!(
+            retry_after("Retry-After: Fri, 31 Dec 9999 23:59:59 GMT", now),
+            Some(RETRY_AFTER_CAP)
+        );
+        // 31 February and 29 February of a common year are not dates.
+        assert_eq!(
+            retry_after("Retry-After: Mon, 31 Feb 2025 07:28:00 GMT", now),
+            None
+        );
+        assert_eq!(
+            retry_after("Retry-After: Sat, 29 Feb 2025 07:28:00 GMT", now),
             None
         );
     }

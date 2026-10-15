@@ -109,7 +109,15 @@ fn parse_rfc3339_ms(s: &str) -> Option<u64> {
     }
     let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
     let (hh, mi, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || hh > 23 || mi > 59 || ss > 60 {
+    // A leap second (`:60`) is refused rather than rolled into the next
+    // minute: a pause deadline has no use for it.
+    if !(1..=12).contains(&mo)
+        || d < 1
+        || d > i64::from(crate::clock::days_in_month(y, mo as u32))
+        || hh > 23
+        || mi > 59
+        || ss > 59
+    {
         return None;
     }
     let mut i = 19;
@@ -143,24 +151,12 @@ fn parse_rfc3339_ms(s: &str) -> Option<u64> {
         _ => return None,
     };
     let secs =
-        days_from_civil(y, mo as u32, d as u32) * 86_400 + hh * 3600 + mi * 60 + ss - offset_secs;
+        crate::clock::days_from_civil(y, mo as u32, d as u32) * 86_400 + hh * 3600 + mi * 60 + ss
+            - offset_secs;
     u64::try_from(secs)
         .ok()?
         .checked_mul(1000)?
         .checked_add(frac_ms as u64)
-}
-
-/// (year, month, day) to days since the Unix epoch (Howard Hinnant's
-/// `days_from_civil`, public domain), the inverse of the conversion in
-/// `dismiss::iso_utc`.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m as i64 + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 #[cfg(test)]
@@ -219,5 +215,15 @@ mod tests {
         assert!(parse_until("tomorrow", 0).is_err());
         assert!(parse_until("2026-13-16T08:00:00Z", 0).is_err());
         assert!(parse_until("2026-10-16T08:00:00", 0).is_err());
+    }
+
+    #[test]
+    fn until_rejects_days_past_the_month_and_leap_seconds() {
+        assert!(parse_until("2026-02-30T08:00:00Z", 0).is_err());
+        assert!(parse_until("2025-02-29T08:00:00Z", 0).is_err());
+        assert!(parse_until("2026-04-31T08:00:00Z", 0).is_err());
+        assert!(parse_until("2024-02-29T08:00:00Z", 0).is_ok());
+        assert!(parse_until("2026-10-16T08:00:60Z", 0).is_err());
+        assert!(parse_until("2026-10-16T08:00:59Z", 0).is_ok());
     }
 }
