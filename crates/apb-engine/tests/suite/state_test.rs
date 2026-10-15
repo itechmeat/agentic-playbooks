@@ -178,6 +178,65 @@ fn legacy_run_paused_marker_still_folds_to_paused() {
     assert_eq!(s.run_status, RunStatus::Paused);
 }
 
+/// Journal compatibility: an older journal whose resume wrote the legacy
+/// `run_paused { reason: "resume from X" }` marker and whose driver then died
+/// mid-attempt reads interrupted, as it always did, not paused.
+#[test]
+fn a_legacy_resume_marker_followed_by_a_crash_reads_interrupted() {
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::RunPaused {
+                reason: "resume from `a`".into(),
+                by: None,
+                mode: None,
+                until: None,
+                keep_lock: false,
+            },
+        ),
+        ev(
+            2,
+            EventPayload::NodeStarted {
+                node: "a".into(),
+                attempt: 1,
+            },
+        ),
+        ev(
+            3,
+            EventPayload::AttemptStarted {
+                node: "a".into(),
+                attempt: 1,
+                agent: "claude".into(),
+                soul_delivery: None,
+                skills_mode: None,
+                pid: None,
+                spawn_ms: None,
+                model: None,
+                workdir: None,
+                transcript: None,
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(s.run_status, RunStatus::Interrupted);
+    assert_eq!(s.nodes.get("a"), Some(&NodeStatus::Interrupted));
+
+    // A real pause over a dead attempt stays paused.
+    let mut paused = events;
+    paused.push(ev(
+        4,
+        EventPayload::RunPaused {
+            reason: "driverless".into(),
+            by: None,
+            mode: None,
+            until: None,
+            keep_lock: false,
+        },
+    ));
+    assert_eq!(RunState::fold(&paused).run_status, RunStatus::Paused);
+}
+
 #[test]
 fn multi_attempt_open_after_finished_marks_interrupted() {
     // Crash-shape simulation with a retry: attempt 1 finished (failed), then a

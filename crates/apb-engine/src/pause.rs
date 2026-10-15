@@ -190,7 +190,7 @@ fn last_pause(events: &[Event]) -> Option<(&Event, u128)> {
 
 /// The old resume wrote `run_paused { reason: "resume from X" }` as a marker
 /// and kept running: not a pause.
-fn is_legacy_resume_marker(p: &EventPayload) -> bool {
+pub(crate) fn is_legacy_resume_marker(p: &EventPayload) -> bool {
     matches!(p, EventPayload::RunPaused { reason, by: None, .. } if reason.starts_with("resume from "))
 }
 
