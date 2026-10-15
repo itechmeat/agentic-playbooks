@@ -89,22 +89,51 @@ fn signal_process_group(pid: u32, signal: libc::c_int) {
 /// then SIGKILL to the group and the leader, and a reap. A script or agent
 /// that handles SIGTERM gets to stop cleanly; one that ignores it is killed
 /// anyway once the grace period is over.
+///
+/// The leader is not reaped before the group SIGKILL: an exited leader stays
+/// a zombie until then, which keeps its pid, and so the group id, from being
+/// reused by an unrelated process. The SIGKILL reaches the group's leftovers
+/// and nothing else.
 pub(crate) fn terminate_process_group(child: &mut std::process::Child, grace: Duration) {
     #[cfg(unix)]
     signal_process_group(child.id(), libc::SIGTERM);
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+        if leader_exited(child) {
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    // A group is not recycled while any member lives, so this reaches the
-    // leftovers of a leader that already exited, and is a harmless ESRCH
-    // otherwise.
     kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Whether `child` has exited, without reaping it (unix: `waitid` with
+/// `WNOWAIT`), so its pid stays reserved for the caller's group kill. Also
+/// true when the state cannot be read, which ends the wait early.
+#[cfg(unix)]
+fn leader_exited(child: &std::process::Child) -> bool {
+    let pid = libc::id_t::from(child.id());
+    // SAFETY: `siginfo_t` is plain data; all-zero is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `waitid` writes only into `info`, which outlives the call.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // With WNOHANG, a child that has not exited leaves `si_pid` at zero.
+    // SAFETY: `info` was zero-initialized and filled by `waitid` above.
+    rc != 0 || unsafe { info.si_pid() } != 0
+}
+
+#[cfg(not(unix))]
+fn leader_exited(child: &mut std::process::Child) -> bool {
+    matches!(child.try_wait(), Ok(Some(_)) | Err(_))
 }
 
 /// The decision half of a group kill, with delivery injected.
@@ -260,6 +289,8 @@ pub fn run_capture(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::{Duration, Instant, leader_exited, thread};
     use super::{group_target, kill_group_with};
     use std::cell::RefCell;
 
@@ -338,5 +369,21 @@ mod tests {
             );
             assert_eq!(target, -(pid as i32));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_check_leaves_the_leader_unreaped() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let start = Instant::now();
+        while !leader_exited(&child) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "`true` never exited"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Still a zombie: its exit status is there to be reaped now.
+        assert!(matches!(child.try_wait(), Ok(Some(s)) if s.success()));
     }
 }
