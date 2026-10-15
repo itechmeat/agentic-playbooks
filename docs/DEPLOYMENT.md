@@ -265,7 +265,8 @@ have an `until`. `apb resume --all` finds what was left waiting in a workspace:
 runs reading `running` with no live driver and paused runs whose `until` has
 passed. It resumes them (sub-playbook children follow their parent) and
 journals a run it cannot resume as `paused (driverless)`, so `apb runs` shows
-the state instead of a false `running`. To run it at boot, add a systemd user
+the state instead of a false `running`. A run whose working tree another run
+holds busy is left as it is; the next pass, or `apb resume`, continues it. To run it at boot, add a systemd user
 unit for the user that owns the runs, started from the project directory
 (the workspace is the current directory):
 

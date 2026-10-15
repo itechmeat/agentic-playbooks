@@ -532,7 +532,8 @@ working tree (or another paused run keeps it with `keep_lock`): `run_resume`
 returns the conflict, `apb resume` exits 2 with `workdir busy`, the dashboard
 endpoint answers 409 `{"error": "workdir_busy", "detail": ...}`, and the run
 stays paused. A waker whose `until` arrives while the tree is busy keeps
-waiting and resumes the run once the lock frees.
+waiting and resumes the run once the lock frees, and `apb resume --all`
+leaves such a run as it is for a later pass.
 
 ## Connecting (local agents, no relay)
 
