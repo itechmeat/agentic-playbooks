@@ -95,15 +95,21 @@ clock below uses it:
    retries and pause when they are exhausted. The node never fails because
    of quota while pauses remain.
 4. The pause journals `reason: "quota (<agent>/<model>)"`, `by: engine`,
-   `mode: now` semantics for the failed attempt (it is `interrupted`, not
-   failed) and `until` from `Retry-After` or the schedule 15 min, 30 min,
-   1 h, 1 h, ... (env override for tests).
+   `mode: drain` (so batch siblings finish their work) and `until` from
+   `Retry-After` or the schedule 15 min, 30 min, 1 h, 1 h, ... (env
+   override for tests). The quota-failed attempt itself is `interrupted`,
+   not failed, and spends no retry. `credit usage limit` and
+   `FreeUsageLimitError` are matched before `Budget`, because the former
+   contains Budget's `usage limit`.
 5. Cap: after 6 consecutive quota pauses of the same node without a
    successful attempt, the node fails with a quota-exhausted reason.
 6. On wake, the engine first sends a probe: one minimal invocation of the
    same agent and model with a fixed tiny prompt and no tools. A quota
    failure of the probe re-pauses at the next schedule step without touching
-   the node. Script nodes need no probe.
+   the node. Script nodes need no probe and never quota-pause. Only the
+   waker and `apb resume --all` probe; an operator's `apb resume` does not.
+   The probe outcome is journaled as a `supervisor_action` marker
+   (`quota_probe`), an existing event type.
 
 ## 7. Driverless runs and `apb resume --all`
 
