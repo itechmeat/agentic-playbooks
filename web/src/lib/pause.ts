@@ -3,6 +3,7 @@
 // since, until, pausing); everything shown about it is derived here.
 
 import type { PauseInfo } from './types'
+import type { PauseRequestBody } from './api'
 import { isTerminalRunStatus } from './status'
 
 // A pause is shown as one of two words: `paused` once the run holds no
@@ -12,9 +13,13 @@ export function pauseWord(pause: PauseInfo | null | undefined): 'paused' | 'paus
   return pause.pausing ? 'pausing' : 'paused'
 }
 
-function when(ms: number | undefined): string | null {
+// An epoch-milliseconds time as RFC 3339. A value past what a Date holds
+// (about 275,000 years out) is shown as the number it is, not dropped.
+export function when(ms: number | undefined): string | null {
   if (ms === undefined || !Number.isFinite(ms)) return null
-  return new Date(ms).toISOString().replace('.000Z', 'Z')
+  const date = new Date(ms)
+  if (Number.isNaN(date.getTime())) return `${ms} ms after the epoch`
+  return date.toISOString().replace('.000Z', 'Z')
 }
 
 // "by operator, since 2026-10-15T20:00:00Z, until ...": the parts after the
@@ -58,8 +63,8 @@ export interface PauseForm {
 
 // The request body of POST /api/runs/{id}/pause: empty fields are left out,
 // so the server applies its defaults (drain, no reason, no until).
-export function pauseBody(form: PauseForm): Record<string, unknown> {
-  const body: Record<string, unknown> = { mode: form.mode }
+export function pauseBody(form: PauseForm): PauseRequestBody {
+  const body: PauseRequestBody = { mode: form.mode }
   const reason = form.reason.trim()
   const until = form.until.trim()
   if (reason) body.reason = reason

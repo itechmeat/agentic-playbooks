@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canPause, canResume, pauseBody, pauseDetails, pauseLine, pauseMarker, pauseWord } from './pause'
+import { canPause, canResume, pauseBody, pauseDetails, pauseLine, pauseMarker, pauseWord, when } from './pause'
 import type { PauseInfo } from './types'
 
 const paused: PauseInfo = {
@@ -70,5 +70,14 @@ describe('pause request body', () => {
       until: '90m',
       keep_lock: true,
     })
+  })
+})
+
+describe('pause times', () => {
+  it('shows a time past what a Date holds instead of throwing', () => {
+    expect(when(Date.UTC(2026, 9, 15, 20, 0, 0))).toBe('2026-10-15T20:00:00Z')
+    expect(when(18446744073709552000)).toBe('18446744073709552000 ms after the epoch')
+    expect(() => pauseDetails({ ...paused, until: 18446744073709552000 })).not.toThrow()
+    expect(when(undefined)).toBeNull()
   })
 })
