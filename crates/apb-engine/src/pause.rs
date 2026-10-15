@@ -13,12 +13,15 @@ pub mod display;
 pub(crate) mod interrupt;
 pub mod kind;
 pub mod operator;
+pub mod probe;
+pub mod quota;
 pub mod request;
 pub mod resume_all;
 pub mod waker;
 
 pub use interrupt::{DEFAULT_GRACE, GRACE_ENV};
 pub use kind::{PauseBy, PauseMode};
+pub use probe::{WakeProbe, probe_before_wake};
 pub use request::{PauseOutcome, request_pause};
 pub use resume_all::{ResumeAllAction, ResumeAllEntry, ResumeCause, resume_all};
 pub use waker::{WakeOutcome, run_waker, spawn_waker};

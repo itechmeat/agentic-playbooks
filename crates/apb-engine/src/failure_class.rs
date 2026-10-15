@@ -27,6 +27,12 @@ pub enum FailureKind {
     /// succeeding. Retried on the same executor out of a separate
     /// infrastructure budget, after a backoff.
     Transient,
+    /// A provider quota or rate limit (HTTP 429, a free-tier usage cap): the
+    /// executor will work again, but only once the provider's window passes,
+    /// which no short backoff waits out. A profile fallback comes first; then
+    /// the run pauses until the quota is back instead of failing the node
+    /// (issue #200, design 6).
+    Quota,
     /// A credential problem: the same executor will fail identically until a
     /// human re-authenticates. No further retry on this step, and every later
     /// chain step on the same agent is suppressed.
@@ -44,6 +50,7 @@ impl FailureKind {
     pub fn as_str(self) -> &'static str {
         match self {
             FailureKind::Transient => "transient",
+            FailureKind::Quota => "quota",
             FailureKind::Auth => "auth",
             FailureKind::Budget => "budget",
             FailureKind::Agent => "agent",
@@ -153,10 +160,6 @@ const TRANSIENT_PATTERNS: &[&str] = &[
     "request timed out",
     "read timeout",
     "gateway timeout",
-    "rate limit",
-    "rate_limit",
-    "ratelimit",
-    "too many requests",
     "overloaded",
     "server error",
     "bad gateway",
@@ -181,29 +184,107 @@ const TRANSIENT_PATTERNS: &[&str] = &[
 /// Only the transient family gets numeric matching: a stray `401` in some
 /// unrelated number would suppress a whole fallback chain, whereas a stray `503`
 /// costs one retry. Auth and budget rely on their words alone.
-const TRANSIENT_CODES: &[&str] = &[
-    "408", "429", "500", "502", "503", "504", "522", "524", "529",
-];
+const TRANSIENT_CODES: &[&str] = &["408", "500", "502", "503", "504", "522", "524", "529"];
+
+/// Provider quota wording that is specific enough to win over the broader
+/// budget words: a free tier's `FreeUsageLimitError` (no space, so not a
+/// budget `usage limit`) and a `credit usage limit` that resets with the
+/// provider's window. Checked before [`BUDGET_PATTERNS`].
+const QUOTA_STRONG_PATTERNS: &[&str] = &["freeusagelimit", "credit usage limit"];
+
+/// Rate-limit wording. Checked after budget and auth, so a spend limit or an
+/// expired token delivered as a 429 keeps its own kind, and before
+/// [`TRANSIENT_PATTERNS`], whose `try again` would otherwise claim it.
+const QUOTA_PATTERNS: &[&str] = &["rate limit", "rate_limit", "ratelimit", "too many requests"];
+
+/// HTTP 429, matched as a standalone number like [`TRANSIENT_CODES`].
+const QUOTA_CODES: &[&str] = &["429"];
 
 /// Classifies a failure detail string. Case-insensitive; matching is plain
 /// substring containment over the lowercased detail.
 ///
-/// Precedence is budget, then auth, then transient: a non-transient cause wins
-/// over a transient-looking one in the same message, because a spend limit and
-/// an expired token are both very often DELIVERED as a 429, and retrying either
-/// on the same executor is pure waste.
+/// Precedence is the specific quota words, then budget, then auth, then the
+/// rate-limit words and 429, then transient: a non-transient cause wins over a
+/// rate-limit-looking one in the same message, because a spend limit and an
+/// expired token are both very often DELIVERED as a 429, and waiting either
+/// out is pure waste; a rate limit in turn wins over transport noise, since a
+/// 5 s backoff never outlasts a provider's quota window.
 pub fn classify(detail: &str) -> FailureKind {
     let hay = detail.to_lowercase();
+    if contains_any(&hay, QUOTA_STRONG_PATTERNS) {
+        return FailureKind::Quota;
+    }
     if contains_any(&hay, BUDGET_PATTERNS) {
         return FailureKind::Budget;
     }
     if contains_any(&hay, AUTH_PATTERNS) {
         return FailureKind::Auth;
     }
+    if contains_any(&hay, QUOTA_PATTERNS) || has_code(&hay, QUOTA_CODES) {
+        return FailureKind::Quota;
+    }
     if contains_any(&hay, TRANSIENT_PATTERNS) || has_code(&hay, TRANSIENT_CODES) {
         return FailureKind::Transient;
     }
     FailureKind::Agent
+}
+
+/// The wait a `Retry-After` value in a failure detail asks for, measured from
+/// `now_ms`: a number of seconds (`Retry-After: 120`, `"retry_after": 30`) or
+/// an HTTP date (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`). A date in the
+/// past reads as no wait. `None` when the detail carries no readable value.
+pub fn retry_after(detail: &str, now_ms: u128) -> Option<Duration> {
+    let hay = detail.to_lowercase();
+    for key in ["retry-after", "retry_after", "retry after"] {
+        for (at, _) in hay.match_indices(key) {
+            let rest = hay[at + key.len()..]
+                .trim_start_matches(['"', '\'', ':', '='])
+                .trim_start()
+                .trim_start_matches(['"', '\'']);
+            if let Some(d) = retry_after_value(rest, now_ms) {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+/// One `Retry-After` value at the start of `rest` (lowercased).
+fn retry_after_value(rest: &str, now_ms: u128) -> Option<Duration> {
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if !digits.is_empty() {
+        let secs: f64 = digits.trim_end_matches('.').parse().ok()?;
+        return (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs));
+    }
+    let at = http_date_ms(rest)?;
+    Some(Duration::from_millis(
+        u64::try_from(at.saturating_sub(now_ms)).unwrap_or(u64::MAX),
+    ))
+}
+
+/// Epoch milliseconds of an IMF-fixdate (`sun, 06 nov 1994 08:49:37 gmt`,
+/// lowercased) at the start of `s`.
+fn http_date_ms(s: &str) -> Option<u128> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let mut parts = s.split_whitespace();
+    let _weekday = parts.next()?.strip_suffix(',')?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    let month_name = parts.next()?;
+    let month = MONTHS.iter().position(|m| *m == month_name)? as u32 + 1;
+    let year: i64 = parts.next()?.parse().ok()?;
+    let mut hms = parts.next()?.split(':').map(|p| p.parse::<u64>().ok());
+    let (h, m, sec) = (hms.next()??, hms.next()??, hms.next()??);
+    if !parts.next()?.starts_with("gmt") || !(1..=31).contains(&day) || h > 23 || m > 59 || sec > 60
+    {
+        return None;
+    }
+    let days = u64::try_from(apb_core::clock::days_from_civil(year, month, day)).ok()?;
+    Some(u128::from(((days * 24 + h) * 60 + m) * 60 + sec) * 1000)
 }
 
 /// Whether a failed resume said the session it was asked to continue does not
@@ -342,14 +423,13 @@ mod tests {
     #[test]
     fn transient_details_are_classified_transient() {
         for detail in [
-            "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
             "API Error: 500 Internal Server Error",
             "API Error: 502 Bad Gateway",
             "503 Service Unavailable",
             "504 Gateway Timeout",
             "Overloaded",
             "{\"type\":\"overloaded_error\"}",
-            "too many requests, please try again later",
+            "please try again later",
             "read ECONNRESET",
             "connect ECONNREFUSED 127.0.0.1:443",
             "Error: connection reset by peer",
@@ -372,6 +452,103 @@ mod tests {
                 "expected transient for {detail:?}"
             );
         }
+    }
+
+    /// Provider quota and rate limits, the field report of issue #200 first:
+    /// a free tier's 429 used to read as transient, was retried three times
+    /// within 40 seconds and failed the node.
+    #[test]
+    fn quota_details_are_classified_quota() {
+        for detail in [
+            "429 FreeUsageLimitError: Rate limit exceeded. Please try again later.",
+            "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+            "HTTP 429",
+            "too many requests, please try again later",
+            "Rate limit exceeded",
+            "ratelimit: slow down",
+            "FreeUsageLimitError",
+            "You have reached your credit usage limit for today",
+        ] {
+            assert_eq!(
+                classify(detail),
+                FailureKind::Quota,
+                "expected quota for {detail:?}"
+            );
+        }
+    }
+
+    /// Quota sits between the non-transient kinds and transport noise: a
+    /// spend limit or a credential problem delivered as a 429 keeps its own
+    /// kind, a rate limit wins over the `try again` and `503` of transport
+    /// noise, and the two specific quota words win over the broader budget
+    /// words they contain.
+    #[test]
+    fn quota_precedence_against_budget_auth_and_transient() {
+        assert_eq!(
+            classify("429 too many requests: quota exceeded"),
+            FailureKind::Budget
+        );
+        assert_eq!(
+            classify("API Error: 429 usage limit reached"),
+            FailureKind::Budget
+        );
+        assert_eq!(
+            classify("429 too many requests (unauthorized client)"),
+            FailureKind::Auth
+        );
+        assert_eq!(
+            classify("503 service unavailable: rate limit, try again"),
+            FailureKind::Quota
+        );
+        assert_eq!(classify("credit usage limit reached"), FailureKind::Quota);
+        assert_eq!(classify("Claude usage limit reached"), FailureKind::Budget);
+        assert_eq!(
+            classify("connection reset, please try again"),
+            FailureKind::Transient
+        );
+        assert_eq!(classify("wrote 14290 bytes"), FailureKind::Agent);
+    }
+
+    #[test]
+    fn retry_after_reads_seconds() {
+        let now = 1_000_000;
+        assert_eq!(
+            retry_after("429 Too Many Requests\nRetry-After: 2", now),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            retry_after("{\"error\":\"rate_limit\",\"retry_after\": 30}", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after("retry-after=1.5", now),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            retry_after("rate limited, retry after 45 seconds", now),
+            Some(Duration::from_secs(45))
+        );
+        assert_eq!(retry_after("429 Too Many Requests", now), None);
+        assert_eq!(retry_after("Retry-After: soon", now), None);
+    }
+
+    #[test]
+    fn retry_after_reads_an_http_date() {
+        // Wed, 21 Oct 2015 07:28:00 GMT = 1445412480 s.
+        let at: u128 = 1_445_412_480_000;
+        assert_eq!(
+            retry_after("Retry-After: Wed, 21 Oct 2015 07:28:00 GMT", at - 90_000),
+            Some(Duration::from_secs(90))
+        );
+        // A date already past asks for no wait.
+        assert_eq!(
+            retry_after("Retry-After: Wed, 21 Oct 2015 07:28:00 GMT", at + 5_000),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            retry_after("Retry-After: Wed, 99 Oct 2015 07:28:00 GMT", at),
+            None
+        );
     }
 
     #[test]
@@ -517,6 +694,8 @@ mod tests {
         assert_eq!(FailureKind::Auth.as_str(), "auth");
         assert_eq!(FailureKind::Budget.as_str(), "budget");
         assert_eq!(FailureKind::Agent.as_str(), "agent");
+        assert_eq!(FailureKind::Quota.as_str(), "quota");
+        assert!(!FailureKind::Quota.is_non_transient());
         assert!(FailureKind::Auth.is_non_transient());
         assert!(FailureKind::Budget.is_non_transient());
         assert!(!FailureKind::Transient.is_non_transient());

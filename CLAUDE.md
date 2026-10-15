@@ -71,7 +71,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   behind, `interrupt` the graceful kill registry of a `--now` pause,
   `waker` the detached resume at `until`, `resume_all` behind
   `apb resume --all`, `operator` the request built from surface arguments,
-  `display` the one text line of a pause),
+  `display` the one text line of a pause, `quota` the quota pause policy and
+  schedule, `probe` the wake-up probe of a quota pause, run by
+  `scheduler/quota_probe`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
@@ -136,6 +138,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   as `paused:<run_id>`, and a pause with `until` leaves a detached
   `apb __pause-waker` that resumes only if the same `run_paused` (journal
   seq) still holds the run.
+- A **quota pause** is the engine's own pause on `FailureKind::Quota`
+  (`failure_class.rs`, design section 6): the node attempt loop (`node.rs`)
+  tries a profile fallback first, then infrastructure retries unless
+  `Retry-After` outlasts them, then returns `AttemptOutcome::QuotaPaused`
+  (the attempt journaled `interrupted`, no `node_finished`); the drive posts
+  it as an engine `Control::Pause` with `until`, so the drain path applies
+  it. At `until` the waker (and `apb resume --all`) runs
+  `pause::probe_before_wake` before resuming; a probe that hits the quota
+  re-pauses. Probe outcomes are `supervisor_action quota_probe` markers.
+  Six quota pauses of a node without a success fail it.
 - Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
   implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in
   inside its own cycle stays first-arrival, else loops deadlock). An unreachable

@@ -59,6 +59,7 @@ mod pipeline;
 mod prepare;
 mod protect;
 mod provenance;
+mod quota_probe;
 mod rebind;
 mod resume;
 mod review_gate;
@@ -90,6 +91,7 @@ use node::*;
 use patch::*;
 use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
 use prepare::*;
+pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
 pub(crate) use resume::{ResumeChoice, build_reprompt_override, resume_decision, resume_inner};
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
@@ -329,6 +331,14 @@ pub(crate) enum AttemptOutcome {
     Suspended {
         question: String,
         options: Vec<String>,
+    },
+    /// The node hit a provider quota it cannot wait out (issue #200, design
+    /// 6): the attempt is journaled `interrupted` already, the node gets no
+    /// `node_finished`, and the drive pauses the run with `pause`, so the
+    /// resume runs the node again.
+    QuotaPaused {
+        pause: crate::pause::PauseRequest,
+        events: Vec<EventPayload>,
     },
 }
 
@@ -1214,6 +1224,18 @@ fn drive_inner(
                                         return Err(EngineError::Invalid(format!(
                                             "interactive node `{node}` must not run in a concurrent batch"
                                         )));
+                                    }
+                                    // A quota pause (issue #200): no
+                                    // `node_finished`; the siblings in flight
+                                    // finish, no chunk is admitted, and the
+                                    // control scan applies the pause.
+                                    AttemptOutcome::QuotaPaused { pause, events } => {
+                                        for ev in events {
+                                            journal.append(ev)?;
+                                        }
+                                        journal::post_quota_pause(run_dir, pause)?;
+                                        halt.store(true, Ordering::SeqCst);
+                                        continue;
                                     }
                                 };
                                 for ev in evs {
@@ -2255,6 +2277,14 @@ fn drive_inner(
                         }
                         continue;
                     }
+                    // A quota pause (issue #200), as in the sequential arm.
+                    AttemptOutcome::QuotaPaused { pause, events } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        journal::post_quota_pause(run_dir, pause)?;
+                        continue;
+                    }
                 }
             }
         } else {
@@ -2345,6 +2375,15 @@ fn drive_inner(
                         return Err(EngineError::Invalid(format!(
                             "non-interactive node `{current}` produced a question suspension"
                         )));
+                    }
+                    // A quota pause (issue #200): no `node_finished`; the
+                    // control scan applies the pause and ends the drive.
+                    AttemptOutcome::QuotaPaused { pause, events } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        journal::post_quota_pause(run_dir, pause)?;
+                        continue;
                     }
                 };
                 for ev in evs {

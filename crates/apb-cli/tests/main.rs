@@ -60,6 +60,9 @@ mod phase9_cli_test;
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]
 mod projects_cli_test;
+#[cfg(unix)]
+#[path = "suite/quota_pause_cli_test.rs"]
+mod quota_pause_cli_test;
 #[path = "suite/real_config_guard_test.rs"]
 mod real_config_guard_test;
 #[path = "suite/release_workflow_test.rs"]

@@ -95,6 +95,7 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
     let run_dir = root.join(".apb/runs").join(run_id);
+    let mut seq = seq;
     loop {
         if !run_dir.is_dir() {
             return Ok(WakeOutcome::Superseded);
@@ -104,6 +105,21 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
         };
         let now = apb_core::clock::now_ms();
         if now >= u128::from(until) {
+            // A quota pause probes its executor first (design 6.6); a probe
+            // that hits the quota again re-pauses the run, and this waker
+            // goes on waiting for the new pause.
+            match super::probe::probe_before_wake(root, run_id, seq)
+                .unwrap_or_else(|e| super::WakeProbe::Skipped(e.to_string()))
+            {
+                super::WakeProbe::Repaused { seq: next, .. } => {
+                    seq = next;
+                    continue;
+                }
+                super::WakeProbe::Superseded => return Ok(WakeOutcome::Superseded),
+                super::WakeProbe::NotQuota
+                | super::WakeProbe::Skipped(_)
+                | super::WakeProbe::Passed => {}
+            }
             return Ok(match engine_resume(root, run_id) {
                 Ok(pid) => WakeOutcome::Resumed { pid },
                 Err(why) => WakeOutcome::Refused(why),

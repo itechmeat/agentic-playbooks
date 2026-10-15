@@ -93,13 +93,24 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
         };
         let action = match RunState::fold(&events).run_status {
             RunStatus::Paused => match super::waker::latest_pause(&events) {
-                Some((_, _, Some(until))) if u128::from(until) <= now => {
-                    match super::waker::engine_resume(root, &run_id) {
-                        Ok(pid) => ResumeAllAction::Resumed {
-                            cause: ResumeCause::Due,
-                            pid,
+                Some((seq, _, Some(until))) if u128::from(until) <= now => {
+                    // A due quota pause probes its executor first, as its
+                    // waker would have (design 6.6).
+                    match super::probe::probe_before_wake(root, &run_id, seq)
+                        .unwrap_or_else(|e| super::WakeProbe::Skipped(e.to_string()))
+                    {
+                        super::WakeProbe::Repaused { seq, .. } => {
+                            super::waker::spawn_waker(root, &run_id, seq);
+                            ResumeAllAction::LeftPaused
+                        }
+                        super::WakeProbe::Superseded => ResumeAllAction::LeftPaused,
+                        _ => match super::waker::engine_resume(root, &run_id) {
+                            Ok(pid) => ResumeAllAction::Resumed {
+                                cause: ResumeCause::Due,
+                                pid,
+                            },
+                            Err(detail) => ResumeAllAction::Refused { detail },
                         },
-                        Err(detail) => ResumeAllAction::Refused { detail },
                     }
                 }
                 _ => ResumeAllAction::LeftPaused,

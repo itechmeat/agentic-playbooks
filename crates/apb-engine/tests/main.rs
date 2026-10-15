@@ -225,6 +225,8 @@ mod prompt_cache_test;
 mod protect_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
+#[path = "suite/quota_pause_test.rs"]
+mod quota_pause_test;
 #[cfg(unix)]
 #[path = "suite/reap_test.rs"]
 mod reap_test;

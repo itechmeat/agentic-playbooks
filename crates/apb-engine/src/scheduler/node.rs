@@ -517,6 +517,51 @@ pub(super) fn journal_interrupted_attempt(
     })
 }
 
+/// What an attempt that failed on a provider quota does next (issue #200,
+/// design 6.3 and 6.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotaDecision {
+    /// Take the next chain step.
+    Fallback,
+    /// Retry the same executor out of the infrastructure budget.
+    InfraRetry,
+    /// Pause the run until `until` (epoch ms).
+    Pause { until: u64 },
+    /// The node had its [`crate::pause::quota::QUOTA_PAUSE_CAP`] quota
+    /// pauses already: it fails.
+    Exhausted { pauses: u32 },
+}
+
+/// Decides [`QuotaDecision`] for a quota failure with detail `msg`. The pause
+/// count reads the journal, so pauses of earlier drives count too.
+fn decide_quota(
+    run_dir: &Path,
+    node_id: &str,
+    msg: &str,
+    fallback_left: bool,
+    next_backoff: Option<Duration>,
+) -> Result<QuotaDecision, EngineError> {
+    use crate::pause::quota::{self, QuotaStep};
+    let now = apb_core::clock::now_ms();
+    let retry_after = crate::failure_class::retry_after(msg, now);
+    Ok(
+        match quota::next_step(fallback_left, retry_after, next_backoff) {
+            QuotaStep::Fallback => QuotaDecision::Fallback,
+            QuotaStep::InfraRetry(_) => QuotaDecision::InfraRetry,
+            QuotaStep::Pause => {
+                let prior = quota::quota_pauses(&read_all(run_dir)?, node_id);
+                if prior >= quota::QUOTA_PAUSE_CAP {
+                    QuotaDecision::Exhausted { pauses: prior }
+                } else {
+                    QuotaDecision::Pause {
+                        until: quota::quota_until(retry_after, prior, now),
+                    }
+                }
+            }
+        },
+    )
+}
+
 /// The failure kind an attempt's adapter error is treated as (spec 2026-08-05
 /// section 2.3), i.e. the curated classification of the detail string plus one
 /// structural override.
@@ -675,7 +720,9 @@ pub(crate) fn execute_node(
     )?;
     match (tracker, &outcome) {
         (Some(t), AttemptOutcome::Finished { .. }) => t.finish(run_dir, journal)?,
-        (Some(t), AttemptOutcome::Suspended { .. }) => t.park(run_dir),
+        (Some(t), AttemptOutcome::Suspended { .. } | AttemptOutcome::QuotaPaused { .. }) => {
+            t.park(run_dir)
+        }
         (None, _) => {}
     }
     Ok(outcome)
@@ -2273,6 +2320,8 @@ fn execute_node_kind(
                             // decision, so neither is classified and neither earns
                             // an infrastructure retry.
                             let mut failure_kind: Option<FailureKind> = None;
+                            // What a quota failure does next (issue #200).
+                            let mut quota: Option<QuotaDecision> = None;
                             // A resume that found no session never reached the
                             // model (issue #136 item 2).
                             let session_lost =
@@ -2452,7 +2501,46 @@ fn execute_node_kind(
                                             require_verdict,
                                         ));
                                     }
-                                    if require_verdict {
+                                    // A host task is no provider call (issue
+                                    // #200): its rate-limit wording keeps the
+                                    // transient handling it always had.
+                                    if step.host && failure_kind == Some(FailureKind::Quota) {
+                                        failure_kind = Some(FailureKind::Transient);
+                                    }
+                                    if failure_kind == Some(FailureKind::Quota) && !session_lost {
+                                        let fallback_left = (idx + 1..step_count).any(|j| {
+                                            let s = &steps[j];
+                                            !s.fallback_host
+                                                && (s.agent != step.agent || s.model != step.model)
+                                                && !blocked_agents.contains(
+                                                    &crate::failure_class::billing_account(
+                                                        &s.agent, &s.model,
+                                                    ),
+                                                )
+                                        });
+                                        quota = Some(decide_quota(
+                                            run_dir,
+                                            node_id,
+                                            &msg,
+                                            fallback_left,
+                                            backoff.get(infra_used).copied(),
+                                        )?);
+                                    }
+                                    if matches!(quota, Some(QuotaDecision::Pause { .. })) {
+                                        // The attempt a quota pause ends is
+                                        // interrupted, not failed: it spends
+                                        // no retry, and the resume runs the
+                                        // node again.
+                                        journal_interrupted_attempt(
+                                            journal,
+                                            node_id,
+                                            attempt,
+                                            duration_ms,
+                                            None,
+                                            &msg,
+                                            failure_kind,
+                                        )?;
+                                    } else if require_verdict {
                                         journal_interrupted_attempt(
                                             journal,
                                             node_id,
@@ -2505,11 +2593,39 @@ fn execute_node_kind(
                                 sessions.remove(&binding);
                                 lost_session_retried = true;
                                 infra_retry = true;
-                            } else if failure_kind == Some(FailureKind::Transient)
+                            } else if let Some(QuotaDecision::Pause { until }) = quota {
+                                return Ok(AttemptOutcome::QuotaPaused {
+                                    pause: crate::pause::quota::quota_pause(
+                                        &step.agent,
+                                        &step.model,
+                                        until,
+                                    ),
+                                    events,
+                                });
+                            } else if let Some(QuotaDecision::Exhausted { pauses }) = quota {
+                                return Ok(AttemptOutcome::Finished {
+                                    status: NodeStatus::Failed,
+                                    output: crate::pause::quota::exhausted_output(
+                                        &step.agent,
+                                        &step.model,
+                                        pauses,
+                                        &last_msg,
+                                    ),
+                                    events,
+                                });
+                            } else if quota == Some(QuotaDecision::Fallback) {
+                                break;
+                            } else if (failure_kind == Some(FailureKind::Transient)
+                                || quota == Some(QuotaDecision::InfraRetry))
                                 && infra_used < backoff.len()
                             {
                                 let wait = backoff[infra_used];
                                 infra_used += 1;
+                                let what = if quota.is_some() {
+                                    "a provider quota error"
+                                } else {
+                                    "a transient infrastructure error"
+                                };
                                 // Cheapest observable form: a supervisor-action
                                 // marker in the attempt timeline, right between
                                 // the failed attempt and its infrastructure retry.
@@ -2518,7 +2634,7 @@ fn execute_node_kind(
                                     action: INFRA_RETRY_ACTION.to_string(),
                                     node: Some(node_id.to_string()),
                                     detail: format!(
-                                        "agent_task node `{node_id}` attempt {cur_attempt} failed with a transient infrastructure error; waiting {} ms before infrastructure retry {infra_used} of {} on the same executor `{}`",
+                                        "agent_task node `{node_id}` attempt {cur_attempt} failed with {what}; waiting {} ms before infrastructure retry {infra_used} of {} on the same executor `{}`",
                                         wait.as_millis(),
                                         backoff.len(),
                                         step.agent,
