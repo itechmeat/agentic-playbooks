@@ -71,7 +71,9 @@ fn finishes(events: &[Event], node: &str) -> usize {
 /// Starts the run, pauses it with an `until` 1.5 s ahead and waits until
 /// the drained driver journals the pause. Returns the run id, its stop guard
 /// and `until`.
-fn start_and_pause(root: &Path) -> (String, RunGuard, u64) {
+/// Starts the playbook detached and pauses it (drain) until `wait_ms` from
+/// now; returns once the run reads paused.
+fn start_and_pause(root: &Path, wait_ms: u64) -> (String, RunGuard, u64) {
     seed(root);
     fs::write(root.join("slow"), "").unwrap();
     let out = crate::common::apb_std()
@@ -98,7 +100,7 @@ fn start_and_pause(root: &Path) -> (String, RunGuard, u64) {
         root.join("s_running").is_file().then_some(())
     });
 
-    let until = u64::try_from(apb_core::clock::now_ms()).unwrap() + 1_500;
+    let until = u64::try_from(apb_core::clock::now_ms()).unwrap() + wait_ms;
     let req = PauseRequest {
         reason: Some("lunch".into()),
         by: Some(PauseBy::Operator),
@@ -123,7 +125,7 @@ fn start_and_pause(root: &Path) -> (String, RunGuard, u64) {
 fn a_pause_with_until_is_resumed_by_its_waker() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let (run_id, _guard, until) = start_and_pause(root);
+    let (run_id, _guard, until) = start_and_pause(root, 1_500);
     let run_dir = root.join(".apb/runs").join(&run_id);
     let events = poll("the waker to resume the run to its finish", || {
         let ev = read_all(&run_dir).ok()?;
@@ -157,13 +159,18 @@ fn a_pause_with_until_is_resumed_by_its_waker() {
 fn a_waker_waits_out_a_busy_workdir() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let (run_id, _guard, until) = start_and_pause(root);
+    // A long `until`, so the lock is surely taken before it arrives.
+    let (run_id, _guard, until) = start_and_pause(root, 5_000);
     let run_dir = root.join(".apb/runs").join(&run_id);
     let lock = root.join(".apb/workdir.lock");
     poll("the paused driver to release the lock", || {
         (!lock.is_file()).then_some(())
     });
     fs::write(&lock, std::process::id().to_string()).unwrap();
+    assert!(
+        apb_core::clock::now_ms() < u128::from(until),
+        "the lock was taken only after `until`; the test proves nothing"
+    );
     poll("`until` to pass", || {
         (apb_core::clock::now_ms() > u128::from(until) + 1_000).then_some(())
     });

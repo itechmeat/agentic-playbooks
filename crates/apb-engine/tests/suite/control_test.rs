@@ -27,7 +27,18 @@ fn post_and_read_control_with_cursor() {
 
     let all = read_control_after(dir.path(), None).unwrap();
     assert_eq!(all.len(), 3);
-    assert!(matches!(all[0].cmd, Control::Pause(_)));
+    // The supervisor's pause reads back as one that journals by supervisor.
+    let Control::Pause(req) = &all[0].cmd else {
+        panic!("expected a pause, got {:?}", all[0].cmd)
+    };
+    assert!(matches!(
+        req.to_event(),
+        apb_engine::event::EventPayload::RunPaused {
+            ref reason,
+            by: Some(apb_engine::pause::PauseBy::Supervisor),
+            ..
+        } if reason == "supervisor pause"
+    ));
 
     let tail = read_control_after(dir.path(), Some(0)).unwrap();
     assert_eq!(tail.len(), 2);
@@ -141,16 +152,4 @@ fn an_old_pause_line_still_parses_and_new_fields_round_trip() {
     assert_eq!(req.mode, PauseMode::Now);
     assert_eq!(req.until, Some(1_800_000_000_000));
     assert!(req.keep_lock);
-}
-
-#[test]
-fn the_supervisor_pause_journals_by_supervisor() {
-    use apb_engine::event::EventPayload;
-    use apb_engine::pause::{PauseBy, PauseRequest};
-    let ev = PauseRequest::supervisor().to_event();
-    assert!(matches!(
-        ev,
-        EventPayload::RunPaused { ref reason, by: Some(PauseBy::Supervisor), .. }
-            if reason == "supervisor pause"
-    ));
 }

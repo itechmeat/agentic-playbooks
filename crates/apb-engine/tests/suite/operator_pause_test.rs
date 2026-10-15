@@ -128,6 +128,21 @@ fn stub_agent(dir: &Path, slow_secs: u32) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// A stub agent: counts its calls, announces itself, and waits while the
+/// file `gate` exists, so a test decides when the node ends.
+fn gated_agent(dir: &Path) -> String {
+    let path = dir.join("agent.sh");
+    let d = dir.display();
+    common::write_sync(
+        &path,
+        &format!(
+            "#!/bin/sh\necho x >> '{d}/calls'\ntouch '{d}/agent_running'\nwhile [ -f '{d}/gate' ]; do sleep 0.05; done\necho done\n"
+        ),
+    );
+    set_executable(&path);
+    path.to_string_lossy().into_owned()
+}
+
 /// A script that announces itself as `<name>_running`, records a SIGTERM as
 /// `term_seen`, and sleeps while the file `slow` exists.
 fn slow_script(root: &Path, name: &str) -> String {
@@ -253,17 +268,20 @@ fn a_drain_pause_lets_the_running_node_finish_and_the_resume_continues() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     seed_playbook(root, "drainpb", TWO_AGENTS, &[]);
-    let prog = stub_agent(root, 1);
+    let prog = gated_agent(root);
     let _env = Env::set(&[("APB_AGENT_CMD", &prog)]);
-    fs::write(root.join("slow"), "").unwrap();
+    fs::write(root.join("gate"), "").unwrap();
 
     let rx = spawn_run(root, "drainpb");
     let run_id = find_run_id(root, "drainpb-");
     poll_until("agent a to start", || {
         root.join("agent_running").is_file().then_some(())
     });
+    // Agent a is held until the pause is queued, so the pause always lands
+    // while it runs.
     let out = request_pause(root, &run_id, &operator(PauseMode::Drain)).unwrap();
     assert!(matches!(out, PauseOutcome::Posted { .. }), "{out:?}");
+    fs::remove_file(root.join("gate")).unwrap();
     assert_eq!(finished(&rx).outcome, RunStatus::Paused);
 
     let ev = events(root, &run_id);
@@ -274,7 +292,6 @@ fn a_drain_pause_lets_the_running_node_finish_and_the_resume_continues() {
         (Some(PauseBy::Operator), Some(PauseMode::Drain), false)
     );
 
-    fs::remove_file(root.join("slow")).unwrap();
     let res = resume_by(root, &run_id, None, false, PauseBy::Operator).unwrap();
     assert_eq!(res.outcome, RunStatus::Succeeded);
     let ev = events(root, &run_id);
@@ -556,6 +573,10 @@ fn the_waker_exits_when_the_run_is_resumed_first() {
     std::thread::spawn(move || {
         let _ = tx.send(run_waker(&r, &id, seq));
     });
+    // Smoke for the in-loop path: whether the waker's first journal read
+    // lands before or after the resume, the outcome is `Superseded` (both
+    // paths end there), so this pause only makes the sleeping-waker path the
+    // likely one; it is not a synchronization the assertion depends on.
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(
         resume(root, &run_id, None).unwrap().outcome,
