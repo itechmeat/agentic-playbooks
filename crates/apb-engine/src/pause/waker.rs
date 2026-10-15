@@ -123,18 +123,26 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
         if now >= u128::from(until) {
             // A quota pause probes its executor first (design 6.6); a probe
             // that hits the quota again re-pauses the run, and this waker
-            // goes on waiting for the new pause.
-            match super::probe::probe_before_wake(root, run_id, seq)
-                .unwrap_or_else(|e| super::WakeProbe::Skipped(e.to_string()))
-            {
-                super::WakeProbe::Repaused { seq: next, .. } => {
+            // goes on waiting for the new pause. A probe whose outcome is not
+            // known never leads to a resume: one refused before it ran (the
+            // run gate, environment drift) is the waker's refusal, one that
+            // ran but could not be journaled is probed again.
+            match super::probe::probe_before_wake(root, run_id, seq) {
+                Ok(super::WakeProbe::Repaused { seq: next, .. }) => {
                     seq = next;
                     continue;
                 }
-                super::WakeProbe::Superseded => return Ok(WakeOutcome::Superseded),
-                super::WakeProbe::NotQuota
-                | super::WakeProbe::Skipped(_)
-                | super::WakeProbe::Passed => {}
+                Ok(super::WakeProbe::Superseded) => return Ok(WakeOutcome::Superseded),
+                Ok(super::WakeProbe::Unrecorded(_)) => {
+                    std::thread::sleep(poll());
+                    continue;
+                }
+                Ok(
+                    super::WakeProbe::NotQuota
+                    | super::WakeProbe::Skipped(_)
+                    | super::WakeProbe::Passed,
+                ) => {}
+                Err(e) => return Ok(WakeOutcome::Refused(refusal_text(e))),
             }
             // Another run holding the busy lock of this run's tree is not a
             // refusal: the run stays paused and the waker retries until the

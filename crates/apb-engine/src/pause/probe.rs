@@ -37,6 +37,11 @@ pub enum WakeProbe {
     Repaused { seq: u64, until: u64 },
     /// The pause at the given sequence no longer holds the run.
     Superseded,
+    /// The probe ran, but its outcome could not be journaled (the run's
+    /// event lock stayed held); the reason. The run stays paused and is
+    /// probed again, never resumed on an outcome nobody recorded: a quota
+    /// that held would otherwise be lost.
+    Unrecorded(String),
 }
 
 /// The `(agent, model)` of the run's pause at journal sequence `seq` when it
@@ -131,10 +136,17 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
         ),
     };
     // Serialized against `stop_run` and `request_pause`; the pause must
-    // still be the one this probe was for. A lock that cannot be taken is an
-    // error (as in `request_pause`): journaled without it, a re-pause could
-    // race a stop.
-    let _lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK)?;
+    // still be the one this probe was for. Journaled without the lock, a
+    // re-pause could race a stop, so a lock that cannot be taken leaves the
+    // outcome unrecorded and the run paused, to be probed again.
+    let _lock = match apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK) {
+        Ok(lock) => lock,
+        Err(e) => {
+            return Ok(WakeProbe::Unrecorded(format!(
+                "the outcome of the wake-up probe could not be journaled: {e}"
+            )));
+        }
+    };
     if !holds(&read_all(&run_dir)?, seq) {
         return Ok(WakeProbe::Superseded);
     }

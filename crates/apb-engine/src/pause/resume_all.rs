@@ -102,15 +102,21 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                 Some((seq, _, Some(until))) if u128::from(until) <= now => {
                     // A due quota pause probes its executor first, as its
                     // waker would have (design 6.6).
-                    match super::probe::probe_before_wake(root, &run_id, seq)
-                        .unwrap_or_else(|e| super::WakeProbe::Skipped(e.to_string()))
-                    {
-                        super::WakeProbe::Repaused { seq, .. } => {
+                    // A probe whose outcome is not known never leads to a
+                    // resume (see the waker).
+                    match super::probe::probe_before_wake(root, &run_id, seq) {
+                        Ok(super::WakeProbe::Repaused { seq, .. }) => {
                             super::waker::spawn_waker(root, &run_id, seq);
                             ResumeAllAction::LeftPaused
                         }
-                        super::WakeProbe::Superseded => ResumeAllAction::LeftPaused,
-                        _ => match super::waker::try_engine_resume(root, &run_id, Some(seq)) {
+                        Ok(super::WakeProbe::Superseded) => ResumeAllAction::LeftPaused,
+                        Ok(super::WakeProbe::Unrecorded(detail)) => {
+                            ResumeAllAction::Busy { detail }
+                        }
+                        Err(e) => ResumeAllAction::Refused {
+                            detail: super::waker::refusal_text(e),
+                        },
+                        Ok(_) => match super::waker::try_engine_resume(root, &run_id, Some(seq)) {
                             Ok(pid) => ResumeAllAction::Resumed {
                                 cause: ResumeCause::Due,
                                 pid,

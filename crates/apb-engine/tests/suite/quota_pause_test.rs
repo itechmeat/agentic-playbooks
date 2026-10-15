@@ -566,3 +566,83 @@ fn the_run_origin_is_verified_before_the_wake_up_probe() {
     assert_eq!(calls(root), 1, "no probe ran");
     assert!(probes(&events(root, &res.run_id)).is_empty());
 }
+
+/// A wake-up probe whose outcome cannot be journaled (the run's event lock
+/// stays held past its wait) never resumes the run: the waker probes again
+/// once the lock is free, and a quota that still holds re-pauses the run.
+#[cfg(unix)]
+#[test]
+fn a_probe_outcome_that_cannot_be_journaled_never_resumes_the_run() {
+    use apb_engine::pause::waker::{WakeOutcome, run_waker};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quotalock");
+    common::seed_main(root);
+    // Call 1: the node (quota, 1 s); call 2: the probe whose outcome is not
+    // journaled; call 3: the probe again (quota, 10 min).
+    let prog = stub(
+        root,
+        &[
+            QUOTA_429,
+            QUOTA_429,
+            "429 Too Many Requests, Retry-After: 600",
+        ],
+    );
+    let _env = Env::set(&prog);
+    struct Poll;
+    impl Drop for Poll {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("APB_WAKER_POLL_MS") };
+        }
+    }
+    unsafe { std::env::set_var("APB_WAKER_POLL_MS", "50") };
+    let _poll = Poll;
+
+    let res = run(root, "quotalock", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let run_dir = root.join(".apb/runs").join(&res.run_id);
+    let (seq, _, _, _, until) = last_pause(&events(root, &res.run_id));
+    while apb_core::clock::now_ms() <= u128::from(until.unwrap()) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let held = apb_core::fsutil::lock_dir(&run_dir, "events.jsonl.lock").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let (r, id) = (root.to_path_buf(), res.run_id.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(run_waker(&r, &id, seq));
+    });
+    let start = Instant::now();
+    while calls(root) < 2 {
+        assert!(start.elapsed() < Duration::from_secs(20), "no probe ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Past the probe's wait for the lock.
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert!(
+        rx.try_recv().is_err(),
+        "the waker must not act on a probe outcome nobody journaled"
+    );
+    assert!(probes(&events(root, &res.run_id)).is_empty());
+    drop(held);
+
+    let start = Instant::now();
+    let repaused = loop {
+        let (s, ..) = last_pause(&events(root, &res.run_id));
+        if s != seq {
+            break s;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "no re-pause");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(repaused > seq);
+    assert_eq!(calls(root), 3, "the node never ran again");
+    let p = probes(&events(root, &res.run_id));
+    assert!(p.len() == 1 && p[0].starts_with("quota"), "{p:?}");
+
+    apb_engine::stop::stop_run(root, &res.run_id).unwrap();
+    let woke = rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();
+    assert_eq!(woke, WakeOutcome::Superseded);
+}
