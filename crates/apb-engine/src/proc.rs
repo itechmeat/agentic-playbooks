@@ -111,7 +111,10 @@ pub(crate) fn terminate_process_group(child: &mut std::process::Child, grace: Du
 
 /// Whether `child` has exited, without reaping it (unix: `waitid` with
 /// `WNOWAIT`), so its pid stays reserved for the caller's group kill. Also
-/// true when the state cannot be read, which ends the wait early.
+/// true when the state cannot be read, which ends the wait early. Only an
+/// exit or a death by signal counts: a platform that also reports a stopped
+/// or continued child here (`CLD_STOPPED`, `CLD_CONTINUED`) does not end the
+/// wait.
 #[cfg(unix)]
 fn leader_exited(child: &std::process::Child) -> bool {
     let pid = libc::id_t::from(child.id());
@@ -126,9 +129,19 @@ fn leader_exited(child: &std::process::Child) -> bool {
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         )
     };
-    // With WNOHANG, a child that has not exited leaves `si_pid` at zero.
+    if rc != 0 {
+        return true;
+    }
+    // With WNOHANG, a child with nothing to report leaves `si_pid` at zero.
     // SAFETY: `info` was zero-initialized and filled by `waitid` above.
-    rc != 0 || unsafe { info.si_pid() } != 0
+    let pid = unsafe { info.si_pid() };
+    pid != 0 && is_exit_code(info.si_code)
+}
+
+/// Whether a `waitid` `si_code` reports the end of a process.
+#[cfg(unix)]
+fn is_exit_code(code: libc::c_int) -> bool {
+    matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED)
 }
 
 #[cfg(not(unix))]
@@ -369,6 +382,52 @@ mod tests {
             );
             assert_eq!(target, -(pid as i32));
         }
+    }
+
+    /// A stopped or continued child is not an exited one, whatever a
+    /// platform's `waitid(WEXITED)` reports.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_exit_or_a_death_by_signal_ends_the_wait() {
+        for code in [libc::CLD_EXITED, libc::CLD_KILLED, libc::CLD_DUMPED] {
+            assert!(super::is_exit_code(code), "{code}");
+        }
+        for code in [libc::CLD_STOPPED, libc::CLD_CONTINUED, libc::CLD_TRAPPED, 0] {
+            assert!(!super::is_exit_code(code), "{code}");
+        }
+    }
+
+    /// A live leader, also a stopped one, reads as not exited; once it dies
+    /// the check sees it while its pid stays taken (a zombie).
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_check_tracks_a_live_then_stopped_then_dead_leader() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        // SAFETY: signal 0 only checks that the process exists.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the leader lives");
+        assert!(!leader_exited(&child));
+        // SAFETY: `pid` is our own child.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        thread::sleep(Duration::from_millis(100));
+        assert!(!leader_exited(&child), "a stopped leader has not exited");
+        // SAFETY: as above.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let start = Instant::now();
+        while !leader_exited(&child) {
+            assert!(start.elapsed() < Duration::from_secs(10), "never died");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "still a zombie, not reaped"
+        );
+        assert!(matches!(child.try_wait(), Ok(Some(_))));
     }
 
     #[cfg(unix)]
