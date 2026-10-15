@@ -164,6 +164,9 @@ fn apb_tasks_lists_and_submits_until_the_run_succeeds() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     assert_eq!(plan["role_prompt"], "You plan and build.");
     // The human-readable listing names the task and how to answer it.
@@ -234,6 +237,9 @@ fn apb_tasks_labels_a_fallback_hint_with_its_source_and_reason() {
     )
     .unwrap();
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let plan_id = plan["task_id"].as_str().unwrap().to_string();
     let out = crate::common::apb_std()
@@ -351,6 +357,9 @@ fn a_resume_before_submission_re_exposes_the_same_task() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap().to_string();
     kill_driver(root, &run_id);
@@ -373,6 +382,9 @@ fn a_resume_after_submission_consumes_it_without_a_new_task() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap().to_string();
     kill_driver(root, &run_id);
@@ -414,6 +426,9 @@ fn a_require_verdict_resume_re_exposes_only_the_open_task() {
             ),
         );
         let run_id = start_detached(root);
+        // Stops the detached driver (and any a resume started) at the end, so
+        // a run left waiting on a host task does not outlive the test.
+        let _guard = crate::common::RunGuard::new(root, &run_id);
         let plan = task_of(root, &run_id, "plan");
         let id = plan["task_id"].as_str().unwrap().to_string();
         kill_driver(root, &run_id);
@@ -490,6 +505,9 @@ fn apb_tasks_never_prints_terminal_escapes_from_a_prompt() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap();
     // A prompt embeds upstream agent output: plant an escape sequence.
@@ -542,6 +560,9 @@ fn apb_wait_on_a_host_task_names_apb_tasks() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let out = crate::common::apb_std()
         .args(["wait", run_id.as_str(), "--timeout", "30"])
@@ -792,6 +813,9 @@ fn apb_decide_from_a_host_task_is_journaled_and_the_actual_model_shows() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let prompt_path = plan["prompt_path"].as_str().expect("prompt_path");
     assert_eq!(

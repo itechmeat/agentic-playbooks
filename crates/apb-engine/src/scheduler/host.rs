@@ -320,6 +320,9 @@ impl HostAdapter<'_, '_> {
                 self.mark("cancelled");
                 return Err(AgentFailure::new(ErrorClass::Transport, "cancelled"));
             }
+            if let Some(gone) = run_dir_gone(self.run_dir) {
+                return Err(gone);
+            }
             if let Some(c) = control {
                 (c.on_poll)();
                 if c.interrupt.load(Ordering::Relaxed) {
@@ -448,6 +451,9 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
         loop {
+            if let Some(gone) = run_dir_gone(self.run_dir) {
+                return Err(gone);
+            }
             if let Some(sub) = host_task::read_submission(self.run_dir, &task_id) {
                 host_task::write_output(self.run_dir, &task_id, &sub.output).map_err(failure)?;
                 self.journal
@@ -537,6 +543,21 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
             std::thread::sleep(HOST_POLL);
         }
     }
+}
+
+/// A host task waits on files in the run directory; once that directory is
+/// gone (the workspace was deleted under a live driver) no submission, answer
+/// or stop can ever land, so the wait ends instead of polling forever.
+fn run_dir_gone(run_dir: &Path) -> Option<AgentFailure> {
+    (!run_dir.is_dir()).then(|| {
+        AgentFailure::new(
+            ErrorClass::Transport,
+            format!(
+                "the run directory {} is gone; nothing can submit the host task",
+                run_dir.display()
+            ),
+        )
+    })
 }
 
 #[cfg(test)]
