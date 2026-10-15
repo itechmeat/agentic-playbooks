@@ -70,7 +70,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   types, `request` the one pause entry point and what a paused drive leaves
   behind, `interrupt` the graceful kill registry of a `--now` pause,
   `waker` the detached resume at `until`, `resume_all` behind
-  `apb resume --all`),
+  `apb resume --all`, `operator` the request built from surface arguments,
+  `display` the one text line of a pause),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution

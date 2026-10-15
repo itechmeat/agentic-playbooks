@@ -52,7 +52,8 @@ Per playbook version:
   `review_withdrawn` (a supervisor moved the run off the gate) records no
   wait, and a gate or question still open when the report is made is not in
   the figures, so a long wait only shows once it was answered.
-- **run duration**: `run_started` to the terminal event. Median and count.
+- **run duration**: `run_started` to the terminal event, leaving out the time the
+  run spent paused (`run_paused` to the next `run_resumed`, issue #200). Median and count.
 - **tokens and cost** per run, over the runs whose attempts reported usage
   (`attempt_finished.usage`); the cost is what the agent CLIs reported, over
   the runs that reported one. Usage marked `estimated` (a source reserved for

@@ -185,6 +185,7 @@ fn a_supervisor_mcp_serves_only_supervisor_and_read_only_tools() {
     );
     for tool in [
         "run_stop",
+        "run_pause",
         "run_resume",
         "review_decide",
         "playbook_create",

@@ -83,6 +83,19 @@ The engine treats a submission exactly like a finished CLI attempt: the report b
 
 A supervising session (`supervise: "self"`) also gets each request from `supervisor_wait_event` (`reason: host_task`, with `pending_tasks` and the same `next` instruction).
 
+### Host tasks across a pause
+
+An operator pause (`apb pause`, MCP `run_pause`, the dashboard) of a host-mode run
+does not touch its open host tasks. They stay listed (`pending_tasks`,
+`apb tasks`) and are not expired or superseded, and their `deadline` is frozen:
+the time the run spends paused does not count against it, so a run paused for
+longer than a task's timeout still has the task open when it is resumed. A reply
+submitted with `run_task_submit` while the run is paused is accepted and stored,
+and the resumed run applies it. `run_wait` on a paused run returns
+`reason: stopped` with the `pause` object (and the open tasks in
+`pending_tasks`), not `needs_input`, because nothing executes a host task or
+consumes a reply while the run holds no driver; resume it with `run_resume`.
+
 ### Decisions inside a host task
 
 A host task that needs a small bounded decision (pick one of N, rank, filter, map items to options, yes or no, a score) can ask the decision providers configured in `decisions.yaml` instead of spending a full model turn on it. This is sanctioned by the contract: a decision call is not an agent run. Ask through apb's decision layer only, never through an arbitrary agent CLI:

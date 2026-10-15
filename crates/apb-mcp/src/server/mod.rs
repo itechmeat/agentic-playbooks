@@ -4,7 +4,9 @@
 //! Phase 5a, and the eight supervisor tools of Phase 4b (gated by token and
 //! capability). Cancellation is available two ways: `supervisor_run_abort`
 //! for a supervisor holding a session token, and the operator-facing
-//! `run_stop`, which additionally finalizes a run whose driver has died.
+//! `run_stop`, which additionally finalizes a run whose driver has died. The
+//! operator's `run_pause` (any run, by: operator) and `run_resume` pause and
+//! continue a run without ending it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -365,7 +367,7 @@ impl WfMcp {
     /// The server a background supervisor agent connects to. A supervisor's
     /// authority is its capability set on the token-bearing `supervisor_*`
     /// tools, so this server offers only those and the read-only tools: the
-    /// operator's run control (`run_stop`, `run_resume`, `review_decide`),
+    /// operator's run control (`run_stop`, `run_pause`, `run_resume`, `review_decide`),
     /// authoring and run starts take no token and would bypass the
     /// capabilities. `run_answer` stays for its token path (answered by the
     /// supervisor); its `run_id` path, which answers as the human, is refused.

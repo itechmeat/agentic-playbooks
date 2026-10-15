@@ -14,7 +14,7 @@ use apb_engine::{
     post_supervisor_command, prepare_supervised_background, resume_with, run, stop_run,
 };
 
-use crate::util::open_registry;
+use crate::util::{QUESTION_TEXT_MAX, open_registry, sanitize_for_terminal};
 
 /// Runs the one run gate every launch surface uses
 /// (`apb_engine::gate::check_run`) for a CLI start - foreground `apb run`,
@@ -238,44 +238,6 @@ fn print_pending_question_check(root: &Path, run_id: &str) {
             pq.node,
             sanitize_for_terminal(&pq.question, QUESTION_TEXT_MAX)
         );
-    }
-}
-
-/// Cap on a sanitized question's rendered length (spec 2026-07-20-interactive-
-/// nodes, Security section, fix round 1): long enough to be useful on both
-/// the `apb runs` table line and the `apb doctor --run` check line, short
-/// enough that a maliciously long question cannot dominate either report.
-const QUESTION_TEXT_MAX: usize = 160;
-
-/// Renders agent-generated (untrusted) question text as safe, single-line
-/// plain text for a terminal (spec 2026-07-20-interactive-nodes, Security
-/// section, fix round 1): the node asking the question is under the
-/// playbook author's control, but the question TEXT is model output, so it
-/// must not be interpreted as anything other than literal characters.
-///
-/// Every control character - including the ESC byte that opens an ANSI CSI
-/// sequence, embedded `\r`, and `\n` - becomes a space, which both strips
-/// the escape channel and guarantees the result cannot break the caller's
-/// single-line indent (a raw `\n` would otherwise let the question text
-/// forge extra report lines). Runs of whitespace then collapse to one
-/// space, the result is trimmed, and it is capped at `max` chars
-/// (appending "..." when cut) so one long question cannot dominate the
-/// report it appears in. Shared by both print sites that render a pending
-/// question's text (`print_waiting_on_question`, `print_pending_question_check`);
-/// node ids are not routed through this - they are already validated safe
-/// segments, not model output.
-fn sanitize_for_terminal(s: &str, max: usize) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let trimmed = collapsed.trim();
-    if trimmed.chars().count() <= max {
-        trimmed.to_string()
-    } else {
-        let truncated: String = trimmed.chars().take(max).collect();
-        format!("{truncated}...")
     }
 }
 
@@ -1030,6 +992,10 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
                     line.push('\t');
                     line.push_str(mode.as_deref().unwrap_or("cli"));
                 }
+                if let Some(p) = &r.pause {
+                    line.push('\t');
+                    line.push_str(&crate::pause::marker(p));
+                }
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
                 }
@@ -1110,6 +1076,9 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     );
     if view.driver_alive == Some(false) {
         println!("  driver dead");
+    }
+    if let Some(p) = view.pause() {
+        crate::pause::print_block(p);
     }
     for (node, status) in view.nodes() {
         println!("  {node}\t{status}");
@@ -1283,6 +1252,9 @@ pub(crate) fn resume_cmd(
             return ExitCode::from(2);
         }
     }
+    if let Some(note) = crate::pause::early_resume_note(root, run_id) {
+        println!("{note}");
+    }
     // Read BEFORE the drive: a resume of a run with a pending stop applies that
     // stop before it executes anything and returns immediately, which otherwise
     // looks like a resume that silently did nothing. Best effort - an
@@ -1369,13 +1341,6 @@ pub(crate) fn resume_all_cmd(root: &Path) -> ExitCode {
     }
 }
 
-/// Stops a run: `apb stop <run_id>`.
-///
-/// Posts the abort, which the driving process picks up within a fraction of a
-/// second and uses to kill whatever agent the run has in flight. When no
-/// process is driving the run any more - a driver that crashed, taking the run
-/// down with it and leaving it reading `running` forever - the stop finalizes
-/// the run itself. `stop_run` validates `run_id` and existence.
 /// `apb wait`: blocks on the run with no model in the loop and reports why it
 /// returned. The exit code carries the verdict so a shell caller needs no
 /// parsing: 0 succeeded, 1 failed/aborted, 3 needs input, 4 stopped, 5 timeout.
@@ -1427,6 +1392,16 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
             print_decisions();
             ExitCode::from(3)
         }
+        WaitReason::Stopped if res.pause().is_some() => {
+            let p = res.pause().expect("guarded");
+            println!(
+                "run {run_id} stopped ({status}): {}; `apb resume {run_id}` continues it",
+                crate::pause::marker(p)
+            );
+            print_open_gates(&res.view);
+            print_decisions();
+            ExitCode::from(4)
+        }
         WaitReason::Stopped => {
             if res.driver_alive == Some(false) {
                 println!(
@@ -1446,6 +1421,40 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
     }
 }
 
+/// The gates a paused run still has open, one line each: they stay open
+/// across the pause and are answered the usual way (issue #200).
+fn print_open_gates(view: &apb_engine::run_view::RunView) {
+    let Some(p) = view.progress.as_ref() else {
+        return;
+    };
+    if let Some(q) = &p.pending_question {
+        println!(
+            "  open: question (node `{}`): {}",
+            q.node,
+            sanitize_for_terminal(&q.question, QUESTION_TEXT_MAX)
+        );
+    }
+    if let Some(r) = &p.pending_review {
+        println!(
+            "  open: human review (node `{}`): {}",
+            r.node, r.how_to_decide
+        );
+    }
+    for t in &p.pending_tasks {
+        println!(
+            "  open: host task `{}` (node `{}`): `apb tasks {}` lists it",
+            t.task_id, t.node, t.run_id
+        );
+    }
+}
+
+/// Stops a run: `apb stop <run_id>`.
+///
+/// Posts the abort, which the driving process picks up within a fraction of a
+/// second and uses to kill whatever agent the run has in flight. When no
+/// process is driving the run any more - a driver that crashed, taking the run
+/// down with it and leaving it reading `running` forever - the stop finalizes
+/// the run itself. `stop_run` validates `run_id` and existence.
 pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
     match stop_run(root, run_id) {
         Ok(StopOutcome::SignaledLiveDriver) => {

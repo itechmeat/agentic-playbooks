@@ -9,8 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod display;
 pub(crate) mod interrupt;
 pub mod kind;
+pub mod operator;
 pub mod request;
 pub mod resume_all;
 pub mod waker;

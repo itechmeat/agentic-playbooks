@@ -50,6 +50,8 @@ mod mcp_supervise_test;
 #[path = "suite/official_connectors_gate.rs"]
 mod official_connectors_gate;
 #[cfg(unix)]
+#[path = "suite/pause_cli_test.rs"]
+mod pause_cli_test;
 #[path = "suite/pause_waker_cli_test.rs"]
 mod pause_waker_cli_test;
 #[path = "suite/phase9_cli_test.rs"]

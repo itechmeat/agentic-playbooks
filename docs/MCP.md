@@ -86,6 +86,7 @@ Mutations (destructive):
 | `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save when it has no scripts. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
 | `trust_revoke` | Revoke approvals: `target` is a digest (exactly that approval) or an id (every approval under it; `kind` narrows it). Returns what was revoked. The same path as `apb trust revoke` and the dashboard's Trust view |
 | `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true` |
+| `run_pause` | Pause a run so it can continue later (operator tool: any live or paused run, `by: operator`, no supervisor token). `mode` `drain` (default: running nodes finish) or `now` (running nodes are interrupted and run again on resume); optional `reason`, `until` (RFC 3339 or a duration such as `90m`; the run resumes by itself then) and `keep_lock`. See Pause and resume below |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
@@ -196,7 +197,7 @@ takes the session `token`; the capability column names the grant it needs:
 | `supervisor_report` | Writes the final supervisor report | `observe` |
 | `supervisor_node_retry` | Retries a failed node, optionally with a new prompt | `retry` |
 | `supervisor_run_continue_from` | Continues the run from a given node, skipping the failed one | `retry` |
-| `supervisor_run_pause` | Pauses the run | `retry` |
+| `supervisor_run_pause` | Pauses the run (journaled with `by: supervisor`, drain mode; the operator's `run_pause` takes mode, reason and until) | `retry` |
 | `supervisor_run_abort` | Aborts the run | `retry` |
 | `supervisor_context_append` | Adds a note delivered to every new agent attempt; overrides the node template and run instruction on conflict | `retry` |
 | `supervisor_interrupt_attempt` | Kills a wedged running attempt (one `node`, or all) so ordinary retry and fallback proceed; the run continues | `retry` |
@@ -210,7 +211,7 @@ supervisor agent that `apb run --supervise` spawns gets
 (agents pass their environment to their MCP servers) serves only the
 `supervisor_*` tools, the read-only tools and `run_answer`, whose `run_id`
 path (answering as the human) it refuses. The operator's run control
-(`run_stop`, `run_resume`, `review_decide`), authoring and run starts take no
+(`run_stop`, `run_pause`, `run_resume`, `review_decide`), authoring and run starts take no
 token, so they are not offered to a supervisor. One is worth naming regardless, because its polling contract is easy
 to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
 until the run's next wake, a new human_review gate, the end of the run, or a
@@ -378,7 +379,12 @@ The CLI has the same shape for an agent that drives apb through a shell:
 `apb wait <run_id> [--timeout SECS]` blocks until the run finishes, needs
 input or stops. Run `apb wait` as one background command and act on its exit
 code (0 succeeded, 1 failed or aborted, 3 needs input, 4 paused or
-driverless, 5 timeout); no status polling, no tokens while it blocks. A plain
+driverless, 5 timeout); no status polling, no tokens while it blocks. Exit 4
+for a paused run prints the pause (reason, who, since, until) and lists the
+gates (a review, a question, host tasks) that stay open across it; the pause
+comes first because nothing answers a gate while the run holds no driver.
+The same holds for `run_wait`: `reason: stopped` carries a `pause` object
+and the usual `pending_*` fields. A plain
 `apb run <id>` also blocks, but it cannot report a gate: it just keeps waiting
 until someone answers it.
 
@@ -463,6 +469,64 @@ is written (`outcome: "already_terminal"`). `apb stop <run_id>` is the CLI
 equivalent; `apb doctor --run <id>` diagnoses a run's process state read-only
 (open attempts and their pid liveness, the driver and workdir-lock holders,
 unapplied control entries).
+
+## Pause and resume
+
+`run_stop` ends a run. `run_pause` (CLI `apb pause <run_id>`, the dashboard's
+Pause button) stops it for a while and keeps everything: the run continues
+later from where it was, and finished nodes never run again.
+
+```text
+apb pause <run_id> [--drain | --now] [--reason <text>] [--until <time|duration>] [--keep-lock]
+```
+
+`run_pause { run_id, mode, reason, until, keep_lock, workspace }` takes the same
+arguments (`mode` is `drain` or `now`). It is an operator tool: it works on any
+run, needs no supervisor token, and is not offered to a supervisor agent
+(`supervisor_run_pause` is the supervisor's own, journaled with
+`by: supervisor`).
+
+- **`drain` (default).** No new node or batch chunk starts; running nodes
+  finish. The run reads `running` with a `pause` object whose `pausing` is true
+  until nothing runs, then `paused`; the driver exits, so a paused run holds no
+  process and a reboot does not lose it.
+- **`now`.** Running nodes are interrupted: scripts get SIGTERM to their
+  process group, a grace period (10 s) and then SIGKILL; agents are killed the
+  same way and keep their session id. The interrupted nodes run again on
+  resume, and the interruption is not a failed attempt (no retry is spent).
+- **`until`.** An RFC 3339 time (`2026-10-16T08:00:00Z`) or a duration from now
+  (`90m`, `2h`). A small detached waker resumes the run then. A reboot kills the
+  waker; `apb resume --all` resumes runs whose `until` has passed (see
+  `docs/DEPLOYMENT.md` for a boot unit).
+- **`keep_lock`.** The working-tree lock is released while paused so another
+  run can use the tree; `keep_lock` holds it for the paused run (`apb doctor`
+  lists it, `apb stop` of the run releases it).
+- Pausing a paused run updates its reason and `until`; pausing a finished run
+  is an error. Gates are unchanged: a review, question or host task that was
+  open stays open, and a host-task reply submitted while paused is stored and
+  applied on resume.
+- **Clocks freeze.** Node and host-task deadlines, wait-node timers, question
+  timeouts, the eval deadline, `expected_duration` comparisons and the run and
+  node durations in `apb stats`, `run_report` and the retro leave the paused
+  time out. A playbook can read `{{run.active_elapsed_seconds}}` for its own
+  budget.
+
+`run_status`, `run_wait` and `runs_list` (and `apb runs`, the dashboard) carry
+the pause as a `pause` object: `reason`, `by` (`operator`, `supervisor` or
+`engine`), `mode`, `since`, `until` (epoch milliseconds), `keep_lock` and
+`pausing`. `apb runs` appends `paused (reason, by, since, until)` after the
+status column, or `pausing (...)` while a live driver drains.
+
+`run_resume` (and `apb resume <run_id>`) continues a paused run. Before its
+`until` that is an early resume: the ack carries `"resumed_early": true` and
+`pause_until`, and the CLI prints `resuming early`. `apb resume --all` resumes
+the runs of the workspace a lost driver or a passed `until` left waiting
+(runs reading `running` with no live driver, paused runs whose `until` has
+passed), skipping sub-playbook children, which follow their parent; a driverless
+run the run gate refuses is journaled `paused (driverless)` so `apb runs` does
+not show it as `running`. The dashboard has the same buttons:
+`POST /api/runs/{id}/pause` and `POST /api/runs/{id}/resume`, which goes
+through the run gate and the irreversible-consent check like `run_resume`.
 
 ## Connecting (local agents, no relay)
 

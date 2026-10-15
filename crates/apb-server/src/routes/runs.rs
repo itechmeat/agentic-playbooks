@@ -73,6 +73,12 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub candidate_trial: Option<apb_engine::candidate::CandidateTrial>,
+    /// The run's pause (issue #200): who paused it, why, since and until
+    /// when, and `pausing` while a live driver drains toward a queued
+    /// pause. Absent for a run that is neither paused nor pausing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub pause: Option<apb_engine::pause::PauseInfo>,
     /// The model each attempt actually ran on, against the profile's primary
     /// model (issue #193); empty before the first attempt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -204,6 +210,7 @@ pub(crate) async fn get_run_handler(
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
     let goal = view.goal(&run_dir);
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
+    let pause = view.pause().cloned();
     let nodes = view.nodes();
     let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
     let execution = manifest
@@ -233,6 +240,7 @@ pub(crate) async fn get_run_handler(
         attempt_models,
         goal,
         candidate_trial,
+        pause,
         usage,
         decisions,
         unknown_events: view.unknown.len(),
@@ -332,6 +340,182 @@ pub(crate) async fn post_answer_handler(
     match apb_engine::post_answer(&run_dir, body.node.as_deref(), &body.answer, "human") {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Body of `POST /api/runs/{id}/pause` (issue #200). Every field is optional:
+/// an empty body is a drain pause with no reason, like `apb pause <id>`.
+#[derive(Deserialize, Default)]
+pub(crate) struct PauseBody {
+    /// `drain` (default) or `now`.
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    /// RFC 3339 timestamp or a duration from now (`90m`, `2h`).
+    #[serde(default)]
+    until: Option<String>,
+    #[serde(default)]
+    keep_lock: bool,
+}
+
+/// POST /api/runs/{id}/pause: the dashboard's Pause button. The same
+/// `apb_engine::pause::request_pause` the CLI and MCP `run_pause` call, as
+/// `by: operator`. 404 for an unknown run, 409 for a run that already ended,
+/// 422 for a bad `mode` or `until`.
+pub(crate) async fn post_pause_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WorkspaceQuery>,
+    body: Option<Json<PauseBody>>,
+) -> impl IntoResponse {
+    use apb_engine::pause::{PauseOutcome, PauseRequest};
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if !root.join(".apb/runs").join(&id).is_dir() {
+        return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
+    }
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let req = match PauseRequest::operator(
+        body.mode.as_deref(),
+        body.reason,
+        body.until.as_deref(),
+        body.keep_lock,
+        apb_core::clock::now_ms_u64(),
+    ) {
+        Ok(r) => r,
+        Err(what) => return (StatusCode::UNPROCESSABLE_ENTITY, what).into_response(),
+    };
+    match apb_engine::pause::request_pause(&root, &id, &req) {
+        Ok(outcome) => {
+            let seq = match outcome {
+                PauseOutcome::Posted { seq } | PauseOutcome::Journaled { seq } => seq,
+            };
+            Json(serde_json::json!({
+                "run_id": id,
+                "outcome": outcome.as_str(),
+                "mode": req.mode.as_str(),
+                "seq": seq,
+                "until": req.until,
+            }))
+            .into_response()
+        }
+        Err(apb_engine::EngineError::NotFound(what)) => {
+            (StatusCode::NOT_FOUND, what).into_response()
+        }
+        // A run that already ended cannot be paused.
+        Err(apb_engine::EngineError::Invalid(what) | apb_engine::EngineError::Conflict(what)) => {
+            (StatusCode::CONFLICT, what).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Body of `POST /api/runs/{id}/resume`.
+#[derive(Deserialize, Default)]
+pub(crate) struct ResumeBody {
+    #[serde(default)]
+    from_node: Option<String>,
+    #[serde(default)]
+    allow_environment_drift: bool,
+    /// The `consent_nonce` of the 409 refusal the consent dialog showed, for
+    /// a run with no valid consent to its irreversible effects recorded (one
+    /// an older apb started): the same confirmation MCP `run_resume` takes.
+    #[serde(default)]
+    confirm_irreversible: Option<apb_engine::consent::Confirmation>,
+}
+
+/// POST /api/runs/{id}/resume: the dashboard's Resume button, for a paused,
+/// interrupted or driverless run. It goes through the gate MCP `run_resume`
+/// uses: `check_resume` (the run was created here, its snapshot is trusted;
+/// the person clicking Resume is the trust confirmation, as clicking Run is)
+/// and the irreversible-consent check, whose refusal (409,
+/// `irreversible_requires_confirmation`, with `consent_nonce`) the dashboard
+/// answers with its consent dialog. The driver then runs detached. 404 for an
+/// unknown run, 409 for a run that cannot be resumed (finished, refused by
+/// the gate, environment drift).
+pub(crate) async fn post_resume_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WorkspaceQuery>,
+    body: Option<Json<ResumeBody>>,
+) -> impl IntoResponse {
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    if let Err(refusal) = apb_engine::gate::check_resume(&root, &id, true) {
+        let status = if refusal["policy"] == "not_found" {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::CONFLICT
+        };
+        return (status, Json(refusal)).into_response();
+    }
+    let deprecation = match apb_engine::gate::check_resume_consent(
+        &root,
+        &id,
+        body.confirm_irreversible.as_ref(),
+        "dashboard",
+    ) {
+        Ok(note) => note,
+        Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
+    };
+    let from_node = body.from_node.as_deref();
+    // Computed before the drive so the answer says where the run resumes, and
+    // so a finished run is refused here (the argument-free plan would).
+    let decision = match apb_engine::plan_resume(&root, &id, from_node) {
+        Ok(d) => d,
+        Err(e) => return resume_error(e),
+    };
+    // A paused run whose `until` is still ahead is resumed early.
+    let early_until = apb_engine::run_view::RunView::load(&root.join(".apb/runs").join(&id), &id)
+        .ok()
+        .and_then(|v| v.pause().filter(|p| !p.pausing).and_then(|p| p.until))
+        .filter(|u| *u > apb_core::clock::now_ms_u64());
+    match apb_engine::resume_detached_by(
+        &root,
+        &id,
+        from_node,
+        body.allow_environment_drift,
+        apb_engine::pause::PauseBy::Operator,
+    ) {
+        Ok(_) => {
+            let mut answer = serde_json::json!({
+                "run_id": id,
+                "resumed_from": decision.start_node,
+                "reason": decision.reason.as_str(),
+                "detached": true,
+            });
+            if let Some(until) = early_until {
+                answer["resumed_early"] = serde_json::json!(true);
+                answer["pause_until"] = serde_json::json!(until);
+            }
+            if let Some(note) = deprecation {
+                answer["deprecation"] = serde_json::json!(note);
+            }
+            Json(answer).into_response()
+        }
+        Err(e) => resume_error(e),
+    }
+}
+
+fn resume_error(e: apb_engine::EngineError) -> axum::response::Response {
+    match e {
+        apb_engine::EngineError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
+        apb_engine::EngineError::Invalid(what) | apb_engine::EngineError::Conflict(what) => {
+            (StatusCode::CONFLICT, what).into_response()
+        }
+        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
     }
 }
 

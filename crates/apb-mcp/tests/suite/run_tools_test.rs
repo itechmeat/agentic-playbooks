@@ -549,6 +549,85 @@ fn run_stop_finalizes_a_run_whose_driver_is_gone() {
     assert_eq!(again["outcome"], "already_terminal");
 }
 
+/// Issue #200: the operator `run_pause` tool pauses a run nothing drives on
+/// the spot, `run_status` then carries the `pause` object (reason, by, until),
+/// a finished run is refused and a bad mode is rejected.
+#[test]
+fn pause_run_pauses_a_driverless_run_and_run_status_reports_it() {
+    use apb_engine::event::{EventLog, EventPayload};
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run_dir = dir.path().join(".apb/runs/noagent-pause");
+    fs::create_dir_all(&run_dir).unwrap();
+    let mut log = EventLog::create(&run_dir).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    drop(log);
+
+    let err = apb_mcp::tools::pause_run(
+        dir.path(),
+        "noagent-pause",
+        Some("later"),
+        None,
+        None,
+        false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("drain"), "{err}");
+
+    let out = apb_mcp::tools::pause_run(
+        dir.path(),
+        "noagent-pause",
+        Some("now"),
+        Some("lunch".into()),
+        Some("2h"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(out["outcome"], "paused");
+    assert_eq!(out["mode"], "now");
+    assert!(out["until"].as_u64().is_some());
+
+    let status = run_status(dir.path(), "noagent-pause").unwrap();
+    assert_eq!(status["run_status"], "paused");
+    assert_eq!(status["pause"]["reason"], "lunch");
+    assert_eq!(status["pause"]["by"], "operator");
+    assert_eq!(status["pause"]["mode"], "now");
+    assert!(status["pause"]["until"].as_u64().is_some());
+    assert!(status["pause"]["since"].is_number());
+
+    let listed = runs_list(dir.path()).unwrap();
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "noagent-pause")
+        .unwrap();
+    assert_eq!(row["pause"]["by"], "operator");
+
+    // A finished run cannot be paused.
+    let done = dir.path().join(".apb/runs/noagent-done");
+    fs::create_dir_all(&done).unwrap();
+    let mut log = EventLog::create(&done).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(EventPayload::RunFinished {
+        outcome: "success".into(),
+    })
+    .unwrap();
+    drop(log);
+    assert!(
+        apb_mcp::tools::pause_run(dir.path(), "noagent-done", None, None, None, false).is_err()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Task 9: liveness in run_status.
 //

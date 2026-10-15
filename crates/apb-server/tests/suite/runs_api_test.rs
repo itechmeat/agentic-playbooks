@@ -1,3 +1,4 @@
+use crate::common;
 use apb_server::{AppState, build_router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -1289,4 +1290,172 @@ async fn post_playbook_run_needs_the_consent_nonce() {
     assert_eq!(status, StatusCode::OK, "{json}");
     assert!(json["deprecation"].as_str().is_some(), "{json}");
     assert_eq!(consent_of(json["run_id"].as_str().unwrap()).by, "dashboard");
+}
+
+// --- issue #200: operator pause and resume ---
+
+/// A run `apb` "created here" (stamped) from a hand-built journal, so the
+/// resume gate accepts it: the stamp key lives in the sandboxed config dir.
+fn seed_stamped_run(
+    root: &std::path::Path,
+    run_id: &str,
+    yaml: &str,
+    payloads: &[apb_engine::event::EventPayload],
+) {
+    seed_gate_run_yaml(root, run_id, yaml, payloads);
+    apb_core::run_origin::stamp(&root.join(".apb/runs").join(run_id), run_id).unwrap();
+}
+
+fn paused_event(reason: &str) -> apb_engine::event::EventPayload {
+    apb_engine::event::EventPayload::RunPaused {
+        reason: reason.into(),
+        by: Some(apb_engine::pause::PauseBy::Operator),
+        mode: None,
+        until: None,
+        keep_lock: false,
+    }
+}
+
+#[tokio::test]
+async fn pause_pauses_a_run_nothing_drives_and_the_list_reports_it() {
+    let _cfg = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    seed_gate_run(dir.path(), "gate-1", &[]);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/runs/gate-1/pause",
+        serde_json::json!({ "reason": "lunch", "mode": "now", "until": "2h" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["outcome"], "paused");
+    assert_eq!(json["mode"], "now");
+    assert!(json["until"].as_u64().is_some());
+
+    let (_, list) = get_json(app.clone(), "/api/runs").await;
+    let row = &list[0];
+    assert_eq!(row["status"], "paused");
+    assert_eq!(row["pause"]["reason"], "lunch");
+    assert_eq!(row["pause"]["by"], "operator");
+    assert!(row["pause"]["until"].as_u64().is_some());
+
+    // Pausing a paused run updates the reason; an empty body is a drain pause.
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/runs/gate-1/pause",
+        serde_json::json!({ "reason": "still away" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (_, list) = get_json(app.clone(), "/api/runs").await;
+    assert_eq!(list[0]["pause"]["reason"], "still away");
+    let (status, detail) = get_json(app, "/api/runs/gate-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["pause"]["by"], "operator");
+    assert_eq!(detail["run_status"], "paused");
+}
+
+#[tokio::test]
+async fn pause_refuses_unknown_finished_and_malformed_requests() {
+    let _cfg = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    seed_gate_run(
+        dir.path(),
+        "done-1",
+        &[apb_engine::event::EventPayload::RunFinished {
+            outcome: "success".into(),
+        }],
+    );
+    seed_gate_run(dir.path(), "gate-1", &[]);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let pause = |id: &str, body: serde_json::Value| {
+        let (app, uri) = (app.clone(), format!("/api/runs/{id}/pause"));
+        async move { post_json(app, &uri, body).await }
+    };
+    assert_eq!(
+        pause("ghost-1", serde_json::json!({})).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        pause("..%2F..%2Fetc", serde_json::json!({})).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        pause("done-1", serde_json::json!({})).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        pause("gate-1", serde_json::json!({ "mode": "later" }))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        pause("gate-1", serde_json::json!({ "until": "tomorrow-ish" }))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
+async fn resume_refuses_unknown_and_finished_runs() {
+    let _cfg = common::config_sandbox().await;
+    apb_core::run_origin::ensure_key().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    seed_stamped_run(
+        dir.path(),
+        "done-1",
+        GATE,
+        &[apb_engine::event::EventPayload::RunFinished {
+            outcome: "success".into(),
+        }],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, _) = post_json(
+        app.clone(),
+        "/api/runs/ghost-1/resume",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = post_json(app, "/api/runs/done-1/resume", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// Resuming goes through the same consent check as MCP `run_resume`: a paused
+/// run of an irreversible playbook with no consent recorded is refused with
+/// the nonce the dashboard's consent dialog confirms; a stale nonce is
+/// refused again.
+#[tokio::test]
+async fn resume_of_an_irreversible_run_needs_the_consent_nonce() {
+    let _cfg = common::config_sandbox().await;
+    apb_core::run_origin::ensure_key().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    seed_stamped_run(
+        dir.path(),
+        "rel-1",
+        &GATE.replace("nodes:", "effects: [irreversible]\nnodes:"),
+        &[paused_event("away")],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) =
+        post_json(app.clone(), "/api/runs/rel-1/resume", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["policy"], "irreversible_requires_confirmation");
+    assert_eq!(json["resume"], true);
+    assert!(json["consent_nonce"].as_str().is_some());
+    let (status, json) = post_json(
+        app,
+        "/api/runs/rel-1/resume",
+        serde_json::json!({ "confirm_irreversible": "consent-stale" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
 }

@@ -206,6 +206,12 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     if let Some(p) = progress.filter(|p| !p.pending_tasks.is_empty()) {
         out["pending_tasks"] = json!(p.pending_tasks);
     }
+    // Issue #200: who paused the run, why, since and until when; `pausing`
+    // while a live driver still drains toward a queued pause. Absent when the
+    // run is neither paused nor pausing.
+    if let Some(p) = view.pause() {
+        out["pause"] = json!(p);
+    }
     add_journal_extras(&mut out, &view);
     add_outcome_blocks(&mut out, &view, &dir);
     add_candidate_trial(&mut out, &view, &dir);
@@ -400,6 +406,9 @@ pub fn run_wait_result(
         WaitReason::Stopped if res.driver_alive == Some(false) => {
             "the run's driver is dead, so the run is interrupted; run_resume continues it"
         }
+        WaitReason::Stopped if res.pause().is_some() => {
+            "the run is paused (see pause); run_resume continues it, also before pause.until. Gates stay open and are listed in pending_*"
+        }
         WaitReason::Stopped => "the run is paused or has no live driver; run_resume continues it",
         WaitReason::Timeout => {
             "still running: call run_wait again with the same arguments; do not poll run_status"
@@ -422,6 +431,9 @@ pub fn run_wait_result(
         && let Some(needs) = res.needs
     {
         out["needs"] = json!(needs.as_str());
+    }
+    if let Some(p) = res.pause() {
+        out["pause"] = json!(p);
     }
     let progress = view.progress.as_ref();
     let dir = resolve_run_dir(root, run_id)?;
@@ -557,6 +569,8 @@ pub fn run_resume(
     // successful resume followed by a run that never moved.
     let pending_stop =
         apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))?.is_some();
+    // Issue #200: a paused run with an `until` still ahead resumes early.
+    let early_until = early_resume_until(root, run_id);
     // The drift preflight runs inside resume_detached_with: a drift the caller
     // did not allow is returned as an Err HERE (issue #45 finding 3), instead
     // of the old detached spawn whose child failed its own check on null stdio
@@ -568,6 +582,12 @@ pub fn run_resume(
         "reason": decision.reason.as_str(),
         "detached": true,
     });
+    if let Some(until) = early_until
+        && let Some(obj) = ack.as_object_mut()
+    {
+        obj.insert("resumed_early".into(), json!(true));
+        obj.insert("pause_until".into(), json!(until));
+    }
     if allow_environment_drift && let Some(obj) = ack.as_object_mut() {
         obj.insert(
             "note".into(),
@@ -586,6 +606,15 @@ pub fn run_resume(
         );
     }
     Ok(ack)
+}
+
+/// The `until` (epoch ms) of the pause a resume called now cuts short, when
+/// the run is paused and that time has not come yet.
+fn early_resume_until(root: &Path, run_id: &str) -> Option<u64> {
+    let dir = resolve_run_dir(root, run_id).ok()?;
+    let view = apb_engine::run_view::RunView::load(&dir, run_id).ok()?;
+    let p = view.pause().filter(|p| !p.pausing)?;
+    p.until.filter(|u| *u > apb_core::clock::now_ms_u64())
 }
 
 /// Starts a playbook in supervised mode without waiting for it to finish, on a
@@ -658,6 +687,49 @@ pub fn playbook_run_supervised(
 pub fn run_stop(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let outcome = stop_run(root, run_id)?;
     Ok(json!({ "run_id": run_id, "outcome": outcome.as_str() }))
+}
+
+/// Pauses a run as the operator (issue #200): the operator-facing pause,
+/// the same one `apb pause` and the dashboard call. Unlike
+/// `supervisor_run_pause` it needs no supervisor session and works on any
+/// live or paused run. `mode` is `drain` (default) or `now`; `until` is an
+/// RFC 3339 timestamp or a duration (`90m`, `2h`).
+pub fn pause_run(
+    root: &Path,
+    run_id: &str,
+    mode: Option<&str>,
+    reason: Option<String>,
+    until: Option<&str>,
+    keep_lock: bool,
+) -> Result<Value, ToolError> {
+    use apb_engine::pause::{PauseOutcome, PauseRequest};
+    let req = PauseRequest::operator(
+        mode,
+        reason,
+        until,
+        keep_lock,
+        apb_core::clock::now_ms_u64(),
+    )
+    .map_err(ToolError::Engine)?;
+    let outcome = apb_engine::pause::request_pause(root, run_id, &req)?;
+    let (seq, next) = match outcome {
+        PauseOutcome::Posted { seq } => (
+            seq,
+            "pause posted: the run reads `pausing` until its driver applies it; run_wait returns when it is paused. run_resume continues it",
+        ),
+        PauseOutcome::Journaled { seq } => (
+            seq,
+            "the run is paused; run_resume continues it, also before `until`",
+        ),
+    };
+    Ok(json!({
+        "run_id": run_id,
+        "outcome": outcome.as_str(),
+        "mode": req.mode.as_str(),
+        "seq": seq,
+        "until": req.until,
+        "next": next,
+    }))
 }
 
 /// Answers a pending interactive question on a run (spec

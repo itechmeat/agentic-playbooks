@@ -643,6 +643,12 @@ commits?: Array<NodeCommits>,
  */
 candidate_trial?: CandidateTrial, 
 /**
+ * The run's pause (issue #200): who paused it, why, since and until
+ * when, and `pausing` while a live driver drains toward a queued
+ * pause. Absent for a run that is neither paused nor pausing.
+ */
+pause?: PauseInfo, 
+/**
  * The model each attempt actually ran on, against the profile's primary
  * model (issue #193); empty before the first attempt.
  */

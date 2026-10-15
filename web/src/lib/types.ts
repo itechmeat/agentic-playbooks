@@ -65,6 +65,9 @@ export interface PlaybookDetail {
 export type {
   ChildRun,
   NodeStatus,
+  PauseBy,
+  PauseInfo,
+  PauseMode,
   PendingQuestion,
   PendingReview,
   PendingSupervisor,

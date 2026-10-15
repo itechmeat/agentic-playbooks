@@ -11,6 +11,7 @@ mod eval;
 // --- end 0.24.0 eval suites ---
 mod manage;
 mod onboarding;
+mod pause;
 mod profile;
 mod run;
 // --- 0.24.0 run execution mode lines ---
@@ -41,6 +42,7 @@ use crate::manage::{
     ProjectsAction, adopt_cmd, detect_cmd, export_cmd, import_cmd, migrate_cmd, projects_cmd,
     run_init, subscriptions_cmd,
 };
+use crate::pause::pause_cmd;
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
     answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd, resume_all_cmd,
@@ -240,6 +242,32 @@ enum Command {
         /// With a run id: the run as JSON, the same object as MCP run_status
         #[arg(long, requires = "run_id")]
         json: bool,
+    },
+    /// Pause a run so it can continue later (issue #200). Default `--drain`:
+    /// no new node starts, running nodes finish, then the run is paused and
+    /// holds no process. `--now` interrupts running nodes, which run again
+    /// on resume. Clocks (node and host-task deadlines, stats) freeze while
+    /// paused. Continue with `apb resume`
+    Pause {
+        run_id: String,
+        /// Admit no new node, let the running ones finish (the default)
+        #[arg(long, conflicts_with = "now")]
+        drain: bool,
+        /// Interrupt the running nodes (SIGTERM, a grace period, then
+        /// SIGKILL); they run again on resume and no attempt counts as failed
+        #[arg(long)]
+        now: bool,
+        /// Why the run is paused; shown by `apb runs` and `apb wait`
+        #[arg(long)]
+        reason: Option<String>,
+        /// Resume on its own at this time: an RFC 3339 timestamp or a
+        /// duration from now (`90m`, `2h`)
+        #[arg(long, value_name = "TIME|DURATION")]
+        until: Option<String>,
+        /// Keep the workdir busy lock while paused, so no other run can touch
+        /// the tree (default: released)
+        #[arg(long)]
+        keep_lock: bool,
     },
     /// Resume a paused/interrupted run
     Resume {
@@ -633,6 +661,14 @@ fn main() -> ExitCode {
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
         Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Pause {
+            run_id,
+            now,
+            reason,
+            until,
+            keep_lock,
+            ..
+        }) => pause_cmd(&root, &run_id, now, reason, until.as_deref(), keep_lock),
         Some(Command::Resume { all: true, .. }) => resume_all_cmd(&root),
         Some(Command::Resume {
             run_id,
