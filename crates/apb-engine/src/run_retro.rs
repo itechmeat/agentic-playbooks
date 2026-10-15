@@ -307,9 +307,20 @@ struct Walk {
     models: AttemptWalk,
     /// Host task id -> its request ts.
     requested: BTreeMap<String, u128>,
+    /// The run's paused intervals (issue #200): node durations leave them out.
+    paused: Vec<(u128, u128)>,
 }
 
 impl Walk {
+    /// A walk over `events`, knowing where the run was paused.
+    fn over(events: &[Event]) -> Self {
+        let now = events.last().map(|e| e.ts).unwrap_or_default();
+        Walk {
+            paused: crate::pause::paused_intervals(events, now),
+            ..Walk::default()
+        }
+    }
+
     fn node(&mut self, node: &str) -> &mut NodeAcc {
         if !self.nodes.contains_key(node) {
             self.order.push(node.to_string());
@@ -343,9 +354,14 @@ impl Walk {
                 n.status = None;
             }
             EventPayload::NodeFinished { node, status, .. } => {
+                // Paused time is not node time (issue #200).
+                let active = self.node(node).open_since.take().map(|t| {
+                    let p = crate::pause::paused_ms_in(&self.paused, t, e.ts);
+                    ms(t, e.ts).saturating_sub(u64::try_from(p).unwrap_or(u64::MAX))
+                });
                 let n = self.node(node);
-                if let Some(t) = n.open_since.take() {
-                    n.duration_ms = n.duration_ms.saturating_add(ms(t, e.ts));
+                if let Some(a) = active {
+                    n.duration_ms = n.duration_ms.saturating_add(a);
                 }
                 n.status = Some(status.clone());
             }
@@ -467,12 +483,14 @@ fn run_duration(events: &[Event]) -> Option<u64> {
     let (start, ..) = run_started(events)?;
     let (_, end) = run_end(events);
     let end = end.or_else(|| events.last().map(|e| e.ts))?;
-    Some(ms(start, end))
+    // Paused time is not run time (issue #200).
+    let active = crate::pause::active_elapsed_ms(events, start, end, end);
+    Some(u64::try_from(active).unwrap_or(u64::MAX))
 }
 
 /// Time per node over one run's finished executions.
 fn node_times(events: &[Event]) -> BTreeMap<String, u64> {
-    let mut w = Walk::default();
+    let mut w = Walk::over(events);
     for e in events {
         w.step(e);
     }
@@ -485,7 +503,7 @@ fn node_times(events: &[Event]) -> BTreeMap<String, u64> {
 /// Builds the report for `run` against `history` (any runs; only finished
 /// runs of the same playbook and version count, the newest `compare_last`).
 pub fn build(run: &RetroRun, history: &[StatsRun], compare_last: usize) -> RetroReport {
-    let mut w = Walk::default();
+    let mut w = Walk::over(&run.events);
     for e in &run.events {
         w.step(e);
     }

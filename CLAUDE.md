@@ -64,6 +64,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`run_stats.rs`, `run_stats/`), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
   `apb eval` (`eval/`),
+  the operator pause: who paused a run and how, the pause every run surface
+  reports, and the paused-interval clock every deadline, timeout and
+  duration goes through (`pause.rs`; `pause/`: `kind` the journal-facing
+  types, `request` the one pause entry point and what a paused drive leaves
+  behind, `interrupt` the graceful kill registry of a `--now` pause,
+  `waker` the detached resume at `until`, `resume_all` behind
+  `apb resume --all`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
@@ -118,6 +125,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `supervisor_*` MCP tools; its binding exists in the manifest only when the run
   is actually externally supervised. `supervisor_interrupt_attempt` takes an
   optional `node`: targeted at one attempt, or a whole-run broadcast when omitted.
+- An **operator pause** (issue #200) goes through
+  `apb_engine::pause::request_pause`: a live driver gets `Control::Pause`
+  (drain: no new node; now: the stop watcher fires a separate pause fanout,
+  never the Abort-only `cancel`, so in-flight attempts get SIGTERM, a grace
+  period, then SIGKILL, and journal `attempt_finished { interrupted }` with
+  no `node_finished`); a run nothing drives gets `run_paused` journaled
+  directly. A paused run holds no driver: `--keep-lock` parks the busy lock
+  as `paused:<run_id>`, and a pause with `until` leaves a detached
+  `apb __pause-waker` that resumes only if the same `run_paused` (journal
+  seq) still holds the run.
 - Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
   implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in
   inside its own cycle stays first-arrival, else loops deadlock). An unreachable

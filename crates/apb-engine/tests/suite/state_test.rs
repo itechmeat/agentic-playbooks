@@ -149,6 +149,7 @@ fn run_resumed_folds_to_running() {
             2,
             EventPayload::RunResumed {
                 from_node: "a".into(),
+                by: None,
             },
         ),
     ];
@@ -166,6 +167,10 @@ fn legacy_run_paused_marker_still_folds_to_paused() {
             1,
             EventPayload::RunPaused {
                 reason: "resume from `a`".into(),
+                by: None,
+                mode: None,
+                until: None,
+                keep_lock: false,
             },
         ),
     ];

@@ -3239,7 +3239,14 @@ pub(crate) fn run_playbook_node(
     if let Some(existing) = latest_child_run(&events, node_id)
         && !run_is_terminal(root, &existing)?
     {
-        let res = resume_inner(root, &existing, None, false, true)?;
+        let res = resume_inner(
+            root,
+            &existing,
+            None,
+            false,
+            true,
+            Some(crate::pause::PauseBy::Engine),
+        )?;
         // Nested resume can also mirror wakes onto the parent log.
         log.resync_seq()?;
         return Ok(map_child_outcome(root, &existing, res.outcome));

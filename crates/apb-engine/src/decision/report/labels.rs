@@ -755,6 +755,7 @@ mod tests {
             seq,
             EventPayload::RunResumed {
                 from_node: "placeholder".into(),
+                by: None,
             },
         )
     }
@@ -774,7 +775,7 @@ mod tests {
         let mut failed = pending.clone();
         failed.push(finished(5, "b", "failed"));
         assert_eq!(label(&failed), Label::Act);
-        pending.push(ev(5, EventPayload::RunPaused { reason: "x".into() }));
+        pending.push(ev(5, crate::pause::engine_paused("x")));
         assert!(matches!(label(&pending), Label::Unlabelled(_)));
         // The last node: the run's outcome labels it.
         let mut last = base();

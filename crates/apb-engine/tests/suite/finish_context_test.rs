@@ -180,7 +180,12 @@ fn finish_context_survives_resume_and_patch_migration() {
     // Pause after p2 finished: p1 and p2 are done, p3 is still pending. The
     // pause is posted while p2 is held, then p2 is released.
     poll_until("p2 started", || node_started(&run_dir, "p2").then_some(()));
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     fs::write(dir.path().join("release-p2"), "").unwrap();
     poll_until("run paused", || {
         (RunState::fold(&read_all(&run_dir).unwrap()).run_status == RunStatus::Paused).then_some(())

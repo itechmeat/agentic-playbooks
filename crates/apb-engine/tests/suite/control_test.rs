@@ -3,7 +3,11 @@ use apb_engine::control::{Control, post_control, read_control_after};
 #[test]
 fn post_and_read_control_with_cursor() {
     let dir = tempfile::tempdir().unwrap();
-    let s0 = post_control(dir.path(), Control::Pause).unwrap();
+    let s0 = post_control(
+        dir.path(),
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     let s1 = post_control(
         dir.path(),
         Control::Retry {
@@ -23,7 +27,7 @@ fn post_and_read_control_with_cursor() {
 
     let all = read_control_after(dir.path(), None).unwrap();
     assert_eq!(all.len(), 3);
-    assert!(matches!(all[0].cmd, Control::Pause));
+    assert!(matches!(all[0].cmd, Control::Pause(_)));
 
     let tail = read_control_after(dir.path(), Some(0)).unwrap();
     assert_eq!(tail.len(), 2);
@@ -102,4 +106,51 @@ fn progress_control_serializes_with_cmd_tag() {
     assert!(s.contains("\"cmd\":\"progress\""), "got {s}");
     assert!(s.contains("\"done\":3"));
     assert!(s.contains("\"total\":14"));
+}
+
+#[test]
+fn an_old_pause_line_still_parses_and_new_fields_round_trip() {
+    use apb_engine::control::ControlEntry;
+    use apb_engine::pause::{PauseBy, PauseMode, PauseRequest};
+    // The historical line, written before issue #200.
+    let old: ControlEntry = serde_json::from_str(r#"{"seq":0,"cmd":"pause"}"#).unwrap();
+    let Control::Pause(req) = &old.cmd else {
+        panic!("expected a pause, got {:?}", old.cmd)
+    };
+    assert_eq!(req, &PauseRequest::default());
+    assert_eq!(req.mode, PauseMode::Drain);
+    assert_eq!(req.journal_reason(), "supervisor pause");
+
+    let full = ControlEntry {
+        seq: 3,
+        cmd: Control::Pause(PauseRequest {
+            reason: Some("overnight".into()),
+            by: Some(PauseBy::Operator),
+            mode: PauseMode::Now,
+            until: Some(1_800_000_000_000),
+            keep_lock: true,
+        }),
+    };
+    let line = serde_json::to_string(&full).unwrap();
+    let back: ControlEntry = serde_json::from_str(&line).unwrap();
+    let Control::Pause(req) = back.cmd else {
+        panic!("expected a pause")
+    };
+    assert_eq!(req.reason.as_deref(), Some("overnight"));
+    assert_eq!(req.by, Some(PauseBy::Operator));
+    assert_eq!(req.mode, PauseMode::Now);
+    assert_eq!(req.until, Some(1_800_000_000_000));
+    assert!(req.keep_lock);
+}
+
+#[test]
+fn the_supervisor_pause_journals_by_supervisor() {
+    use apb_engine::event::EventPayload;
+    use apb_engine::pause::{PauseBy, PauseRequest};
+    let ev = PauseRequest::supervisor().to_event();
+    assert!(matches!(
+        ev,
+        EventPayload::RunPaused { ref reason, by: Some(PauseBy::Supervisor), .. }
+            if reason == "supervisor pause"
+    ));
 }

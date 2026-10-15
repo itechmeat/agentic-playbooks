@@ -78,11 +78,10 @@ pub use entry::{
 };
 pub(crate) use journal::{
     Journal, attempt_started_count, current_visit_start_seq, last_attempt_session,
-    last_question_asked_ts, last_wait_started_ts, node_finished_count,
-    node_has_unanswered_channel_question, node_primary_invocation, node_started_count,
-    question_answered_count, question_asked_count, questions_answered_before_seq,
-    questions_asked_before_seq, review_decided_count, review_open_count, wait_ended_count,
-    wait_signalled_count, wait_started_count,
+    node_finished_count, node_has_unanswered_channel_question, node_primary_invocation,
+    node_started_count, question_active_ms, question_answered_count, question_asked_count,
+    questions_answered_before_seq, questions_asked_before_seq, review_decided_count,
+    review_open_count, wait_active_ms, wait_ended_count, wait_signalled_count, wait_started_count,
 };
 pub use listing::{RunSummary, list_runs};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
@@ -94,7 +93,10 @@ use prepare::*;
 use rebind::*;
 pub(crate) use resume::{ResumeChoice, build_reprompt_override, resume_decision, resume_inner};
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
-pub use resume::{record_run_error, resume, resume_detached, resume_detached_with, resume_with};
+pub use resume::{
+    record_run_error, resume, resume_by, resume_detached, resume_detached_by, resume_detached_with,
+    resume_with,
+};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -365,7 +367,14 @@ fn drive(
     match drive_inner(
         playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode, lock,
     ) {
-        Ok(r) => Ok(r),
+        Ok(r) => {
+            // A paused run holds no driver (issue #200): keep its lock when
+            // the pause asked for it, and leave a waker behind for `until`.
+            if r.outcome == RunStatus::Paused {
+                crate::pause::request::after_pause(root, run_dir, &r.run_id, lock);
+            }
+            Ok(r)
+        }
         Err(e) => {
             // Best effort: the run directory may itself be in a bad state
             // (the same disk fault that failed the drive loop could also fail
@@ -462,11 +471,12 @@ fn drive_inner(
     // An eval run's wall clock (0.24.0): the driver aborts the run itself at
     // the deadline, so the limit holds even when the `apb eval` that
     // started it is gone.
-    let _deadline = cfg
-        .eval
-        .as_ref()
-        .and_then(|e| e.deadline_ms)
-        .map(|at| DeadlineWatch::start(run_dir, at));
+    let _deadline = cfg.eval.as_ref().and_then(|e| e.deadline_ms).map(|at| {
+        // A resumed eval run gets its paused time back (issue #200).
+        let events = crate::event::read_all_lossy_tail(run_dir).unwrap_or_default();
+        let at = crate::pause::shift_by_paused(at, &events, apb_core::clock::now_ms());
+        DeadlineWatch::start(run_dir, at)
+    });
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once
     // per run and removed from every spawned agent's environment - even runs
@@ -620,11 +630,18 @@ fn drive_inner(
     // below to stop chunk admission on a Pause without journaling anything
     // off (Task 9).
     let halt = Arc::new(AtomicBool::new(false));
+    // Set when a `--now` pause (issue #200) fired: a node that then ends
+    // `cancelled` was interrupted by the pause, journals an `interrupted`
+    // attempt and no `node_finished`, and runs again on resume.
+    let pause_now = Arc::new(AtomicBool::new(false));
     let watcher = crate::stop::StopWatcher::spawn(
         run_dir,
         control_cursor,
-        Arc::clone(&run_cancel),
-        Arc::clone(&halt),
+        crate::stop::StopFlags {
+            cancel: Arc::clone(&run_cancel),
+            halt: Arc::clone(&halt),
+            pause_now: Arc::clone(&pause_now),
+        },
     );
     // `fanout.fire()` (triggered by the watcher on Abort) is what lets a
     // run-level Abort reach a flag a batch member polls directly instead of
@@ -643,6 +660,9 @@ fn drive_inner(
     // `cancel_short_circuited` because the sequential arm and the batch arm
     // each own their own latch.
     let mut batch_stop_short_circuited = false;
+    // The same one-shot idea for a node a `--now` pause interrupted: the hop
+    // back to the control scan happens once.
+    let mut pause_short_circuited = false;
     // One-shot prompt overrides set by the Retry{prompt_override} command:
     // node_id -> text that will replace the rendered prompt for EXACTLY the next
     // execution of that node, after which the entry is removed.
@@ -924,8 +944,10 @@ fn drive_inner(
                     .iter()
                     .map(|n| (n.clone(), Arc::new(AtomicBool::new(false))))
                     .collect();
-                let mut member_fans: Vec<crate::stop::FanoutGuard> =
-                    member_flags.values().map(|f| fanout.register(f)).collect();
+                let mut member_fans: Vec<crate::stop::FanoutGuard> = member_flags
+                    .values()
+                    .map(|f| fanout.register_pausable(f))
+                    .collect();
                 // Members a fork's policy interrupted or kept from starting.
                 let mut fork_killed: BTreeSet<String> = BTreeSet::new();
                 // Node, terminal status and output per branch. The output is
@@ -1197,6 +1219,19 @@ fn drive_inner(
                                 for ev in evs {
                                     journal.append(ev)?;
                                 }
+                                // A `--now` pause cut this member short (issue
+                                // #200): an interrupted attempt and no
+                                // `node_finished`, so the resume runs it again.
+                                // A member a fork policy or a won `join: any`
+                                // cancelled stays cancelled.
+                                if status == NodeStatus::Cancelled
+                                    && journal::interrupted_by_pause(&pause_now, &run_cancel)
+                                    && !fork_killed.contains(&node)
+                                    && !cancel.load(Ordering::Relaxed)
+                                {
+                                    journal::journal_interrupted(&journal, run_dir, &node)?;
+                                    continue;
+                                }
                                 // Declared-artifact capture and cache admission,
                                 // the same unit the sequential arm uses, on THIS
                                 // (the drive) thread as each member returns.
@@ -1411,9 +1446,9 @@ fn drive_inner(
                     .iter()
                     .any(|(_, s, _)| matches!(s, NodeStatus::Unknown | NodeStatus::Interrupted))
                 {
-                    log.append(EventPayload::RunPaused {
-                        reason: "parallel branch ended with unknown/interrupted status".into(),
-                    })?;
+                    log.append(crate::pause::engine_paused(
+                        "parallel branch ended with unknown/interrupted status",
+                    ))?;
                     return Ok(RunResult {
                         run_id,
                         outcome: RunStatus::Paused,
@@ -1681,9 +1716,8 @@ fn drive_inner(
                     kind: kind.into(),
                 })?;
             }
-            let start_ts = last_wait_started_ts(&read_all(run_dir)?, &current)
-                .unwrap_or_else(apb_core::clock::now_ms);
-            let elapsed = apb_core::clock::now_ms().saturating_sub(start_ts);
+            let events = read_all(run_dir)?;
+            let elapsed = wait_active_ms(&events, &current, apb_core::clock::now_ms()).unwrap_or(0);
             let signalled = match wait_for {
                 WaitFor::Timer { seconds } => elapsed >= u128::from(*seconds) * 1000,
                 // We only resolve the wait via an UNCONSUMED signal: how many
@@ -1945,12 +1979,9 @@ fn drive_inner(
                         };
                         let expired = match (
                             question_timeout_seconds,
-                            last_question_asked_ts(&events, &current),
+                            question_active_ms(&events, &current, apb_core::clock::now_ms()),
                         ) {
-                            (Some(secs), Some(asked_ts)) => {
-                                apb_core::clock::now_ms().saturating_sub(asked_ts)
-                                    >= u128::from(secs) * 1000
-                            }
+                            (Some(secs), Some(open_ms)) => open_ms >= u128::from(secs) * 1000,
                             _ => false,
                         };
                         if !expired {
@@ -2273,6 +2304,10 @@ fn drive_inner(
                 hit
             } else {
                 let override_prompt = prompt_overrides.remove(&current);
+                // This execution's own kill flag: an Abort and a `--now` pause
+                // (issue #200) both latch it, and `pause_now` tells them apart.
+                let node_kill = Arc::new(AtomicBool::new(false));
+                let _node_fan = fanout.register_pausable(&node_kill);
                 // The journal borrows `log` for the duration of execute_node so the
                 // node can append attempt_started at spawn time; the block scopes
                 // that borrow so `log` is free again for the return-batch writes.
@@ -2287,7 +2322,7 @@ fn drive_inner(
                         &state,
                         cfg,
                         override_prompt,
-                        &run_cancel,
+                        &node_kill,
                         &env_scrub,
                         &journal,
                         decisions.as_ref(),
@@ -2314,6 +2349,17 @@ fn drive_inner(
                 };
                 for ev in evs {
                     log.append(ev)?;
+                }
+                // A `--now` pause cut the node short (issue #200): journal an
+                // interrupted attempt and no `node_finished`, then go back to
+                // the control scan, which applies the pause and ends the drive.
+                if st == NodeStatus::Cancelled
+                    && !pause_short_circuited
+                    && journal::interrupted_by_pause(&pause_now, &run_cancel)
+                {
+                    pause_short_circuited = true;
+                    journal::journal_interrupted(&Journal::new(&mut *log), run_dir, &current)?;
+                    continue;
                 }
                 // Declared-artifact capture and cache admission, the same unit
                 // the batch path uses.
@@ -2373,9 +2419,10 @@ fn drive_inner(
 
         // unknown/interrupted halt progression (Phase 2 without supervisor - run pauses).
         if matches!(status, NodeStatus::Unknown | NodeStatus::Interrupted) {
-            log.append(EventPayload::RunPaused {
-                reason: format!("node `{current}` ended with status {}", status.as_str()),
-            })?;
+            log.append(crate::pause::engine_paused(format!(
+                "node `{current}` ended with status {}",
+                status.as_str()
+            )))?;
             return Ok(RunResult {
                 run_id,
                 outcome: RunStatus::Paused,

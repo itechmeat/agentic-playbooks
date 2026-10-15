@@ -43,8 +43,9 @@ use crate::manage::{
 };
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
-    answer_cmd, drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd,
-    run_doctor, run_list, run_validate, runs_cmd, stop_cmd, wait_cmd,
+    answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd, resume_all_cmd,
+    resume_cmd, review_cmd, run_cmd, run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
+    wait_cmd,
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
@@ -242,7 +243,15 @@ enum Command {
     },
     /// Resume a paused/interrupted run
     Resume {
-        run_id: String,
+        #[arg(required_unless_present = "all")]
+        run_id: Option<String>,
+        /// Resume every run of this workspace a lost driver or a passed
+        /// pause `until` left waiting (runs reading `running` with no live
+        /// driver, paused runs whose `until` has passed); sub-playbook
+        /// children follow their parent. A driverless run that cannot be
+        /// resumed is marked `paused (driverless)`.
+        #[arg(long, conflicts_with_all = ["run_id", "from_node"])]
+        all: bool,
         #[arg(long)]
         from_node: Option<String>,
         /// Continue even though an agent binary changed on disk since the run
@@ -499,6 +508,25 @@ enum Command {
         /// drift events instead of refusing.
         #[arg(long = "allow-environment-drift")]
         allow_environment_drift: bool,
+        /// Who resumes the run (`operator`, `supervisor`, `engine`), journaled
+        /// on `run_resumed` (issue #200). Only meaningful with `--resume`.
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// The waker of a paused run with an `until` (issue #200): sleeps until
+    /// then and resumes the run only if the same pause still holds it. Spawned
+    /// detached by the driver that journaled the pause. Holds no lock and runs
+    /// no node. Hidden: an internal re-exec target.
+    #[command(hide = true, name = "__pause-waker")]
+    PauseWaker {
+        /// Project root holding `.apb/runs` (absolute).
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long = "run-id")]
+        run_id: String,
+        /// The journal sequence of the `run_paused` this waker belongs to.
+        #[arg(long)]
+        seq: u64,
     },
     /// The live-question sidecar (spec 2026-07-20-interactive-nodes, Task 10):
     /// a stdio MCP server exposing one `ask_user` tool, injected into the
@@ -526,7 +554,10 @@ fn registers_workspace(command: Option<&Command>) -> bool {
     !matches!(
         command,
         Some(
-            Command::DriveSupervised { .. } | Command::DriveRun { .. } | Command::AskServer { .. }
+            Command::DriveSupervised { .. }
+                | Command::DriveRun { .. }
+                | Command::PauseWaker { .. }
+                | Command::AskServer { .. }
         )
     )
 }
@@ -602,14 +633,16 @@ fn main() -> ExitCode {
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
         Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Resume { all: true, .. }) => resume_all_cmd(&root),
         Some(Command::Resume {
             run_id,
             from_node,
             allow_environment_drift,
             confirm_irreversible,
+            ..
         }) => resume_cmd(
             &root,
-            &run_id,
+            run_id.as_deref().unwrap_or_default(),
             from_node.as_deref(),
             allow_environment_drift,
             confirm_irreversible,
@@ -736,13 +769,20 @@ fn main() -> ExitCode {
             from_node,
             resume,
             allow_environment_drift,
+            by,
         }) => drive_run_child(
             &run_root,
             &run_id,
             from_node.as_deref(),
             resume,
             allow_environment_drift,
+            by.as_deref(),
         ),
+        Some(Command::PauseWaker {
+            root: run_root,
+            run_id,
+            seq,
+        }) => pause_waker_cmd(&run_root, &run_id, seq),
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
         None => match resolve_bind(None) {
             Ok(addr) => dashboard(addr, resolve_port(None), false),

@@ -298,7 +298,7 @@ fn v13_message_includes_variable_and_known_namespaces() {
             "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
              nodes.<id>.output.<field>, nodes.<id>.report.<field>, nodes.<id>.review_note, \
              nodes.<id>.review_decision, nodes.<id>.rejected_output, run.instruction, \
-             run.context, run.id, run.retro, run.hooks.*"
+             run.context, run.id, run.retro, run.active_elapsed_seconds, run.hooks.*"
         ),
         "message must carry the exact known-namespaces suffix: {}",
         issue.message
@@ -315,6 +315,16 @@ fn v13_resolves_the_run_id() {
     );
     let typo = VALID.replace("{{params.task}}", "{{run.ids}}");
     assert!(error_codes(&typo).contains(&"V13"));
+}
+
+/// `{{run.active_elapsed_seconds}}` (issue #200) resolves anywhere a prompt
+/// renders; a deeper path does not.
+#[test]
+fn v13_resolves_the_run_active_elapsed_seconds() {
+    let ok = VALID.replace("{{params.task}}", "{{run.active_elapsed_seconds}}");
+    assert!(!error_codes(&ok).contains(&"V13"));
+    let deeper = VALID.replace("{{params.task}}", "{{run.active_elapsed_seconds.x}}");
+    assert!(error_codes(&deeper).contains(&"V13"));
 }
 
 /// `{{run.retro}}` (issue #192) renders the run's retrospective and

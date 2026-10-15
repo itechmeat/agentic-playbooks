@@ -16,7 +16,9 @@ pub enum Control {
     ContinueFrom {
         node: String,
     },
-    Pause,
+    /// Pause the run (issue #200). The payload's fields are all optional,
+    /// so the historical `{"cmd":"pause"}` line still parses.
+    Pause(crate::pause::PauseRequest),
     Abort {
         reason: String,
     },
@@ -93,7 +95,7 @@ impl Control {
         match self {
             Control::Retry { .. } => "retry",
             Control::ContinueFrom { .. } => "continue_from",
-            Control::Pause => "pause",
+            Control::Pause(_) => "pause",
             Control::Abort { .. } => "abort",
             Control::ContextAppend { .. } => crate::event::supervisor_action::CONTEXT_APPEND,
             Control::Progress { .. } => "progress",
@@ -201,6 +203,18 @@ pub fn pending_stop_seq(run_dir: &Path) -> Result<Option<u64>, EngineError> {
         .iter()
         .find(|e| matches!(e.cmd, Control::Abort { .. }))
         .map(|e| e.seq))
+}
+
+/// The first UNAPPLIED `Pause` in this run's control queue, if any (issue
+/// #200): what a live driver is draining toward, reported as `pausing`.
+pub fn pending_pause(run_dir: &Path) -> Result<Option<crate::pause::PauseRequest>, EngineError> {
+    let cursor = read_control_cursor(run_dir)?;
+    Ok(read_control_after(run_dir, cursor)?
+        .into_iter()
+        .find_map(|e| match e.cmd {
+            Control::Pause(req) => Some(req),
+            _ => None,
+        }))
 }
 
 pub fn read_control_after(

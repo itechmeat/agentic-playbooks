@@ -792,7 +792,12 @@ fn a_pause_during_a_batch_stops_admission_without_writing_members_off() {
     poll_until("the first chunk to start", || {
         dir.path().join("chunk1_started").is_file().then_some(())
     });
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     std::fs::write(dir.path().join("release"), "go").unwrap();
 
     let res = rx
@@ -834,7 +839,12 @@ fn a_paused_batch_resumes_and_runs_the_deferred_members() {
     poll_until("the first chunk to start", || {
         dir.path().join("chunk1_started").is_file().then_some(())
     });
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     std::fs::write(dir.path().join("release"), "go").unwrap();
     let paused = rx
         .recv_timeout(ABORT_DEADLINE)
@@ -891,7 +901,12 @@ fn a_pause_during_the_last_chunk_of_a_batch_still_pauses_and_resume_completes_it
     poll_until("the only chunk to start", || {
         dir.path().join("chunk1_started").is_file().then_some(())
     });
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     fs::write(dir.path().join("release"), "go").unwrap();
 
     let res = rx
@@ -1281,7 +1296,12 @@ edges:
         },
     )
     .unwrap();
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
 
     let res = rx
         .recv_timeout(ABORT_DEADLINE)

@@ -129,12 +129,7 @@ fn run(id: &str, f: &Fixture) -> RunJournal {
                 Some(if failed { "failed" } else { "succeeded" }),
             ));
         }
-        None => events.push(ev(
-            6,
-            EventPayload::RunPaused {
-                reason: "stop".into(),
-            },
-        )),
+        None => events.push(ev(6, crate::pause::engine_paused("stop"))),
     }
     RunJournal {
         run_id: id.into(),

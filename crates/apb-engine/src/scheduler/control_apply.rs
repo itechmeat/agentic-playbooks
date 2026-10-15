@@ -78,11 +78,9 @@ pub(crate) fn scan_control(
                 write_control_cursor(run_dir, entry.seq)?;
                 return Ok(ControlScan::Terminal(RunStatus::Aborted));
             }
-            Control::Pause => {
+            Control::Pause(req) => {
                 // Same ordering and reasoning as Abort above.
-                log.append(EventPayload::RunPaused {
-                    reason: "supervisor pause".into(),
-                })?;
+                log.append(req.to_event())?;
                 write_control_cursor(run_dir, entry.seq)?;
                 return Ok(ControlScan::Terminal(RunStatus::Paused));
             }
@@ -232,11 +230,16 @@ pub(crate) fn scan_control(
     // real entry in hand.
     if let Some(blocked_node) = blocked_by.as_ref() {
         let salvage = pending_control.iter().find_map(|e| match &e.cmd {
-            Control::Abort { reason } => Some((e.seq, RunStatus::Aborted, reason.clone())),
-            Control::Pause => Some((e.seq, RunStatus::Paused, "supervisor pause".to_string())),
+            Control::Abort { reason } => Some((e.seq, RunStatus::Aborted, reason.clone(), None)),
+            Control::Pause(req) => Some((
+                e.seq,
+                RunStatus::Paused,
+                req.journal_reason(),
+                Some(req.clone()),
+            )),
             _ => None,
         });
-        if let Some((terminal_seq, status, reason)) = salvage
+        if let Some((terminal_seq, status, reason, pause)) = salvage
             && (status != RunStatus::Aborted || run_cancel.load(Ordering::SeqCst))
         {
             log.append(EventPayload::SupervisorAction {
@@ -248,7 +251,7 @@ pub(crate) fn scan_control(
             })?;
             match status {
                 RunStatus::Aborted => log.append(EventPayload::RunAborted { reason })?,
-                RunStatus::Paused => log.append(EventPayload::RunPaused { reason })?,
+                RunStatus::Paused => log.append(pause.unwrap_or_default().to_event())?,
                 _ => unreachable!("salvage only ever produces Aborted or Paused"),
             };
             write_control_cursor(run_dir, terminal_seq)?;

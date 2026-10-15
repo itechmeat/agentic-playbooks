@@ -344,6 +344,7 @@ fn resume_failed_terminal_no_successor_is_refused_without_journaling() {
 fn run_resumed_serializes_with_snake_case_tag() {
     let payload = EventPayload::RunResumed {
         from_node: "a".into(),
+        by: None,
     };
     let json = serde_json::to_string(&payload).unwrap();
     assert!(

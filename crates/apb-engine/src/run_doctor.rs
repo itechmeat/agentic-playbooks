@@ -371,6 +371,17 @@ fn driver_check(run_dir: &Path, run_id: &str) -> RunCheck {
 /// leaked it.
 fn workdir_lock_check(root: &Path, tree: Option<&Path>) -> RunCheck {
     let path = crate::workdir::tree_lock_path(root, tree);
+    // A run paused with `--keep-lock` (issue #200) holds the lock with no
+    // process behind it, by design.
+    if let Some(crate::workdir::LockOwner::PausedRun(id)) = crate::workdir::lock_owner(&path) {
+        return RunCheck::new(
+            OK,
+            "workdir lock",
+            format!(
+                "held by the paused run `{id}` (--keep-lock); its resume takes it back, its stop releases it"
+            ),
+        );
+    }
     let Some(pid) = crate::workdir::lock_holder(&path) else {
         return RunCheck::new(OK, "workdir lock", "not held");
     };

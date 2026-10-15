@@ -950,9 +950,13 @@ pub(crate) fn drive_run_child(
     from_node: Option<&str>,
     resume: bool,
     allow_environment_drift: bool,
+    by: Option<&str>,
 ) -> ExitCode {
     let res = if resume {
-        apb_engine::resume_with(root, run_id, from_node, allow_environment_drift)
+        let by = by
+            .and_then(apb_engine::pause::PauseBy::parse)
+            .unwrap_or(apb_engine::pause::PauseBy::Operator);
+        apb_engine::resume_by(root, run_id, from_node, allow_environment_drift, by)
     } else {
         apb_engine::drive_run_from_dir(root, run_id)
     };
@@ -975,6 +979,24 @@ pub(crate) fn drive_run_child(
             } else {
                 eprintln!("drive of run `{run_id}` failed: {e}");
             }
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Body of the hidden `__pause-waker` subcommand (issue #200): sleeps until
+/// the pause at journal sequence `seq` reaches its `until`, then resumes the
+/// run if that pause still holds it. Stdio is nulled by the spawner; the exit
+/// code says what happened (0 resumed or nothing to do, 1 refused, 2 error).
+pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, seq: u64) -> ExitCode {
+    match apb_engine::pause::run_waker(root, run_id, seq) {
+        Ok(apb_engine::pause::WakeOutcome::Refused(why)) => {
+            eprintln!("waker of run `{run_id}`: resume refused: {why}");
+            ExitCode::from(1)
+        }
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("waker of run `{run_id}` failed: {e}");
             ExitCode::from(2)
         }
     }
@@ -1309,6 +1331,39 @@ pub(crate) fn resume_cmd(
         }
         Err(e) => {
             eprintln!("resume failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `apb resume --all` (issue #200): resumes what a lost driver or a passed
+/// pause `until` left waiting, one line per run it considered.
+pub(crate) fn resume_all_cmd(root: &Path) -> ExitCode {
+    use apb_engine::pause::ResumeAllAction;
+    match apb_engine::pause::resume_all(root) {
+        Ok(entries) => {
+            if entries.is_empty() {
+                println!("nothing to resume");
+            }
+            for e in &entries {
+                let what = match &e.action {
+                    ResumeAllAction::Resumed { cause, pid } => {
+                        format!("resumed ({}), driver pid {pid}", cause.as_str())
+                    }
+                    ResumeAllAction::MarkedDriverless { detail } => {
+                        format!("paused (driverless): cannot resume: {detail}")
+                    }
+                    ResumeAllAction::Refused { detail } => {
+                        format!("still paused: cannot resume: {detail}")
+                    }
+                    ResumeAllAction::LeftPaused => "left paused".to_string(),
+                };
+                println!("{}  {what}", e.run_id);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("resume --all failed: {e}");
             ExitCode::from(2)
         }
     }

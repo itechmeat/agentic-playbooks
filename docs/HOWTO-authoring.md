@@ -661,6 +661,10 @@ a V13 validation error:
   with a note). The same report as data is MCP `run_retro_context`. See
   "Retrospective node" below. It renders differently on every run, so such a
   node never hits the node cache.
+- `run.active_elapsed_seconds` - whole seconds the run has been active since
+  it started, as of the moment the node starts. Time the run spent paused
+  does not count, so a playbook can compute its own time budget from it. It
+  renders differently on every run, so such a node never hits the node cache.
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
   Bounded by the node's context budget (see "Context budget" below).

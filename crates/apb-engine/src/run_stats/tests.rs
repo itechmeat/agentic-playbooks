@@ -378,3 +378,37 @@ fn compare_against_a_version_without_runs_says_so() {
     let text = render_text(&build(&three_runs(), &filter));
     assert!(text.contains("compare p 9.9.9: no runs of 9.9.9"), "{text}");
 }
+
+/// Issue #200 (AC4): a run paused for 2 h mid-node reports its run and node
+/// durations without those 2 h, and the node stays within its estimate.
+#[test]
+fn a_two_hour_pause_is_left_out_of_run_and_node_durations() {
+    use serde_json::json;
+    let hour: u128 = 3_600_000;
+    let runs = vec![run(
+        "paused",
+        "1.0.0",
+        Some(SNAPSHOT),
+        &[
+            (1_000, started("work")),
+            (
+                3_000,
+                json!({"type": "run_paused", "reason": "lunch", "by": "operator"}),
+            ),
+            (
+                3_000 + 2 * hour,
+                json!({"type": "run_resumed", "from_node": "work", "by": "operator"}),
+            ),
+            (9_000 + 2 * hour, finished("work", "succeeded", 1)),
+            (9_000 + 2 * hour, edge("work", "done")),
+            (10_000 + 2 * hour, end("succeeded")),
+        ],
+    )];
+    let r = build(&runs, &StatsFilter::default());
+    let v = &r.versions[0];
+    // 1 000 -> 10 000 + 2 h, minus the 2 h pause.
+    assert_eq!(v.duration.median_ms, Some(9_000));
+    let work = v.nodes.iter().find(|n| n.node == "work").unwrap();
+    assert_eq!(work.duration.median_ms, Some(8_000));
+    assert_eq!(work.over_expected.unwrap().text(), "0/1 (0%)");
+}

@@ -90,10 +90,10 @@ pub(crate) fn tick_live_observation(
         return Ok(None);
     }
     let events = read_all(run_dir)?;
-    let Some(asked_ts) = last_question_asked_ts(&events, node) else {
+    let Some(open_ms) = question_active_ms(&events, node, apb_core::clock::now_ms()) else {
         return Ok(None);
     };
-    if apb_core::clock::now_ms().saturating_sub(asked_ts) < u128::from(secs) * 1000 {
+    if open_ms < u128::from(secs) * 1000 {
         return Ok(None);
     }
     match default_answer {

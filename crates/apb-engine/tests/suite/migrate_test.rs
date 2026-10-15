@@ -383,7 +383,7 @@ fn second_patch_pauses_when_patch_limit_is_exhausted() {
     let events = read_all(&run_dir).unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.payload,
-        EventPayload::RunPaused { reason } if reason.starts_with("max patches per run exhausted:")
+        EventPayload::RunPaused { reason, .. } if reason.starts_with("max patches per run exhausted:")
     )));
     assert_eq!(
         events

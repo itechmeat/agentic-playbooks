@@ -242,6 +242,20 @@ pub enum EventPayload {
     },
     RunPaused {
         reason: String,
+        /// Who paused the run (issue #200). Absent in older journals; the
+        /// views read a missing `by` as `supervisor`, the journal is never
+        /// rewritten. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<crate::pause::kind::PauseBy>,
+        /// `drain` or `now`; absent in older journals (read as `drain`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<crate::pause::kind::PauseMode>,
+        /// When the run resumes on its own, epoch milliseconds. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
+        /// The workdir busy lock stays held while paused. Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_lock: bool,
     },
     /// The run was ADMITTED while another write-run held the shared workdir
     /// lock, and its first node cannot start until that holder releases it.
@@ -280,6 +294,10 @@ pub enum EventPayload {
     /// `RunPaused` marker fold unchanged.
     RunResumed {
         from_node: String,
+        /// Who resumed the run (issue #200). Absent in older journals.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<crate::pause::kind::PauseBy>,
     },
     RunFinished {
         outcome: String,

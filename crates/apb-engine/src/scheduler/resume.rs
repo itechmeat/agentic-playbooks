@@ -14,6 +14,7 @@ use apb_core::registry::is_safe_segment;
 
 use crate::error::EngineError;
 use crate::event::read_all;
+use crate::pause::PauseBy;
 use crate::state::{NodeStatus, RunState, RunStatus};
 
 /// How `drive` treats the start node of a resume.
@@ -43,6 +44,11 @@ pub enum ResumeReason {
     ParallelFallback,
     /// The caller named an explicit `--from-node`.
     ExplicitFromNode,
+    /// A `--now` pause (issue #200) interrupted several nodes at once: every
+    /// one of them runs again. The first is the start node and the drive's
+    /// frontier reconstruction re-admits the others; no finished node runs
+    /// again.
+    PausedParallelRestart,
 }
 
 impl ResumeReason {
@@ -52,6 +58,7 @@ impl ResumeReason {
             ResumeReason::AdvancePastFinished => "advance_past_finished",
             ResumeReason::ParallelFallback => "parallel_fallback",
             ResumeReason::ExplicitFromNode => "explicit_from_node",
+            ResumeReason::PausedParallelRestart => "paused_parallel_restart",
         }
     }
 }
@@ -91,7 +98,8 @@ pub fn plan_resume(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let state = RunState::fold(&read_all(&run_dir)?);
+    let events = read_all(&run_dir)?;
+    let state = RunState::fold(&events);
 
     // An explicit target always wins: restart exactly that node.
     if let Some(n) = from_node {
@@ -137,6 +145,15 @@ pub fn plan_resume(
                 reason: ResumeReason::AdvancePastFinished,
             })
         }
+        // A `--now` pause interrupted these nodes itself, so every one of them
+        // is a branch head of a finished node: rerun them all, nothing else.
+        [first, ..] if state.run_status == RunStatus::Paused && paused_now(&events) => {
+            Ok(ResumeDecision {
+                start_node: first.clone(),
+                mode: StartMode::Rerun,
+                reason: ResumeReason::PausedParallelRestart,
+            })
+        }
         _ => {
             let start_node = last_node_or_err(&state)?;
             Ok(ResumeDecision {
@@ -146,6 +163,26 @@ pub fn plan_resume(
             })
         }
     }
+}
+
+/// Whether the run's current pause began as a `--now` pause (issue #200),
+/// the one kind that leaves several nodes interrupted on purpose. A later
+/// `run_paused` of the same pause (a new reason or `until`) does not change
+/// what the pause did to the nodes.
+fn paused_now(events: &[crate::event::Event]) -> bool {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| !matches!(e.payload, EventPayload::RunResumed { .. }))
+        .any(|e| {
+            matches!(
+                e.payload,
+                EventPayload::RunPaused {
+                    mode: Some(crate::pause::PauseMode::Now),
+                    ..
+                }
+            )
+        })
 }
 
 fn last_node_or_err(state: &RunState) -> Result<String, EngineError> {
@@ -282,6 +319,26 @@ pub fn resume_detached_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<u32, EngineError> {
+    resume_detached_by(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        PauseBy::Operator,
+    )
+}
+
+/// [`resume_detached_with`] naming who resumes the run (issue #200): `by` is
+/// journaled on the detached driver's `run_resumed`. The operator surfaces
+/// pass `Operator`, the supervisor tools `Supervisor`, the waker and
+/// `apb resume --all` `Engine`.
+pub fn resume_detached_by(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    by: PauseBy,
+) -> Result<u32, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -306,6 +363,7 @@ pub fn resume_detached_with(
         from_node,
         true,
         allow_environment_drift,
+        Some(by),
     )
     .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
     // As in `hand_to_detached_driver`: name the driver before returning, so a
@@ -395,8 +453,33 @@ pub fn resume_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<RunResult, EngineError> {
+    resume_by(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        PauseBy::Operator,
+    )
+}
+
+/// [`resume_with`] naming who resumes the run (issue #200), journaled as
+/// `run_resumed.by`.
+pub fn resume_by(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    by: PauseBy,
+) -> Result<RunResult, EngineError> {
     require_resume_consent(root, run_id)?;
-    resume_inner(root, run_id, from_node, allow_environment_drift, false)
+    resume_inner(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        false,
+        Some(by),
+    )
 }
 
 /// The engine's own irreversible-consent check on resume (0.24.0): a run
@@ -433,6 +516,7 @@ pub(crate) fn resume_inner(
     from_node: Option<&str>,
     allow_environment_drift: bool,
     allow_shared_workdir: bool,
+    by: Option<PauseBy>,
 ) -> Result<RunResult, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -531,6 +615,7 @@ pub(crate) fn resume_inner(
     // folded status stuck on paused for the rest of the run.
     log.append(EventPayload::RunResumed {
         from_node: decision.start_node.clone(),
+        by,
     })?;
     // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
     // parent with a sub-playbook node (or a finish-with-prompt agent node)
@@ -543,7 +628,7 @@ pub(crate) fn resume_inner(
         .worktree
         .map(PathBuf::from);
     let mut guard = if is_write {
-        acquire_tree(root, tree.as_deref(), allow_shared_workdir)?
+        crate::workdir::acquire_tree_for(root, tree.as_deref(), allow_shared_workdir, run_id)?
     } else {
         None
     };

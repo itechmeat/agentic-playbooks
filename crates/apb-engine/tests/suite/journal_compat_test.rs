@@ -270,3 +270,50 @@ fn stop_goes_through_an_unknown_event_newer_than_the_last_checkpoint() {
         RunStatus::Aborted
     );
 }
+
+#[test]
+fn old_pause_and_resume_lines_decode_with_the_new_fields_absent() {
+    // Issue #200 added `by`, `mode`, `until` and `keep_lock` to `run_paused`
+    // and `by` to `run_resumed`; a journal written before them still reads.
+    let paused: Event = serde_json::from_str(
+        r#"{"seq":3,"ts":10,"type":"run_paused","reason":"supervisor pause"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        paused.payload,
+        EventPayload::RunPaused { ref reason, by: None, mode: None, until: None, keep_lock: false }
+            if reason == "supervisor pause"
+    ));
+    let resumed: Event =
+        serde_json::from_str(r#"{"seq":4,"ts":20,"type":"run_resumed","from_node":"a"}"#).unwrap();
+    assert!(matches!(
+        resumed.payload,
+        EventPayload::RunResumed { ref from_node, by: None } if from_node == "a"
+    ));
+    // And an event without the new fields writes the old shape back.
+    assert_eq!(
+        serde_json::to_string(&paused).unwrap(),
+        r#"{"seq":3,"ts":10,"type":"run_paused","reason":"supervisor pause"}"#
+    );
+}
+
+#[test]
+fn new_pause_fields_round_trip() {
+    use apb_engine::pause::{PauseBy, PauseMode};
+    let line = r#"{"seq":3,"ts":10,"type":"run_paused","reason":"lunch","by":"operator","mode":"now","until":5000,"keep_lock":true}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::RunPaused {
+            by: Some(PauseBy::Operator),
+            mode: Some(PauseMode::Now),
+            until: Some(5000),
+            keep_lock: true,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    let line = r#"{"seq":4,"ts":20,"type":"run_resumed","from_node":"a","by":"engine"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+}

@@ -198,13 +198,23 @@ fn post_supervisor_command_rejects_traversal_and_missing_run() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path()).unwrap();
 
-    let err = post_supervisor_command(dir.path(), "../../etc", Control::Pause).unwrap_err();
+    let err = post_supervisor_command(
+        dir.path(),
+        "../../etc",
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap_err();
     match err {
         EngineError::NotFound(_) => {}
         other => panic!("expected NotFound for traversal run_id, got {other:?}"),
     }
 
-    let err = post_supervisor_command(dir.path(), "does-not-exist", Control::Pause).unwrap_err();
+    let err = post_supervisor_command(
+        dir.path(),
+        "does-not-exist",
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap_err();
     match err {
         EngineError::NotFound(_) => {}
         other => panic!("expected NotFound for missing run_id, got {other:?}"),
@@ -305,7 +315,12 @@ fn proactive_context_append_then_pause_in_supervised_without_wake() {
         Control::ContextAppend { note: note.into() },
     )
     .unwrap();
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
 
     let events = wait_for_run_status(&run_dir, RunStatus::Paused);
 
@@ -318,6 +333,17 @@ fn proactive_context_append_then_pause_in_supervised_without_wake() {
             .iter()
             .any(|e| matches!(&e.payload, EventPayload::RunFinished { .. })),
         "run must have paused, not run to completion"
+    );
+    // Issue #200: the supervisor's pause journals who paused the run.
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::RunPaused {
+                by: Some(apb_engine::pause::PauseBy::Supervisor),
+                ..
+            }
+        )),
+        "the supervisor pause must journal by: supervisor"
     );
 
     let context_md = fs::read_to_string(run_dir.join("context.md")).unwrap();
@@ -384,7 +410,12 @@ fn autonomous_proactive_context_append_then_pause_at_node_boundary() {
         Control::ContextAppend { note: note.into() },
     )
     .unwrap();
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
 
     let events = wait_for_run_status(&run_dir, RunStatus::Paused);
     assert!(
@@ -422,7 +453,12 @@ fn resume_does_not_replay_an_already_applied_context_append() {
         Control::ContextAppend { note: note.into() },
     )
     .unwrap();
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
 
     // Drive N: applies the note, then pauses at the nearest node boundary.
     wait_for_run_status(&run_dir, RunStatus::Paused);
@@ -463,7 +499,12 @@ fn resume_does_not_replay_a_consumed_pause() {
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
     wait_for_any_node_finished(&run_dir);
 
-    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     wait_for_run_status(&run_dir, RunStatus::Paused);
     wait_for_workdir_unlocked(dir.path());
 

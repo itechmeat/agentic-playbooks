@@ -565,7 +565,7 @@ pub(crate) fn hand_to_detached_driver(
     prepared: PreparedRun,
 ) -> Result<String, EngineError> {
     let run_id = prepared.run_id().to_string();
-    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false, false) {
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false, false, None) {
         Ok(pid) => pid,
         Err(e) => {
             // No driver was started, so nothing will ever move this run. Close

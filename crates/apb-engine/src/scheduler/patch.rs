@@ -57,11 +57,9 @@ pub(crate) fn apply_patch(
         .count();
     let limit = cfg.max_patches_per_run.unwrap_or(5);
     if handled >= usize::try_from(limit).unwrap_or(usize::MAX) {
-        log.append(EventPayload::RunPaused {
-            reason: format!(
-                "max patches per run exhausted: {handled} patches handled (limit {limit})"
-            ),
-        })?;
+        log.append(crate::pause::engine_paused(format!(
+            "max patches per run exhausted: {handled} patches handled (limit {limit})"
+        )))?;
         return Ok(PatchResult::Paused);
     }
 

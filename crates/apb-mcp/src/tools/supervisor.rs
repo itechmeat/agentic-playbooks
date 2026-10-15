@@ -162,7 +162,11 @@ pub fn run_continue_from(root: &Path, run_id: &str, node: &str) -> Result<Value,
 }
 
 pub fn run_pause(root: &Path, run_id: &str) -> Result<Value, ToolError> {
-    let seq = post_supervisor_command(root, run_id, Control::Pause)?;
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )?;
     Ok(json!({ "posted_seq": seq }))
 }
 

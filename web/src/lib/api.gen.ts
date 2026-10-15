@@ -522,6 +522,26 @@ version: string,
  */
 verdict: string, reason?: string, };
 
+export type PauseBy = "operator" | "supervisor" | "engine";
+
+export type PauseMode = "drain" | "now";
+
+export type PauseInfo = { reason: string, by: PauseBy, mode: PauseMode, 
+/**
+ * When the run went paused (the `run_paused` that opened the current
+ * paused interval); absent while it is still `pausing`.
+ */
+since?: number, 
+/**
+ * When the run resumes on its own, epoch milliseconds.
+ */
+until?: number, keep_lock?: boolean, 
+/**
+ * The run still reads `running`: a pause is queued and a live driver is
+ * draining toward it. A view overlay, never a journal status.
+ */
+pausing?: boolean, };
+
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
@@ -542,7 +562,13 @@ unknown_events?: number,
  * The run was a trial of the playbook's candidate version (issue #192),
  * with its verdict; absent for every other run.
  */
-candidate_trial?: CandidateTrial, };
+candidate_trial?: CandidateTrial, 
+/**
+ * The run's pause (issue #200): who paused it, why, since and until
+ * when, and `pausing` while a live driver drains toward a queued pause.
+ * Absent for a run that is neither paused nor pausing.
+ */
+pause?: PauseInfo, };
 
 export type RunListEntry = { 
 /**
@@ -568,7 +594,13 @@ unknown_events?: number,
  * The run was a trial of the playbook's candidate version (issue #192),
  * with its verdict; absent for every other run.
  */
-candidate_trial?: CandidateTrial, };
+candidate_trial?: CandidateTrial, 
+/**
+ * The run's pause (issue #200): who paused it, why, since and until
+ * when, and `pausing` while a live driver drains toward a queued pause.
+ * Absent for a run that is neither paused nor pausing.
+ */
+pause?: PauseInfo, };
 
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**

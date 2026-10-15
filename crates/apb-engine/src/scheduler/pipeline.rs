@@ -117,7 +117,9 @@ pub(crate) fn pipeline_member(
     frontier.retain(|n| !ready.contains(n));
     for n in ready {
         let flag = Arc::new(AtomicBool::new(false));
-        slots.member_fans.push(slots.fanout.register(&flag));
+        slots
+            .member_fans
+            .push(slots.fanout.register_pausable(&flag));
         slots.member_flags.insert(n.clone(), flag);
         slots.batch.push(n.clone());
         slots.queue.push_back(n);

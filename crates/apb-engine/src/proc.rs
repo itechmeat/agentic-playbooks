@@ -63,18 +63,48 @@ fn group_target(pid: u32) -> Option<i32> {
 /// any process remains in the group, and an empty group is a harmless ESRCH.
 pub(crate) fn kill_process_group(pid: u32) {
     #[cfg(unix)]
+    signal_process_group(pid, libc::SIGKILL);
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+/// Sends `signal` to every process in the group led by `pid`, through the
+/// same validated target as [`kill_process_group`].
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: libc::c_int) {
     kill_group_with(pid, &|target| {
         // SAFETY: `kill` takes no pointers and is async-signal-safe; `target`
         // came from `group_target`, so it is a validated negative group id and
         // never a wildcard.
         unsafe {
-            libc::kill(target, libc::SIGKILL);
+            libc::kill(target, signal);
         }
     });
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
+}
+
+/// Ends the process group led by `child` the way a `--now` pause does
+/// (issue #200): SIGTERM to the group, up to `grace` for the leader to exit,
+/// then SIGKILL to the group and the leader, and a reap. A script or agent
+/// that handles SIGTERM gets to stop cleanly; one that ignores it is killed
+/// anyway once the grace period is over.
+pub(crate) fn terminate_process_group(child: &mut std::process::Child, grace: Duration) {
+    #[cfg(unix)]
+    signal_process_group(child.id(), libc::SIGTERM);
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
+    // A group is not recycled while any member lives, so this reaches the
+    // leftovers of a leader that already exited, and is a harmless ESRCH
+    // otherwise.
+    kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The decision half of a group kill, with delivery injected.
@@ -158,6 +188,13 @@ pub fn run_capture(
             // ambiguity of `kill -KILL -<pgid>` across implementations,
             // which on some Linux setups failed to reach the grandchild
             // and left the stdout pipe open until natural exit.
+            // A `--now` pause (issue #200) ends the script gracefully:
+            // SIGTERM, a grace period, then the same SIGKILL as below.
+            if was_cancelled && cancel.is_some_and(crate::pause::interrupt::is_graceful) {
+                terminate_process_group(&mut child, crate::pause::interrupt::grace());
+                cancelled = true;
+                break None;
+            }
             kill_process_group(child.id());
             // Also the leader directly, through the handle rather than by pid:
             // if `process_group(0)` did not take, the group kill above missed

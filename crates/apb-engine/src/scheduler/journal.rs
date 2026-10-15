@@ -218,6 +218,22 @@ pub(crate) fn last_question_asked_ts(events: &[Event], node: &str) -> Option<u12
         .map(|e| e.ts)
 }
 
+/// How long the current wait of `node` has been running at `now`, paused
+/// time left out (issue #200): a run paused mid-wait resumes its timer and
+/// its `timeout_seconds` where they stopped. `None` before the wait started.
+pub(crate) fn wait_active_ms(events: &[Event], node: &str, now: u128) -> Option<u128> {
+    last_wait_started_ts(events, node)
+        .map(|start| crate::pause::active_elapsed_ms(events, start, now, now))
+}
+
+/// How long the pending question of `node` has been open at `now`, paused
+/// time left out (issue #200), for `question_timeout_seconds`. `None` when
+/// the node never asked.
+pub(crate) fn question_active_ms(events: &[Event], node: &str, now: u128) -> Option<u128> {
+    last_question_asked_ts(events, node)
+        .map(|asked| crate::pause::active_elapsed_ms(events, asked, now, now))
+}
+
 /// The session id captured from the node's MOST RECENT finished attempt (spec
 /// 2026-07-20, Task 7). That attempt is the one that asked the pending
 /// question, so its `AttemptFinished.session` is the session to resume into.
@@ -325,9 +341,119 @@ pub(crate) fn questions_answered_before_seq(events: &[Event], node: &str, seq: u
         .count()
 }
 
+// --- issue #200: the `--now` pause interrupt ---
+
+/// Whether a node that ended `cancelled` was cut short by a `--now` pause
+/// rather than by a stop: the pause fired and no Abort did.
+pub(crate) fn interrupted_by_pause(
+    pause_now: &std::sync::atomic::AtomicBool,
+    run_cancel: &std::sync::atomic::AtomicBool,
+) -> bool {
+    pause_now.load(std::sync::atomic::Ordering::SeqCst)
+        && !run_cancel.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Journals the end of an attempt a `--now` pause cut short:
+/// `attempt_finished { status: "interrupted" }` and no `node_finished`, so
+/// the node stays unfinished and the resume runs it again. No retry and no
+/// infrastructure retry is spent, and the node's agent session id (the one
+/// its latest finished attempt captured) is carried forward so a resume can
+/// continue the session. The `run_paused` checkpoint follows right after it.
+pub(crate) fn journal_interrupted(
+    journal: &Journal,
+    run_dir: &std::path::Path,
+    node: &str,
+) -> Result<(), crate::error::EngineError> {
+    let events = crate::event::read_all(run_dir)?;
+    let attempt = crate::state::RunState::fold(&events)
+        .attempts
+        .get(node)
+        .copied()
+        .unwrap_or(1);
+    let session = last_attempt_session(&events, node);
+    journal.append(EventPayload::AttemptFinished {
+        node: node.to_string(),
+        attempt,
+        status: "interrupted".into(),
+        duration_ms: None,
+        session,
+        summary: None,
+        rejected_output: None,
+        partial_output: Some("interrupted by a pause (--now)".into()),
+        failure_kind: None,
+        usage: None,
+    })
+}
+
+// --- end of the `--now` pause interrupt ---
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stop_after_a_pause_is_not_a_pause_interrupt() {
+        let (pause, cancel) = (
+            std::sync::atomic::AtomicBool::new(true),
+            std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(interrupted_by_pause(&pause, &cancel));
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!interrupted_by_pause(&pause, &cancel));
+        assert!(!interrupted_by_pause(
+            &std::sync::atomic::AtomicBool::new(false),
+            &cancel
+        ));
+    }
+
     use super::*;
+
+    fn at(ts: u128, payload: EventPayload) -> Event {
+        Event {
+            seq: ts as u64,
+            ts,
+            payload,
+        }
+    }
+
+    /// Issue #200: a wait timer and a question timeout do not count the time
+    /// the run sat paused. Wait opened at 1 s, paused 3 s -> 2 h + 3 s, now
+    /// 2 h + 6 s: 5 s of active wait, not 2 h.
+    #[test]
+    fn wait_and_question_clocks_leave_out_paused_time() {
+        let hour: u128 = 3_600_000;
+        let resumed = || EventPayload::RunResumed {
+            from_node: "w".into(),
+            by: None,
+        };
+        let waits = vec![
+            at(
+                1_000,
+                EventPayload::WaitStarted {
+                    node: "w".into(),
+                    kind: "timer".into(),
+                },
+            ),
+            at(3_000, crate::pause::engine_paused("x")),
+            at(3_000 + 2 * hour, resumed()),
+        ];
+        assert_eq!(wait_active_ms(&waits, "w", 6_000 + 2 * hour), Some(5_000));
+        assert_eq!(wait_active_ms(&waits, "other", 6_000 + 2 * hour), None);
+        // Still paused: the clock stands still at 2 s.
+        assert_eq!(wait_active_ms(&waits[..2], "w", 3_000 + hour), Some(2_000));
+
+        let asked: EventPayload = serde_json::from_value(serde_json::json!({
+            "type": "question_asked", "node": "q", "question": "?"
+        }))
+        .unwrap();
+        let questions = vec![
+            at(1_000, asked),
+            at(3_000, crate::pause::engine_paused("x")),
+            at(3_000 + 2 * hour, resumed()),
+        ];
+        assert_eq!(
+            question_active_ms(&questions, "q", 6_000 + 2 * hour),
+            Some(5_000)
+        );
+    }
 
     fn finished(seq: u64, node: &str, status: &str) -> Event {
         Event {
