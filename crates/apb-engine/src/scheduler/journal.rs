@@ -254,15 +254,27 @@ pub(crate) fn last_attempt_session(events: &[Event], node: &str) -> Option<Strin
         .flatten()
 }
 
-/// The `(agent, model, session)` of `node`'s most recent finished attempt
-/// when it was journaled `interrupted` with a session id: the attempt a
-/// `--now` pause cut short (issue #200), whose session the resume continues
-/// on the same binding. `None` for any other latest attempt, for one closed
-/// without a session (a reaped attempt) and for one with no recorded model.
-pub(crate) fn paused_attempt_session(
-    events: &[Event],
-    node: &str,
-) -> Option<(String, String, String)> {
+/// What the attempt a `--now` pause cut short left for the resume (issue
+/// #200): the binding it ran on, its agent session and the directory it ran
+/// in, so the first attempt after the resume continues that session where
+/// the session lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PausedSession {
+    pub agent: String,
+    pub model: String,
+    pub session: String,
+    /// The attempt's working directory, when it is recorded and still there.
+    pub workdir: Option<std::path::PathBuf>,
+}
+
+/// The session `node`'s most recent finished attempt leaves for the resume,
+/// when that attempt is the one a `--now` pause cut short: journaled by
+/// [`journal_interrupted`] (its marker, not merely an `interrupted` status:
+/// a missing verdict and a reaped attempt are `interrupted` too) with a
+/// session id, and followed by the `run_paused` of that pause. `None` for
+/// any other latest attempt, so a crash resume, a `--from-node` re-run or a
+/// cycle revisit never continues an old session.
+pub(crate) fn paused_attempt_session(events: &[Event], node: &str) -> Option<PausedSession> {
     let (at, attempt, session) = events.iter().enumerate().rev().find_map(|(i, e)| {
         match &e.payload {
             EventPayload::AttemptFinished {
@@ -270,26 +282,41 @@ pub(crate) fn paused_attempt_session(
                 attempt,
                 status,
                 session,
+                partial_output,
                 ..
-            } if n == node => Some((i, *attempt, status, session)),
+            } if n == node => Some((i, *attempt, status, session, partial_output)),
             _ => None,
         }
-        .map(|(i, attempt, status, session)| {
-            let id = (status.as_str() == NodeStatus::Interrupted.as_str())
-                .then(|| session.clone())
-                .flatten();
-            (i, attempt, id)
+        .map(|(i, attempt, status, session, partial)| {
+            let by_pause = status.as_str() == NodeStatus::Interrupted.as_str()
+                && partial.as_deref() == Some(PAUSE_INTERRUPT_NOTE);
+            (i, attempt, by_pause.then(|| session.clone()).flatten())
         })
     })?;
     let id = session?;
+    if !events[at + 1..]
+        .iter()
+        .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+    {
+        return None;
+    }
     events[..at].iter().rev().find_map(|e| match &e.payload {
         EventPayload::AttemptStarted {
             node: n,
             attempt: a,
             agent,
             model: Some(model),
+            workdir,
             ..
-        } if n == node && *a == attempt => Some((agent.clone(), model.clone(), id.clone())),
+        } if n == node && *a == attempt => Some(PausedSession {
+            agent: agent.clone(),
+            model: model.clone(),
+            session: id.clone(),
+            workdir: workdir
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .filter(|d| d.is_dir()),
+        }),
         _ => None,
     })
 }
@@ -393,12 +420,49 @@ pub(crate) fn interrupted_by_pause(
         && !run_cancel.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// The `partial_output` of an attempt a `--now` pause cut short: the marker
+/// [`paused_attempt_session`] keys on.
+pub(crate) const PAUSE_INTERRUPT_NOTE: &str = "interrupted by a pause (--now)";
+
+/// The agent session of attempt `attempt` of `node`, which a `--now` pause
+/// cut short before it could journal its own finish: the id the attempt
+/// recorded in its transcript directory when it was killed (an assigned,
+/// continued or printed one), else one its raw output carries. `None` when
+/// the attempt never started or reported no session.
+fn interrupted_attempt_session(
+    run_dir: &std::path::Path,
+    events: &[Event],
+    node: &str,
+    attempt: u32,
+) -> Option<String> {
+    let (agent, transcript) = events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::AttemptStarted {
+            node: n,
+            attempt: a,
+            agent,
+            transcript: Some(t),
+            ..
+        } if n == node && *a == attempt => Some((agent.clone(), t.clone())),
+        _ => None,
+    })?;
+    let dir = run_dir.join(transcript);
+    if let Ok(id) = std::fs::read_to_string(dir.join(super::transcript::SESSION_ID_FILE)) {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Some(id.to_string());
+        }
+    }
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
+    crate::adapter::capture_session(&agent, &read("stdout.log"))
+        .or_else(|| crate::adapter::capture_session_header(&agent, &read("stderr.log")))
+}
+
 /// Journals the end of an attempt a `--now` pause cut short:
 /// `attempt_finished { status: "interrupted" }` and no `node_finished`, so
 /// the node stays unfinished and the resume runs it again. No retry and no
-/// infrastructure retry is spent, and the node's agent session id (the one
-/// its latest finished attempt captured) is carried forward so a resume can
-/// continue the session. The `run_paused` checkpoint follows right after it.
+/// infrastructure retry is spent, and the attempt's own agent session id
+/// ([`interrupted_attempt_session`]) is kept so a resume can continue the
+/// session. The `run_paused` checkpoint follows right after it.
 pub(crate) fn journal_interrupted(
     journal: &Journal,
     run_dir: &std::path::Path,
@@ -410,7 +474,7 @@ pub(crate) fn journal_interrupted(
         .get(node)
         .copied()
         .unwrap_or(1);
-    let session = last_attempt_session(&events, node);
+    let session = interrupted_attempt_session(run_dir, &events, node, attempt);
     journal.append(EventPayload::AttemptFinished {
         node: node.to_string(),
         attempt,
@@ -419,7 +483,7 @@ pub(crate) fn journal_interrupted(
         session,
         summary: None,
         rejected_output: None,
-        partial_output: Some("interrupted by a pause (--now)".into()),
+        partial_output: Some(PAUSE_INTERRUPT_NOTE.into()),
         failure_kind: None,
         usage: None,
     })
@@ -553,5 +617,65 @@ mod tests {
             finished(1, "work", "succeeded"),
         ];
         assert!(!last_attempt_interrupted(&events, "work"));
+    }
+
+    /// Only the attempt a `--now` pause cut short, followed by that pause,
+    /// hands its session to the resume: an attempt closed `interrupted` for
+    /// a missing verdict or by the reaper never does, and neither does a
+    /// pause interrupt whose `run_paused` never landed (the driver died).
+    #[test]
+    fn only_a_pause_interrupt_followed_by_its_pause_hands_over_a_session() {
+        let started = |ts| {
+            at(
+                ts,
+                EventPayload::AttemptStarted {
+                    node: "work".into(),
+                    attempt: 1,
+                    agent: "claude".into(),
+                    soul_delivery: None,
+                    skills_mode: None,
+                    pid: None,
+                    spawn_ms: None,
+                    model: Some("haiku".into()),
+                    workdir: None,
+                    transcript: None,
+                },
+            )
+        };
+        let finished = |ts, partial: Option<&str>| {
+            at(
+                ts,
+                EventPayload::AttemptFinished {
+                    node: "work".into(),
+                    attempt: 1,
+                    status: "interrupted".into(),
+                    duration_ms: None,
+                    session: Some("sid".into()),
+                    summary: None,
+                    rejected_output: None,
+                    partial_output: partial.map(str::to_string),
+                    failure_kind: None,
+                    usage: None,
+                },
+            )
+        };
+        let paused = |ts| at(ts, crate::pause::engine_paused("x"));
+
+        let by_pause = vec![
+            started(1),
+            finished(2, Some(PAUSE_INTERRUPT_NOTE)),
+            paused(3),
+        ];
+        let got = paused_attempt_session(&by_pause, "work").expect("a paused session");
+        assert_eq!(
+            (got.agent.as_str(), got.model.as_str(), got.session.as_str()),
+            ("claude", "haiku", "sid")
+        );
+        // A missing verdict, then a pause: the attempt was not cut short.
+        let no_verdict = vec![started(1), finished(2, Some("partial work")), paused(3)];
+        assert_eq!(paused_attempt_session(&no_verdict, "work"), None);
+        // The pause interrupt without its pause (a driver that died).
+        let no_pause = vec![started(1), finished(2, Some(PAUSE_INTERRUPT_NOTE))];
+        assert_eq!(paused_attempt_session(&no_pause, "work"), None);
     }
 }

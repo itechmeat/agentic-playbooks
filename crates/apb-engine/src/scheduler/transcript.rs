@@ -11,6 +11,21 @@ pub(crate) fn relative(node_id: &str, attempt: u32) -> String {
     format!("attempts/{node_id}-{attempt}")
 }
 
+/// The file in an attempt's transcript directory holding the agent session
+/// id of an attempt that was killed before it could journal its finish (a
+/// `--now` pause, issue #200).
+pub(crate) const SESSION_ID_FILE: &str = "session.id";
+
+/// Records `session` as the session of the attempt whose transcript
+/// directory is `dir`, best effort.
+pub(crate) fn record_session(run_dir: &Path, dir: &Path, session: &str) {
+    let _ = apb_core::fsutil::atomic_write_under(
+        run_dir,
+        &dir.join(SESSION_ID_FILE),
+        session.as_bytes(),
+    );
+}
+
 /// Creates (empty) the transcript directory of one attempt and returns it. A
 /// directory left by an earlier execution whose attempt counter restarted
 /// (a resume, a continue_from) is cleared first, so it only ever holds what

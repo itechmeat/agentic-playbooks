@@ -1107,3 +1107,112 @@ fn a_now_pause_keeps_the_agent_session_for_the_resume() {
     let ev = events(root, &run_id);
     assert_eq!(interrupted_attempts(&ev, "work"), 1);
 }
+
+/// The pause session of a FIRST attempt: an attempt killed by a `--now`
+/// pause journals no finish of its own, so its session comes from the
+/// attempt itself (here the id apb assigned at launch), not from an earlier
+/// attempt; the resumed attempt continues it.
+#[cfg(unix)]
+#[test]
+fn a_now_pause_of_a_first_attempt_keeps_its_session() {
+    use crate::token_economy_test::{invocations, recording_stub};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    init_project(root).unwrap();
+    crate::token_economy_test::seed_playbook(
+        root,
+        "sess",
+        "schema: 2\nid: sess\nname: Sess\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"do\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+    );
+    common::seed_profile(root, "main", "claude", "haiku", &[]);
+    let d = root.display();
+    let stub = recording_stub(
+        root,
+        &format!(
+            "if [ \"$N\" = 1 ]; then touch '{d}/agent_running'; while [ -f '{d}/gate' ]; do sleep 0.05; done; fi\n\
+             printf '\\n```yaml\\nstatus: success\\nsummary: ok\\n```\\n'"
+        ),
+    );
+    let _env = Env::set(&[("APB_AGENT_CMD", &stub), ("APB_PAUSE_GRACE_MS", "300")]);
+    fs::write(root.join("gate"), "").unwrap();
+
+    let rx = spawn_run(root, "sess");
+    let run_id = find_run_id(root, "sess-");
+    poll_until("the first attempt to start", || {
+        root.join("agent_running").is_file().then_some(())
+    });
+    request_pause(root, &run_id, &operator(PauseMode::Now)).unwrap();
+    assert_eq!(finished(&rx).outcome, RunStatus::Paused);
+    fs::remove_file(root.join("gate")).unwrap();
+    let res = resume_by(root, &run_id, None, false, PauseBy::Operator).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let inv = invocations(root);
+    let work: Vec<_> = inv.iter().filter(|i| i.node == "work").collect();
+    assert_eq!(work.len(), 2, "the paused attempt and the resumed one");
+    let sid = work[0]
+        .flag("--session-id")
+        .expect("the first attempt opens a session");
+    assert_eq!(
+        work[1].flag("--resume"),
+        Some(sid),
+        "the resumed attempt continues the paused attempt's session"
+    );
+}
+
+/// An isolated node's agent session is bound to the directory it ran in:
+/// the resumed attempt runs in the interrupted attempt's own directory, as
+/// that attempt left it, not in a fresh (emptied) one.
+#[cfg(unix)]
+#[test]
+fn a_resumed_isolated_node_continues_its_session_in_the_same_directory() {
+    use crate::token_economy_test::{invocations, recording_stub};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    init_project(root).unwrap();
+    crate::token_economy_test::seed_playbook(
+        root,
+        "sess",
+        "schema: 2\nid: sess\nname: Sess\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"do\", isolation: best_effort }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+    );
+    common::seed_profile(root, "main", "claude", "haiku", &[]);
+    let d = root.display();
+    let stub = recording_stub(
+        root,
+        &format!(
+            "pwd > '{d}/cwd-'$N\n\
+             if [ \"$N\" = 1 ]; then touch session_work; touch '{d}/agent_running'; while [ -f '{d}/gate' ]; do sleep 0.05; done; fi\n\
+             if [ -f session_work ]; then touch '{d}/work_found'; fi\n\
+             printf '\\n```yaml\\nstatus: success\\nsummary: ok\\n```\\n'"
+        ),
+    );
+    let _env = Env::set(&[("APB_AGENT_CMD", &stub), ("APB_PAUSE_GRACE_MS", "300")]);
+    fs::write(root.join("gate"), "").unwrap();
+
+    let rx = spawn_run(root, "sess");
+    let run_id = find_run_id(root, "sess-");
+    poll_until("the first attempt to start", || {
+        root.join("agent_running").is_file().then_some(())
+    });
+    request_pause(root, &run_id, &operator(PauseMode::Now)).unwrap();
+    assert_eq!(finished(&rx).outcome, RunStatus::Paused);
+    fs::remove_file(root.join("gate")).unwrap();
+    let res = resume_by(root, &run_id, None, false, PauseBy::Operator).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let work: Vec<_> = invocations(root)
+        .into_iter()
+        .filter(|i| i.node == "work")
+        .collect();
+    assert_eq!(work.len(), 2, "the paused attempt and the resumed one");
+    assert!(
+        work[1].resumed(),
+        "the resumed attempt continues the session"
+    );
+    let cwd = |n: usize| fs::read_to_string(root.join(format!("cwd-{n}"))).unwrap();
+    assert_eq!(cwd(2), cwd(1), "the session's own directory");
+    assert!(
+        root.join("work_found").is_file(),
+        "the directory still holds what the interrupted attempt left"
+    );
+}

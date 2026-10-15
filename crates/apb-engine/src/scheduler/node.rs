@@ -1209,11 +1209,20 @@ fn execute_node_kind(
             let mut pause_session = false;
             if resume.is_none()
                 && !host_mode
-                && let Some((agent, model, id)) = journaled
+                && let Some(paused) = journaled
                     .as_deref()
                     .and_then(|events| super::journal::paused_attempt_session(events, node_id))
             {
-                sessions.insert((agent, model), KnownSession::Id { id, workdir: None });
+                // The session is bound to the directory it ran in: an
+                // isolated node resumes in the interrupted attempt's own
+                // directory, not a fresh one.
+                sessions.insert(
+                    (paused.agent, paused.model),
+                    KnownSession::Id {
+                        id: paused.session,
+                        workdir: paused.workdir,
+                    },
+                );
                 pause_session = true;
             }
             // This node's own successful sessions must be findable when a
@@ -2046,6 +2055,16 @@ fn execute_node_kind(
                         }
                         _ => None,
                     });
+                    // An attempt killed by the node's kill flag (a `--now`
+                    // pause, issue #200) journals no finish of its own: its
+                    // session is recorded next to its output, where the
+                    // interrupted attempt the pause journals finds it.
+                    if cancel.load(Ordering::Relaxed)
+                        && spawn_instant.is_some()
+                        && let Some(id) = &session_now
+                    {
+                        super::transcript::record_session(run_dir, &transcript_dir, id);
+                    }
                     if let Some(id) = &session_now {
                         sessions.insert(
                             binding.clone(),
