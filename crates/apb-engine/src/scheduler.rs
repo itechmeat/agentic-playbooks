@@ -95,8 +95,8 @@ pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
 pub(crate) use resume::resume_detached_pause;
 pub use resume::{
-    PAUSE_SUPERSEDED, record_run_error, resume, resume_by, resume_detached, resume_detached_by,
-    resume_detached_with, resume_pause, resume_with,
+    PAUSE_SUPERSEDED, RESUME_SUPERSEDED, record_run_error, resume, resume_by, resume_detached,
+    resume_detached_by, resume_detached_with, resume_pause, resume_with,
 };
 pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,

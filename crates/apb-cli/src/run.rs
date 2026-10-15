@@ -930,10 +930,12 @@ pub(crate) fn drive_run_child(
             RunStatus::Succeeded => ExitCode::SUCCESS,
             _ => ExitCode::from(1),
         },
-        // The engine's resume of a pause that a newer pause, resume or stop
-        // replaced in the meantime: nothing to do and nothing to record.
+        // A resume that a newer pause, resume or stop replaced in the
+        // meantime (the engine's resume of an old pause, or two resumes
+        // racing): nothing to do and nothing to record.
         Err(apb_engine::error::EngineError::Conflict(why))
-            if why == apb_engine::scheduler::PAUSE_SUPERSEDED =>
+            if why == apb_engine::scheduler::PAUSE_SUPERSEDED
+                || why == apb_engine::scheduler::RESUME_SUPERSEDED =>
         {
             ExitCode::SUCCESS
         }

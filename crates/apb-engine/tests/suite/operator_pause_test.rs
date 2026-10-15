@@ -883,6 +883,154 @@ fn the_engine_resume_of_a_replaced_pause_journals_nothing() {
     assert_eq!(resumed_by(&events(root, &run_id)), Some(PauseBy::Engine));
 }
 
+/// The engine's resume of a pause that a stop or a newer pause replaced
+/// returns the superseded conflict before anything else can refuse it (and
+/// make the detached driver journal a misleading error): not a resume-plan
+/// refusal after a stop, not a busy workdir.
+#[cfg(unix)]
+#[test]
+fn the_engine_resume_of_a_replaced_pause_refuses_before_any_other_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let _env = Env::set(&[("APB_PAUSE_GRACE_MS", "200")]);
+    let superseded = |err: &EngineError| matches!(err, EngineError::Conflict(m) if m == apb_engine::scheduler::PAUSE_SUPERSEDED);
+
+    // Replaced by a newer pause while another run holds the workdir.
+    let run_id = pause_script_run(root, false);
+    let first = latest_pause_seq(&events(root, &run_id));
+    request_pause(root, &run_id, &operator(PauseMode::Drain)).unwrap();
+    let held = acquire_tree(root, None, false).unwrap();
+    let err = apb_engine::scheduler::resume_pause(root, &run_id, first).unwrap_err();
+    assert!(superseded(&err), "{err:?}");
+    drop(held);
+
+    // Ended by a stop.
+    let stopped = pause_script_run(root, false);
+    let seq = latest_pause_seq(&events(root, &stopped));
+    stop_run(root, &stopped).unwrap();
+    let before = events(root, &stopped).len();
+    let err = apb_engine::scheduler::resume_pause(root, &stopped, seq).unwrap_err();
+    assert!(superseded(&err), "{err:?}");
+    assert_eq!(events(root, &stopped).len(), before, "nothing journaled");
+}
+
+/// A resume journals `run_resumed` under the run's event lock and only while
+/// the run is as it planned: an operator resume that loses the race to
+/// another resume journals nothing, so the run has one `run_resumed`.
+#[cfg(unix)]
+#[test]
+fn two_racing_resumes_journal_one_run_resumed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let _env = Env::set(&[("APB_PAUSE_GRACE_MS", "200")]);
+    let run_id = pause_script_run(root, false);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let lock_file = root.join(".apb/workdir.lock");
+
+    let event_lock = apb_core::fsutil::lock_dir(&run_dir, "events.jsonl.lock").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let (r, id) = (root.to_path_buf(), run_id.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(resume(&r, &id, None));
+    });
+    // The operator resume took the workdir lock and waits for the event lock.
+    poll_until("the resume to take the workdir lock", || {
+        (lock_owner(&lock_file) == Some(LockOwner::Pid(std::process::id()))).then_some(())
+    });
+    // Another resume wins the race.
+    EventLog::open(&run_dir)
+        .unwrap()
+        .append(EventPayload::RunResumed {
+            from_node: "s".into(),
+            by: Some(PauseBy::Engine),
+        })
+        .unwrap();
+    drop(event_lock);
+
+    let err = rx.recv_timeout(DEADLINE).unwrap().unwrap_err();
+    assert!(
+        matches!(&err, EngineError::Conflict(m) if m == apb_engine::scheduler::RESUME_SUPERSEDED),
+        "{err:?}"
+    );
+    let resumed = events(root, &run_id)
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::RunResumed { .. }))
+        .count();
+    assert_eq!(resumed, 1);
+    assert_eq!(lock_owner(&lock_file), None, "the refused resume lets go");
+}
+
+/// An engine resume that took a lock its run had parked, then found that a
+/// newer `--keep-lock` pause replaced the one it was for, parks the lock
+/// again instead of removing it.
+#[cfg(unix)]
+#[test]
+fn a_replaced_engine_resume_gives_a_kept_lock_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let _env = Env::set(&[("APB_PAUSE_GRACE_MS", "200")]);
+    let run_id = pause_script_run(root, true);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let lock_file = root.join(".apb/workdir.lock");
+    let seq = latest_pause_seq(&events(root, &run_id));
+    assert_eq!(
+        lock_owner(&lock_file),
+        Some(LockOwner::PausedRun(run_id.clone()))
+    );
+
+    let event_lock = apb_core::fsutil::lock_dir(&run_dir, "events.jsonl.lock").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let (r, id) = (root.to_path_buf(), run_id.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(apb_engine::scheduler::resume_pause(&r, &id, seq));
+    });
+    poll_until("the engine resume to take the parked lock", || {
+        (lock_owner(&lock_file) == Some(LockOwner::Pid(std::process::id()))).then_some(())
+    });
+    // A newer `--keep-lock` pause lands before the resume journals.
+    EventLog::open(&run_dir)
+        .unwrap()
+        .append(
+            PauseRequest {
+                keep_lock: true,
+                ..operator(PauseMode::Drain)
+            }
+            .to_event(),
+        )
+        .unwrap();
+    drop(event_lock);
+
+    let err = rx.recv_timeout(DEADLINE).unwrap().unwrap_err();
+    assert!(
+        matches!(&err, EngineError::Conflict(m) if m == apb_engine::scheduler::PAUSE_SUPERSEDED),
+        "{err:?}"
+    );
+    assert_eq!(
+        lock_owner(&lock_file),
+        Some(LockOwner::PausedRun(run_id.clone())),
+        "the newer pause keeps the lock"
+    );
+    stop_run(root, &run_id).unwrap();
+}
+
 fn latest_pause_seq(events: &[Event]) -> u64 {
     events
         .iter()
