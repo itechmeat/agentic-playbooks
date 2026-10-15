@@ -727,7 +727,7 @@ fn resume_inner_checked(
         let _event_lock = match pause_seq {
             Some(seq) => {
                 let lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK)?;
-                if !crate::pause::probe::holds(&read_all(&run_dir)?, seq) {
+                if !crate::pause::holds(&read_all(&run_dir)?, seq) {
                     return Err(EngineError::Conflict(PAUSE_SUPERSEDED.into()));
                 }
                 Some(lock)

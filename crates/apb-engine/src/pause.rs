@@ -280,6 +280,17 @@ pub fn active_elapsed_seconds(run_dir: &std::path::Path, now_ms: u128) -> Option
     u64::try_from(active / 1000).ok()
 }
 
+/// Whether the run is paused by the `run_paused` at journal sequence `seq`.
+pub(crate) fn holds(events: &[Event], seq: u64) -> bool {
+    crate::state::RunState::fold(events).run_status == RunStatus::Paused
+        && events
+            .iter()
+            .rev()
+            .find(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+            .map(|e| e.seq)
+            == Some(seq)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

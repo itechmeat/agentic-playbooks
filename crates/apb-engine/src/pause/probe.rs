@@ -19,8 +19,8 @@ use crate::event::{Event, EventLog, EventPayload, read_all};
 use crate::failure_class::FailureKind;
 use crate::scheduler::ProbeRun;
 
-use super::PauseBy;
 use super::quota::{self, PROBE_ERROR, PROBE_PASSED, PROBE_QUOTA, QUOTA_PROBE_ACTION};
+use super::{PauseBy, holds};
 
 /// What [`probe_before_wake`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,17 +50,6 @@ fn quota_executor(events: &[Event], seq: u64) -> Option<(String, String)> {
         } if e.seq == seq => quota::parse_quota_reason(reason),
         _ => None,
     })
-}
-
-/// Whether the run is paused by the `run_paused` at journal sequence `seq`.
-pub(crate) fn holds(events: &[Event], seq: u64) -> bool {
-    crate::state::RunState::fold(events).run_status == crate::state::RunStatus::Paused
-        && events
-            .iter()
-            .rev()
-            .find(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
-            .map(|e| e.seq)
-            == Some(seq)
 }
 
 /// The checks a resume makes before anything of the run executes, applied
