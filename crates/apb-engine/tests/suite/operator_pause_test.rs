@@ -1031,6 +1031,41 @@ fn a_replaced_engine_resume_gives_a_kept_lock_back() {
     stop_run(root, &run_id).unwrap();
 }
 
+/// A resume of a `--keep-lock` pause that cannot journal its `run_resumed`
+/// (the run's event lock stays busy) parks the lock it took back under the
+/// run, so the still-paused run keeps its workdir.
+#[cfg(unix)]
+#[test]
+fn a_resume_that_cannot_reach_the_journal_gives_a_kept_lock_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_playbook(
+        root,
+        "nowscript",
+        ONE_SCRIPT,
+        &[("s.sh", slow_script(root, "s"))],
+    );
+    let _env = Env::set(&[("APB_PAUSE_GRACE_MS", "200")]);
+    let run_id = pause_script_run(root, true);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let lock_file = root.join(".apb/workdir.lock");
+
+    let event_lock = apb_core::fsutil::lock_dir(&run_dir, "events.jsonl.lock").unwrap();
+    let err = resume(root, &run_id, None).unwrap_err();
+    assert!(matches!(err, EngineError::Io(_)), "{err:?}");
+    assert_eq!(
+        lock_owner(&lock_file),
+        Some(LockOwner::PausedRun(run_id.clone())),
+        "the paused run keeps its lock"
+    );
+    assert_eq!(
+        apb_engine::state::RunState::fold(&events(root, &run_id)).run_status,
+        RunStatus::Paused
+    );
+    drop(event_lock);
+    stop_run(root, &run_id).unwrap();
+}
+
 fn latest_pause_seq(events: &[Event]) -> u64 {
     events
         .iter()

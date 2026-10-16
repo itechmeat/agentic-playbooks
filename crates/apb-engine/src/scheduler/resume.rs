@@ -583,9 +583,10 @@ fn lifecycle_seq(events: &[crate::event::Event]) -> Option<u64> {
 /// holds the run. Two resumes racing each other, or a resume racing a pause
 /// or a stop, journal one `run_resumed` at most.
 ///
-/// On a refusal the busy lock the resume took goes back to how the journal
-/// leaves it: parked under the run again when a `--keep-lock` pause holds
-/// it, released otherwise.
+/// On any failure (a refusal, a busy or unreadable journal, a failed write)
+/// the busy lock the resume took goes back to how the journal leaves it:
+/// parked under the run again when a `--keep-lock` pause holds it, released
+/// otherwise ([`give_lock_back`]).
 fn journal_resumed(
     log: &mut EventLog,
     run_dir: &Path,
@@ -595,6 +596,20 @@ fn journal_resumed(
     guard: &mut Option<crate::workdir::WorkdirGuard>,
     payload: EventPayload,
 ) -> Result<(), EngineError> {
+    let res = try_journal_resumed(log, run_dir, planned, pause_seq, payload);
+    if res.is_err() {
+        give_lock_back(run_dir, run_id, guard);
+    }
+    res
+}
+
+fn try_journal_resumed(
+    log: &mut EventLog,
+    run_dir: &Path,
+    planned: Option<u64>,
+    pause_seq: Option<u64>,
+    payload: EventPayload,
+) -> Result<(), EngineError> {
     let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)?;
     let events = read_all(run_dir)?;
     let refusal = match pause_seq {
@@ -602,16 +617,33 @@ fn journal_resumed(
         _ if lifecycle_seq(&events) != planned => Some(RESUME_SUPERSEDED),
         _ => None,
     };
-    let Some(why) = refusal else {
-        log.append(payload)?;
-        return Ok(());
+    match refusal {
+        None => {
+            log.append(payload)?;
+            Ok(())
+        }
+        Some(why) => Err(EngineError::Conflict(why.into())),
+    }
+}
+
+/// The busy lock of a resume that journaled no `run_resumed`: parked under
+/// the run again while a `--keep-lock` pause holds it, else released by the
+/// guard. A journal that cannot be read falls back to what the lock was
+/// when the resume took it (the run's own parked lock is parked again).
+fn give_lock_back(run_dir: &Path, run_id: &str, guard: &mut Option<crate::workdir::WorkdirGuard>) {
+    let keep = match read_all(run_dir) {
+        Ok(events) => {
+            RunState::fold(&events).run_status == RunStatus::Paused
+                && matches!(
+                    crate::pause::waker::latest_pause(&events),
+                    Some((_, true, _))
+                )
+        }
+        Err(_) => guard
+            .as_ref()
+            .is_some_and(crate::workdir::WorkdirGuard::took_parked),
     };
-    let state = RunState::fold(&events);
-    if state.run_status == RunStatus::Paused
-        && matches!(
-            crate::pause::waker::latest_pause(&events),
-            Some((_, true, _))
-        )
+    if keep
         && let Some(g) = guard.take()
         && let Err(e) = g.park(run_id)
     {
@@ -619,7 +651,6 @@ fn journal_resumed(
             "apb: warning: run `{run_id}` is paused with --keep-lock, but its lock could not be kept: {e}"
         );
     }
-    Err(EngineError::Conflict(why.into()))
 }
 
 /// The engine's own irreversible-consent check on resume (0.24.0): a run
