@@ -110,9 +110,6 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                             ResumeAllAction::LeftPaused
                         }
                         Ok(super::WakeProbe::Superseded) => ResumeAllAction::LeftPaused,
-                        Ok(super::WakeProbe::Unrecorded(detail)) => {
-                            ResumeAllAction::Busy { detail }
-                        }
                         Err(e) => ResumeAllAction::Refused {
                             detail: super::waker::refusal_text(e),
                         },

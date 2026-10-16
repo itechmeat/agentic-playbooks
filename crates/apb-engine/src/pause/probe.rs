@@ -37,11 +37,6 @@ pub enum WakeProbe {
     Repaused { seq: u64, until: u64 },
     /// The pause at the given sequence no longer holds the run.
     Superseded,
-    /// The probe ran, but its outcome could not be journaled (the run's
-    /// event lock stayed held); the reason. The run stays paused and is
-    /// probed again, never resumed on an outcome nobody recorded: a quota
-    /// that held would otherwise be lost.
-    Unrecorded(String),
 }
 
 /// The `(agent, model)` of the run's pause at journal sequence `seq` when it
@@ -89,7 +84,8 @@ fn journal_message(root: &Path, msg: &str) -> String {
 /// Probes the executor of the quota pause at journal sequence `seq` of run
 /// `run_id`, and journals the outcome (see [`WakeProbe`]). The run origin
 /// and environment drift are verified first, so a run a resume would refuse
-/// is never probed: that refusal is the `Err`.
+/// is never probed: that refusal is the `Err`, and so is an outcome that
+/// could not be journaled ([`journal_outcome`]).
 pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProbe, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -135,31 +131,60 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
             None,
         ),
     };
-    // Serialized against `stop_run` and `request_pause`; the pause must
-    // still be the one this probe was for. Journaled without the lock, a
-    // re-pause could race a stop, so a lock that cannot be taken leaves the
-    // outcome unrecorded and the run paused, to be probed again.
-    let _lock = match apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK) {
-        Ok(lock) => lock,
-        Err(e) => {
-            return Ok(WakeProbe::Unrecorded(format!(
-                "the outcome of the wake-up probe could not be journaled: {e}"
-            )));
+    journal_outcome(&run_dir, seq, &node, &agent, &model, detail, repause)
+}
+
+/// How many times the probe's outcome is offered to the run's event lock
+/// (each try waits out the lock's own timeout) before the waker gives up.
+const JOURNAL_TRIES: u32 = 30;
+
+/// Journals the outcome of a probe that ran: the marker and, for a quota
+/// that still holds, the new pause. Serialized against `stop_run` and
+/// `request_pause` under the run's event lock, and only while the pause at
+/// `seq` still holds the run. The probe is never run again for this: a lock
+/// that stays busy is retried up to [`JOURNAL_TRIES`] times, and any other
+/// lock error, or a lock still busy after that, is a refusal (the run stays
+/// paused for `apb resume` or `apb resume --all`), never a resume on an
+/// outcome nobody recorded.
+fn journal_outcome(
+    run_dir: &Path,
+    seq: u64,
+    node: &str,
+    agent: &str,
+    model: &str,
+    detail: String,
+    repause: Option<u64>,
+) -> Result<WakeProbe, EngineError> {
+    let mut tries = 0;
+    let _lock = loop {
+        match apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK) {
+            Ok(lock) => break lock,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries + 1 < JOURNAL_TRIES => {
+                tries += 1;
+                if !holds(&read_all(run_dir)?, seq) {
+                    return Ok(WakeProbe::Superseded);
+                }
+            }
+            Err(e) => {
+                return Err(EngineError::Conflict(format!(
+                    "the outcome of the wake-up probe could not be journaled: {e}"
+                )));
+            }
         }
     };
-    if !holds(&read_all(&run_dir)?, seq) {
+    if !holds(&read_all(run_dir)?, seq) {
         return Ok(WakeProbe::Superseded);
     }
-    let mut log = EventLog::open(&run_dir)?;
+    let mut log = EventLog::open(run_dir)?;
     log.append(EventPayload::SupervisorAction {
         action: QUOTA_PROBE_ACTION.into(),
-        node: Some(node),
+        node: Some(node.to_string()),
         detail,
     })?;
     Ok(match repause {
         Some(until) => {
             let seq = log
-                .append(quota::quota_pause(&agent, &model, until).to_event())?
+                .append(quota::quota_pause(agent, model, until).to_event())?
                 .seq;
             WakeProbe::Repaused { seq, until }
         }

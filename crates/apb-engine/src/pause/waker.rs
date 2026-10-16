@@ -125,18 +125,15 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
             // that hits the quota again re-pauses the run, and this waker
             // goes on waiting for the new pause. A probe whose outcome is not
             // known never leads to a resume: one refused before it ran (the
-            // run gate, environment drift) is the waker's refusal, one that
-            // ran but could not be journaled is probed again.
+            // run gate, environment drift) or one whose outcome could not be
+            // journaled is the waker's refusal. The paid probe runs once per
+            // pause, never again for a journal write.
             match super::probe::probe_before_wake(root, run_id, seq) {
                 Ok(super::WakeProbe::Repaused { seq: next, .. }) => {
                     seq = next;
                     continue;
                 }
                 Ok(super::WakeProbe::Superseded) => return Ok(WakeOutcome::Superseded),
-                Ok(super::WakeProbe::Unrecorded(_)) => {
-                    std::thread::sleep(poll());
-                    continue;
-                }
                 Ok(
                     super::WakeProbe::NotQuota
                     | super::WakeProbe::Skipped(_)

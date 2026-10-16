@@ -567,9 +567,11 @@ fn the_run_origin_is_verified_before_the_wake_up_probe() {
     assert!(probes(&events(root, &res.run_id)).is_empty());
 }
 
-/// A wake-up probe whose outcome cannot be journaled (the run's event lock
-/// stays held past its wait) never resumes the run: the waker probes again
-/// once the lock is free, and a quota that still holds re-pauses the run.
+/// A wake-up probe whose outcome cannot be journaled right away (the run's
+/// event lock is held past its wait) keeps that outcome and retries only the
+/// journal write: the run is not resumed while the outcome is unrecorded,
+/// the paid probe never runs a second time, and the quota that still holds
+/// re-pauses the run once the lock frees.
 #[cfg(unix)]
 #[test]
 fn a_probe_outcome_that_cannot_be_journaled_never_resumes_the_run() {
@@ -580,15 +582,11 @@ fn a_probe_outcome_that_cannot_be_journaled_never_resumes_the_run() {
     let root = dir.path();
     seed(root, "quotalock");
     common::seed_main(root);
-    // Call 1: the node (quota, 1 s); call 2: the probe whose outcome is not
-    // journaled; call 3: the probe again (quota, 10 min).
+    // Call 1: the node (quota, 1 s); call 2: the probe (quota, 10 min). A
+    // third call would succeed, so a probe run again would resume the run.
     let prog = stub(
         root,
-        &[
-            QUOTA_429,
-            QUOTA_429,
-            "429 Too Many Requests, Retry-After: 600",
-        ],
+        &[QUOTA_429, "429 Too Many Requests, Retry-After: 600"],
     );
     let _env = Env::set(&prog);
     struct Poll;
@@ -619,8 +617,10 @@ fn a_probe_outcome_that_cannot_be_journaled_never_resumes_the_run() {
         assert!(start.elapsed() < Duration::from_secs(20), "no probe ran");
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Past the probe's wait for the lock.
-    std::thread::sleep(Duration::from_millis(2_500));
+    // Held past at least one full wait of the event lock (2 s), so the
+    // first journal write has failed by now. The assertions below hold for
+    // any hold time shorter than the retry budget.
+    std::thread::sleep(Duration::from_millis(3_000));
     assert!(
         rx.try_recv().is_err(),
         "the waker must not act on a probe outcome nobody journaled"
@@ -638,7 +638,11 @@ fn a_probe_outcome_that_cannot_be_journaled_never_resumes_the_run() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert!(repaused > seq);
-    assert_eq!(calls(root), 3, "the node never ran again");
+    assert_eq!(
+        calls(root),
+        2,
+        "the probe ran once and the node never again"
+    );
     let p = probes(&events(root, &res.run_id));
     assert!(p.len() == 1 && p[0].starts_with("quota"), "{p:?}");
 
