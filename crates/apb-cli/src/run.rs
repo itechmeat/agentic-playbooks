@@ -932,7 +932,12 @@ pub(crate) fn drive_run_child(
         },
         // A resume that a newer pause, resume or stop replaced in the
         // meantime (the engine's resume of an old pause, or two resumes
-        // racing): nothing to do and nothing to record.
+        // racing): nothing to do and nothing to record. The caller of a
+        // detached resume (MCP `run_resume`, the dashboard) was already told
+        // the run resumed; the journal then shows what replaced it (the
+        // winning `run_resumed`, the newer `run_paused`, or the stop), which
+        // `run_status` reports. Journaling the lost race as well would add a
+        // marker that supervisor wakes and reports read as an action.
         Err(apb_engine::error::EngineError::Conflict(why))
             if why == apb_engine::scheduler::PAUSE_SUPERSEDED
                 || why == apb_engine::scheduler::RESUME_SUPERSEDED =>

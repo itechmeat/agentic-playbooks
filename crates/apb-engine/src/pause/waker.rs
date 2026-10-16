@@ -83,7 +83,12 @@ pub(crate) fn try_engine_resume(
 ) -> Result<u32, EngineError> {
     // Acknowledged: like `apb resume`, the operator who set up the pause or
     // the boot unit is the confirmation; what still refuses is a run
-    // directory this machine did not create.
+    // directory this machine did not create. The origin stamp binds the run
+    // id and the manifest, not the playbook snapshot. Recording the
+    // snapshot digest in the journal would add nothing: the journal is a
+    // plain file in the same run directory, so whoever can rewrite the
+    // snapshot can rewrite that digest too. A person's `apb resume` makes
+    // the same check; binding the snapshot belongs in the stamp itself.
     crate::gate::check_resume(root, run_id, true)
         .map_err(|v| EngineError::Conflict(v.to_string()))?;
     match pause_seq {
