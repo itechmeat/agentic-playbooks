@@ -1049,3 +1049,92 @@ fn a_host_task_outlives_a_pause_longer_than_its_deadline() {
     submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
     assert_eq!(wait_outcome(root, &run_id), "succeeded");
 }
+
+/// One host task with a 6 s deadline and no retry.
+const SIX_SECOND_DEADLINE: &str = r#"
+schema: 1
+id: hm
+name: Host mode
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 6, max_retries: 0 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: plan }
+  - { from: plan, to: done }
+"#;
+
+/// Issue #200, AC3, the clock itself: a host task's deadline stands still
+/// while the run is paused and, after the resume, runs on with what was left
+/// of it. The task is open about 3 s before a `--now` pause, the pause lasts
+/// 4 s (together past the 6 s deadline), and the resumed driver expires the
+/// task about 3 s after the resume: not right away (paused time counted) and
+/// not after a fresh 6 s (the clock restarted).
+#[test]
+fn a_resumed_host_task_expires_at_what_was_left_of_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(root, SIX_SECOND_DEADLINE);
+    let run_id = start_detached(root);
+    let _guard = crate::common::RunGuard::new(root, &run_id);
+    let plan = task_of(root, &run_id, "plan");
+    let id = plan["task_id"].as_str().unwrap().to_string();
+
+    std::thread::sleep(Duration::from_secs(3));
+    let out = crate::common::apb_std()
+        .args(["pause", &run_id, "--now", "--reason", "lunch"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pause failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll("the run to pause", || {
+        read_all(&run_dir(root, &run_id))
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(4));
+    resume(root, &run_id);
+
+    let events = poll("the task to expire", || {
+        let events = read_all(&run_dir(root, &run_id)).ok()?;
+        events
+            .iter()
+            .any(|e| {
+                matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, .. }
+                    if *task_id == id && status == "expired")
+            })
+            .then_some(events)
+    });
+    let ts = |what: &str, f: &dyn Fn(&EventPayload) -> bool| {
+        events
+            .iter()
+            .find(|e| f(&e.payload))
+            .unwrap_or_else(|| panic!("no {what}: {events:?}"))
+            .ts
+    };
+    let requested = ts(
+        "request",
+        &|p| matches!(p, EventPayload::HostTaskRequested { task_id, .. } if *task_id == id),
+    );
+    let paused = ts("pause", &|p| matches!(p, EventPayload::RunPaused { .. }));
+    let resumed = ts("resume", &|p| matches!(p, EventPayload::RunResumed { .. }));
+    let expired = ts("expiry", &|p| {
+        matches!(p, EventPayload::HostTaskSubmitted { task_id, status, .. }
+            if *task_id == id && status == "expired")
+    });
+    let left = 6_000 - (paused - requested);
+    let took = expired - resumed;
+    assert!(
+        took + 1_000 >= left && took <= left + 1_500,
+        "the task expired {took} ms after the resume; {left} ms of its deadline were left"
+    );
+}
