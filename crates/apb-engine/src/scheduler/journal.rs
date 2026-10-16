@@ -476,7 +476,13 @@ fn interrupted_attempt_session(
     attempt: u32,
 ) -> Option<String> {
     transcript_session(run_dir, events, node, attempt).or_else(|| {
-        events.iter().rev().find_map(|e| match &e.payload {
+        // Attempt numbers restart with every execution of the node, so only
+        // a finish after this attempt's latest start is its own.
+        let start = events.iter().rposition(|e| {
+            matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt: a, .. }
+                if n == node && *a == attempt)
+        })?;
+        events[start..].iter().find_map(|e| match &e.payload {
             EventPayload::AttemptFinished {
                 node: n,
                 attempt: a,
@@ -854,6 +860,14 @@ mod tests {
         );
         assert_eq!(
             interrupted_attempt_session(dir.path(), &events, "work", 2),
+            None
+        );
+        // A later execution of the node restarts at attempt 1: the older
+        // execution's session is not this attempt's.
+        let mut rerun = events.clone();
+        rerun.push(at(3, events[0].payload.clone()));
+        assert_eq!(
+            interrupted_attempt_session(dir.path(), &rerun, "work", 1),
             None
         );
     }
