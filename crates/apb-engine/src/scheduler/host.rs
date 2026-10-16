@@ -190,11 +190,29 @@ impl HostAdapter<'_, '_> {
         env: &BTreeMap<String, String>,
         adopt: bool,
     ) -> Result<Requested, EngineError> {
+        let events = if adopt {
+            read_all(self.run_dir)?
+        } else {
+            Vec::new()
+        };
         let adoption = if adopt {
-            host_task::adoptable(self.run_dir, &read_all(self.run_dir)?, task.node)
+            host_task::adoptable(self.run_dir, &events, task.node)
         } else {
             host_task::Adoption::default()
         };
+        // An adopted task keeps its own clock (issue #200): it gets what is
+        // left of the timeout since it opened, and the time the run sat paused
+        // does not count. A task opened by this request gets the full timeout.
+        let adopted_clock = adoption
+            .adopted
+            .as_ref()
+            .map(|r| (r.requested_ts, r.deadline_ms));
+        let adopted_deadline = adopted_clock.map(|(opened, _)| {
+            task.timeout.map(|t| {
+                std::time::Instant::now()
+                    + host_task::remaining_timeout(t, opened, &events, apb_core::clock::now_ms())
+            })
+        });
         for old in &adoption.superseded {
             self.close(
                 old,
@@ -211,14 +229,23 @@ impl HostAdapter<'_, '_> {
         if host_task::read_submission(self.run_dir, &task_id).is_some() {
             return Ok(Requested {
                 task_id,
-                deadline: task.timeout.map(|t| std::time::Instant::now() + t),
+                deadline: adopted_deadline
+                    .unwrap_or_else(|| task.timeout.map(|t| std::time::Instant::now() + t)),
                 prior_status_file,
             });
         }
         let now_ms = apb_core::clock::now_ms() as u64;
-        let deadline_ms = task
-            .timeout
-            .map(|t| now_ms.saturating_add(t.as_millis() as u64));
+        // The record keeps an adopted task's original opening and deadline:
+        // readers shift that deadline by the paused time since the opening
+        // (`host_task::shifted_deadline_ms`), so the clock is never reset.
+        let (requested_ts, deadline_ms) = match adopted_clock {
+            Some((opened, deadline)) if task.timeout.is_some() => (opened, deadline),
+            _ => (
+                now_ms,
+                task.timeout
+                    .map(|t| now_ms.saturating_add(t.as_millis() as u64)),
+            ),
+        };
         let record = TaskRecord {
             task_id: task_id.clone(),
             node: task.node.to_string(),
@@ -231,7 +258,7 @@ impl HostAdapter<'_, '_> {
             hint_source: self.hint_source.clone(),
             fallback_of: self.fallback_of.clone(),
             env: env.clone(),
-            requested_ts: now_ms,
+            requested_ts,
         };
         host_task::write_task(self.run_dir, &record, prompt, task.soul)?;
         self.journal.append(EventPayload::HostTaskRequested {
@@ -246,7 +273,8 @@ impl HostAdapter<'_, '_> {
             skills: self.skills.clone(),
             workdir: record.workdir.clone(),
             outputs: self.outputs.clone(),
-            deadline_ms,
+            // An adopted task's deadline as of now, paused time added.
+            deadline_ms: host_task::shifted_deadline_ms(&record, &events, u128::from(now_ms)),
             model_hint: self.model_hint.clone(),
             hint_source: self.hint_source.clone(),
             fallback_of: self.fallback_of.clone(),
@@ -258,7 +286,10 @@ impl HostAdapter<'_, '_> {
         })?;
         Ok(Requested {
             task_id,
-            deadline: task.timeout.map(|t| std::time::Instant::now() + t),
+            // An adopted task goes on with what is left of its own clock,
+            // paused time left out, instead of a fresh full timeout.
+            deadline: adopted_deadline
+                .unwrap_or_else(|| task.timeout.map(|t| std::time::Instant::now() + t)),
             prior_status_file,
         })
     }
@@ -291,6 +322,9 @@ impl HostAdapter<'_, '_> {
             if cancel.load(Ordering::Relaxed) {
                 self.mark("cancelled");
                 return Err(AgentFailure::new(ErrorClass::Transport, "cancelled"));
+            }
+            if let Some(gone) = run_dir_gone(self.run_dir) {
+                return Err(gone);
             }
             if let Some(c) = control {
                 (c.on_poll)();
@@ -420,6 +454,9 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
         loop {
+            if let Some(gone) = run_dir_gone(self.run_dir) {
+                return Err(gone);
+            }
             if let Some(sub) = host_task::read_submission(self.run_dir, &task_id) {
                 host_task::write_output(self.run_dir, &task_id, &sub.output).map_err(failure)?;
                 self.journal
@@ -469,8 +506,13 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
             }
             if cancel.load(Ordering::Relaxed) {
                 self.mark("cancelled");
-                let note = super::fork::cancel_note(self.run_dir, task.node);
-                let _ = self.close(&task_id, "cancelled", note);
+                // A pause never closes a host task (issue #200): a `--now`
+                // pause leaves it open, and the resume adopts it with its
+                // clock frozen across the pause.
+                if !crate::pause::interrupt::is_graceful(cancel) {
+                    let note = super::fork::cancel_note(self.run_dir, task.node);
+                    let _ = self.close(&task_id, "cancelled", note);
+                }
                 return Err(AgentFailure::new(ErrorClass::Transport, "cancelled"));
             }
             if let Some(c) = control {
@@ -504,6 +546,21 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
             std::thread::sleep(HOST_POLL);
         }
     }
+}
+
+/// A host task waits on files in the run directory; once that directory is
+/// gone (the workspace was deleted under a live driver) no submission, answer
+/// or stop can ever land, so the wait ends instead of polling forever.
+fn run_dir_gone(run_dir: &Path) -> Option<AgentFailure> {
+    (!run_dir.is_dir()).then(|| {
+        AgentFailure::new(
+            ErrorClass::Transport,
+            format!(
+                "the run directory {} is gone; nothing can submit the host task",
+                run_dir.display()
+            ),
+        )
+    })
 }
 
 #[cfg(test)]

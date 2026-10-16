@@ -141,6 +141,30 @@ pub struct RunRefArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunPauseArgs {
+    pub run_id: String,
+    /// `drain` (default): no new node starts, running nodes finish, then the
+    /// run is paused. `now`: running nodes are interrupted (SIGTERM, a grace
+    /// period, SIGKILL) and run again on resume; no attempt counts as failed.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Why the run is paused; shown by every status surface.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Resume on its own at this time: an RFC 3339 timestamp
+    /// (`2026-10-16T08:00:00Z`) or a duration from now (`90m`, `2h`).
+    #[serde(default)]
+    pub until: Option<String>,
+    /// Keep the workdir busy lock while paused so no other run can touch the
+    /// tree (default false: the lock is released).
+    #[serde(default)]
+    pub keep_lock: bool,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunWaitArgs {
     pub run_id: String,
     /// workspace_id of another workspace (spec 7). None - the current one.

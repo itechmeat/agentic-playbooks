@@ -661,6 +661,10 @@ a V13 validation error:
   with a note). The same report as data is MCP `run_retro_context`. See
   "Retrospective node" below. It renders differently on every run, so such a
   node never hits the node cache.
+- `run.active_elapsed_seconds` - whole seconds the run has been active since
+  it started, as of the moment the node starts. Time the run spent paused
+  does not count, so a playbook can compute its own time budget from it. It
+  renders differently on every run, so such a node never hits the node cache.
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
   Bounded by the node's context budget (see "Context budget" below).
@@ -1296,13 +1300,20 @@ the label is journaled on the attempt as `failure_kind`:
   agent can fix it.
 - `auth` - a credential problem. The same executor will fail identically until a
   human re-authenticates.
-- `transient` - infrastructure noise: a dropped connection, a 5xx, a rate limit.
-  The same executor, run again, has a real chance of succeeding.
+- `quota` - a provider quota or rate limit: HTTP 429, `too many requests`,
+  `rate limit`, a free tier's `FreeUsageLimitError`, a `credit usage limit`.
+  The executor works again once the provider's window passes, which no short
+  backoff waits out (see "Quota pause" below).
+- `transient` - infrastructure noise: a dropped connection, a 5xx, an
+  overloaded server. The same executor, run again, has a real chance of
+  succeeding.
 - `agent` - everything else, the agent's own mistakes included. This is the
   historical behavior: consume a node retry, then walk the fallback chain.
 
-The classifier is a curated table over the failure text, checked in that order,
-because a spend limit and an expired token are both routinely delivered as a 429.
+The classifier is a curated table over the failure text, checked budget, auth,
+quota, transient, because a spend limit and an expired token are both routinely
+delivered as a 429. Only `FreeUsageLimitError` and `credit usage limit` are
+checked first, ahead of the budget words they resemble.
 A plain "agent timed out" is deliberately NOT transient: that wording is the
 engine's own deadline kill, and reading it as infrastructure would hand every
 timed-out node extra same-executor attempts it never had. That holds for a
@@ -1339,6 +1350,36 @@ will not. That suppression lives for one node execution and is not persisted. A
 resume, a supervisor retry, or the next node walks the chain from the top again
 and hits the same expired credential unless a human fixed it in between, which is
 the point: between two drives, someone may have.
+
+### Quota pause
+
+A `quota` failure never fails the node while pauses remain. A profile fallback
+comes first: another chain step runs at once. On the last step, when the
+failure text carries a `Retry-After` (seconds or an HTTP date) longer than the
+next infrastructure backoff step, the run pauses right away; otherwise the
+ordinary infrastructure retries run first and the run pauses once they are
+spent. The attempt that ends in the pause is journaled `interrupted` with
+`failure_kind: quota` and spends no retry; the node gets no `node_finished`.
+The run journals `run_paused` with `reason: "quota (<agent>/<model>)"`, `by:
+engine` and an `until` taken from `Retry-After`, or from the schedule 15 min,
+30 min, then 1 h for every later pause (`APB_QUOTA_BACKOFF_MS`, a
+comma-separated list of milliseconds whose last step repeats, changes it for
+tests). The driver exits and leaves the waker behind, like any pause with an
+`until`.
+
+When `until` passes, the waker first sends a probe: one minimal call of the
+same agent and model with a fixed tiny prompt, no tools and no autonomy grant.
+Its outcome is journaled as a `supervisor_action` with action `quota_probe`
+(detail `passed: ...`, `quota: ...` or `error: ...`). A probe that hits the
+quota again re-pauses the run at the next schedule step without touching the
+node; any other outcome resumes the run, which runs the node again. `apb
+resume --all` probes a due quota pause the same way; an operator's `apb
+resume` resumes at once, without a probe. After 6 consecutive quota pauses of
+the same node (attempts and probes alike) without a successful attempt, the
+next quota failure fails the node with a `quota exhausted` output. A host task
+is no provider call: in a host-mode run the rate-limit wording keeps the
+`transient` handling and no probe is sent. Script nodes are never classified,
+so they never pause on quota.
 
 ### Retries continue the session
 

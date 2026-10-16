@@ -680,6 +680,12 @@ fn resolve(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
         ["run", "hooks", key] => hooks.get(*key).cloned().unwrap_or_default(),
+        // Seconds the run has been active, paused time left out (issue #200).
+        ["run", "active_elapsed_seconds"] => {
+            crate::pause::active_elapsed_seconds(clip_outputs.run_dir, apb_core::clock::now_ms())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        }
         // The run's retrospective as of now (issue #192 part 3), bounded.
         ["run", "retro"] => clip_outputs
             .retro

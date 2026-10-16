@@ -342,3 +342,45 @@ fn run_retro_renders_into_a_prompt_bounded() {
         "{cut}"
     );
 }
+
+/// Issue #200 (AC4): a 2 h pause is left out of the run and node durations
+/// of the retrospective.
+#[test]
+fn a_two_hour_pause_is_left_out_of_the_retro_durations() {
+    let hour: u128 = 3_600_000;
+    let root = tempfile::tempdir().unwrap();
+    let dir = write_run(
+        root.path(),
+        "p2",
+        &[
+            (
+                0,
+                json!({"type": "run_started", "playbook": "p", "version": "1.0.0"}),
+            ),
+            (
+                1_000,
+                json!({"type": "node_started", "node": "work", "attempt": 1}),
+            ),
+            (
+                4_000,
+                json!({"type": "run_paused", "reason": "overnight", "by": "operator"}),
+            ),
+            (
+                4_000 + 2 * hour,
+                json!({"type": "run_resumed", "from_node": "work"}),
+            ),
+            (
+                11_000 + 2 * hour,
+                json!({"type": "node_finished", "node": "work", "status": "succeeded", "attempt": 1, "output": "", "artifacts": []}),
+            ),
+            (
+                12_000 + 2 * hour,
+                json!({"type": "run_finished", "outcome": "succeeded"}),
+            ),
+        ],
+    );
+    let report = run_retro::build(&RetroRun::load(&dir).unwrap(), &[], 0);
+    assert_eq!(report.duration_ms, Some(12_000));
+    let work = report.nodes.iter().find(|n| n.node == "work").unwrap();
+    assert_eq!(work.duration_ms, 10_000);
+}

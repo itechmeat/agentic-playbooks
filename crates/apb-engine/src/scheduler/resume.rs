@@ -14,6 +14,7 @@ use apb_core::registry::is_safe_segment;
 
 use crate::error::EngineError;
 use crate::event::read_all;
+use crate::pause::PauseBy;
 use crate::state::{NodeStatus, RunState, RunStatus};
 
 /// How `drive` treats the start node of a resume.
@@ -43,6 +44,11 @@ pub enum ResumeReason {
     ParallelFallback,
     /// The caller named an explicit `--from-node`.
     ExplicitFromNode,
+    /// A `--now` pause (issue #200) interrupted several nodes at once: every
+    /// one of them runs again. The first is the start node and the drive's
+    /// frontier reconstruction re-admits the others; no finished node runs
+    /// again.
+    PausedParallelRestart,
 }
 
 impl ResumeReason {
@@ -52,6 +58,7 @@ impl ResumeReason {
             ResumeReason::AdvancePastFinished => "advance_past_finished",
             ResumeReason::ParallelFallback => "parallel_fallback",
             ResumeReason::ExplicitFromNode => "explicit_from_node",
+            ResumeReason::PausedParallelRestart => "paused_parallel_restart",
         }
     }
 }
@@ -91,7 +98,8 @@ pub fn plan_resume(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let state = RunState::fold(&read_all(&run_dir)?);
+    let events = read_all(&run_dir)?;
+    let state = RunState::fold(&events);
 
     // An explicit target always wins: restart exactly that node.
     if let Some(n) = from_node {
@@ -137,6 +145,15 @@ pub fn plan_resume(
                 reason: ResumeReason::AdvancePastFinished,
             })
         }
+        // A `--now` pause interrupted these nodes itself, so every one of them
+        // is a branch head of a finished node: rerun them all, nothing else.
+        [first, ..] if state.run_status == RunStatus::Paused && paused_now(&events) => {
+            Ok(ResumeDecision {
+                start_node: first.clone(),
+                mode: StartMode::Rerun,
+                reason: ResumeReason::PausedParallelRestart,
+            })
+        }
         _ => {
             let start_node = last_node_or_err(&state)?;
             Ok(ResumeDecision {
@@ -146,6 +163,26 @@ pub fn plan_resume(
             })
         }
     }
+}
+
+/// Whether the run's current pause began as a `--now` pause (issue #200),
+/// the one kind that leaves several nodes interrupted on purpose. A later
+/// `run_paused` of the same pause (a new reason or `until`) does not change
+/// what the pause did to the nodes.
+fn paused_now(events: &[crate::event::Event]) -> bool {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| !matches!(e.payload, EventPayload::RunResumed { .. }))
+        .any(|e| {
+            matches!(
+                e.payload,
+                EventPayload::RunPaused {
+                    mode: Some(crate::pause::PauseMode::Now),
+                    ..
+                }
+            )
+        })
 }
 
 fn last_node_or_err(state: &RunState) -> Result<String, EngineError> {
@@ -282,6 +319,49 @@ pub fn resume_detached_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<u32, EngineError> {
+    resume_detached_by(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        PauseBy::Operator,
+    )
+}
+
+/// [`resume_detached_with`] naming who resumes the run (issue #200): `by` is
+/// journaled on the detached driver's `run_resumed`. The operator surfaces
+/// pass `Operator`, the supervisor tools `Supervisor`, the waker and
+/// `apb resume --all` `Engine`.
+pub fn resume_detached_by(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    by: PauseBy,
+) -> Result<u32, EngineError> {
+    resume_detached_inner(root, run_id, from_node, allow_environment_drift, by, None)
+}
+
+/// The engine's resume of a paused run (the waker, `apb resume --all`): a
+/// detached driver that journals its `run_resumed` only while the run is
+/// still paused by the `run_paused` at journal sequence `pause_seq`, checked
+/// under the run's event lock (see [`resume_pause`]).
+pub(crate) fn resume_detached_pause(
+    root: &Path,
+    run_id: &str,
+    pause_seq: u64,
+) -> Result<u32, EngineError> {
+    resume_detached_inner(root, run_id, None, false, PauseBy::Engine, Some(pause_seq))
+}
+
+fn resume_detached_inner(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    by: PauseBy,
+    pause_seq: Option<u64>,
+) -> Result<u32, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -300,12 +380,21 @@ pub fn resume_detached_with(
     // know and cannot skip safely (see `event::read_all`): refuse here, where
     // the caller sees the version mismatch.
     read_all(&run_dir)?;
+    // And for a busy lock another run holds: the driver would die on it right
+    // after this call reported the resume started (issue #200).
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    if let Some(tree) = resume_lock_tree(&playbook, &run_dir)? {
+        crate::workdir::check_free_for(root, tree.as_deref(), run_id)?;
+    }
     let pid = crate::driver::spawn_detached_driver(
         root,
         run_id,
         from_node,
         true,
         allow_environment_drift,
+        Some(by),
+        pause_seq,
     )
     .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
     // As in `hand_to_detached_driver`: name the driver before returning, so a
@@ -395,8 +484,178 @@ pub fn resume_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<RunResult, EngineError> {
+    resume_by(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        PauseBy::Operator,
+    )
+}
+
+/// [`resume_with`] naming who resumes the run (issue #200), journaled as
+/// `run_resumed.by`.
+pub fn resume_by(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    by: PauseBy,
+) -> Result<RunResult, EngineError> {
     require_resume_consent(root, run_id)?;
-    resume_inner(root, run_id, from_node, allow_environment_drift, false)
+    resume_inner(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        false,
+        Some(by),
+    )
+}
+
+/// The engine's resume of the pause at journal sequence `pause_seq` (issue
+/// #200): what the detached driver of [`resume_detached_pause`] runs.
+/// `run_resumed` is journaled only while that pause still holds the run,
+/// checked under the run's event lock, the lock `request_pause` and
+/// `stop_run` journal under: a pause, resume or stop that came after the
+/// waker's own check makes this a `Conflict` that journals nothing.
+pub fn resume_pause(root: &Path, run_id: &str, pause_seq: u64) -> Result<RunResult, EngineError> {
+    // A superseded pause ends here, before any check that could journal a
+    // refusal (a consent, a busy workdir, a resume plan after a stop).
+    pause_still_holds(root, run_id, pause_seq)?;
+    require_resume_consent(root, run_id)?;
+    resume_inner_checked(
+        root,
+        run_id,
+        None,
+        false,
+        false,
+        Some(PauseBy::Engine),
+        Some(pause_seq),
+    )
+}
+
+/// The error [`resume_pause`] returns when the pause it was for no longer
+/// holds the run.
+pub const PAUSE_SUPERSEDED: &str = "the pause this resume was for no longer holds the run";
+
+/// The error a resume returns when another pause, resume or stop changed the
+/// run between its plan and its `run_resumed`: nothing was journaled.
+pub const RESUME_SUPERSEDED: &str = "another pause, resume or stop changed the run while this resume was starting; nothing was resumed";
+
+/// `Conflict(PAUSE_SUPERSEDED)` unless the run is paused by the `run_paused`
+/// at journal sequence `seq`. A run that does not exist passes, so the
+/// caller's own not-found error reports it.
+fn pause_still_holds(root: &Path, run_id: &str, seq: u64) -> Result<(), EngineError> {
+    if !is_safe_segment(run_id) {
+        return Ok(());
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if run_dir.is_dir() && !crate::pause::holds(&read_all(&run_dir)?, seq) {
+        return Err(EngineError::Conflict(PAUSE_SUPERSEDED.into()));
+    }
+    Ok(())
+}
+
+/// The journal sequence of the latest event that changed the run's lifecycle
+/// (start, pause, resume, stop, finish): what a resume planned against.
+fn lifecycle_seq(events: &[crate::event::Event]) -> Option<u64> {
+    events
+        .iter()
+        .rev()
+        .find(|e| {
+            matches!(
+                e.payload,
+                EventPayload::RunStarted { .. }
+                    | EventPayload::RunPaused { .. }
+                    | EventPayload::RunResumed { .. }
+                    | EventPayload::RunAborted { .. }
+                    | EventPayload::RunFinished { .. }
+            )
+        })
+        .map(|e| e.seq)
+}
+
+/// Journals `run_resumed` under the run's event lock (the lock
+/// `request_pause`, `stop_run` and the wake-up probe journal under), only
+/// while the run's lifecycle is still the one the resume planned against
+/// (`planned`) and, for an engine resume of one pause, that pause still
+/// holds the run. Two resumes racing each other, or a resume racing a pause
+/// or a stop, journal one `run_resumed` at most.
+///
+/// On any failure (a refusal, a busy or unreadable journal, a failed write)
+/// the busy lock the resume took goes back to how the journal leaves it:
+/// parked under the run again when a `--keep-lock` pause holds it, released
+/// otherwise ([`give_lock_back`]).
+fn journal_resumed(
+    log: &mut EventLog,
+    run_dir: &Path,
+    run_id: &str,
+    planned: Option<u64>,
+    pause_seq: Option<u64>,
+    guard: &mut Option<crate::workdir::WorkdirGuard>,
+    payload: EventPayload,
+) -> Result<(), EngineError> {
+    let res = try_journal_resumed(log, run_dir, planned, pause_seq, payload);
+    if res.is_err() {
+        give_lock_back(run_dir, run_id, guard);
+    }
+    res
+}
+
+fn try_journal_resumed(
+    log: &mut EventLog,
+    run_dir: &Path,
+    planned: Option<u64>,
+    pause_seq: Option<u64>,
+    payload: EventPayload,
+) -> Result<(), EngineError> {
+    let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)?;
+    let events = read_all(run_dir)?;
+    let refusal = match pause_seq {
+        Some(seq) if !crate::pause::holds(&events, seq) => Some(PAUSE_SUPERSEDED),
+        _ if lifecycle_seq(&events) != planned => Some(RESUME_SUPERSEDED),
+        _ => None,
+    };
+    match refusal {
+        None => {
+            log.append(payload)?;
+            Ok(())
+        }
+        Some(why) => Err(EngineError::Conflict(why.into())),
+    }
+}
+
+/// The busy lock of a resume that journaled no `run_resumed`: parked under
+/// the run again while a `--keep-lock` pause holds it, else released by the
+/// guard. A journal that cannot be read falls back to what the lock was
+/// when the resume took it (the run's own parked lock is parked again).
+/// Decided and parked under the run's event lock, so a stop that lands in
+/// between cannot leave a parked lock behind a stopped run.
+fn give_lock_back(run_dir: &Path, run_id: &str, guard: &mut Option<crate::workdir::WorkdirGuard>) {
+    // Best effort, like `stop`: a lock we could not take must not keep the
+    // resume from giving the workdir back.
+    let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK).ok();
+    let keep = match read_all(run_dir) {
+        Ok(events) => {
+            RunState::fold(&events).run_status == RunStatus::Paused
+                && matches!(
+                    crate::pause::waker::latest_pause(&events),
+                    Some((_, true, _))
+                )
+        }
+        Err(_) => guard
+            .as_ref()
+            .is_some_and(crate::workdir::WorkdirGuard::took_parked),
+    };
+    if keep
+        && let Some(g) = guard.take()
+        && let Err(e) = g.park(run_id)
+    {
+        eprintln!(
+            "apb: warning: run `{run_id}` is paused with --keep-lock, but its lock could not be kept: {e}"
+        );
+    }
 }
 
 /// The engine's own irreversible-consent check on resume (0.24.0): a run
@@ -422,6 +681,27 @@ fn require_resume_consent(root: &Path, run_id: &str) -> Result<(), EngineError> 
     }
 }
 
+/// The tree whose busy lock a resume of this run takes, or `None` when the
+/// run takes no lock. Mirrors prepare's predicate
+/// (`NodeKind::takes_workdir_lock`): a resumed parent with a sub-playbook
+/// node (or a finish-with-prompt agent node) still takes the shared workdir
+/// lock. The lock covers the run's working tree once one is journaled (issue
+/// #67 item 8), so resuming a run over its own worktree does not wait on a
+/// run in the execution root; the inner `None` is the execution root.
+fn resume_lock_tree(
+    playbook: &Playbook,
+    run_dir: &Path,
+) -> Result<Option<Option<PathBuf>>, EngineError> {
+    if !playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock()) {
+        return Ok(None);
+    }
+    Ok(Some(
+        RunState::fold(&read_all(run_dir)?)
+            .worktree
+            .map(PathBuf::from),
+    ))
+}
+
 /// Shared implementation behind `resume`/`resume_with`. `allow_shared_workdir`
 /// mirrors `RunOptions::allow_shared_workdir`: a sub-playbook child reattached
 /// on resume runs on the parent's drive thread while the parent still holds the
@@ -433,6 +713,30 @@ pub(crate) fn resume_inner(
     from_node: Option<&str>,
     allow_environment_drift: bool,
     allow_shared_workdir: bool,
+    by: Option<PauseBy>,
+) -> Result<RunResult, EngineError> {
+    resume_inner_checked(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        allow_shared_workdir,
+        by,
+        None,
+    )
+}
+
+/// [`resume_inner`], journaling `run_resumed` only while the run is still
+/// paused by the `run_paused` at journal sequence `pause_seq` when one is
+/// given (see [`resume_pause`]).
+fn resume_inner_checked(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    allow_shared_workdir: bool,
+    by: Option<PauseBy>,
+    pause_seq: Option<u64>,
 ) -> Result<RunResult, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -440,6 +744,11 @@ pub(crate) fn resume_inner(
     let run_dir = root.join(".apb/runs").join(run_id);
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    // An engine resume of a pause that no longer holds the run stops before
+    // it journals or locks anything.
+    if let Some(seq) = pause_seq {
+        pause_still_holds(root, run_id, seq)?;
     }
     // Anti-drift: agent binary must not silently change between start and resume.
     let drift_events = check_environment_drift(&run_dir, allow_environment_drift)?;
@@ -471,6 +780,9 @@ pub(crate) fn resume_inner(
     for ev in drift_events {
         log.append(ev)?;
     }
+    // The lifecycle this resume plans against; `run_resumed` is journaled
+    // only while it is unchanged (`journal_resumed`).
+    let planned = lifecycle_seq(&read_all(&run_dir)?);
 
     // Decide where and how to resume (Task 3): restart interrupted work, advance
     // past a finished node without re-executing it, fall back for a cut-short
@@ -526,27 +838,36 @@ pub(crate) fn resume_inner(
             )));
         }
     }
+    // The busy lock is taken BEFORE the `run_resumed` marker: a lock another
+    // run holds refuses the resume and leaves the run as it was (paused),
+    // instead of journaling a resume that dies on the spot. An engine resume
+    // checks its pause once more first, so a pause that replaced it in the
+    // meantime keeps the lock it parked.
+    if let Some(seq) = pause_seq {
+        pause_still_holds(root, run_id, seq)?;
+    }
+    let mut guard = match resume_lock_tree(&playbook, &run_dir)? {
+        Some(tree) => {
+            crate::workdir::acquire_tree_for(root, tree.as_deref(), allow_shared_workdir, run_id)?
+        }
+        None => None,
+    };
     // Journal a proper `run_resumed` marker (folds to running), replacing the
     // old `RunPaused { reason: "resume from X" }` write that used to leave the
     // folded status stuck on paused for the rest of the run.
-    log.append(EventPayload::RunResumed {
-        from_node: decision.start_node.clone(),
-    })?;
-    // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
-    // parent with a sub-playbook node (or a finish-with-prompt agent node)
-    // still takes the shared workdir lock.
-    // The lock covers the run's working tree once one is journaled (issue #67
-    // item 8), so resuming a run over its own worktree does not wait on a run
-    // in the execution root.
-    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
-    let tree = RunState::fold(&read_all(&run_dir)?)
-        .worktree
-        .map(PathBuf::from);
-    let mut guard = if is_write {
-        acquire_tree(root, tree.as_deref(), allow_shared_workdir)?
-    } else {
-        None
-    };
+    journal_resumed(
+        &mut log,
+        &run_dir,
+        run_id,
+        planned,
+        pause_seq,
+        &mut guard,
+        EventPayload::RunResumed {
+            from_node: decision.start_node.clone(),
+            by,
+            explicit: decision.reason == ResumeReason::ExplicitFromNode,
+        },
+    )?;
     // The persisted mode, as a resume drives it (`RunMode::on_resume`): an
     // agent-supervised run keeps its supervisor agent (heartbeat monitoring
     // and parking both continue), a session-supervised one resumes
@@ -591,4 +912,55 @@ pub fn record_run_error(
         reason: reason.to_string(),
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pause::PauseRequest;
+    use crate::workdir::{LockOwner, lock_owner};
+
+    /// A stop journaled while a failed resume is about to re-park the lock
+    /// must win: the resume decides only once the stop has finished.
+    #[test]
+    fn a_stop_landing_before_the_lock_goes_back_leaves_no_parked_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let run_dir = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+        })
+        .unwrap();
+        log.append(
+            PauseRequest {
+                by: Some(PauseBy::Operator),
+                keep_lock: true,
+                ..Default::default()
+            }
+            .to_event(),
+        )
+        .unwrap();
+        let guard = crate::workdir::acquire(root.path(), false).unwrap();
+        // The stop holds the event lock while it journals the abort.
+        let stop_lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK).unwrap();
+        let dir = run_dir.clone();
+        let resume = std::thread::spawn(move || {
+            let mut guard = guard;
+            give_lock_back(&dir, "r1", &mut guard);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        log.append(EventPayload::RunAborted {
+            reason: "stopped".into(),
+        })
+        .unwrap();
+        drop(stop_lock);
+        resume.join().unwrap();
+        let owner = lock_owner(&root.path().join(".apb/workdir.lock"));
+        assert!(
+            !matches!(owner, Some(LockOwner::PausedRun(_))),
+            "a stopped run must not keep a parked lock, got {owner:?}"
+        );
+    }
 }

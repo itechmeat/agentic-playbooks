@@ -604,10 +604,8 @@ pub(crate) fn park_for_supervisor(
                     }
                 }
             }
-            Control::Pause => {
-                log.append(EventPayload::RunPaused {
-                    reason: "supervisor pause".into(),
-                })?;
+            Control::Pause(req) => {
+                log.append(req.to_event())?;
                 // The function returns right below, so there is no
                 // further loop iteration to read the in-memory
                 // `control_cursor` back - only the persisted file
@@ -734,7 +732,11 @@ mod tests {
             },
         )
         .unwrap();
-        post_control(&run_dir, Control::Pause).unwrap();
+        post_control(
+            &run_dir,
+            Control::Pause(crate::pause::PauseRequest::supervisor()),
+        )
+        .unwrap();
 
         let cursor =
             super::drain_progress_after_execute(&run_dir, &mut log, None, Some("a")).unwrap();

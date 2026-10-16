@@ -428,8 +428,34 @@ fn own_pending(run_dir: &Path, events: &[Event]) -> Vec<PendingHostTask> {
         .into_iter()
         .filter(|(task_id, _)| is_valid_task_id(task_id))
         .filter(|(task_id, _)| !task_dir(run_dir, task_id).join(SUBMISSION_FILE).exists())
-        .filter_map(|(task_id, _)| pending_task(run_dir, &task_id))
+        .filter_map(|(task_id, _)| pending_task(run_dir, events, &task_id))
         .collect()
+}
+
+/// A task's deadline as a reader sees it at `now_ms` (issue #200): the
+/// recorded deadline moved later by the time the run spent paused since the
+/// task opened. A pause freezes the task's clock; it never expires the task.
+pub fn shifted_deadline_ms(record: &TaskRecord, events: &[Event], now_ms: u128) -> Option<u64> {
+    let paused =
+        crate::pause::paused_ms_between(events, u128::from(record.requested_ts), now_ms, now_ms);
+    record
+        .deadline_ms
+        .map(|d| d.saturating_add(u64::try_from(paused).unwrap_or(u64::MAX)))
+}
+
+/// What is left at `now_ms` of a `timeout` for a task opened at
+/// `requested_ts`: the timeout minus the time the run was active since then,
+/// so paused time does not count (issue #200).
+pub(crate) fn remaining_timeout(
+    timeout: std::time::Duration,
+    requested_ts: u64,
+    events: &[Event],
+    now_ms: u128,
+) -> std::time::Duration {
+    let active = crate::pause::active_elapsed_ms(events, u128::from(requested_ts), now_ms, now_ms);
+    timeout.saturating_sub(std::time::Duration::from_millis(
+        u64::try_from(active).unwrap_or(u64::MAX),
+    ))
 }
 
 /// The sub-playbook runs `events` started, oldest first, each once.
@@ -445,8 +471,9 @@ fn child_runs(events: &[Event]) -> Vec<String> {
     out
 }
 
-fn pending_task(run_dir: &Path, task_id: &str) -> Option<PendingHostTask> {
+fn pending_task(run_dir: &Path, events: &[Event], task_id: &str) -> Option<PendingHostTask> {
     let record = read_record(run_dir, task_id)?;
+    let deadline = shifted_deadline_ms(&record, events, apb_core::clock::now_ms());
     let prompt = read_prompt(run_dir, task_id)?;
     let role_prompt = read_role(run_dir, task_id);
     let dir = task_dir(run_dir, task_id);
@@ -467,7 +494,7 @@ fn pending_task(run_dir: &Path, task_id: &str) -> Option<PendingHostTask> {
         skills: record.skills,
         workdir: record.workdir,
         outputs: record.outputs,
-        deadline: record.deadline_ms,
+        deadline,
         hint_note: describe_hint(
             record.model_hint.as_deref(),
             record.hint_source.as_ref(),
@@ -991,5 +1018,53 @@ mod tests {
         assert_eq!(pending.len(), 1, "the task must not vanish");
         assert_eq!(pending[0].hint_source, None);
         assert_eq!(pending[0].fallback_of, None);
+    }
+
+    fn at(ts: u128, payload: EventPayload) -> Event {
+        Event {
+            seq: ts as u64,
+            ts,
+            payload,
+        }
+    }
+
+    /// Issue #200 (AC3): a task opened at 1 000 with a 60 s timeout, then a
+    /// two-hour pause. The listed deadline moves by the pause, and what is
+    /// left of the timeout ignores it, so the task does not expire.
+    #[test]
+    fn a_pause_freezes_a_host_task_deadline() {
+        let hour: u128 = 3_600_000;
+        let mut r = record("t-1", "a");
+        r.requested_ts = 1_000;
+        r.deadline_ms = Some(61_000);
+        let events = vec![
+            at(11_000, crate::pause::engine_paused("x")),
+            at(
+                11_000 + 2 * hour,
+                EventPayload::RunResumed {
+                    from_node: "a".into(),
+                    by: None,
+                    explicit: false,
+                },
+            ),
+        ];
+        let now = 21_000 + 2 * hour;
+        assert_eq!(
+            shifted_deadline_ms(&r, &events, now),
+            Some(61_000 + 2 * hour as u64)
+        );
+        // 20 s of active time since the opening: 40 s are left.
+        assert_eq!(
+            remaining_timeout(std::time::Duration::from_secs(60), 1_000, &events, now),
+            std::time::Duration::from_secs(40)
+        );
+        // While still paused, the deadline keeps moving with the clock.
+        let open = vec![at(11_000, crate::pause::engine_paused("x"))];
+        assert_eq!(
+            shifted_deadline_ms(&r, &open, 11_000 + hour),
+            Some(61_000 + hour as u64)
+        );
+        // Without a pause nothing moves.
+        assert_eq!(shifted_deadline_ms(&r, &[], now), Some(61_000));
     }
 }

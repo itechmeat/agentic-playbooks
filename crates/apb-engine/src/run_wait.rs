@@ -92,11 +92,17 @@ impl RunSnapshot {
         if self.status.is_terminal() {
             return Some(WaitReason::Finished);
         }
+        // A paused run is stopped even with a gate open (issue #200): nothing
+        // answers a gate while the run holds no driver, so the caller needs
+        // the pause first. The open gates stay open and stay in `needs` and
+        // the view.
+        if self.status == RunStatus::Paused {
+            return Some(WaitReason::Stopped);
+        }
         if self.needs.is_some() {
             return Some(WaitReason::NeedsInput);
         }
         match self.status {
-            RunStatus::Paused => Some(WaitReason::Stopped),
             RunStatus::Interrupted if self.driver_alive != Some(true) => Some(WaitReason::Stopped),
             _ => None,
         }
@@ -117,6 +123,13 @@ pub struct RunWaitResult {
     /// the fields above (pending gates, node counts, the answer) reads them
     /// from here, never from a second read that may disagree with `reason`.
     pub view: std::sync::Arc<crate::run_view::RunView>,
+}
+
+impl RunWaitResult {
+    /// The pause of a paused (or pausing) run: reason, who, since and until.
+    pub fn pause(&self) -> Option<&crate::pause::PauseInfo> {
+        self.view.pause()
+    }
 }
 
 /// Reads the run once, through the same [`crate::run_view::RunView`] every

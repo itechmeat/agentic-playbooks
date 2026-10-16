@@ -15,6 +15,7 @@
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import { runStatusClass, showsDriverDead } from '../lib/status'
+  import { pauseLine, pauseMarker } from '../lib/pause'
   import { toast } from 'svelte-sonner'
   import PlayCircle from '@lucide/svelte/icons/play-circle'
 
@@ -101,6 +102,11 @@
                   <Badge variant={statusVariant(r.status)} class={runStatusClass(r.status)}>
                     {r.status}
                   </Badge>
+                  {#if r.pause}
+                    <Badge variant="outline" class="ml-1" title={pauseLine(r.pause)} data-testid="run-pause-marker">
+                      {pauseMarker(r.pause)}
+                    </Badge>
+                  {/if}
                   {#if showsDriverDead(r.status, r.driver_dead)}
                     <Badge variant="outline" class="ml-1">needs resume</Badge>
                   {/if}

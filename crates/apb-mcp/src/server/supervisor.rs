@@ -116,7 +116,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Pause a supervised run. Requires the `retry` capability",
+        description = "Pause a supervised run (journaled with by: supervisor; drain mode, no reason or until). The operator's run_pause takes mode, reason and until. Requires the `retry` capability",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn supervisor_run_pause(

@@ -96,7 +96,8 @@ apb validate        validate playbooks, the profiles and scripts they reference,
 apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal)
 apb runs            list runs (apb runs <id> [--json]: one run with its execution mode)
 apb wait <run>      block until a run finishes, needs input or stops
-apb resume <run>    resume a paused or interrupted run
+apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
+apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
 apb stop <run>      stop a run
 apb review          decide a pending human_review node
 apb answer          answer an interactive node's pending question

@@ -58,6 +58,8 @@ pub struct RunView {
     /// The status to report: the fold, corrected by liveness (see
     /// [`crate::liveness::reported_run_status`]).
     pub run_status: RunStatus,
+    /// The pause to report (issue #200), read through [`RunView::pause`].
+    pause: Option<crate::pause::PauseInfo>,
 }
 
 /// Token usage summed over a run's own agent attempts that reported it (see
@@ -139,7 +141,17 @@ impl RunView {
         let driver_alive = crate::liveness::driver_alive(run_dir, run_id);
         let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
         let run_status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
+        // A control file a surface cannot read only hides the `pausing`
+        // overlay; it never fails the view.
+        let pending_pause = if run_status == RunStatus::Running {
+            crate::control::pending_pause(run_dir).ok().flatten()
+        } else {
+            None
+        };
+        let pause =
+            crate::pause::pause_info(&events, run_status, pending_pause.as_ref(), driver_alive);
         Ok(Self {
+            pause,
             state: RunState::fold(&events),
             events,
             unknown,
@@ -147,6 +159,13 @@ impl RunView {
             driver_alive,
             run_status,
         })
+    }
+
+    /// The run's pause: the latest `run_paused` of a paused run, or the
+    /// queued pause a live driver drains toward (`pausing`). `None` for a run
+    /// that is neither. The one pause accessor every surface reports from.
+    pub fn pause(&self) -> Option<&crate::pause::PauseInfo> {
+        self.pause.as_ref()
     }
 
     /// Per-node status for live reporting (`lost` for a dead attempt,

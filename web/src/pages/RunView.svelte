@@ -14,6 +14,7 @@
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
+  import RunPauseControls from '../lib/RunPauseControls.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
@@ -23,6 +24,7 @@
   import * as Card from '$lib/components/ui/card'
   import * as Tabs from '$lib/components/ui/tabs'
   import { runStatusClass, showsDriverDead } from '../lib/status'
+  import { pauseLine } from '../lib/pause'
   import { toast } from 'svelte-sonner'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
 
@@ -116,6 +118,11 @@
       >
         {detail.run_status}
       </Badge>
+      {#if detail.pause?.pausing}
+        <Badge variant="outline" title={pauseLine(detail.pause)} data-testid="run-pause-badge">
+          pausing
+        </Badge>
+      {/if}
       {#if showsDriverDead(detail.run_status, detail.driver_alive === false)}
         <Badge variant="outline">needs resume</Badge>
       {/if}
@@ -129,6 +136,15 @@
 </Topbar>
 
 {#if detail}
+  <RunPauseControls
+    {id}
+    {workspace}
+    status={detail.run_status}
+    pause={detail.pause ?? null}
+    driverDead={detail.driver_alive === false}
+    playbookId={detail.playbook}
+    onchange={load}
+  />
   <div class="border-b border-border px-4 py-2">
     <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />
   </div>

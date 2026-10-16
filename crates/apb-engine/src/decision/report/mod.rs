@@ -861,7 +861,7 @@ pub fn parse_since(s: &str, now_ms: u128) -> Option<u128> {
         if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
             return None;
         }
-        let days = days_from_civil(y, m, d);
+        let days = apb_core::clock::days_from_civil(y, m, d);
         return u128::try_from(days).ok().map(|d| d * 86_400_000);
     }
     let secs = apb_core::duration::parse_duration_str(s)?;
@@ -870,18 +870,6 @@ pub fn parse_since(s: &str, now_ms: u128) -> Option<u128> {
         return None;
     }
     Some(now_ms.saturating_sub(u128::from(secs) * 1000))
-}
-
-/// Days since 1970-01-01 of a proleptic-Gregorian date (Howard Hinnant's
-/// `days_from_civil`, public domain).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let m = i64::from(m);
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 #[cfg(test)]

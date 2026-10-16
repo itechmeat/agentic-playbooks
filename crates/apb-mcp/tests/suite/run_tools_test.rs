@@ -549,6 +549,100 @@ fn run_stop_finalizes_a_run_whose_driver_is_gone() {
     assert_eq!(again["outcome"], "already_terminal");
 }
 
+/// Issue #200: `.` names the runs directory itself, not a run: the operator
+/// pause refuses it (and `..`) as not found and touches nothing.
+#[test]
+fn pause_run_rejects_dot_run_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let runs = dir.path().join(".apb/runs");
+    fs::create_dir_all(&runs).unwrap();
+    for bad in [".", ".."] {
+        let err = apb_mcp::tools::pause_run(dir.path(), bad, None, None, None, false).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{bad}: {err}");
+    }
+    assert!(!runs.join("events.jsonl").exists());
+}
+
+/// Issue #200: the operator `run_pause` tool pauses a run nothing drives on
+/// the spot, `run_status` then carries the `pause` object (reason, by, until),
+/// a finished run is refused and a bad mode is rejected.
+#[test]
+fn pause_run_pauses_a_driverless_run_and_run_status_reports_it() {
+    use apb_engine::event::{EventLog, EventPayload};
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run_dir = dir.path().join(".apb/runs/noagent-pause");
+    fs::create_dir_all(&run_dir).unwrap();
+    let mut log = EventLog::create(&run_dir).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    drop(log);
+
+    let err = apb_mcp::tools::pause_run(
+        dir.path(),
+        "noagent-pause",
+        Some("later"),
+        None,
+        None,
+        false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("drain"), "{err}");
+
+    let out = apb_mcp::tools::pause_run(
+        dir.path(),
+        "noagent-pause",
+        Some("now"),
+        Some("lunch".into()),
+        Some("2h"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(out["outcome"], "paused");
+    assert_eq!(out["mode"], "now");
+    assert!(out["until"].as_u64().is_some());
+
+    let status = run_status(dir.path(), "noagent-pause").unwrap();
+    assert_eq!(status["run_status"], "paused");
+    assert_eq!(status["pause"]["reason"], "lunch");
+    assert_eq!(status["pause"]["by"], "operator");
+    assert_eq!(status["pause"]["mode"], "now");
+    assert!(status["pause"]["until"].as_u64().is_some());
+    assert!(status["pause"]["since"].is_number());
+
+    let listed = runs_list(dir.path()).unwrap();
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "noagent-pause")
+        .unwrap();
+    assert_eq!(row["pause"]["by"], "operator");
+
+    // A finished run cannot be paused.
+    let done = dir.path().join(".apb/runs/noagent-done");
+    fs::create_dir_all(&done).unwrap();
+    let mut log = EventLog::create(&done).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(EventPayload::RunFinished {
+        outcome: "success".into(),
+    })
+    .unwrap();
+    drop(log);
+    assert!(
+        apb_mcp::tools::pause_run(dir.path(), "noagent-done", None, None, None, false).is_err()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Task 9: liveness in run_status.
 //
@@ -1342,4 +1436,65 @@ fn run_status_lists_branch_failures_only_when_journaled() {
     fs::write(plain.join("events.jsonl"), format!("{}\n", lines[0])).unwrap();
     let out = run_status(dir.path(), "r2").unwrap();
     assert!(out.get("branch_failures").is_none());
+}
+
+/// `run_resume` of a paused run whose tree another live run holds (issue
+/// #200): the tool returns the busy-lock conflict instead of a `detached`
+/// ack for a driver that would die at once, and journals nothing.
+#[test]
+fn run_resume_refuses_a_busy_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_scripted(root);
+    let run_dir = root.join(".apb/runs/busy-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), SCRIPTED).unwrap();
+    {
+        use apb_engine::event::{EventLog, EventPayload};
+        let mut log = EventLog::open(&run_dir).unwrap();
+        for p in [
+            EventPayload::RunStarted {
+                playbook: "scripted".into(),
+                version: "1.0.0".into(),
+            },
+            EventPayload::NodeStarted {
+                node: "start".into(),
+                attempt: 1,
+            },
+            EventPayload::NodeFinished {
+                node: "start".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: String::new(),
+                artifacts: Vec::new(),
+            },
+            EventPayload::RunPaused {
+                reason: "away".into(),
+                by: Some(apb_engine::pause::PauseBy::Operator),
+                mode: None,
+                until: None,
+                keep_lock: false,
+            },
+        ] {
+            log.append(p).unwrap();
+        }
+    }
+    fs::write(
+        root.join(".apb/workdir.lock"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let err = apb_mcp::tools::run_resume(root, "busy-1", None, false).unwrap_err();
+    assert!(
+        matches!(&err, apb_mcp::tools::ToolError::Conflict(m) if m.contains("another write-run holds the workdir")),
+        "expected the busy-lock conflict, got {err:?}"
+    );
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(
+            e.payload,
+            apb_engine::event::EventPayload::RunResumed { .. }
+        )),
+        "a refused resume journals nothing"
+    );
 }

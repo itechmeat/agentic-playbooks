@@ -227,11 +227,20 @@ pub struct JudgeEdgeAnswers {
     pub p: BTreeMap<String, f64>,
 }
 
+/// The old resume wrote `run_paused { reason: "resume from X" }` as a marker
+/// and kept running: not a pause.
+pub(crate) fn is_legacy_resume_marker(p: &EventPayload) -> bool {
+    matches!(p, EventPayload::RunPaused { reason, by: None, .. } if reason.starts_with("resume from "))
+}
+
 impl RunState {
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
         // Open attempts: node -> attempt. Closed by attempt_finished/node_finished.
         let mut open: BTreeSet<String> = BTreeSet::new();
+        // The run status came from the old resume's `run_paused { reason:
+        // "resume from X" }` marker, which never meant a pause.
+        let mut legacy_marker = false;
         for e in events {
             match &e.payload {
                 EventPayload::RunStarted { .. } => s.run_status = RunStatus::Running,
@@ -272,7 +281,10 @@ impl RunState {
                     s.last_node = Some(node.clone());
                     *s.finished_counts.entry(node.clone()).or_insert(0) += 1;
                 }
-                EventPayload::RunPaused { .. } => s.run_status = RunStatus::Paused,
+                p @ EventPayload::RunPaused { .. } => {
+                    s.run_status = RunStatus::Paused;
+                    legacy_marker = is_legacy_resume_marker(p);
+                }
                 EventPayload::RunResumed { .. } => s.run_status = RunStatus::Running,
                 // A queued run is `Running` and stays that way: it was
                 // admitted, its parameters are on disk, and it is waiting for
@@ -450,10 +462,21 @@ impl RunState {
             // `doctor --run` all still read interrupted) and a second stop
             // passed the terminal check again and appended a second
             // `RunAborted`.
-            if !matches!(
-                s.run_status,
-                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
-            ) {
+            //
+            // `Paused` is exempt for the same reason (issue #200): a driver
+            // closes its attempts before it journals `run_paused`, so an
+            // attempt still open under a pause is one whose driver died, and
+            // the pause was journaled for the driverless run afterwards
+            // (`request_pause`, `resume --all`). The run is paused; the node
+            // still reads interrupted and the resume reaps the attempt. The
+            // old resume marker is not a pause: an older journal whose driver
+            // died after it still reads interrupted.
+            let exempt = match s.run_status {
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted => true,
+                RunStatus::Paused => !legacy_marker,
+                _ => false,
+            };
+            if !exempt {
                 s.run_status = RunStatus::Interrupted;
             }
         }

@@ -520,11 +520,14 @@ impl Labeller for RetryAdviceLabeller {
                 _ => None,
             });
         // Up to the node's next execution: a later visit is not this retry.
-        let window = events[at + 1..].iter().take_while(
-            |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
-        );
+        let window: Vec<&Event> = events[at + 1..]
+            .iter()
+            .take_while(
+                |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
+            )
+            .collect();
         let mut next_started = false;
-        for e in window {
+        for (i, e) in window.iter().enumerate() {
             match &e.payload {
                 EventPayload::SupervisorAction {
                     action,
@@ -554,6 +557,16 @@ impl Labeller for RetryAdviceLabeller {
                     status,
                     ..
                 } if n == node && *attempt == failed + 1 => {
+                    // An attempt a pause interrupted (issue #200) says nothing
+                    // about the executor: it neither failed nor helped, and it
+                    // runs again on resume. The pause follows it in the journal.
+                    if status == "interrupted"
+                        && window[i + 1..]
+                            .iter()
+                            .any(|f| matches!(f.payload, EventPayload::RunPaused { .. }))
+                    {
+                        return Label::Unlabelled("the next attempt was interrupted by a pause");
+                    }
                     return match status.as_str() {
                         "succeeded" => Label::Keep,
                         "failed" | "timed_out" | "interrupted" => Label::Act,
@@ -755,6 +768,8 @@ mod tests {
             seq,
             EventPayload::RunResumed {
                 from_node: "placeholder".into(),
+                by: None,
+                explicit: false,
             },
         )
     }
@@ -774,7 +789,7 @@ mod tests {
         let mut failed = pending.clone();
         failed.push(finished(5, "b", "failed"));
         assert_eq!(label(&failed), Label::Act);
-        pending.push(ev(5, EventPayload::RunPaused { reason: "x".into() }));
+        pending.push(ev(5, crate::pause::engine_paused("x")));
         assert!(matches!(label(&pending), Label::Unlabelled(_)));
         // The last node: the run's outcome labels it.
         let mut last = base();
@@ -1024,6 +1039,21 @@ mod tests {
             },
         ));
         assert!(matches!(l.label(&r, &enforced), Label::Unlabelled(_)));
+        // An attempt a pause interrupted is not a failure of the executor:
+        // unlabelled, while a supervisor-interrupted one still counts as Act.
+        let mut paused = base();
+        paused.extend([
+            attempt_started(4, "a", 2, "m"),
+            attempt_finished(5, "a", 2, "interrupted"),
+            ev(6, crate::pause::engine_paused("operator pause")),
+        ]);
+        assert!(matches!(l.label(&r, &paused), Label::Unlabelled(_)));
+        let mut interrupted = base();
+        interrupted.extend([
+            attempt_started(4, "a", 2, "m"),
+            attempt_finished(5, "a", 2, "interrupted"),
+        ]);
+        assert_eq!(l.label(&r, &interrupted), Label::Act);
         // Acting means switching or stopping at the threshold.
         assert_eq!(l.acts_at(&r, 0.6), Some(true));
         assert_eq!(

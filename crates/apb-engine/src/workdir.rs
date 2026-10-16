@@ -25,6 +25,9 @@ pub struct WorkdirGuard {
     /// process: the guard then goes away without removing the lock, so the
     /// lock never lapses between the two owners.
     armed: bool,
+    /// The lock this guard took over was one the claimant run itself had
+    /// parked across a `--keep-lock` pause.
+    took_parked: bool,
 }
 
 impl WorkdirGuard {
@@ -45,11 +48,126 @@ impl WorkdirGuard {
         self.disarm();
         Ok(())
     }
+
+    /// Keeps the lock across a `--keep-lock` pause (issue #200): the lock
+    /// file names the paused run instead of a pid, so [`acquire_tree`] keeps
+    /// refusing other write-runs while no process drives the run, and only
+    /// that run's own resume takes the lock back (or its stop releases it).
+    pub fn park(mut self, run_id: &str) -> Result<(), EngineError> {
+        write_lock_text(&self.lock_path, &paused_owner(run_id))?;
+        self.disarm();
+        Ok(())
+    }
+
+    /// Whether the lock this guard took over was parked by the run it was
+    /// taken for (a resume taking back its own `--keep-lock` lock).
+    pub fn took_parked(&self) -> bool {
+        self.took_parked
+    }
+}
+
+/// The prefix of a lock file held by a paused run rather than a process.
+const PAUSED_PREFIX: &str = "paused:";
+
+fn paused_owner(run_id: &str) -> String {
+    format!("{PAUSED_PREFIX}{run_id}")
+}
+
+/// Who a lock file names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockOwner {
+    /// The process driving a write-run.
+    Pid(u32),
+    /// A run paused with `--keep-lock` (issue #200): no process, the run id.
+    PausedRun(String),
+}
+
+/// The owner a lock file names, `None` for no lock or an unreadable one.
+pub fn lock_owner(path: &Path) -> Option<LockOwner> {
+    if !path.is_file() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let raw = raw.trim();
+    if let Some(id) = raw.strip_prefix(PAUSED_PREFIX) {
+        return apb_core::registry::is_safe_segment(id).then(|| LockOwner::PausedRun(id.into()));
+    }
+    match raw.parse::<u32>() {
+        Ok(0) | Err(_) => None,
+        Ok(pid) => Some(LockOwner::Pid(pid)),
+    }
+}
+
+/// The `.apb` directory a lock file lives under (`.apb/workdir.lock` or
+/// `.apb/locks/<tree>.lock`).
+fn apb_dir_of(lock_path: &Path) -> Option<&Path> {
+    let parent = lock_path.parent()?;
+    match parent.file_name() {
+        Some(name) if name == "locks" => parent.parent(),
+        _ => Some(parent),
+    }
+}
+
+/// Whether the paused run `run_id` still holds the lock at `lock_path`: its
+/// run directory exists and the run is not over. A stopped or finished run
+/// left a stale paused lock, which the next acquire takes.
+fn paused_run_holds(lock_path: &Path, run_id: &str) -> bool {
+    let Some(run_dir) = apb_dir_of(lock_path).map(|d| d.join("runs").join(run_id)) else {
+        return false;
+    };
+    if !run_dir.is_dir() {
+        return false;
+    }
+    crate::event::read_all_lossy_tail(&run_dir).is_ok_and(|events| {
+        !crate::state::RunState::fold(&events)
+            .run_status
+            .is_terminal()
+    })
+}
+
+/// Every lock of the workspace at `root` a paused run holds (issue #200), as
+/// `(lock file, run id)`: what `apb doctor` lists.
+pub fn paused_locks(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut files = vec![lock_path(root)];
+    if let Ok(dir) = std::fs::read_dir(root.join(".apb/locks")) {
+        files.extend(dir.flatten().map(|e| e.path()));
+    }
+    files
+        .into_iter()
+        .filter_map(|f| match lock_owner(&f) {
+            Some(LockOwner::PausedRun(id)) => Some((f, id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Releases every lock the paused run `run_id` holds (issue #200): its stop,
+/// or a pause update without `--keep-lock`. A lock naming anything else is
+/// left alone.
+pub fn release_paused(root: &Path, run_id: &str) {
+    for (file, id) in paused_locks(root) {
+        if id == run_id {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
+/// Takes the busy lock of `tree` for the paused run `run_id` and parks it
+/// under the run (a `--keep-lock` pause of a run no process drives). Refuses
+/// with `WorkdirBusy` while another live write-run holds it.
+pub fn park_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<(), EngineError> {
+    match acquire_at(tree_lock_path(root, tree), Some(run_id))? {
+        Some(guard) => guard.park(run_id),
+        None => Ok(()),
+    }
 }
 
 impl Drop for WorkdirGuard {
+    /// Removes the lock only while it still names this process: a lock
+    /// another owner holds by now (a handover, a park, a new claimant after
+    /// a stale steal) is theirs.
     fn drop(&mut self) {
-        if self.armed {
+        if self.armed && lock_owner(&self.lock_path) == Some(LockOwner::Pid(std::process::id())) {
             let _ = std::fs::remove_file(&self.lock_path);
         }
     }
@@ -125,6 +243,10 @@ pub(crate) fn git_path(dir: &Path, what: &str) -> Option<PathBuf> {
 /// driver of a deleted workspace must not re-create it (a tree lock's
 /// `.apb/locks` may be created, `.apb` itself never).
 fn write_lock(lock_path: &Path, pid: u32) -> std::io::Result<()> {
+    write_lock_text(lock_path, &pid.to_string())
+}
+
+fn write_lock_text(lock_path: &Path, text: &str) -> std::io::Result<()> {
     let parent = lock_path.parent().unwrap_or(lock_path);
     let apb_dir = match parent.file_name() {
         Some(name) if name == "locks" => {
@@ -143,17 +265,13 @@ fn write_lock(lock_path: &Path, pid: u32) -> std::io::Result<()> {
         }
         _ => parent,
     };
-    atomic_write_under(apb_dir, lock_path, pid.to_string().as_bytes())
+    atomic_write_under(apb_dir, lock_path, text.as_bytes())
 }
 
 pub(crate) fn lock_holder(path: &Path) -> Option<u32> {
-    if !path.is_file() {
-        return None;
-    }
-    let raw = std::fs::read_to_string(path).unwrap_or_default();
-    match raw.trim().parse::<u32>() {
-        Ok(0) | Err(_) => None,
-        Ok(pid) => Some(pid),
+    match lock_owner(path)? {
+        LockOwner::Pid(pid) => Some(pid),
+        LockOwner::PausedRun(_) => None,
     }
 }
 
@@ -172,23 +290,127 @@ pub fn acquire_tree(
     if allow_shared {
         return Ok(None);
     }
-    acquire_at(tree_lock_path(root, tree))
+    acquire_at(tree_lock_path(root, tree), None)
 }
 
-fn acquire_at(lock_path: PathBuf) -> Result<Option<WorkdirGuard>, EngineError> {
-    if let Some(pid) = lock_holder(&lock_path)
-        && pid_alive(pid)
-    {
-        return Err(EngineError::WorkdirBusy(format!(
-            "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
-        )));
+/// [`acquire_tree`] for the resume of run `run_id`: a lock that run parked
+/// across a `--keep-lock` pause (issue #200) is its own to take back.
+pub fn acquire_tree_for(
+    root: &Path,
+    tree: Option<&Path>,
+    allow_shared: bool,
+    run_id: &str,
+) -> Result<Option<WorkdirGuard>, EngineError> {
+    if allow_shared {
+        return Ok(None);
     }
-    // No lock, or a stale one - overwrite it.
+    acquire_at(tree_lock_path(root, tree), Some(run_id))
+}
+
+/// Why the lock at `lock_path` is not free for `claimant`, or `None` when it
+/// is (no lock, a stale one, or one `claimant` itself parked).
+///
+/// The hint names what the caller can do: a new run (`claimant` is `None`)
+/// can take its own worktree or `--allow-shared-workdir`; an existing run
+/// (its resume, or a `--keep-lock` pause of it) has neither option on any
+/// surface, so it is told to wait for the other run or stop it.
+fn busy_reason(lock_path: &Path, claimant: Option<&str>) -> Option<String> {
+    let existing = claimant.is_some();
+    match lock_owner(lock_path) {
+        Some(LockOwner::Pid(pid)) if pid_alive(pid) => Some(if existing {
+            format!(
+                "another write-run holds the workdir (pid {pid}); try again once it finishes, or stop it first"
+            )
+        } else {
+            format!(
+                "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
+            )
+        }),
+        Some(LockOwner::PausedRun(id))
+            if claimant != Some(id.as_str()) && paused_run_holds(lock_path, &id) =>
+        {
+            Some(if existing {
+                format!(
+                    "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first"
+                )
+            } else {
+                format!(
+                    "the paused run `{id}` keeps the workdir locked (paused with --keep-lock); resume or stop it first, give this run its own worktree, or use --allow-shared-workdir"
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Read-only preflight of [`acquire_tree_for`]: refuses with `WorkdirBusy`
+/// when resuming run `run_id` would find the busy lock of `tree` held by
+/// another live run, without taking the lock. A resume that hands the run to
+/// a detached driver calls it so the caller sees the refusal instead of a
+/// driver that dies right after the resume reported success.
+pub fn check_free_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<(), EngineError> {
+    match busy_reason(&tree_lock_path(root, tree), Some(run_id)) {
+        Some(msg) => Err(EngineError::WorkdirBusy(msg)),
+        None => Ok(()),
+    }
+}
+
+fn acquire_at(
+    lock_path: PathBuf,
+    claimant: Option<&str>,
+) -> Result<Option<WorkdirGuard>, EngineError> {
+    // The check and the write are one step under a short mutex, so two
+    // claimants of a free, stale or parked lock never both take it (the
+    // loser's guard would later remove the winner's lock).
+    // A mutex held by a live sibling past the short wait is a busy workdir,
+    // so the queued and handover waits retry it like a held lock.
+    let _taking = take_mutex(&lock_path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::WouldBlock => EngineError::WorkdirBusy(e.to_string()),
+        _ => EngineError::Io(e),
+    })?;
+    if let Some(msg) = busy_reason(&lock_path, claimant) {
+        return Err(EngineError::WorkdirBusy(msg));
+    }
+    let took_parked = matches!(
+        (lock_owner(&lock_path), claimant),
+        (Some(LockOwner::PausedRun(id)), Some(c)) if id == c
+    );
+    // No lock, a stale one or the claimant's own parked one: overwrite it.
     write_lock(&lock_path, std::process::id())?;
     Ok(Some(WorkdirGuard {
         lock_path,
         armed: true,
+        took_parked,
     }))
+}
+
+/// The mutex [`acquire_at`] holds while it checks and writes the lock at
+/// `lock_path`: a sibling lock file next to it, held for microseconds. Never
+/// creates the workspace's `.apb` and never goes through a symlinked
+/// `locks` directory, like the lock write itself.
+fn take_mutex(lock_path: &Path) -> std::io::Result<apb_core::fsutil::DirLock> {
+    let parent = lock_path.parent().unwrap_or(lock_path);
+    let apb_dir = apb_dir_of(lock_path).unwrap_or(parent);
+    if !apb_dir.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("`{}` no longer exists", apb_dir.display()),
+        ));
+    }
+    if parent
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::other(format!(
+            "`{}` is a symlink, refusing to write a lock through it",
+            parent.display()
+        )));
+    }
+    let name = lock_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    apb_core::fsutil::lock_dir(parent, &format!("{name}.take"))
 }
 
 /// Lock acquisition for a detached driver process (see
@@ -288,9 +510,10 @@ fn wait_for_workdir(
             return Ok(Some(WorkdirGuard {
                 lock_path,
                 armed: true,
+                took_parked: false,
             }));
         }
-        match acquire_at(lock_path.clone()) {
+        match acquire_at(lock_path.clone(), None) {
             Err(EngineError::WorkdirBusy(msg)) => {
                 if let LockWait::Queue { stopped } = &mut mode
                     && (*stopped)()
@@ -312,5 +535,75 @@ fn wait_for_workdir(
             }
             other => return other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn busy(r: Result<impl std::fmt::Debug, EngineError>) -> String {
+        match r {
+            Err(EngineError::WorkdirBusy(msg)) => msg,
+            other => panic!("expected WorkdirBusy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_resume_is_not_told_about_options_only_a_new_run_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let _held = acquire_tree(root, None, false).unwrap();
+        let start = busy(acquire_tree(root, None, false));
+        assert!(start.contains("--allow-shared-workdir"), "{start}");
+        let resume = busy(check_free_for(root, None, "r-1"));
+        assert!(!resume.contains("--allow-shared-workdir"), "{resume}");
+        assert!(!resume.contains("worktree"), "{resume}");
+        assert!(resume.contains("stop it first"), "{resume}");
+    }
+
+    /// Two resumes of one run reclaiming the lock it parked: exactly one
+    /// takes it, the other is told the workdir is busy.
+    #[test]
+    fn racing_claimants_of_a_parked_lock_take_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let lock = lock_path(root);
+        for _ in 0..20 {
+            write_lock_text(&lock, &paused_owner("r-1")).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (root, barrier) = (root.to_path_buf(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        acquire_tree_for(&root, None, false, "r-1")
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let taken = results.iter().filter(|r| matches!(r, Ok(Some(_)))).count();
+            assert_eq!(taken, 1, "{results:?}");
+            drop(results);
+            assert_eq!(lock_owner(&lock), None, "the winner's guard released it");
+        }
+    }
+
+    /// A guard whose lock names another owner by now leaves that lock alone.
+    #[test]
+    fn a_guard_never_removes_a_lock_it_no_longer_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let guard = acquire_tree(root, None, false).unwrap();
+        let lock = lock_path(root);
+        write_lock_text(&lock, &paused_owner("other")).unwrap();
+        drop(guard);
+        assert_eq!(
+            lock_owner(&lock),
+            Some(LockOwner::PausedRun("other".into()))
+        );
     }
 }

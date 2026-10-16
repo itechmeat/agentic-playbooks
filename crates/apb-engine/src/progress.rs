@@ -975,9 +975,12 @@ pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
     None
 }
 
-/// Measured wall time per node in whole seconds, from NodeStarted to
-/// NodeFinished; the last completion of a node wins (loops overwrite).
+/// Measured time per node in whole seconds, from NodeStarted to
+/// NodeFinished without the time the run spent paused in between (issue
+/// #200); the last completion of a node wins (loops overwrite).
 pub fn node_durations_seconds(events: &[Event]) -> BTreeMap<String, u64> {
+    let paused =
+        crate::pause::paused_intervals(events, events.last().map(|e| e.ts).unwrap_or_default());
     let mut start: BTreeMap<String, u128> = BTreeMap::new();
     let mut out: BTreeMap<String, u64> = BTreeMap::new();
     for e in events {
@@ -987,7 +990,10 @@ pub fn node_durations_seconds(events: &[Event]) -> BTreeMap<String, u64> {
             }
             EventPayload::NodeFinished { node, .. } => {
                 if let Some(s) = start.get(node) {
-                    out.insert(node.clone(), (e.ts.saturating_sub(*s) / 1000) as u64);
+                    let active =
+                        e.ts.saturating_sub(*s)
+                            .saturating_sub(crate::pause::paused_ms_in(&paused, *s, e.ts));
+                    out.insert(node.clone(), (active / 1000) as u64);
                 }
             }
             _ => {}
@@ -1837,6 +1843,45 @@ edges:
 
         // The version is part of the identity.
         assert!(one.starts_with("1.0.0|"));
+    }
+
+    #[test]
+    fn node_durations_leave_out_paused_time() {
+        // Issue #200: a wait node open across a 2 h pause measures 5 s.
+        let at = |seq: u64, ts: u128, payload| Event { seq, ts, payload };
+        let hour: u128 = 3_600_000;
+        let events = vec![
+            at(
+                0,
+                0,
+                EventPayload::NodeStarted {
+                    node: "w".into(),
+                    attempt: 1,
+                },
+            ),
+            at(1, 2_000, crate::pause::engine_paused("x")),
+            at(
+                2,
+                2_000 + 2 * hour,
+                EventPayload::RunResumed {
+                    from_node: "w".into(),
+                    by: None,
+                    explicit: false,
+                },
+            ),
+            at(
+                3,
+                5_000 + 2 * hour,
+                EventPayload::NodeFinished {
+                    node: "w".into(),
+                    status: "succeeded".into(),
+                    attempt: 1,
+                    output: String::new(),
+                    artifacts: Vec::new(),
+                },
+            ),
+        ];
+        assert_eq!(node_durations_seconds(&events).get("w"), Some(&5));
     }
 
     #[test]

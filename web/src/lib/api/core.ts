@@ -167,6 +167,36 @@ export const postReview = (
     body: JSON.stringify({ node, decision, note }),
   })
 
+// POST /api/runs/{id}/pause (issue #200): the Pause button. `mode` is
+// `drain` (default) or `now`; `until` is an RFC 3339 time or a duration.
+export interface PauseRequestBody {
+  mode?: 'drain' | 'now'
+  reason?: string
+  until?: string
+  keep_lock?: boolean
+}
+export const pauseRun = (id: string, body: PauseRequestBody = {}, workspace = '') =>
+  requestJson<{ run_id: string; outcome: string; mode: string; seq: number; until: number | null }>(
+    `${run(id)}/pause${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
+  )
+
+// POST /api/runs/{id}/resume: the Resume button. An irreversible run with no
+// consent recorded is refused with `irreversible_requires_confirmation`; the
+// run page answers with its consent dialog and sends the refusal's nonce.
+export const resumeRun = (id: string, workspace = '', consentNonce?: string) =>
+  requestJson<{
+    run_id: string
+    resumed_from: string
+    detached: boolean
+    resumed_early?: boolean
+    pause_until?: number
+  }>(`${run(id)}/resume${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(consentNonce ? { confirm_irreversible: consentNonce } : {}),
+  })
+
 // POST /api/runs/{id}/answer: the web facade for answering an interactive
 // agent_task node's pending question (spec 2026-07-20-interactive-nodes).
 // `node` is omitted when the run has exactly one pending question; the

@@ -30,6 +30,8 @@ pub mod liveness;
 pub mod host_task;
 pub mod manifest;
 pub mod parallel;
+// operator pause (issue #200)
+pub mod pause;
 pub mod proc;
 pub mod progress;
 pub mod question;
@@ -105,9 +107,10 @@ pub use run_doctor::{RunCheck, diagnose_run};
 pub use scheduler::{
     PreparedRun, ResumeDecision, ResumeReason, RunMode, RunOptions, RunResult, RunSummary,
     StartMode, drive_prepared, drive_run_from_dir, list_runs, plan_resume, post_supervisor_command,
-    prepare_supervised_background, record_run_error, resume, resume_detached, resume_detached_with,
-    resume_with, run, run_background, run_background_resolved, run_cancel, run_profile_origin,
-    run_resolved, spawn_supervisor_agent, start_detached, start_detached_resolved,
+    prepare_supervised_background, record_run_error, resume, resume_by, resume_detached,
+    resume_detached_by, resume_detached_with, resume_with, run, run_background,
+    run_background_resolved, run_cancel, run_profile_origin, run_resolved, spawn_supervisor_agent,
+    start_detached, start_detached_resolved,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};
 pub use stop::{StopOutcome, stop_run};

@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -242,6 +242,20 @@ pub enum EventPayload {
     },
     RunPaused {
         reason: String,
+        /// Who paused the run (issue #200). Absent in older journals; the
+        /// views read a missing `by` as `supervisor`, the journal is never
+        /// rewritten. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<crate::pause::kind::PauseBy>,
+        /// `drain` or `now`; absent in older journals (read as `drain`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<crate::pause::kind::PauseMode>,
+        /// When the run resumes on its own, epoch milliseconds. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
+        /// The workdir busy lock stays held while paused. Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_lock: bool,
     },
     /// The run was ADMITTED while another write-run held the shared workdir
     /// lock, and its first node cannot start until that holder releases it.
@@ -280,6 +294,16 @@ pub enum EventPayload {
     /// `RunPaused` marker fold unchanged.
     RunResumed {
         from_node: String,
+        /// Who resumed the run (issue #200). Absent in older journals.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<crate::pause::kind::PauseBy>,
+        /// The resume named its start node (`--from-node`): no session a
+        /// `--now` pause kept carries over into the nodes it re-runs.
+        /// Absent (false) in older journals and for every other resume.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        explicit: bool,
     },
     RunFinished {
         outcome: String,
@@ -1262,6 +1286,22 @@ pub(crate) fn with_journal_lock<T>(
     Ok(f())
 }
 
+/// The lines of a journal read as ONE snapshot of its bytes. A reader
+/// outside the append lock races the writers: reading line by line from
+/// the open file, a line still being written comes back as a short "last"
+/// line at a momentary end-of-file, and its rest then arrives as one more
+/// line, so a torn tail looked like corruption in the middle. Splitting a
+/// single read keeps every torn byte at the end of the snapshot, where it
+/// is forgiven. A line that is not UTF-8 (a write torn inside a multi-byte
+/// character) is a parse error like any other torn line.
+fn journal_lines(bytes: &[u8]) -> impl Iterator<Item = Result<&str, EngineError>> {
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    body.split(|b| *b == b'\n').map(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        std::str::from_utf8(line).map_err(|e| EngineError::Yaml(e.to_string()))
+    })
+}
+
 /// Last seq recorded in an events.jsonl file, if any.
 fn last_seq_on_disk(path: &Path) -> Result<Option<u64>, EngineError> {
     if !path.is_file() {
@@ -1271,17 +1311,24 @@ fn last_seq_on_disk(path: &Path) -> Result<Option<u64>, EngineError> {
     // A line torn by a writer that died mid-write is forgiven at the tail
     // only, as in [`read_all_lossy_tail`].
     let mut torn: Option<EngineError> = None;
-    for line in BufReader::new(File::open(path)?).lines() {
-        let line = line?;
+    let bytes = std::fs::read(path)?;
+    for line in journal_lines(&bytes) {
         if let Some(e) = torn.take() {
             return Err(e);
         }
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                torn = Some(e);
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
         // Only the seq is needed, so an event of a type this binary does not
         // know still counts: its seq is taken all the same.
-        match serde_json::from_str::<EventHeader>(&line) {
+        match serde_json::from_str::<EventHeader>(line) {
             Ok(ev) => last = Some(ev.seq),
             Err(e) => torn = Some(EngineError::Yaml(e.to_string())),
         }
@@ -1769,18 +1816,22 @@ fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Journal
     // An unparsable line is only forgiven once nothing follows it, so the
     // verdict is deferred: the next line proves it was not the tail.
     let mut torn: Option<EngineError> = None;
-    for line in BufReader::new(File::open(&path)?).lines() {
-        let line = line?;
+    let bytes = std::fs::read(&path)?;
+    for line in journal_lines(&bytes) {
         // Any further line at all proves the stored candidate was not the
         // tail, a blank one included: only end-of-file makes a torn line
         // forgivable, so this must run before the blank-line skip.
         if let Some(e) = torn.take() {
             return Err(e);
         }
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Err(err) = push_line(&line, &mut out) {
+        let parsed = line.and_then(|line| {
+            if line.trim().is_empty() {
+                Ok(())
+            } else {
+                push_line(line, &mut out)
+            }
+        });
+        if let Err(err) = parsed {
             if !tolerate_torn_tail {
                 return Err(err);
             }
@@ -1843,6 +1894,27 @@ mod tests {
             .unwrap();
         assert!(EventLog::open(dir.path()).is_err());
         assert!(EventLog::open_foreign(dir.path()).is_ok());
+    }
+
+    /// A write torn inside a multi-byte character is a torn tail like any
+    /// other: forgiven at the end, refused once a line follows it.
+    #[test]
+    fn a_tail_torn_inside_a_multibyte_character_is_forgiven_only_at_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        log.append(EventPayload::SupervisorLost { detail: "a".into() })
+            .unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        let torn = "{\"seq\":1,\"ts\":1,\"type\":\"supervisor_lost\",\"detail\":\"\u{e9}";
+        f.write_all(&torn.as_bytes()[..torn.len() - 1]).unwrap();
+        assert!(EventLog::open(dir.path()).is_err());
+        let foreign = EventLog::open_foreign(dir.path()).unwrap();
+        assert_eq!(foreign.peek_next_seq(), 1);
+        assert_eq!(read_journal(dir.path()).unwrap().events.len(), 1);
+        f.write_all(b"\n{\"seq\":2,\"ts\":2,\"type\":\"supervisor_lost\",\"detail\":\"b\"}\n")
+            .unwrap();
+        assert!(read_journal(dir.path()).is_err());
     }
 
     #[test]

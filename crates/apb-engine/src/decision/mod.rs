@@ -28,7 +28,7 @@ pub(crate) mod completion;
 pub mod host_task;
 pub(crate) mod judge;
 mod providers;
-mod redact;
+pub(crate) mod redact;
 pub mod report;
 pub mod standalone;
 // Engine uses (issue #165 Parts 9-12 and 14), one module each.

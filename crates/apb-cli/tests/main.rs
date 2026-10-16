@@ -49,12 +49,20 @@ mod mcp_cli_test;
 mod mcp_supervise_test;
 #[path = "suite/official_connectors_gate.rs"]
 mod official_connectors_gate;
+#[cfg(unix)]
+#[path = "suite/pause_cli_test.rs"]
+mod pause_cli_test;
+#[path = "suite/pause_waker_cli_test.rs"]
+mod pause_waker_cli_test;
 #[path = "suite/phase9_cli_test.rs"]
 mod phase9_cli_test;
 #[path = "suite/profile_cli_test.rs"]
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]
 mod projects_cli_test;
+#[cfg(unix)]
+#[path = "suite/quota_pause_cli_test.rs"]
+mod quota_pause_cli_test;
 #[path = "suite/real_config_guard_test.rs"]
 mod real_config_guard_test;
 #[path = "suite/release_workflow_test.rs"]

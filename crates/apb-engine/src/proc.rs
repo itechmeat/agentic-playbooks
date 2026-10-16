@@ -63,18 +63,90 @@ fn group_target(pid: u32) -> Option<i32> {
 /// any process remains in the group, and an empty group is a harmless ESRCH.
 pub(crate) fn kill_process_group(pid: u32) {
     #[cfg(unix)]
+    signal_process_group(pid, libc::SIGKILL);
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+/// Sends `signal` to every process in the group led by `pid`, through the
+/// same validated target as [`kill_process_group`].
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: libc::c_int) {
     kill_group_with(pid, &|target| {
         // SAFETY: `kill` takes no pointers and is async-signal-safe; `target`
         // came from `group_target`, so it is a validated negative group id and
         // never a wildcard.
         unsafe {
-            libc::kill(target, libc::SIGKILL);
+            libc::kill(target, signal);
         }
     });
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
+}
+
+/// Ends the process group led by `child` the way a `--now` pause does
+/// (issue #200): SIGTERM to the group, up to `grace` for the leader to exit,
+/// then SIGKILL to the group and the leader, and a reap. A script or agent
+/// that handles SIGTERM gets to stop cleanly; one that ignores it is killed
+/// anyway once the grace period is over.
+///
+/// The leader is not reaped before the group SIGKILL: an exited leader stays
+/// a zombie until then, which keeps its pid, and so the group id, from being
+/// reused by an unrelated process. The SIGKILL reaches the group's leftovers
+/// and nothing else.
+pub(crate) fn terminate_process_group(child: &mut std::process::Child, grace: Duration) {
+    #[cfg(unix)]
+    signal_process_group(child.id(), libc::SIGTERM);
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if leader_exited(child) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
+    kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Whether `child` has exited, without reaping it (unix: `waitid` with
+/// `WNOWAIT`), so its pid stays reserved for the caller's group kill. Also
+/// true when the state cannot be read, which ends the wait early. Only an
+/// exit or a death by signal counts: a platform that also reports a stopped
+/// or continued child here (`CLD_STOPPED`, `CLD_CONTINUED`) does not end the
+/// wait.
+#[cfg(unix)]
+fn leader_exited(child: &std::process::Child) -> bool {
+    let pid = libc::id_t::from(child.id());
+    // SAFETY: `siginfo_t` is plain data; all-zero is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `waitid` writes only into `info`, which outlives the call.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return true;
+    }
+    // With WNOHANG, a child with nothing to report leaves `si_pid` at zero.
+    // SAFETY: `info` was zero-initialized and filled by `waitid` above.
+    let pid = unsafe { info.si_pid() };
+    pid != 0 && is_exit_code(info.si_code)
+}
+
+/// Whether a `waitid` `si_code` reports the end of a process.
+#[cfg(unix)]
+fn is_exit_code(code: libc::c_int) -> bool {
+    matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED)
+}
+
+#[cfg(not(unix))]
+fn leader_exited(child: &mut std::process::Child) -> bool {
+    matches!(child.try_wait(), Ok(Some(_)) | Err(_))
 }
 
 /// The decision half of a group kill, with delivery injected.
@@ -158,6 +230,13 @@ pub fn run_capture(
             // ambiguity of `kill -KILL -<pgid>` across implementations,
             // which on some Linux setups failed to reach the grandchild
             // and left the stdout pipe open until natural exit.
+            // A `--now` pause (issue #200) ends the script gracefully:
+            // SIGTERM, a grace period, then the same SIGKILL as below.
+            if was_cancelled && cancel.is_some_and(crate::pause::interrupt::is_graceful) {
+                terminate_process_group(&mut child, crate::pause::interrupt::grace());
+                cancelled = true;
+                break None;
+            }
             kill_process_group(child.id());
             // Also the leader directly, through the handle rather than by pid:
             // if `process_group(0)` did not take, the group kill above missed
@@ -223,6 +302,8 @@ pub fn run_capture(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::{Duration, Instant, leader_exited, thread};
     use super::{group_target, kill_group_with};
     use std::cell::RefCell;
 
@@ -301,5 +382,25 @@ mod tests {
             );
             assert_eq!(target, -(pid as i32));
         }
+    }
+
+    /// The exit check reads an exited leader as exited and leaves it a
+    /// zombie for the group kill. (A stopped leader cannot be told apart
+    /// here on Linux, whose `waitid(WEXITED)` never reports a stop; the
+    /// `si_code` filter in `leader_exited` is for platforms that do.)
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_check_leaves_the_leader_unreaped() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let start = Instant::now();
+        while !leader_exited(&child) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "`true` never exited"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Still a zombie: its exit status is there to be reaped now.
+        assert!(matches!(child.try_wait(), Ok(Some(s)) if s.success()));
     }
 }

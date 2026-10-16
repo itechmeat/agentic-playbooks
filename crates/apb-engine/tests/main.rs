@@ -197,6 +197,9 @@ mod missing_input_test;
 #[cfg(unix)]
 #[path = "suite/named_outputs_test.rs"]
 mod named_outputs_test;
+#[cfg(unix)]
+#[path = "suite/operator_pause_test.rs"]
+mod operator_pause_test;
 #[path = "suite/output_field_test.rs"]
 mod output_field_test;
 #[path = "suite/overrides_run_test.rs"]
@@ -222,6 +225,8 @@ mod prompt_cache_test;
 mod protect_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
+#[path = "suite/quota_pause_test.rs"]
+mod quota_pause_test;
 #[cfg(unix)]
 #[path = "suite/reap_test.rs"]
 mod reap_test;

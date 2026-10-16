@@ -256,7 +256,8 @@ stub reports nothing. When a repetition reports no cost, `apb eval` warns
 once (`warnings` in `--json`) that the budget cannot be enforced for that
 executor; `max_tokens` and `timeout` still apply.
 
-The wall clock is enforced twice: by `apb eval` while it follows the run,
+The wall clock leaves out the time a run spends paused (a pause moves the
+deadline by the paused time). It is enforced twice: by `apb eval` while it follows the run,
 and by the run's own driver, which aborts the run at the deadline (the
 timeout plus the five-second grace) even when no `apb eval` follows it any
 more. SIGINT or SIGTERM stops the live repetition's run, waits for its

@@ -80,6 +80,10 @@ fn render_types() -> String {
         apb_core::agent_output::AgentUsage::decl(&cfg),
         // Issue #192: candidate trials.
         apb_engine::candidate::CandidateTrial::decl(&cfg),
+        // Issue #200: operator pause.
+        apb_engine::pause::PauseBy::decl(&cfg),
+        apb_engine::pause::PauseMode::decl(&cfg),
+        apb_engine::pause::PauseInfo::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),

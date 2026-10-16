@@ -164,6 +164,9 @@ fn apb_tasks_lists_and_submits_until_the_run_succeeds() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     assert_eq!(plan["role_prompt"], "You plan and build.");
     // The human-readable listing names the task and how to answer it.
@@ -234,6 +237,9 @@ fn apb_tasks_labels_a_fallback_hint_with_its_source_and_reason() {
     )
     .unwrap();
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let plan_id = plan["task_id"].as_str().unwrap().to_string();
     let out = crate::common::apb_std()
@@ -351,6 +357,9 @@ fn a_resume_before_submission_re_exposes_the_same_task() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap().to_string();
     kill_driver(root, &run_id);
@@ -373,6 +382,9 @@ fn a_resume_after_submission_consumes_it_without_a_new_task() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap().to_string();
     kill_driver(root, &run_id);
@@ -414,6 +426,9 @@ fn a_require_verdict_resume_re_exposes_only_the_open_task() {
             ),
         );
         let run_id = start_detached(root);
+        // Stops the detached driver (and any a resume started) at the end, so
+        // a run left waiting on a host task does not outlive the test.
+        let _guard = crate::common::RunGuard::new(root, &run_id);
         let plan = task_of(root, &run_id, "plan");
         let id = plan["task_id"].as_str().unwrap().to_string();
         kill_driver(root, &run_id);
@@ -490,6 +505,9 @@ fn apb_tasks_never_prints_terminal_escapes_from_a_prompt() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap();
     // A prompt embeds upstream agent output: plant an escape sequence.
@@ -542,6 +560,9 @@ fn apb_wait_on_a_host_task_names_apb_tasks() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let out = crate::common::apb_std()
         .args(["wait", run_id.as_str(), "--timeout", "30"])
@@ -792,6 +813,9 @@ fn apb_decide_from_a_host_task_is_journaled_and_the_actual_model_shows() {
     let root = dir.path();
     seed(root);
     let run_id = start_detached(root);
+    // Stops the detached driver (and any a resume started) at the end, so
+    // a run left waiting on a host task does not outlive the test.
+    let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let prompt_path = plan["prompt_path"].as_str().expect("prompt_path");
     assert_eq!(
@@ -921,4 +945,201 @@ fn run_wait_without_inline_prompts_hands_tasks_over_by_path() {
     let again = mcp.call("run_wait", json!({"run_id": run_id, "timeout_ms": 30000}));
     assert!(again["pending_tasks"][0]["prompt"].is_string(), "{again}");
     mcp.call("run_stop", json!({"run_id": run_id}));
+}
+
+/// Two host tasks, the first with a 4 s deadline.
+const SHORT_DEADLINE: &str = r#"
+schema: 1
+id: hm
+name: Host mode
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 4 }
+  - { id: build, type: agent_task, prompt: "Build from {{nodes.plan.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: plan }
+  - { from: plan, to: build }
+  - { from: build, to: done }
+"#;
+
+/// Issue #200, AC3: a `--now` pause leaves an open host task open, and its
+/// deadline does not run while the run is paused. A pause longer than the
+/// whole 4 s deadline, a resume without a reply, and a wait that takes the
+/// wall time since the task opened well past the deadline: the driver keeps
+/// the task open (its clock left the pause out) and the run alive. The reply
+/// submitted then is applied and the run succeeds.
+#[test]
+fn a_host_task_outlives_a_pause_longer_than_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(root, SHORT_DEADLINE);
+    let run_id = start_detached(root);
+    let _guard = crate::common::RunGuard::new(root, &run_id);
+    let plan = task_of(root, &run_id, "plan");
+    let id = plan["task_id"].as_str().unwrap().to_string();
+
+    let out = crate::common::apb_std()
+        .args(["pause", &run_id, "--now", "--reason", "lunch"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pause failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll("the run to pause", || {
+        read_all(&run_dir(root, &run_id))
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+            .then_some(())
+    });
+    // Paused for longer than the task's whole deadline.
+    std::thread::sleep(Duration::from_secs(5));
+    let open = tasks_json(root, &run_id);
+    assert!(
+        open.iter().any(|t| t["task_id"] == id.as_str()),
+        "the task is still open after the pause outlasted its deadline: {open:?}"
+    );
+
+    // Resumed without a reply: the driver watches the task again, with the
+    // wall time since it opened past its deadline but the active time not.
+    resume(root, &run_id);
+    std::thread::sleep(Duration::from_millis(1_500));
+    let events = read_all(&run_dir(root, &run_id)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunFinished { .. })),
+        "the run is still going: {events:?}"
+    );
+    assert_eq!(
+        apb_engine::liveness::driver_alive(&run_dir(root, &run_id), &run_id),
+        Some(true),
+        "the resumed driver is alive"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::AttemptFinished { node, status, .. }
+                if node == "plan" && status != "interrupted"
+        )),
+        "the plan task was not closed: {events:?}"
+    );
+    let open = tasks_json(root, &run_id);
+    assert!(
+        open.iter().any(|t| t["task_id"] == id.as_str()),
+        "the resumed driver kept the task open: {open:?}"
+    );
+
+    submit(root, &run_id, &id, "PLAN-AFTER-PAUSE");
+    let build = task_of(root, &run_id, "build");
+    assert!(
+        build["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Build from PLAN-AFTER-PAUSE"),
+        "{build}"
+    );
+    submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
+    assert_eq!(wait_outcome(root, &run_id), "succeeded");
+}
+
+/// One host task with a 12 s deadline and no retry.
+const TWELVE_SECOND_DEADLINE: &str = r#"
+schema: 1
+id: hm
+name: Host mode
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 12, max_retries: 0 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: plan }
+  - { from: plan, to: done }
+"#;
+
+/// Issue #200, AC3, the clock itself: a host task's deadline stands still
+/// while the run is paused and, after the resume, runs on with what was left
+/// of it. The task is open about 6 s before a `--now` pause, the pause lasts
+/// 7 s (together past the 12 s deadline), and the resumed driver expires the
+/// task about 6 s after the resume: not right away (paused time counted) and
+/// not after a fresh 12 s (the clock restarted). The bounds sit halfway
+/// between the right answer and each wrong one, so a slow machine has
+/// seconds of slack on either side.
+#[test]
+fn a_resumed_host_task_expires_at_what_was_left_of_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_with(root, TWELVE_SECOND_DEADLINE);
+    let run_id = start_detached(root);
+    let _guard = crate::common::RunGuard::new(root, &run_id);
+    let plan = task_of(root, &run_id, "plan");
+    let id = plan["task_id"].as_str().unwrap().to_string();
+
+    std::thread::sleep(Duration::from_secs(6));
+    let out = crate::common::apb_std()
+        .args(["pause", &run_id, "--now", "--reason", "lunch"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pause failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll("the run to pause", || {
+        read_all(&run_dir(root, &run_id))
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(7));
+    resume(root, &run_id);
+
+    let events = poll("the task to expire", || {
+        let events = read_all(&run_dir(root, &run_id)).ok()?;
+        events
+            .iter()
+            .any(|e| {
+                matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, .. }
+                    if *task_id == id && status == "expired")
+            })
+            .then_some(events)
+    });
+    let ts = |what: &str, f: &dyn Fn(&EventPayload) -> bool| {
+        events
+            .iter()
+            .find(|e| f(&e.payload))
+            .unwrap_or_else(|| panic!("no {what}: {events:?}"))
+            .ts
+    };
+    let requested = ts(
+        "request",
+        &|p| matches!(p, EventPayload::HostTaskRequested { task_id, .. } if *task_id == id),
+    );
+    let paused = ts("pause", &|p| matches!(p, EventPayload::RunPaused { .. }));
+    let resumed = ts("resume", &|p| matches!(p, EventPayload::RunResumed { .. }));
+    let expired = ts("expiry", &|p| {
+        matches!(p, EventPayload::HostTaskSubmitted { task_id, status, .. }
+            if *task_id == id && status == "expired")
+    });
+    let deadline = 12_000;
+    let left = deadline - (paused - requested);
+    let took = expired - resumed;
+    // Paused time counted: expired about `left - 7 s` after the resume, at
+    // most 0 here. A restarted clock: about the full deadline.
+    assert!(
+        took * 2 >= left && took * 2 <= left + deadline,
+        "the task expired {took} ms after the resume; {left} ms of its deadline were left"
+    );
 }

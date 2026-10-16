@@ -258,6 +258,43 @@ Run apb as its own unprivileged user. That user owns the playbooks, the runs,
 and every connector credential the runs use, so give it nothing else. It must
 also be the user whose config directory holds the keys from step 1.
 
+### Resuming runs after a reboot (optional)
+
+A reboot kills the drivers of running runs and the wakers of paused runs that
+have an `until`. `apb resume --all` finds what was left waiting in a workspace:
+runs reading `running` with no live driver and paused runs whose `until` has
+passed. It resumes them (sub-playbook children follow their parent) and
+journals a run it cannot resume as `paused (driverless)`, so `apb runs` shows
+the state instead of a false `running`. A run whose working tree another run
+holds busy is left as it is; the next pass, or `apb resume`, continues it. To run it at boot, add a systemd user
+unit for the user that owns the runs, started from the project directory
+(the workspace is the current directory):
+
+```ini
+# ~/.config/systemd/user/apb-resume.service
+[Unit]
+Description=Resume apb runs left waiting by a reboot
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/path/to/project
+ExecStart=/usr/local/bin/apb resume --all
+# A resumed run is driven by a detached process; leave it running after the
+# oneshot exits.
+KillMode=process
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable apb-resume.service
+loginctl enable-linger "$USER"   # start user units at boot without a login
+```
+
+Use one unit per workspace, or run the command from a script that visits each.
+
 ## 5. Verify that authentication is actually on
 
 Do this before announcing the address to anyone. A key issued as the wrong user

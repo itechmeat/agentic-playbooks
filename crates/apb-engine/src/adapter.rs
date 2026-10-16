@@ -1358,7 +1358,13 @@ impl ClaudeAdapter {
         pending_ms: u128,
     ) -> Option<(ErrorClass, String)> {
         if cancel.load(Ordering::Relaxed) {
-            kill_process_tree(child);
+            // A `--now` pause (issue #200) gives the agent SIGTERM and a
+            // grace period first; a stop kills at once.
+            if crate::pause::interrupt::is_graceful(cancel) {
+                crate::proc::terminate_process_group(child, crate::pause::interrupt::grace());
+            } else {
+                kill_process_tree(child);
+            }
             return Some((ErrorClass::Transport, "cancelled".to_string()));
         }
         if let Some(limit) = timeout {

@@ -38,6 +38,12 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub candidate_trial: Option<crate::candidate::CandidateTrial>,
+    /// The run's pause (issue #200): who paused it, why, since and until
+    /// when, and `pausing` while a live driver drains toward a queued pause.
+    /// Absent for a run that is neither paused nor pausing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub pause: Option<crate::pause::PauseInfo>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -83,8 +89,10 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let unknown_events = view.unknown.len();
         let status = view.run_status.as_str().into();
         let candidate_trial = crate::candidate::trial_of(&entry.path(), &view.events);
+        let pause = view.pause().cloned();
         let progress = view.progress;
         out.push(RunSummary {
+            pause,
             run_id,
             playbook,
             status,

@@ -397,3 +397,55 @@ fn run_wait_reads_through_a_torn_trailing_line() {
     assert_eq!(res.reason, WaitReason::Finished);
     assert_eq!(res.status, RunStatus::Succeeded);
 }
+
+/// Issue #200: a paused run is stopped for a waiting caller even with a
+/// review open; the gate stays listed and the pause details come along.
+#[test]
+fn run_wait_reports_a_paused_run_as_stopped_even_with_an_open_gate() {
+    use apb_engine::pause::{PauseBy, PauseMode, PauseRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = synthetic_run(dir.path(), "pz");
+    // The run's playbook snapshot, so the view can name the open gate.
+    fs::write(dir.path().join(".apb/runs/pz/playbook.yaml"), WF_REVIEW).unwrap();
+    log.append(EventPayload::NodeStarted {
+        node: "gate".into(),
+        attempt: 1,
+    })
+    .unwrap();
+    let review: EventPayload = serde_json::from_value(serde_json::json!({
+        "type": "review_requested",
+        "node": "gate",
+        "options": ["approved", "rejected"],
+    }))
+    .unwrap();
+    log.append(review).unwrap();
+    log.append(
+        PauseRequest {
+            reason: Some("overnight".into()),
+            by: Some(PauseBy::Operator),
+            mode: PauseMode::Drain,
+            until: Some(4_000_000_000_000),
+            keep_lock: false,
+        }
+        .to_event(),
+    )
+    .unwrap();
+
+    let res = wait_run_with(
+        dir.path(),
+        "pz",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        Duration::from_millis(20),
+    )
+    .unwrap();
+    assert_eq!(res.reason, WaitReason::Stopped);
+    assert_eq!(res.status, RunStatus::Paused);
+    assert_eq!(res.needs, Some(NeedsInput::Review), "the gate stays listed");
+    let pause = res.pause().expect("pause details");
+    assert_eq!(pause.reason, "overnight");
+    assert_eq!(pause.by, PauseBy::Operator);
+    assert_eq!(pause.until, Some(4_000_000_000_000));
+    assert!(pause.since.is_some());
+    assert!(!pause.pausing);
+}

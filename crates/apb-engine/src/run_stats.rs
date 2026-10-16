@@ -472,6 +472,16 @@ fn ms(from: u128, to: u128) -> u64 {
     u64::try_from(to.saturating_sub(from)).unwrap_or(u64::MAX)
 }
 
+/// Like [`ms`], without the time the run spent paused in between (issue
+/// #200): run and node durations measure the run's active time.
+/// `paused` comes from [`crate::pause::paused_intervals`], computed once per
+/// run rather than once per measured span.
+fn active_ms(paused: &[(u128, u128)], from: u128, to: u128) -> u64 {
+    ms(from, to).saturating_sub(
+        u64::try_from(crate::pause::paused_ms_in(paused, from, to)).unwrap_or(u64::MAX),
+    )
+}
+
 /// Pairs each `open` of a node with the next `close` of the same node, in
 /// journal order, and returns the waits in milliseconds. A `withdraw` closes
 /// the oldest open request of the node without a wait: the request was never
@@ -509,6 +519,7 @@ fn run_facts(
     goal: &mut BTreeMap<usize, GoalAcc>,
 ) -> RunFacts {
     let ev = &run.events;
+    let paused = crate::pause::paused_intervals(ev, ev.last().map(|e| e.ts).unwrap_or_default());
     let mut f = RunFacts::default();
     let start = run.started_ms();
     // Per-node facts of this run.
@@ -540,7 +551,7 @@ fn run_facts(
                         .entry(node.clone())
                         .or_default()
                         .durations
-                        .push(ms(t, e.ts));
+                        .push(active_ms(&paused, t, e.ts));
                 }
             }
             EventPayload::RetryStarted { node, .. } => {
@@ -597,11 +608,11 @@ fn run_facts(
                     "aborted" => "aborted",
                     _ => "failed",
                 });
-                f.duration = start.map(|s| ms(s, e.ts));
+                f.duration = start.map(|s| active_ms(&paused, s, e.ts));
             }
             EventPayload::RunAborted { .. } => {
                 f.outcome = Some("aborted");
-                f.duration = start.map(|s| ms(s, e.ts));
+                f.duration = start.map(|s| active_ms(&paused, s, e.ts));
             }
             _ => {}
         }

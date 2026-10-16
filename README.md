@@ -25,7 +25,8 @@ log behind.
   models never means editing the playbook.
 - **Recorded and resumable runs.** The graph, not the agent, decides what
   runs next. Append-only event log, immutable
-  per-run snapshot of the playbook and profiles, `apb resume` after a crash.
+  per-run snapshot of the playbook and profiles, `apb resume` after a crash,
+  `apb pause` to stop a run for a while and continue it later with its clocks frozen.
 - **Visual editor and live monitor.** `apb dashboard` opens a svelte-flow web UI:
   edit YAML and graph side by side, watch runs light up node by node.
 - **Built for agents, not just humans.** `apb mcp` exposes the whole surface
@@ -159,7 +160,8 @@ apb validate        validate playbooks, the profiles and scripts they reference,
 apb run <id>        run a playbook (--param k=v, --overrides, --supervise, --detach, --execution, --confirm-irreversible)
 apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
 apb runs [run]      list runs, or one run with its execution mode and tokens (--json)
-apb resume <run>    resume a paused or interrupted run
+apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
+apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
 apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
 apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
@@ -219,7 +221,7 @@ Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
 with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
 
 Tool families: playbook CRUD and validation, run control (`playbook_run`,
-`run_wait`, `run_status`, `run_events`, `run_report`, `run_resume`), profile and advisory
+`run_wait`, `run_status`, `run_events`, `run_report`, `run_pause`, `run_resume`, `run_stop`), profile and advisory
 tools, and supervisor tools.
 
 **Supervised runs.** `playbook_run` with `supervise: "self"` starts the run in
@@ -233,7 +235,7 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Released on the `0.x` line (the latest release is `0.24.5`); each tagged
+Released on the `0.x` line (the latest release is `0.25.0`); each tagged
 release has its notes in [docs/release-notes/](docs/release-notes/) and on
 the GitHub releases page. The engine, web editor, versioning, MCP surface, and
 supervisor are implemented and tested; until `1.0` the schema and CLI may

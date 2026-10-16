@@ -839,7 +839,11 @@ fn resumed_agent_supervised_run_still_parks_for_its_supervisor() {
     let rx = run_in_background(dir.path().to_path_buf(), "supres", opts);
     let run_dir = find_run_dir(dir.path(), "supres-");
     wait_for_wake(&run_dir);
-    post_control(&run_dir, Control::Pause).unwrap();
+    post_control(
+        &run_dir,
+        Control::Pause(apb_engine::pause::PauseRequest::supervisor()),
+    )
+    .unwrap();
     let first = recv_result(&rx).unwrap();
     assert_eq!(first.outcome, RunStatus::Paused);
 

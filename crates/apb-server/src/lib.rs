@@ -161,6 +161,14 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::runs::post_answer_handler),
         )
         .route(
+            "/api/runs/{id}/pause",
+            post(routes::runs::post_pause_handler),
+        )
+        .route(
+            "/api/runs/{id}/resume",
+            post(routes::runs::post_resume_handler),
+        )
+        .route(
             "/api/hooks/{run_id}/{secret}",
             post(routes::runs::post_hook_handler),
         )

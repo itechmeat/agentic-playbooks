@@ -695,7 +695,36 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Resume a run, optionally from a given node. Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway. A run with no valid consent to its irreversible effects (one an older apb started) is refused once with irreversible_requires_confirmation; pass confirm_irreversible set to its consent_nonce after asking the person.",
+        description = "Pause a run so it can continue later (any live or paused run, by: operator; no supervisor token). mode drain (default): no new node starts, running nodes finish, then the run is paused and holds no process; the run reads `pausing` until then. mode now: running nodes are interrupted and run again on resume, none counts as failed. Clocks (host-task and node deadlines, statistics) freeze while paused. Open gates (reviews, questions, host tasks) stay open. Optional reason, until (RFC 3339 or a duration such as 90m: the run resumes by itself then) and keep_lock. Pausing a paused run updates its reason and until; a finished run is refused. run_resume continues a paused run, also before until.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_pause(
+        &self,
+        Parameters(RunPauseArgs {
+            run_id,
+            mode,
+            reason,
+            until,
+            keep_lock,
+            workspace,
+        }): Parameters<RunPauseArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::pause_run(
+            &root,
+            &run_id,
+            mode.as_deref(),
+            reason,
+            until.as_deref(),
+            keep_lock,
+        ))
+    }
+
+    #[tool(
+        description = "Resume a run, optionally from a given node. Also continues a paused run; before its pause `until` that is an early resume, and the ack says so (resumed_early). Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway. A run with no valid consent to its irreversible effects (one an older apb started) is refused once with irreversible_requires_confirmation; pass confirm_irreversible set to its consent_nonce after asking the person.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_resume(

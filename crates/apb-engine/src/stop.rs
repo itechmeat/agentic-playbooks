@@ -63,7 +63,7 @@ const STOP_REASON: &str = "stop requested";
 /// another `stop_run` racing it: without it two concurrent stops of the same
 /// dead run could both observe a non-terminal state and both append
 /// `RunAborted`.
-const EVENT_LOCK: &str = "events.jsonl.lock";
+pub(crate) const EVENT_LOCK: &str = "events.jsonl.lock";
 
 /// What a `stop_run` call actually did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +180,8 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     log.append(EventPayload::RunAborted {
         reason: STOP_REASON.into(),
     })?;
+    // A run paused with `--keep-lock` (issue #200) gives its lock back.
+    crate::workdir::release_paused(root, run_id);
     Ok(StopOutcome::FinalizedDeadRun)
 }
 
@@ -242,6 +244,13 @@ const WATCH_SLICE: Duration = Duration::from_millis(25);
 #[derive(Default)]
 pub(crate) struct CancelFanout {
     inner: std::sync::Mutex<FanoutInner>,
+    /// The `--now` pause fanout (issue #200): every flag it latches is
+    /// marked graceful (`pause::interrupt`), so its kill site terminates the
+    /// work with SIGTERM and a grace period instead of a bare SIGKILL.
+    graceful: bool,
+    /// The pause fanout a stop fanout hands node kill flags to as well, via
+    /// [`CancelFanout::register_pausable`].
+    pause: Option<Arc<CancelFanout>>,
 }
 
 #[derive(Default)]
@@ -254,21 +263,42 @@ impl CancelFanout {
     pub(crate) fn register(self: &Arc<Self>, flag: &Arc<AtomicBool>) -> FanoutGuard {
         let mut inner = self.inner.lock().expect("cancel fanout mutex poisoned");
         if inner.fired {
-            flag.store(true, Ordering::SeqCst);
+            self.latch(flag);
         }
         inner.flags.push(Arc::clone(flag));
         drop(inner);
         FanoutGuard {
             fanout: Arc::clone(self),
             flag: Arc::clone(flag),
+            also: None,
         }
+    }
+
+    /// Registers the kill flag of ONE node's execution with this stop fanout
+    /// and with its `--now` pause fanout (issue #200), so both an Abort and a
+    /// `--now` pause kill that node. A batch-wide flag must not use this: a
+    /// pause latching it would read as a won `join: any` and write the queued
+    /// members off as cancelled.
+    pub(crate) fn register_pausable(self: &Arc<Self>, flag: &Arc<AtomicBool>) -> FanoutGuard {
+        let mut guard = self.register(flag);
+        if let Some(pause) = &self.pause {
+            guard.also = Some(Box::new(pause.register(flag)));
+        }
+        guard
+    }
+
+    fn latch(&self, flag: &AtomicBool) {
+        if self.graceful {
+            crate::pause::interrupt::mark_graceful(flag);
+        }
+        flag.store(true, Ordering::SeqCst);
     }
 
     fn fire(&self) {
         let mut inner = self.inner.lock().expect("cancel fanout mutex poisoned");
         inner.fired = true;
         for f in &inner.flags {
-            f.store(true, Ordering::SeqCst);
+            self.latch(f);
         }
     }
 
@@ -287,6 +317,8 @@ impl CancelFanout {
 pub(crate) struct FanoutGuard {
     fanout: Arc<CancelFanout>,
     flag: Arc<AtomicBool>,
+    /// The same flag's registration with the pause fanout, if any.
+    also: Option<Box<FanoutGuard>>,
 }
 
 impl Drop for FanoutGuard {
@@ -297,6 +329,9 @@ impl Drop for FanoutGuard {
             .lock()
             .expect("cancel fanout mutex poisoned");
         inner.flags.retain(|f| !Arc::ptr_eq(f, &self.flag));
+        if self.fanout.graceful {
+            crate::pause::interrupt::unmark_graceful(&self.flag);
+        }
     }
 }
 
@@ -322,19 +357,38 @@ pub(crate) struct StopWatcher {
     fanout: Arc<CancelFanout>,
 }
 
+/// The flags a [`StopWatcher`] latches.
+pub(crate) struct StopFlags {
+    /// Abort only (see the module docs).
+    pub cancel: Arc<AtomicBool>,
+    /// Abort or Pause: admit no new work.
+    pub halt: Arc<AtomicBool>,
+    /// A `--now` pause (issue #200) fired the pause fanout: a node that ends
+    /// `cancelled` while this is set and `cancel` is not was interrupted by
+    /// the pause, not stopped.
+    pub pause_now: Arc<AtomicBool>,
+}
+
 impl StopWatcher {
     /// `after` is the drive's starting control cursor: entries at or below it
     /// have already been applied by an earlier drive and must not re-fire.
     /// `cancel` is registered with the returned fanout at construction, so a
     /// batch-local flag registered later through [`Self::fanout`] latches
     /// through the exact same call that latches `cancel` itself.
-    pub(crate) fn spawn(
-        run_dir: &Path,
-        after: Option<u64>,
-        cancel: Arc<AtomicBool>,
-        halt: Arc<AtomicBool>,
-    ) -> Self {
-        let fanout = Arc::new(CancelFanout::default());
+    pub(crate) fn spawn(run_dir: &Path, after: Option<u64>, flags: StopFlags) -> Self {
+        let StopFlags {
+            cancel,
+            halt,
+            pause_now,
+        } = flags;
+        let pause_fanout = Arc::new(CancelFanout {
+            graceful: true,
+            ..CancelFanout::default()
+        });
+        let fanout = Arc::new(CancelFanout {
+            pause: Some(Arc::clone(&pause_fanout)),
+            ..CancelFanout::default()
+        });
         let _cancel_guard = fanout.register(&cancel);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_c = Arc::clone(&stop);
@@ -363,8 +417,17 @@ impl StopWatcher {
                         // watch.
                         return;
                     }
-                    if entries.iter().any(|e| matches!(e.cmd, Control::Pause)) {
+                    if entries.iter().any(|e| matches!(e.cmd, Control::Pause(_))) {
                         halt.store(true, Ordering::SeqCst);
+                        // A `--now` pause (issue #200) also interrupts the
+                        // work in flight, through its own fanout: `cancel`
+                        // stays untouched, so nothing reads it as an Abort.
+                        let now = entries.iter().any(|e| {
+                            matches!(&e.cmd, Control::Pause(r) if r.mode == crate::pause::PauseMode::Now)
+                        });
+                        if now && !pause_now.swap(true, Ordering::SeqCst) {
+                            pause_fanout.fire();
+                        }
                         // A Pause is not terminal: keep polling, because an
                         // Abort may still be posted later in the same drive.
                     }
