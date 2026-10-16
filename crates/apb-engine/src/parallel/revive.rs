@@ -16,6 +16,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use apb_core::schema::Playbook;
 
+use crate::state::{NodeStatus, RunState};
+
 /// The nodes a drive re-executes when it executes every node of `starts`
 /// again, per start and as a whole. Built once per rebuild: the forward and
 /// reverse adjacency are computed once, not once per question.
@@ -26,7 +28,10 @@ pub struct Revival {
 }
 
 impl Revival {
-    pub fn new(playbook: &Playbook, starts: &[String]) -> Self {
+    /// The revival of `starts` against `state`, the fold it is applied to:
+    /// the state decides which `defaults.on_failure` hops are real (see
+    /// below).
+    pub fn new(playbook: &Playbook, state: &RunState, starts: &[String]) -> Self {
         let mut forward = apb_core::graphutil::adjacency(playbook);
         let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
         for e in &playbook.edges {
@@ -35,15 +40,30 @@ impl Revival {
                 .or_default()
                 .push(e.from.as_str());
         }
-        // A `defaults.on_failure` handler is a real hop out of every node it
-        // covers, with no declared edge: without it the handler would stay
-        // outside the revival while its own edges are weighed against the
-        // revived nodes, and a fallback edge it never took would become a
-        // stale head. Forward only: the ancestor walk stays on declared
-        // edges, or a handler with a rework path back upstream would make
-        // every node an ancestor and shrink the revival to the start alone.
+        // A `defaults.on_failure` handler is a real hop, with no declared
+        // edge, out of a node whose failure took it (a journaled policy hop),
+        // and out of a start that failed (its re-run may fail into it again).
+        // Without it the handler would stay outside the revival while its own
+        // edges are weighed against the revived nodes, and a fallback edge it
+        // never took would become a stale head. Not out of every covered
+        // node: one that succeeded never routed there, and a join fed by the
+        // handler would wait on a handler nobody routes to again. Forward
+        // only: the ancestor walk stays on declared edges, or a handler with
+        // a rework path back upstream would make every node an ancestor and
+        // shrink the revival to the start alone.
         for n in &playbook.nodes {
-            if let Some(handler) = playbook.defaults.on_failure.target_for(&n.id) {
+            let Some(handler) = playbook.defaults.on_failure.target_for(&n.id) else {
+                continue;
+            };
+            let routed = state
+                .journaled_hops
+                .contains(&(n.id.clone(), handler.to_string()));
+            let failed_start = starts.contains(&n.id)
+                && state
+                    .nodes
+                    .get(&n.id)
+                    .is_some_and(|st| matches!(st, NodeStatus::Failed | NodeStatus::TimedOut));
+            if routed || failed_start {
                 forward.entry(n.id.as_str()).or_default().push(handler);
             }
         }
@@ -125,8 +145,8 @@ fn walk(adj: &HashMap<&str, Vec<&str>>, from: &str, stop: &BTreeSet<String>) -> 
 }
 
 /// The nodes a re-execution of `start` runs again (see [`Revival`]).
-pub fn revived_nodes(playbook: &Playbook, start: &str) -> BTreeSet<String> {
-    Revival::new(playbook, &[start.to_string()]).all
+pub fn revived_nodes(playbook: &Playbook, state: &RunState, start: &str) -> BTreeSet<String> {
+    Revival::new(playbook, state, &[start.to_string()]).all
 }
 
 #[cfg(test)]
@@ -141,7 +161,7 @@ mod tests {
     /// `nodes_revived` record.
     fn revived(p: &Playbook, state: &RunState, starts: &[String]) -> RunState {
         let mut s = state.clone();
-        s.revive(Revival::new(p, starts).nodes());
+        s.revive(Revival::new(p, state, starts).nodes());
         s
     }
 
@@ -235,7 +255,9 @@ edges:
     fn revived_nodes_is_the_downstream_closure_without_ancestors() {
         let p = pb(REPORT);
         assert_eq!(
-            revived_nodes(&p, "c").into_iter().collect::<Vec<_>>(),
+            revived_nodes(&p, &RunState::default(), "c")
+                .into_iter()
+                .collect::<Vec<_>>(),
             names(&["c", "c2", "done", "failed", "j"])
         );
     }
@@ -282,7 +304,10 @@ edges:
         assert_eq!(new.nodes.get("j"), Some(&NodeStatus::Succeeded));
         // Upstream of the rerun node nothing changes.
         assert_eq!(new.nodes.get("b"), Some(&NodeStatus::Succeeded));
-        assert!(new.journaled_hops.contains(&("b".into(), "j".into())));
+        assert!(new.routes("b", "j"));
+        // The revived join's old hop stays in the history, but does not route.
+        assert!(new.journaled_hops.contains(&("j".into(), "done".into())));
+        assert!(!new.routes("j", "done"));
     }
 
     #[test]
@@ -291,7 +316,9 @@ edges:
         // Inside the cycle `a` is an ancestor of `x`: the walk stops there,
         // so neither `a` nor `y` (downstream only through `a`) is revived.
         assert_eq!(
-            revived_nodes(&p, "x").into_iter().collect::<Vec<_>>(),
+            revived_nodes(&p, &RunState::default(), "x")
+                .into_iter()
+                .collect::<Vec<_>>(),
             names(&["x"])
         );
         let old = state(
@@ -354,22 +381,21 @@ edges:
   - { from: j, to: done, fallback: true }
 "#);
         assert_eq!(
-            revived_nodes(&p, "x").into_iter().collect::<Vec<_>>(),
+            revived_nodes(&p, &RunState::default(), "x")
+                .into_iter()
+                .collect::<Vec<_>>(),
             names(&["x"])
         );
         // From `j` the walk stops at `a`: `done` is the only node beyond it.
         assert_eq!(
-            revived_nodes(&p, "j").into_iter().collect::<Vec<_>>(),
+            revived_nodes(&p, &RunState::default(), "j")
+                .into_iter()
+                .collect::<Vec<_>>(),
             names(&["done", "j"])
         );
     }
 
-    /// Round 4: a `defaults.on_failure` handler is downstream of the nodes
-    /// it covers, so a re-run revives it; its never-taken fallback edge is no
-    /// stale head.
-    #[test]
-    fn a_failure_policy_handler_is_revived_with_the_node() {
-        let p = pb(r#"
+    const HANDLED: &str = r#"
 schema: 2
 id: h
 name: H
@@ -378,6 +404,7 @@ defaults: { on_failure: handler }
 nodes:
   - { id: start, type: start }
   - { id: c, type: prompt, prompt: "c" }
+  - { id: d, type: prompt, prompt: "d" }
   - { id: handler, type: prompt, prompt: "handler" }
   - { id: notify, type: prompt, prompt: "notify" }
   - { id: other, type: prompt, prompt: "other" }
@@ -385,14 +412,20 @@ nodes:
   - { id: failed, type: finish, outcome: failure }
 edges:
   - { from: start, to: c }
-  - { from: c, to: done }
+  - { from: c, to: d }
+  - { from: d, to: done }
   - { from: handler, to: notify, condition: { type: node_status, node: c, equals: failure } }
   - { from: handler, to: other, fallback: true }
   - { from: notify, to: failed }
   - { from: other, to: failed }
-"#);
-        let set = revived_nodes(&p, "c");
-        assert!(set.contains("handler") && set.contains("notify"), "{set:?}");
+"#;
+
+    /// Round 4: a `defaults.on_failure` handler the re-run node's failure
+    /// took is downstream of it, so a re-run revives it; its never-taken
+    /// fallback edge is no stale head.
+    #[test]
+    fn a_failure_policy_handler_is_revived_with_the_node() {
+        let p = pb(HANDLED);
         let old = state(
             &[
                 ("start", NodeStatus::Succeeded),
@@ -401,31 +434,66 @@ edges:
             ],
             &[("start", "c"), ("c", "handler"), ("handler", "notify")],
         );
+        let set = revived_nodes(&p, &old, "c");
+        assert!(set.contains("handler") && set.contains("notify"), "{set:?}");
         let new = revived(&p, &old, &names(&["c"]));
         assert!(!pending_heads(&p, &new).contains(&"other".to_string()));
+    }
+
+    /// Round 6: only a node whose own result routed into the handler (or a
+    /// failed start) leads there. `c` succeeded and `d` failed into the
+    /// handler: re-running `c` revives `d` and through it the handler;
+    /// re-running a succeeded `c` whose closure never failed does not.
+    #[test]
+    fn a_failure_policy_handler_is_revived_only_from_a_real_route() {
+        let p = pb(HANDLED);
+        let clean = state(
+            &[
+                ("start", NodeStatus::Succeeded),
+                ("c", NodeStatus::Succeeded),
+                ("d", NodeStatus::Succeeded),
+            ],
+            &[("start", "c"), ("c", "d"), ("d", "done")],
+        );
+        let set = revived_nodes(&p, &clean, "c");
+        assert!(!set.contains("handler"), "{set:?}");
+        let d_failed = state(
+            &[
+                ("start", NodeStatus::Succeeded),
+                ("c", NodeStatus::Succeeded),
+                ("d", NodeStatus::Failed),
+                ("handler", NodeStatus::Succeeded),
+            ],
+            &[("start", "c"), ("c", "d"), ("d", "handler")],
+        );
+        assert!(revived_nodes(&p, &d_failed, "c").contains("handler"));
     }
 
     #[test]
     fn revival_names_the_start_that_revives_a_node() {
         let p = pb(REPORT);
-        let r = Revival::new(&p, &names(&["b", "c"]));
+        let r = Revival::new(&p, &RunState::default(), &names(&["b", "c"]));
         assert_eq!(r.start_of("c2"), Some("c"));
         assert_eq!(r.start_of("j"), Some("b"));
         assert_eq!(r.start_of("a"), None);
         assert!(r.contains("done") && !r.contains("a"));
     }
 
+    /// Policy marks of a revived node stay in the history and do not matter
+    /// while it is revived: its own edges are never weighed then, and its
+    /// next start clears them.
     #[test]
-    fn policy_marks_of_revived_nodes_are_cleared() {
+    fn policy_marks_of_revived_nodes_do_not_route() {
         let p = pb(REPORT);
         let mut old = report_failed_pass();
         old.route_suppressed.insert("c".into());
-        old.refused_joins.insert("j".into());
-        old.route_suppressed.insert("b".into());
         let new = revived(&p, &old, &names(&["c"]));
-        assert!(!new.route_suppressed.contains("c"));
-        assert!(!new.refused_joins.contains("j"));
-        assert!(new.route_suppressed.contains("b"));
+        assert_eq!(new.current_status("c"), NodeStatus::Pending);
+        // `c` counts as live: the join waits for its branch.
+        assert_eq!(
+            join_readiness(&p, "j", &new, &names(&["c"])),
+            JoinReadiness::NotReady
+        );
     }
 
     #[test]

@@ -811,12 +811,6 @@ fn resume_inner_checked(
     // parallel fork, or honor an explicit `--from-node`. A pointless resume (an
     // argument-free resume of a succeeded run) is refused here.
     let decision = plan_resume(root, run_id, from_node)?;
-    // A `--from-node` inside the revival of a re-run the run still owes is
-    // refused before anything is journaled (issue #203).
-    if let Some(node) = from_node {
-        let state = RunState::fold(&read_all(&run_dir)?);
-        super::revive::refuse_inside_owed(&playbook, &state, node, super::revive::Asker::Operator)?;
-    }
     // Refuse a pointless `After`-mode resume BEFORE journaling anything: if the
     // already-finished start node has no pending successor to advance into (for
     // example a no-arg resume of a failed terminal run whose last node has no

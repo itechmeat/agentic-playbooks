@@ -1770,6 +1770,7 @@ fn drive_inner(
                         &read_all(run_dir)?,
                         std::slice::from_ref(&current),
                         &mut frontier,
+                        &[],
                     )?;
                     continue;
                 }
@@ -2560,6 +2561,7 @@ fn drive_inner(
                         &read_all(run_dir)?,
                         std::slice::from_ref(&current),
                         &mut frontier,
+                        &[],
                     )?;
                     continue;
                 }

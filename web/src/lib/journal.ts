@@ -120,13 +120,13 @@ function eventNote(e: WfEvent): string | undefined {
     // Issue #203: a join written off an input, and a re-run that revived it.
     case 'join_input_dead': {
       const list = listOf(r.sources)
-      return list ? `${String(r.node ?? '')} proceeds without ${list}` : undefined
+      return r.node && list ? `${String(r.node)} proceeds without ${list}` : undefined
     }
     case 'join_input_revived': {
       if (!r.node) return undefined
       const list = listOf(r.sources)
       const from = r.from_node ? ` (re-run of ${String(r.from_node)})` : ''
-      return `${String(r.node ?? '')} waits for ${list || 'its revived inputs'} again${from}`
+      return `${String(r.node)} waits for ${list || 'its revived inputs'} again${from}`
     }
     case 'nodes_revived': {
       const list = listOf(r.nodes)

@@ -431,7 +431,7 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
     let mut targets: BTreeSet<String> = state
         .journaled_hops
         .iter()
-        .filter(|(from, to)| from == node && playbook.node(to).is_some())
+        .filter(|(from, to)| from == node && playbook.node(to).is_some() && state.routes(from, to))
         .map(|(_, to)| to.clone())
         .collect();
     targets.extend(successors(playbook, node, state));

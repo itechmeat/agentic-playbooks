@@ -34,30 +34,37 @@ pub(crate) fn restore_revived_frontier(
     let Some(current) = starts.first() else {
         return Ok(());
     };
-    let state = revive(log, playbook, events, starts, frontier)?;
     let overridden: Vec<String> = overridden
         .iter()
         .filter(|n| !starts.contains(n))
         .cloned()
         .collect();
+    let state = revive(log, playbook, events, starts, frontier, &overridden)?;
     restore_frontier_besides(playbook, &state, current, frontier, &overridden);
     Ok(())
 }
 
-/// The revival of a drive that executes every node of `starts` again,
-/// `starts[0]` being the drive's `current`, without rebuilding any head:
-/// what a supervisor directive at a sequential park or a review gate needs,
-/// whose in-memory frontier is still the drive's own. Journals
-/// `nodes_revived` per start (and `join_input_revived` per obsolete
-/// write-off), drops from `frontier` the revived nodes that are not starts
-/// (the re-run reaches them again, e.g. an earlier owed re-run this one
-/// covers), puts every other owed re-run back, and returns the revived fold.
+/// The revival of a drive that executes every node of `starts` again on an
+/// explicit request, `starts[0]` being the drive's `current`, without
+/// rebuilding any head: what a supervisor directive at a sequential park or a
+/// review gate needs, whose in-memory frontier is still the drive's own.
+///
+/// Journals `nodes_revived` per start (and `join_input_revived` per obsolete
+/// write-off). The request supersedes every owed re-run the drive does not
+/// hold on its frontier (a re-run a pause or a crash stopped before it
+/// began): the latest choice wins, so their revivals end and the nodes only
+/// they covered read their earlier results again. An owed re-run still on the
+/// frontier is the drive's own plan (a sibling a batch retry queued) and
+/// stays. Drops from `frontier` the revived nodes that are not starts (the
+/// re-run reaches them again), puts every other owed re-run back, and returns
+/// the revived fold. `overridden` as in [`restore_revived_frontier`].
 pub(crate) fn revive(
     log: &mut EventLog,
     playbook: &Playbook,
     events: &[Event],
     starts: &[String],
     frontier: &mut Vec<String>,
+    overridden: &[String],
 ) -> Result<RunState, EngineError> {
     let mut state = RunState::fold(events);
     let Some(current) = starts.first() else {
@@ -75,25 +82,37 @@ pub(crate) fn revive(
     }
     let starts = all_starts;
     let rest = &starts[1..];
-    let mut revival = parallel::Revival::new(playbook, &starts);
+    let mut revival = parallel::Revival::new(playbook, &state, &starts);
     for (start, node) in &cancelled {
         if parallel::is_join(playbook, node) {
             revival.add(start, node);
         }
     }
+    let mut superseded: Vec<String> = state
+        .revival_starts
+        .iter()
+        .filter(|s| !frontier.contains(s))
+        .cloned()
+        .collect();
     for (start, nodes) in revival.per_start() {
-        if !nodes.iter().any(|n| carries_a_result(&state, n)) {
+        // The first record of the request carries what it supersedes.
+        let sup = std::mem::take(&mut superseded);
+        if sup.is_empty() && !nodes.iter().any(|n| carries_a_result(&state, n)) {
             continue;
         }
         log.append(EventPayload::NodesRevived {
             from_node: start.to_string(),
             nodes: nodes.iter().cloned().collect(),
+            superseded: sup.clone(),
         })?;
         // Exactly what the fold does with the record just written.
-        state.revive_from(start, nodes);
+        state.revive_from(start, nodes, &sup);
     }
     let mut also: Vec<String> = rest.to_vec();
-    also.extend(parallel::pending_heads(playbook, &state));
+    also.extend(parallel::pending_heads_besides(
+        playbook, &state, overridden,
+    ));
+    also.extend(state.revival_starts.iter().cloned());
     let active = active_set(current, frontier, &also);
     for record in revived_inputs(playbook, events, &state, &revival, &active) {
         log.append(record)?;
@@ -138,43 +157,6 @@ fn cancelled_siblings(
         }
     }
     out
-}
-
-/// Who asks for a re-run, for the wording of [`refuse_inside_owed`].
-pub(crate) enum Asker {
-    Operator,
-    Supervisor,
-}
-
-/// Refuses a re-run of `node` that lies inside the revival of a re-run the
-/// run still owes (issue #203): a supervisor's retry a pause stopped before
-/// it began, say. Re-running `node` first would run it again when the owed
-/// re-run reaches it. Checked before anything is journaled.
-pub(crate) fn refuse_inside_owed(
-    playbook: &Playbook,
-    state: &RunState,
-    node: &str,
-    asker: Asker,
-) -> Result<(), EngineError> {
-    for owed in &state.revival_starts {
-        if owed == node
-            || !parallel::Revival::new(playbook, std::slice::from_ref(owed)).contains(node)
-        {
-            continue;
-        }
-        let hint = match asker {
-            Asker::Operator => format!(
-                "resume without --from-node (`{owed}` runs first), or with --from-node `{owed}` or a node upstream of it"
-            ),
-            Asker::Supervisor => {
-                format!("retry or continue from `{owed}` or a node upstream of it instead")
-            }
-        };
-        return Err(EngineError::Invalid(format!(
-            "node `{node}` lies downstream of `{owed}`, whose re-run is still owed: {hint}"
-        )));
-    }
-    Ok(())
 }
 
 /// Whether the drive over `events` starts from an operator's re-run of
@@ -457,9 +439,9 @@ edges:
         let mut records = Vec::new();
         for e in &run.events()[events.len()..] {
             match &e.payload {
-                EventPayload::NodesRevived { from_node, nodes } => {
-                    revivals.push((from_node.clone(), nodes.clone()))
-                }
+                EventPayload::NodesRevived {
+                    from_node, nodes, ..
+                } => revivals.push((from_node.clone(), nodes.clone())),
                 other => records.push(other.clone()),
             }
         }
@@ -941,7 +923,7 @@ edges:
         assert_eq!(r.frontier, names(&["b"]));
         let state = RunState::fold(&run.events());
         assert_eq!(state.current_status("x"), NodeStatus::Pending);
-        assert!(!state.route_suppressed.contains("b"));
+        assert_eq!(state.current_status("b"), NodeStatus::Pending);
     }
 
     /// Round 4 item 3: a later revival that covers an earlier owed re-run
@@ -954,11 +936,20 @@ edges:
         e.push(EventPayload::NodesRevived {
             from_node: "b".into(),
             nodes: names(&["b", "done", "j"]),
+            superseded: Vec::new(),
         });
         let mut run = Run::new(e);
         let events = run.events();
         let mut frontier = names(&["b"]);
-        revive(&mut run.log, &p, &events, &names(&["a"]), &mut frontier).unwrap();
+        revive(
+            &mut run.log,
+            &p,
+            &events,
+            &names(&["a"]),
+            &mut frontier,
+            &[],
+        )
+        .unwrap();
         assert!(frontier.is_empty(), "{frontier:?}");
         let state = RunState::fold(&run.events());
         assert_eq!(
@@ -1009,6 +1000,7 @@ edges:
             e.push(EventPayload::NodesRevived {
                 from_node: start.into(),
                 nodes: names(&[start]),
+                superseded: Vec::new(),
             });
         }
         let run = Run::new(e);
@@ -1018,31 +1010,74 @@ edges:
         assert_eq!(frontier, names(&["y"]), "{frontier:?}");
     }
 
-    /// Round 5 item 5: a re-run asked inside the revival of a still-owed
-    /// re-run (`a`, upstream of `c`) is refused; the owed node itself, or
-    /// one upstream of it, is not.
+    /// Round 6: a new explicit re-run supersedes an owed one. `a` was owed
+    /// (a pause stopped it before it began); an operator then asks for `c`,
+    /// inside `a`'s revival. The record names `a` as superseded, `a` is owed
+    /// no longer and not put back, and `b`, which only `a`'s revival
+    /// covered, reads its earlier result and delivery again.
     #[test]
-    fn a_rerun_inside_an_owed_revival_is_refused() {
+    fn a_new_explicit_rerun_supersedes_an_owed_one() {
         let p = report("");
         let mut e = failed_pass();
         e.push(EventPayload::NodesRevived {
             from_node: "a".into(),
             nodes: names(&["a", "b", "c", "c2", "done", "failed", "j"]),
+            superseded: Vec::new(),
         });
-        let state = RunState::fold(&Run::new(e).events());
-        let err = refuse_inside_owed(&p, &state, "c", Asker::Operator).unwrap_err();
-        let text = err.to_string();
-        assert!(
-            text.contains("`a`") && text.contains("--from-node"),
-            "{text}"
+        let mut run = Run::new(e);
+        let r = rebuild(&p, &mut run, &["c"]);
+        assert!(r.frontier.is_empty(), "{:?}", r.frontier);
+        let state = RunState::fold(&run.events());
+        let sup: Vec<Vec<String>> = run
+            .events()
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::NodesRevived {
+                    from_node,
+                    superseded,
+                    ..
+                } if from_node == "c" => Some(superseded.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sup, vec![names(&["a"])]);
+        assert_eq!(
+            state.revival_starts.iter().collect::<Vec<_>>(),
+            [&"c".to_string()]
         );
-        let err = refuse_inside_owed(&p, &state, "c2", Asker::Supervisor).unwrap_err();
-        assert!(
-            err.to_string().contains("retry or continue from `a`"),
-            "{err}"
-        );
-        assert!(refuse_inside_owed(&p, &state, "a", Asker::Operator).is_ok());
-        assert!(refuse_inside_owed(&p, &state, "start", Asker::Operator).is_ok());
+        assert_eq!(state.current_status("a"), NodeStatus::Succeeded);
+        assert_eq!(state.current_status("b"), NodeStatus::Succeeded);
+        assert!(state.routes("b", "j"));
+        assert_eq!(state.current_status("j"), NodeStatus::Pending);
+    }
+
+    /// An owed re-run the drive still holds on its frontier (a sibling a
+    /// batch retry queued) is the drive's own plan: a directive elsewhere
+    /// does not supersede it.
+    #[test]
+    fn an_owed_rerun_on_the_frontier_is_not_superseded() {
+        let p = report("");
+        let mut e = failed_pass();
+        e.push(EventPayload::NodesRevived {
+            from_node: "b".into(),
+            nodes: names(&["b", "done", "j"]),
+            superseded: Vec::new(),
+        });
+        let mut run = Run::new(e);
+        let events = run.events();
+        let mut frontier = names(&["b"]);
+        revive(
+            &mut run.log,
+            &p,
+            &events,
+            &names(&["c"]),
+            &mut frontier,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(frontier, names(&["b"]));
+        let state = RunState::fold(&run.events());
+        assert!(state.revival_starts.contains("b") && state.revival_starts.contains("c"));
     }
 
     /// A join already on the frontier is not offered twice.

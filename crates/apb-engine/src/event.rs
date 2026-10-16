@@ -990,9 +990,11 @@ pub enum EventPayload {
     /// `nodes`: `from_node` and every node only downstream of it (issue
     /// #203). From here on the fold reads each of them as not yet run for
     /// routing and join readiness (`RunState::revived`) until it starts
-    /// or finishes again: its earlier result stays in the run's history, its
-    /// journaled hops and policy marks are dropped. A `from_node` that has not
-    /// started again is a re-run the drive owes: a resume re-runs it. Every later readiness decision of
+    /// or finishes again: its earlier result, hops and policy marks stay in
+    /// the run's history and are left out of routing on read; its hops are
+    /// dropped once it runs again. A `from_node` that has not started again
+    /// is a re-run the drive owes: a plain resume re-runs it, and a later
+    /// explicit re-run supersedes it (`superseded`). Every later readiness decision of
     /// the drive (each advance, a batch tail, a later resume) sees the same
     /// view, so a join fed by a revived branch waits for it.
     ///
@@ -1010,6 +1012,12 @@ pub enum EventPayload {
         from_node: String,
         #[serde(default)]
         nodes: Vec<String>,
+        /// The owed re-runs (earlier `from_node`s not started again) this
+        /// explicit request supersedes: the latest choice wins. Their
+        /// revivals end, so the nodes only they covered read their earlier
+        /// results again. Carried on the first record of a request.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        superseded: Vec<String>,
     },
     /// A node inside the branches of a fork that declares
     /// `fork.on_branch_failure` (issue #195) finished failed, and the fork's

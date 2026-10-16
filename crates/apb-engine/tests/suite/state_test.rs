@@ -546,6 +546,7 @@ fn revival_journal() -> Vec<EventPayload> {
     e.push(EventPayload::NodesRevived {
         from_node: "c".into(),
         nodes: ["c", "c2", "j", "done"].map(String::from).to_vec(),
+        superseded: Vec::new(),
     });
     e
 }
@@ -575,15 +576,18 @@ fn nodes_revived_keeps_history_and_changes_only_routing() {
     assert_eq!(s.current_status("j"), NodeStatus::Pending);
     assert_eq!(s.current_status("c"), NodeStatus::Pending);
     assert_eq!(s.current_status("b"), NodeStatus::Succeeded);
-    // Hops and marks are dropped for revived nodes only.
+    // The history keeps every hop and mark; the hops of revived nodes do
+    // not route while they are revived, every other hop does.
+    assert_eq!(s.journaled_hops, old.journaled_hops);
+    assert_eq!(s.route_suppressed, old.route_suppressed);
+    assert_eq!(s.refused_joins, old.refused_joins);
     for hop in [("c", "c2"), ("c2", "j"), ("j", "done")] {
-        assert!(old.journaled_hops.contains(&(hop.0.into(), hop.1.into())));
-        assert!(!s.journaled_hops.contains(&(hop.0.into(), hop.1.into())));
+        assert!(
+            old.routes(hop.0, hop.1) && !s.routes(hop.0, hop.1),
+            "{hop:?}"
+        );
     }
-    assert!(s.journaled_hops.contains(&("b".into(), "j".into())));
-    assert!(old.route_suppressed.contains("c") && !s.route_suppressed.contains("c"));
-    assert!(s.route_suppressed.contains("b"));
-    assert!(old.refused_joins.contains("j") && !s.refused_joins.contains("j"));
+    assert!(s.routes("b", "j"));
     assert_eq!(
         s.revival_starts.iter().collect::<Vec<_>>(),
         [&"c".to_string()]
@@ -600,6 +604,8 @@ fn a_revived_node_leaves_the_revival_when_it_starts_or_finishes_again() {
     let s = fold_of(&all);
     assert!(!s.revived.contains("c") && s.revival_starts.is_empty());
     assert_eq!(s.current_status("c"), NodeStatus::Running);
+    // Its earlier pass's hop is gone for good once it runs again.
+    assert!(!s.journaled_hops.contains(&("c".into(), "c2".into())));
     assert!(s.revived.contains("j"));
     // A finish node without a prompt journals only its finish.
     all.push(EventPayload::NodeFinished {
@@ -620,16 +626,40 @@ fn a_covering_revival_drops_the_earlier_owed_rerun() {
     all.push(EventPayload::NodesRevived {
         from_node: "x".into(),
         nodes: ["x", "y"].map(String::from).to_vec(),
+        superseded: Vec::new(),
     });
     let s = fold_of(&all);
     assert_eq!(s.revival_starts.len(), 2, "{:?}", s.revival_starts);
     all.push(EventPayload::NodesRevived {
         from_node: "b".into(),
         nodes: ["b", "c", "x", "j"].map(String::from).to_vec(),
+        superseded: Vec::new(),
     });
     let s = fold_of(&all);
     assert_eq!(
         s.revival_starts.iter().collect::<Vec<_>>(),
         [&"b".to_string()]
     );
+}
+
+/// Round 6: a revival that supersedes an owed one ends it. The nodes only it
+/// covered read their earlier results and hops again; nodes the new revival
+/// also covers stay revived.
+#[test]
+fn a_superseding_revival_restores_what_only_the_old_one_covered() {
+    let mut all = revival_journal();
+    all.push(EventPayload::NodesRevived {
+        from_node: "c2".into(),
+        nodes: ["c2", "j", "done"].map(String::from).to_vec(),
+        superseded: vec!["c".into()],
+    });
+    let s = fold_of(&all);
+    assert_eq!(
+        s.revival_starts.iter().collect::<Vec<_>>(),
+        [&"c2".to_string()]
+    );
+    assert_eq!(s.current_status("c"), NodeStatus::Succeeded);
+    assert!(s.routes("c", "c2"));
+    assert_eq!(s.current_status("j"), NodeStatus::Pending);
+    assert!(!s.routes("j", "done"));
 }

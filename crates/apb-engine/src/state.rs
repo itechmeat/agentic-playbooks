@@ -216,18 +216,30 @@ pub struct RunState {
     /// Nodes a re-run revived (issue #203), folded from `NodesRevived`: the
     /// drive executes them again, so until each one starts again its result
     /// from the earlier pass does not count for routing. `nodes` keeps that
-    /// result (it is the run's history every surface reports);
-    /// [`RunState::current_status`] is the view routing and join readiness
-    /// read. Their journaled hops are dropped from `journaled_hops` when they
-    /// are revived. A node leaves the set when it starts or finishes again (a
-    /// finish node without a prompt journals only its finish).
+    /// result (it is the run's history every surface reports), and so does
+    /// `journaled_hops`: [`RunState::current_status`] and
+    /// [`RunState::routes`] are the view routing and join readiness read.
+    /// A node leaves the set when it starts or finishes again (a finish node
+    /// without a prompt journals only its finish); its old hops are dropped
+    /// then. The union of [`RunState::revivals`].
     pub revived: BTreeSet<String>,
     /// The `from_node` of every revival whose node has not started again: the
     /// re-runs a drive was asked for and has not begun. A pause before the
     /// node starts, or a kill while a revived review gate waits, leaves one
     /// here; a resume re-runs it ([`crate::scheduler::plan_resume`]) and the
-    /// frontier rebuild puts every other one back.
+    /// frontier rebuild puts every other one back. A later explicit re-run
+    /// supersedes them (`NodesRevived::superseded`).
     pub revival_starts: BTreeSet<String>,
+    /// Each revival still in force: its `from_node` and the nodes it revived
+    /// that have not started again.
+    pub revivals: Vec<RevivalEntry>,
+}
+
+/// One revival in force (see [`RunState::revivals`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RevivalEntry {
+    pub from_node: String,
+    pub nodes: BTreeSet<String>,
 }
 
 /// One node's judge-edge answers, as journaled by the `judge_edge` decision
@@ -265,38 +277,78 @@ impl RunState {
         self.revived.contains(node) && self.nodes.get(node).is_some_and(|s| s.is_finished())
     }
 
-    /// Applies a revival: each node reads as not yet run for routing, its
-    /// journaled hops and its fork or join policy marks are dropped. Outputs,
-    /// edge counts, finished counts and judge answers stay: edge selection
-    /// consults them only for finished nodes, which revived ones are not, and
-    /// loop budgets must keep counting.
-    pub fn revive<'a>(&mut self, nodes: impl IntoIterator<Item = &'a String>) {
-        for n in nodes {
-            self.revived.insert(n.clone());
-            self.route_suppressed.remove(n);
-            self.refused_joins.remove(n);
-        }
-        let revived = &self.revived;
-        self.journaled_hops
-            .retain(|(from, _)| !revived.contains(from));
+    /// Whether the journaled hop `from -> to` counts for routing: a revived
+    /// node's hops are its earlier pass's and do not, until it runs again.
+    pub fn routes(&self, from: &str, to: &str) -> bool {
+        !self.revived.contains(from)
+            && self
+                .journaled_hops
+                .contains(&(from.to_string(), to.to_string()))
     }
 
-    /// [`RunState::revive`] for the revival of `from_node`, recorded as a
-    /// re-run the drive owes ([`RunState::revival_starts`]).
+    /// Applies a revival without a start of its own (tests, mostly): see
+    /// [`RunState::revive_from`].
+    pub fn revive<'a>(&mut self, nodes: impl IntoIterator<Item = &'a String>) {
+        self.revive_from("", nodes, &[]);
+    }
+
+    /// Applies the revival of `from_node`: each of `nodes` reads as not yet
+    /// run for routing until it starts again, and `from_node` is a re-run the
+    /// drive owes ([`RunState::revival_starts`]). Nothing is deleted: the
+    /// overlay is applied on read ([`RunState::current_status`],
+    /// [`RunState::routes`]).
     ///
-    /// An earlier owed re-run this revival covers is dropped: this re-run
-    /// reaches it again, so it is no longer owed on its own.
+    /// `superseded` are the owed re-runs this explicit request replaces (the
+    /// latest choice wins): their revivals end, so the nodes only they
+    /// covered read their earlier results and hops again. An owed re-run this
+    /// revival covers is owed no longer either: this re-run reaches it.
     pub fn revive_from<'a>(
         &mut self,
         from_node: &str,
         nodes: impl IntoIterator<Item = &'a String>,
+        superseded: &[String],
     ) {
-        let nodes: Vec<&String> = nodes.into_iter().collect();
-        self.revival_starts.retain(|s| !nodes.contains(&s));
-        self.revive(nodes);
-        if self.revived.contains(from_node) {
-            self.revival_starts.insert(from_node.to_string());
+        let nodes: BTreeSet<String> = nodes.into_iter().cloned().collect();
+        self.revivals
+            .retain(|r| !(superseded.contains(&r.from_node) && r.nodes.contains(&r.from_node)));
+        for r in &mut self.revivals {
+            if nodes.contains(&r.from_node) {
+                r.nodes.remove(&r.from_node);
+            }
         }
+        self.revivals.push(RevivalEntry {
+            from_node: from_node.to_string(),
+            nodes,
+        });
+        self.settle_revivals();
+    }
+
+    /// A node started or finished again: it leaves every revival, and the
+    /// hops of its earlier pass are dropped for good.
+    fn ran_again(&mut self, node: &str) {
+        if !self.revived.contains(node) {
+            return;
+        }
+        self.journaled_hops.retain(|(from, _)| from != node);
+        for r in &mut self.revivals {
+            r.nodes.remove(node);
+        }
+        self.settle_revivals();
+    }
+
+    fn settle_revivals(&mut self) {
+        self.revivals.retain(|r| !r.nodes.is_empty());
+        self.revived = self
+            .revivals
+            .iter()
+            .flat_map(|r| r.nodes.iter().cloned())
+            .collect();
+        self.revival_starts = self
+            .revivals
+            .iter()
+            .filter(|r| r.nodes.contains(&r.from_node))
+            .map(|r| r.from_node.clone())
+            .collect();
     }
 
     pub fn fold(events: &[Event]) -> RunState {
@@ -314,8 +366,7 @@ impl RunState {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
-                    s.revived.remove(node);
-                    s.revival_starts.remove(node);
+                    s.ran_again(node);
                 }
                 EventPayload::AttemptStarted { node, attempt, .. } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
@@ -343,8 +394,7 @@ impl RunState {
                     ..
                 } => {
                     open.remove(node);
-                    s.revived.remove(node);
-                    s.revival_starts.remove(node);
+                    s.ran_again(node);
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
                     s.last_node = Some(node.clone());
@@ -447,7 +497,11 @@ impl RunState {
                 EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. } => {}
                 // A re-run's revival (issue #203): routing reads the nodes as
                 // not yet run until each starts again; history stays.
-                EventPayload::NodesRevived { from_node, nodes } => s.revive_from(from_node, nodes),
+                EventPayload::NodesRevived {
+                    from_node,
+                    nodes,
+                    superseded,
+                } => s.revive_from(from_node, nodes, superseded),
                 // Fork and join failure options (issue #195): the routing they
                 // decided against is folded so edge selection stays pure.
                 EventPayload::BranchFailed { node, policy, .. } => {

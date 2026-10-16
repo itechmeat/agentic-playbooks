@@ -1992,6 +1992,7 @@ edges:
                 EventPayload::NodesRevived {
                     from_node: "s".into(),
                     nodes: vec!["s".into(), "g".into()],
+                    superseded: Vec::new(),
                 },
             ),
         ];

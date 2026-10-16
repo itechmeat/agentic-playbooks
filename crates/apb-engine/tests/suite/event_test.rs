@@ -108,6 +108,7 @@ fn nodes_revived_has_its_own_tag_and_defaults_every_field() {
     let p = EventPayload::NodesRevived {
         from_node: "c".into(),
         nodes: vec!["c".into(), "j".into()],
+        superseded: Vec::new(),
     };
     let s = serde_json::to_string(&p).unwrap();
     assert!(s.contains(r#""type":"nodes_revived""#), "{s}");
@@ -117,6 +118,6 @@ fn nodes_revived_has_its_own_tag_and_defaults_every_field() {
     let bare: EventPayload = serde_json::from_str(r#"{"type":"nodes_revived"}"#).unwrap();
     assert!(matches!(
         bare,
-        EventPayload::NodesRevived { from_node, nodes } if from_node.is_empty() && nodes.is_empty()
+        EventPayload::NodesRevived { from_node, nodes, superseded } if from_node.is_empty() && nodes.is_empty() && superseded.is_empty()
     ));
 }

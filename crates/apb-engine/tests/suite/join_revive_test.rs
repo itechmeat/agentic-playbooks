@@ -7,7 +7,7 @@
 //! not let a finish node the old pass routed into end the run early.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
@@ -15,9 +15,7 @@ use apb_engine::control::{Control, post_control};
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::pause::{PauseMode, PauseRequest};
 use apb_engine::review::{ReviewCommand, post_review};
-use apb_engine::scheduler::{
-    RunMode, RunOptions, StartMode, plan_resume, post_supervisor_command, resume, run,
-};
+use apb_engine::scheduler::{RunMode, RunOptions, StartMode, plan_resume, resume, run};
 use apb_engine::state::{RunState, RunStatus};
 
 /// The report's shape: `b` delivers into the implicit join `j` before `c`
@@ -1187,55 +1185,150 @@ fn an_interrupted_node_and_an_owed_rerun_both_run_once() {
     assert!(!root.join(TIMED_OUT).exists());
 }
 
-/// Round 5 item 5: a re-run asked inside the revival of a still-owed re-run
-/// (`a`, owed, upstream of `c`) is refused before anything is journaled,
-/// from an operator's `--from-node` and from a supervisor directive alike.
-/// The owed node itself is accepted.
+/// Round 6, shape B: `o` is owed (a pause stopped its re-run before it
+/// began) and the operator re-runs `p`, downstream of it. The latest choice
+/// wins: `o` does not run, `p` runs, and the join `j` (`require:
+/// all_succeeded`) weighs `q`'s earlier successful delivery as delivered,
+/// not dead, so it runs instead of refusing.
+const OWED_UPSTREAM: &str = r#"
+schema: 2
+id: jr
+name: Join revive
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: o, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: p, type: script, script: "scripts/gate.sh", runner: sh }
+  - { id: q, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: o }
+  - { from: o, to: p }
+  - { from: o, to: q }
+  - { from: p, to: j, require: all_succeeded, condition: { type: node_status, node: p, equals: success } }
+  - { from: p, to: failed, condition: { type: node_status, node: p, equals: failure } }
+  - { from: q, to: j, require: all_succeeded }
+  - { from: j, to: done }
+"#;
+
 #[test]
-fn a_rerun_inside_an_owed_revival_is_refused_before_journaling() {
+fn a_rerun_below_an_owed_one_supersedes_it() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    seed(root, REPORT, &report_scripts(root));
+    seed(root, OWED_UPSTREAM, &[("gate.sh", gate(root))]);
     let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    assert_eq!(first.outcome, RunStatus::Failed);
     let run_dir = root.join(".apb/runs").join(&first.run_id);
     append_lines(
         &run_dir,
         &[
-            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"a","nodes":["a","b","c","c2","done","failed","j"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"o","nodes":["done","failed","j","o","p","q"]}"#,
             r#"{"seq":SEQ,"ts":1,"type":"run_paused","reason":"test"}"#,
         ],
     );
-    let before = read_all(&run_dir).unwrap().len();
-    let err = resume(root, &first.run_id, Some("c"))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("`a`") && err.contains("--from-node"), "{err}");
-    assert_eq!(
-        read_all(&run_dir).unwrap().len(),
-        before,
-        "the refusal journaled"
+    fs::write(root.join(PASS), "").unwrap();
+    let at = read_all(&run_dir).unwrap().len();
+    let res = resume(root, &first.run_id, Some("p")).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let after = &read_all(&run_dir).unwrap()[at..];
+    assert_eq!(starts_of(after, "o"), 0, "the superseded re-run ran");
+    assert_eq!(starts_of(after, "q"), 0);
+    assert_eq!(starts_of(after, "p"), 1);
+    assert_eq!(starts_of(after, "j"), 1);
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::JoinRefused { .. })),
+        "the join weighed q's earlier delivery as dead"
+    );
+}
+
+/// Round 6, shape A: a loop `start -> a -> b -> k`, `k` reworks into `a`
+/// once or approves into `done`. `b` failed and its re-run is owed (a
+/// pause stopped it); every node of the cycle is an ancestor of every
+/// other. Each explicit re-run supersedes the owed `b`: one token runs the
+/// loop, `b` never runs beside its own upstream.
+fn loop_rework(k_script: &str) -> String {
+    format!(
+        r#"
+schema: 2
+id: jr
+name: Join revive
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - {{ id: a, type: script, script: "scripts/ok.sh", runner: sh }}
+  - {{ id: b, type: script, script: "scripts/gate.sh", runner: sh }}
+  - {{ id: k, type: script, script: "scripts/{k_script}", runner: sh }}
+  - {{ id: done, type: finish, outcome: success }}
+  - {{ id: failed, type: finish, outcome: failure }}
+edges:
+  - {{ from: start, to: a }}
+  - {{ from: a, to: b }}
+  - {{ from: b, to: k, condition: {{ type: node_status, node: b, equals: success }} }}
+  - {{ from: b, to: failed, condition: {{ type: node_status, node: b, equals: failure }} }}
+  - {{ from: k, to: a, max_traversals: 1, condition: {{ type: output_match, node: k, pattern: rework }} }}
+  - {{ from: k, to: done, fallback: true }}
+"#
+    )
+}
+
+fn owed_b_in_a_loop(root: &Path, k_script: &str) -> (String, PathBuf, usize) {
+    let scripts = vec![
+        ("gate.sh", gate(root)),
+        ("approve.sh", "echo approve\n".to_string()),
+        (
+            "rework_once.sh",
+            format!(
+                "if [ -e '{m}' ]; then echo approve; else : > '{m}'; echo rework; fi\n",
+                m = root.join("k-reworked").display()
+            ),
+        ),
+    ];
+    seed(root, &loop_rework(k_script), &scripts);
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    assert_eq!(first.outcome, RunStatus::Failed);
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    append_lines(
+        &run_dir,
+        &[
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"b","nodes":["b","failed"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"run_paused","reason":"test"}"#,
+        ],
+    );
+    fs::write(root.join(PASS), "").unwrap();
+    let at = read_all(&run_dir).unwrap().len();
+    (first.run_id, run_dir, at)
+}
+
+#[test]
+fn a_rerun_inside_a_loop_supersedes_the_owed_one() {
+    // `--from-node a`: `b` runs once, after `a`, never beside it.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (id, run_dir, at) = owed_b_in_a_loop(root, "approve.sh");
+    let res = resume(root, &id, Some("a")).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let after = &read_all(&run_dir).unwrap()[at..];
+    assert_eq!(starts_of(after, "a"), 1);
+    assert_eq!(starts_of(after, "b"), 1, "b ran twice");
+    assert!(
+        finished_at(after, "a").unwrap() < started_at(after, "b").unwrap(),
+        "b ran beside its own upstream"
     );
 
-    let err = post_supervisor_command(
-        root,
-        &first.run_id,
-        Control::ContinueFrom { node: "c".into() },
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("retry or continue from `a`"), "{err}");
-    assert!(
-        !run_dir.join("control.jsonl").exists()
-            || fs::read_to_string(run_dir.join("control.jsonl"))
-                .unwrap()
-                .is_empty(),
-        "the refused directive was posted"
-    );
-    post_supervisor_command(
-        root,
-        &first.run_id,
-        Control::ContinueFrom { node: "a".into() },
-    )
-    .expect("the owed node itself is accepted");
-    assert!(!root.join(TIMED_OUT).exists());
+    // `--from-node k`: one token. `k` reworks once into `a`, then approves.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (id, run_dir, at) = owed_b_in_a_loop(root, "rework_once.sh");
+    let res = resume(root, &id, Some("k")).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let after = &read_all(&run_dir).unwrap()[at..];
+    assert_eq!(starts_of(after, "k"), 2);
+    assert_eq!(starts_of(after, "a"), 1);
+    assert_eq!(starts_of(after, "b"), 1, "two tokens in the loop");
+    assert!(finished_at(after, "k").unwrap() < started_at(after, "a").unwrap());
+    assert!(finished_at(after, "a").unwrap() < started_at(after, "b").unwrap());
 }
