@@ -1315,3 +1315,98 @@ fn resumed_agent_supervised_run_still_parks_for_its_supervisor() {
         "the resumed run must park for its supervisor, not fail autonomously"
     );
 }
+
+// Round 7 item 1: a supersede at a review gate puts back the heads the
+// superseded revival had dropped. `g` approved, `deploy` (an agent, beside
+// the `prompt` sibling `docs`, so it runs alone) fails and parks with `docs`
+// waiting. The supervisor continues at `g` (revives `g`, drops `docs`); at
+// the gate it retries `deploy`, which supersedes `g`'s owed re-run: `g`
+// reads approved again and `docs` must run before the join.
+const WF_SUPERSEDE_AT_GATE: &str = r#"
+schema: 1
+id: supgate
+name: Supersede at a gate
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: g, type: human_review, options: [approve, reject] }
+  - { id: deploy, type: agent_task, prompt: "branch flaky1" }
+  - { id: docs, type: prompt, prompt: "docs" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: g }
+  - { from: g, to: deploy }
+  - { from: g, to: docs }
+  - { from: deploy, to: j }
+  - { from: docs, to: j }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn a_supersede_at_a_gate_puts_back_the_sibling_the_earlier_revival_dropped() {
+    use apb_engine::review::{ReviewCommand, post_review};
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supgate", WF_SUPERSEDE_AT_GATE);
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supgate", opts);
+    let run_dir = find_run_dir(dir.path(), "supgate-");
+    let requests = |run_dir: &Path| {
+        read_all(run_dir)
+            .map(|evs| {
+                evs.iter()
+                    .filter(|e| matches!(&e.payload, EventPayload::ReviewRequested { .. }))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let approve = |run_dir: &Path| {
+        post_review(
+            run_dir,
+            ReviewCommand {
+                node: "g".into(),
+                decision: "approve".into(),
+                note: String::new(),
+            },
+        )
+        .unwrap();
+    };
+    poll_until("the first review request", || {
+        (requests(&run_dir) == 1).then_some(())
+    });
+    approve(&run_dir);
+    wait_for_wake_on(&run_dir, "deploy");
+    post_control(&run_dir, Control::ContinueFrom { node: "g".into() }).unwrap();
+    poll_until("the gate asks again", || {
+        (requests(&run_dir) == 2).then_some(())
+    });
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "deploy".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started_count(&events, "docs"), 1, "docs never ran");
+    assert_eq!(started_count(&events, "j"), 1);
+    assert!(node_finished_at(&events, "docs") < node_started_at(&events, "j"));
+}

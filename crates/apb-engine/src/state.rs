@@ -233,6 +233,11 @@ pub struct RunState {
     /// Each revival still in force: its `from_node` and the nodes it revived
     /// that have not started again.
     pub revivals: Vec<RevivalEntry>,
+    /// Revived nodes that received a hop after their revival: a fresh
+    /// delivery of this pass. Such a node is a pending head again even if it
+    /// finished in an earlier pass (`parallel::pending_heads`). A node leaves
+    /// the set when it runs again or its revival ends.
+    pub delivered_since_revival: BTreeSet<String>,
 }
 
 /// One revival in force (see [`RunState::revivals`]).
@@ -273,8 +278,13 @@ impl RunState {
     /// Whether `node` was revived and still carries a finished result from an
     /// earlier pass: a hop into it recorded before the revival is not a reason
     /// to run it again (see `parallel::pending_heads`).
+    ///
+    /// A fresh delivery since the revival (a hop journaled after it) is such
+    /// a reason, so a node that received one is not counted here.
     pub fn revived_after_finish(&self, node: &str) -> bool {
-        self.revived.contains(node) && self.nodes.get(node).is_some_and(|s| s.is_finished())
+        self.revived.contains(node)
+            && self.nodes.get(node).is_some_and(|s| s.is_finished())
+            && !self.delivered_since_revival.contains(node)
     }
 
     /// Whether the journaled hop `from -> to` counts for routing: a revived
@@ -330,6 +340,7 @@ impl RunState {
             return;
         }
         self.journaled_hops.retain(|(from, _)| from != node);
+        self.delivered_since_revival.remove(node);
         for r in &mut self.revivals {
             r.nodes.remove(node);
         }
@@ -349,6 +360,16 @@ impl RunState {
             .filter(|r| r.nodes.contains(&r.from_node))
             .map(|r| r.from_node.clone())
             .collect();
+        let revived = &self.revived;
+        self.delivered_since_revival.retain(|n| revived.contains(n));
+    }
+
+    /// The run reached a terminal state: a re-run it still owed is owed no
+    /// longer (a plain resume of a finished run re-runs nothing), so those
+    /// revivals end.
+    fn end_owed_revivals(&mut self) {
+        self.revivals.retain(|r| !r.nodes.contains(&r.from_node));
+        self.settle_revivals();
     }
 
     pub fn fold(events: &[Event]) -> RunState {
@@ -419,9 +440,13 @@ impl RunState {
                         "succeeded" => RunStatus::Succeeded,
                         _ => RunStatus::Failed,
                     };
+                    s.end_owed_revivals();
                 }
                 EventPayload::RetryStarted { .. } | EventPayload::FallbackTriggered { .. } => {}
-                EventPayload::RunAborted { .. } => s.run_status = RunStatus::Aborted,
+                EventPayload::RunAborted { .. } => {
+                    s.run_status = RunStatus::Aborted;
+                    s.end_owed_revivals();
+                }
                 EventPayload::WakeRaised { .. } => {}
                 // A question and its answer are audit-only channel mirrors
                 // (spec 2026-07-20-interactive-nodes): they do not change
@@ -546,6 +571,9 @@ impl RunState {
                     uncounted,
                 } => {
                     s.journaled_hops.insert((from.clone(), to.clone()));
+                    if s.revived.contains(to) && !s.revived.contains(from) {
+                        s.delivered_since_revival.insert(to.clone());
+                    }
                     if !via_policy && !uncounted {
                         *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
                     }

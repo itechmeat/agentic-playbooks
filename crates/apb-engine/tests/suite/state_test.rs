@@ -663,3 +663,24 @@ fn a_superseding_revival_restores_what_only_the_old_one_covered() {
     assert_eq!(s.current_status("j"), NodeStatus::Pending);
     assert!(!s.routes("j", "done"));
 }
+
+/// Round 7 item 4: a terminal finish ends the revivals whose re-run is still
+/// owed; a plain resume of a finished run re-runs nothing.
+#[test]
+fn a_terminal_finish_ends_owed_revivals() {
+    for terminal in [
+        EventPayload::RunFinished {
+            outcome: "failed".into(),
+        },
+        EventPayload::RunAborted {
+            reason: "stop".into(),
+        },
+    ] {
+        let mut all = revival_journal();
+        all.push(terminal);
+        let s = fold_of(&all);
+        assert!(s.revival_starts.is_empty(), "{:?}", s.revival_starts);
+        assert!(s.revived.is_empty());
+        assert_eq!(s.current_status("c"), NodeStatus::Succeeded);
+    }
+}

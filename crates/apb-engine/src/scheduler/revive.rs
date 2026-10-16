@@ -94,6 +94,10 @@ pub(crate) fn revive(
         .filter(|s| !frontier.contains(s))
         .cloned()
         .collect();
+    // The same revival without the supersede: what it exposes is the
+    // difference between the two.
+    let mut kept = state.clone();
+    let mut any_superseded = false;
     for (start, nodes) in revival.per_start() {
         // The first record of the request carries what it supersedes.
         let sup = std::mem::take(&mut superseded);
@@ -107,6 +111,11 @@ pub(crate) fn revive(
         })?;
         // Exactly what the fold does with the record just written.
         state.revive_from(start, nodes, &sup);
+        kept.revive_from(start, nodes, &[]);
+        any_superseded |= !sup.is_empty();
+    }
+    if any_superseded {
+        put_back_exposed_heads(playbook, &state, &kept, current, frontier, overridden);
     }
     let mut also: Vec<String> = rest.to_vec();
     also.extend(parallel::pending_heads_besides(
@@ -124,6 +133,40 @@ pub(crate) fn revive(
         }
     }
     Ok(state)
+}
+
+/// Puts back the heads a supersede exposed: the nodes only a superseded
+/// revival covered read their earlier results again, so the routing out of
+/// them that revival had taken off the frontier counts again (a sibling the
+/// earlier re-run dropped, say). Only those heads: the drive's own frontier
+/// is not otherwise rebuilt. A join is gated as in [`restore_frontier`].
+fn put_back_exposed_heads(
+    playbook: &Playbook,
+    state: &RunState,
+    without_supersede: &RunState,
+    current: &str,
+    frontier: &mut Vec<String>,
+    overridden: &[String],
+) {
+    let before = parallel::pending_heads_besides(playbook, without_supersede, overridden);
+    let heads = parallel::pending_heads_besides(playbook, state, overridden);
+    let mut also = heads.clone();
+    also.extend(state.revival_starts.iter().cloned());
+    let active = active_set(current, frontier, &also);
+    for head in heads.iter().filter(|h| !before.contains(h)) {
+        if head == current || frontier.contains(head) {
+            continue;
+        }
+        if parallel::is_join(playbook, head)
+            && matches!(
+                parallel::join_readiness(playbook, head, state, &active),
+                JoinReadiness::NotReady
+            )
+        {
+            continue;
+        }
+        frontier.push(head.clone());
+    }
 }
 
 /// The branch siblings a fork's failure policy cancelled because a start
@@ -1078,6 +1121,32 @@ edges:
         assert_eq!(frontier, names(&["b"]));
         let state = RunState::fold(&run.events());
         assert!(state.revival_starts.contains("b") && state.revival_starts.contains("c"));
+    }
+
+    /// Round 7 item 2: the join `j` finished in the earlier pass, the re-run
+    /// of `c` delivered into it again (`c2 -> j`), and the drive stopped
+    /// before `j` started. The fresh delivery makes `j` a head again, so the
+    /// rebuild offers it instead of stranding it.
+    #[test]
+    fn a_revived_join_with_a_fresh_delivery_is_a_head_again() {
+        let p = report("");
+        let mut e = failed_pass();
+        e.extend(finished("j", "succeeded"));
+        e.push(hop("j", "done"));
+        e.push(EventPayload::NodesRevived {
+            from_node: "c".into(),
+            nodes: names(&["c", "c2", "done", "failed", "j"]),
+            superseded: Vec::new(),
+        });
+        e.extend(finished("c", "succeeded"));
+        e.push(hop("c", "c2"));
+        e.extend(finished("c2", "succeeded"));
+        e.push(hop("c2", "j"));
+        let state = RunState::fold(&Run::new(e).events());
+        assert!(parallel::pending_heads(&p, &state).contains(&"j".to_string()));
+        let mut frontier = Vec::new();
+        restore_frontier(&p, &state, "c2", &mut frontier);
+        assert_eq!(frontier, names(&["j"]));
     }
 
     /// A join already on the frontier is not offered twice.

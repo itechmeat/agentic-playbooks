@@ -58,11 +58,14 @@ impl Revival {
             let routed = state
                 .journaled_hops
                 .contains(&(n.id.clone(), handler.to_string()));
+            // A failed start reaches the handler only when none of its own
+            // declared edges takes the failure.
             let failed_start = starts.contains(&n.id)
                 && state
                     .nodes
                     .get(&n.id)
-                    .is_some_and(|st| matches!(st, NodeStatus::Failed | NodeStatus::TimedOut));
+                    .is_some_and(|st| matches!(st, NodeStatus::Failed | NodeStatus::TimedOut))
+                && super::selected_edges(playbook, &n.id, state).is_empty();
             if routed || failed_start {
                 forward.entry(n.id.as_str()).or_default().push(handler);
             }
@@ -467,6 +470,22 @@ edges:
             &[("start", "c"), ("c", "d"), ("d", "handler")],
         );
         assert!(revived_nodes(&p, &d_failed, "c").contains("handler"));
+    }
+
+    /// Round 7 item 6: a failed start whose own declared failure edge takes
+    /// the failure never reaches the `defaults.on_failure` handler.
+    #[test]
+    fn a_failed_start_with_its_own_failure_edge_skips_the_handler() {
+        let with_edge = HANDLED.replace(
+            "  - { from: c, to: d }\n",
+            "  - { from: c, to: d, condition: { type: node_status, node: c, equals: success } }\n  - { from: c, to: notify, condition: { type: node_status, node: c, equals: failure } }\n",
+        );
+        let failed = state(
+            &[("start", NodeStatus::Succeeded), ("c", NodeStatus::Failed)],
+            &[("start", "c")],
+        );
+        assert!(!revived_nodes(&pb(&with_edge), &failed, "c").contains("handler"));
+        assert!(revived_nodes(&pb(HANDLED.replace("  - { from: c, to: d }\n", "  - { from: c, to: d, condition: { type: node_status, node: c, equals: success } }\n").as_str()), &failed, "c").contains("handler"));
     }
 
     #[test]

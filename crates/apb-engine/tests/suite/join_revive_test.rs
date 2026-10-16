@@ -1332,3 +1332,33 @@ fn a_rerun_inside_a_loop_supersedes_the_owed_one() {
     assert!(finished_at(after, "k").unwrap() < started_at(after, "a").unwrap());
     assert!(finished_at(after, "a").unwrap() < started_at(after, "b").unwrap());
 }
+
+/// Round 7 items 4 and 5: an owed re-run does not outlive a terminal finish
+/// (a plain resume of the finished run does not pick it), and owed re-runs
+/// are picked in journal order, not by name.
+#[test]
+fn owed_reruns_end_with_the_run_and_go_in_journal_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REPORT, &report_scripts(root));
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    append_lines(
+        &run_dir,
+        &[
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"c","nodes":["c","c2","done","failed","j"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"b","nodes":["b","done","j"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"run_paused","reason":"test"}"#,
+        ],
+    );
+    assert_eq!(
+        plan_resume(root, &first.run_id, None).unwrap().start_node,
+        "c"
+    );
+    append_lines(
+        &run_dir,
+        &[r#"{"seq":SEQ,"ts":1,"type":"run_finished","outcome":"failed"}"#],
+    );
+    let plan = plan_resume(root, &first.run_id, None).unwrap();
+    assert_eq!(plan.mode, StartMode::After, "{plan:?}");
+}

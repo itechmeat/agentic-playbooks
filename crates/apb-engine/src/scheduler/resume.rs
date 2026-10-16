@@ -143,8 +143,15 @@ pub fn plan_resume(
     // fallback would re-run an unrelated last node. With nothing really
     // interrupted the first owed one is re-run, and the frontier rebuild puts
     // every other one back (`restore_frontier`).
+    // The first owed one in journal order; reported as an interrupted
+    // restart, the reason a re-run that never began is closest to (the
+    // reason is a public string, so no new value is added for it).
     if interrupted.is_empty()
-        && let Some(owed) = state.revival_starts.iter().next()
+        && let Some(owed) = state
+            .revivals
+            .iter()
+            .find(|r| r.nodes.contains(&r.from_node))
+            .map(|r| &r.from_node)
     {
         return Ok(ResumeDecision {
             start_node: owed.clone(),
