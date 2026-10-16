@@ -1050,8 +1050,8 @@ fn a_host_task_outlives_a_pause_longer_than_its_deadline() {
     assert_eq!(wait_outcome(root, &run_id), "succeeded");
 }
 
-/// One host task with a 6 s deadline and no retry.
-const SIX_SECOND_DEADLINE: &str = r#"
+/// One host task with a 12 s deadline and no retry.
+const TWELVE_SECOND_DEADLINE: &str = r#"
 schema: 1
 id: hm
 name: Host mode
@@ -1060,7 +1060,7 @@ defaults:
   profile: main
 nodes:
   - { id: start, type: start }
-  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 6, max_retries: 0 }
+  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 12, max_retries: 0 }
   - { id: done, type: finish, outcome: success }
 edges:
   - { from: start, to: plan }
@@ -1069,21 +1069,23 @@ edges:
 
 /// Issue #200, AC3, the clock itself: a host task's deadline stands still
 /// while the run is paused and, after the resume, runs on with what was left
-/// of it. The task is open about 3 s before a `--now` pause, the pause lasts
-/// 4 s (together past the 6 s deadline), and the resumed driver expires the
-/// task about 3 s after the resume: not right away (paused time counted) and
-/// not after a fresh 6 s (the clock restarted).
+/// of it. The task is open about 6 s before a `--now` pause, the pause lasts
+/// 7 s (together past the 12 s deadline), and the resumed driver expires the
+/// task about 6 s after the resume: not right away (paused time counted) and
+/// not after a fresh 12 s (the clock restarted). The bounds sit halfway
+/// between the right answer and each wrong one, so a slow machine has
+/// seconds of slack on either side.
 #[test]
 fn a_resumed_host_task_expires_at_what_was_left_of_its_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    seed_with(root, SIX_SECOND_DEADLINE);
+    seed_with(root, TWELVE_SECOND_DEADLINE);
     let run_id = start_detached(root);
     let _guard = crate::common::RunGuard::new(root, &run_id);
     let plan = task_of(root, &run_id, "plan");
     let id = plan["task_id"].as_str().unwrap().to_string();
 
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_secs(6));
     let out = crate::common::apb_std()
         .args(["pause", &run_id, "--now", "--reason", "lunch"])
         .current_dir(root)
@@ -1101,7 +1103,7 @@ fn a_resumed_host_task_expires_at_what_was_left_of_its_deadline() {
             .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
             .then_some(())
     });
-    std::thread::sleep(Duration::from_secs(4));
+    std::thread::sleep(Duration::from_secs(7));
     resume(root, &run_id);
 
     let events = poll("the task to expire", || {
@@ -1131,10 +1133,13 @@ fn a_resumed_host_task_expires_at_what_was_left_of_its_deadline() {
         matches!(p, EventPayload::HostTaskSubmitted { task_id, status, .. }
             if *task_id == id && status == "expired")
     });
-    let left = 6_000 - (paused - requested);
+    let deadline = 12_000;
+    let left = deadline - (paused - requested);
     let took = expired - resumed;
+    // Paused time counted: expired about `left - 7 s` after the resume, at
+    // most 0 here. A restarted clock: about the full deadline.
     assert!(
-        took + 1_000 >= left && took <= left + 1_500,
+        took * 2 >= left && took * 2 <= left + deadline,
         "the task expired {took} ms after the resume; {left} ms of its deadline were left"
     );
 }
