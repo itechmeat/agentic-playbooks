@@ -947,7 +947,7 @@ fn run_wait_without_inline_prompts_hands_tasks_over_by_path() {
     mcp.call("run_stop", json!({"run_id": run_id}));
 }
 
-/// Two host tasks, the first with a 2 s deadline.
+/// Two host tasks, the first with a 4 s deadline.
 const SHORT_DEADLINE: &str = r#"
 schema: 1
 id: hm
@@ -957,7 +957,7 @@ defaults:
   profile: main
 nodes:
   - { id: start, type: start }
-  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 2 }
+  - { id: plan, type: agent_task, prompt: "Plan it", timeout_seconds: 4 }
   - { id: build, type: agent_task, prompt: "Build from {{nodes.plan.output}}" }
   - { id: done, type: finish, outcome: success }
 edges:
@@ -968,9 +968,10 @@ edges:
 
 /// Issue #200, AC3: a `--now` pause leaves an open host task open, and its
 /// deadline does not run while the run is paused. A pause longer than the
-/// deadline, a reply submitted while paused, then a resume: the task is
-/// still open before the submit, the reply is applied, and the run
-/// succeeds.
+/// whole 4 s deadline, a resume without a reply, and a wait that takes the
+/// wall time since the task opened well past the deadline: the driver keeps
+/// the task open (its clock left the pause out) and the run alive. The reply
+/// submitted then is applied and the run succeeds.
 #[test]
 fn a_host_task_outlives_a_pause_longer_than_its_deadline() {
     let dir = tempfile::tempdir().unwrap();
@@ -999,21 +1000,50 @@ fn a_host_task_outlives_a_pause_longer_than_its_deadline() {
             .then_some(())
     });
     // Paused for longer than the task's whole deadline.
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_secs(5));
     let open = tasks_json(root, &run_id);
     assert!(
         open.iter().any(|t| t["task_id"] == id.as_str()),
         "the task is still open after the pause outlasted its deadline: {open:?}"
     );
 
-    submit(root, &run_id, &id, "PLAN-WHILE-PAUSED");
+    // Resumed without a reply: the driver watches the task again, with the
+    // wall time since it opened past its deadline but the active time not.
     resume(root, &run_id);
+    std::thread::sleep(Duration::from_millis(1_500));
+    let events = read_all(&run_dir(root, &run_id)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunFinished { .. })),
+        "the run is still going: {events:?}"
+    );
+    assert_eq!(
+        apb_engine::liveness::driver_alive(&run_dir(root, &run_id), &run_id),
+        Some(true),
+        "the resumed driver is alive"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::AttemptFinished { node, status, .. }
+                if node == "plan" && status != "interrupted"
+        )),
+        "the plan task was not closed: {events:?}"
+    );
+    let open = tasks_json(root, &run_id);
+    assert!(
+        open.iter().any(|t| t["task_id"] == id.as_str()),
+        "the resumed driver kept the task open: {open:?}"
+    );
+
+    submit(root, &run_id, &id, "PLAN-AFTER-PAUSE");
     let build = task_of(root, &run_id, "build");
     assert!(
         build["prompt"]
             .as_str()
             .unwrap()
-            .contains("Build from PLAN-WHILE-PAUSED"),
+            .contains("Build from PLAN-AFTER-PAUSE"),
         "{build}"
     );
     submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");

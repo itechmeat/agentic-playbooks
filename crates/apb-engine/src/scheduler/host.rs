@@ -286,7 +286,10 @@ impl HostAdapter<'_, '_> {
         })?;
         Ok(Requested {
             task_id,
-            deadline: task.timeout.map(|t| std::time::Instant::now() + t),
+            // An adopted task goes on with what is left of its own clock,
+            // paused time left out, instead of a fresh full timeout.
+            deadline: adopted_deadline
+                .unwrap_or_else(|| task.timeout.map(|t| std::time::Instant::now() + t)),
             prior_status_file,
         })
     }
