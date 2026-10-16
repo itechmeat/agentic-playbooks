@@ -549,6 +549,21 @@ fn run_stop_finalizes_a_run_whose_driver_is_gone() {
     assert_eq!(again["outcome"], "already_terminal");
 }
 
+/// Issue #200: `.` names the runs directory itself, not a run: the operator
+/// pause refuses it (and `..`) as not found and touches nothing.
+#[test]
+fn pause_run_rejects_dot_run_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let runs = dir.path().join(".apb/runs");
+    fs::create_dir_all(&runs).unwrap();
+    for bad in [".", ".."] {
+        let err = apb_mcp::tools::pause_run(dir.path(), bad, None, None, None, false).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{bad}: {err}");
+    }
+    assert!(!runs.join("events.jsonl").exists());
+}
+
 /// Issue #200: the operator `run_pause` tool pauses a run nothing drives on
 /// the spot, `run_status` then carries the `pause` object (reason, by, until),
 /// a finished run is refused and a bad mode is rejected.

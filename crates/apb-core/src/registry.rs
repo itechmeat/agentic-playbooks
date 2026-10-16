@@ -73,9 +73,10 @@ pub enum RegistryError {
 }
 
 /// Checks that a path segment is safe to join: non-empty and does not
-/// contain path separators or `..`, to rule out directory traversal (path traversal).
+/// contain path separators, `..` or be a bare `.`, to rule out directory
+/// traversal (path traversal) and naming the parent directory itself.
 pub fn is_safe_segment(s: &str) -> bool {
-    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
+    !s.is_empty() && s != "." && !s.contains('/') && !s.contains('\\') && !s.contains("..")
 }
 
 /// Marker filename (inside the playbook directory, alongside `current`) that
