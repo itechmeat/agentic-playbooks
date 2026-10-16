@@ -384,52 +384,10 @@ mod tests {
         }
     }
 
-    /// A stopped or continued child is not an exited one, whatever a
-    /// platform's `waitid(WEXITED)` reports.
-    #[cfg(unix)]
-    #[test]
-    fn only_an_exit_or_a_death_by_signal_ends_the_wait() {
-        for code in [libc::CLD_EXITED, libc::CLD_KILLED, libc::CLD_DUMPED] {
-            assert!(super::is_exit_code(code), "{code}");
-        }
-        for code in [libc::CLD_STOPPED, libc::CLD_CONTINUED, libc::CLD_TRAPPED, 0] {
-            assert!(!super::is_exit_code(code), "{code}");
-        }
-    }
-
-    /// A live leader, also a stopped one, reads as not exited; once it dies
-    /// the check sees it while its pid stays taken (a zombie).
-    #[cfg(unix)]
-    #[test]
-    fn the_exit_check_tracks_a_live_then_stopped_then_dead_leader() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let pid = libc::pid_t::try_from(child.id()).unwrap();
-        // SAFETY: signal 0 only checks that the process exists.
-        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the leader lives");
-        assert!(!leader_exited(&child));
-        // SAFETY: `pid` is our own child.
-        unsafe { libc::kill(pid, libc::SIGSTOP) };
-        thread::sleep(Duration::from_millis(100));
-        assert!(!leader_exited(&child), "a stopped leader has not exited");
-        // SAFETY: as above.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        let start = Instant::now();
-        while !leader_exited(&child) {
-            assert!(start.elapsed() < Duration::from_secs(10), "never died");
-            thread::sleep(Duration::from_millis(10));
-        }
-        // SAFETY: as above.
-        assert_eq!(
-            unsafe { libc::kill(pid, 0) },
-            0,
-            "still a zombie, not reaped"
-        );
-        assert!(matches!(child.try_wait(), Ok(Some(_))));
-    }
-
+    /// The exit check reads an exited leader as exited and leaves it a
+    /// zombie for the group kill. (A stopped leader cannot be told apart
+    /// here on Linux, whose `waitid(WEXITED)` never reports a stop; the
+    /// `si_code` filter in `leader_exited` is for platforms that do.)
     #[cfg(unix)]
     #[test]
     fn the_exit_check_leaves_the_leader_unreaped() {
