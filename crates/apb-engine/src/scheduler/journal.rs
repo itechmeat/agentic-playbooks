@@ -279,7 +279,11 @@ pub(crate) struct PausedSession {
 /// `--from-node` resume (which re-runs the nodes it starts from) voids it,
 /// and so does any later pause and resume of the run before the node ran
 /// again.
-pub(crate) fn paused_attempt_session(events: &[Event], node: &str) -> Option<PausedSession> {
+pub(crate) fn paused_attempt_session(
+    run_dir: &Path,
+    events: &[Event],
+    node: &str,
+) -> Option<PausedSession> {
     let (at, attempt, session) = events.iter().enumerate().rev().find_map(|(i, e)| {
         match &e.payload {
             EventPayload::AttemptFinished {
@@ -317,10 +321,23 @@ pub(crate) fn paused_attempt_session(events: &[Event], node: &str) -> Option<Pau
             workdir: workdir
                 .as_deref()
                 .map(std::path::PathBuf::from)
-                .filter(|d| d.is_dir()),
+                .filter(|d| is_attempt_dir(run_dir, d)),
         }),
         _ => None,
     })
+}
+
+/// Whether `dir` is an isolated attempt's own directory of this run: an
+/// existing directory that resolves (symlinks followed) to a path below
+/// `<run_dir>/work`. Only such a directory is reused, and cleaned, for a
+/// continued session; the journal is a file in the workspace, so a path it
+/// names is not trusted on its own. Any other directory (a shared node
+/// directory, which the node computes again anyway) means a fresh one.
+fn is_attempt_dir(run_dir: &Path, dir: &Path) -> bool {
+    let (Ok(work), Ok(dir)) = (run_dir.join("work").canonicalize(), dir.canonicalize()) else {
+        return false;
+    };
+    dir != work && dir.starts_with(&work) && dir.is_dir()
 }
 
 /// Whether the run's lifecycle since a pause interrupt (`after`) is that
@@ -712,17 +729,80 @@ mod tests {
             finished(2, Some(PAUSE_INTERRUPT_NOTE)),
             paused(3),
         ];
-        let got = paused_attempt_session(&by_pause, "work").expect("a paused session");
+        let got = paused_attempt_session(Path::new("/nonexistent"), &by_pause, "work")
+            .expect("a paused session");
         assert_eq!(
             (got.agent.as_str(), got.model.as_str(), got.session.as_str()),
             ("claude", "haiku", "sid")
         );
         // A missing verdict, then a pause: the attempt was not cut short.
         let no_verdict = vec![started(1), finished(2, Some("partial work")), paused(3)];
-        assert_eq!(paused_attempt_session(&no_verdict, "work"), None);
+        assert_eq!(
+            paused_attempt_session(Path::new("/nonexistent"), &no_verdict, "work"),
+            None
+        );
         // The pause interrupt without its pause (a driver that died).
         let no_pause = vec![started(1), finished(2, Some(PAUSE_INTERRUPT_NOTE))];
-        assert_eq!(paused_attempt_session(&no_pause, "work"), None);
+        assert_eq!(
+            paused_attempt_session(Path::new("/nonexistent"), &no_pause, "work"),
+            None
+        );
+    }
+
+    /// A kept session's directory is reused only when it is an attempt
+    /// directory of the run (below `<run_dir>/work`, symlinks resolved);
+    /// any other journaled path starts the attempt in a fresh one.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_session_reuses_only_an_attempt_directory_of_the_run() {
+        let run = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside = run.path().join("work/work/1");
+        std::fs::create_dir_all(&inside).unwrap();
+        let link = run.path().join("work/work/2");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let session = |dir: &Path| {
+            let events = vec![
+                at(
+                    1,
+                    EventPayload::AttemptStarted {
+                        node: "work".into(),
+                        attempt: 1,
+                        agent: "claude".into(),
+                        soul_delivery: None,
+                        skills_mode: None,
+                        pid: None,
+                        spawn_ms: None,
+                        model: Some("haiku".into()),
+                        workdir: Some(dir.to_string_lossy().into_owned()),
+                        transcript: None,
+                    },
+                ),
+                at(
+                    2,
+                    EventPayload::AttemptFinished {
+                        node: "work".into(),
+                        attempt: 1,
+                        status: "interrupted".into(),
+                        duration_ms: None,
+                        session: Some("sid".into()),
+                        summary: None,
+                        rejected_output: None,
+                        partial_output: Some(PAUSE_INTERRUPT_NOTE.into()),
+                        failure_kind: None,
+                        usage: None,
+                    },
+                ),
+                at(3, crate::pause::engine_paused("x")),
+            ];
+            paused_attempt_session(run.path(), &events, "work")
+                .expect("a paused session")
+                .workdir
+        };
+        assert_eq!(session(&inside), Some(inside.clone()));
+        assert_eq!(session(outside.path()), None, "a path outside the run");
+        assert_eq!(session(&link), None, "a symlink out of the run");
+        assert_eq!(session(&run.path().join("work")), None, "the work root");
     }
 
     /// A `--now` pause during a retry backoff cuts no attempt short: the
@@ -825,15 +905,21 @@ mod tests {
             explicit,
         };
         let first = events(&[paused.clone(), resumed(false)]);
-        assert!(paused_attempt_session(&first, "work").is_some());
+        assert!(paused_attempt_session(Path::new("/nonexistent"), &first, "work").is_some());
         let from_node = events(&[paused.clone(), resumed(true)]);
-        assert_eq!(paused_attempt_session(&from_node, "work"), None);
+        assert_eq!(
+            paused_attempt_session(Path::new("/nonexistent"), &from_node, "work"),
+            None
+        );
         let second_cycle = events(&[
             paused.clone(),
             resumed(false),
             paused.clone(),
             resumed(false),
         ]);
-        assert_eq!(paused_attempt_session(&second_cycle, "work"), None);
+        assert_eq!(
+            paused_attempt_session(Path::new("/nonexistent"), &second_cycle, "work"),
+            None
+        );
     }
 }

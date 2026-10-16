@@ -1209,9 +1209,9 @@ fn execute_node_kind(
             let mut pause_session = false;
             if resume.is_none()
                 && !host_mode
-                && let Some(paused) = journaled
-                    .as_deref()
-                    .and_then(|events| super::journal::paused_attempt_session(events, node_id))
+                && let Some(paused) = journaled.as_deref().and_then(|events| {
+                    super::journal::paused_attempt_session(run_dir, events, node_id)
+                })
             {
                 // The session is bound to the directory it ran in: an
                 // isolated node resumes in the interrupted attempt's own
