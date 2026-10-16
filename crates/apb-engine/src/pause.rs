@@ -27,7 +27,7 @@ pub use resume_all::{ResumeAllAction, ResumeAllEntry, ResumeCause, resume_all};
 pub use waker::{WakeOutcome, run_waker, spawn_waker};
 
 use crate::event::{Event, EventPayload};
-use crate::state::RunStatus;
+use crate::state::{RunStatus, is_legacy_resume_marker};
 
 /// The payload of a `pause` control command. Every field is optional, so the
 /// historical `{"cmd":"pause"}` line still parses (as a supervisor-style drain
@@ -186,12 +186,6 @@ fn last_pause(events: &[Event]) -> Option<(&Event, u128)> {
         }
     }
     Some((last?, since?))
-}
-
-/// The old resume wrote `run_paused { reason: "resume from X" }` as a marker
-/// and kept running: not a pause.
-pub(crate) fn is_legacy_resume_marker(p: &EventPayload) -> bool {
-    matches!(p, EventPayload::RunPaused { reason, by: None, .. } if reason.starts_with("resume from "))
 }
 
 /// An event that ends a paused interval. A paused run has no driver, so

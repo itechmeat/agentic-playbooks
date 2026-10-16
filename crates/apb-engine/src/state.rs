@@ -227,6 +227,12 @@ pub struct JudgeEdgeAnswers {
     pub p: BTreeMap<String, f64>,
 }
 
+/// The old resume wrote `run_paused { reason: "resume from X" }` as a marker
+/// and kept running: not a pause.
+pub(crate) fn is_legacy_resume_marker(p: &EventPayload) -> bool {
+    matches!(p, EventPayload::RunPaused { reason, by: None, .. } if reason.starts_with("resume from "))
+}
+
 impl RunState {
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
@@ -277,7 +283,7 @@ impl RunState {
                 }
                 p @ EventPayload::RunPaused { .. } => {
                     s.run_status = RunStatus::Paused;
-                    legacy_marker = crate::pause::is_legacy_resume_marker(p);
+                    legacy_marker = is_legacy_resume_marker(p);
                 }
                 EventPayload::RunResumed { .. } => s.run_status = RunStatus::Running,
                 // A queued run is `Running` and stays that way: it was
