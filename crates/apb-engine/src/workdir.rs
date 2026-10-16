@@ -25,6 +25,9 @@ pub struct WorkdirGuard {
     /// process: the guard then goes away without removing the lock, so the
     /// lock never lapses between the two owners.
     armed: bool,
+    /// The lock this guard took over was one the claimant run itself had
+    /// parked across a `--keep-lock` pause.
+    took_parked: bool,
 }
 
 impl WorkdirGuard {
@@ -54,6 +57,12 @@ impl WorkdirGuard {
         write_lock_text(&self.lock_path, &paused_owner(run_id))?;
         self.disarm();
         Ok(())
+    }
+
+    /// Whether the lock this guard took over was parked by the run it was
+    /// taken for (a resume taking back its own `--keep-lock` lock).
+    pub fn took_parked(&self) -> bool {
+        self.took_parked
     }
 }
 
@@ -154,8 +163,11 @@ pub fn park_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<(), En
 }
 
 impl Drop for WorkdirGuard {
+    /// Removes the lock only while it still names this process: a lock
+    /// another owner holds by now (a handover, a park, a new claimant after
+    /// a stale steal) is theirs.
     fn drop(&mut self) {
-        if self.armed {
+        if self.armed && lock_owner(&self.lock_path) == Some(LockOwner::Pid(std::process::id())) {
             let _ = std::fs::remove_file(&self.lock_path);
         }
     }
@@ -347,15 +359,53 @@ fn acquire_at(
     lock_path: PathBuf,
     claimant: Option<&str>,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
+    // The check and the write are one step under a short mutex, so two
+    // claimants of a free, stale or parked lock never both take it (the
+    // loser's guard would later remove the winner's lock).
+    let _taking = take_mutex(&lock_path)?;
     if let Some(msg) = busy_reason(&lock_path, claimant) {
         return Err(EngineError::WorkdirBusy(msg));
     }
-    // No lock, or a stale one - overwrite it.
+    let took_parked = matches!(
+        (lock_owner(&lock_path), claimant),
+        (Some(LockOwner::PausedRun(id)), Some(c)) if id == c
+    );
+    // No lock, a stale one or the claimant's own parked one: overwrite it.
     write_lock(&lock_path, std::process::id())?;
     Ok(Some(WorkdirGuard {
         lock_path,
         armed: true,
+        took_parked,
     }))
+}
+
+/// The mutex [`acquire_at`] holds while it checks and writes the lock at
+/// `lock_path`: a sibling lock file next to it, held for microseconds. Never
+/// creates the workspace's `.apb` and never goes through a symlinked
+/// `locks` directory, like the lock write itself.
+fn take_mutex(lock_path: &Path) -> std::io::Result<apb_core::fsutil::DirLock> {
+    let parent = lock_path.parent().unwrap_or(lock_path);
+    let apb_dir = apb_dir_of(lock_path).unwrap_or(parent);
+    if !apb_dir.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("`{}` no longer exists", apb_dir.display()),
+        ));
+    }
+    if parent
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::other(format!(
+            "`{}` is a symlink, refusing to write a lock through it",
+            parent.display()
+        )));
+    }
+    let name = lock_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    apb_core::fsutil::lock_dir(parent, &format!("{name}.take"))
 }
 
 /// Lock acquisition for a detached driver process (see
@@ -455,6 +505,7 @@ fn wait_for_workdir(
             return Ok(Some(WorkdirGuard {
                 lock_path,
                 armed: true,
+                took_parked: false,
             }));
         }
         match acquire_at(lock_path.clone(), None) {
@@ -505,5 +556,49 @@ mod tests {
         assert!(!resume.contains("--allow-shared-workdir"), "{resume}");
         assert!(!resume.contains("worktree"), "{resume}");
         assert!(resume.contains("stop it first"), "{resume}");
+    }
+
+    /// Two resumes of one run reclaiming the lock it parked: exactly one
+    /// takes it, the other is told the workdir is busy.
+    #[test]
+    fn racing_claimants_of_a_parked_lock_take_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let lock = lock_path(root);
+        for _ in 0..20 {
+            write_lock_text(&lock, &paused_owner("r-1")).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (root, barrier) = (root.to_path_buf(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        acquire_tree_for(&root, None, false, "r-1")
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let taken = results.iter().filter(|r| matches!(r, Ok(Some(_)))).count();
+            assert_eq!(taken, 1, "{results:?}");
+            drop(results);
+            assert_eq!(lock_owner(&lock), None, "the winner's guard released it");
+        }
+    }
+
+    /// A guard whose lock names another owner by now leaves that lock alone.
+    #[test]
+    fn a_guard_never_removes_a_lock_it_no_longer_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let guard = acquire_tree(root, None, false).unwrap();
+        let lock = lock_path(root);
+        write_lock_text(&lock, &paused_owner("other")).unwrap();
+        drop(guard);
+        assert_eq!(
+            lock_owner(&lock),
+            Some(LockOwner::PausedRun("other".into()))
+        );
     }
 }
