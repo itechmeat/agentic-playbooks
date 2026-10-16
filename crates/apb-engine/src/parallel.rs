@@ -13,7 +13,7 @@ use crate::state::{NodeStatus, RunState};
 pub use apb_core::schema::JoinMode;
 
 mod revive;
-pub use revive::{revived, revived_nodes};
+pub use revive::{Revival, revive_state, revived, revived_nodes};
 
 /// Readiness of a join node to execute, based on incoming branch statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

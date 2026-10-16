@@ -489,6 +489,13 @@ fn a_supervisor_retry_of_a_batch_member_revives_the_join_it_feeds() {
         1,
         "the join runs once, on the retried branch's delivery"
     );
+    // The batch parks before it routes, so the join was never written off:
+    // there is no `join_input_dead` to revive, and none is recorded. The fix
+    // shows as the join waiting, not as a record.
+    assert!(!events.iter().any(|e| matches!(
+        e.payload,
+        EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. }
+    )));
 }
 
 // Scenario 2c: TWO failures in one supervised batch. Each is presented on its

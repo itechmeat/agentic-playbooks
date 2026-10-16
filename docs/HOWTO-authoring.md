@@ -1003,8 +1003,14 @@ fed by its branch waits for that branch again instead of starting together
 with the re-run node, and an old route of a downstream node (into a finish
 node, say) is not taken before the join runs on the new input. The run
 journals a `join_input_revived` event naming the join, the sources it waits
-for again, and the re-run node (`from_node`). Inside a loop, the nodes that
-lead back into the re-run node keep their old routing.
+for again, and the re-run node (`from_node`). If the re-run branch dies
+again (the node fails again, or routes elsewhere), the join is weighed again
+and journals a fresh `join_input_dead`. A node that already ran in the old pass
+on an input from outside the re-run (a `join: any`, a merge inside a cycle) is
+not run again on that old input; it runs when the re-run branch delivers into
+it. "Only downstream" stops at the nodes that lead back into the re-run node:
+inside a loop they keep their old routing, so a sibling that already
+completed is not re-run before the loop comes back to it.
 
 ```yaml
 nodes:

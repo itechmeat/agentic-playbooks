@@ -970,10 +970,12 @@ pub enum EventPayload {
     /// is weighed against that revived view and waits for them.
     ///
     /// Pure observability: the readiness verdict is recomputed from the
-    /// journal, never from this record. Additive: fields default, old logs
-    /// never carry it, and a checkpoint (the re-run node's `NodeFinished`, or a
-    /// `RunPaused`) follows it, so an older binary skipping it folds the same
-    /// state.
+    /// journal, never from this record, so an older binary skipping it folds
+    /// the same state. Additive: fields default and old logs never carry it.
+    /// A checkpoint (the re-run node's `NodeFinished`, or a `RunPaused`)
+    /// follows it unless the driver is killed in between; then, as with any
+    /// newer event such as `JoinInputDead`, only an apb that knows the event
+    /// can continue the run.
     JoinInputRevived {
         #[serde(default)]
         node: String,

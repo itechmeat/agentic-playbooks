@@ -58,17 +58,18 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
   return events.map((e) => ({ seq: e.seq, type: e.type, node: e.node ?? null, note: eventNote(e) }))
 }
 
-// The detail line of an event kind that has one (issue #67): how a session
-// handoff started, which declared output fields a node left out, where an
-// attempt's transcript is, the tokens an attempt reported (issue #167),
-// which working tree the run moved into, what a decision model answered
-// (issue #165), and what a fork's branch-failure policy or a refusing join did
-// (issue #195). Every other kind has none.
 /** A list of node ids as `a, b`, for a note line. */
 function listOf(v: unknown): string {
   return Array.isArray(v) ? v.map(String).join(', ') : ''
 }
 
+// The detail line of an event kind that has one (issue #67): how a session
+// handoff started, which declared output fields a node left out, where an
+// attempt's transcript is, the tokens an attempt reported (issue #167),
+// which working tree the run moved into, what a decision model answered
+// (issue #165), and what a fork's branch-failure policy or a refusing join did
+// (issue #195), or which inputs a join wrote off and a re-run revived
+// (issue #203). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -120,7 +121,7 @@ function eventNote(e: WfEvent): string | undefined {
     case 'join_input_dead':
       return `${String(r.node ?? '')} proceeds without ${listOf(r.sources)}`
     case 'join_input_revived':
-      return `${String(r.node ?? '')} waits for ${listOf(r.sources)} again (re-run of ${String(r.from_node ?? '')})`
+      return `${String(r.node ?? '')} waits for ${listOf(r.sources)} again${r.from_node ? ` (re-run of ${String(r.from_node)})` : ''}`
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

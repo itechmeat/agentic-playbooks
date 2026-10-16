@@ -10,59 +10,116 @@
 //! finish node that ends the run before the join re-runs on the new input.
 //! The revived view removes both: those nodes read as not yet run.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use apb_core::schema::Playbook;
 
 use crate::state::RunState;
 
-/// The nodes a re-execution of `start` runs again: `start` itself and every
-/// node only downstream of it.
+/// The nodes a drive re-executes when it executes every node of `starts`
+/// again, per start and as a whole. Built once per rebuild: the forward and
+/// reverse adjacency are computed once, not once per question.
+#[derive(Debug, Clone, Default)]
+pub struct Revival {
+    by_start: Vec<(String, BTreeSet<String>)>,
+    all: BTreeSet<String>,
+}
+
+impl Revival {
+    pub fn new(playbook: &Playbook, starts: &[String]) -> Self {
+        let forward = apb_core::graphutil::adjacency(playbook);
+        let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
+        for e in &playbook.edges {
+            reverse
+                .entry(e.to.as_str())
+                .or_default()
+                .push(e.from.as_str());
+        }
+        let mut out = Revival::default();
+        for start in starts {
+            let nodes = downstream_only(&forward, &reverse, start);
+            out.all.extend(nodes.iter().cloned());
+            out.by_start.push((start.clone(), nodes));
+        }
+        out
+    }
+
+    /// Every revived node, of every start.
+    pub fn nodes(&self) -> &BTreeSet<String> {
+        &self.all
+    }
+
+    pub fn contains(&self, node: &str) -> bool {
+        self.all.contains(node)
+    }
+
+    /// The first start whose re-execution revives `node`.
+    pub fn start_of(&self, node: &str) -> Option<&str> {
+        self.by_start
+            .iter()
+            .find(|(_, nodes)| nodes.contains(node))
+            .map(|(start, _)| start.as_str())
+    }
+}
+
+/// `start` itself and every node only downstream of it: the forward walk from
+/// `start` that never enters an ancestor of `start` (a node that can reach
+/// it).
 ///
-/// "Only downstream" excludes the ancestors of `start` (the nodes that can
-/// reach it). In a cycle the forward closure of `start` contains the fan-out
-/// points upstream of it; reviving those would drop the hops that keep a
-/// never-started sibling a pending head, so inside a loop the cycle keeps its
-/// old routing, which errs toward waiting.
-pub fn revived_nodes(playbook: &Playbook, start: &str) -> BTreeSet<String> {
-    let ancestors = reaching(playbook, start);
-    let mut out: BTreeSet<String> = apb_core::graphutil::reachable(playbook, &[start])
-        .into_iter()
-        .filter(|n| !ancestors.contains(n))
-        .collect();
+/// Inside a loop the walk stops where the cycle leads back upstream. What lies
+/// beyond an ancestor is downstream of that ancestor rather than of `start`,
+/// and reviving it would drop the routing that keeps a never-started sibling a
+/// pending head, or re-run a sibling that already completed (`a -> {x, y}`,
+/// `x -> a`: re-running `x` revives neither `a` nor `y`). The cycle keeps its
+/// old routing and the next loop pass re-runs it as usual.
+fn downstream_only(
+    forward: &HashMap<&str, Vec<&str>>,
+    reverse: &HashMap<&str, Vec<&str>>,
+    start: &str,
+) -> BTreeSet<String> {
+    let ancestors = walk(reverse, start, &BTreeSet::new());
+    let mut out = walk(forward, start, &ancestors);
     out.insert(start.to_string());
     out
 }
 
-/// Every node that has a path to `target`, `target` excluded.
-fn reaching(playbook: &Playbook, target: &str) -> BTreeSet<String> {
+/// The nodes reachable from `from` over `adj` without entering `stop`,
+/// `from` itself excluded unless a cycle leads back to it.
+fn walk(adj: &HashMap<&str, Vec<&str>>, from: &str, stop: &BTreeSet<String>) -> BTreeSet<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut queue: VecDeque<&str> = VecDeque::from([target]);
+    let mut queue: VecDeque<&str> = VecDeque::from([from]);
     while let Some(id) = queue.pop_front() {
-        for e in playbook.edges.iter().filter(|e| e.to == id) {
-            if e.from != target && seen.insert(e.from.clone()) {
-                queue.push_back(e.from.as_str());
+        for next in adj.get(id).into_iter().flatten() {
+            if !stop.contains(*next) && seen.insert((*next).to_string()) {
+                queue.push_back(next);
             }
         }
     }
+    seen.remove(from);
     seen
 }
 
+/// The nodes a re-execution of `start` runs again (see [`Revival`]).
+pub fn revived_nodes(playbook: &Playbook, start: &str) -> BTreeSet<String> {
+    Revival::new(playbook, &[start.to_string()]).all
+}
+
 /// `state` as the drive weighs joins and rebuilds its frontier when it is
-/// about to execute every node of `starts` again: each revived node (see
-/// [`revived_nodes`]) reads as not yet run, its journaled hops are dropped and
-/// its fork or join policy marks are cleared, because this pass re-executes it.
+/// about to execute every node of `starts` again (see [`revive_state`]).
+pub fn revived(playbook: &Playbook, state: &RunState, starts: &[String]) -> RunState {
+    revive_state(state, Revival::new(playbook, starts).nodes())
+}
+
+/// `state` with every node of `nodes` read as not yet run: its status, its
+/// journaled hops and its fork or join policy marks are dropped, because this
+/// pass re-executes it.
 ///
 /// Outputs, edge counts, finished counts and judge answers stay: edge
 /// selection consults them only for finished nodes, which revived ones are
 /// not, and loop budgets must keep counting.
-pub fn revived(playbook: &Playbook, state: &RunState, starts: &[String]) -> RunState {
-    let mut nodes: BTreeSet<String> = BTreeSet::new();
-    for start in starts {
-        nodes.extend(revived_nodes(playbook, start));
-    }
+pub fn revive_state(state: &RunState, nodes: &BTreeSet<String>) -> RunState {
     let mut s = state.clone();
-    for n in &nodes {
+    for n in nodes {
         s.nodes.remove(n);
         s.route_suppressed.remove(n);
         s.refused_joins.remove(n);
@@ -217,10 +274,11 @@ edges:
     #[test]
     fn a_loop_keeps_the_routing_of_its_upstream_fan_out() {
         let p = pb(LOOP_FORK);
-        // Inside the cycle `a` is an ancestor of `x`, so it is not revived.
+        // Inside the cycle `a` is an ancestor of `x`: the walk stops there,
+        // so neither `a` nor `y` (downstream only through `a`) is revived.
         assert_eq!(
             revived_nodes(&p, "x").into_iter().collect::<Vec<_>>(),
-            names(&["x", "y"])
+            names(&["x"])
         );
         let old = state(
             &[
@@ -234,6 +292,72 @@ edges:
         // `a`'s hops survive, so the never-started sibling stays a head.
         assert_eq!(pending_heads(&p, &new), names(&["x", "y"]));
         assert_eq!(new.nodes.get("a"), Some(&NodeStatus::Succeeded));
+    }
+
+    /// Review finding: a sibling that already completed is not re-run by a
+    /// re-run of the other sibling inside the loop.
+    #[test]
+    fn a_loop_does_not_revive_a_completed_sibling() {
+        let p = pb(LOOP_FORK);
+        let old = state(
+            &[
+                ("start", NodeStatus::Succeeded),
+                ("a", NodeStatus::Succeeded),
+                ("x", NodeStatus::Failed),
+                ("y", NodeStatus::Succeeded),
+            ],
+            &[("start", "a"), ("a", "x"), ("a", "y")],
+        );
+        let new = revived(&p, &old, &names(&["x"]));
+        assert_eq!(new.nodes.get("y"), Some(&NodeStatus::Succeeded));
+        assert_eq!(pending_heads(&p, &new), names(&["x"]));
+    }
+
+    /// A join inside the cycle (`a -> {x, y}`, `x -> j`, `y -> j`, `j -> a`):
+    /// every other node of the cycle can reach `x`, so a re-run of `x` revives
+    /// `x` alone, and `j` keeps whatever the old pass left it.
+    #[test]
+    fn a_join_inside_the_cycle_is_not_revived() {
+        let p = pb(r#"
+schema: 2
+id: l
+name: L
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: x, type: prompt, prompt: "x" }
+  - { id: y, type: prompt, prompt: "y" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: x }
+  - { from: a, to: y }
+  - { from: x, to: j }
+  - { from: y, to: j }
+  - { from: j, to: a, max_traversals: 1 }
+  - { from: j, to: done, fallback: true }
+"#);
+        assert_eq!(
+            revived_nodes(&p, "x").into_iter().collect::<Vec<_>>(),
+            names(&["x"])
+        );
+        // From `j` the walk stops at `a`: `done` is the only node beyond it.
+        assert_eq!(
+            revived_nodes(&p, "j").into_iter().collect::<Vec<_>>(),
+            names(&["done", "j"])
+        );
+    }
+
+    #[test]
+    fn revival_names_the_start_that_revives_a_node() {
+        let p = pb(REPORT);
+        let r = Revival::new(&p, &names(&["b", "c"]));
+        assert_eq!(r.start_of("c2"), Some("c"));
+        assert_eq!(r.start_of("j"), Some("b"));
+        assert_eq!(r.start_of("a"), None);
+        assert!(r.contains("done") && !r.contains("a"));
     }
 
     #[test]

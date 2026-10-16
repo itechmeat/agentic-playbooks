@@ -103,7 +103,7 @@ pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
 };
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
-use revive::restore_revived_frontier;
+use revive::{Withheld, restore_revived_frontier};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -608,7 +608,9 @@ fn drive_inner(
     // of it read as not yet run (issue #203): otherwise a join fed by its
     // branch is weighed against the old pass, written off as dead, and starts
     // together with the re-run node.
-    match start_mode {
+    // The joins that rebuild held back are re-offered after every advance
+    // (`Withheld::reoffer`), so one whose revived input dies is not lost.
+    let mut withheld = match start_mode {
         StartMode::Rerun => restore_revived_frontier(
             log,
             &playbook,
@@ -616,8 +618,11 @@ fn drive_inner(
             std::slice::from_ref(&current),
             &mut frontier,
         )?,
-        StartMode::After => restore_frontier(&playbook, &entry_state, &current, &mut frontier),
-    }
+        StartMode::After => {
+            restore_frontier(&playbook, &entry_state, &current, &mut frontier);
+            Withheld::default()
+        }
+    };
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
     // the validator (V11) only requires that a loop pass through such a node,
@@ -1544,13 +1549,13 @@ fn drive_inner(
                                     frontier.push(t);
                                 }
                             }
-                            restore_revived_frontier(
+                            withheld.extend(restore_revived_frontier(
                                 log,
                                 &playbook,
                                 &read_all(run_dir)?,
                                 &starts,
                                 &mut frontier,
-                            )?;
+                            )?);
                             continue;
                         }
                     }
@@ -1610,6 +1615,7 @@ fn drive_inner(
                     advance_frontier(&playbook, node, &state_now, &mut frontier, &batch, log)?;
                 }
                 reoffer_joins(&playbook, run_dir, log, &advanced, &batch, &mut frontier)?;
+                withheld.reoffer(&playbook, run_dir, log, &current, &batch, &mut frontier)?;
                 for f in &fork_failures {
                     fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
                 }
@@ -2638,6 +2644,7 @@ fn drive_inner(
         if let Some(f) = &fork_failure {
             fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
         }
+        withheld.reoffer(&playbook, run_dir, log, &current, &[], &mut frontier)?;
         if frontier.is_empty() {
             // Branch completed with no ready successors and no other active
             // branches: dead-end (or unready join with no chance) - not finish.
