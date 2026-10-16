@@ -769,6 +769,7 @@ mod tests {
             EventPayload::RunResumed {
                 from_node: "placeholder".into(),
                 by: None,
+                explicit: false,
             },
         )
     }

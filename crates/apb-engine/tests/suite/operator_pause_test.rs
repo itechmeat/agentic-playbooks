@@ -752,6 +752,7 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
     log.append(EventPayload::RunResumed {
         from_node: "s".into(),
         by: Some(PauseBy::Operator),
+        explicit: false,
     })
     .unwrap();
     log.append(EventPayload::AttemptStarted {
@@ -814,6 +815,7 @@ fn resume_all_waits_out_a_busy_workdir_and_reports_a_run_it_cannot_mark() {
     log.append(EventPayload::RunResumed {
         from_node: "s".into(),
         by: Some(PauseBy::Operator),
+        explicit: false,
     })
     .unwrap();
     drop(log);
@@ -955,6 +957,7 @@ fn two_racing_resumes_journal_one_run_resumed() {
         .append(EventPayload::RunResumed {
             from_node: "s".into(),
             by: Some(PauseBy::Engine),
+            explicit: false,
         })
         .unwrap();
     drop(event_lock);

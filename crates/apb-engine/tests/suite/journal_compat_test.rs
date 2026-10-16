@@ -288,7 +288,7 @@ fn old_pause_and_resume_lines_decode_with_the_new_fields_absent() {
         serde_json::from_str(r#"{"seq":4,"ts":20,"type":"run_resumed","from_node":"a"}"#).unwrap();
     assert!(matches!(
         resumed.payload,
-        EventPayload::RunResumed { ref from_node, by: None } if from_node == "a"
+        EventPayload::RunResumed { ref from_node, by: None, .. } if from_node == "a"
     ));
     // And an event without the new fields writes the old shape back.
     assert_eq!(

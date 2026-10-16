@@ -345,6 +345,7 @@ fn run_resumed_serializes_with_snake_case_tag() {
     let payload = EventPayload::RunResumed {
         from_node: "a".into(),
         by: None,
+        explicit: false,
     };
     let json = serde_json::to_string(&payload).unwrap();
     assert!(

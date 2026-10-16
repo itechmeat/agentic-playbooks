@@ -272,8 +272,13 @@ pub(crate) struct PausedSession {
 /// [`journal_interrupted`] (its marker, not merely an `interrupted` status:
 /// a missing verdict and a reaped attempt are `interrupted` too) with a
 /// session id, and followed by the `run_paused` of that pause. `None` for
-/// any other latest attempt, so a crash resume, a `--from-node` re-run or a
-/// cycle revisit never continues an old session.
+/// any other latest attempt, so a crash resume or a cycle revisit never
+/// continues an old session.
+///
+/// The session is handed to the first resume after that pause only: a
+/// `--from-node` resume (which re-runs the nodes it starts from) voids it,
+/// and so does any later pause and resume of the run before the node ran
+/// again.
 pub(crate) fn paused_attempt_session(events: &[Event], node: &str) -> Option<PausedSession> {
     let (at, attempt, session) = events.iter().enumerate().rev().find_map(|(i, e)| {
         match &e.payload {
@@ -294,10 +299,7 @@ pub(crate) fn paused_attempt_session(events: &[Event], node: &str) -> Option<Pau
         })
     })?;
     let id = session?;
-    if !events[at + 1..]
-        .iter()
-        .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
-    {
+    if !first_resume_after_pause(&events[at + 1..]) {
         return None;
     }
     events[..at].iter().rev().find_map(|e| match &e.payload {
@@ -319,6 +321,26 @@ pub(crate) fn paused_attempt_session(events: &[Event], node: &str) -> Option<Pau
         }),
         _ => None,
     })
+}
+
+/// Whether the run's lifecycle since a pause interrupt (`after`) is that
+/// pause and at most the first resume after it, which did not name its
+/// start node: the one shape in which the interrupted attempt's session
+/// carries over.
+fn first_resume_after_pause(after: &[Event]) -> bool {
+    let (mut paused, mut resumed) = (false, false);
+    for e in after {
+        match &e.payload {
+            EventPayload::RunPaused { .. } if !resumed => paused = true,
+            EventPayload::RunPaused { .. } => return false,
+            EventPayload::RunResumed { explicit, .. } if paused && !resumed && !explicit => {
+                resumed = true;
+            }
+            EventPayload::RunResumed { .. } => return false,
+            _ => {}
+        }
+    }
+    paused
 }
 
 /// Whether `node`'s MOST RECENT finished attempt was journaled `interrupted`
@@ -538,6 +560,7 @@ mod tests {
         let resumed = || EventPayload::RunResumed {
             from_node: "w".into(),
             by: None,
+            explicit: false,
         };
         let waits = vec![
             at(
@@ -677,5 +700,69 @@ mod tests {
         // The pause interrupt without its pause (a driver that died).
         let no_pause = vec![started(1), finished(2, Some(PAUSE_INTERRUPT_NOTE))];
         assert_eq!(paused_attempt_session(&no_pause, "work"), None);
+    }
+
+    /// The kept session belongs to the first resume after the pause only: a
+    /// `--from-node` resume and a second pause and resume cycle void it.
+    #[test]
+    fn a_pause_session_is_handed_to_the_first_resume_only() {
+        let events = |tail: &[EventPayload]| {
+            let mut v = vec![
+                at(
+                    1,
+                    EventPayload::AttemptStarted {
+                        node: "work".into(),
+                        attempt: 1,
+                        agent: "claude".into(),
+                        soul_delivery: None,
+                        skills_mode: None,
+                        pid: None,
+                        spawn_ms: None,
+                        model: Some("haiku".into()),
+                        workdir: None,
+                        transcript: None,
+                    },
+                ),
+                at(
+                    2,
+                    EventPayload::AttemptFinished {
+                        node: "work".into(),
+                        attempt: 1,
+                        status: "interrupted".into(),
+                        duration_ms: None,
+                        session: Some("sid".into()),
+                        summary: None,
+                        rejected_output: None,
+                        partial_output: Some(PAUSE_INTERRUPT_NOTE.into()),
+                        failure_kind: None,
+                        usage: None,
+                    },
+                ),
+            ];
+            v.extend(
+                tail.iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, p)| at(3 + i as u128, p)),
+            );
+            v
+        };
+        let paused = crate::pause::engine_paused("x");
+        let resumed = |explicit| EventPayload::RunResumed {
+            from_node: "work".into(),
+            by: None,
+            explicit,
+        };
+        let first = events(&[paused.clone(), resumed(false)]);
+        assert!(paused_attempt_session(&first, "work").is_some());
+        let from_node = events(&[paused.clone(), resumed(true)]);
+        assert_eq!(paused_attempt_session(&from_node, "work"), None);
+        let second_cycle = events(&[
+            paused.clone(),
+            resumed(false),
+            paused.clone(),
+            resumed(false),
+        ]);
+        assert_eq!(paused_attempt_session(&second_cycle, "work"), None);
     }
 }

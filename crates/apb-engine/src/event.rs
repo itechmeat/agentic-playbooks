@@ -298,6 +298,12 @@ pub enum EventPayload {
         /// Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<crate::pause::kind::PauseBy>,
+        /// The resume named its start node (`--from-node`): no session a
+        /// `--now` pause kept carries over into the nodes it re-runs.
+        /// Absent (false) in older journals and for every other resume.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        explicit: bool,
     },
     RunFinished {
         outcome: String,

@@ -263,6 +263,7 @@ mod tests {
                 EventPayload::RunResumed {
                     from_node: "a".into(),
                     by: Some(PauseBy::Operator),
+                    explicit: false,
                 },
             ),
         ];

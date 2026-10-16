@@ -37,7 +37,11 @@ decisions on the points the issue leaves open.
    the Abort-only `cancel` signal. Scripts get SIGTERM to the process group,
    a grace period (default 10 s, env override for tests), then SIGKILL.
    Agents are killed the same way; their session id stays in the journal so
-   resume continues the session where the node supports it.
+   resume continues the session where the node supports it. Only the first
+   resume after that pause continues it: a `--from-node` resume
+   (`run_resumed.explicit`) or a later pause and resume before the node
+   ran again starts the node fresh. A `--now` pause during a retry backoff
+   keeps the session of the attempt that just failed.
 3. An attempt ended by a `--now` pause journals
    `AttemptFinished { status: "interrupted" }` and no `NodeFinished`. It
    spends no retry and no infra retry, and retro and stats do not count it

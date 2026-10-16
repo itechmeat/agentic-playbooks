@@ -860,6 +860,7 @@ fn resume_inner_checked(
         EventPayload::RunResumed {
             from_node: decision.start_node.clone(),
             by,
+            explicit: decision.reason == ResumeReason::ExplicitFromNode,
         },
     )?;
     // The persisted mode, as a resume drives it (`RunMode::on_resume`): an

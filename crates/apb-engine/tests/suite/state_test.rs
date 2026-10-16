@@ -150,6 +150,7 @@ fn run_resumed_folds_to_running() {
             EventPayload::RunResumed {
                 from_node: "a".into(),
                 by: None,
+                explicit: false,
             },
         ),
     ];
