@@ -84,3 +84,21 @@ fn old_connector_call_without_smtp_fields_still_parses() {
         }
     ));
 }
+
+#[test]
+fn join_input_revived_has_its_own_tag_and_defaults_every_field() {
+    let p = EventPayload::JoinInputRevived {
+        node: "j".into(),
+        sources: vec!["c2".into()],
+        from_node: "c".into(),
+    };
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(s.contains(r#""type":"join_input_revived""#), "{s}");
+    assert!(!p.is_checkpoint());
+    let bare: EventPayload = serde_json::from_str(r#"{"type":"join_input_revived"}"#).unwrap();
+    assert!(matches!(
+        bare,
+        EventPayload::JoinInputRevived { node, sources, from_node }
+            if node.is_empty() && sources.is_empty() && from_node.is_empty()
+    ));
+}

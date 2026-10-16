@@ -63,6 +63,7 @@ mod quota_probe;
 mod rebind;
 mod resume;
 mod review_gate;
+mod revive;
 mod skills_copy;
 mod status_file;
 mod supervisor;
@@ -102,6 +103,7 @@ pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
 };
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
+use revive::restore_revived_frontier;
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -601,7 +603,21 @@ fn drive_inner(
     // actually executes them. Informing the seed above is not enough: every later
     // advance derives liveness from the frontier, so a head that is not in it
     // flips to dead at the next step and its joins fire without it.
-    restore_frontier(&playbook, &entry_state, &current, &mut frontier);
+    //
+    // A re-run executes `current` again, so it and everything only downstream
+    // of it read as not yet run (issue #203): otherwise a join fed by its
+    // branch is weighed against the old pass, written off as dead, and starts
+    // together with the re-run node.
+    match start_mode {
+        StartMode::Rerun => restore_revived_frontier(
+            log,
+            &playbook,
+            &entry_events,
+            std::slice::from_ref(&current),
+            &mut frontier,
+        )?,
+        StartMode::After => restore_frontier(&playbook, &entry_state, &current, &mut frontier),
+    }
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
     // the validator (V11) only requires that a loop pass through such a node,
@@ -1515,14 +1531,26 @@ fn drive_inner(
                             // rebuilt from the journal - the same contract a
                             // resume uses, and the reason a park that clears the
                             // frontier does not lose the other branches.
+                            // Every directive re-executes its node, so the
+                            // rebuild weighs joins against the revived view
+                            // (issue #203), as a re-run resume does.
+                            let mut starts = vec![next.clone()];
                             current = next;
                             for t in also {
+                                if !starts.contains(&t) {
+                                    starts.push(t.clone());
+                                }
                                 if !frontier.contains(&t) {
                                     frontier.push(t);
                                 }
                             }
-                            let after = RunState::fold(&read_all(run_dir)?);
-                            restore_frontier(&playbook, &after, &current, &mut frontier);
+                            restore_revived_frontier(
+                                log,
+                                &playbook,
+                                &read_all(run_dir)?,
+                                &starts,
+                                &mut frontier,
+                            )?;
                             continue;
                         }
                     }

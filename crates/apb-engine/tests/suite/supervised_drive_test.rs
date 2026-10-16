@@ -410,6 +410,87 @@ fn supervised_batch_failure_wakes_after_the_batch_and_retry_recovers() {
     node_finished_at(&events, "j");
 }
 
+// Scenario 2b': the retried branch reaches the implicit join `j` only through
+// `b2`, and only on success. Weighed against the fold that still reads `b`
+// failed, `b2` is dead and `j` would start together with the retry (issue
+// #203); the revived view makes `j` wait for `b2`.
+const WF_SUPERVISED_REVIVED_JOIN: &str = r#"
+schema: 1
+id: suprev
+name: Supervised revived join
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "branch a steady" }
+  - { id: b, type: agent_task, prompt: "branch b flaky" }
+  - { id: b2, type: prompt, prompt: "after b" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j }
+  - { from: b, to: b2, condition: { type: node_status, node: b, equals: success } }
+  - { from: b2, to: j }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn a_supervisor_retry_of_a_batch_member_revives_the_join_it_feeds() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "suprev", WF_SUPERVISED_REVIVED_JOIN);
+
+    let prog = branch_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "suprev", opts);
+    let run_dir = find_run_dir(dir.path(), "suprev-");
+    wait_for_wake(&run_dir);
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    let wake_at = index_of(&events, "wake_raised", |p| {
+        matches!(p, EventPayload::WakeRaised { .. })
+    });
+    let after = &events[wake_at..];
+    // `b2` ran after the retried `b`, and `j` only after `b2`.
+    assert!(node_finished_at(after, "b") < node_started_at(after, "b2"));
+    assert!(
+        node_finished_at(after, "b2") < node_started_at(after, "j"),
+        "the join started together with the retried branch"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j"))
+            .count(),
+        1,
+        "the join runs once, on the retried branch's delivery"
+    );
+}
+
 // Scenario 2c: TWO failures in one supervised batch. Each is presented on its
 // own, in batch order, and the run only moves on once the supervisor has answered
 // both - the contract that replaces per-branch live parking (spec 1.3).

@@ -963,6 +963,25 @@ pub enum EventPayload {
         #[serde(default)]
         sources: Vec<String>,
     },
+    /// A drive about to execute `from_node` again (a `--from-node` resume, a
+    /// restart, a supervisor retry) found that an earlier `JoinInputDead`
+    /// write-off of the join `node` no longer holds: `sources` can arrive again
+    /// because they are `from_node` or downstream of it (issue #203). The join
+    /// is weighed against that revived view and waits for them.
+    ///
+    /// Pure observability: the readiness verdict is recomputed from the
+    /// journal, never from this record. Additive: fields default, old logs
+    /// never carry it, and a checkpoint (the re-run node's `NodeFinished`, or a
+    /// `RunPaused`) follows it, so an older binary skipping it folds the same
+    /// state.
+    JoinInputRevived {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        sources: Vec<String>,
+        #[serde(default)]
+        from_node: String,
+    },
     /// A node inside the branches of a fork that declares
     /// `fork.on_branch_failure` (issue #195) finished failed, and the fork's
     /// policy took over: `fail_fast` cancels the other branches and routes to

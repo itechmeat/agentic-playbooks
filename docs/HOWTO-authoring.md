@@ -996,6 +996,16 @@ decision is auditable afterwards. That is routine graph bookkeeping rather than 
 anomaly - an either-or merge has one by construction - so no supervisor is woken
 for it.
 
+A write-off holds only for the pass that made it. When a node runs again (a
+`resume --from-node`, a restart of an interrupted node, a supervisor retry),
+that node and every node only downstream of it count as not yet run: a join
+fed by its branch waits for that branch again instead of starting together
+with the re-run node, and an old route of a downstream node (into a finish
+node, say) is not taken before the join runs on the new input. The run
+journals a `join_input_revived` event naming the join, the sources it waits
+for again, and the re-run node (`from_node`). Inside a loop, the nodes that
+lead back into the re-run node keep their old routing.
+
 ```yaml
 nodes:
   - { id: start,   type: start }

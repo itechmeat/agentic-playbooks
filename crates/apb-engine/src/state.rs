@@ -372,8 +372,10 @@ impl RunState {
                 | EventPayload::NodeCacheRejected { .. } => {}
                 // A join write-off is an observability record of a readiness
                 // verdict (spec 2026-08-05, Task 4): the run-state effect is the
-                // join's own execution, journaled right after it.
-                EventPayload::JoinInputDead { .. } => {}
+                // join's own execution, journaled right after it. Its revival
+                // by a re-run (issue #203) is the same kind of record: the
+                // readiness is recomputed from the revived fold, not from it.
+                EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. } => {}
                 // Fork and join failure options (issue #195): the routing they
                 // decided against is folded so edge selection stays pure.
                 EventPayload::BranchFailed { node, policy, .. } => {

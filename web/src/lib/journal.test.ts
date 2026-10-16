@@ -99,6 +99,17 @@ describe('runEventJournal notes', () => {
       'join `j` refused',
     ])
   })
+
+  it('names the inputs a join wrote off and a re-run revived (issue #203)', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'join_input_dead', node: 'j', sources: ['c2'] },
+      { seq: 2, ts: 2, type: 'join_input_revived', node: 'j', sources: ['c2', 'c3'], from_node: 'c' },
+    ] as never)
+    expect(entries.map((e) => e.note)).toEqual([
+      'j proceeds without c2',
+      'j waits for c2, c3 again (re-run of c)',
+    ])
+  })
 })
 
 describe('wake triage note', () => {

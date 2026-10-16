@@ -64,6 +64,11 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
 // which working tree the run moved into, what a decision model answered
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
 // (issue #195). Every other kind has none.
+/** A list of node ids as `a, b`, for a note line. */
+function listOf(v: unknown): string {
+  return Array.isArray(v) ? v.map(String).join(', ') : ''
+}
+
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -111,6 +116,11 @@ function eventNote(e: WfEvent): string | undefined {
       return `fork ${String(r.fork ?? '')}: cancelled after ${String(r.failed_node ?? '')} failed`
     case 'join_refused':
       return typeof r.reason === 'string' && r.reason ? r.reason : undefined
+    // Issue #203: a join written off an input, and a re-run that revived it.
+    case 'join_input_dead':
+      return `${String(r.node ?? '')} proceeds without ${listOf(r.sources)}`
+    case 'join_input_revived':
+      return `${String(r.node ?? '')} waits for ${listOf(r.sources)} again (re-run of ${String(r.from_node ?? '')})`
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

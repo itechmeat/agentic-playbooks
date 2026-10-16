@@ -12,6 +12,9 @@ use crate::state::{NodeStatus, RunState};
 
 pub use apb_core::schema::JoinMode;
 
+mod revive;
+pub use revive::{revived, revived_nodes};
+
 /// Readiness of a join node to execute, based on incoming branch statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinReadiness {
@@ -634,6 +637,34 @@ pub fn dead_inputs(
         })
         .map(|e| e.from.clone())
         .collect()
+}
+
+/// The incoming sources of `node` that can still arrive, in incoming-edge
+/// order: the twin of [`dead_inputs`] over the same arrivals. A resume or a
+/// supervisor retry reads it against the revived state to journal which
+/// earlier write-offs it made obsolete (issue #203), so the record and the
+/// readiness verdict come from one implementation.
+pub fn pending_inputs(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Vec<String> {
+    if join_kind(playbook, node).is_none() {
+        return Vec::new();
+    }
+    let live = live_nodes(playbook, state, active);
+    let mut out: Vec<String> = Vec::new();
+    for e in incoming(playbook, node) {
+        let pending = matches!(
+            arrival(playbook, node, &e.from, state, &live),
+            Arrival::Pending
+        );
+        if pending && !out.contains(&e.from) {
+            out.push(e.from.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
