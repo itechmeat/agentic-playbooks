@@ -15,7 +15,9 @@ use apb_engine::control::{Control, post_control};
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::pause::{PauseMode, PauseRequest};
 use apb_engine::review::{ReviewCommand, post_review};
-use apb_engine::scheduler::{RunMode, RunOptions, StartMode, plan_resume, resume, run};
+use apb_engine::scheduler::{
+    RunMode, RunOptions, StartMode, plan_resume, post_supervisor_command, resume, run,
+};
 use apb_engine::state::{RunState, RunStatus};
 
 /// The report's shape: `b` delivers into the implicit join `j` before `c`
@@ -1182,5 +1184,58 @@ fn an_interrupted_node_and_an_owed_rerun_both_run_once() {
     }
     let j = started_at(after, "j").unwrap();
     assert!(finished_at(after, "b").unwrap() < j && finished_at(after, "c2").unwrap() < j);
+    assert!(!root.join(TIMED_OUT).exists());
+}
+
+/// Round 5 item 5: a re-run asked inside the revival of a still-owed re-run
+/// (`a`, owed, upstream of `c`) is refused before anything is journaled,
+/// from an operator's `--from-node` and from a supervisor directive alike.
+/// The owed node itself is accepted.
+#[test]
+fn a_rerun_inside_an_owed_revival_is_refused_before_journaling() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REPORT, &report_scripts(root));
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    append_lines(
+        &run_dir,
+        &[
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"a","nodes":["a","b","c","c2","done","failed","j"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"run_paused","reason":"test"}"#,
+        ],
+    );
+    let before = read_all(&run_dir).unwrap().len();
+    let err = resume(root, &first.run_id, Some("c"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`a`") && err.contains("--from-node"), "{err}");
+    assert_eq!(
+        read_all(&run_dir).unwrap().len(),
+        before,
+        "the refusal journaled"
+    );
+
+    let err = post_supervisor_command(
+        root,
+        &first.run_id,
+        Control::ContinueFrom { node: "c".into() },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("retry or continue from `a`"), "{err}");
+    assert!(
+        !run_dir.join("control.jsonl").exists()
+            || fs::read_to_string(run_dir.join("control.jsonl"))
+                .unwrap()
+                .is_empty(),
+        "the refused directive was posted"
+    );
+    post_supervisor_command(
+        root,
+        &first.run_id,
+        Control::ContinueFrom { node: "a".into() },
+    )
+    .expect("the owed node itself is accepted");
     assert!(!root.join(TIMED_OUT).exists());
 }

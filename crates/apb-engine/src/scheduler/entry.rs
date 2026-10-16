@@ -691,5 +691,20 @@ pub fn post_supervisor_command(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
+    // A directive that re-runs a node inside the revival of a re-run the run
+    // still owes (issue #203) is refused here, back to the supervisor's tool,
+    // instead of parking the drive on a command it must not apply.
+    if let Control::Retry { node, .. } | Control::ContinueFrom { node } = &cmd
+        && let Ok(yaml) = std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        && let Ok(playbook) = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)
+    {
+        let state = RunState::fold(&read_all(&run_dir)?);
+        super::revive::refuse_inside_owed(
+            &playbook,
+            &state,
+            node,
+            super::revive::Asker::Supervisor,
+        )?;
+    }
     crate::control::post_control(&run_dir, cmd)
 }

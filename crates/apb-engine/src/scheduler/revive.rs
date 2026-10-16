@@ -81,19 +81,6 @@ pub(crate) fn revive(
             revival.add(start, node);
         }
     }
-    // An earlier owed re-run upstream of a start of this one (a supervisor's
-    // retry a pause stopped, then an operator's `--from-node` below it): the
-    // later choice wins. The owed node joins this revival, so it is owed no
-    // longer and stays not yet run; re-running it would reach the start again.
-    for owed in state.revival_starts.clone() {
-        if starts.contains(&owed) {
-            continue;
-        }
-        let covers = parallel::Revival::new(playbook, std::slice::from_ref(&owed));
-        if let Some(start) = starts.iter().find(|s| covers.contains(s)) {
-            revival.add(start, &owed);
-        }
-    }
     for (start, nodes) in revival.per_start() {
         if !nodes.iter().any(|n| carries_a_result(&state, n)) {
             continue;
@@ -151,6 +138,43 @@ fn cancelled_siblings(
         }
     }
     out
+}
+
+/// Who asks for a re-run, for the wording of [`refuse_inside_owed`].
+pub(crate) enum Asker {
+    Operator,
+    Supervisor,
+}
+
+/// Refuses a re-run of `node` that lies inside the revival of a re-run the
+/// run still owes (issue #203): a supervisor's retry a pause stopped before
+/// it began, say. Re-running `node` first would run it again when the owed
+/// re-run reaches it. Checked before anything is journaled.
+pub(crate) fn refuse_inside_owed(
+    playbook: &Playbook,
+    state: &RunState,
+    node: &str,
+    asker: Asker,
+) -> Result<(), EngineError> {
+    for owed in &state.revival_starts {
+        if owed == node
+            || !parallel::Revival::new(playbook, std::slice::from_ref(owed)).contains(node)
+        {
+            continue;
+        }
+        let hint = match asker {
+            Asker::Operator => format!(
+                "resume without --from-node (`{owed}` runs first), or with --from-node `{owed}` or a node upstream of it"
+            ),
+            Asker::Supervisor => {
+                format!("retry or continue from `{owed}` or a node upstream of it instead")
+            }
+        };
+        return Err(EngineError::Invalid(format!(
+            "node `{node}` lies downstream of `{owed}`, whose re-run is still owed: {hint}"
+        )));
+    }
+    Ok(())
 }
 
 /// Whether the drive over `events` starts from an operator's re-run of
@@ -994,25 +1018,31 @@ edges:
         assert_eq!(frontier, names(&["y"]), "{frontier:?}");
     }
 
-    /// Round 5 item 5: an owed re-run of `a` (upstream of `c`) and then a
-    /// re-run asked from `c`: the later choice wins, `a` is owed no longer
-    /// and is not put back on the frontier.
+    /// Round 5 item 5: a re-run asked inside the revival of a still-owed
+    /// re-run (`a`, upstream of `c`) is refused; the owed node itself, or
+    /// one upstream of it, is not.
     #[test]
-    fn a_rerun_below_an_owed_one_drops_it() {
+    fn a_rerun_inside_an_owed_revival_is_refused() {
         let p = report("");
         let mut e = failed_pass();
         e.push(EventPayload::NodesRevived {
             from_node: "a".into(),
             nodes: names(&["a", "b", "c", "c2", "done", "failed", "j"]),
         });
-        let mut run = Run::new(e);
-        let r = rebuild(&p, &mut run, &["c"]);
-        assert!(r.frontier.is_empty(), "{:?}", r.frontier);
-        let state = RunState::fold(&run.events());
-        assert_eq!(
-            state.revival_starts.iter().collect::<Vec<_>>(),
-            [&"c".to_string()]
+        let state = RunState::fold(&Run::new(e).events());
+        let err = refuse_inside_owed(&p, &state, "c", Asker::Operator).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("`a`") && text.contains("--from-node"),
+            "{text}"
         );
+        let err = refuse_inside_owed(&p, &state, "c2", Asker::Supervisor).unwrap_err();
+        assert!(
+            err.to_string().contains("retry or continue from `a`"),
+            "{err}"
+        );
+        assert!(refuse_inside_owed(&p, &state, "a", Asker::Operator).is_ok());
+        assert!(refuse_inside_owed(&p, &state, "start", Asker::Operator).is_ok());
     }
 
     /// A join already on the frontier is not offered twice.
