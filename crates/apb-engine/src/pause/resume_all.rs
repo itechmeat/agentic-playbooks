@@ -51,8 +51,9 @@ pub enum ResumeAllAction {
     /// A due paused run the gate refused: it stays paused. Also a driverless
     /// run that could not be journaled paused.
     Refused { detail: String },
-    /// Another run holds the busy lock of the run's tree: left as it is, a
-    /// later pass (or `apb resume`) continues it.
+    /// Another run holds the busy lock of the run's tree, or the run's event
+    /// lock stayed busy while a wake-up probe's outcome waited to be
+    /// journaled: left as it is, a later pass (or `apb resume`) continues it.
     Busy { detail: String },
     /// A paused run whose `until` has not passed, or that has none.
     LeftPaused,
@@ -104,12 +105,20 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                     // waker would have (design 6.6).
                     // A probe whose outcome is not known never leads to a
                     // resume (see the waker).
-                    match super::probe::probe_before_wake(root, &run_id, seq) {
+                    match super::probe::probe_before_wake_within(
+                        root,
+                        &run_id,
+                        seq,
+                        super::probe::RESUME_ALL_JOURNAL_TRIES,
+                    ) {
                         Ok(super::WakeProbe::Repaused { seq, .. }) => {
                             super::waker::spawn_waker(root, &run_id, seq);
                             ResumeAllAction::LeftPaused
                         }
                         Ok(super::WakeProbe::Superseded) => ResumeAllAction::LeftPaused,
+                        // The run's event lock stayed busy: a later pass
+                        // probes again.
+                        Err(EngineError::WorkdirBusy(detail)) => ResumeAllAction::Busy { detail },
                         Err(e) => ResumeAllAction::Refused {
                             detail: super::waker::refusal_text(e),
                         },

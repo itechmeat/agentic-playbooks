@@ -87,6 +87,19 @@ fn journal_message(root: &Path, msg: &str) -> String {
 /// is never probed: that refusal is the `Err`, and so is an outcome that
 /// could not be journaled ([`journal_outcome`]).
 pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProbe, EngineError> {
+    probe_before_wake_within(root, run_id, seq, JOURNAL_TRIES)
+}
+
+/// [`probe_before_wake`] offering the outcome to the run's event lock at
+/// most `journal_tries` times: `apb resume --all` walks the runs one after
+/// another and keeps the bound short, the waker of one run keeps the long
+/// one.
+pub(crate) fn probe_before_wake_within(
+    root: &Path,
+    run_id: &str,
+    seq: u64,
+    journal_tries: u32,
+) -> Result<WakeProbe, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -131,21 +144,36 @@ pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProb
             None,
         ),
     };
-    journal_outcome(&run_dir, seq, &node, &agent, &model, detail, repause)
+    journal_outcome(
+        &run_dir,
+        seq,
+        &node,
+        &agent,
+        &model,
+        detail,
+        repause,
+        journal_tries,
+    )
 }
 
 /// How many times the probe's outcome is offered to the run's event lock
 /// (each try waits out the lock's own timeout) before the waker gives up.
 const JOURNAL_TRIES: u32 = 30;
 
+/// The same bound for `apb resume --all`, which handles the runs one after
+/// another and must not sit a minute on each busy one.
+pub(crate) const RESUME_ALL_JOURNAL_TRIES: u32 = 2;
+
 /// Journals the outcome of a probe that ran: the marker and, for a quota
 /// that still holds, the new pause. Serialized against `stop_run` and
 /// `request_pause` under the run's event lock, and only while the pause at
 /// `seq` still holds the run. The probe is never run again for this: a lock
-/// that stays busy is retried up to [`JOURNAL_TRIES`] times, and any other
-/// lock error, or a lock still busy after that, is a refusal (the run stays
-/// paused for `apb resume` or `apb resume --all`), never a resume on an
-/// outcome nobody recorded.
+/// that stays busy is retried up to `tries_max` times and then reads as busy
+/// (`WorkdirBusy`, so `apb resume --all` reports the run busy), and any other
+/// lock error is a refusal (`Conflict`). Either way the run stays paused for
+/// `apb resume` or `apb resume --all`, never resumed on an outcome nobody
+/// recorded.
+#[allow(clippy::too_many_arguments)]
 fn journal_outcome(
     run_dir: &Path,
     seq: u64,
@@ -154,16 +182,22 @@ fn journal_outcome(
     model: &str,
     detail: String,
     repause: Option<u64>,
+    tries_max: u32,
 ) -> Result<WakeProbe, EngineError> {
     let mut tries = 0;
     let _lock = loop {
         match apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK) {
             Ok(lock) => break lock,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries + 1 < JOURNAL_TRIES => {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries + 1 < tries_max => {
                 tries += 1;
                 if !holds(&read_all(run_dir)?, seq) {
                     return Ok(WakeProbe::Superseded);
                 }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(EngineError::WorkdirBusy(format!(
+                    "the outcome of the wake-up probe could not be journaled, the run's event lock stayed busy: {e}"
+                )));
             }
             Err(e) => {
                 return Err(EngineError::Conflict(format!(

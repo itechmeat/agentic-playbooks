@@ -650,3 +650,47 @@ fn a_probe_outcome_that_cannot_be_journaled_never_resumes_the_run() {
     let woke = rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();
     assert_eq!(woke, WakeOutcome::Superseded);
 }
+
+/// `apb resume --all` walks the runs one after another: a probe outcome it
+/// cannot journal because the run's event lock stays busy reports the run
+/// busy after a short wait, not a refusal after a minute.
+#[cfg(unix)]
+#[test]
+fn resume_all_reports_a_busy_journal_quickly_as_busy() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quotaall");
+    common::seed_main(root);
+    let prog = stub(
+        root,
+        &[QUOTA_429, "429 Too Many Requests, Retry-After: 600"],
+    );
+    let _env = Env::set(&prog);
+
+    let res = run(root, "quotaall", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let run_dir = root.join(".apb/runs").join(&res.run_id);
+    let (_, _, _, _, until) = last_pause(&events(root, &res.run_id));
+    while apb_core::clock::now_ms() <= u128::from(until.unwrap()) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let held = apb_core::fsutil::lock_dir(&run_dir, "events.jsonl.lock").unwrap();
+    let start = Instant::now();
+    let entries = apb_engine::pause::resume_all(root).unwrap();
+    let took = start.elapsed();
+    drop(held);
+    assert!(
+        matches!(
+            entries.as_slice(),
+            [apb_engine::pause::ResumeAllEntry {
+                action: apb_engine::pause::ResumeAllAction::Busy { .. },
+                ..
+            }]
+        ),
+        "{entries:?}"
+    );
+    assert!(took < Duration::from_secs(30), "took {took:?}");
+    assert!(probes(&events(root, &res.run_id)).is_empty());
+}
