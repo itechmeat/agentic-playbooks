@@ -13,7 +13,7 @@ use crate::state::{NodeStatus, RunState};
 pub use apb_core::schema::JoinMode;
 
 mod revive;
-pub use revive::{Revival, revive_state, revived, revived_nodes};
+pub use revive::{Revival, revived_nodes};
 
 /// Readiness of a join node to execute, based on incoming branch statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,11 +64,9 @@ fn judge_edge_p(state: &RunState, from: &str, index: usize) -> Option<f64> {
 pub fn edge_matches_at(edge: &Edge, index: Option<usize>, from: &str, state: &RunState) -> bool {
     match &edge.condition {
         None => true,
-        Some(EdgeCondition::NodeStatus { node, equals }) => state
-            .nodes
-            .get(node)
-            .map(|s| status_matches(*s, *equals))
-            .unwrap_or(false),
+        Some(EdgeCondition::NodeStatus { node, equals }) => {
+            status_matches(state.current_status(node), *equals)
+        }
         Some(EdgeCondition::ReviewStatus { equals }) => state
             .reviews
             .get(from)
@@ -347,12 +345,10 @@ enum Arrival {
     Dead,
 }
 
+/// The status routing reads: a node a re-run revived reads `Pending` until
+/// it starts again ([`RunState::current_status`]).
 fn status_of(state: &RunState, node: &str) -> NodeStatus {
-    state
-        .nodes
-        .get(node)
-        .copied()
-        .unwrap_or(NodeStatus::Pending)
+    state.current_status(node)
 }
 
 /// The nodes a run can still execute, walked forward from `active` over the
@@ -455,14 +451,19 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
 /// journals that route as `EdgeTraversed { via_policy: true }` when it takes it,
 /// so [`routed_targets`] sees it without this function re-deriving the
 /// failure-policy predicate (which must not drift from the drive loop's copy).
+///
+/// A node a re-run revived after it finished in an earlier pass is no head
+/// (issue #203): the hop that names it was recorded before the revival, from a
+/// node outside it, and running it on that old input would run it twice. The
+/// re-run reaches it again when a revived branch delivers into it.
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
-    for (node, status) in &state.nodes {
-        if !status.is_finished() {
+    for node in state.nodes.keys() {
+        if !status_of(state, node).is_finished() {
             continue;
         }
         for s in routed_targets(playbook, node, state) {
-            if !status_of(state, &s).is_finished() {
+            if !status_of(state, &s).is_finished() && !state.revived_after_finish(&s) {
                 heads.insert(s);
             }
         }

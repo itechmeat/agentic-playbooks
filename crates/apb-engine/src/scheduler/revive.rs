@@ -1,156 +1,102 @@
 //! The frontier rebuild of a drive that is about to execute nodes again
-//! (issue #203): a re-run resume and a supervisor retry of failed batch
-//! members. Joins are weighed against the revived view
-//! ([`parallel::Revival`]), every earlier `join_input_dead` write-off that view
-//! makes obsolete is journaled as `join_input_revived`, and a join the rebuild
-//! holds back is re-offered once its revived inputs have settled.
+//! (issue #203): a re-run resume and a supervisor retry or continue-from of
+//! failed batch members.
+//!
+//! The rebuild journals the revival as `nodes_revived`, so the fold reads the
+//! revived nodes as not yet run from then on ([`RunState::revive`]): every
+//! readiness decision of the drive, not only this rebuild, sees the same view
+//! until each node starts again. It also journals `join_input_revived` for
+//! every earlier write-off that view makes obsolete. [`reoffer_revived_joins`]
+//! covers the one gap no edge does: a revived join whose revived input dies.
 
 use super::*;
 
-/// The joins a revived rebuild held back because a revived input could still
-/// arrive. Nothing else re-offers such a join when that input then dies (the
-/// re-run node fails again, or routes elsewhere): no edge delivers into it, so
-/// [`advance_frontier`] never sees it. [`Withheld::reoffer`] does, after every
-/// advance of the drive.
-#[derive(Debug, Default)]
-pub(crate) struct Withheld {
-    entries: Vec<WithheldJoin>,
-}
-
-#[derive(Debug)]
-struct WithheldJoin {
-    join: String,
-    /// The journal length at the rebuild: a `node_started` after it belongs
-    /// to this pass.
-    since: usize,
-    /// The nodes this pass re-executes, as the rebuild revived them.
-    revived: BTreeSet<String>,
-}
-
-impl Withheld {
-    pub(crate) fn extend(&mut self, other: Withheld) {
-        for e in other.entries {
-            self.entries.retain(|w| w.join != e.join);
-            self.entries.push(e);
-        }
-    }
-
-    /// Re-offers every held join whose readiness has been decided, with the
-    /// revived nodes that have not started again in this pass still read as
-    /// not yet run. A join already on the frontier, or started in this pass,
-    /// is no longer held. A ready join is offered exactly as
-    /// [`advance_frontier`] offers one: its dead inputs journaled, then pushed.
-    pub(crate) fn reoffer(
-        &mut self,
-        playbook: &Playbook,
-        run_dir: &Path,
-        log: &mut EventLog,
-        node: &str,
-        also_active: &[String],
-        frontier: &mut Vec<String>,
-    ) -> Result<(), EngineError> {
-        if self.entries.is_empty() {
-            return Ok(());
-        }
-        let events = read_all(run_dir)?;
-        let real = RunState::fold(&events);
-        let mut kept = Vec::new();
-        for w in std::mem::take(&mut self.entries) {
-            let started = started_since(&events, w.since);
-            if frontier.contains(&w.join) || started.contains(&w.join) {
-                continue;
-            }
-            let still: BTreeSet<String> = w.revived.difference(&started).cloned().collect();
-            let state = parallel::revive_state(&real, &still);
-            let active = active_set(node, frontier, also_active);
-            if matches!(
-                parallel::join_readiness(playbook, &w.join, &state, &active),
-                JoinReadiness::NotReady
-            ) {
-                kept.push(w);
-                continue;
-            }
-            journal_dead_inputs(log, playbook, &w.join, &state, &active)?;
-            frontier.push(w.join);
-        }
-        self.entries = kept;
-        Ok(())
-    }
-}
-
-fn started_since(events: &[Event], since: usize) -> BTreeSet<String> {
-    events
-        .iter()
-        .skip(since)
-        .filter_map(|e| match &e.payload {
-            EventPayload::NodeStarted { node, .. } => Some(node.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// [`restore_frontier`] for a drive that executes every node of `starts`
-/// again, `starts[0]` being the drive's `current`: the revived nodes read as
-/// not yet run, so a join fed by their branches waits for them instead of
-/// starting together with the re-run node, and a stale hop into a revived node
-/// is not re-offered.
-///
-/// A rebuilt head that is itself revived (not a start) is handled apart from
-/// the plain rule, because the hop that makes it a head comes from a node
-/// outside the revival, recorded in the old pass:
-/// - a join still waiting for a revived input is held back ([`Withheld`]);
-/// - one that finished in the old pass, and would be ready now (`join: any`,
-///   a first-arrival merge inside a cycle), is not offered at all: running it
-///   again on the old input would run it twice. This pass re-runs it when a
-///   revived branch delivers into it;
-/// - one that never finished is offered as before.
+/// again, `starts[0]` being the drive's `current`: journals the revival of
+/// each start, then rebuilds the heads against the revived fold.
 pub(crate) fn restore_revived_frontier(
     log: &mut EventLog,
     playbook: &Playbook,
     events: &[Event],
     starts: &[String],
     frontier: &mut Vec<String>,
-) -> Result<Withheld, EngineError> {
-    let mut withheld = Withheld::default();
+) -> Result<(), EngineError> {
     let Some((current, rest)) = starts.split_first() else {
-        return Ok(withheld);
+        return Ok(());
     };
-    let real = RunState::fold(events);
+    let mut state = RunState::fold(events);
     let revival = parallel::Revival::new(playbook, starts);
-    let state = parallel::revive_state(&real, revival.nodes());
-    let heads = parallel::pending_heads(playbook, &state);
+    for (start, nodes) in revival.per_start() {
+        if !nodes.iter().any(|n| carries_a_result(&state, n)) {
+            continue;
+        }
+        log.append(EventPayload::NodesRevived {
+            from_node: start.to_string(),
+            nodes: nodes.iter().cloned().collect(),
+        })?;
+        // Exactly what the fold does with the record just written.
+        state.revive(nodes);
+    }
     let mut also: Vec<String> = rest.to_vec();
-    also.extend(heads.iter().cloned());
+    also.extend(parallel::pending_heads(playbook, &state));
     let active = active_set(current, frontier, &also);
     for record in revived_inputs(playbook, events, &state, &revival, &active) {
         log.append(record)?;
     }
-    for head in &heads {
-        if head == current || frontier.contains(head) {
-            continue;
-        }
-        let revived = revival.contains(head) && !starts.contains(head);
-        if parallel::is_join(playbook, head)
-            && matches!(
-                parallel::join_readiness(playbook, head, &state, &active),
-                JoinReadiness::NotReady
-            )
-        {
-            if revived {
-                withheld.entries.push(WithheldJoin {
-                    join: head.clone(),
-                    since: events.len(),
-                    revived: revival.nodes().clone(),
-                });
-            }
-            continue;
-        }
-        if revived && real.nodes.get(head).is_some_and(|s| s.is_finished()) {
-            continue;
-        }
-        frontier.push(head.clone());
+    restore_frontier(playbook, &state, current, frontier);
+    Ok(())
+}
+
+/// Whether reviving `node` changes the fold: it has a result, a hop or a
+/// policy mark. A fresh run has none, so it never journals a revival.
+fn carries_a_result(state: &RunState, node: &str) -> bool {
+    state.nodes.contains_key(node)
+        || state.route_suppressed.contains(node)
+        || state.refused_joins.contains(node)
+        || state.journaled_hops.iter().any(|(from, _)| from == node)
+}
+
+/// Offers every revived join that a hop from outside the revival made a
+/// head, once its readiness is decided, exactly as [`advance_frontier`] offers
+/// one: its dead inputs journaled, then pushed.
+///
+/// A revived join is offered by the advance of a revived branch that delivers
+/// into it. When that branch dies instead (the re-run node fails again, or
+/// routes elsewhere), no edge delivers into the join and nothing else would
+/// offer it, so the run would end without it. Called after every advance with
+/// the state that advance weighed; a no-op unless the run revived something.
+/// A join that finished in an earlier pass is no head
+/// ([`parallel::pending_heads`]), so it is not run twice on its old inputs.
+pub(crate) fn reoffer_revived_joins(
+    playbook: &Playbook,
+    state: &RunState,
+    log: &mut EventLog,
+    node: &str,
+    also_active: &[String],
+    frontier: &mut Vec<String>,
+) -> Result<(), EngineError> {
+    if state.revived.is_empty() {
+        return Ok(());
     }
-    Ok(withheld)
+    for head in parallel::pending_heads(playbook, state) {
+        if !state.revived.contains(&head)
+            || !parallel::is_join(playbook, &head)
+            || frontier.contains(&head)
+            || head == node
+        {
+            continue;
+        }
+        let active = active_set(node, frontier, also_active);
+        if matches!(
+            parallel::join_readiness(playbook, &head, state, &active),
+            JoinReadiness::NotReady
+        ) {
+            continue;
+        }
+        journal_dead_inputs(log, playbook, &head, state, &active)?;
+        frontier.push(head);
+    }
+    Ok(())
 }
 
 /// The write-offs still standing: per join, the sources of its latest
@@ -190,7 +136,7 @@ fn revived_inputs(
 ) -> Vec<EventPayload> {
     let mut out = Vec::new();
     for (join, dead) in standing_write_offs(events) {
-        if state.nodes.get(join).is_some_and(|s| s.is_finished()) {
+        if state.current_status(join).is_finished() {
             continue;
         }
         let pending = parallel::pending_inputs(playbook, join, state, active);
@@ -345,50 +291,79 @@ edges:
         }
     }
 
-    /// What one revived rebuild did: the records it journaled, the frontier
-    /// it built, the joins it held back.
+    /// What one revived rebuild did: the revivals and the join records it
+    /// journaled, and the frontier it built.
     struct Rebuilt {
+        revivals: Vec<(String, Vec<String>)>,
         records: Vec<EventPayload>,
         frontier: Vec<String>,
-        withheld: Withheld,
-    }
-
-    impl Rebuilt {
-        fn held(&self) -> Vec<String> {
-            self.withheld
-                .entries
-                .iter()
-                .map(|w| w.join.clone())
-                .collect()
-        }
     }
 
     fn rebuild(p: &Playbook, run: &mut Run, starts: &[&str]) -> Rebuilt {
         let events = run.events();
         let mut frontier = Vec::new();
-        let withheld =
-            restore_revived_frontier(&mut run.log, p, &events, &names(starts), &mut frontier)
-                .unwrap();
-        let records = run.events()[events.len()..]
-            .iter()
-            .map(|e| e.payload.clone())
-            .collect();
+        restore_revived_frontier(&mut run.log, p, &events, &names(starts), &mut frontier).unwrap();
+        let mut revivals = Vec::new();
+        let mut records = Vec::new();
+        for e in &run.events()[events.len()..] {
+            match &e.payload {
+                EventPayload::NodesRevived { from_node, nodes } => {
+                    revivals.push((from_node.clone(), nodes.clone()))
+                }
+                other => records.push(other.clone()),
+            }
+        }
         Rebuilt {
+            revivals,
             records,
             frontier,
-            withheld,
         }
     }
 
+    /// The drive's sweep after an advance out of `node`, against the journal.
+    fn sweep(
+        p: &Playbook,
+        run: &mut Run,
+        node: &str,
+        frontier: &mut Vec<String>,
+    ) -> Vec<EventPayload> {
+        let events = run.events();
+        let state = RunState::fold(&events);
+        reoffer_revived_joins(p, &state, &mut run.log, node, &[], frontier).unwrap();
+        run.events()[events.len()..]
+            .iter()
+            .map(|e| e.payload.clone())
+            .collect()
+    }
+
     #[test]
-    fn a_rerun_revives_the_written_off_source_and_holds_the_join() {
+    fn a_rerun_journals_the_revival_and_the_revived_source() {
         let p = report("");
         let mut run = Run::new(failed_pass());
         let r = rebuild(&p, &mut run, &["c"]);
+        assert_eq!(
+            r.revivals,
+            vec![("c".to_string(), names(&["c", "c2", "done", "failed", "j"]))]
+        );
         assert_eq!(dbg(&r.records), dbg(&[revived_record("j", &["c2"], "c")]));
         // `c` is the drive's current; the join waits, the failure route is gone.
         assert!(r.frontier.is_empty());
-        assert_eq!(r.held(), names(&["j"]));
+        // The fold now carries the revival for every later decision.
+        let state = RunState::fold(&run.events());
+        assert_eq!(state.current_status("c"), NodeStatus::Pending);
+        assert_eq!(state.nodes.get("c"), Some(&NodeStatus::Failed));
+    }
+
+    /// A fresh run revives nothing that carries a result: no record at all.
+    #[test]
+    fn a_fresh_run_journals_no_revival() {
+        let p = report("");
+        let mut run = Run::new(vec![EventPayload::RunStarted {
+            playbook: "r".into(),
+            version: "1.0.0".into(),
+        }]);
+        let r = rebuild(&p, &mut run, &["start"]);
+        assert!(r.revivals.is_empty() && r.records.is_empty());
     }
 
     /// The supervisor retry path hands several starts: the record names the
@@ -399,7 +374,7 @@ edges:
         let mut run = Run::new(failed_pass());
         let r = rebuild(&p, &mut run, &["b", "c"]);
         assert_eq!(dbg(&r.records), dbg(&[revived_record("j", &["c2"], "c")]));
-        assert_eq!(r.frontier, names(&["c"]));
+        assert_eq!(r.revivals.len(), 2);
     }
 
     #[test]
@@ -416,6 +391,25 @@ edges:
         events.pop();
         let mut run = Run::new(events);
         assert!(rebuild(&p, &mut run, &["c"]).records.is_empty());
+    }
+
+    /// One of two written-off sources revived: the other still stands.
+    #[test]
+    fn a_partial_revival_leaves_the_other_source_standing() {
+        let events = vec![
+            ev(dead("j", &["c2", "c3"])),
+            ev(revived_record("j", &["c2"], "c")),
+        ];
+        let standing = standing_write_offs(&events);
+        assert_eq!(standing.get("j"), Some(&names(&["c3"])));
+    }
+
+    fn ev(payload: EventPayload) -> Event {
+        Event {
+            seq: 0,
+            ts: 0,
+            payload,
+        }
     }
 
     /// A second resume after the first one revived the write-off records
@@ -482,7 +476,6 @@ edges:
         let mut run = Run::new(e);
         let r = rebuild(&p, &mut run, &["x"]);
         assert!(r.records.is_empty());
-        assert!(r.held().is_empty());
     }
 
     /// Review finding: a `join: any` that ran on `b` in the old pass is not
@@ -497,7 +490,6 @@ edges:
         let mut run = Run::new(e);
         let r = rebuild(&p, &mut run, &["c"]);
         assert!(r.frontier.is_empty(), "{:?}", r.frontier);
-        assert!(r.held().is_empty());
     }
 
     /// The same for a first-arrival merge inside a cycle (`m <-> n`): it is no
@@ -545,49 +537,144 @@ edges:
         assert!(r.frontier.is_empty(), "{:?}", r.frontier);
     }
 
-    /// The held join is re-offered once the re-run node fails again and its
+    /// The revived join is offered once the re-run node fails again and its
     /// branch is dead: the fresh write-off is journaled and the join pushed.
     #[test]
-    fn a_held_join_is_reoffered_when_the_revived_branch_dies() {
+    fn a_revived_join_is_reoffered_when_the_revived_branch_dies() {
         let p = report("");
         let mut run = Run::new(failed_pass());
-        let mut r = rebuild(&p, &mut run, &["c"]);
+        rebuild(&p, &mut run, &["c"]);
         let mut frontier = Vec::new();
 
         run.append(vec![started("c")]);
-        r.withheld
-            .reoffer(&p, run.dir.path(), &mut run.log, "c", &[], &mut frontier)
-            .unwrap();
+        assert!(sweep(&p, &mut run, "c", &mut frontier).is_empty());
         assert!(frontier.is_empty(), "still waiting while c runs");
 
         run.append(finished("c", "failed")[1..].to_vec());
-        run.append(vec![hop("c", "failed")]);
-        let before = run.events().len();
         frontier.push("failed".into());
-        r.withheld
-            .reoffer(&p, run.dir.path(), &mut run.log, "c", &[], &mut frontier)
-            .unwrap();
+        let fresh = sweep(&p, &mut run, "c", &mut frontier);
         assert_eq!(frontier, names(&["failed", "j"]));
-        let fresh: Vec<EventPayload> = run.events()[before..]
-            .iter()
-            .map(|e| e.payload.clone())
-            .collect();
         assert_eq!(dbg(&fresh), dbg(&[dead("j", &["c2"])]));
-        assert!(r.held().is_empty());
     }
 
-    /// Once the revived branch delivers, the normal advance offers the join;
-    /// the hold then drops it without offering it twice.
+    /// Review hole 1: a revived join that finished in the old pass is not run
+    /// again on its old inputs when the revived branch dies again.
     #[test]
-    fn a_held_join_is_released_once_it_is_on_the_frontier() {
+    fn a_join_that_ran_before_is_not_reoffered_on_its_old_inputs() {
+        let p = report("");
+        let mut e = failed_pass();
+        e.pop();
+        e.push(dead("j", &["c2"]));
+        e.extend(finished("j", "succeeded"));
+        e.push(hop("j", "done"));
+        let mut run = Run::new(e);
+        let r = rebuild(&p, &mut run, &["c"]);
+        assert!(r.frontier.is_empty());
+        run.append(finished("c", "failed"));
+        let mut frontier = names(&["failed"]);
+        assert!(sweep(&p, &mut run, "c", &mut frontier).is_empty());
+        assert_eq!(frontier, names(&["failed"]));
+    }
+
+    /// Round 2 hole 3: `G` (`join: any` over `b`, `c2`) ran on `b`, and so
+    /// did `P`; the downstream join `J` (over `P` and `b`) had not run yet
+    /// when the driver died. Resumed from `c`, which dies again through a
+    /// non-finish step: `G` and `P` are revived and get no new input, so `J`
+    /// must be offered on `b` alone instead of waiting forever.
+    #[test]
+    fn a_downstream_join_behind_a_revived_any_join_is_offered() {
+        let p = Playbook::from_yaml(
+            r#"
+schema: 2
+id: g
+name: G
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: c, type: prompt, prompt: "c" }
+  - { id: c2, type: prompt, prompt: "c2" }
+  - { id: G, type: prompt, prompt: "G" }
+  - { id: P, type: prompt, prompt: "P" }
+  - { id: J, type: prompt, prompt: "J" }
+  - { id: notify, type: prompt, prompt: "notify" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: b }
+  - { from: a, to: c }
+  - { from: b, to: G, join: any }
+  - { from: c2, to: G, join: any }
+  - { from: c, to: c2, condition: { type: node_status, node: c, equals: success } }
+  - { from: c, to: notify, condition: { type: node_status, node: c, equals: failure } }
+  - { from: G, to: P }
+  - { from: P, to: J }
+  - { from: b, to: J }
+  - { from: J, to: done }
+"#,
+        )
+        .unwrap();
+        let mut e = Vec::new();
+        e.extend(finished("start", "succeeded"));
+        e.push(hop("start", "a"));
+        e.extend(finished("a", "succeeded"));
+        e.push(hop("a", "b"));
+        e.push(hop("a", "c"));
+        e.extend(finished("b", "succeeded"));
+        e.push(hop("b", "G"));
+        e.push(hop("b", "J"));
+        e.extend(finished("G", "succeeded"));
+        e.push(hop("G", "P"));
+        e.extend(finished("P", "succeeded"));
+        e.push(hop("P", "J"));
+        e.extend(finished("c", "failed"));
+        e.push(hop("c", "notify"));
+        let mut run = Run::new(e);
+        let r = rebuild(&p, &mut run, &["c"]);
+        assert!(r.frontier.is_empty(), "{:?}", r.frontier);
+
+        run.append(finished("c", "failed"));
+        let mut frontier = names(&["notify"]);
+        let fresh = sweep(&p, &mut run, "c", &mut frontier);
+        assert_eq!(frontier, names(&["notify", "J"]));
+        assert_eq!(dbg(&fresh), dbg(&[dead("J", &["P"])]));
+    }
+
+    /// Round 2 item 5: the old hop of a revived node does not survive its
+    /// re-run. `c` delivered into `c2` in the old pass; re-run, it fails and
+    /// routes to `failed`, and the fold no longer counts the old delivery.
+    #[test]
+    fn an_old_hop_of_a_revived_node_does_not_survive_its_rerun() {
+        let p = report("");
+        let mut e = Vec::new();
+        e.extend(finished("start", "succeeded"));
+        e.extend(finished("a", "succeeded"));
+        e.extend(finished("c", "succeeded"));
+        e.push(hop("c", "c2"));
+        let mut run = Run::new(e);
+        rebuild(&p, &mut run, &["c"]);
+        run.append(finished("c", "failed"));
+        run.append(vec![hop("c", "failed")]);
+        let state = RunState::fold(&run.events());
+        assert!(!state.journaled_hops.contains(&("c".into(), "c2".into())));
+        assert!(
+            state
+                .journaled_hops
+                .contains(&("c".into(), "failed".into()))
+        );
+        assert!(state.revived.contains("c2") && !state.revived.contains("c"));
+    }
+
+    /// A join already on the frontier is not offered twice.
+    #[test]
+    fn a_revived_join_on_the_frontier_is_left_alone() {
         let p = report("");
         let mut run = Run::new(failed_pass());
-        let mut r = rebuild(&p, &mut run, &["c"]);
+        rebuild(&p, &mut run, &["c"]);
+        run.append(finished("c", "failed"));
         let mut frontier = names(&["j"]);
-        r.withheld
-            .reoffer(&p, run.dir.path(), &mut run.log, "c2", &[], &mut frontier)
-            .unwrap();
+        assert!(sweep(&p, &mut run, "c", &mut frontier).is_empty());
         assert_eq!(frontier, names(&["j"]));
-        assert!(r.held().is_empty());
     }
 }

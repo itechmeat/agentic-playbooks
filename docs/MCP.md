@@ -451,9 +451,11 @@ continues past the last finished node without re-running it),
 `parallel_fallback` (two or more branches were cut, so the run restarts from
 the last finished node), or `explicit_from_node` (the caller named
 `from_node`). A `from_node` resume re-runs that node and everything only
-downstream of it: a join fed by its branch waits for it again, and the
-journal records each write-off this undoes as `join_input_revived` (`node`,
-`sources`, `from_node`) in `run_events`. Follow it with `run_wait` the same
+downstream of it: `run_events` shows the revival as `nodes_revived`
+(`from_node`, `nodes`), a join fed by its branch waits for it again, and each
+write-off this undoes is a `join_input_revived` (`node`, `sources`,
+`from_node`). `run_status` keeps the earlier results of the revived nodes
+until they run again. Follow it with `run_wait` the same
 way you would for a `background: true` run.
 
 When the run still has an unapplied stop in its control queue, the ack also

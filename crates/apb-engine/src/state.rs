@@ -213,6 +213,14 @@ pub struct RunState {
     /// take only a failure route, never an unconditional edge. A node leaves
     /// the set when it starts again.
     pub refused_joins: BTreeSet<String>,
+    /// Nodes a re-run revived (issue #203), folded from `NodesRevived`: the
+    /// drive executes them again, so until each one starts again its result
+    /// from the earlier pass does not count for routing. `nodes` keeps that
+    /// result (it is the run's history every surface reports);
+    /// [`RunState::current_status`] is the view routing and join readiness
+    /// read. Their journaled hops are dropped from `journaled_hops` when they
+    /// are revived. A node leaves the set when it starts again.
+    pub revived: BTreeSet<String>,
 }
 
 /// One node's judge-edge answers, as journaled by the `judge_edge` decision
@@ -234,6 +242,38 @@ pub(crate) fn is_legacy_resume_marker(p: &EventPayload) -> bool {
 }
 
 impl RunState {
+    /// The status routing and join readiness read: `Pending` for a node a
+    /// re-run revived and that has not started again, else its folded status.
+    pub fn current_status(&self, node: &str) -> NodeStatus {
+        match self.revived.contains(node) {
+            true => NodeStatus::Pending,
+            false => self.nodes.get(node).copied().unwrap_or(NodeStatus::Pending),
+        }
+    }
+
+    /// Whether `node` was revived and still carries a finished result from an
+    /// earlier pass: a hop into it recorded before the revival is not a reason
+    /// to run it again (see `parallel::pending_heads`).
+    pub fn revived_after_finish(&self, node: &str) -> bool {
+        self.revived.contains(node) && self.nodes.get(node).is_some_and(|s| s.is_finished())
+    }
+
+    /// Applies a revival: each node reads as not yet run for routing, its
+    /// journaled hops and its fork or join policy marks are dropped. Outputs,
+    /// edge counts, finished counts and judge answers stay: edge selection
+    /// consults them only for finished nodes, which revived ones are not, and
+    /// loop budgets must keep counting.
+    pub fn revive<'a>(&mut self, nodes: impl IntoIterator<Item = &'a String>) {
+        for n in nodes {
+            self.revived.insert(n.clone());
+            self.route_suppressed.remove(n);
+            self.refused_joins.remove(n);
+        }
+        let revived = &self.revived;
+        self.journaled_hops
+            .retain(|(from, _)| !revived.contains(from));
+    }
+
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
         // Open attempts: node -> attempt. Closed by attempt_finished/node_finished.
@@ -249,6 +289,7 @@ impl RunState {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
+                    s.revived.remove(node);
                 }
                 EventPayload::AttemptStarted { node, attempt, .. } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
@@ -376,6 +417,9 @@ impl RunState {
                 // by a re-run (issue #203) is the same kind of record: the
                 // readiness is recomputed from the revived fold, not from it.
                 EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. } => {}
+                // A re-run's revival (issue #203): routing reads the nodes as
+                // not yet run until each starts again; history stays.
+                EventPayload::NodesRevived { nodes, .. } => s.revive(nodes),
                 // Fork and join failure options (issue #195): the routing they
                 // decided against is folded so edge selection stays pure.
                 EventPayload::BranchFailed { node, policy, .. } => {

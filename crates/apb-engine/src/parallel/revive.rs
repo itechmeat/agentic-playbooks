@@ -8,13 +8,13 @@
 //! re-run node's branch off as dead, so the join starts together with the
 //! re-run node, and an old hop of a downstream node (`j -> done`) re-offers a
 //! finish node that ends the run before the join re-runs on the new input.
-//! The revived view removes both: those nodes read as not yet run.
+//! The revived view removes both: those nodes read as not yet run. The drive
+//! journals it as `nodes_revived`, and the fold applies it
+//! (`RunState::revive`), so every later readiness decision sees it.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use apb_core::schema::Playbook;
-
-use crate::state::RunState;
 
 /// The nodes a drive re-executes when it executes every node of `starts`
 /// again, per start and as a whole. Built once per rebuild: the forward and
@@ -51,6 +51,11 @@ impl Revival {
 
     pub fn contains(&self, node: &str) -> bool {
         self.all.contains(node)
+    }
+
+    /// Each start with the nodes its re-execution revives, in start order.
+    pub fn per_start(&self) -> impl Iterator<Item = (&str, &BTreeSet<String>)> {
+        self.by_start.iter().map(|(s, n)| (s.as_str(), n))
     }
 
     /// The first start whose re-execution revives `node`.
@@ -104,37 +109,21 @@ pub fn revived_nodes(playbook: &Playbook, start: &str) -> BTreeSet<String> {
     Revival::new(playbook, &[start.to_string()]).all
 }
 
-/// `state` as the drive weighs joins and rebuilds its frontier when it is
-/// about to execute every node of `starts` again (see [`revive_state`]).
-pub fn revived(playbook: &Playbook, state: &RunState, starts: &[String]) -> RunState {
-    revive_state(state, Revival::new(playbook, starts).nodes())
-}
-
-/// `state` with every node of `nodes` read as not yet run: its status, its
-/// journaled hops and its fork or join policy marks are dropped, because this
-/// pass re-executes it.
-///
-/// Outputs, edge counts, finished counts and judge answers stay: edge
-/// selection consults them only for finished nodes, which revived ones are
-/// not, and loop budgets must keep counting.
-pub fn revive_state(state: &RunState, nodes: &BTreeSet<String>) -> RunState {
-    let mut s = state.clone();
-    for n in nodes {
-        s.nodes.remove(n);
-        s.route_suppressed.remove(n);
-        s.refused_joins.remove(n);
-    }
-    s.journaled_hops.retain(|(from, _)| !nodes.contains(from));
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parallel::{
         JoinReadiness, dead_inputs, join_readiness, pending_heads, pending_inputs,
     };
-    use crate::state::NodeStatus;
+    use crate::state::{NodeStatus, RunState};
+
+    /// `state` with the revival of `starts` applied, as the fold applies a
+    /// `nodes_revived` record.
+    fn revived(p: &Playbook, state: &RunState, starts: &[String]) -> RunState {
+        let mut s = state.clone();
+        s.revive(Revival::new(p, starts).nodes());
+        s
+    }
 
     /// The issue's shape: `b` delivered into the implicit join `j`, `c` failed
     /// into `failed`, so `c2` never ran and `j` was weighed without it.
@@ -250,8 +239,9 @@ edges:
         );
         assert_eq!(pending_inputs(&p, "j", &new, &active), names(&["c2"]));
         assert!(dead_inputs(&p, "j", &new, &active).is_empty());
-        // The old failure route is not re-offered, the join still is.
-        assert_eq!(pending_heads(&p, &new), names(&["c", "j"]));
+        // The old failure route is not re-offered, the join still is (it never
+        // finished); the re-run node itself is the drive's current.
+        assert_eq!(pending_heads(&p, &new), names(&["j"]));
     }
 
     #[test]
@@ -264,8 +254,12 @@ edges:
         assert!(pending_heads(&p, &old).contains(&"done".to_string()));
 
         let new = revived(&p, &old, &names(&["c"]));
-        assert!(!pending_heads(&p, &new).contains(&"done".to_string()));
-        assert!(!new.nodes.contains_key("j"));
+        // Neither the stale `done` nor the join that already ran is a head:
+        // the join runs again when `c`'s branch delivers into it.
+        assert!(pending_heads(&p, &new).is_empty());
+        assert_eq!(new.current_status("j"), NodeStatus::Pending);
+        // The history keeps the earlier result.
+        assert_eq!(new.nodes.get("j"), Some(&NodeStatus::Succeeded));
         // Upstream of the rerun node nothing changes.
         assert_eq!(new.nodes.get("b"), Some(&NodeStatus::Succeeded));
         assert!(new.journaled_hops.contains(&("b".into(), "j".into())));
@@ -290,7 +284,7 @@ edges:
         );
         let new = revived(&p, &old, &names(&["x"]));
         // `a`'s hops survive, so the never-started sibling stays a head.
-        assert_eq!(pending_heads(&p, &new), names(&["x", "y"]));
+        assert_eq!(pending_heads(&p, &new), names(&["y"]));
         assert_eq!(new.nodes.get("a"), Some(&NodeStatus::Succeeded));
     }
 
@@ -309,8 +303,8 @@ edges:
             &[("start", "a"), ("a", "x"), ("a", "y")],
         );
         let new = revived(&p, &old, &names(&["x"]));
-        assert_eq!(new.nodes.get("y"), Some(&NodeStatus::Succeeded));
-        assert_eq!(pending_heads(&p, &new), names(&["x"]));
+        assert_eq!(new.current_status("y"), NodeStatus::Succeeded);
+        assert!(pending_heads(&p, &new).is_empty());
     }
 
     /// A join inside the cycle (`a -> {x, y}`, `x -> j`, `y -> j`, `j -> a`):

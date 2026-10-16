@@ -69,7 +69,7 @@ function listOf(v: unknown): string {
 // which working tree the run moved into, what a decision model answered
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
 // (issue #195), or which inputs a join wrote off and a re-run revived
-// (issue #203). Every other kind has none.
+// (issue #203), and what a re-run revives. Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -118,10 +118,19 @@ function eventNote(e: WfEvent): string | undefined {
     case 'join_refused':
       return typeof r.reason === 'string' && r.reason ? r.reason : undefined
     // Issue #203: a join written off an input, and a re-run that revived it.
-    case 'join_input_dead':
-      return `${String(r.node ?? '')} proceeds without ${listOf(r.sources)}`
-    case 'join_input_revived':
-      return `${String(r.node ?? '')} waits for ${listOf(r.sources)} again${r.from_node ? ` (re-run of ${String(r.from_node)})` : ''}`
+    case 'join_input_dead': {
+      const list = listOf(r.sources)
+      return list ? `${String(r.node ?? '')} proceeds without ${list}` : undefined
+    }
+    case 'join_input_revived': {
+      const list = listOf(r.sources)
+      const from = r.from_node ? ` (re-run of ${String(r.from_node)})` : ''
+      return `${String(r.node ?? '')} waits for ${list || 'its revived inputs'} again${from}`
+    }
+    case 'nodes_revived': {
+      const list = listOf(r.nodes)
+      return list ? `re-run of ${String(r.from_node ?? '')} revives ${list}` : undefined
+    }
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

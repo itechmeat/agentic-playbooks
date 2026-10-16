@@ -491,7 +491,8 @@ fn a_supervisor_retry_of_a_batch_member_revives_the_join_it_feeds() {
     );
     // The batch parks before it routes, so the join was never written off:
     // there is no `join_input_dead` to revive, and none is recorded. The fix
-    // shows as the join waiting, not as a record.
+    // shows as the join waiting, and as the revival of `b`.
+    assert_eq!(revivals(&events), ["b"]);
     assert!(!events.iter().any(|e| matches!(
         e.payload,
         EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. }
@@ -629,6 +630,175 @@ fn two_failures_in_one_batch_park_one_at_a_time_in_batch_order() {
         );
     }
     node_finished_at(&events, "j");
+}
+
+// Scenario 2c': two batch members fail; the supervisor continues `b1` at
+// `b1x` (a `prompt` node, so it runs on its own, before the retried `b2`) and
+// retries `b2`. Both reach the implicit join `j` only on success. Before the
+// fold carried the revival, advancing out of `b1x` read `b2` as failed and
+// routed away, wrote `b2x` off and started `j` before `b2` re-ran (issue
+// #203, review round 2).
+const WF_SUPERVISED_CONTINUE_AND_RETRY: &str = r#"
+schema: 1
+id: supcr
+name: Supervised continue and retry
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: b1, type: agent_task, prompt: "branch flaky1" }
+  - { id: b2, type: agent_task, prompt: "branch flaky2" }
+  - { id: b1x, type: prompt, prompt: "after b1" }
+  - { id: b2x, type: agent_task, prompt: "after b2" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: b1 }
+  - { from: start, to: b2 }
+  - { from: b1, to: b1x, condition: { type: node_status, node: b1, equals: success } }
+  - { from: b2, to: b2x, condition: { type: node_status, node: b2, equals: success } }
+  - { from: b1x, to: j }
+  - { from: b2x, to: j }
+  - { from: j, to: done }
+"#;
+
+/// Both failed members retried: they run again as one batch, so the batch
+/// tail's re-offer sites weigh the join.
+const WF_SUPERVISED_TWO_RETRIES: &str = r#"
+schema: 1
+id: suptr
+name: Supervised two retries
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "branch a steady" }
+  - { id: b1, type: agent_task, prompt: "branch flaky1" }
+  - { id: b2, type: agent_task, prompt: "branch flaky2" }
+  - { id: b1x, type: agent_task, prompt: "after b1" }
+  - { id: b2x, type: agent_task, prompt: "after b2" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b1 }
+  - { from: start, to: b2 }
+  - { from: a, to: j }
+  - { from: b1, to: b1x, condition: { type: node_status, node: b1, equals: success } }
+  - { from: b2, to: b2x, condition: { type: node_status, node: b2, equals: success } }
+  - { from: b1x, to: j }
+  - { from: b2x, to: j }
+  - { from: j, to: done }
+"#;
+
+/// Drives `id` supervised, answers the wake on `b1` with `first` and the wake
+/// on `b2` with a retry, and returns the outcome and the journal.
+fn two_failures_answered(id: &'static str, yaml: &str, first: Control) -> (RunStatus, Vec<Event>) {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), id, yaml);
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), id, opts);
+    let run_dir = find_run_dir(dir.path(), &format!("{id}-"));
+    wait_for_wake_on(&run_dir, "b1");
+    post_control(&run_dir, first).unwrap();
+    wait_for_wake_on(&run_dir, "b2");
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b2".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    (res.outcome, read_all(&run_dir).unwrap())
+}
+
+fn last_index_of(events: &[Event], pred: impl Fn(&EventPayload) -> bool) -> usize {
+    events
+        .iter()
+        .rposition(|e| pred(&e.payload))
+        .expect("event in the log")
+}
+
+fn revivals(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::NodesRevived { from_node, .. } => Some(from_node.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_continue_from_does_not_start_the_join_before_the_retried_branch() {
+    let (outcome, events) = two_failures_answered(
+        "supcr",
+        WF_SUPERVISED_CONTINUE_AND_RETRY,
+        Control::ContinueFrom { node: "b1x".into() },
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    // `b1x` and what it leads to never ran, so only `b2`'s re-run revives
+    // anything.
+    assert_eq!(revivals(&events), ["b2"]);
+    let b2x_done = last_index_of(
+        &events,
+        |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "b2x"),
+    );
+    assert!(
+        b2x_done < node_started_at(&events, "j"),
+        "the join started before the retried branch delivered"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn two_retried_batch_members_both_deliver_before_the_join() {
+    let (outcome, events) = two_failures_answered(
+        "suptr",
+        WF_SUPERVISED_TWO_RETRIES,
+        Control::Retry {
+            node: "b1".into(),
+            prompt_override: None,
+        },
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(revivals(&events), ["b1", "b2"]);
+    let j_start = node_started_at(&events, "j");
+    for n in ["b1x", "b2x"] {
+        assert!(
+            node_finished_at(&events, n) < j_start,
+            "the join started before {n}"
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j"))
+            .count(),
+        1
+    );
 }
 
 // Scenario 2d: a join whose input already failed must be FAILED and woken on,

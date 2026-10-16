@@ -75,7 +75,8 @@ const PASS: &str = "pass";
 /// a race against a sleep.
 fn after_finished(root: &Path, node: &str) -> String {
     format!(
-        "i=0; until grep -qs '\"type\":\"node_finished\",\"node\":\"{node}\"' '{runs}'/*/events.jsonl || [ $i -ge 600 ]; do sleep 0.05; i=$((i+1)); done\n",
+        "i=0; until grep -qs '\"type\":\"node_finished\",\"node\":\"{node}\"' '{runs}'/*/events.jsonl; do \
+         i=$((i+1)); if [ $i -ge 600 ]; then echo 'timed out waiting for {node} to finish' >&2; exit 97; fi; sleep 0.05; done\n",
         runs = root.join(".apb/runs").display()
     )
 }
@@ -127,7 +128,11 @@ fn fail_then_resume(
 ) -> (RunStatus, Vec<Event>, Vec<Event>) {
     seed(root, yaml, scripts);
     let first = run(root, "jr", None, RunOptions::default()).unwrap();
-    assert_eq!(first.outcome, RunStatus::Failed);
+    // DIAMOND_NOTIFY's first pass may end through `done`: its failure route
+    // starts with a non-finish step, so the join's route can win the race.
+    if yaml != DIAMOND_NOTIFY {
+        assert_eq!(first.outcome, RunStatus::Failed);
+    }
     let run_dir = root.join(".apb/runs").join(&first.run_id);
     let before = read_all(&run_dir).unwrap();
     if pass {
@@ -204,19 +209,38 @@ fn strs(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| (*s).to_string()).collect()
 }
 
-/// The fold of `events` with every `join_input_revived` left out, as an
-/// older apb that skips the event folds it.
+/// What an older apb that skips both new events folds. `join_input_revived`
+/// is pure observability, so the fold is the same without it.
+/// `nodes_revived` changes routing only: the run's history (every node's
+/// status) is the same without it, so nothing an older apb reads is corrupt.
 fn folds_the_same_without_the_revival(events: &[Event]) {
-    let without: Vec<Event> = events
-        .iter()
-        .filter(|e| !matches!(e.payload, EventPayload::JoinInputRevived { .. }))
-        .cloned()
-        .collect();
-    assert!(without.len() < events.len(), "no revival to leave out");
+    let skip = |keep: fn(&EventPayload) -> bool| -> Vec<Event> {
+        events
+            .iter()
+            .filter(|e| keep(&e.payload))
+            .cloned()
+            .collect()
+    };
+    let without_record = skip(|p| !matches!(p, EventPayload::JoinInputRevived { .. }));
+    assert!(
+        without_record.len() < events.len(),
+        "no revival to leave out"
+    );
     assert_eq!(
         format!("{:?}", RunState::fold(events)),
-        format!("{:?}", RunState::fold(&without))
+        format!("{:?}", RunState::fold(&without_record))
     );
+    let older = skip(|p| {
+        !matches!(
+            p,
+            EventPayload::JoinInputRevived { .. } | EventPayload::NodesRevived { .. }
+        )
+    });
+    assert!(
+        older.len() < without_record.len(),
+        "no nodes_revived to leave out"
+    );
+    assert_eq!(RunState::fold(events).nodes, RunState::fold(&older).nodes);
 }
 
 /// Acceptance 2 and 3: the surviving branch was already traversed into the
@@ -290,35 +314,112 @@ fn a_resume_from_node_reruns_the_join_before_the_old_finish() {
     assert!(finished_at(&resumed, "failed").is_none());
 }
 
-/// Review finding: the re-run node fails again. The held join is re-weighed
-/// once its revived branch is dead (a fresh `join_input_dead`), the run fails
-/// through the failure edge, and no stale `done` finishes it.
+/// Round 1 review: the re-run node fails again. The join that never ran is
+/// re-weighed once its revived branch is dead (a fresh `join_input_dead`),
+/// and the run fails through the failure edge before it runs; no stale
+/// `done` finishes it.
 #[test]
-fn a_rerun_that_fails_again_writes_the_branch_off_again() {
-    for (yaml, written_off) in [(REPORT, "c2"), (DIAMOND, "c")] {
+fn a_rerun_that_fails_again_writes_a_join_that_never_ran_off_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (outcome, _, resumed) = fail_then_resume_from_c(root, REPORT, false);
+    assert_eq!(outcome, RunStatus::Failed);
+    let c_done = finished_at(&resumed, "c").expect("c re-ran");
+    assert_eq!(
+        revived_inputs(&resumed),
+        vec![("j".to_string(), strs(&["c2"]), "c".to_string())]
+    );
+    assert_eq!(
+        dead_inputs(&resumed),
+        vec![("j".to_string(), strs(&["c2"]))]
+    );
+    let dead_at = pos(&resumed, |p| {
+        matches!(p, EventPayload::JoinInputDead { .. })
+    })
+    .unwrap();
+    assert!(c_done < dead_at);
+    assert!(finished_at(&resumed, "failed").is_some());
+    assert!(finished_at(&resumed, "done").is_none());
+    assert!(started_at(&resumed, "j").is_none());
+}
+
+/// DIAMOND with a non-finish step on `c`'s failure route.
+const DIAMOND_NOTIFY: &str = r#"
+schema: 2
+id: jr
+name: Join revive
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/slow.sh", runner: sh }
+  - { id: c, type: script, script: "scripts/gate.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: notify, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: b }
+  - { from: a, to: c }
+  - { from: b, to: j }
+  - { from: c, to: j, condition: { type: node_status, node: c, equals: success } }
+  - { from: c, to: notify, condition: { type: node_status, node: c, equals: failure } }
+  - { from: notify, to: failed }
+  - { from: j, to: done }
+"#;
+
+/// DIAMOND where a passing `c` routes away from the join (its output never
+/// says `deliver`), into its own finish.
+const DIAMOND_AWAY: &str = r#"
+schema: 2
+id: jr
+name: Join revive
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/slow.sh", runner: sh }
+  - { id: c, type: script, script: "scripts/gate.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: elsewhere, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+  - { id: away, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: b }
+  - { from: a, to: c }
+  - { from: b, to: j }
+  - { from: c, to: j, condition: { type: output_match, node: c, pattern: deliver } }
+  - { from: c, to: failed, condition: { type: node_status, node: c, equals: failure } }
+  - { from: c, to: elsewhere, fallback: true }
+  - { from: elsewhere, to: away }
+  - { from: j, to: done }
+"#;
+
+/// Round 2 hole 1: the join already ran in the first pass. When the re-run
+/// branch dies again, or routes away, the join is not run a second time on
+/// the same old inputs.
+#[test]
+fn a_join_that_ran_before_is_not_rerun_when_the_revived_branch_does_not_deliver() {
+    for (yaml, pass, outcome, finish) in [
+        (DIAMOND_NOTIFY, false, RunStatus::Failed, "failed"),
+        (DIAMOND_AWAY, true, RunStatus::Succeeded, "away"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let (outcome, _, resumed) = fail_then_resume_from_c(root, yaml, false);
-        assert_eq!(outcome, RunStatus::Failed);
-        let c_done = finished_at(&resumed, "c").expect("c re-ran");
+        let (got, before, resumed) = fail_then_resume_from_c(root, yaml, pass);
+        assert_eq!(starts_of(&before, "j"), 1, "the first pass ran the join");
+        assert_eq!(got, outcome);
+        assert!(finished_at(&resumed, "c").is_some());
         assert_eq!(
-            revived_inputs(&resumed),
-            vec![("j".to_string(), strs(&[written_off]), "c".to_string())]
+            starts_of(&resumed, "j"),
+            0,
+            "the join ran twice on its old inputs"
         );
-        assert_eq!(
-            dead_inputs(&resumed),
-            vec![("j".to_string(), strs(&[written_off]))]
-        );
-        let dead_at = pos(&resumed, |p| {
-            matches!(p, EventPayload::JoinInputDead { .. })
-        })
-        .unwrap();
-        assert!(c_done < dead_at);
-        assert!(finished_at(&resumed, "failed").is_some());
+        assert!(finished_at(&resumed, finish).is_some());
         assert!(finished_at(&resumed, "done").is_none());
-        if let Some(j) = started_at(&resumed, "j") {
-            assert!(c_done < j, "the join started together with the re-run node");
-        }
     }
 }
 
@@ -354,6 +455,16 @@ edges:
 fn loop_scripts(root: &Path) -> Vec<(&'static str, String)> {
     vec![
         ("gate.sh", gate(root)),
+        // `x` of LOOP_JOIN: a passing re-run takes a second, so the join that
+        // runs on `y`'s old arrival visibly runs alongside it.
+        (
+            "slowpass.sh",
+            format!(
+                "[ -e '{}' ] && sleep 1\n{}",
+                root.join(PASS).display(),
+                gate(root)
+            ),
+        ),
         (
             "after_x.sh",
             format!("{}echo ok\n", after_finished(root, "x")),
@@ -375,17 +486,19 @@ fn a_resume_inside_a_loop_does_not_rerun_a_completed_sibling() {
     let a_again = started_at(&resumed, "a").expect("x looped back into a");
     let y_again = started_at(&resumed, "y").expect("the next loop pass ran y");
     assert!(finished_at(&resumed, "x").unwrap() < a_again);
-    assert!(a_again < y_again, "y re-ran with the resumed x, before a");
+    assert!(a_again < y_again, "y re-ran before the loop came back to a");
     assert_eq!(starts_of(&resumed, "y"), 1);
 }
 
 /// The join-in-cycle shape `a -> {x, y}`, `x -> j`, `y -> j`, `j -> a`: `j`
-/// has an input inside its own cycle, so it is a first-arrival merge, and it
-/// is an ancestor of `x`. Resuming from `x` revives `x` alone: `j` is not
-/// revived, so `y`'s arrival from the old pass still counts and `j` is
-/// offered at once, as it would have been had the run not failed. `y` itself
-/// is not re-run before the loop comes back to `a`. Pinned: a first-arrival
-/// merge outside the revival does not wait for the re-run node.
+/// has an input inside its own cycle, so it is a first-arrival merge (the
+/// CLAUDE.md fan-in rule: a fan-in inside its own cycle stays first-arrival,
+/// else loops deadlock), and it is an ancestor of `x`. Resuming from `x`
+/// revives `x` alone: `j` is not revived, so `y`'s arrival from the old pass
+/// still counts and `j` runs on it at once, alongside the re-run `x`, as it
+/// would have had the run not failed. `y` itself is not re-run before the loop
+/// comes back to `a`. Intended and pinned: a first-arrival merge outside the
+/// revival does not wait for the re-run node.
 const LOOP_JOIN: &str = r#"
 schema: 2
 id: jr
@@ -394,7 +507,7 @@ version: 1.0.0
 nodes:
   - { id: start, type: start }
   - { id: a, type: script, script: "scripts/ok.sh", runner: sh }
-  - { id: x, type: script, script: "scripts/gate.sh", runner: sh }
+  - { id: x, type: script, script: "scripts/slowpass.sh", runner: sh }
   - { id: y, type: script, script: "scripts/after_x.sh", runner: sh }
   - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
   - { id: done, type: finish, outcome: success }
@@ -423,8 +536,10 @@ fn a_resume_inside_a_loop_keeps_a_first_arrival_merge_on_its_old_input() {
     let a_again = started_at(&resumed, "a").expect("j looped back into a");
     let y_again = started_at(&resumed, "y").expect("the next loop pass ran y");
     assert!(a_again < y_again, "y re-ran before the loop came back to a");
-    // `j` ran on `y`'s old arrival, before the loop came back, and once more
-    // on the next loop pass.
-    assert!(started_at(&resumed, "j").unwrap() < a_again);
+    // `j` ran on `y`'s old arrival alongside the re-run `x` (it finished
+    // before `x` did), and once more on the next loop pass.
+    let j_first = finished_at(&resumed, "j").unwrap();
+    assert!(j_first < finished_at(&resumed, "x").unwrap());
+    assert!(j_first < a_again);
     assert_eq!(starts_of(&resumed, "j"), 2);
 }

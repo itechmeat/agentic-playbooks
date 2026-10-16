@@ -984,6 +984,28 @@ pub enum EventPayload {
         #[serde(default)]
         from_node: String,
     },
+    /// A drive is about to execute `from_node` again (a `--from-node`
+    /// resume, a restart, a supervisor retry or continue-from), and with it
+    /// `nodes`: `from_node` and every node only downstream of it (issue
+    /// #203). From here on the fold reads each of them as not yet run for
+    /// routing and join readiness (`RunState::revived`) until it starts
+    /// again: its earlier result stays in the run's history, its journaled
+    /// hops and policy marks are dropped. Every later readiness decision of
+    /// the drive (each advance, a batch tail, a later resume) sees the same
+    /// view, so a join fed by a revived branch waits for it.
+    ///
+    /// Journaled only when the revival changes something (a revived node has
+    /// a result, a hop or a mark), so a fresh run never carries it. Additive:
+    /// fields default, old logs never carry it. An older apb skips it and
+    /// folds the earlier results back in, which is the routing before this
+    /// fix, not a corrupt state. A checkpoint follows it unless the driver is
+    /// killed in between.
+    NodesRevived {
+        #[serde(default)]
+        from_node: String,
+        #[serde(default)]
+        nodes: Vec<String>,
+    },
     /// A node inside the branches of a fork that declares
     /// `fork.on_branch_failure` (issue #195) finished failed, and the fork's
     /// policy took over: `fail_fast` cancels the other branches and routes to
