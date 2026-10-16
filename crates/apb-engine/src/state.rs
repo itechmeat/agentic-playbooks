@@ -233,11 +233,13 @@ pub struct RunState {
     /// Each revival still in force: its `from_node` and the nodes it revived
     /// that have not started again.
     pub revivals: Vec<RevivalEntry>,
-    /// Revived nodes that received a hop after their revival: a fresh
-    /// delivery of this pass. Such a node is a pending head again even if it
-    /// finished in an earlier pass (`parallel::pending_heads`). A node leaves
-    /// the set when it runs again or its revival ends.
-    pub delivered_since_revival: BTreeSet<String>,
+    /// Hops `(from, to)` into a revived node journaled after its revival: a
+    /// fresh delivery of this pass. Such a node is a pending head again even
+    /// if it finished in an earlier pass (`parallel::pending_heads`), but
+    /// only while the hop still routes ([`RunState::routes`]): a later
+    /// revival of the delivering node makes it stale. A pair leaves the set
+    /// when its target runs again or its revival ends.
+    pub delivered_since_revival: BTreeSet<(String, String)>,
 }
 
 /// One revival in force (see [`RunState::revivals`]).
@@ -284,7 +286,10 @@ impl RunState {
     pub fn revived_after_finish(&self, node: &str) -> bool {
         self.revived.contains(node)
             && self.nodes.get(node).is_some_and(|s| s.is_finished())
-            && !self.delivered_since_revival.contains(node)
+            && !self
+                .delivered_since_revival
+                .iter()
+                .any(|(f, t)| t == node && self.routes(f, t))
     }
 
     /// Whether the journaled hop `from -> to` counts for routing: a revived
@@ -340,7 +345,7 @@ impl RunState {
             return;
         }
         self.journaled_hops.retain(|(from, _)| from != node);
-        self.delivered_since_revival.remove(node);
+        self.delivered_since_revival.retain(|(_, t)| t != node);
         for r in &mut self.revivals {
             r.nodes.remove(node);
         }
@@ -361,7 +366,8 @@ impl RunState {
             .map(|r| r.from_node.clone())
             .collect();
         let revived = &self.revived;
-        self.delivered_since_revival.retain(|n| revived.contains(n));
+        self.delivered_since_revival
+            .retain(|(_, t)| revived.contains(t));
     }
 
     /// The run reached a terminal state: a re-run it still owed is owed no
@@ -572,7 +578,8 @@ impl RunState {
                 } => {
                     s.journaled_hops.insert((from.clone(), to.clone()));
                     if s.revived.contains(to) && !s.revived.contains(from) {
-                        s.delivered_since_revival.insert(to.clone());
+                        s.delivered_since_revival
+                            .insert((from.clone(), to.clone()));
                     }
                     if !via_policy && !uncounted {
                         *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;

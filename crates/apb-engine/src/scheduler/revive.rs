@@ -1149,6 +1149,50 @@ edges:
         assert_eq!(frontier, names(&["j"]));
     }
 
+    /// Round 8 item 1: `j` got a fresh delivery from `c2` after the first
+    /// revival, then a second re-run revived `c2`, which failed. The old
+    /// fresh delivery no longer routes, so `j` is no head and the sweep does
+    /// not run it again on `b`'s earlier input.
+    #[test]
+    fn a_fresh_delivery_goes_stale_when_its_source_is_revived_again() {
+        let p = report("");
+        let mut e = Vec::new();
+        e.extend(finished("start", "succeeded"));
+        e.push(hop("start", "a"));
+        e.extend(finished("a", "succeeded"));
+        e.push(hop("a", "b"));
+        e.push(hop("a", "c"));
+        e.extend(finished("b", "succeeded"));
+        e.push(hop("b", "j"));
+        e.extend(finished("c", "succeeded"));
+        e.push(hop("c", "c2"));
+        e.extend(finished("c2", "succeeded"));
+        e.push(hop("c2", "j"));
+        e.extend(finished("j", "succeeded"));
+        e.push(hop("j", "done"));
+        e.push(EventPayload::NodesRevived {
+            from_node: "c".into(),
+            nodes: names(&["c", "c2", "done", "failed", "j"]),
+            superseded: Vec::new(),
+        });
+        e.extend(finished("c", "succeeded"));
+        e.push(hop("c", "c2"));
+        e.extend(finished("c2", "succeeded"));
+        e.push(hop("c2", "j"));
+        e.push(EventPayload::NodesRevived {
+            from_node: "c2".into(),
+            nodes: names(&["c2", "done", "j"]),
+            superseded: Vec::new(),
+        });
+        e.extend(finished("c2", "failed"));
+        let mut run = Run::new(e);
+        let state = RunState::fold(&run.events());
+        assert!(!parallel::pending_heads(&p, &state).contains(&"j".to_string()));
+        let mut frontier = Vec::new();
+        assert!(sweep(&p, &mut run, "c2", &mut frontier).is_empty());
+        assert!(frontier.is_empty(), "{frontier:?}");
+    }
+
     /// A join already on the frontier is not offered twice.
     #[test]
     fn a_revived_join_on_the_frontier_is_left_alone() {

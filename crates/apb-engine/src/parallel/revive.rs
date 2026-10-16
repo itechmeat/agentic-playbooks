@@ -65,7 +65,10 @@ impl Revival {
                     .nodes
                     .get(&n.id)
                     .is_some_and(|st| matches!(st, NodeStatus::Failed | NodeStatus::TimedOut))
-                && super::selected_edges(playbook, &n.id, state).is_empty();
+                && super::selected_edges(playbook, &n.id, state).is_empty()
+                // A `fail_fast` fork took the failure (it suppresses the
+                // node's routing): the drive never routes it to the handler.
+                && !state.route_suppressed.contains(&n.id);
             if routed || failed_start {
                 forward.entry(n.id.as_str()).or_default().push(handler);
             }
@@ -486,6 +489,19 @@ edges:
         );
         assert!(!revived_nodes(&pb(&with_edge), &failed, "c").contains("handler"));
         assert!(revived_nodes(&pb(HANDLED.replace("  - { from: c, to: d }\n", "  - { from: c, to: d, condition: { type: node_status, node: c, equals: success } }\n").as_str()), &failed, "c").contains("handler"));
+    }
+
+    /// Round 8 item 2: a failed start whose failure a `fail_fast` fork took
+    /// (its routing is suppressed) never reaches the handler either.
+    #[test]
+    fn a_fail_fast_failed_start_skips_the_handler() {
+        let p = pb(HANDLED);
+        let mut failed = state(
+            &[("start", NodeStatus::Succeeded), ("c", NodeStatus::Failed)],
+            &[("start", "c")],
+        );
+        failed.route_suppressed.insert("c".into());
+        assert!(!revived_nodes(&p, &failed, "c").contains("handler"));
     }
 
     #[test]
