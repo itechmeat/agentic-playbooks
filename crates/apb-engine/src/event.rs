@@ -963,6 +963,62 @@ pub enum EventPayload {
         #[serde(default)]
         sources: Vec<String>,
     },
+    /// A revival (`NodesRevived`) made an earlier `JoinInputDead` write-off
+    /// of the join `node` obsolete: `sources` can arrive again because they
+    /// are `from_node` or downstream of it (issue #203). The join is weighed
+    /// against the revived view and waits for them.
+    ///
+    /// Pure observability: the readiness verdict comes from the fold of
+    /// `NodesRevived`, never from this record, and the fold ignores it.
+    /// Additive: fields default and old logs never carry it. It is written
+    /// right after the `NodesRevived` it belongs to, so an older binary that
+    /// skips both routes the run as 0.25.0 did (see `NodesRevived`), not as
+    /// this binary does. A checkpoint follows it unless the driver is killed
+    /// in between.
+    JoinInputRevived {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        sources: Vec<String>,
+        #[serde(default)]
+        from_node: String,
+    },
+    /// A drive is about to execute `from_node` again on an operator's or a
+    /// supervisor's word (an explicit `--from-node` resume, a supervisor
+    /// retry, continue-from, patch, or a move off a review gate; an automatic
+    /// restart of interrupted work revives nothing), and with it
+    /// `nodes`: `from_node` and every node only downstream of it (issue
+    /// #203). From here on the fold reads each of them as not yet run for
+    /// routing and join readiness (`RunState::revived`) until it starts
+    /// or finishes again: its earlier result, hops and policy marks stay in
+    /// the run's history and are left out of routing on read; its hops are
+    /// dropped once it runs again. A `from_node` that has not started again
+    /// is a re-run the drive owes: a plain resume re-runs it, and a later
+    /// explicit re-run supersedes it (`superseded`). Every later readiness decision of
+    /// the drive (each advance, a batch tail, a later resume) sees the same
+    /// view, so a join fed by a revived branch waits for it.
+    ///
+    /// Journaled only when the revival changes something (a revived node has
+    /// a result, a hop or a mark), so a fresh run never carries it. Additive:
+    /// fields default, old logs never carry it. An older apb skips it and
+    /// folds the earlier results back in, which is the routing before this
+    /// fix, not a corrupt state; a run revived by this binary must therefore
+    /// not be driven by 0.25.0 or older. Every node an older binary did run
+    /// leaves the revival on its own `NodeStarted`/`NodeFinished`, so this
+    /// binary resuming after it does not mis-route. A checkpoint follows it
+    /// unless the driver is killed in between.
+    NodesRevived {
+        #[serde(default)]
+        from_node: String,
+        #[serde(default)]
+        nodes: Vec<String>,
+        /// The owed re-runs (earlier `from_node`s not started again) this
+        /// explicit request supersedes: the latest choice wins. Their
+        /// revivals end, so the nodes only they covered read their earlier
+        /// results again. Carried on the first record of a request.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        superseded: Vec<String>,
+    },
     /// A node inside the branches of a fork that declares
     /// `fork.on_branch_failure` (issue #195) finished failed, and the fork's
     /// policy took over: `fail_fast` cancels the other branches and routes to

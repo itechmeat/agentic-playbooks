@@ -12,6 +12,9 @@ use crate::state::{NodeStatus, RunState};
 
 pub use apb_core::schema::JoinMode;
 
+mod revive;
+pub use revive::{Revival, revived_nodes};
+
 /// Readiness of a join node to execute, based on incoming branch statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinReadiness {
@@ -61,11 +64,9 @@ fn judge_edge_p(state: &RunState, from: &str, index: usize) -> Option<f64> {
 pub fn edge_matches_at(edge: &Edge, index: Option<usize>, from: &str, state: &RunState) -> bool {
     match &edge.condition {
         None => true,
-        Some(EdgeCondition::NodeStatus { node, equals }) => state
-            .nodes
-            .get(node)
-            .map(|s| status_matches(*s, *equals))
-            .unwrap_or(false),
+        Some(EdgeCondition::NodeStatus { node, equals }) => {
+            status_matches(state.current_status(node), *equals)
+        }
         Some(EdgeCondition::ReviewStatus { equals }) => state
             .reviews
             .get(from)
@@ -344,12 +345,10 @@ enum Arrival {
     Dead,
 }
 
+/// The status routing reads: a node a re-run revived reads `Pending` until
+/// it starts again ([`RunState::current_status`]).
 fn status_of(state: &RunState, node: &str) -> NodeStatus {
-    state
-        .nodes
-        .get(node)
-        .copied()
-        .unwrap_or(NodeStatus::Pending)
+    state.current_status(node)
 }
 
 /// The nodes a run can still execute, walked forward from `active` over the
@@ -432,7 +431,7 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
     let mut targets: BTreeSet<String> = state
         .journaled_hops
         .iter()
-        .filter(|(from, to)| from == node && playbook.node(to).is_some())
+        .filter(|(from, to)| from == node && playbook.node(to).is_some() && state.routes(from, to))
         .map(|(_, to)| to.clone())
         .collect();
     targets.extend(successors(playbook, node, state));
@@ -452,14 +451,33 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
 /// journals that route as `EdgeTraversed { via_policy: true }` when it takes it,
 /// so [`routed_targets`] sees it without this function re-deriving the
 /// failure-policy predicate (which must not drift from the drive loop's copy).
+///
+/// A node a re-run revived after it finished in an earlier pass is no head
+/// (issue #203): the hop that names it was recorded before the revival, from a
+/// node outside it, and running it on that old input would run it twice. The
+/// re-run reaches it again when a revived branch delivers into it.
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
+    pending_heads_besides(playbook, state, &[])
+}
+
+/// [`pending_heads`] without the routing of `overridden`: finished nodes a
+/// supervisor directive moved the run away from (a parked failed node it did
+/// not re-run). A target only they route into is no head; a target another
+/// node routes into still is. Readiness is not touched: their deliveries
+/// still count for the joins they feed (a failed delivery still fails a
+/// `join: all`).
+pub fn pending_heads_besides(
+    playbook: &Playbook,
+    state: &RunState,
+    overridden: &[String],
+) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
-    for (node, status) in &state.nodes {
-        if !status.is_finished() {
+    for node in state.nodes.keys() {
+        if !status_of(state, node).is_finished() || overridden.contains(node) {
             continue;
         }
         for s in routed_targets(playbook, node, state) {
-            if !status_of(state, &s).is_finished() {
+            if !status_of(state, &s).is_finished() && !state.revived_after_finish(&s) {
                 heads.insert(s);
             }
         }
@@ -634,6 +652,34 @@ pub fn dead_inputs(
         })
         .map(|e| e.from.clone())
         .collect()
+}
+
+/// The incoming sources of `node` that can still arrive, in incoming-edge
+/// order: the twin of [`dead_inputs`] over the same arrivals. A resume or a
+/// supervisor retry reads it against the revived state to journal which
+/// earlier write-offs it made obsolete (issue #203), so the record and the
+/// readiness verdict come from one implementation.
+pub fn pending_inputs(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Vec<String> {
+    if join_kind(playbook, node).is_none() {
+        return Vec::new();
+    }
+    let live = live_nodes(playbook, state, active);
+    let mut out: Vec<String> = Vec::new();
+    for e in incoming(playbook, node) {
+        let pending = matches!(
+            arrival(playbook, node, &e.from, state, &live),
+            Arrival::Pending
+        );
+        if pending && !out.contains(&e.from) {
+            out.push(e.from.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

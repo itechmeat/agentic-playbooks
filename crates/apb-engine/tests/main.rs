@@ -175,6 +175,9 @@ mod interactive_live_test;
 mod interactive_reprompt_test;
 #[path = "suite/interactive_timeout_test.rs"]
 mod interactive_timeout_test;
+#[cfg(unix)]
+#[path = "suite/join_revive_test.rs"]
+mod join_revive_test;
 #[path = "suite/journal_compat_test.rs"]
 mod journal_compat_test;
 #[path = "suite/judge_test.rs"]

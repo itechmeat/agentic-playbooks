@@ -996,6 +996,35 @@ decision is auditable afterwards. That is routine graph bookkeeping rather than 
 anomaly - an either-or merge has one by construction - so no supervisor is woken
 for it.
 
+A write-off holds only for the pass that made it. When an operator or a
+supervisor asks for a node to run again (`resume --from-node`, or a
+supervisor's retry, continue-from, patch, or move off a review gate), that
+node and every node only downstream of it count as not yet run for routing
+until each one starts again; the run journals that as a `nodes_revived` event
+(`from_node`, `nodes`), and the run's history keeps their earlier results. An
+automatic restart of interrupted work (a crash, a `--now` pause) revives
+nothing: the nodes after it may already have run in this pass. A requested
+re-run that a pause or a crash stopped before it began is still owed: the
+next resume without `--from-node` re-runs it. A new explicit re-run (a
+`--from-node`, or a supervisor directive) supersedes it instead: the latest
+choice wins, the owed re-run is dropped, and the nodes only it revived read
+their earlier results again. Siblings a fork's failure policy cancelled when the
+re-run node failed are revived with it. A join fed by the re-run branch waits for that branch
+again instead of starting together with the re-run node, and an old route of a
+downstream node (into a finish node, say) is not taken before the join runs on
+the new input. The run journals a `join_input_revived` event naming the join,
+the sources it waits for again, and the re-run node (`from_node`).
+
+If the re-run branch does not deliver (the node fails again, or routes
+elsewhere), a join that never ran is weighed again and journals a fresh
+`join_input_dead`, as in a first pass. A node that already ran in the earlier
+pass (a join, a `join: any`, a merge inside a cycle) is not run again on its
+old inputs: it runs again only when the re-run branch delivers into it.
+"Only downstream" stops at the nodes that lead back into the re-run node:
+inside a loop they keep their old routing, so a sibling that already
+completed is not re-run before the loop comes back to it, and a first-arrival
+merge inside the cycle still runs on an arrival from the earlier pass.
+
 ```yaml
 nodes:
   - { id: start,   type: start }

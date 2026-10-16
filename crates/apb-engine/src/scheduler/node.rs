@@ -3874,8 +3874,24 @@ pub(crate) fn restore_frontier(
     current: &str,
     frontier: &mut Vec<String>,
 ) {
-    let heads = parallel::pending_heads(playbook, state);
-    let active = active_set(current, frontier, &heads);
+    restore_frontier_besides(playbook, state, current, frontier, &[]);
+}
+
+/// [`restore_frontier`] without the heads only `overridden` route into (see
+/// [`parallel::pending_heads_besides`]).
+pub(crate) fn restore_frontier_besides(
+    playbook: &Playbook,
+    state: &RunState,
+    current: &str,
+    frontier: &mut Vec<String>,
+    overridden: &[String],
+) {
+    let heads = parallel::pending_heads_besides(playbook, state, overridden);
+    // Every owed re-run (issue #203) is about to run too: it counts as active
+    // before any join is weighed, so a join it feeds is not ready without it.
+    let mut also = heads.clone();
+    also.extend(state.revival_starts.iter().cloned());
+    let active = active_set(current, frontier, &also);
     for head in &heads {
         if head == current || frontier.contains(head) {
             continue;
@@ -3889,6 +3905,14 @@ pub(crate) fn restore_frontier(
             continue;
         }
         frontier.push(head.clone());
+    }
+    // A re-run the run was asked for and never began (issue #203): a pause
+    // before it started, or a kill while a revived gate waited. It is no head
+    // (its old result predates the revival), so it is put back explicitly.
+    for start in &state.revival_starts {
+        if start != current && !frontier.contains(start) {
+            frontier.push(start.clone());
+        }
     }
 }
 

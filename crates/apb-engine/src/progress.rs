@@ -957,22 +957,42 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
 }
 
 /// The run answer (spec B): the non-empty output of the succeeded finish node.
-/// Derived purely by fold from the run's events + snapshot; `None` when the
-/// finish had no prompt (empty output), the finish has not run, or the snapshot
-/// is missing. Multiple finish nodes: the first with a non-empty output wins.
+/// Derived purely from the run's events + snapshot; `None` when the finish had
+/// no prompt (empty output), no finish has run, or the snapshot is missing.
+///
+/// A run no re-run revived answers as it always did: the first succeeded
+/// finish in playbook order with a non-empty output. A revived run (issue
+/// #203) answers from the finish it reached last, and only while that finish
+/// reads succeeded now: a finish that is revived, or running again, answers
+/// nothing, because its output is the earlier pass's.
 pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
     let pb = load_run_playbook(run_dir)?;
     let state = RunState::fold(events);
-    for n in &pb.nodes {
-        if matches!(n.kind, NodeKind::Finish { .. })
-            && state.nodes.get(&n.id).copied() == Some(NodeStatus::Succeeded)
-            && let Some(out) = state.outputs.get(&n.id)
-            && !out.is_empty()
-        {
-            return Some(out.clone());
-        }
+    let is_finish = |id: &str| {
+        pb.node(id)
+            .is_some_and(|n| matches!(n.kind, NodeKind::Finish { .. }))
+    };
+    let revived_run = events
+        .iter()
+        .any(|e| matches!(e.payload, EventPayload::NodesRevived { .. }));
+    if !revived_run {
+        return pb.nodes.iter().find_map(|n| {
+            (is_finish(&n.id) && state.nodes.get(&n.id).copied() == Some(NodeStatus::Succeeded))
+                .then(|| state.outputs.get(&n.id))
+                .flatten()
+                .filter(|out| !out.is_empty())
+                .cloned()
+        });
     }
-    None
+    let last = events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::NodeFinished { node, .. } if is_finish(node) => Some(node.as_str()),
+        _ => None,
+    })?;
+    (state.current_status(last) == NodeStatus::Succeeded)
+        .then(|| state.outputs.get(last))
+        .flatten()
+        .filter(|out| !out.is_empty())
+        .cloned()
 }
 
 /// Measured time per node in whole seconds, from NodeStarted to
@@ -1942,6 +1962,78 @@ edges:
             ),
         ];
         assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("THE ANSWER"));
+    }
+
+    /// A re-run that ends at another finish answers with that one, not with
+    /// the finish an earlier pass reached (issue #203).
+    #[test]
+    fn run_answer_is_the_finish_reached_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success, prompt: \"c\" }\n  - { id: g, type: finish, outcome: success, prompt: \"c\" }\nedges:\n  - { from: s, to: f }\n  - { from: s, to: g }\n",
+        )
+        .unwrap();
+        let finished = |seq: u64, node: &str, out: &str| {
+            ev(
+                seq,
+                EventPayload::NodeFinished {
+                    node: node.into(),
+                    status: "succeeded".into(),
+                    attempt: 1,
+                    output: out.into(),
+                    artifacts: Vec::new(),
+                },
+            )
+        };
+        let revival = |seq: u64, nodes: &[&str]| {
+            ev(
+                seq,
+                EventPayload::NodesRevived {
+                    from_node: "s".into(),
+                    nodes: nodes.iter().map(|n| (*n).to_string()).collect(),
+                    superseded: Vec::new(),
+                },
+            )
+        };
+        // Without a revival, the answer of a 0.25.0 journal: the first
+        // succeeded finish in playbook order with an output.
+        let events = vec![finished(1, "f", "FIRST PASS"), finished(2, "g", "RE-RUN")];
+        assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("FIRST PASS"));
+        let events = vec![finished(1, "f", ""), finished(2, "g", "SECOND")];
+        assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("SECOND"));
+        // A revived run: the finish reached last.
+        let events = vec![
+            finished(1, "f", "FIRST PASS"),
+            revival(2, &["s", "f", "g"]),
+            finished(3, "g", "RE-RUN"),
+        ];
+        assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("RE-RUN"));
+        let events = vec![
+            finished(1, "f", "FIRST PASS"),
+            revival(2, &["s", "f", "g"]),
+            finished(3, "g", ""),
+        ];
+        assert_eq!(run_answer(&run_dir, &events), None);
+        // A re-run revived `g` and has not reached it again: no answer yet.
+        let events = vec![finished(1, "g", "FIRST PASS"), revival(2, &["s", "g"])];
+        assert_eq!(run_answer(&run_dir, &events), None);
+        // `g` (it has a prompt) is running again: no answer from its earlier
+        // pass either.
+        let events = vec![
+            finished(1, "g", "FIRST PASS"),
+            revival(2, &["s", "g"]),
+            ev(
+                3,
+                EventPayload::NodeStarted {
+                    node: "g".into(),
+                    attempt: 1,
+                },
+            ),
+        ];
+        assert_eq!(run_answer(&run_dir, &events), None);
     }
 
     #[test]

@@ -58,12 +58,18 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
   return events.map((e) => ({ seq: e.seq, type: e.type, node: e.node ?? null, note: eventNote(e) }))
 }
 
+/** A list of node ids as `a, b`, for a note line. */
+function listOf(v: unknown): string {
+  return Array.isArray(v) ? v.map(String).join(', ') : ''
+}
+
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
 // attempt's transcript is, the tokens an attempt reported (issue #167),
 // which working tree the run moved into, what a decision model answered
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
-// (issue #195). Every other kind has none.
+// (issue #195), or which inputs a join wrote off and a re-run revived
+// (issue #203), and what a re-run revives. Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -111,6 +117,22 @@ function eventNote(e: WfEvent): string | undefined {
       return `fork ${String(r.fork ?? '')}: cancelled after ${String(r.failed_node ?? '')} failed`
     case 'join_refused':
       return typeof r.reason === 'string' && r.reason ? r.reason : undefined
+    // Issue #203: a join written off an input, and a re-run that revived it.
+    case 'join_input_dead': {
+      const list = listOf(r.sources)
+      return r.node && list ? `${String(r.node)} proceeds without ${list}` : undefined
+    }
+    case 'join_input_revived': {
+      if (!r.node) return undefined
+      const list = listOf(r.sources)
+      const from = r.from_node ? ` (re-run of ${String(r.from_node)})` : ''
+      return `${String(r.node)} waits for ${list || 'its revived inputs'} again${from}`
+    }
+    case 'nodes_revived': {
+      const list = listOf(r.nodes)
+      if (!list) return undefined
+      return r.from_node ? `re-run of ${String(r.from_node)} revives ${list}` : `a re-run revives ${list}`
+    }
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

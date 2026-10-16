@@ -213,6 +213,40 @@ pub struct RunState {
     /// take only a failure route, never an unconditional edge. A node leaves
     /// the set when it starts again.
     pub refused_joins: BTreeSet<String>,
+    /// Nodes a re-run revived (issue #203), folded from `NodesRevived`: the
+    /// drive executes them again, so until each one starts again its result
+    /// from the earlier pass does not count for routing. `nodes` keeps that
+    /// result (it is the run's history every surface reports), and so does
+    /// `journaled_hops`: [`RunState::current_status`] and
+    /// [`RunState::routes`] are the view routing and join readiness read.
+    /// A node leaves the set when it starts or finishes again (a finish node
+    /// without a prompt journals only its finish); its old hops are dropped
+    /// then. The union of [`RunState::revivals`].
+    pub revived: BTreeSet<String>,
+    /// The `from_node` of every revival whose node has not started again: the
+    /// re-runs a drive was asked for and has not begun. A pause before the
+    /// node starts, or a kill while a revived review gate waits, leaves one
+    /// here; a resume re-runs it ([`crate::scheduler::plan_resume`]) and the
+    /// frontier rebuild puts every other one back. A later explicit re-run
+    /// supersedes them (`NodesRevived::superseded`).
+    pub revival_starts: BTreeSet<String>,
+    /// Each revival still in force: its `from_node` and the nodes it revived
+    /// that have not started again.
+    pub revivals: Vec<RevivalEntry>,
+    /// Hops `(from, to)` into a revived node journaled after its revival: a
+    /// fresh delivery of this pass. Such a node is a pending head again even
+    /// if it finished in an earlier pass (`parallel::pending_heads`), but
+    /// only while the hop still routes ([`RunState::routes`]): a later
+    /// revival of the delivering node makes it stale. A pair leaves the set
+    /// when its target runs again or its revival ends.
+    pub delivered_since_revival: BTreeSet<(String, String)>,
+}
+
+/// One revival in force (see [`RunState::revivals`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RevivalEntry {
+    pub from_node: String,
+    pub nodes: BTreeSet<String>,
 }
 
 /// One node's judge-edge answers, as journaled by the `judge_edge` decision
@@ -234,6 +268,116 @@ pub(crate) fn is_legacy_resume_marker(p: &EventPayload) -> bool {
 }
 
 impl RunState {
+    /// The status routing and join readiness read: `Pending` for a node a
+    /// re-run revived and that has not started again, else its folded status.
+    pub fn current_status(&self, node: &str) -> NodeStatus {
+        match self.revived.contains(node) {
+            true => NodeStatus::Pending,
+            false => self.nodes.get(node).copied().unwrap_or(NodeStatus::Pending),
+        }
+    }
+
+    /// Whether `node` was revived and still carries a finished result from an
+    /// earlier pass: a hop into it recorded before the revival is not a reason
+    /// to run it again (see `parallel::pending_heads`).
+    ///
+    /// A fresh delivery since the revival (a hop journaled after it) is such
+    /// a reason, so a node that received one is not counted here.
+    pub fn revived_after_finish(&self, node: &str) -> bool {
+        self.revived.contains(node)
+            && self.nodes.get(node).is_some_and(|s| s.is_finished())
+            && !self
+                .delivered_since_revival
+                .iter()
+                .any(|(f, t)| t == node && self.routes(f, t))
+    }
+
+    /// Whether the journaled hop `from -> to` counts for routing: a revived
+    /// node's hops are its earlier pass's and do not, until it runs again.
+    pub fn routes(&self, from: &str, to: &str) -> bool {
+        !self.revived.contains(from)
+            && self
+                .journaled_hops
+                .contains(&(from.to_string(), to.to_string()))
+    }
+
+    /// Applies a revival without a start of its own (tests, mostly): see
+    /// [`RunState::revive_from`].
+    pub fn revive<'a>(&mut self, nodes: impl IntoIterator<Item = &'a String>) {
+        self.revive_from("", nodes, &[]);
+    }
+
+    /// Applies the revival of `from_node`: each of `nodes` reads as not yet
+    /// run for routing until it starts again, and `from_node` is a re-run the
+    /// drive owes ([`RunState::revival_starts`]). Nothing is deleted: the
+    /// overlay is applied on read ([`RunState::current_status`],
+    /// [`RunState::routes`]).
+    ///
+    /// `superseded` are the owed re-runs this explicit request replaces (the
+    /// latest choice wins): their revivals end, so the nodes only they
+    /// covered read their earlier results and hops again. An owed re-run this
+    /// revival covers is owed no longer either: this re-run reaches it.
+    pub fn revive_from<'a>(
+        &mut self,
+        from_node: &str,
+        nodes: impl IntoIterator<Item = &'a String>,
+        superseded: &[String],
+    ) {
+        let nodes: BTreeSet<String> = nodes.into_iter().cloned().collect();
+        self.revivals
+            .retain(|r| !(superseded.contains(&r.from_node) && r.nodes.contains(&r.from_node)));
+        for r in &mut self.revivals {
+            if nodes.contains(&r.from_node) {
+                r.nodes.remove(&r.from_node);
+            }
+        }
+        self.revivals.push(RevivalEntry {
+            from_node: from_node.to_string(),
+            nodes,
+        });
+        self.settle_revivals();
+    }
+
+    /// A node started or finished again: it leaves every revival, and the
+    /// hops of its earlier pass are dropped for good.
+    fn ran_again(&mut self, node: &str) {
+        if !self.revived.contains(node) {
+            return;
+        }
+        self.journaled_hops.retain(|(from, _)| from != node);
+        self.delivered_since_revival.retain(|(_, t)| t != node);
+        for r in &mut self.revivals {
+            r.nodes.remove(node);
+        }
+        self.settle_revivals();
+    }
+
+    fn settle_revivals(&mut self) {
+        self.revivals.retain(|r| !r.nodes.is_empty());
+        self.revived = self
+            .revivals
+            .iter()
+            .flat_map(|r| r.nodes.iter().cloned())
+            .collect();
+        self.revival_starts = self
+            .revivals
+            .iter()
+            .filter(|r| r.nodes.contains(&r.from_node))
+            .map(|r| r.from_node.clone())
+            .collect();
+        let revived = &self.revived;
+        self.delivered_since_revival
+            .retain(|(_, t)| revived.contains(t));
+    }
+
+    /// The run reached a terminal state: a re-run it still owed is owed no
+    /// longer (a plain resume of a finished run re-runs nothing), so those
+    /// revivals end.
+    fn end_owed_revivals(&mut self) {
+        self.revivals.retain(|r| !r.nodes.contains(&r.from_node));
+        self.settle_revivals();
+    }
+
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
         // Open attempts: node -> attempt. Closed by attempt_finished/node_finished.
@@ -249,6 +393,7 @@ impl RunState {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
+                    s.ran_again(node);
                 }
                 EventPayload::AttemptStarted { node, attempt, .. } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
@@ -276,6 +421,7 @@ impl RunState {
                     ..
                 } => {
                     open.remove(node);
+                    s.ran_again(node);
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
                     s.last_node = Some(node.clone());
@@ -300,9 +446,13 @@ impl RunState {
                         "succeeded" => RunStatus::Succeeded,
                         _ => RunStatus::Failed,
                     };
+                    s.end_owed_revivals();
                 }
                 EventPayload::RetryStarted { .. } | EventPayload::FallbackTriggered { .. } => {}
-                EventPayload::RunAborted { .. } => s.run_status = RunStatus::Aborted,
+                EventPayload::RunAborted { .. } => {
+                    s.run_status = RunStatus::Aborted;
+                    s.end_owed_revivals();
+                }
                 EventPayload::WakeRaised { .. } => {}
                 // A question and its answer are audit-only channel mirrors
                 // (spec 2026-07-20-interactive-nodes): they do not change
@@ -372,8 +522,17 @@ impl RunState {
                 | EventPayload::NodeCacheRejected { .. } => {}
                 // A join write-off is an observability record of a readiness
                 // verdict (spec 2026-08-05, Task 4): the run-state effect is the
-                // join's own execution, journaled right after it.
-                EventPayload::JoinInputDead { .. } => {}
+                // join's own execution, journaled right after it. Its revival
+                // by a re-run (issue #203) is the same kind of record: the
+                // readiness is recomputed from the revived fold, not from it.
+                EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. } => {}
+                // A re-run's revival (issue #203): routing reads the nodes as
+                // not yet run until each starts again; history stays.
+                EventPayload::NodesRevived {
+                    from_node,
+                    nodes,
+                    superseded,
+                } => s.revive_from(from_node, nodes, superseded),
                 // Fork and join failure options (issue #195): the routing they
                 // decided against is folded so edge selection stays pure.
                 EventPayload::BranchFailed { node, policy, .. } => {
@@ -418,6 +577,10 @@ impl RunState {
                     uncounted,
                 } => {
                     s.journaled_hops.insert((from.clone(), to.clone()));
+                    if s.revived.contains(to) && !s.revived.contains(from) {
+                        s.delivered_since_revival
+                            .insert((from.clone(), to.clone()));
+                    }
                     if !via_policy && !uncounted {
                         *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
                     }

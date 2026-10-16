@@ -84,3 +84,40 @@ fn old_connector_call_without_smtp_fields_still_parses() {
         }
     ));
 }
+
+#[test]
+fn join_input_revived_has_its_own_tag_and_defaults_every_field() {
+    let p = EventPayload::JoinInputRevived {
+        node: "j".into(),
+        sources: vec!["c2".into()],
+        from_node: "c".into(),
+    };
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(s.contains(r#""type":"join_input_revived""#), "{s}");
+    assert!(!p.is_checkpoint());
+    let bare: EventPayload = serde_json::from_str(r#"{"type":"join_input_revived"}"#).unwrap();
+    assert!(matches!(
+        bare,
+        EventPayload::JoinInputRevived { node, sources, from_node }
+            if node.is_empty() && sources.is_empty() && from_node.is_empty()
+    ));
+}
+
+#[test]
+fn nodes_revived_has_its_own_tag_and_defaults_every_field() {
+    let p = EventPayload::NodesRevived {
+        from_node: "c".into(),
+        nodes: vec!["c".into(), "j".into()],
+        superseded: Vec::new(),
+    };
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(s.contains(r#""type":"nodes_revived""#), "{s}");
+    assert!(!p.is_checkpoint());
+    let back: EventPayload = serde_json::from_str(&s).unwrap();
+    assert_eq!(format!("{back:?}"), format!("{p:?}"));
+    let bare: EventPayload = serde_json::from_str(r#"{"type":"nodes_revived"}"#).unwrap();
+    assert!(matches!(
+        bare,
+        EventPayload::NodesRevived { from_node, nodes, superseded } if from_node.is_empty() && nodes.is_empty() && superseded.is_empty()
+    ));
+}

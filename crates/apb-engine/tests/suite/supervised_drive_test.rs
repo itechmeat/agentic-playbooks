@@ -410,6 +410,97 @@ fn supervised_batch_failure_wakes_after_the_batch_and_retry_recovers() {
     node_finished_at(&events, "j");
 }
 
+// Scenario 2b': the retried branch reaches the implicit join `j` only through
+// `b2`, and only on success. Weighed against the fold that still reads `b`
+// failed, `b2` is dead and `j` would start together with the retry (issue
+// #203); the revived view makes `j` wait for `b2`.
+const WF_SUPERVISED_REVIVED_JOIN: &str = r#"
+schema: 1
+id: suprev
+name: Supervised revived join
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "branch a steady" }
+  - { id: b, type: agent_task, prompt: "branch b flaky" }
+  - { id: b2, type: prompt, prompt: "after b" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j }
+  - { from: b, to: b2, condition: { type: node_status, node: b, equals: success } }
+  - { from: b2, to: j }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn a_supervisor_retry_of_a_batch_member_revives_the_join_it_feeds() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "suprev", WF_SUPERVISED_REVIVED_JOIN);
+
+    let prog = branch_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "suprev", opts);
+    let run_dir = find_run_dir(dir.path(), "suprev-");
+    wait_for_wake(&run_dir);
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    let wake_at = index_of(&events, "wake_raised", |p| {
+        matches!(p, EventPayload::WakeRaised { .. })
+    });
+    let after = &events[wake_at..];
+    // `b2` ran after the retried `b`, and `j` only after `b2`.
+    assert!(node_finished_at(after, "b") < node_started_at(after, "b2"));
+    assert!(
+        node_finished_at(after, "b2") < node_started_at(after, "j"),
+        "the join started together with the retried branch"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j"))
+            .count(),
+        1,
+        "the join runs once, on the retried branch's delivery"
+    );
+    // Deliberate: the batch parks before it routes, so the join was never
+    // written off. There is no `join_input_dead` to revive, and asserting
+    // that none is recorded pins that the revival record is not written for
+    // a write-off that never happened. The fix shows as the join waiting,
+    // and as the revival of `b`.
+    assert_eq!(revivals(&events), ["b"]);
+    assert!(!events.iter().any(|e| matches!(
+        e.payload,
+        EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. }
+    )));
+}
+
 // Scenario 2c: TWO failures in one supervised batch. Each is presented on its
 // own, in batch order, and the run only moves on once the supervisor has answered
 // both - the contract that replaces per-branch live parking (spec 1.3).
@@ -541,6 +632,347 @@ fn two_failures_in_one_batch_park_one_at_a_time_in_batch_order() {
         );
     }
     node_finished_at(&events, "j");
+}
+
+// Scenario 2c': two batch members fail; the supervisor continues `b1` at
+// `b1x` (a `prompt` node, so it runs on its own, before the retried `b2`) and
+// retries `b2`. Both reach the implicit join `j` only on success. Before the
+// fold carried the revival, advancing out of `b1x` read `b2` as failed and
+// routed away, wrote `b2x` off and started `j` before `b2` re-ran (issue
+// #203, review round 2).
+const WF_SUPERVISED_CONTINUE_AND_RETRY: &str = r#"
+schema: 1
+id: supcr
+name: Supervised continue and retry
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: b1, type: agent_task, prompt: "branch flaky1" }
+  - { id: b2, type: agent_task, prompt: "branch flaky2" }
+  - { id: b1x, type: prompt, prompt: "after b1" }
+  - { id: b2x, type: agent_task, prompt: "after b2" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: b1 }
+  - { from: start, to: b2 }
+  - { from: b1, to: b1x, condition: { type: node_status, node: b1, equals: success } }
+  - { from: b2, to: b2x, condition: { type: node_status, node: b2, equals: success } }
+  - { from: b1x, to: j }
+  - { from: b2x, to: j }
+  - { from: j, to: done }
+"#;
+
+/// Both failed members retried: `b1` becomes `current`, `b2` comes in through
+/// the `also` directives, and they run again as one batch whose tail routes
+/// both into the join. Not decisive for the batch tail's revived-join
+/// re-offer (both branches deliver, so the normal advance offers the join);
+/// that re-offer is covered by `scheduler::revive` unit tests.
+const WF_SUPERVISED_TWO_RETRIES: &str = r#"
+schema: 1
+id: suptr
+name: Supervised two retries
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "branch a steady" }
+  - { id: b1, type: agent_task, prompt: "branch flaky1" }
+  - { id: b2, type: agent_task, prompt: "branch flaky2" }
+  - { id: b1x, type: agent_task, prompt: "after b1" }
+  - { id: b2x, type: agent_task, prompt: "after b2" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b1 }
+  - { from: start, to: b2 }
+  - { from: a, to: j }
+  - { from: b1, to: b1x, condition: { type: node_status, node: b1, equals: success } }
+  - { from: b2, to: b2x, condition: { type: node_status, node: b2, equals: success } }
+  - { from: b1x, to: j }
+  - { from: b2x, to: j }
+  - { from: j, to: done }
+"#;
+
+/// Drives `id` supervised, answers the wake on `b1` with `first` and the wake
+/// on `b2` with a retry, and returns the outcome and the journal.
+fn two_failures_answered(id: &'static str, yaml: &str, first: Control) -> (RunStatus, Vec<Event>) {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), id, yaml);
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), id, opts);
+    let run_dir = find_run_dir(dir.path(), &format!("{id}-"));
+    wait_for_wake_on(&run_dir, "b1");
+    post_control(&run_dir, first).unwrap();
+    wait_for_wake_on(&run_dir, "b2");
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b2".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    (res.outcome, read_all(&run_dir).unwrap())
+}
+
+fn last_index_of(events: &[Event], pred: impl Fn(&EventPayload) -> bool) -> usize {
+    events
+        .iter()
+        .rposition(|e| pred(&e.payload))
+        .expect("event in the log")
+}
+
+fn revivals(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::NodesRevived { from_node, .. } => Some(from_node.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_continue_from_does_not_start_the_join_before_the_retried_branch() {
+    let (outcome, events) = two_failures_answered(
+        "supcr",
+        WF_SUPERVISED_CONTINUE_AND_RETRY,
+        Control::ContinueFrom { node: "b1x".into() },
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    // `b1x` and what it leads to never ran, so only `b2`'s re-run revives
+    // anything.
+    assert_eq!(revivals(&events), ["b2"]);
+    let b2x_done = last_index_of(
+        &events,
+        |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "b2x"),
+    );
+    assert!(
+        b2x_done < node_started_at(&events, "j"),
+        "the join started before the retried branch delivered"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn two_retried_batch_members_both_deliver_before_the_join() {
+    let (outcome, events) = two_failures_answered(
+        "suptr",
+        WF_SUPERVISED_TWO_RETRIES,
+        Control::Retry {
+            node: "b1".into(),
+            prompt_override: None,
+        },
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(revivals(&events), ["b1", "b2"]);
+    let j_start = node_started_at(&events, "j");
+    for n in ["b1x", "b2x"] {
+        assert!(
+            node_finished_at(&events, n) < j_start,
+            "the join started before {n}"
+        );
+    }
+    for n in ["j", "b1x", "b2x"] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n)
+                )
+                .count(),
+            1,
+            "{n} ran more than once"
+        );
+    }
+}
+
+// Scenario 2c'': a SEQUENTIAL park (the failing node runs on its own, the
+// sibling `b` waits behind it on the frontier). The supervisor continues at
+// `c2`; the join `j2` waits for the pending sibling and runs once. The
+// revival the park applies (round 3) must not add a second `j2` run.
+const WF_SUPERVISED_SEQUENTIAL_CONTINUE: &str = r#"
+schema: 1
+id: supseq
+name: Supervised sequential continue
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: s, type: prompt, prompt: "split" }
+  - { id: c, type: agent_task, prompt: "branch flaky1" }
+  - { id: b, type: prompt, prompt: "sibling" }
+  - { id: c2, type: prompt, prompt: "after c" }
+  - { id: j2, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: s }
+  - { from: s, to: c }
+  - { from: s, to: b }
+  - { from: c, to: c2, condition: { type: node_status, node: c, equals: success } }
+  - { from: b, to: j2 }
+  - { from: c2, to: j2 }
+  - { from: j2, to: done }
+"#;
+
+/// Drives `id` supervised and answers the first wake, on `node`, with
+/// `directive`; returns the outcome and the journal.
+fn one_failure_answered(
+    id: &'static str,
+    yaml: &str,
+    node: &'static str,
+    directive: Control,
+) -> (RunStatus, Vec<Event>) {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), id, yaml);
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), id, opts);
+    let run_dir = find_run_dir(dir.path(), &format!("{id}-"));
+    wait_for_wake_on(&run_dir, node);
+    post_control(&run_dir, directive).unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    (res.outcome, read_all(&run_dir).unwrap())
+}
+
+fn started_count(events: &[Event], n: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n))
+        .count()
+}
+
+/// The sequential park, answered with a continue-from (nothing it leads to
+/// has run, so nothing is revived) and with a retry of `c` (`c` has a
+/// result, so its re-run is journaled as a revival). Either way `j2` waits
+/// for the pending sibling and runs once. A routing change cannot be
+/// observed here: the directed node is the next one the drive runs, so no
+/// decision weighs the earlier state in between; the batch and resume tests
+/// cover that.
+#[test]
+fn a_sequential_continue_from_runs_the_join_once_after_the_pending_sibling() {
+    for (directive, revived) in [
+        (Control::ContinueFrom { node: "c2".into() }, vec![]),
+        (
+            Control::Retry {
+                node: "c".into(),
+                prompt_override: None,
+            },
+            vec!["c"],
+        ),
+    ] {
+        let label = format!("{directive:?}");
+        let (outcome, events) =
+            one_failure_answered("supseq", WF_SUPERVISED_SEQUENTIAL_CONTINUE, "c", directive);
+        assert_eq!(outcome, RunStatus::Succeeded, "{label}");
+        assert_eq!(revivals(&events), revived, "{label}");
+        let j2 = node_started_at(&events, "j2");
+        assert!(node_finished_at(&events, "c2") < j2, "{label}");
+        assert!(node_finished_at(&events, "b") < j2, "{label}");
+        assert_eq!(started_count(&events, "j2"), 1, "{label}");
+    }
+}
+
+// Round 4: a supervised failure with its own failure edge (`f -> h`, a
+// rollback, say). The supervisor moves the run to `s` instead; `h` is the
+// route it decided against and must not run, sequentially or in a batch.
+const WF_SUPERVISED_FAILURE_EDGE: &str = r#"
+schema: 1
+id: supfe
+name: Supervised failure edge
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: f, type: agent_task, prompt: "branch flaky1" }
+  - { id: s, type: prompt, prompt: "instead" }
+  - { id: h, type: prompt, prompt: "rollback" }
+  - { id: done, type: finish, outcome: success }
+  - { id: rolled, type: finish, outcome: failure }
+edges:
+  - { from: start, to: f }
+  - { from: f, to: s, condition: { type: node_status, node: f, equals: success } }
+  - { from: f, to: h, condition: { type: node_status, node: f, equals: failure } }
+  - { from: s, to: done }
+  - { from: h, to: rolled }
+"#;
+
+const WF_SUPERVISED_FAILURE_EDGE_BATCH: &str = r#"
+schema: 1
+id: supfb
+name: Supervised failure edge in a batch
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: f, type: agent_task, prompt: "branch flaky1" }
+  - { id: g, type: agent_task, prompt: "branch steady" }
+  - { id: s, type: prompt, prompt: "instead" }
+  - { id: h, type: prompt, prompt: "rollback" }
+  - { id: k, type: prompt, prompt: "after g" }
+  - { id: done, type: finish, outcome: success }
+  - { id: rolled, type: finish, outcome: failure }
+edges:
+  - { from: start, to: f }
+  - { from: start, to: g }
+  - { from: f, to: s, condition: { type: node_status, node: f, equals: success } }
+  - { from: f, to: h, condition: { type: node_status, node: f, equals: failure } }
+  - { from: g, to: k }
+  - { from: s, to: done }
+  - { from: k, to: done }
+  - { from: h, to: rolled }
+"#;
+
+#[test]
+fn a_continue_from_does_not_take_the_parked_nodes_failure_edge() {
+    for (id, yaml) in [
+        ("supfe", WF_SUPERVISED_FAILURE_EDGE),
+        ("supfb", WF_SUPERVISED_FAILURE_EDGE_BATCH),
+    ] {
+        let (outcome, events) =
+            one_failure_answered(id, yaml, "f", Control::ContinueFrom { node: "s".into() });
+        assert_eq!(outcome, RunStatus::Succeeded, "{id}");
+        assert_eq!(started_count(&events, "h"), 0, "{id}: the rollback ran");
+        assert_eq!(started_count(&events, "s"), 1, "{id}");
+    }
 }
 
 // Scenario 2d: a join whose input already failed must be FAILED and woken on,
@@ -882,4 +1314,99 @@ fn resumed_agent_supervised_run_still_parks_for_its_supervisor() {
         wakes, 2,
         "the resumed run must park for its supervisor, not fail autonomously"
     );
+}
+
+// Round 7 item 1: a supersede at a review gate puts back the heads the
+// superseded revival had dropped. `g` approved, `deploy` (an agent, beside
+// the `prompt` sibling `docs`, so it runs alone) fails and parks with `docs`
+// waiting. The supervisor continues at `g` (revives `g`, drops `docs`); at
+// the gate it retries `deploy`, which supersedes `g`'s owed re-run: `g`
+// reads approved again and `docs` must run before the join.
+const WF_SUPERSEDE_AT_GATE: &str = r#"
+schema: 1
+id: supgate
+name: Supersede at a gate
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: g, type: human_review, options: [approve, reject] }
+  - { id: deploy, type: agent_task, prompt: "branch flaky1" }
+  - { id: docs, type: prompt, prompt: "docs" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: g }
+  - { from: g, to: deploy }
+  - { from: g, to: docs }
+  - { from: deploy, to: j }
+  - { from: docs, to: j }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn a_supersede_at_a_gate_puts_back_the_sibling_the_earlier_revival_dropped() {
+    use apb_engine::review::{ReviewCommand, post_review};
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supgate", WF_SUPERSEDE_AT_GATE);
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supgate", opts);
+    let run_dir = find_run_dir(dir.path(), "supgate-");
+    let requests = |run_dir: &Path| {
+        read_all(run_dir)
+            .map(|evs| {
+                evs.iter()
+                    .filter(|e| matches!(&e.payload, EventPayload::ReviewRequested { .. }))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let approve = |run_dir: &Path| {
+        post_review(
+            run_dir,
+            ReviewCommand {
+                node: "g".into(),
+                decision: "approve".into(),
+                note: String::new(),
+            },
+        )
+        .unwrap();
+    };
+    poll_until("the first review request", || {
+        (requests(&run_dir) == 1).then_some(())
+    });
+    approve(&run_dir);
+    wait_for_wake_on(&run_dir, "deploy");
+    post_control(&run_dir, Control::ContinueFrom { node: "g".into() }).unwrap();
+    poll_until("the gate asks again", || {
+        (requests(&run_dir) == 2).then_some(())
+    });
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "deploy".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started_count(&events, "docs"), 1, "docs never ran");
+    assert_eq!(started_count(&events, "j"), 1);
+    assert!(node_finished_at(&events, "docs") < node_started_at(&events, "j"));
 }

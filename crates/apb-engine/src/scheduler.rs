@@ -63,6 +63,7 @@ mod quota_probe;
 mod rebind;
 mod resume;
 mod review_gate;
+mod revive;
 mod skills_copy;
 mod status_file;
 mod supervisor;
@@ -102,6 +103,7 @@ pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
 };
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
+use revive::{reoffer_revived_joins, restore_revived_frontier};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -544,6 +546,14 @@ fn drive_inner(
         // status and outputs (exactly the normal post-node advancement), then
         // start from the first ready successor.
         StartMode::After => {
+            // A node a re-run revived has no result of this pass to advance
+            // from (issue #203): its old output would fire its edges again.
+            if !entry_state.current_status(&start_node).is_finished() {
+                return Err(EngineError::Invalid(format!(
+                    "node `{start_node}` {} - resume re-runs it",
+                    revive::why_not_finished(&entry_state, &start_node)
+                )));
+            }
             // The outstanding heads are handed in as extra active nodes so a
             // sibling branch that never started blocks a join here instead of
             // being written off as dead.
@@ -601,7 +611,27 @@ fn drive_inner(
     // actually executes them. Informing the seed above is not enough: every later
     // advance derives liveness from the frontier, so a head that is not in it
     // flips to dead at the next step and its joins fire without it.
-    restore_frontier(&playbook, &entry_state, &current, &mut frontier);
+    //
+    // An operator's re-run (`--from-node`) executes `current` again, so it
+    // and everything only downstream of it read as not yet run (issue #203):
+    // otherwise a join fed by its branch is weighed against the old pass,
+    // written off as dead, and starts together with the re-run node. An
+    // automatic restart of interrupted work revives nothing: the nodes after
+    // it may already have run in this pass, and their routing is real. A
+    // revival an earlier drive journaled stays in the fold either way.
+    match start_mode {
+        StartMode::Rerun if revive::operator_rerun(&entry_events, &current) => {
+            restore_revived_frontier(
+                log,
+                &playbook,
+                &entry_events,
+                std::slice::from_ref(&current),
+                &mut frontier,
+                &[],
+            )?
+        }
+        _ => restore_frontier(&playbook, &entry_state, &current, &mut frontier),
+    }
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
     // the validator (V11) only requires that a loop pass through such a node,
@@ -1515,14 +1545,31 @@ fn drive_inner(
                             // rebuilt from the journal - the same contract a
                             // resume uses, and the reason a park that clears the
                             // frontier does not lose the other branches.
+                            // Every directive re-executes its node, so the
+                            // rebuild weighs joins against the revived view
+                            // (issue #203), as a re-run resume does.
+                            // The failed members the directives moved
+                            // away from: their own routing is overridden.
+                            let parked: Vec<String> =
+                                failed.iter().map(|(n, _, _)| n.clone()).collect();
+                            let mut starts = vec![next.clone()];
                             current = next;
                             for t in also {
+                                if !starts.contains(&t) {
+                                    starts.push(t.clone());
+                                }
                                 if !frontier.contains(&t) {
                                     frontier.push(t);
                                 }
                             }
-                            let after = RunState::fold(&read_all(run_dir)?);
-                            restore_frontier(&playbook, &after, &current, &mut frontier);
+                            restore_revived_frontier(
+                                log,
+                                &playbook,
+                                &read_all(run_dir)?,
+                                &starts,
+                                &mut frontier,
+                                &parked,
+                            )?;
                             continue;
                         }
                     }
@@ -1582,6 +1629,7 @@ fn drive_inner(
                     advance_frontier(&playbook, node, &state_now, &mut frontier, &batch, log)?;
                 }
                 reoffer_joins(&playbook, run_dir, log, &advanced, &batch, &mut frontier)?;
+                reoffer_revived_joins(&playbook, &state_now, log, &current, &batch, &mut frontier)?;
                 for f in &fork_failures {
                     fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
                 }
@@ -1713,6 +1761,17 @@ fn drive_inner(
                         &mut current,
                         entry.cmd,
                         entry.seq,
+                    )?;
+                    // The directed node runs again: the same revival as a
+                    // batch retry (issue #203), but no head rebuild, the
+                    // frontier is still the drive's own.
+                    revive::revive(
+                        log,
+                        &playbook,
+                        &read_all(run_dir)?,
+                        std::slice::from_ref(&current),
+                        &mut frontier,
+                        &[],
                     )?;
                     continue;
                 }
@@ -2490,7 +2549,23 @@ fn drive_inner(
                 decisions.as_ref(),
             )? {
                 WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
-                WakeOutcome::Resumed => continue,
+                // Every directive the park resumes on (a retry, a
+                // continue-from, a patch) runs `current` again: the same
+                // revival as a batch retry (issue #203).
+                // No head rebuild: the frontier is still the drive's own,
+                // and the parked node's own routing is what the directive
+                // decided against.
+                WakeOutcome::Resumed => {
+                    revive::revive(
+                        log,
+                        &playbook,
+                        &read_all(run_dir)?,
+                        std::slice::from_ref(&current),
+                        &mut frontier,
+                        &[],
+                    )?;
+                    continue;
+                }
             }
         }
 
@@ -2607,6 +2682,10 @@ fn drive_inner(
         }
 
         advance_frontier(&playbook, &current, &state_now, &mut frontier, &[], log)?;
+        // Before the fork policy settles, as on the batch path: `state_now`
+        // predates the settle, so a join it cancels must already be on the
+        // frontier for the settle to see it, never pushed back after it.
+        reoffer_revived_joins(&playbook, &state_now, log, &current, &[], &mut frontier)?;
         if let Some(f) = &fork_failure {
             fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
         }

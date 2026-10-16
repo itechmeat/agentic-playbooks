@@ -99,6 +99,37 @@ describe('runEventJournal notes', () => {
       'join `j` refused',
     ])
   })
+
+  it('names the inputs a join wrote off and a re-run revived (issue #203)', () => {
+    const fixture: WfEvent[] = [
+      { seq: 1, ts: 1, type: 'join_input_dead', node: 'j', sources: ['c2'] },
+      { seq: 2, ts: 2, type: 'join_input_revived', node: 'j', sources: ['c2', 'c3'], from_node: 'c' },
+      // Every field of the record defaults, so an empty `from_node` is legal.
+      { seq: 3, ts: 3, type: 'join_input_revived', node: 'j', sources: ['c2'] },
+      // Empty or missing sources never render an empty list.
+      { seq: 4, ts: 4, type: 'join_input_revived', node: 'j', sources: [] },
+      { seq: 5, ts: 5, type: 'join_input_revived', node: 'j' },
+      { seq: 6, ts: 6, type: 'join_input_dead', node: 'j' },
+      { seq: 7, ts: 7, type: 'nodes_revived', from_node: 'c', nodes: ['c', 'c2', 'j'] },
+      { seq: 8, ts: 8, type: 'nodes_revived', from_node: 'c' },
+      { seq: 9, ts: 9, type: 'nodes_revived', nodes: ['c'] },
+      { seq: 10, ts: 10, type: 'join_input_revived', sources: ['c2'] },
+      { seq: 11, ts: 11, type: 'join_input_dead', sources: ['c2'] },
+    ]
+    expect(runEventJournal(fixture).map((e) => e.note)).toEqual([
+      'j proceeds without c2',
+      'j waits for c2, c3 again (re-run of c)',
+      'j waits for c2 again',
+      'j waits for its revived inputs again',
+      'j waits for its revived inputs again',
+      undefined,
+      're-run of c revives c, c2, j',
+      undefined,
+      'a re-run revives c',
+      undefined,
+      undefined,
+    ])
+  })
 })
 
 describe('wake triage note', () => {
