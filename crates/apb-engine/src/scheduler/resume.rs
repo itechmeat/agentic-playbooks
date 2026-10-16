@@ -630,7 +630,12 @@ fn try_journal_resumed(
 /// the run again while a `--keep-lock` pause holds it, else released by the
 /// guard. A journal that cannot be read falls back to what the lock was
 /// when the resume took it (the run's own parked lock is parked again).
+/// Decided and parked under the run's event lock, so a stop that lands in
+/// between cannot leave a parked lock behind a stopped run.
 fn give_lock_back(run_dir: &Path, run_id: &str, guard: &mut Option<crate::workdir::WorkdirGuard>) {
+    // Best effort, like `stop`: a lock we could not take must not keep the
+    // resume from giving the workdir back.
+    let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK).ok();
     let keep = match read_all(run_dir) {
         Ok(events) => {
             RunState::fold(&events).run_status == RunStatus::Paused
@@ -907,4 +912,55 @@ pub fn record_run_error(
         reason: reason.to_string(),
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pause::PauseRequest;
+    use crate::workdir::{LockOwner, lock_owner};
+
+    /// A stop journaled while a failed resume is about to re-park the lock
+    /// must win: the resume decides only once the stop has finished.
+    #[test]
+    fn a_stop_landing_before_the_lock_goes_back_leaves_no_parked_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let run_dir = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+        })
+        .unwrap();
+        log.append(
+            PauseRequest {
+                by: Some(PauseBy::Operator),
+                keep_lock: true,
+                ..Default::default()
+            }
+            .to_event(),
+        )
+        .unwrap();
+        let guard = crate::workdir::acquire(root.path(), false).unwrap();
+        // The stop holds the event lock while it journals the abort.
+        let stop_lock = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK).unwrap();
+        let dir = run_dir.clone();
+        let resume = std::thread::spawn(move || {
+            let mut guard = guard;
+            give_lock_back(&dir, "r1", &mut guard);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        log.append(EventPayload::RunAborted {
+            reason: "stopped".into(),
+        })
+        .unwrap();
+        drop(stop_lock);
+        resume.join().unwrap();
+        let owner = lock_owner(&root.path().join(".apb/workdir.lock"));
+        assert!(
+            !matches!(owner, Some(LockOwner::PausedRun(_))),
+            "a stopped run must not keep a parked lock, got {owner:?}"
+        );
+    }
 }
