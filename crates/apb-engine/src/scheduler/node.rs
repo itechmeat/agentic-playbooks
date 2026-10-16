@@ -1470,13 +1470,7 @@ fn execute_node_kind(
                         // attempt, so the continued session cannot hand a
                         // modified bundle to itself either.
                         if isolated {
-                            for sub in [".agents/skills", ".claude/skills"] {
-                                match std::fs::remove_dir_all(wd.join(sub)) {
-                                    Ok(()) => {}
-                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                                    Err(e) => return Err(e.into()),
-                                }
-                            }
+                            super::skills_copy::clear_isolated_skills(wd)?;
                             super::skills_copy::materialize_isolated_skills(run_dir, &entry, wd)?;
                         }
                         wd.clone()
