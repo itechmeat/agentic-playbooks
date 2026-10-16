@@ -485,3 +485,129 @@ fn a_legacy_edge_traversed_line_still_counts() {
     assert_eq!(s.edge_counts.get(&("a".into(), "b".into())), Some(&1));
     assert!(s.journaled_hops.contains(&("a".into(), "b".into())));
 }
+
+/// Issue #203: the fold-level revival. A journal of a first pass (`c`
+/// delivered through `c2` into `j`, which ran into `done`; `c` and `b` fork
+/// marks; `j` refused once) ending right after `nodes_revived` for `c`.
+fn revival_journal() -> Vec<EventPayload> {
+    let finished = |node: &str, status: &str| {
+        [
+            EventPayload::NodeStarted {
+                node: node.into(),
+                attempt: 1,
+            },
+            EventPayload::NodeFinished {
+                node: node.into(),
+                status: status.into(),
+                attempt: 1,
+                output: format!("{node} out"),
+                artifacts: Vec::new(),
+            },
+        ]
+    };
+    let hop = |from: &str, to: &str, uncounted: bool| EventPayload::EdgeTraversed {
+        from: from.into(),
+        to: to.into(),
+        via_policy: false,
+        uncounted,
+    };
+    let mut e = vec![run_started("p")];
+    e.extend(finished("b", "succeeded"));
+    e.push(hop("b", "j", true));
+    e.extend(finished("c", "succeeded"));
+    e.push(hop("c", "c2", false));
+    e.extend(finished("c2", "succeeded"));
+    e.push(hop("c2", "j", true));
+    e.push(EventPayload::NodeStarted {
+        node: "j".into(),
+        attempt: 1,
+    });
+    e.push(EventPayload::JoinRefused {
+        node: "j".into(),
+        sources: vec!["c2".into()],
+        reason: "test".into(),
+    });
+    e.push(EventPayload::NodeFinished {
+        node: "j".into(),
+        status: "succeeded".into(),
+        attempt: 1,
+        output: "j out".into(),
+        artifacts: Vec::new(),
+    });
+    e.push(hop("j", "done", true));
+    for n in ["b", "c"] {
+        e.push(EventPayload::BranchFailed {
+            fork: "start".into(),
+            node: n.into(),
+            policy: "fail_fast".into(),
+            target: None,
+        });
+    }
+    e.push(EventPayload::NodesRevived {
+        from_node: "c".into(),
+        nodes: ["c", "c2", "j", "done"].map(String::from).to_vec(),
+    });
+    e
+}
+
+fn fold_of(payloads: &[EventPayload]) -> RunState {
+    let events: Vec<Event> = payloads
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ev(i as u64, p.clone()))
+        .collect();
+    RunState::fold(&events)
+}
+
+#[test]
+fn nodes_revived_keeps_history_and_changes_only_routing() {
+    let all = revival_journal();
+    let without: Vec<EventPayload> = all[..all.len() - 1].to_vec();
+    let s = fold_of(&all);
+    let old = fold_of(&without);
+    // The history every surface reports is untouched.
+    assert_eq!(s.nodes, old.nodes);
+    assert_eq!(s.outputs, old.outputs);
+    assert_eq!(s.edge_counts, old.edge_counts);
+    assert_eq!(s.finished_counts, old.finished_counts);
+    // Routing reads the revived nodes as not yet run.
+    assert_eq!(s.nodes.get("j"), Some(&NodeStatus::Succeeded));
+    assert_eq!(s.current_status("j"), NodeStatus::Pending);
+    assert_eq!(s.current_status("c"), NodeStatus::Pending);
+    assert_eq!(s.current_status("b"), NodeStatus::Succeeded);
+    // Hops and marks are dropped for revived nodes only.
+    for hop in [("c", "c2"), ("c2", "j"), ("j", "done")] {
+        assert!(old.journaled_hops.contains(&(hop.0.into(), hop.1.into())));
+        assert!(!s.journaled_hops.contains(&(hop.0.into(), hop.1.into())));
+    }
+    assert!(s.journaled_hops.contains(&("b".into(), "j".into())));
+    assert!(old.route_suppressed.contains("c") && !s.route_suppressed.contains("c"));
+    assert!(s.route_suppressed.contains("b"));
+    assert!(old.refused_joins.contains("j") && !s.refused_joins.contains("j"));
+    assert_eq!(
+        s.revival_starts.iter().collect::<Vec<_>>(),
+        [&"c".to_string()]
+    );
+}
+
+#[test]
+fn a_revived_node_leaves_the_revival_when_it_starts_or_finishes_again() {
+    let mut all = revival_journal();
+    all.push(EventPayload::NodeStarted {
+        node: "c".into(),
+        attempt: 1,
+    });
+    let s = fold_of(&all);
+    assert!(!s.revived.contains("c") && s.revival_starts.is_empty());
+    assert_eq!(s.current_status("c"), NodeStatus::Running);
+    assert!(s.revived.contains("j"));
+    // A finish node without a prompt journals only its finish.
+    all.push(EventPayload::NodeFinished {
+        node: "done".into(),
+        status: "succeeded".into(),
+        attempt: 1,
+        output: String::new(),
+        artifacts: Vec::new(),
+    });
+    assert!(!fold_of(&all).revived.contains("done"));
+}

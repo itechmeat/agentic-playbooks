@@ -102,3 +102,21 @@ fn join_input_revived_has_its_own_tag_and_defaults_every_field() {
             if node.is_empty() && sources.is_empty() && from_node.is_empty()
     ));
 }
+
+#[test]
+fn nodes_revived_has_its_own_tag_and_defaults_every_field() {
+    let p = EventPayload::NodesRevived {
+        from_node: "c".into(),
+        nodes: vec!["c".into(), "j".into()],
+    };
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(s.contains(r#""type":"nodes_revived""#), "{s}");
+    assert!(!p.is_checkpoint());
+    let back: EventPayload = serde_json::from_str(&s).unwrap();
+    assert_eq!(format!("{back:?}"), format!("{p:?}"));
+    let bare: EventPayload = serde_json::from_str(r#"{"type":"nodes_revived"}"#).unwrap();
+    assert!(matches!(
+        bare,
+        EventPayload::NodesRevived { from_node, nodes } if from_node.is_empty() && nodes.is_empty()
+    ));
+}

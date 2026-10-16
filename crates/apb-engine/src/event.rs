@@ -963,19 +963,18 @@ pub enum EventPayload {
         #[serde(default)]
         sources: Vec<String>,
     },
-    /// A drive about to execute `from_node` again (a `--from-node` resume, a
-    /// restart, a supervisor retry) found that an earlier `JoinInputDead`
-    /// write-off of the join `node` no longer holds: `sources` can arrive again
-    /// because they are `from_node` or downstream of it (issue #203). The join
-    /// is weighed against that revived view and waits for them.
+    /// A revival (`NodesRevived`) made an earlier `JoinInputDead` write-off
+    /// of the join `node` obsolete: `sources` can arrive again because they
+    /// are `from_node` or downstream of it (issue #203). The join is weighed
+    /// against the revived view and waits for them.
     ///
-    /// Pure observability: the readiness verdict is recomputed from the
-    /// journal, never from this record, so an older binary skipping it folds
-    /// the same state. Additive: fields default and old logs never carry it.
-    /// A checkpoint (the re-run node's `NodeFinished`, or a `RunPaused`)
-    /// follows it unless the driver is killed in between; then, as with any
-    /// newer event such as `JoinInputDead`, only an apb that knows the event
-    /// can continue the run.
+    /// Pure observability: the readiness verdict comes from the fold of
+    /// `NodesRevived`, never from this record, and the fold ignores it.
+    /// Additive: fields default and old logs never carry it. It is written
+    /// right after the `NodesRevived` it belongs to, so an older binary that
+    /// skips both routes the run as 0.25.0 did (see `NodesRevived`), not as
+    /// this binary does. A checkpoint follows it unless the driver is killed
+    /// in between.
     JoinInputRevived {
         #[serde(default)]
         node: String,
@@ -984,13 +983,16 @@ pub enum EventPayload {
         #[serde(default)]
         from_node: String,
     },
-    /// A drive is about to execute `from_node` again (a `--from-node`
-    /// resume, a restart, a supervisor retry or continue-from), and with it
+    /// A drive is about to execute `from_node` again on an operator's or a
+    /// supervisor's word (an explicit `--from-node` resume, a supervisor
+    /// retry, continue-from, patch, or a move off a review gate; an automatic
+    /// restart of interrupted work revives nothing), and with it
     /// `nodes`: `from_node` and every node only downstream of it (issue
     /// #203). From here on the fold reads each of them as not yet run for
     /// routing and join readiness (`RunState::revived`) until it starts
-    /// again: its earlier result stays in the run's history, its journaled
-    /// hops and policy marks are dropped. Every later readiness decision of
+    /// or finishes again: its earlier result stays in the run's history, its
+    /// journaled hops and policy marks are dropped. A `from_node` that has not
+    /// started again is a re-run the drive owes: a resume re-runs it. Every later readiness decision of
     /// the drive (each advance, a batch tail, a later resume) sees the same
     /// view, so a join fed by a revived branch waits for it.
     ///
@@ -998,8 +1000,11 @@ pub enum EventPayload {
     /// a result, a hop or a mark), so a fresh run never carries it. Additive:
     /// fields default, old logs never carry it. An older apb skips it and
     /// folds the earlier results back in, which is the routing before this
-    /// fix, not a corrupt state. A checkpoint follows it unless the driver is
-    /// killed in between.
+    /// fix, not a corrupt state; a run revived by this binary must therefore
+    /// not be driven by 0.25.0 or older. Every node an older binary did run
+    /// leaves the revival on its own `NodeStarted`/`NodeFinished`, so this
+    /// binary resuming after it does not mis-route. A checkpoint follows it
+    /// unless the driver is killed in between.
     NodesRevived {
         #[serde(default)]
         from_node: String,

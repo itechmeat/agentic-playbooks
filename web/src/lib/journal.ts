@@ -129,7 +129,8 @@ function eventNote(e: WfEvent): string | undefined {
     }
     case 'nodes_revived': {
       const list = listOf(r.nodes)
-      return list ? `re-run of ${String(r.from_node ?? '')} revives ${list}` : undefined
+      if (!list) return undefined
+      return r.from_node ? `re-run of ${String(r.from_node)} revives ${list}` : `a re-run revives ${list}`
     }
     case 'worktree_resolved':
       return typeof r.path === 'string'

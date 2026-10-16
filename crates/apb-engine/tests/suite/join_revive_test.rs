@@ -8,10 +8,14 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
+use apb_engine::control::{Control, post_control};
 use apb_engine::event::{Event, EventPayload, read_all};
-use apb_engine::scheduler::{RunOptions, resume, run};
+use apb_engine::pause::{PauseMode, PauseRequest};
+use apb_engine::review::{ReviewCommand, post_review};
+use apb_engine::scheduler::{RunOptions, plan_resume, resume, run};
 use apb_engine::state::{RunState, RunStatus};
 
 /// The report's shape: `b` delivers into the implicit join `j` before `c`
@@ -70,14 +74,19 @@ edges:
 
 const PASS: &str = "pass";
 
+/// Touched by a wait that ran out of time, so a test can tell a timed-out
+/// wait (exit 97) from a script that failed on purpose.
+const TIMED_OUT: &str = "wait-timed-out";
+
 /// A script line that waits (at most 30 s) until the run's journal shows
 /// `node` finished, so the branch order of the first pass is a condition, not
-/// a race against a sleep.
+/// a race against a sleep. On timeout it touches [`TIMED_OUT`] and exits 97.
 fn after_finished(root: &Path, node: &str) -> String {
     format!(
         "i=0; until grep -qs '\"type\":\"node_finished\",\"node\":\"{node}\"' '{runs}'/*/events.jsonl; do \
-         i=$((i+1)); if [ $i -ge 600 ]; then echo 'timed out waiting for {node} to finish' >&2; exit 97; fi; sleep 0.05; done\n",
-        runs = root.join(".apb/runs").display()
+         i=$((i+1)); if [ $i -ge 600 ]; then echo 'timed out waiting for {node} to finish' >&2; : > '{sentinel}'; exit 97; fi; sleep 0.05; done\n",
+        runs = root.join(".apb/runs").display(),
+        sentinel = root.join(TIMED_OUT).display(),
     )
 }
 
@@ -113,6 +122,11 @@ fn report_scripts(root: &Path) -> Vec<(&'static str, String)> {
             format!("{}{}", after_finished(root, "b"), gate(root)),
         ),
         ("slow.sh", format!("{}echo ok\n", after_finished(root, "c"))),
+        // `notify` of DIAMOND_NOTIFY: finishes only after the join did.
+        (
+            "after_j.sh",
+            format!("{}echo ok\n", after_finished(root, "j")),
+        ),
     ]
 }
 
@@ -125,14 +139,11 @@ fn fail_then_resume(
     scripts: &[(&str, String)],
     from: &str,
     pass: bool,
+    first_outcome: RunStatus,
 ) -> (RunStatus, Vec<Event>, Vec<Event>) {
     seed(root, yaml, scripts);
     let first = run(root, "jr", None, RunOptions::default()).unwrap();
-    // DIAMOND_NOTIFY's first pass may end through `done`: its failure route
-    // starts with a non-finish step, so the join's route can win the race.
-    if yaml != DIAMOND_NOTIFY {
-        assert_eq!(first.outcome, RunStatus::Failed);
-    }
+    assert_eq!(first.outcome, first_outcome, "the first pass");
     let run_dir = root.join(".apb/runs").join(&first.run_id);
     let before = read_all(&run_dir).unwrap();
     if pass {
@@ -144,16 +155,19 @@ fn fail_then_resume(
         .iter()
         .rposition(|e| matches!(e.payload, EventPayload::RunResumed { .. }))
         .expect("the resume journals run_resumed");
+    assert!(!root.join(TIMED_OUT).exists(), "a script wait timed out");
     (res.outcome, before, all[resumed_at..].to_vec())
 }
 
+/// [`fail_then_resume`] from `c` with the REPORT/DIAMOND scripts, the first
+/// pass failing.
 fn fail_then_resume_from_c(
     root: &Path,
     yaml: &str,
     pass: bool,
 ) -> (RunStatus, Vec<Event>, Vec<Event>) {
     let scripts = report_scripts(root);
-    fail_then_resume(root, yaml, &scripts, "c", pass)
+    fail_then_resume(root, yaml, &scripts, "c", pass, RunStatus::Failed)
 }
 
 fn starts_of(events: &[Event], node: &str) -> usize {
@@ -343,7 +357,9 @@ fn a_rerun_that_fails_again_writes_a_join_that_never_ran_off_again() {
     assert!(started_at(&resumed, "j").is_none());
 }
 
-/// DIAMOND with a non-finish step on `c`'s failure route.
+/// DIAMOND with a non-finish step on `c`'s failure route. `notify` finishes
+/// only after the join did, so the first pass ends through `done`
+/// (succeeded) every time: the join's route reaches its finish first.
 const DIAMOND_NOTIFY: &str = r#"
 schema: 2
 id: jr
@@ -355,7 +371,7 @@ nodes:
   - { id: b, type: script, script: "scripts/slow.sh", runner: sh }
   - { id: c, type: script, script: "scripts/gate.sh", runner: sh }
   - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
-  - { id: notify, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: notify, type: script, script: "scripts/after_j.sh", runner: sh }
   - { id: done, type: finish, outcome: success }
   - { id: failed, type: finish, outcome: failure }
 edges:
@@ -403,23 +419,48 @@ edges:
 /// the same old inputs.
 #[test]
 fn a_join_that_ran_before_is_not_rerun_when_the_revived_branch_does_not_deliver() {
-    for (yaml, pass, outcome, finish) in [
-        (DIAMOND_NOTIFY, false, RunStatus::Failed, "failed"),
-        (DIAMOND_AWAY, true, RunStatus::Succeeded, "away"),
+    for (case, yaml, pass, first, outcome, finish) in [
+        (
+            "dies again through notify",
+            DIAMOND_NOTIFY,
+            false,
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            "failed",
+        ),
+        (
+            "passes and routes away",
+            DIAMOND_AWAY,
+            true,
+            RunStatus::Failed,
+            RunStatus::Succeeded,
+            "away",
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let (got, before, resumed) = fail_then_resume_from_c(root, yaml, pass);
-        assert_eq!(starts_of(&before, "j"), 1, "the first pass ran the join");
-        assert_eq!(got, outcome);
-        assert!(finished_at(&resumed, "c").is_some());
+        let scripts = report_scripts(root);
+        let (got, before, resumed) = fail_then_resume(root, yaml, &scripts, "c", pass, first);
+        assert_eq!(
+            starts_of(&before, "j"),
+            1,
+            "{case}: the first pass ran the join"
+        );
+        assert_eq!(got, outcome, "{case}");
+        assert!(finished_at(&resumed, "c").is_some(), "{case}: c re-ran");
         assert_eq!(
             starts_of(&resumed, "j"),
             0,
-            "the join ran twice on its old inputs"
+            "{case}: the join ran twice on its old inputs"
         );
-        assert!(finished_at(&resumed, finish).is_some());
-        assert!(finished_at(&resumed, "done").is_none());
+        assert!(
+            finished_at(&resumed, finish).is_some(),
+            "{case}: {finish} ended it"
+        );
+        assert!(
+            finished_at(&resumed, "done").is_none(),
+            "{case}: a stale done"
+        );
     }
 }
 
@@ -455,13 +496,15 @@ edges:
 fn loop_scripts(root: &Path) -> Vec<(&'static str, String)> {
     vec![
         ("gate.sh", gate(root)),
-        // `x` of LOOP_JOIN: a passing re-run takes a second, so the join that
-        // runs on `y`'s old arrival visibly runs alongside it.
+        // `x` of LOOP_JOIN: a passing run finishes only after the join did,
+        // so the join that runs on `y`'s old arrival visibly runs alongside
+        // the re-run `x` (the next loop pass finds `j` finished already).
         (
             "slowpass.sh",
             format!(
-                "[ -e '{}' ] && sleep 1\n{}",
+                "if [ -e '{}' ]; then\n{}fi\n{}",
                 root.join(PASS).display(),
+                after_finished(root, "j"),
                 gate(root)
             ),
         ),
@@ -480,8 +523,9 @@ fn a_resume_inside_a_loop_does_not_rerun_a_completed_sibling() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let scripts = loop_scripts(root);
-    let (outcome, before, resumed) = fail_then_resume(root, LOOP_FORK, &scripts, "x", true);
-    assert_eq!(finished_at(&before, "y").map(|_| ()), Some(()));
+    let (outcome, before, resumed) =
+        fail_then_resume(root, LOOP_FORK, &scripts, "x", true, RunStatus::Failed);
+    assert!(finished_at(&before, "y").is_some());
     assert_eq!(outcome, RunStatus::Succeeded);
     let a_again = started_at(&resumed, "a").expect("x looped back into a");
     let y_again = started_at(&resumed, "y").expect("the next loop pass ran y");
@@ -528,7 +572,8 @@ fn a_resume_inside_a_loop_keeps_a_first_arrival_merge_on_its_old_input() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let scripts = loop_scripts(root);
-    let (outcome, before, resumed) = fail_then_resume(root, LOOP_JOIN, &scripts, "x", true);
+    let (outcome, before, resumed) =
+        fail_then_resume(root, LOOP_JOIN, &scripts, "x", true, RunStatus::Failed);
     assert!(finished_at(&before, "y").is_some());
     assert!(started_at(&before, "j").is_none());
     assert_eq!(outcome, RunStatus::Succeeded);
@@ -542,4 +587,205 @@ fn a_resume_inside_a_loop_keeps_a_first_arrival_merge_on_its_old_input() {
     assert!(j_first < finished_at(&resumed, "x").unwrap());
     assert!(j_first < a_again);
     assert_eq!(starts_of(&resumed, "j"), 2);
+}
+
+fn count(events: &[Event], pred: impl Fn(&EventPayload) -> bool) -> usize {
+    events.iter().filter(|e| pred(&e.payload)).count()
+}
+
+fn is_revival(p: &EventPayload) -> bool {
+    matches!(p, EventPayload::NodesRevived { .. })
+}
+
+fn drain() -> Control {
+    Control::Pause(PauseRequest {
+        reason: Some("test".into()),
+        by: None,
+        mode: PauseMode::Drain,
+        until: None,
+        keep_lock: false,
+    })
+}
+
+/// Round 3: an automatic restart of interrupted work revives nothing. The
+/// driver died while `c2` ran; the restart re-runs `c2` alone, and the nodes
+/// this pass already ran keep their routing.
+#[test]
+fn an_interrupted_restart_revives_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REPORT, &report_scripts(root));
+    fs::write(root.join(PASS), "").unwrap();
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    assert_eq!(first.outcome, RunStatus::Succeeded);
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    let path = run_dir.join("events.jsonl");
+    let text = fs::read_to_string(&path).unwrap();
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        kept.push(line);
+        if line.contains(r#""type":"node_started","node":"c2""#) {
+            break;
+        }
+    }
+    fs::write(&path, kept.join("\n") + "\n").unwrap();
+    let _ = fs::remove_file(run_dir.join("driver.pid"));
+
+    let res = resume(root, &first.run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(count(&events, is_revival), 0);
+    assert_eq!(starts_of(&events, "j"), 1);
+    assert!(finished_at(&events, "c2").unwrap() < started_at(&events, "j").unwrap());
+}
+
+/// Round 3 hole 1, the drain window: a pause applied before the re-run node
+/// starts leaves its revival standing. The next resume re-runs it (it is
+/// interrupted work, not a node to advance past) and the join still waits.
+#[test]
+fn a_drain_pause_before_the_rerun_starts_keeps_the_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REPORT, &report_scripts(root));
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    assert_eq!(first.outcome, RunStatus::Failed);
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    fs::write(root.join(PASS), "").unwrap();
+    post_control(&run_dir, drain()).unwrap();
+    let paused = resume(root, &first.run_id, Some("c")).unwrap();
+    assert_eq!(paused.outcome, RunStatus::Paused);
+    let events = read_all(&run_dir).unwrap();
+    let resumed_at = events
+        .iter()
+        .rposition(|e| matches!(e.payload, EventPayload::RunResumed { .. }))
+        .unwrap();
+    assert_eq!(count(&events[resumed_at..], is_revival), 1);
+    assert_eq!(
+        starts_of(&events[resumed_at..], "c"),
+        0,
+        "the pause came first"
+    );
+    assert_eq!(
+        plan_resume(root, &first.run_id, None).unwrap().start_node,
+        "c"
+    );
+
+    let res = resume(root, &first.run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let after = &read_all(&run_dir).unwrap()[resumed_at..];
+    let c2_done = finished_at(after, "c2").expect("c re-ran and c2 ran");
+    assert!(c2_done < started_at(after, "j").expect("the join ran"));
+    assert_eq!(starts_of(after, "j"), 1);
+    assert_eq!(
+        count(after, is_revival),
+        1,
+        "an automatic restart revives nothing"
+    );
+}
+
+/// The issue's report shape with `c` a review gate: `reject` fails the run,
+/// `approve` takes `c2`.
+const REVIEWED: &str = r#"
+schema: 2
+id: jr
+name: Join revive
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: c, type: human_review, options: [approve, reject] }
+  - { id: c2, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: b }
+  - { from: a, to: c }
+  - { from: b, to: j }
+  - { from: c, to: c2, condition: { type: review_status, equals: approve } }
+  - { from: c, to: failed, condition: { type: review_status, equals: reject } }
+  - { from: c2, to: j }
+  - { from: j, to: done }
+"#;
+
+fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !f() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "timed out: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn reviews_requested(run_dir: &Path) -> usize {
+    read_all(run_dir)
+        .map(|e| {
+            count(
+                &e,
+                |p| matches!(p, EventPayload::ReviewRequested { node, .. } if node == "c"),
+            )
+        })
+        .unwrap_or(0)
+}
+
+fn decide(run_dir: &Path, decision: &str) {
+    post_review(
+        run_dir,
+        ReviewCommand {
+            node: "c".into(),
+            decision: decision.into(),
+            note: String::new(),
+        },
+    )
+    .unwrap();
+}
+
+/// Round 3 hole 1, the review window: a revived review gate journals no
+/// `node_started` until it is decided. Paused while it waits, the next
+/// resume still re-runs it, and the join waits for its branch.
+#[test]
+fn a_pause_while_a_revived_review_gate_waits_keeps_the_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    seed(&root, REVIEWED, &[]);
+    let r = root.clone();
+    let first = std::thread::spawn(move || run(&r, "jr", None, RunOptions::default()).unwrap());
+    let runs = root.join(".apb/runs");
+    wait_until("the run dir", || {
+        fs::read_dir(&runs).is_ok_and(|mut d| d.next().is_some())
+    });
+    let run_dir = fs::read_dir(&runs).unwrap().next().unwrap().unwrap().path();
+    let run_id = run_dir.file_name().unwrap().to_string_lossy().to_string();
+    wait_until("the first review request", || {
+        reviews_requested(&run_dir) == 1
+    });
+    decide(&run_dir, "reject");
+    assert_eq!(first.join().unwrap().outcome, RunStatus::Failed);
+
+    let (r, id) = (root.clone(), run_id.clone());
+    let rerun = std::thread::spawn(move || resume(&r, &id, Some("c")).unwrap());
+    wait_until("the revived gate asks again", || {
+        reviews_requested(&run_dir) == 2
+    });
+    post_control(&run_dir, drain()).unwrap();
+    assert_eq!(rerun.join().unwrap().outcome, RunStatus::Paused);
+    let events = read_all(&run_dir).unwrap();
+    let resumed_at = events
+        .iter()
+        .rposition(|e| matches!(e.payload, EventPayload::RunResumed { .. }))
+        .unwrap();
+    assert_eq!(count(&events[resumed_at..], is_revival), 1);
+    assert_eq!(starts_of(&events[resumed_at..], "c"), 0);
+
+    decide(&run_dir, "approve");
+    let res = resume(&root, &run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let after = &read_all(&run_dir).unwrap()[resumed_at..];
+    let c2_done = finished_at(after, "c2").expect("the approved gate took c2");
+    assert!(c2_done < started_at(after, "j").expect("the join ran"));
+    assert_eq!(starts_of(after, "j"), 1);
 }

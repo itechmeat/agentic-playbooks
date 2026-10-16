@@ -112,6 +112,7 @@ describe('runEventJournal notes', () => {
       { seq: 6, ts: 6, type: 'join_input_dead', node: 'j' },
       { seq: 7, ts: 7, type: 'nodes_revived', from_node: 'c', nodes: ['c', 'c2', 'j'] },
       { seq: 8, ts: 8, type: 'nodes_revived', from_node: 'c' },
+      { seq: 9, ts: 9, type: 'nodes_revived', nodes: ['c'] },
     ]
     expect(runEventJournal(fixture).map((e) => e.note)).toEqual([
       'j proceeds without c2',
@@ -122,6 +123,7 @@ describe('runEventJournal notes', () => {
       undefined,
       're-run of c revives c, c2, j',
       undefined,
+      'a re-run revives c',
     ])
   })
 })

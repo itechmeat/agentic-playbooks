@@ -1,6 +1,8 @@
-//! The frontier rebuild of a drive that is about to execute nodes again
-//! (issue #203): a re-run resume and a supervisor retry or continue-from of
-//! failed batch members.
+//! The frontier rebuild of a drive that is about to execute nodes again on an
+//! operator's or a supervisor's word (issue #203): an explicit `--from-node`
+//! resume, and a supervisor retry, continue-from, patch or review-gate move,
+//! sequential or after a batch. An automatic restart of interrupted work does
+//! not come here: it revives nothing.
 //!
 //! The rebuild journals the revival as `nodes_revived`, so the fold reads the
 //! revived nodes as not yet run from then on ([`RunState::revive`]): every
@@ -21,11 +23,28 @@ pub(crate) fn restore_revived_frontier(
     starts: &[String],
     frontier: &mut Vec<String>,
 ) -> Result<(), EngineError> {
-    let Some((current, rest)) = starts.split_first() else {
+    let Some(current) = starts.first() else {
         return Ok(());
     };
     let mut state = RunState::fold(events);
-    let revival = parallel::Revival::new(playbook, starts);
+    let cancelled = cancelled_siblings(events, &state, starts);
+    // A cancelled sibling runs again: a plain node as a start of its own, so
+    // the rebuild puts it back on the frontier; a join only revived, so it
+    // still waits for its inputs instead of running as soon as it is offered.
+    let mut all_starts = starts.to_vec();
+    for (_, node) in &cancelled {
+        if !parallel::is_join(playbook, node) && !all_starts.contains(node) {
+            all_starts.push(node.clone());
+        }
+    }
+    let starts = all_starts;
+    let rest = &starts[1..];
+    let mut revival = parallel::Revival::new(playbook, &starts);
+    for (start, node) in &cancelled {
+        if parallel::is_join(playbook, node) {
+            revival.add(start, node);
+        }
+    }
     for (start, nodes) in revival.per_start() {
         if !nodes.iter().any(|n| carries_a_result(&state, n)) {
             continue;
@@ -35,7 +54,7 @@ pub(crate) fn restore_revived_frontier(
             nodes: nodes.iter().cloned().collect(),
         })?;
         // Exactly what the fold does with the record just written.
-        state.revive(nodes);
+        state.revive_from(start, nodes);
     }
     let mut also: Vec<String> = rest.to_vec();
     also.extend(parallel::pending_heads(playbook, &state));
@@ -45,6 +64,58 @@ pub(crate) fn restore_revived_frontier(
     }
     restore_frontier(playbook, &state, current, frontier);
     Ok(())
+}
+
+/// The branch siblings a fork's failure policy cancelled because a start
+/// failed (`branch_cancelled` with that `failed_node`, after the start's last
+/// `node_started`) and that are still cancelled, as `(start, sibling)`. They
+/// lie outside the failed node's own closure, so without them a re-run of it
+/// would leave its join to proceed without them.
+fn cancelled_siblings(
+    events: &[Event],
+    state: &RunState,
+    starts: &[String],
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for start in starts {
+        let since = events
+            .iter()
+            .rposition(
+                |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == start),
+            )
+            .unwrap_or(0);
+        for e in &events[since..] {
+            if let EventPayload::BranchCancelled {
+                node, failed_node, ..
+            } = &e.payload
+                && failed_node == start
+                && state.nodes.get(node) == Some(&NodeStatus::Cancelled)
+                && !out.iter().any(|(_, n)| n == node)
+            {
+                out.push((start.clone(), node.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the drive over `events` starts from an operator's re-run of
+/// `node`: the latest `run_resumed` is an explicit `--from-node` naming it.
+/// Only that, and a supervisor's directive, revives (issue #203); an
+/// automatic restart of interrupted work does not.
+pub(crate) fn operator_rerun(events: &[Event], node: &str) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::RunResumed {
+                from_node,
+                explicit,
+                ..
+            } => Some(*explicit && from_node == node),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Whether reviving `node` changes the fold: it has a result, a hop or a
@@ -664,6 +735,134 @@ edges:
                 .contains(&("c".into(), "failed".into()))
         );
         assert!(state.revived.contains("c2") && !state.revived.contains("c"));
+    }
+
+    /// Round 3 item 11: two sources written off, only one of them revived:
+    /// the record names that one alone, the other stays written off.
+    #[test]
+    fn only_the_revived_one_of_two_written_off_sources_is_recorded() {
+        let p = Playbook::from_yaml(
+            r#"
+schema: 2
+id: t
+name: T
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: c, type: prompt, prompt: "c" }
+  - { id: c2, type: prompt, prompt: "c2" }
+  - { id: d, type: prompt, prompt: "d" }
+  - { id: d2, type: prompt, prompt: "d2" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: b }
+  - { from: a, to: c }
+  - { from: a, to: d }
+  - { from: b, to: j }
+  - { from: c, to: c2, condition: { type: node_status, node: c, equals: success } }
+  - { from: c, to: failed, condition: { type: node_status, node: c, equals: failure } }
+  - { from: d, to: d2, condition: { type: node_status, node: d, equals: success } }
+  - { from: d, to: failed, condition: { type: node_status, node: d, equals: failure } }
+  - { from: c2, to: j }
+  - { from: d2, to: j }
+"#,
+        )
+        .unwrap();
+        let mut e = Vec::new();
+        e.extend(finished("start", "succeeded"));
+        e.push(hop("start", "a"));
+        e.extend(finished("a", "succeeded"));
+        e.push(hop("a", "b"));
+        e.push(hop("a", "c"));
+        e.push(hop("a", "d"));
+        e.extend(finished("b", "succeeded"));
+        e.push(hop("b", "j"));
+        e.extend(finished("c", "failed"));
+        e.push(hop("c", "failed"));
+        e.extend(finished("d", "failed"));
+        e.push(hop("d", "failed"));
+        e.push(dead("j", &["c2", "d2"]));
+        let mut run = Run::new(e);
+        let r = rebuild(&p, &mut run, &["c"]);
+        assert_eq!(dbg(&r.records), dbg(&[revived_record("j", &["c2"], "c")]));
+    }
+
+    /// A fork's `fail_fast` (`start` forks into `a` and `b`, `b` feeds the
+    /// join `j`; `x` is a second join cancelled while it waited) cancelled
+    /// `b` and `x` when `a` failed. Both lie outside `a`'s closure: re-running
+    /// `a` revives them, `b` goes back on the frontier, `x` waits again.
+    fn fail_fast_pass() -> (Playbook, Vec<EventPayload>) {
+        let p = Playbook::from_yaml(
+            r#"
+schema: 2
+id: f
+name: F
+version: 1.0.0
+nodes:
+  - { id: start, type: start, fork: { on_branch_failure: fail_fast, on_failure: rejected } }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: p, type: prompt, prompt: "p" }
+  - { id: x, type: prompt, prompt: "x" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: rejected, type: finish, outcome: failure }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: start, to: p }
+  - { from: p, to: x }
+  - { from: b, to: x }
+  - { from: a, to: j }
+  - { from: x, to: j }
+  - { from: j, to: done }
+"#,
+        )
+        .unwrap();
+        let mut e = Vec::new();
+        e.extend(finished("start", "succeeded"));
+        e.push(hop("start", "a"));
+        e.push(hop("start", "b"));
+        e.push(hop("start", "p"));
+        e.extend(finished("p", "succeeded"));
+        e.push(hop("p", "x"));
+        e.extend(finished("a", "failed"));
+        e.push(EventPayload::BranchFailed {
+            fork: "start".into(),
+            node: "a".into(),
+            policy: "fail_fast".into(),
+            target: Some("rejected".into()),
+        });
+        for n in ["b", "x"] {
+            e.extend(finished(n, "cancelled"));
+            e.push(EventPayload::BranchCancelled {
+                fork: "start".into(),
+                node: n.into(),
+                failed_node: "a".into(),
+            });
+        }
+        (p, e)
+    }
+
+    #[test]
+    fn a_rerun_revives_the_siblings_its_failure_cancelled() {
+        let (p, e) = fail_fast_pass();
+        let mut run = Run::new(e);
+        let r = rebuild(&p, &mut run, &["a"]);
+        let from: Vec<&str> = r.revivals.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(from, ["a", "b"], "the plain sibling is a start of its own");
+        assert!(
+            r.revivals[0].1.contains(&"x".to_string()),
+            "the join is revived"
+        );
+        assert_eq!(r.frontier, names(&["b"]));
+        let state = RunState::fold(&run.events());
+        assert_eq!(state.current_status("x"), NodeStatus::Pending);
+        assert!(!state.route_suppressed.contains("b"));
     }
 
     /// A join already on the frontier is not offered twice.

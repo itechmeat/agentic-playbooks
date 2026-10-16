@@ -3890,6 +3890,14 @@ pub(crate) fn restore_frontier(
         }
         frontier.push(head.clone());
     }
+    // A re-run the run was asked for and never began (issue #203): a pause
+    // before it started, or a kill while a revived gate waited. It is no head
+    // (its old result predates the revival), so it is put back explicitly.
+    for start in &state.revival_starts {
+        if start != current && !frontier.contains(start) {
+            frontier.push(start.clone());
+        }
+    }
 }
 
 /// Journals the branch inputs a join is about to proceed WITHOUT, at the moment

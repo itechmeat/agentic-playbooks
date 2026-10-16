@@ -546,6 +546,13 @@ fn drive_inner(
         // status and outputs (exactly the normal post-node advancement), then
         // start from the first ready successor.
         StartMode::After => {
+            // A node a re-run revived has no result of this pass to advance
+            // from (issue #203): its old output would fire its edges again.
+            if !entry_state.current_status(&start_node).is_finished() {
+                return Err(EngineError::Invalid(format!(
+                    "node `{start_node}` was revived for a re-run and has not run again - resume re-runs it"
+                )));
+            }
             // The outstanding heads are handed in as extra active nodes so a
             // sibling branch that never started blocks a join here instead of
             // being written off as dead.
@@ -604,19 +611,24 @@ fn drive_inner(
     // advance derives liveness from the frontier, so a head that is not in it
     // flips to dead at the next step and its joins fire without it.
     //
-    // A re-run executes `current` again, so it and everything only downstream
-    // of it read as not yet run (issue #203): otherwise a join fed by its
-    // branch is weighed against the old pass, written off as dead, and starts
-    // together with the re-run node.
+    // An operator's re-run (`--from-node`) executes `current` again, so it
+    // and everything only downstream of it read as not yet run (issue #203):
+    // otherwise a join fed by its branch is weighed against the old pass,
+    // written off as dead, and starts together with the re-run node. An
+    // automatic restart of interrupted work revives nothing: the nodes after
+    // it may already have run in this pass, and their routing is real. A
+    // revival an earlier drive journaled stays in the fold either way.
     match start_mode {
-        StartMode::Rerun => restore_revived_frontier(
-            log,
-            &playbook,
-            &entry_events,
-            std::slice::from_ref(&current),
-            &mut frontier,
-        )?,
-        StartMode::After => restore_frontier(&playbook, &entry_state, &current, &mut frontier),
+        StartMode::Rerun if revive::operator_rerun(&entry_events, &current) => {
+            restore_revived_frontier(
+                log,
+                &playbook,
+                &entry_events,
+                std::slice::from_ref(&current),
+                &mut frontier,
+            )?
+        }
+        _ => restore_frontier(&playbook, &entry_state, &current, &mut frontier),
     }
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
@@ -1743,6 +1755,15 @@ fn drive_inner(
                         entry.cmd,
                         entry.seq,
                     )?;
+                    // The directed node runs again: the same revival as a
+                    // batch retry (issue #203).
+                    restore_revived_frontier(
+                        log,
+                        &playbook,
+                        &read_all(run_dir)?,
+                        std::slice::from_ref(&current),
+                        &mut frontier,
+                    )?;
                     continue;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);
@@ -2519,7 +2540,19 @@ fn drive_inner(
                 decisions.as_ref(),
             )? {
                 WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
-                WakeOutcome::Resumed => continue,
+                // Every directive the park resumes on (a retry, a
+                // continue-from, a patch) runs `current` again: the same
+                // revival as a batch retry (issue #203).
+                WakeOutcome::Resumed => {
+                    restore_revived_frontier(
+                        log,
+                        &playbook,
+                        &read_all(run_dir)?,
+                        std::slice::from_ref(&current),
+                        &mut frontier,
+                    )?;
+                    continue;
+                }
             }
         }
 
@@ -2636,10 +2669,13 @@ fn drive_inner(
         }
 
         advance_frontier(&playbook, &current, &state_now, &mut frontier, &[], log)?;
+        // Before the fork policy settles, as on the batch path: `state_now`
+        // predates the settle, so a join it cancels must already be on the
+        // frontier for the settle to see it, never pushed back after it.
+        reoffer_revived_joins(&playbook, &state_now, log, &current, &[], &mut frontier)?;
         if let Some(f) = &fork_failure {
             fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
         }
-        reoffer_revived_joins(&playbook, &state_now, log, &current, &[], &mut frontier)?;
         if frontier.is_empty() {
             // Branch completed with no ready successors and no other active
             // branches: dead-end (or unready join with no chance) - not finish.

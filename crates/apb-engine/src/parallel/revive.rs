@@ -44,6 +44,14 @@ impl Revival {
         out
     }
 
+    /// Adds `node` to the revival of `start` (a start of this revival).
+    pub fn add(&mut self, start: &str, node: &str) {
+        if let Some((_, nodes)) = self.by_start.iter_mut().find(|(s, _)| s == start) {
+            nodes.insert(node.to_string());
+            self.all.insert(node.to_string());
+        }
+    }
+
     /// Every revived node, of every start.
     pub fn nodes(&self) -> &BTreeSet<String> {
         &self.all

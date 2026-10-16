@@ -124,12 +124,21 @@ pub fn plan_resume(
     // journal ends at `node_started`) or `Interrupted` (an open
     // `attempt_started` with no `attempt_finished`). Both are nodes whose work
     // the crash cut short.
-    let interrupted: Vec<String> = state
+    let mut interrupted: Vec<String> = state
         .nodes
         .iter()
         .filter(|(_, st)| matches!(st, NodeStatus::Running | NodeStatus::Interrupted))
         .map(|(n, _)| n.clone())
         .collect();
+    // A re-run an operator or a supervisor asked for that never began (issue
+    // #203): its revival is journaled, its node has not started again. It is
+    // interrupted work too; advancing past it instead would read its branch
+    // as dead and run its joins without it.
+    for start in &state.revival_starts {
+        if !interrupted.contains(start) {
+            interrupted.push(start.clone());
+        }
+    }
 
     match interrupted.as_slice() {
         [only] => Ok(ResumeDecision {

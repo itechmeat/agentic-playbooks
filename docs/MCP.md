@@ -450,8 +450,8 @@ restarts), `advance_past_finished` (nothing was interrupted; the run
 continues past the last finished node without re-running it),
 `parallel_fallback` (two or more branches were cut, so the run restarts from
 the last finished node), or `explicit_from_node` (the caller named
-`from_node`). A `from_node` resume re-runs that node and everything only
-downstream of it: `run_events` shows the revival as `nodes_revived`
+`from_node`). A `from_node` resume (unlike an automatic restart of
+interrupted work) re-runs that node and everything only downstream of it: `run_events` shows the revival as `nodes_revived`
 (`from_node`, `nodes`), a join fed by its branch waits for it again, and each
 write-off this undoes is a `join_input_revived` (`node`, `sources`,
 `from_node`). `run_status` keeps the earlier results of the revived nodes

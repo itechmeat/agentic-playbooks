@@ -996,12 +996,17 @@ decision is auditable afterwards. That is routine graph bookkeeping rather than 
 anomaly - an either-or merge has one by construction - so no supervisor is woken
 for it.
 
-A write-off holds only for the pass that made it. When a node runs again (a
-`resume --from-node`, a restart of an interrupted node, a supervisor retry or
-continue-from), that node and every node only downstream of it count as not
-yet run for routing until each one starts again; the run journals that as a
-`nodes_revived` event (`from_node`, `nodes`), and the run's history keeps
-their earlier results. A join fed by the re-run branch waits for that branch
+A write-off holds only for the pass that made it. When an operator or a
+supervisor asks for a node to run again (`resume --from-node`, or a
+supervisor's retry, continue-from, patch, or move off a review gate), that
+node and every node only downstream of it count as not yet run for routing
+until each one starts again; the run journals that as a `nodes_revived` event
+(`from_node`, `nodes`), and the run's history keeps their earlier results. An
+automatic restart of interrupted work (a crash, a `--now` pause) revives
+nothing: the nodes after it may already have run in this pass. A requested
+re-run that a pause or a crash stopped before it began is still owed: the
+next resume re-runs it. Siblings a fork's failure policy cancelled when the
+re-run node failed are revived with it. A join fed by the re-run branch waits for that branch
 again instead of starting together with the re-run node, and an old route of a
 downstream node (into a finish node, say) is not taken before the join runs on
 the new input. The run journals a `join_input_revived` event naming the join,

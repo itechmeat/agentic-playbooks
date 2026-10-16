@@ -956,23 +956,30 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     }
 }
 
-/// The run answer (spec B): the non-empty output of the succeeded finish node.
-/// Derived purely by fold from the run's events + snapshot; `None` when the
-/// finish had no prompt (empty output), the finish has not run, or the snapshot
-/// is missing. Multiple finish nodes: the first with a non-empty output wins.
+/// The run answer (spec B): the non-empty output of the succeeded finish node
+/// the run reached last. Derived purely from the run's events + snapshot;
+/// `None` when that finish had no prompt (empty output), no finish has run,
+/// or the snapshot is missing. The last one reached, because a re-run (issue
+/// #203) can end at another finish than an earlier pass did, and the answer
+/// is this pass's.
 pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
     let pb = load_run_playbook(run_dir)?;
-    let state = RunState::fold(events);
-    for n in &pb.nodes {
-        if matches!(n.kind, NodeKind::Finish { .. })
-            && state.nodes.get(&n.id).copied() == Some(NodeStatus::Succeeded)
-            && let Some(out) = state.outputs.get(&n.id)
-            && !out.is_empty()
-        {
-            return Some(out.clone());
-        }
-    }
-    None
+    let is_finish = |id: &str| {
+        pb.node(id)
+            .is_some_and(|n| matches!(n.kind, NodeKind::Finish { .. }))
+    };
+    events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::NodeFinished {
+            node,
+            status,
+            output,
+            ..
+        } if is_finish(node) => Some(
+            (NodeStatus::from_label(status) == NodeStatus::Succeeded && !output.is_empty())
+                .then(|| output.clone()),
+        ),
+        _ => None,
+    })?
 }
 
 /// Measured time per node in whole seconds, from NodeStarted to
@@ -1942,6 +1949,36 @@ edges:
             ),
         ];
         assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("THE ANSWER"));
+    }
+
+    /// A re-run that ends at another finish answers with that one, not with
+    /// the finish an earlier pass reached (issue #203).
+    #[test]
+    fn run_answer_is_the_finish_reached_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success, prompt: \"c\" }\n  - { id: g, type: finish, outcome: success, prompt: \"c\" }\nedges:\n  - { from: s, to: f }\n  - { from: s, to: g }\n",
+        )
+        .unwrap();
+        let finished = |seq: u64, node: &str, out: &str| {
+            ev(
+                seq,
+                EventPayload::NodeFinished {
+                    node: node.into(),
+                    status: "succeeded".into(),
+                    attempt: 1,
+                    output: out.into(),
+                    artifacts: Vec::new(),
+                },
+            )
+        };
+        let events = vec![finished(1, "f", "FIRST PASS"), finished(2, "g", "RE-RUN")];
+        assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("RE-RUN"));
+        let events = vec![finished(1, "f", "FIRST PASS"), finished(2, "g", "")];
+        assert_eq!(run_answer(&run_dir, &events), None);
     }
 
     #[test]

@@ -489,9 +489,11 @@ fn a_supervisor_retry_of_a_batch_member_revives_the_join_it_feeds() {
         1,
         "the join runs once, on the retried branch's delivery"
     );
-    // The batch parks before it routes, so the join was never written off:
-    // there is no `join_input_dead` to revive, and none is recorded. The fix
-    // shows as the join waiting, and as the revival of `b`.
+    // Deliberate: the batch parks before it routes, so the join was never
+    // written off. There is no `join_input_dead` to revive, and asserting
+    // that none is recorded pins that the revival record is not written for
+    // a write-off that never happened. The fix shows as the join waiting,
+    // and as the revival of `b`.
     assert_eq!(revivals(&events), ["b"]);
     assert!(!events.iter().any(|e| matches!(
         e.payload,
@@ -663,8 +665,11 @@ edges:
   - { from: j, to: done }
 "#;
 
-/// Both failed members retried: they run again as one batch, so the batch
-/// tail's re-offer sites weigh the join.
+/// Both failed members retried: `b1` becomes `current`, `b2` comes in through
+/// the `also` directives, and they run again as one batch whose tail routes
+/// both into the join. Not decisive for the batch tail's revived-join
+/// re-offer (both branches deliver, so the normal advance offers the join);
+/// that re-offer is covered by `scheduler::revive` unit tests.
 const WF_SUPERVISED_TWO_RETRIES: &str = r#"
 schema: 1
 id: suptr
@@ -792,10 +797,83 @@ fn two_retried_batch_members_both_deliver_before_the_join() {
             "the join started before {n}"
         );
     }
+    for n in ["j", "b1x", "b2x"] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n)
+                )
+                .count(),
+            1,
+            "{n} ran more than once"
+        );
+    }
+}
+
+// Scenario 2c'': a SEQUENTIAL park (the failing node runs on its own, the
+// sibling `b` waits behind it on the frontier). The supervisor continues at
+// `c2`; the join `j2` waits for the pending sibling and runs once. The
+// revival the park applies (round 3) must not add a second `j2` run.
+const WF_SUPERVISED_SEQUENTIAL_CONTINUE: &str = r#"
+schema: 1
+id: supseq
+name: Supervised sequential continue
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: s, type: prompt, prompt: "split" }
+  - { id: c, type: agent_task, prompt: "branch flaky1" }
+  - { id: b, type: prompt, prompt: "sibling" }
+  - { id: c2, type: prompt, prompt: "after c" }
+  - { id: j2, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: s }
+  - { from: s, to: c }
+  - { from: s, to: b }
+  - { from: c, to: c2, condition: { type: node_status, node: c, equals: success } }
+  - { from: b, to: j2 }
+  - { from: c2, to: j2 }
+  - { from: j2, to: done }
+"#;
+
+#[test]
+fn a_sequential_continue_from_runs_the_join_once_after_the_pending_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supseq", WF_SUPERVISED_SEQUENTIAL_CONTINUE);
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supseq", opts);
+    let run_dir = find_run_dir(dir.path(), "supseq-");
+    wait_for_wake_on(&run_dir, "c");
+    post_control(&run_dir, Control::ContinueFrom { node: "c2".into() }).unwrap();
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    let j2 = node_started_at(&events, "j2");
+    assert!(node_finished_at(&events, "c2") < j2);
+    assert!(node_finished_at(&events, "b") < j2);
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j"))
+            .filter(
+                |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j2")
+            )
             .count(),
         1
     );

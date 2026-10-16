@@ -219,8 +219,15 @@ pub struct RunState {
     /// result (it is the run's history every surface reports);
     /// [`RunState::current_status`] is the view routing and join readiness
     /// read. Their journaled hops are dropped from `journaled_hops` when they
-    /// are revived. A node leaves the set when it starts again.
+    /// are revived. A node leaves the set when it starts or finishes again (a
+    /// finish node without a prompt journals only its finish).
     pub revived: BTreeSet<String>,
+    /// The `from_node` of every revival whose node has not started again: the
+    /// re-runs a drive was asked for and has not begun. A pause before the
+    /// node starts, or a kill while a revived review gate waits, leaves one
+    /// here; a resume re-runs it ([`crate::scheduler::plan_resume`]) and the
+    /// frontier rebuild puts every other one back.
+    pub revival_starts: BTreeSet<String>,
 }
 
 /// One node's judge-edge answers, as journaled by the `judge_edge` decision
@@ -274,6 +281,19 @@ impl RunState {
             .retain(|(from, _)| !revived.contains(from));
     }
 
+    /// [`RunState::revive`] for the revival of `from_node`, recorded as a
+    /// re-run the drive owes ([`RunState::revival_starts`]).
+    pub fn revive_from<'a>(
+        &mut self,
+        from_node: &str,
+        nodes: impl IntoIterator<Item = &'a String>,
+    ) {
+        self.revive(nodes);
+        if self.revived.contains(from_node) {
+            self.revival_starts.insert(from_node.to_string());
+        }
+    }
+
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
         // Open attempts: node -> attempt. Closed by attempt_finished/node_finished.
@@ -290,6 +310,7 @@ impl RunState {
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
                     s.revived.remove(node);
+                    s.revival_starts.remove(node);
                 }
                 EventPayload::AttemptStarted { node, attempt, .. } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
@@ -317,6 +338,8 @@ impl RunState {
                     ..
                 } => {
                     open.remove(node);
+                    s.revived.remove(node);
+                    s.revival_starts.remove(node);
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
                     s.last_node = Some(node.clone());
@@ -419,7 +442,7 @@ impl RunState {
                 EventPayload::JoinInputDead { .. } | EventPayload::JoinInputRevived { .. } => {}
                 // A re-run's revival (issue #203): routing reads the nodes as
                 // not yet run until each starts again; history stays.
-                EventPayload::NodesRevived { nodes, .. } => s.revive(nodes),
+                EventPayload::NodesRevived { from_node, nodes } => s.revive_from(from_node, nodes),
                 // Fork and join failure options (issue #195): the routing they
                 // decided against is folded so edge selection stays pure.
                 EventPayload::BranchFailed { node, policy, .. } => {
