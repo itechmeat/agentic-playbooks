@@ -832,8 +832,9 @@ fn resume_inner_checked(
         // drive keeps the same check as a defensive backstop.
         if !state.current_status(&decision.start_node).is_finished() {
             return Err(EngineError::Invalid(format!(
-                "node `{}` was revived for a re-run and has not run again - pass --from-node to re-run it",
-                decision.start_node
+                "node `{}` {} - pass --from-node to re-run it",
+                decision.start_node,
+                super::revive::why_not_finished(&state, &decision.start_node)
             )));
         }
         // Same active-set reconstruction as the `After` seed in `drive`: the

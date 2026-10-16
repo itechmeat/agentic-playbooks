@@ -202,6 +202,16 @@ fn cancelled_siblings(
     out
 }
 
+/// Why an advance past `node` is refused: it reads as not yet run either
+/// because a re-run revived it, or because it never finished at all (it has
+/// not run, or it is still running).
+pub(crate) fn why_not_finished(state: &RunState, node: &str) -> &'static str {
+    match state.revived.contains(node) {
+        true => "was revived for a re-run and has not run again",
+        false => "has not finished",
+    }
+}
+
 /// Whether the drive over `events` starts from an operator's re-run of
 /// `node`: the latest `run_resumed` is an explicit `--from-node` naming it.
 /// Only that, and a supervisor's directive, revives (issue #203); an

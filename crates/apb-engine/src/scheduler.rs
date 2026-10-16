@@ -550,7 +550,8 @@ fn drive_inner(
             // from (issue #203): its old output would fire its edges again.
             if !entry_state.current_status(&start_node).is_finished() {
                 return Err(EngineError::Invalid(format!(
-                    "node `{start_node}` was revived for a re-run and has not run again - resume re-runs it"
+                    "node `{start_node}` {} - resume re-runs it",
+                    revive::why_not_finished(&entry_state, &start_node)
                 )));
             }
             // The outstanding heads are handed in as extra active nodes so a
