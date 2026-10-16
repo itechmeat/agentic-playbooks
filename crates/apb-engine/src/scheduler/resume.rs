@@ -124,7 +124,7 @@ pub fn plan_resume(
     // journal ends at `node_started`) or `Interrupted` (an open
     // `attempt_started` with no `attempt_finished`). Both are nodes whose work
     // the crash cut short.
-    let mut interrupted: Vec<String> = state
+    let interrupted: Vec<String> = state
         .nodes
         .iter()
         .filter(|(_, st)| matches!(st, NodeStatus::Running | NodeStatus::Interrupted))
@@ -132,12 +132,20 @@ pub fn plan_resume(
         .collect();
     // A re-run an operator or a supervisor asked for that never began (issue
     // #203): its revival is journaled, its node has not started again. It is
-    // interrupted work too; advancing past it instead would read its branch
-    // as dead and run its joins without it.
-    for start in &state.revival_starts {
-        if !interrupted.contains(start) {
-            interrupted.push(start.clone());
-        }
+    // owed work; advancing past it instead would read its branch as dead and
+    // run its joins without it. It never counts as an interrupted node: two
+    // owed re-runs are not a cut-off parallel batch, and the parallel
+    // fallback would re-run an unrelated last node. With nothing really
+    // interrupted the first owed one is re-run, and the frontier rebuild puts
+    // every other one back (`restore_frontier`).
+    if interrupted.is_empty()
+        && let Some(owed) = state.revival_starts.iter().next()
+    {
+        return Ok(ResumeDecision {
+            start_node: owed.clone(),
+            mode: StartMode::Rerun,
+            reason: ResumeReason::InterruptedRestart,
+        });
     }
 
     match interrupted.as_slice() {
@@ -807,6 +815,15 @@ fn resume_inner_checked(
     // the run to running forever and appending another marker on every retry.
     if decision.mode == StartMode::After {
         let state = RunState::fold(&read_all(&run_dir)?);
+        // A node a re-run revived has no result of this pass to advance from
+        // (issue #203). Refused here, before anything is journaled; the
+        // drive keeps the same check as a defensive backstop.
+        if !state.current_status(&decision.start_node).is_finished() {
+            return Err(EngineError::Invalid(format!(
+                "node `{}` was revived for a re-run and has not run again - pass --from-node to re-run it",
+                decision.start_node
+            )));
+        }
         // Same active-set reconstruction as the `After` seed in `drive`: the
         // outstanding branch heads come from the journal, so a sibling branch
         // that never started still blocks a join instead of being written off.

@@ -611,3 +611,25 @@ fn a_revived_node_leaves_the_revival_when_it_starts_or_finishes_again() {
     });
     assert!(!fold_of(&all).revived.contains("done"));
 }
+
+/// A later revival covering an earlier owed re-run drops it from the owed
+/// set; one that does not cover it keeps it (round 4 item 3).
+#[test]
+fn a_covering_revival_drops_the_earlier_owed_rerun() {
+    let mut all = revival_journal();
+    all.push(EventPayload::NodesRevived {
+        from_node: "x".into(),
+        nodes: ["x", "y"].map(String::from).to_vec(),
+    });
+    let s = fold_of(&all);
+    assert_eq!(s.revival_starts.len(), 2, "{:?}", s.revival_starts);
+    all.push(EventPayload::NodesRevived {
+        from_node: "b".into(),
+        nodes: ["b", "c", "x", "j"].map(String::from).to_vec(),
+    });
+    let s = fold_of(&all);
+    assert_eq!(
+        s.revival_starts.iter().collect::<Vec<_>>(),
+        [&"b".to_string()]
+    );
+}

@@ -283,11 +283,16 @@ impl RunState {
 
     /// [`RunState::revive`] for the revival of `from_node`, recorded as a
     /// re-run the drive owes ([`RunState::revival_starts`]).
+    ///
+    /// An earlier owed re-run this revival covers is dropped: this re-run
+    /// reaches it again, so it is no longer owed on its own.
     pub fn revive_from<'a>(
         &mut self,
         from_node: &str,
         nodes: impl IntoIterator<Item = &'a String>,
     ) {
+        let nodes: Vec<&String> = nodes.into_iter().collect();
+        self.revival_starts.retain(|s| !nodes.contains(&s));
         self.revive(nodes);
         if self.revived.contains(from_node) {
             self.revival_starts.insert(from_node.to_string());

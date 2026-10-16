@@ -27,13 +27,24 @@ pub struct Revival {
 
 impl Revival {
     pub fn new(playbook: &Playbook, starts: &[String]) -> Self {
-        let forward = apb_core::graphutil::adjacency(playbook);
+        let mut forward = apb_core::graphutil::adjacency(playbook);
         let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
         for e in &playbook.edges {
             reverse
                 .entry(e.to.as_str())
                 .or_default()
                 .push(e.from.as_str());
+        }
+        // A `defaults.on_failure` handler is a real hop out of every node it
+        // covers, with no declared edge: without it the handler would stay
+        // outside the revival while its own edges are weighed against the
+        // revived nodes, and a fallback edge it never took would become a
+        // stale head.
+        for n in &playbook.nodes {
+            if let Some(handler) = playbook.defaults.on_failure.target_for(&n.id) {
+                forward.entry(n.id.as_str()).or_default().push(handler);
+                reverse.entry(handler).or_default().push(n.id.as_str());
+            }
         }
         let mut out = Revival::default();
         for start in starts {
@@ -350,6 +361,47 @@ edges:
             revived_nodes(&p, "j").into_iter().collect::<Vec<_>>(),
             names(&["done", "j"])
         );
+    }
+
+    /// Round 4: a `defaults.on_failure` handler is downstream of the nodes
+    /// it covers, so a re-run revives it; its never-taken fallback edge is no
+    /// stale head.
+    #[test]
+    fn a_failure_policy_handler_is_revived_with_the_node() {
+        let p = pb(r#"
+schema: 2
+id: h
+name: H
+version: 1.0.0
+defaults: { on_failure: handler }
+nodes:
+  - { id: start, type: start }
+  - { id: c, type: prompt, prompt: "c" }
+  - { id: handler, type: prompt, prompt: "handler" }
+  - { id: notify, type: prompt, prompt: "notify" }
+  - { id: other, type: prompt, prompt: "other" }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: c }
+  - { from: c, to: done }
+  - { from: handler, to: notify, condition: { type: node_status, node: c, equals: failure } }
+  - { from: handler, to: other, fallback: true }
+  - { from: notify, to: failed }
+  - { from: other, to: failed }
+"#);
+        let set = revived_nodes(&p, "c");
+        assert!(set.contains("handler") && set.contains("notify"), "{set:?}");
+        let old = state(
+            &[
+                ("start", NodeStatus::Succeeded),
+                ("c", NodeStatus::Failed),
+                ("handler", NodeStatus::Succeeded),
+            ],
+            &[("start", "c"), ("c", "handler"), ("handler", "notify")],
+        );
+        let new = revived(&p, &old, &names(&["c"]));
+        assert!(!pending_heads(&p, &new).contains(&"other".to_string()));
     }
 
     #[test]

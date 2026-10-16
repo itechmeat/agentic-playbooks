@@ -964,6 +964,9 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
 /// is this pass's.
 pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
     let pb = load_run_playbook(run_dir)?;
+    // A finish a re-run revived and has not reached again answers nothing:
+    // its output is the earlier pass's.
+    let revived = RunState::fold(events).revived;
     let is_finish = |id: &str| {
         pb.node(id)
             .is_some_and(|n| matches!(n.kind, NodeKind::Finish { .. }))
@@ -975,8 +978,10 @@ pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
             output,
             ..
         } if is_finish(node) => Some(
-            (NodeStatus::from_label(status) == NodeStatus::Succeeded && !output.is_empty())
-                .then(|| output.clone()),
+            (NodeStatus::from_label(status) == NodeStatus::Succeeded
+                && !output.is_empty()
+                && !revived.contains(node))
+            .then(|| output.clone()),
         ),
         _ => None,
     })?
@@ -1978,6 +1983,18 @@ edges:
         let events = vec![finished(1, "f", "FIRST PASS"), finished(2, "g", "RE-RUN")];
         assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("RE-RUN"));
         let events = vec![finished(1, "f", "FIRST PASS"), finished(2, "g", "")];
+        assert_eq!(run_answer(&run_dir, &events), None);
+        // A re-run revived `g` and has not reached it again: no answer yet.
+        let events = vec![
+            finished(1, "g", "FIRST PASS"),
+            ev(
+                2,
+                EventPayload::NodesRevived {
+                    from_node: "s".into(),
+                    nodes: vec!["s".into(), "g".into()],
+                },
+            ),
+        ];
         assert_eq!(run_answer(&run_dir, &events), None);
     }
 

@@ -626,6 +626,7 @@ fn drive_inner(
                 &entry_events,
                 std::slice::from_ref(&current),
                 &mut frontier,
+                &[],
             )?
         }
         _ => restore_frontier(&playbook, &entry_state, &current, &mut frontier),
@@ -1546,6 +1547,10 @@ fn drive_inner(
                             // Every directive re-executes its node, so the
                             // rebuild weighs joins against the revived view
                             // (issue #203), as a re-run resume does.
+                            // The failed members the directives moved
+                            // away from: their own routing is overridden.
+                            let parked: Vec<String> =
+                                failed.iter().map(|(n, _, _)| n.clone()).collect();
                             let mut starts = vec![next.clone()];
                             current = next;
                             for t in also {
@@ -1562,6 +1567,7 @@ fn drive_inner(
                                 &read_all(run_dir)?,
                                 &starts,
                                 &mut frontier,
+                                &parked,
                             )?;
                             continue;
                         }
@@ -1756,8 +1762,9 @@ fn drive_inner(
                         entry.seq,
                     )?;
                     // The directed node runs again: the same revival as a
-                    // batch retry (issue #203).
-                    restore_revived_frontier(
+                    // batch retry (issue #203), but no head rebuild, the
+                    // frontier is still the drive's own.
+                    revive::revive(
                         log,
                         &playbook,
                         &read_all(run_dir)?,
@@ -2543,8 +2550,11 @@ fn drive_inner(
                 // Every directive the park resumes on (a retry, a
                 // continue-from, a patch) runs `current` again: the same
                 // revival as a batch retry (issue #203).
+                // No head rebuild: the frontier is still the drive's own,
+                // and the parked node's own routing is what the directive
+                // decided against.
                 WakeOutcome::Resumed => {
-                    restore_revived_frontier(
+                    revive::revive(
                         log,
                         &playbook,
                         &read_all(run_dir)?,

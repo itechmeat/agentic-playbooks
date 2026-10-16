@@ -15,7 +15,7 @@ use apb_engine::control::{Control, post_control};
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::pause::{PauseMode, PauseRequest};
 use apb_engine::review::{ReviewCommand, post_review};
-use apb_engine::scheduler::{RunOptions, plan_resume, resume, run};
+use apb_engine::scheduler::{RunOptions, StartMode, plan_resume, resume, run};
 use apb_engine::state::{RunState, RunStatus};
 
 /// The report's shape: `b` delivers into the implicit join `j` before `c`
@@ -122,10 +122,13 @@ fn report_scripts(root: &Path) -> Vec<(&'static str, String)> {
             format!("{}{}", after_finished(root, "b"), gate(root)),
         ),
         ("slow.sh", format!("{}echo ok\n", after_finished(root, "c"))),
-        // `notify` of DIAMOND_NOTIFY: finishes only after the join did.
+        // `notify` of DIAMOND_NOTIFY: finishes only after the join did, then
+        // half a second more. It cannot wait for `done` itself: reaching
+        // `done` ends the run, so the wait would never see it. The margin is
+        // the time the drive has to route `j` into `done` and finish there.
         (
             "after_j.sh",
-            format!("{}echo ok\n", after_finished(root, "j")),
+            format!("{}sleep 0.5\necho ok\n", after_finished(root, "j")),
         ),
     ]
 }
@@ -612,31 +615,187 @@ fn drain() -> Control {
 /// this pass already ran keep their routing.
 #[test]
 fn an_interrupted_restart_revives_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    seed(root, REPORT, &report_scripts(root));
-    fs::write(root.join(PASS), "").unwrap();
-    let first = run(root, "jr", None, RunOptions::default()).unwrap();
-    assert_eq!(first.outcome, RunStatus::Succeeded);
-    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    // Cut while `c2` runs (an interrupted restart of `c2`), and after `j`
+    // finished (an advance past `j`): the nodes this pass already ran keep
+    // their routing, `j` is not run again.
+    for cut in [
+        r#""type":"node_started","node":"c2""#,
+        r#""type":"node_finished","node":"j""#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed(root, REPORT, &report_scripts(root));
+        fs::write(root.join(PASS), "").unwrap();
+        let first = run(root, "jr", None, RunOptions::default()).unwrap();
+        assert_eq!(first.outcome, RunStatus::Succeeded);
+        let run_dir = root.join(".apb/runs").join(&first.run_id);
+        keep_through(&run_dir, cut);
+
+        let res = resume(root, &first.run_id, None).unwrap();
+        assert_eq!(res.outcome, RunStatus::Succeeded, "{cut}");
+        let events = read_all(&run_dir).unwrap();
+        assert_eq!(count(&events, is_revival), 0, "{cut}");
+        assert_eq!(starts_of(&events, "j"), 1, "{cut}: j ran again");
+        assert!(finished_at(&events, "c2").unwrap() < started_at(&events, "j").unwrap());
+        assert!(!root.join(TIMED_OUT).exists());
+    }
+}
+
+/// Keeps the journal through the first line containing `cut`, as a driver
+/// killed right after writing it leaves it.
+fn keep_through(run_dir: &Path, cut: &str) {
     let path = run_dir.join("events.jsonl");
     let text = fs::read_to_string(&path).unwrap();
     let mut kept: Vec<&str> = Vec::new();
     for line in text.lines() {
         kept.push(line);
-        if line.contains(r#""type":"node_started","node":"c2""#) {
+        if line.contains(cut) {
             break;
         }
     }
     fs::write(&path, kept.join("\n") + "\n").unwrap();
     let _ = fs::remove_file(run_dir.join("driver.pid"));
+}
 
+/// Appends raw journal lines, `SEQ` replaced by each line's sequence number.
+fn append_lines(run_dir: &Path, lines: &[&str]) {
+    let path = run_dir.join("events.jsonl");
+    let text = fs::read_to_string(&path).unwrap();
+    let base = text.lines().count();
+    let mut out = text;
+    for (i, l) in lines.iter().enumerate() {
+        out.push_str(&l.replace("SEQ", &(base + i).to_string()));
+        out.push('\n');
+    }
+    fs::write(&path, out).unwrap();
+    let _ = fs::remove_file(run_dir.join("driver.pid"));
+}
+
+fn resumed_count(events: &[Event]) -> usize {
+    count(events, |p| matches!(p, EventPayload::RunResumed { .. }))
+}
+
+/// Round 4 items 1 and 7: two owed re-runs (`b` and `c`) and nothing really
+/// interrupted. The resume re-runs the first owed one, the rebuild puts the
+/// other back (it is not the drive's current), and the run never falls back
+/// to re-running its unrelated last node.
+#[test]
+fn two_owed_reruns_are_both_run_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REPORT, &report_scripts(root));
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    assert_eq!(first.outcome, RunStatus::Failed);
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    append_lines(
+        &run_dir,
+        &[
+            r#"{"seq":SEQ,"ts":1,"type":"run_resumed","from_node":"b"}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"b","nodes":["b","done","j"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","from_node":"c","nodes":["c","c2","done","failed","j"]}"#,
+            r#"{"seq":SEQ,"ts":1,"type":"run_paused","reason":"test"}"#,
+        ],
+    );
+    fs::write(root.join(PASS), "").unwrap();
+    let plan = plan_resume(root, &first.run_id, None).unwrap();
+    assert_eq!(
+        (plan.start_node.as_str(), plan.mode),
+        ("b", StartMode::Rerun)
+    );
+
+    let before = read_all(&run_dir).unwrap().len();
     let res = resume(root, &first.run_id, None).unwrap();
     assert_eq!(res.outcome, RunStatus::Succeeded);
-    let events = read_all(&run_dir).unwrap();
-    assert_eq!(count(&events, is_revival), 0);
-    assert_eq!(starts_of(&events, "j"), 1);
-    assert!(finished_at(&events, "c2").unwrap() < started_at(&events, "j").unwrap());
+    let after = &read_all(&run_dir).unwrap()[before..];
+    for n in ["b", "c", "c2", "j"] {
+        assert_eq!(starts_of(after, n), 1, "{n}");
+    }
+    assert!(finished_at(after, "c2").unwrap() < started_at(after, "j").unwrap());
+    assert!(
+        finished_at(after, "failed").is_none(),
+        "the old last node re-ran"
+    );
+    assert!(!root.join(TIMED_OUT).exists());
+}
+
+/// Round 4 items 4 and 7: an advance past a node that reads as not yet run
+/// is refused before anything is journaled, so no driverless `run_resumed`
+/// is left behind.
+#[test]
+fn an_advance_past_a_revived_node_is_refused_before_journaling() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, REPORT, &report_scripts(root));
+    let first = run(root, "jr", None, RunOptions::default()).unwrap();
+    let run_dir = root.join(".apb/runs").join(&first.run_id);
+    // `failed` finished last; a revival naming it with no owed start.
+    append_lines(
+        &run_dir,
+        &[r#"{"seq":SEQ,"ts":1,"type":"nodes_revived","nodes":["failed"]}"#],
+    );
+    let before = read_all(&run_dir).unwrap();
+    let err = resume(root, &first.run_id, None).unwrap_err();
+    assert!(err.to_string().contains("revived"), "{err}");
+    let after = read_all(&run_dir).unwrap();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "the refused resume journaled something"
+    );
+    assert_eq!(resumed_count(&after), resumed_count(&before));
+}
+
+/// Round 4 item 11: `fail_fast` cancelled `b` when `a` failed. Re-running
+/// `a` re-runs `b` too, and the join waits for both and runs once.
+const FAIL_FAST: &str = r#"
+schema: 2
+id: jr
+name: Join revive
+version: 1.0.0
+nodes:
+  - { id: start, type: start, fork: { on_branch_failure: fail_fast, on_failure: rejected } }
+  - { id: a, type: script, script: "scripts/gate.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/slow.sh", runner: sh }
+  - { id: j, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: rejected, type: finish, outcome: failure }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn a_rerun_runs_the_siblings_its_failure_cancelled_before_the_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // `b` outlives `a` (the gate), so `fail_fast` cancels it.
+    let scripts = vec![
+        ("gate.sh", gate(root)),
+        (
+            "slow.sh",
+            format!("{}sleep 0.2\necho ok\n", after_finished(root, "a")),
+        ),
+    ];
+    let (outcome, before, resumed) =
+        fail_then_resume(root, FAIL_FAST, &scripts, "a", true, RunStatus::Failed);
+    assert!(
+        before.iter().any(|e| matches!(&e.payload,
+            EventPayload::BranchCancelled { node, .. } if node == "b")),
+        "the first pass cancelled b"
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let j = started_at(&resumed, "j").expect("the join ran");
+    for n in ["a", "b"] {
+        assert_eq!(starts_of(&resumed, n), 1, "{n}");
+        assert!(
+            finished_at(&resumed, n).unwrap() < j,
+            "the join ran before {n}"
+        );
+    }
+    assert_eq!(starts_of(&resumed, "j"), 1);
 }
 
 /// Round 3 hole 1, the drain window: a pause applied before the re-run node
@@ -681,6 +840,7 @@ fn a_drain_pause_before_the_rerun_starts_keeps_the_rerun() {
         1,
         "an automatic restart revives nothing"
     );
+    assert!(!root.join(TIMED_OUT).exists());
 }
 
 /// The issue's report shape with `c` a review gate: `reject` fails the run,
@@ -753,7 +913,8 @@ fn a_pause_while_a_revived_review_gate_waits_keeps_the_rerun() {
     let root = dir.path().to_path_buf();
     seed(&root, REVIEWED, &[]);
     let r = root.clone();
-    let first = std::thread::spawn(move || run(&r, "jr", None, RunOptions::default()).unwrap());
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || first_tx.send(run(&r, "jr", None, RunOptions::default()).unwrap()));
     let runs = root.join(".apb/runs");
     wait_until("the run dir", || {
         fs::read_dir(&runs).is_ok_and(|mut d| d.next().is_some())
@@ -764,15 +925,22 @@ fn a_pause_while_a_revived_review_gate_waits_keeps_the_rerun() {
         reviews_requested(&run_dir) == 1
     });
     decide(&run_dir, "reject");
-    assert_eq!(first.join().unwrap().outcome, RunStatus::Failed);
+    let first = first_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the rejected first pass returns");
+    assert_eq!(first.outcome, RunStatus::Failed);
 
     let (r, id) = (root.clone(), run_id.clone());
-    let rerun = std::thread::spawn(move || resume(&r, &id, Some("c")).unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(resume(&r, &id, Some("c")).unwrap()));
     wait_until("the revived gate asks again", || {
         reviews_requested(&run_dir) == 2
     });
     post_control(&run_dir, drain()).unwrap();
-    assert_eq!(rerun.join().unwrap().outcome, RunStatus::Paused);
+    let paused = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the paused re-run returns");
+    assert_eq!(paused.outcome, RunStatus::Paused);
     let events = read_all(&run_dir).unwrap();
     let resumed_at = events
         .iter()

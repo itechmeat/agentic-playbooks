@@ -14,23 +14,58 @@
 use super::*;
 
 /// [`restore_frontier`] for a drive that executes every node of `starts`
-/// again, `starts[0]` being the drive's `current`: journals the revival of
-/// each start, then rebuilds the heads against the revived fold.
+/// again, `starts[0]` being the drive's `current`: [`revive`], then rebuilds
+/// the heads against the revived fold. Used where the drive has lost its
+/// frontier or never had one (an operator's `--from-node` resume) and where a
+/// batch tail did not advance its members (the batch-path directives).
+///
+/// `overridden` are parked failed nodes a directive moved the run away from
+/// without re-running them: their own routing (a failure edge into a
+/// rollback, say) is what the supervisor decided against, so it is no head.
 pub(crate) fn restore_revived_frontier(
     log: &mut EventLog,
     playbook: &Playbook,
     events: &[Event],
     starts: &[String],
     frontier: &mut Vec<String>,
+    overridden: &[String],
 ) -> Result<(), EngineError> {
     let Some(current) = starts.first() else {
         return Ok(());
     };
+    let mut state = revive(log, playbook, events, starts, frontier)?;
+    for n in overridden {
+        if !starts.contains(n) {
+            state.route_suppressed.insert(n.clone());
+        }
+    }
+    restore_frontier(playbook, &state, current, frontier);
+    Ok(())
+}
+
+/// The revival of a drive that executes every node of `starts` again,
+/// `starts[0]` being the drive's `current`, without rebuilding any head:
+/// what a supervisor directive at a sequential park or a review gate needs,
+/// whose in-memory frontier is still the drive's own. Journals
+/// `nodes_revived` per start (and `join_input_revived` per obsolete
+/// write-off), drops from `frontier` the revived nodes that are not starts
+/// (the re-run reaches them again, e.g. an earlier owed re-run this one
+/// covers), puts every other owed re-run back, and returns the revived fold.
+pub(crate) fn revive(
+    log: &mut EventLog,
+    playbook: &Playbook,
+    events: &[Event],
+    starts: &[String],
+    frontier: &mut Vec<String>,
+) -> Result<RunState, EngineError> {
     let mut state = RunState::fold(events);
+    let Some(current) = starts.first() else {
+        return Ok(state);
+    };
     let cancelled = cancelled_siblings(events, &state, starts);
     // A cancelled sibling runs again: a plain node as a start of its own, so
-    // the rebuild puts it back on the frontier; a join only revived, so it
-    // still waits for its inputs instead of running as soon as it is offered.
+    // it goes back on the frontier; a join only revived, so it still waits
+    // for its inputs instead of running as soon as it is offered.
     let mut all_starts = starts.to_vec();
     for (_, node) in &cancelled {
         if !parallel::is_join(playbook, node) && !all_starts.contains(node) {
@@ -62,8 +97,13 @@ pub(crate) fn restore_revived_frontier(
     for record in revived_inputs(playbook, events, &state, &revival, &active) {
         log.append(record)?;
     }
-    restore_frontier(playbook, &state, current, frontier);
-    Ok(())
+    frontier.retain(|n| starts.contains(n) || !revival.contains(n));
+    for owed in &state.revival_starts {
+        if owed != current && !frontier.contains(owed) {
+            frontier.push(owed.clone());
+        }
+    }
+    Ok(state)
 }
 
 /// The branch siblings a fork's failure policy cancelled because a start
@@ -373,7 +413,8 @@ edges:
     fn rebuild(p: &Playbook, run: &mut Run, starts: &[&str]) -> Rebuilt {
         let events = run.events();
         let mut frontier = Vec::new();
-        restore_revived_frontier(&mut run.log, p, &events, &names(starts), &mut frontier).unwrap();
+        restore_revived_frontier(&mut run.log, p, &events, &names(starts), &mut frontier, &[])
+            .unwrap();
         let mut revivals = Vec::new();
         let mut records = Vec::new();
         for e in &run.events()[events.len()..] {
@@ -863,6 +904,29 @@ edges:
         let state = RunState::fold(&run.events());
         assert_eq!(state.current_status("x"), NodeStatus::Pending);
         assert!(!state.route_suppressed.contains("b"));
+    }
+
+    /// Round 4 item 3: a later revival that covers an earlier owed re-run
+    /// drops it: `b` was owed, then the run moves to `a`, upstream of `b`.
+    /// `b` leaves the frontier and the owed set; `a`'s re-run reaches it.
+    #[test]
+    fn a_later_revival_drops_the_owed_rerun_it_covers() {
+        let p = report("");
+        let mut e = failed_pass();
+        e.push(EventPayload::NodesRevived {
+            from_node: "b".into(),
+            nodes: names(&["b", "done", "j"]),
+        });
+        let mut run = Run::new(e);
+        let events = run.events();
+        let mut frontier = names(&["b"]);
+        revive(&mut run.log, &p, &events, &names(&["a"]), &mut frontier).unwrap();
+        assert!(frontier.is_empty(), "{frontier:?}");
+        let state = RunState::fold(&run.events());
+        assert_eq!(
+            state.revival_starts.iter().collect::<Vec<_>>(),
+            [&"a".to_string()]
+        );
     }
 
     /// A join already on the frontier is not offered twice.

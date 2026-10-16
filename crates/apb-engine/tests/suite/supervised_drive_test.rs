@@ -840,10 +840,16 @@ edges:
   - { from: j2, to: done }
 "#;
 
-#[test]
-fn a_sequential_continue_from_runs_the_join_once_after_the_pending_sibling() {
+/// Drives `id` supervised and answers the first wake, on `node`, with
+/// `directive`; returns the outcome and the journal.
+fn one_failure_answered(
+    id: &'static str,
+    yaml: &str,
+    node: &'static str,
+    directive: Control,
+) -> (RunStatus, Vec<Event>) {
     let dir = tempfile::tempdir().unwrap();
-    seed(dir.path(), "supseq", WF_SUPERVISED_SEQUENTIAL_CONTINUE);
+    seed(dir.path(), id, yaml);
     let prog = two_flaky_branches_agent(dir.path());
     let _env = common::env_lock();
     unsafe {
@@ -853,30 +859,120 @@ fn a_sequential_continue_from_runs_the_join_once_after_the_pending_sibling() {
         mode: RunMode::Supervised,
         ..Default::default()
     };
-    let rx = run_in_background(dir.path().to_path_buf(), "supseq", opts);
-    let run_dir = find_run_dir(dir.path(), "supseq-");
-    wait_for_wake_on(&run_dir, "c");
-    post_control(&run_dir, Control::ContinueFrom { node: "c2".into() }).unwrap();
+    let rx = run_in_background(dir.path().to_path_buf(), id, opts);
+    let run_dir = find_run_dir(dir.path(), &format!("{id}-"));
+    wait_for_wake_on(&run_dir, node);
+    post_control(&run_dir, directive).unwrap();
     let res = recv_result(&rx).unwrap();
     unsafe {
         std::env::remove_var("APB_AGENT_CMD");
     }
     drop(_env);
+    (res.outcome, read_all(&run_dir).unwrap())
+}
 
-    assert_eq!(res.outcome, RunStatus::Succeeded);
-    let events = read_all(&run_dir).unwrap();
-    let j2 = node_started_at(&events, "j2");
-    assert!(node_finished_at(&events, "c2") < j2);
-    assert!(node_finished_at(&events, "b") < j2);
-    assert_eq!(
-        events
-            .iter()
-            .filter(
-                |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "j2")
-            )
-            .count(),
-        1
-    );
+fn started_count(events: &[Event], n: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n))
+        .count()
+}
+
+/// The sequential park, answered with a continue-from (nothing it leads to
+/// has run, so nothing is revived) and with a retry of `c` (`c` has a
+/// result, so its re-run is journaled as a revival). Either way `j2` waits
+/// for the pending sibling and runs once. A routing change cannot be
+/// observed here: the directed node is the next one the drive runs, so no
+/// decision weighs the earlier state in between; the batch and resume tests
+/// cover that.
+#[test]
+fn a_sequential_continue_from_runs_the_join_once_after_the_pending_sibling() {
+    for (directive, revived) in [
+        (Control::ContinueFrom { node: "c2".into() }, vec![]),
+        (
+            Control::Retry {
+                node: "c".into(),
+                prompt_override: None,
+            },
+            vec!["c"],
+        ),
+    ] {
+        let label = format!("{directive:?}");
+        let (outcome, events) =
+            one_failure_answered("supseq", WF_SUPERVISED_SEQUENTIAL_CONTINUE, "c", directive);
+        assert_eq!(outcome, RunStatus::Succeeded, "{label}");
+        assert_eq!(revivals(&events), revived, "{label}");
+        let j2 = node_started_at(&events, "j2");
+        assert!(node_finished_at(&events, "c2") < j2, "{label}");
+        assert!(node_finished_at(&events, "b") < j2, "{label}");
+        assert_eq!(started_count(&events, "j2"), 1, "{label}");
+    }
+}
+
+// Round 4: a supervised failure with its own failure edge (`f -> h`, a
+// rollback, say). The supervisor moves the run to `s` instead; `h` is the
+// route it decided against and must not run, sequentially or in a batch.
+const WF_SUPERVISED_FAILURE_EDGE: &str = r#"
+schema: 1
+id: supfe
+name: Supervised failure edge
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: f, type: agent_task, prompt: "branch flaky1" }
+  - { id: s, type: prompt, prompt: "instead" }
+  - { id: h, type: prompt, prompt: "rollback" }
+  - { id: done, type: finish, outcome: success }
+  - { id: rolled, type: finish, outcome: failure }
+edges:
+  - { from: start, to: f }
+  - { from: f, to: s, condition: { type: node_status, node: f, equals: success } }
+  - { from: f, to: h, condition: { type: node_status, node: f, equals: failure } }
+  - { from: s, to: done }
+  - { from: h, to: rolled }
+"#;
+
+const WF_SUPERVISED_FAILURE_EDGE_BATCH: &str = r#"
+schema: 1
+id: supfb
+name: Supervised failure edge in a batch
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: f, type: agent_task, prompt: "branch flaky1" }
+  - { id: g, type: agent_task, prompt: "branch steady" }
+  - { id: s, type: prompt, prompt: "instead" }
+  - { id: h, type: prompt, prompt: "rollback" }
+  - { id: k, type: prompt, prompt: "after g" }
+  - { id: done, type: finish, outcome: success }
+  - { id: rolled, type: finish, outcome: failure }
+edges:
+  - { from: start, to: f }
+  - { from: start, to: g }
+  - { from: f, to: s, condition: { type: node_status, node: f, equals: success } }
+  - { from: f, to: h, condition: { type: node_status, node: f, equals: failure } }
+  - { from: g, to: k }
+  - { from: s, to: done }
+  - { from: k, to: done }
+  - { from: h, to: rolled }
+"#;
+
+#[test]
+fn a_continue_from_does_not_take_the_parked_nodes_failure_edge() {
+    for (id, yaml) in [
+        ("supfe", WF_SUPERVISED_FAILURE_EDGE),
+        ("supfb", WF_SUPERVISED_FAILURE_EDGE_BATCH),
+    ] {
+        let (outcome, events) =
+            one_failure_answered(id, yaml, "f", Control::ContinueFrom { node: "s".into() });
+        assert_eq!(outcome, RunStatus::Succeeded, "{id}");
+        assert_eq!(started_count(&events, "h"), 0, "{id}: the rollback ran");
+        assert_eq!(started_count(&events, "s"), 1, "{id}");
+    }
 }
 
 // Scenario 2d: a join whose input already failed must be FAILED and woken on,
