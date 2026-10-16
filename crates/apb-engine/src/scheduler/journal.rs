@@ -320,24 +320,23 @@ pub(crate) fn paused_attempt_session(
             session: id.clone(),
             workdir: workdir
                 .as_deref()
-                .map(std::path::PathBuf::from)
-                .filter(|d| is_attempt_dir(run_dir, d)),
+                .and_then(|d| attempt_dir(run_dir, Path::new(d))),
         }),
         _ => None,
     })
 }
 
-/// Whether `dir` is an isolated attempt's own directory of this run: an
+/// `dir` when it is an isolated attempt's own directory of this run: an
 /// existing directory that resolves (symlinks followed) to a path below
 /// `<run_dir>/work`. Only such a directory is reused, and cleaned, for a
 /// continued session; the journal is a file in the workspace, so a path it
 /// names is not trusted on its own. Any other directory (a shared node
 /// directory, which the node computes again anyway) means a fresh one.
-fn is_attempt_dir(run_dir: &Path, dir: &Path) -> bool {
-    let (Ok(work), Ok(dir)) = (run_dir.join("work").canonicalize(), dir.canonicalize()) else {
-        return false;
-    };
-    dir != work && dir.starts_with(&work) && dir.is_dir()
+/// Returns the resolved path the check validated, never the journaled one.
+fn attempt_dir(run_dir: &Path, dir: &Path) -> Option<std::path::PathBuf> {
+    let work = run_dir.join("work").canonicalize().ok()?;
+    let dir = dir.canonicalize().ok()?;
+    (dir != work && dir.starts_with(&work) && dir.is_dir()).then_some(dir)
 }
 
 /// Whether the run's lifecycle since a pause interrupt (`after`) is that
@@ -799,7 +798,13 @@ mod tests {
                 .expect("a paused session")
                 .workdir
         };
-        assert_eq!(session(&inside), Some(inside.clone()));
+        let canonical = inside.canonicalize().unwrap();
+        assert_eq!(session(&inside), Some(canonical.clone()));
+        assert_eq!(
+            session(&inside.join("../1")),
+            Some(canonical),
+            "the path the check resolved, not the journaled one"
+        );
         assert_eq!(session(outside.path()), None, "a path outside the run");
         assert_eq!(session(&link), None, "a symlink out of the run");
         assert_eq!(session(&run.path().join("work")), None, "the work root");
