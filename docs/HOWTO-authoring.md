@@ -1005,7 +1005,8 @@ until each one starts again; the run journals that as a `nodes_revived` event
 automatic restart of interrupted work (a crash, a `--now` pause) revives
 nothing: the nodes after it may already have run in this pass. A requested
 re-run that a pause or a crash stopped before it began is still owed: the
-next resume re-runs it. Siblings a fork's failure policy cancelled when the
+next resume re-runs it, unless a later re-run asked below it takes over
+(the later choice wins). Siblings a fork's failure policy cancelled when the
 re-run node failed are revived with it. A join fed by the re-run branch waits for that branch
 again instead of starting together with the re-run node, and an old route of a
 downstream node (into a finish node, say) is not taken before the join runs on

@@ -20,8 +20,9 @@ use super::*;
 /// batch tail did not advance its members (the batch-path directives).
 ///
 /// `overridden` are parked failed nodes a directive moved the run away from
-/// without re-running them: their own routing (a failure edge into a
-/// rollback, say) is what the supervisor decided against, so it is no head.
+/// without re-running them: a target only they route into (a failure edge
+/// into a rollback, say) is what the supervisor decided against, so it is no
+/// head. Their deliveries still count for join readiness.
 pub(crate) fn restore_revived_frontier(
     log: &mut EventLog,
     playbook: &Playbook,
@@ -33,13 +34,13 @@ pub(crate) fn restore_revived_frontier(
     let Some(current) = starts.first() else {
         return Ok(());
     };
-    let mut state = revive(log, playbook, events, starts, frontier)?;
-    for n in overridden {
-        if !starts.contains(n) {
-            state.route_suppressed.insert(n.clone());
-        }
-    }
-    restore_frontier(playbook, &state, current, frontier);
+    let state = revive(log, playbook, events, starts, frontier)?;
+    let overridden: Vec<String> = overridden
+        .iter()
+        .filter(|n| !starts.contains(n))
+        .cloned()
+        .collect();
+    restore_frontier_besides(playbook, &state, current, frontier, &overridden);
     Ok(())
 }
 
@@ -78,6 +79,19 @@ pub(crate) fn revive(
     for (start, node) in &cancelled {
         if parallel::is_join(playbook, node) {
             revival.add(start, node);
+        }
+    }
+    // An earlier owed re-run upstream of a start of this one (a supervisor's
+    // retry a pause stopped, then an operator's `--from-node` below it): the
+    // later choice wins. The owed node joins this revival, so it is owed no
+    // longer and stays not yet run; re-running it would reach the start again.
+    for owed in state.revival_starts.clone() {
+        if starts.contains(&owed) {
+            continue;
+        }
+        let covers = parallel::Revival::new(playbook, std::slice::from_ref(&owed));
+        if let Some(start) = starts.iter().find(|s| covers.contains(s)) {
+            revival.add(start, &owed);
         }
     }
     for (start, nodes) in revival.per_start() {
@@ -926,6 +940,78 @@ edges:
         assert_eq!(
             state.revival_starts.iter().collect::<Vec<_>>(),
             [&"a".to_string()]
+        );
+    }
+
+    /// Round 5 item 3: two owed re-runs, `c` (the drive's current) and `y`,
+    /// which feeds the join `jj` beside `x` (finished, routed into `jj`).
+    /// `y` counts as active before `jj` is weighed, so `jj` is not ready
+    /// without it.
+    #[test]
+    fn an_owed_rerun_that_is_not_current_keeps_its_join_waiting() {
+        let p = Playbook::from_yaml(
+            r#"
+schema: 2
+id: o
+name: O
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: x, type: prompt, prompt: "x" }
+  - { id: y, type: prompt, prompt: "y" }
+  - { id: c, type: prompt, prompt: "c" }
+  - { id: jj, type: prompt, prompt: "jj" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: x }
+  - { from: start, to: y }
+  - { from: start, to: c }
+  - { from: x, to: jj }
+  - { from: y, to: jj }
+  - { from: c, to: done }
+"#,
+        )
+        .unwrap();
+        let mut e = Vec::new();
+        e.extend(finished("start", "succeeded"));
+        e.push(hop("start", "x"));
+        e.push(hop("start", "y"));
+        e.push(hop("start", "c"));
+        e.extend(finished("x", "succeeded"));
+        e.push(hop("x", "jj"));
+        e.extend(finished("y", "failed"));
+        e.extend(finished("c", "failed"));
+        for start in ["c", "y"] {
+            e.push(EventPayload::NodesRevived {
+                from_node: start.into(),
+                nodes: names(&[start]),
+            });
+        }
+        let run = Run::new(e);
+        let state = RunState::fold(&run.events());
+        let mut frontier = Vec::new();
+        restore_frontier(&p, &state, "c", &mut frontier);
+        assert_eq!(frontier, names(&["y"]), "{frontier:?}");
+    }
+
+    /// Round 5 item 5: an owed re-run of `a` (upstream of `c`) and then a
+    /// re-run asked from `c`: the later choice wins, `a` is owed no longer
+    /// and is not put back on the frontier.
+    #[test]
+    fn a_rerun_below_an_owed_one_drops_it() {
+        let p = report("");
+        let mut e = failed_pass();
+        e.push(EventPayload::NodesRevived {
+            from_node: "a".into(),
+            nodes: names(&["a", "b", "c", "c2", "done", "failed", "j"]),
+        });
+        let mut run = Run::new(e);
+        let r = rebuild(&p, &mut run, &["c"]);
+        assert!(r.frontier.is_empty(), "{:?}", r.frontier);
+        let state = RunState::fold(&run.events());
+        assert_eq!(
+            state.revival_starts.iter().collect::<Vec<_>>(),
+            [&"c".to_string()]
         );
     }
 

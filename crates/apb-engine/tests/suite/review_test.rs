@@ -352,6 +352,16 @@ fn a_retry_posted_while_parked_on_a_gate_reruns_the_node_and_asks_again() {
         .filter(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "work"))
         .count();
     assert_eq!(work_runs, 2, "the retried node ran again");
+    // The move off the gate re-runs `work`, so it is journaled as a revival
+    // of `work` (issue #203).
+    let revived: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::NodesRevived { from_node, .. } => Some(from_node.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(revived, ["work"]);
 }
 
 #[test]

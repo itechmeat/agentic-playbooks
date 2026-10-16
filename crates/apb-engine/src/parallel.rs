@@ -457,9 +457,23 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
 /// node outside it, and running it on that old input would run it twice. The
 /// re-run reaches it again when a revived branch delivers into it.
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
+    pending_heads_besides(playbook, state, &[])
+}
+
+/// [`pending_heads`] without the routing of `overridden`: finished nodes a
+/// supervisor directive moved the run away from (a parked failed node it did
+/// not re-run). A target only they route into is no head; a target another
+/// node routes into still is. Readiness is not touched: their deliveries
+/// still count for the joins they feed (a failed delivery still fails a
+/// `join: all`).
+pub fn pending_heads_besides(
+    playbook: &Playbook,
+    state: &RunState,
+    overridden: &[String],
+) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
     for node in state.nodes.keys() {
-        if !status_of(state, node).is_finished() {
+        if !status_of(state, node).is_finished() || overridden.contains(node) {
             continue;
         }
         for s in routed_targets(playbook, node, state) {

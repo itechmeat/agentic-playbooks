@@ -123,6 +123,7 @@ function eventNote(e: WfEvent): string | undefined {
       return list ? `${String(r.node ?? '')} proceeds without ${list}` : undefined
     }
     case 'join_input_revived': {
+      if (!r.node) return undefined
       const list = listOf(r.sources)
       const from = r.from_node ? ` (re-run of ${String(r.from_node)})` : ''
       return `${String(r.node ?? '')} waits for ${list || 'its revived inputs'} again${from}`

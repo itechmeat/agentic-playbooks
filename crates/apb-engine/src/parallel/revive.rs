@@ -39,11 +39,12 @@ impl Revival {
         // covers, with no declared edge: without it the handler would stay
         // outside the revival while its own edges are weighed against the
         // revived nodes, and a fallback edge it never took would become a
-        // stale head.
+        // stale head. Forward only: the ancestor walk stays on declared
+        // edges, or a handler with a rework path back upstream would make
+        // every node an ancestor and shrink the revival to the start alone.
         for n in &playbook.nodes {
             if let Some(handler) = playbook.defaults.on_failure.target_for(&n.id) {
                 forward.entry(n.id.as_str()).or_default().push(handler);
-                reverse.entry(handler).or_default().push(n.id.as_str());
             }
         }
         let mut out = Revival::default();

@@ -124,10 +124,15 @@ pub fn plan_resume(
     // journal ends at `node_started`) or `Interrupted` (an open
     // `attempt_started` with no `attempt_finished`). Both are nodes whose work
     // the crash cut short.
+    // A revived node's `Running`/`Interrupted` predates its revival: the
+    // re-run reaches it again, so it is not interrupted work of its own.
     let interrupted: Vec<String> = state
         .nodes
         .iter()
-        .filter(|(_, st)| matches!(st, NodeStatus::Running | NodeStatus::Interrupted))
+        .filter(|(n, st)| {
+            matches!(st, NodeStatus::Running | NodeStatus::Interrupted)
+                && !state.revived.contains(*n)
+        })
         .map(|(n, _)| n.clone())
         .collect();
     // A re-run an operator or a supervisor asked for that never began (issue

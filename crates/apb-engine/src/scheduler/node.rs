@@ -3874,8 +3874,24 @@ pub(crate) fn restore_frontier(
     current: &str,
     frontier: &mut Vec<String>,
 ) {
-    let heads = parallel::pending_heads(playbook, state);
-    let active = active_set(current, frontier, &heads);
+    restore_frontier_besides(playbook, state, current, frontier, &[]);
+}
+
+/// [`restore_frontier`] without the heads only `overridden` route into (see
+/// [`parallel::pending_heads_besides`]).
+pub(crate) fn restore_frontier_besides(
+    playbook: &Playbook,
+    state: &RunState,
+    current: &str,
+    frontier: &mut Vec<String>,
+    overridden: &[String],
+) {
+    let heads = parallel::pending_heads_besides(playbook, state, overridden);
+    // Every owed re-run (issue #203) is about to run too: it counts as active
+    // before any join is weighed, so a join it feeds is not ready without it.
+    let mut also = heads.clone();
+    also.extend(state.revival_starts.iter().cloned());
+    let active = active_set(current, frontier, &also);
     for head in &heads {
         if head == current || frontier.contains(head) {
             continue;
