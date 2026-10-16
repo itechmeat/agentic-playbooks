@@ -449,9 +449,32 @@ pub(crate) const PAUSE_INTERRUPT_NOTE: &str = "interrupted by a pause (--now)";
 /// The agent session of attempt `attempt` of `node`, which a `--now` pause
 /// cut short before it could journal its own finish: the id the attempt
 /// recorded in its transcript directory when it was killed (an assigned,
-/// continued or printed one), else one its raw output carries. `None` when
-/// the attempt never started or reported no session.
+/// continued or printed one), else one its raw output carries. A pause
+/// during a retry backoff finds that attempt already finished: its own
+/// journaled session then. `None` when the attempt never started or
+/// reported no session.
 fn interrupted_attempt_session(
+    run_dir: &std::path::Path,
+    events: &[Event],
+    node: &str,
+    attempt: u32,
+) -> Option<String> {
+    transcript_session(run_dir, events, node, attempt).or_else(|| {
+        events.iter().rev().find_map(|e| match &e.payload {
+            EventPayload::AttemptFinished {
+                node: n,
+                attempt: a,
+                session,
+                ..
+            } if n == node && *a == attempt => session.clone(),
+            _ => None,
+        })
+    })
+}
+
+/// The session attempt `attempt` of `node` recorded in its transcript
+/// directory (see [`interrupted_attempt_session`]).
+fn transcript_session(
     run_dir: &std::path::Path,
     events: &[Event],
     node: &str,
@@ -700,6 +723,54 @@ mod tests {
         // The pause interrupt without its pause (a driver that died).
         let no_pause = vec![started(1), finished(2, Some(PAUSE_INTERRUPT_NOTE))];
         assert_eq!(paused_attempt_session(&no_pause, "work"), None);
+    }
+
+    /// A `--now` pause during a retry backoff cuts no attempt short: the
+    /// attempt that just failed already journaled its session, and that
+    /// session is the one the pause keeps.
+    #[test]
+    fn a_pause_in_a_retry_backoff_keeps_the_failed_attempts_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = vec![
+            at(
+                1,
+                EventPayload::AttemptStarted {
+                    node: "work".into(),
+                    attempt: 1,
+                    agent: "claude".into(),
+                    soul_delivery: None,
+                    skills_mode: None,
+                    pid: None,
+                    spawn_ms: None,
+                    model: Some("haiku".into()),
+                    workdir: None,
+                    transcript: None,
+                },
+            ),
+            at(
+                2,
+                EventPayload::AttemptFinished {
+                    node: "work".into(),
+                    attempt: 1,
+                    status: "failed".into(),
+                    duration_ms: None,
+                    session: Some("sid".into()),
+                    summary: None,
+                    rejected_output: None,
+                    partial_output: None,
+                    failure_kind: None,
+                    usage: None,
+                },
+            ),
+        ];
+        assert_eq!(
+            interrupted_attempt_session(dir.path(), &events, "work", 1).as_deref(),
+            Some("sid")
+        );
+        assert_eq!(
+            interrupted_attempt_session(dir.path(), &events, "work", 2),
+            None
+        );
     }
 
     /// The kept session belongs to the first resume after the pause only: a
