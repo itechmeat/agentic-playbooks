@@ -362,7 +362,12 @@ fn acquire_at(
     // The check and the write are one step under a short mutex, so two
     // claimants of a free, stale or parked lock never both take it (the
     // loser's guard would later remove the winner's lock).
-    let _taking = take_mutex(&lock_path)?;
+    // A mutex held by a live sibling past the short wait is a busy workdir,
+    // so the queued and handover waits retry it like a held lock.
+    let _taking = take_mutex(&lock_path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::WouldBlock => EngineError::WorkdirBusy(e.to_string()),
+        _ => EngineError::Io(e),
+    })?;
     if let Some(msg) = busy_reason(&lock_path, claimant) {
         return Err(EngineError::WorkdirBusy(msg));
     }

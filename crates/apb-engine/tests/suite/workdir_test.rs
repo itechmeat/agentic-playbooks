@@ -62,6 +62,20 @@ fn second_writer_is_refused_but_shared_allowed() {
     assert!(acquire(root.path(), false).unwrap().is_some());
 }
 
+/// A claimant that finds the short take mutex held by a live sibling gets
+/// the same busy answer as one that finds the lock itself held, so queued
+/// waits and handovers retry instead of failing the run on an I/O error.
+#[test]
+fn a_held_take_mutex_reads_as_a_busy_workdir() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    std::fs::write(root.path().join(".apb/workdir.lock.take"), "other").unwrap();
+    match acquire(root.path(), false) {
+        Err(EngineError::WorkdirBusy(_)) => {}
+        other => panic!("expected WorkdirBusy, got {other:?}"),
+    }
+}
+
 /// The queue's whole job: a start that would have been refused waits the
 /// holder out and then runs. Without this, an event that arrives while any
 /// other write-run holds the lock has nowhere to go.
