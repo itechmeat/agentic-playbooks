@@ -118,14 +118,25 @@ pub(crate) fn clear_isolated_skills(workdir: &Path) -> Result<(), EngineError> {
                     remove_link(&path)?;
                     break;
                 }
+                // A plain file where a directory belongs: remove it, never
+                // `remove_dir_all` a file.
+                Ok(m) if !m.is_dir() => {
+                    std::fs::remove_file(&path)?;
+                    break;
+                }
                 Ok(_) if path.ends_with(sub) => std::fs::remove_dir_all(&path)?,
                 Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) if is_absent(&e) => break,
                 Err(e) => return Err(e.into()),
             }
         }
     }
     Ok(())
+}
+
+/// A missing path, or one below a regular file (ENOTDIR).
+fn is_absent(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound || e.kind() == std::io::ErrorKind::NotADirectory
 }
 
 /// Removes the symlink at `path` itself. A directory symlink on Windows is
@@ -171,5 +182,19 @@ mod tests {
         clear_isolated_skills(wd.path()).unwrap();
         assert!(!wd.path().join(".claude/skills").exists());
         assert!(wd.path().join(".claude").is_dir());
+    }
+
+    /// A regular file where `.claude`, `.agents` or a `skills` directory
+    /// belongs does not fail the clear.
+    #[test]
+    fn clearing_skills_removes_plain_files_in_place_of_directories() {
+        let wd = tempfile::tempdir().unwrap();
+        std::fs::write(wd.path().join(".claude"), "f").unwrap();
+        std::fs::create_dir_all(wd.path().join(".agents")).unwrap();
+        std::fs::write(wd.path().join(".agents/skills"), "f").unwrap();
+        clear_isolated_skills(wd.path()).unwrap();
+        assert!(!wd.path().join(".claude").exists());
+        assert!(!wd.path().join(".agents/skills").exists());
+        assert!(wd.path().join(".agents").is_dir());
     }
 }
