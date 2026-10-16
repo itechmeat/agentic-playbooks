@@ -475,13 +475,13 @@ fn interrupted_attempt_session(
     node: &str,
     attempt: u32,
 ) -> Option<String> {
-    transcript_session(run_dir, events, node, attempt).or_else(|| {
-        // Attempt numbers restart with every execution of the node, so only
-        // a finish after this attempt's latest start is its own.
-        let start = events.iter().rposition(|e| {
-            matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt: a, .. }
-                if n == node && *a == attempt)
-        })?;
+    // Attempt numbers restart with every execution of the node, so only the
+    // latest start of this attempt (and a finish after it) is its own.
+    let start = events.iter().rposition(|e| {
+        matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt: a, .. }
+            if n == node && *a == attempt)
+    })?;
+    transcript_session(run_dir, &events[start]).or_else(|| {
         events[start..].iter().find_map(|e| match &e.payload {
             EventPayload::AttemptFinished {
                 node: n,
@@ -494,25 +494,22 @@ fn interrupted_attempt_session(
     })
 }
 
-/// The session attempt `attempt` of `node` recorded in its transcript
-/// directory (see [`interrupted_attempt_session`]).
-fn transcript_session(
-    run_dir: &std::path::Path,
-    events: &[Event],
-    node: &str,
-    attempt: u32,
-) -> Option<String> {
-    let (agent, transcript) = events.iter().rev().find_map(|e| match &e.payload {
-        EventPayload::AttemptStarted {
-            node: n,
-            attempt: a,
-            agent,
-            transcript: Some(t),
-            ..
-        } if n == node && *a == attempt => Some((agent.clone(), t.clone())),
-        _ => None,
-    })?;
-    let dir = run_dir.join(transcript);
+/// The session the attempt started by `start` recorded in its transcript
+/// directory (see [`interrupted_attempt_session`]). A journaled transcript
+/// path that does not resolve under the run directory is ignored.
+fn transcript_session(run_dir: &std::path::Path, start: &Event) -> Option<String> {
+    let EventPayload::AttemptStarted {
+        agent,
+        transcript: Some(transcript),
+        ..
+    } = &start.payload
+    else {
+        return None;
+    };
+    let dir = run_dir.join(transcript).canonicalize().ok()?;
+    if !dir.starts_with(run_dir.canonicalize().ok()?) {
+        return None;
+    }
     if let Ok(id) = std::fs::read_to_string(dir.join(super::transcript::SESSION_ID_FILE)) {
         let id = id.trim();
         if !id.is_empty() {
@@ -520,8 +517,8 @@ fn transcript_session(
         }
     }
     let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
-    crate::adapter::capture_session(&agent, &read("stdout.log"))
-        .or_else(|| crate::adapter::capture_session_header(&agent, &read("stderr.log")))
+    crate::adapter::capture_session(agent, &read("stdout.log"))
+        .or_else(|| crate::adapter::capture_session_header(agent, &read("stderr.log")))
 }
 
 /// Journals the end of an attempt a `--now` pause cut short:
@@ -869,6 +866,67 @@ mod tests {
         assert_eq!(
             interrupted_attempt_session(dir.path(), &rerun, "work", 1),
             None
+        );
+    }
+
+    fn started(seq: u128, transcript: Option<&str>) -> Event {
+        at(
+            seq,
+            EventPayload::AttemptStarted {
+                node: "work".into(),
+                attempt: 1,
+                agent: "claude".into(),
+                soul_delivery: None,
+                skills_mode: None,
+                pid: None,
+                spawn_ms: None,
+                model: None,
+                workdir: None,
+                transcript: transcript.map(Into::into),
+            },
+        )
+    }
+
+    /// Only the latest start of the attempt counts: an older execution's
+    /// transcript is not read when the latest start has none.
+    #[test]
+    fn the_session_comes_from_the_latest_start_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("t-old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(super::super::transcript::SESSION_ID_FILE), "old").unwrap();
+        let events = vec![started(1, Some("t-old")), started(2, None)];
+        assert_eq!(
+            interrupted_attempt_session(dir.path(), &events, "work", 1),
+            None
+        );
+    }
+
+    /// A journaled transcript path that leaves the run directory is ignored.
+    #[test]
+    fn a_transcript_path_outside_the_run_dir_is_ignored() {
+        let base = tempfile::tempdir().unwrap();
+        let run = base.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let outside = base.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join(super::super::transcript::SESSION_ID_FILE), "x").unwrap();
+        let events = vec![started(1, Some("../elsewhere"))];
+        assert_eq!(interrupted_attempt_session(&run, &events, "work", 1), None);
+        let abs = outside.to_str().unwrap();
+        let events = vec![started(1, Some(abs))];
+        assert_eq!(interrupted_attempt_session(&run, &events, "work", 1), None);
+        std::fs::create_dir_all(run.join("t")).unwrap();
+        std::fs::write(
+            run.join("t")
+                .join(super::super::transcript::SESSION_ID_FILE),
+            "ok",
+        )
+        .unwrap();
+        let events = vec![started(1, Some("t"))];
+        assert_eq!(
+            interrupted_attempt_session(&run, &events, "work", 1).as_deref(),
+            Some("ok")
         );
     }
 
