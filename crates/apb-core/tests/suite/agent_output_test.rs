@@ -1,7 +1,7 @@
 //! Reply and token usage from each agent CLI's machine output, over
 //! recorded outputs (see `apb_core::agent_output` for the shapes).
 
-use apb_core::agent_output::{AgentUsage, UsageSource, reply, usage};
+use apb_core::agent_output::{AgentUsage, UsageSource, has_final_record, reply, usage};
 
 const CLAUDE: &str = include_str!("../fixtures/agent_output/claude_result.json");
 const CODEX: &str = include_str!("../fixtures/agent_output/codex_exec.jsonl");
@@ -179,4 +179,40 @@ fn unverifiable_overlaps_are_kept_as_the_cli_reports_them() {
     let zcode = ZCODE.replace(r#""reasoningTokens": 0"#, r#""reasoningTokens": 40"#);
     assert_ne!(zcode, ZCODE);
     assert_eq!(usage("zcode", &zcode).unwrap().output_tokens, 318);
+}
+
+#[test]
+fn the_final_record_is_found_in_each_machine_format_and_missing_when_cut() {
+    for (agent, out) in [
+        ("claude", CLAUDE),
+        ("codex", CODEX),
+        ("opencode", OPENCODE),
+        ("zcode", ZCODE),
+    ] {
+        assert_eq!(has_final_record(agent, out), Some(true), "{agent}");
+        // The closing record torn in half is not a record.
+        let cut = &out[..out.trim_end().len() - 5];
+        assert_eq!(has_final_record(agent, cut), Some(false), "{agent} cut");
+    }
+    assert_eq!(has_final_record("hermes", "plain text reply"), None);
+}
+
+/// A failed run ends with its own terminal record instead of the success
+/// one; that is a whole ending, not a cut one.
+#[test]
+fn a_failed_run_ends_with_a_final_record_too() {
+    for (agent, last) in [
+        (
+            "codex",
+            r#"{"type":"turn.failed","error":{"message":"rate limited"}}"#,
+        ),
+        ("codex", r#"{"type":"error","message":"stream error"}"#),
+        (
+            "opencode",
+            r#"{"type":"error","error":{"name":"APIError"}}"#,
+        ),
+    ] {
+        let out = format!("{{\"type\":\"item.started\"}}\n{last}\n");
+        assert_eq!(has_final_record(agent, &out), Some(true), "{agent}: {last}");
+    }
 }

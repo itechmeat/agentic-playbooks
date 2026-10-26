@@ -405,6 +405,7 @@ impl HostAdapter<'_, '_> {
             question: None,
             session: None,
             usage: sub.usage.as_ref().map(|u| u.to_agent_usage()),
+            capture: crate::capture::OutputCapture::default(),
         }
     }
 }

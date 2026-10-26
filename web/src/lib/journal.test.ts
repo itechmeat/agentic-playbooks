@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { interventionJournal, runEventJournal } from './journal'
+import { attemptOutputNote } from './outputloss'
 import type { WfEvent } from './types'
 
 const events: WfEvent[] = [
@@ -61,6 +62,7 @@ describe('runEventJournal', () => {
 
 describe('runEventJournal notes', () => {
   it('says how a session handoff started and which declared fields were missing', () => {
+    const loss = [{ stream: 'stdout', kept_bytes: 8, dropped_bytes_at_least: 4 }]
     const entries = runEventJournal([
       { seq: 1, ts: 1, type: 'session_handoff', node: 'b', from_node: 'a', warm: true },
       { seq: 2, ts: 2, type: 'session_handoff', node: 'c', from_node: 'a', warm: false, reason: 'different model' },
@@ -71,6 +73,14 @@ describe('runEventJournal notes', () => {
       { seq: 7, ts: 7, type: 'worktree_resolved', path: '/src/wt', source: 'caller' },
       { seq: 8, ts: 8, type: 'attempt_finished', node: 'a', usage: { input_tokens: 10, output_tokens: 2, source: 'reported' } },
       { seq: 9, ts: 9, type: 'attempt_finished', node: 'a' },
+      {
+        seq: 10,
+        ts: 10,
+        type: 'attempt_finished',
+        node: 'a',
+        usage: { input_tokens: 10, output_tokens: 2, source: 'reported' },
+        output_truncated: loss,
+      },
     ] as never)
     expect(entries.map((e) => e.note)).toEqual([
       'warm: continues the session of a',
@@ -82,6 +92,8 @@ describe('runEventJournal notes', () => {
       'working tree: /src/wt (from caller)',
       'tokens: 10 in, 2 out',
       undefined,
+      // The loss wording is outputloss.ts's; here only that it is attached.
+      `tokens: 10 in, 2 out · ${attemptOutputNote(loss, undefined)}`,
     ])
   })
 

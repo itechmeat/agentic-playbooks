@@ -4,7 +4,9 @@
 //! placeholders; `config` and `secrets` handle account configuration and
 //! secret resolution; `store` is the on-disk connector store; `resolve`
 //! validates a playbook's connector bindings against installed connectors
-//! and configured accounts and expands them into per-node grants.
+//! and configured accounts and expands them into per-node grants;
+//! `text_mode` prepares agent-written string args (`text_args`) before they
+//! reach a request body.
 
 pub mod common;
 pub mod config;
@@ -21,6 +23,7 @@ pub mod resolve;
 pub mod secrets;
 pub mod store;
 pub mod template;
+pub mod text_mode;
 // Not glob re-exported, for the same reason as `inbox`: `webhook::verify_*`
 // and future `store::*` names must not compete under one glob.
 pub mod webhook;
@@ -33,3 +36,4 @@ pub use resolve::*;
 pub use secrets::*;
 pub use store::*;
 pub use template::*;
+pub use text_mode::{TextMode, apply_text_args};

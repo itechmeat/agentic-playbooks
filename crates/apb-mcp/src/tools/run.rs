@@ -237,10 +237,10 @@ fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, di
 
 // --- 0.23.0: run outcome blocks (C1, C7) ---
 
-/// The run's goal with the criteria results (C1) and the commits its nodes
-/// made (C7), each only when there is one: a run of a playbook without a
-/// goal on a tree without commits reads as before. Shared by `run_status`
-/// and `run_report`.
+/// The run's goal with the criteria results (C1), the commits its nodes made
+/// (C7) and the inbox gaps its connector reads found, each only when there is
+/// one: a run of a playbook without a goal on a tree without commits reads as
+/// before. Shared by `run_status` and `run_report`.
 fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
     if let Some(goal) = view.goal(dir) {
         out["goal"] = json!(goal);
@@ -258,16 +258,28 @@ fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir
             out["model_mismatch"] = json!(mismatches);
         }
     }
+    // The inbox gaps the run's connector reads journaled: retention dropped
+    // unread events, so the run's view of its inbox was incomplete. Absent
+    // when the run journaled none, like every other outcome block.
+    let gaps = view.inbox_gaps();
+    if !gaps.is_empty() {
+        out["inbox_gaps"] = json!(gaps);
+    }
 }
 
 // --- end of the 0.23.0 blocks ---
 
 /// The fields a run view carries only when they apply: the token usage its
-/// attempts reported, the decision-model totals, and the note about events a newer apb wrote that this
-/// binary skipped. Shared by `run_status` and `run_report`.
+/// attempts reported, the attempts that lost part of their output, the
+/// decision-model totals, and the note about events a newer apb wrote that
+/// this binary skipped. Shared by `run_status` and `run_report`.
 fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     if let Some(usage) = view.usage() {
         out["usage"] = json!(usage);
+    }
+    let losses = view.output_losses();
+    if !losses.is_empty() {
+        out["output_truncated"] = json!(losses);
     }
     // One compact object; each decision's detail stays in `run_events`.
     if let Some(decisions) = view.decisions() {

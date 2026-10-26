@@ -70,6 +70,8 @@ fn attempt_finished_rejected_output_populates_rejected_outputs() {
         ev(
             1,
             EventPayload::AttemptFinished {
+                output_truncated: Vec::new(),
+                transcript_incomplete: false,
                 node: "a".into(),
                 attempt: 1,
                 status: "failed".into(),
@@ -271,6 +273,8 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
         ev(
             2,
             EventPayload::AttemptFinished {
+                output_truncated: Vec::new(),
+                transcript_incomplete: false,
                 node: "ping".into(),
                 attempt: 1,
                 status: "failed".into(),

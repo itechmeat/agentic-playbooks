@@ -47,32 +47,31 @@ pub(crate) fn attempt_dir(
 }
 
 /// Copies the agent's own record of session `session` into `dir` as
-/// `session.jsonl`, best effort. Only claude keeps one apb can find: a JSONL
-/// file named after the session under `projects/` of its config directory
-/// (`CLAUDE_CONFIG_DIR`, else `~/.claude`), with every tool call and result.
-/// Other agents keep their sessions in their own stores; their raw output is
-/// still in `stdout.log` and `stderr.log`.
-pub(crate) fn copy_agent_session(agent: &str, session: &str, dir: &Path) {
+/// `session.jsonl`, best effort, up to `cap` bytes. Only claude keeps one
+/// apb can find: a JSONL file named after the session under `projects/` of
+/// its config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`), with every
+/// tool call and result. Other agents keep their sessions in their own
+/// stores; their raw output is still in `stdout.log` and `stderr.log`.
+/// Returns what the cap kept out of the copy.
+pub(crate) fn copy_agent_session(
+    agent: &str,
+    session: &str,
+    dir: &Path,
+    cap: u64,
+) -> Option<crate::event::OutputLoss> {
     if apb_core::detect::canonical_agent_id(agent) != "claude"
         || !apb_core::registry::is_safe_segment(session)
     {
-        return;
+        return None;
     }
-    let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR")
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
-    else {
-        return;
-    };
-    let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
-        return;
-    };
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
+    let projects = std::fs::read_dir(config.join("projects")).ok()?;
     let file = format!("{session}.jsonl");
-    for project in projects.filter_map(|e| e.ok()) {
-        let candidate = project.path().join(&file);
-        if candidate.is_file() {
-            let _ = std::fs::copy(&candidate, dir.join("session.jsonl"));
-            return;
-        }
-    }
+    let source = projects
+        .filter_map(|e| e.ok())
+        .map(|project| project.path().join(&file))
+        .find(|candidate| candidate.is_file())?;
+    crate::capture::copy_capped(&source, &dir.join("session.jsonl"), cap)
 }

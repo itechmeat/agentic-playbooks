@@ -200,6 +200,23 @@ pub enum EventPayload {
             deserialize_with = "lenient_usage"
         )]
         usage: Option<apb_core::agent_output::AgentUsage>,
+        /// What was cut from this attempt's captured output when a size limit
+        /// hit (bounded agent output): one entry per truncated stream. Empty
+        /// when everything fit; additive, old logs read unchanged. Read
+        /// leniently like `usage`: a list this binary cannot decode (a newer
+        /// apb's shape) reads as empty.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        output_truncated: Vec<OutputLoss>,
+        /// True when the attempt's final agent record could not be read whole
+        /// (it fell into a dropped span, the line was over the tail limit, or
+        /// the stream ended mid-record), so the attempt must not count as a
+        /// success. Additive, old logs read unchanged.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        transcript_incomplete: bool,
     },
     NodeFinished {
         node: String,
@@ -654,6 +671,35 @@ pub enum EventPayload {
         smtp_subject: Option<String>,
         #[serde(default)]
         smtp_recipients: Option<u32>,
+        /// Response completeness (incomplete connector response): `None` for
+        /// old events and for kinds where completeness does not apply (smtp,
+        /// imap, inbox, mock), `Some(true)` when the response body was read
+        /// whole, `Some(false)` when it was cut at the size cap or the read
+        /// failed partway. A read-only function with `Some(false)` failed as
+        /// `incomplete_response`. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_complete: Option<bool>,
+    },
+    /// A connector inbox read found unread events that retention had already
+    /// dropped (the consumer's cursor pointed past the oldest stored event).
+    /// `from` and `through` bound the lost sequence numbers inclusively.
+    /// Recorded once per distinct gap per run, when a read first crosses it.
+    ///
+    /// Safe to skip up to the next checkpoint: it is a reporting record; the
+    /// node that made the read still ends with its own `attempt_finished` and
+    /// `node_finished`, and retention is not undone by knowing about it.
+    /// Additive variant: old logs never carry it, and an older apb skips it.
+    InboxGap {
+        #[serde(default)]
+        node_id: String,
+        #[serde(default)]
+        connector: String,
+        #[serde(default)]
+        account: String,
+        #[serde(default)]
+        from: u64,
+        #[serde(default)]
+        through: u64,
     },
     /// Node cache (spec 2026-07-19-node-cache-design). A cache lookup for a
     /// cacheable node always ends in exactly one of `NodeCacheHit` or
@@ -1105,6 +1151,22 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+}
+
+/// One stream's kept-versus-dropped byte counts for a truncated attempt output
+/// ([`EventPayload::AttemptFinished`], bounded agent output). `stream` is one
+/// of `stdout`, `stderr`, `stream_log` (the streaming transport's log),
+/// `session_copy` (the copied agent session transcript). `dropped_bytes_at_least`
+/// is a lower bound: only whole dropped spans are countable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct OutputLoss {
+    #[serde(default)]
+    pub stream: String,
+    #[serde(default)]
+    pub kept_bytes: u64,
+    #[serde(default)]
+    pub dropped_bytes_at_least: u64,
 }
 
 /// One commit of an [`EventPayload::ArtifactsCommitted`].
@@ -2156,6 +2218,8 @@ mod tests {
     #[test]
     fn attempt_finished_with_rejected_output_round_trips() {
         let payload = EventPayload::AttemptFinished {
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
             node: "a".into(),
             attempt: 1,
             status: "failed".into(),
@@ -2192,6 +2256,8 @@ mod tests {
     #[test]
     fn attempt_finished_with_failure_kind_round_trips() {
         let payload = EventPayload::AttemptFinished {
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
             node: "a".into(),
             attempt: 1,
             status: "failed".into(),
@@ -2261,6 +2327,8 @@ mod tests {
     #[test]
     fn attempt_finished_with_session_round_trips() {
         let payload = EventPayload::AttemptFinished {
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
             node: "a".into(),
             attempt: 1,
             status: "succeeded".into(),

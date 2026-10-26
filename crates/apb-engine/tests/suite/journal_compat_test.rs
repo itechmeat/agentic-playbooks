@@ -239,6 +239,40 @@ fn an_attempt_usage_block_of_a_newer_shape_does_not_break_the_journal() {
     apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
 }
 
+/// The same for the output loss list: an entry shape this binary cannot
+/// decode reads as no recorded loss, and the attempt still reads.
+#[test]
+fn an_output_loss_list_of_a_newer_shape_does_not_break_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = |seq: u64, body: &str| format!(r#"{{"seq":{seq},"ts":1,{body}}}"#);
+    let journal = [
+        line(0, r#""type":"run_started","playbook":"p","version":"1.0.0""#),
+        line(
+            1,
+            r#""type":"attempt_finished","node":"w","attempt":1,"status":"failed","output_truncated":{"streams":[{"stream":"stdout","kept_bytes":"1 MiB"}]},"transcript_incomplete":true"#,
+        ),
+        line(
+            2,
+            r#""type":"node_finished","node":"w","status":"failed","attempt":1,"output":"""#,
+        ),
+    ]
+    .join("\n");
+    std::fs::write(dir.path().join("events.jsonl"), journal + "\n").unwrap();
+
+    let read = apb_engine::event::read_journal(dir.path()).expect("journal reads");
+    assert!(read.unknown.is_empty());
+    let attempt = read.events.iter().find_map(|e| match &e.payload {
+        apb_engine::event::EventPayload::AttemptFinished {
+            output_truncated,
+            transcript_incomplete,
+            ..
+        } => Some((output_truncated.len(), *transcript_incomplete)),
+        _ => None,
+    });
+    assert_eq!(attempt, Some((0, true)));
+    apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
+}
+
 /// Stopping never re-drives a run and only appends `run_aborted`, itself a
 /// checkpoint, so an older apb can stop a run whose journal holds an unknown
 /// event after the last checkpoint. Resuming the same journal still refuses.
@@ -316,4 +350,62 @@ fn new_pause_fields_round_trip() {
     let line = r#"{"seq":4,"ts":20,"type":"run_resumed","from_node":"a","by":"engine"}"#;
     let e: Event = serde_json::from_str(line).unwrap();
     assert_eq!(serde_json::to_string(&e).unwrap(), line);
+}
+
+/// The completeness fields added to known events read as absent from old
+/// lines and write the old shape back when unset, so a journal without them
+/// is byte-for-byte what it was.
+#[test]
+fn old_connector_call_and_attempt_lines_keep_their_shape() {
+    let lines = [
+        r#"{"seq":5,"ts":9,"type":"connector_call","node_id":"n","connector":"c","function":"f","account":"a","url":"u","outcome":"ok","http_status":200,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}"#,
+        r#"{"seq":6,"ts":10,"type":"attempt_finished","node":"n","attempt":1,"status":"succeeded","duration_ms":null,"session":null,"summary":null}"#,
+    ];
+    for line in lines {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let call: Event = serde_json::from_str(lines[0]).unwrap();
+    assert!(matches!(
+        call.payload,
+        EventPayload::ConnectorCall {
+            response_complete: None,
+            ..
+        }
+    ));
+    let cut = lines[0].replace("}", r#","response_complete":false}"#);
+    let e: Event = serde_json::from_str(&cut).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ConnectorCall {
+            response_complete: Some(false),
+            ..
+        }
+    ));
+}
+
+/// `inbox_gap` is a reporting record: it round trips, changes no run state,
+/// and a binary that does not know it skips it because the node that made the
+/// read still ends with its own `node_finished` checkpoint.
+#[test]
+fn inbox_gap_round_trips_and_is_skippable_before_a_checkpoint() {
+    let line = r#"{"seq":2,"ts":3,"type":"inbox_gap","node_id":"a","connector":"c","account":"main","from":3,"through":6}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+
+    // The same journal as an older binary sees it: the type is unknown, and a
+    // checkpoint follows it, so the engine read still succeeds.
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        line.replace("inbox_gap", "inbox_gap_from_the_future"),
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
 }

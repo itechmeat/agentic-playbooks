@@ -501,25 +501,36 @@ fn route_execution(
 /// rather than a second hand-built event.
 pub(super) fn journal_interrupted_attempt(
     journal: &Journal,
-    node_id: &str,
-    attempt: u32,
-    duration_ms: Option<u64>,
-    session: Option<String>,
-    partial: &str,
-    failure_kind: Option<FailureKind>,
+    attempt: InterruptedAttempt<'_>,
 ) -> Result<(), EngineError> {
     journal.append(EventPayload::AttemptFinished {
-        node: node_id.into(),
-        attempt,
+        output_truncated: attempt.capture.truncated,
+        transcript_incomplete: attempt.capture.transcript_incomplete,
+        node: attempt.node_id.into(),
+        attempt: attempt.attempt,
         status: NodeStatus::Interrupted.as_str().into(),
-        duration_ms,
-        session,
+        duration_ms: attempt.duration_ms,
+        session: attempt.session,
         summary: None,
         rejected_output: None,
-        partial_output: (!partial.trim().is_empty()).then(|| partial.to_string()),
-        failure_kind: failure_kind.map(|k| k.as_str().to_string()),
+        partial_output: (!attempt.partial.trim().is_empty()).then(|| attempt.partial.to_string()),
+        failure_kind: attempt.failure_kind.map(|k| k.as_str().to_string()),
         usage: None,
     })
+}
+
+/// One attempt [`journal_interrupted_attempt`] records.
+#[derive(Debug, Default)]
+pub(super) struct InterruptedAttempt<'a> {
+    pub(super) node_id: &'a str,
+    pub(super) attempt: u32,
+    pub(super) duration_ms: Option<u64>,
+    pub(super) session: Option<String>,
+    /// What the attempt produced before it ended.
+    pub(super) partial: &'a str,
+    pub(super) failure_kind: Option<FailureKind>,
+    /// What the attempt lost of its output.
+    pub(super) capture: crate::capture::OutputCapture,
 }
 
 /// What an attempt that failed on a provider quota does next (issue #200,
@@ -1696,6 +1707,7 @@ fn execute_node_kind(
                         // hermetic profile on an isolation-capable agent.
                         hermetic_settings: hermetic_settings.clone(),
                         transcript_dir: Some(&transcript_dir),
+                        output_limits: cfg.output_limits(),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -1937,6 +1949,12 @@ fn execute_node_kind(
                             attempt,
                         })?;
                     }
+                    // What the attempt lost of its output (bounded agent
+                    // output), for every `attempt_finished` below.
+                    let mut capture = match &outcome {
+                        Ok(report) => report.capture.clone(),
+                        Err(f) => f.capture.clone(),
+                    };
                     // --- 0.23.0 protected paths (C6): undo and name any change
                     // to a protected file before anything else reads the tree. ---
                     let protect_violation = match protect_snapshot {
@@ -1948,6 +1966,8 @@ fn execute_node_kind(
                     if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
+                            output_truncated: capture.truncated.clone(),
+                            transcript_incomplete: capture.transcript_incomplete,
                             node: node_id.into(),
                             attempt,
                             status: "failed".into(),
@@ -1974,6 +1994,8 @@ fn execute_node_kind(
                     if let Some(msg) = timeout_msg.borrow_mut().take() {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
+                            output_truncated: capture.truncated.clone(),
+                            transcript_incomplete: capture.transcript_incomplete,
                             node: node_id.into(),
                             attempt,
                             status: "failed".into(),
@@ -2007,11 +2029,12 @@ fn execute_node_kind(
                             _ => None,
                         });
                         if let Some(sid) = sid {
-                            super::transcript::copy_agent_session(
+                            capture.record(super::transcript::copy_agent_session(
                                 &step.agent,
                                 &sid,
                                 &transcript_dir,
-                            );
+                                cfg.output_limits().session_copy_bytes,
+                            ));
                         }
                     }
                     // Remember the session this attempt ran in (issue #136 item
@@ -2120,6 +2143,8 @@ fn execute_node_kind(
                             // interactive nodes.
                             if *interactive && let Some(q) = report.question {
                                 journal.append(EventPayload::AttemptFinished {
+                                    output_truncated: capture.truncated.clone(),
+                                    transcript_incomplete: capture.transcript_incomplete,
                                     node: node_id.into(),
                                     attempt,
                                     status: report.status.as_str().into(),
@@ -2164,16 +2189,20 @@ fn execute_node_kind(
                                 // done.
                                 journal_interrupted_attempt(
                                     journal,
-                                    node_id,
-                                    attempt,
-                                    duration_ms,
-                                    report.session.clone(),
-                                    &report.output,
-                                    // The process exited NORMALLY, there is no
-                                    // failure detail to classify: what the agent
-                                    // printed is mid-work text, not an error
-                                    // message from the transport.
-                                    None,
+                                    InterruptedAttempt {
+                                        node_id,
+                                        attempt,
+                                        duration_ms,
+                                        session: report.session.clone(),
+                                        partial: &report.output,
+                                        // The process exited NORMALLY, there is
+                                        // no failure detail to classify: what
+                                        // the agent printed is mid-work text,
+                                        // not an error message from the
+                                        // transport.
+                                        failure_kind: None,
+                                        capture: capture.clone(),
+                                    },
                                 )?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -2219,6 +2248,8 @@ fn execute_node_kind(
                                     // downstream `nodes.<id>.rejected_output`.
                                     Some(reason) => {
                                         journal.append(EventPayload::AttemptFinished {
+                                            output_truncated: capture.truncated.clone(),
+                                            transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
                                             attempt,
                                             status: "failed".into(),
@@ -2254,6 +2285,9 @@ fn execute_node_kind(
                                         // failure, like a success_check one.
                                         if let Some(reason) = check.reject {
                                             journal.append(EventPayload::AttemptFinished {
+                                                output_truncated: capture.truncated.clone(),
+                                                transcript_incomplete: capture
+                                                    .transcript_incomplete,
                                                 node: node_id.into(),
                                                 attempt,
                                                 status: "failed".into(),
@@ -2273,6 +2307,8 @@ fn execute_node_kind(
                                             continue;
                                         }
                                         journal.append(EventPayload::AttemptFinished {
+                                            output_truncated: capture.truncated.clone(),
+                                            transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
                                             attempt,
                                             status: report.status.as_str().into(),
@@ -2304,6 +2340,8 @@ fn execute_node_kind(
                                 }
                             } else {
                                 journal.append(EventPayload::AttemptFinished {
+                                    output_truncated: capture.truncated.clone(),
+                                    transcript_incomplete: capture.transcript_incomplete,
                                     node: node_id.into(),
                                     attempt,
                                     status: report.status.as_str().into(),
@@ -2387,6 +2425,8 @@ fn execute_node_kind(
                                         ),
                                     )?;
                                     journal.append(EventPayload::AttemptFinished {
+                                        output_truncated: capture.truncated.clone(),
+                                        transcript_incomplete: capture.transcript_incomplete,
                                         node: node_id.into(),
                                         attempt,
                                         status: attempt_status.into(),
@@ -2451,6 +2491,9 @@ fn execute_node_kind(
                                                 // Completion enforce (issue #165
                                                 // Part 14.1), as on the Ok branch.
                                                 journal.append(EventPayload::AttemptFinished {
+                                                    output_truncated: capture.truncated.clone(),
+                                                    transcript_incomplete: capture
+                                                        .transcript_incomplete,
                                                     node: node_id.into(),
                                                     attempt,
                                                     status: "failed".into(),
@@ -2466,6 +2509,9 @@ fn execute_node_kind(
                                                 last_timed_out = false;
                                             } else {
                                                 journal.append(EventPayload::AttemptFinished {
+                                                    output_truncated: capture.truncated.clone(),
+                                                    transcript_incomplete: capture
+                                                        .transcript_incomplete,
                                                     node: node_id.into(),
                                                     attempt,
                                                     status: NodeStatus::Succeeded.as_str().into(),
@@ -2486,6 +2532,9 @@ fn execute_node_kind(
                                         }
                                         Some(reason) => {
                                             journal.append(EventPayload::AttemptFinished {
+                                                output_truncated: capture.truncated.clone(),
+                                                transcript_incomplete: capture
+                                                    .transcript_incomplete,
                                                 node: node_id.into(),
                                                 attempt,
                                                 status: "failed".into(),
@@ -2508,6 +2557,8 @@ fn execute_node_kind(
                                 // raw CLI error text.
                                 Some(sfr) => {
                                     journal.append(EventPayload::AttemptFinished {
+                                        output_truncated: capture.truncated.clone(),
+                                        transcript_incomplete: capture.transcript_incomplete,
                                         node: node_id.into(),
                                         attempt,
                                         status: attempt_status.into(),
@@ -2571,26 +2622,34 @@ fn execute_node_kind(
                                         // node again.
                                         journal_interrupted_attempt(
                                             journal,
-                                            node_id,
-                                            attempt,
-                                            duration_ms,
-                                            None,
-                                            &msg,
-                                            failure_kind,
+                                            InterruptedAttempt {
+                                                node_id,
+                                                attempt,
+                                                duration_ms,
+                                                session: None,
+                                                partial: &msg,
+                                                failure_kind,
+                                                capture: capture.clone(),
+                                            },
                                         )?;
                                     } else if require_verdict {
                                         journal_interrupted_attempt(
                                             journal,
-                                            node_id,
-                                            attempt,
-                                            duration_ms,
-                                            None,
-                                            &msg,
-                                            failure_kind,
+                                            InterruptedAttempt {
+                                                node_id,
+                                                attempt,
+                                                duration_ms,
+                                                session: None,
+                                                partial: &msg,
+                                                failure_kind,
+                                                capture: capture.clone(),
+                                            },
                                         )?;
                                         was_interrupted = true;
                                     } else {
                                         journal.append(EventPayload::AttemptFinished {
+                                            output_truncated: capture.truncated.clone(),
+                                            transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
                                             attempt,
                                             status: attempt_status.into(),
@@ -3117,6 +3176,7 @@ pub(crate) fn execute_finish_answer(
                 // Internal finish-answer composition: no hermetic isolation.
                 hermetic_settings: None,
                 transcript_dir: None,
+                output_limits: cfg.output_limits(),
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -3184,6 +3244,8 @@ pub(crate) fn execute_finish_answer(
             match outcome {
                 Ok(report) => {
                     journal.append(EventPayload::AttemptFinished {
+                        output_truncated: report.capture.truncated.clone(),
+                        transcript_incomplete: report.capture.transcript_incomplete,
                         node: node_id.into(),
                         attempt,
                         status: report.status.as_str().into(),
@@ -3207,10 +3269,13 @@ pub(crate) fn execute_finish_answer(
                     class,
                     message: msg,
                     usage: failed_usage,
+                    capture,
                     ..
                 }) => {
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {
+                        output_truncated: capture.truncated,
+                        transcript_incomplete: capture.transcript_incomplete,
                         node: node_id.into(),
                         attempt,
                         status: if last_timed_out {
@@ -3772,6 +3837,7 @@ pub(crate) fn maybe_compact_context(
         // Internal summarizer: no hermetic isolation.
         hermetic_settings: None,
         transcript_dir: None,
+        output_limits: cfg.output_limits(),
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

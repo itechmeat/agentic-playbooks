@@ -196,6 +196,12 @@ pub struct RunConfig {
     /// every other run and every config written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval: Option<EvalRunSettings>,
+    /// The output limits the run's agent attempts apply (global config,
+    /// lowered by the project's), resolved once at the start so a re-drive
+    /// keeps them. `None` for every config written before the field existed:
+    /// the defaults apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limits: Option<apb_core::output_limits::OutputLimits>,
 }
 
 /// The settings of an eval repetition's run (`apb eval`).
@@ -214,6 +220,11 @@ pub struct EvalRunSettings {
 }
 
 impl RunConfig {
+    /// The output limits of the run's agent attempts.
+    pub fn output_limits(&self) -> apb_core::output_limits::OutputLimits {
+        self.output_limits.unwrap_or_default()
+    }
+
     /// The env overlay every spawned agent and script gets (empty outside
     /// eval runs).
     pub fn spawn_env(&self) -> Vec<(String, String)> {

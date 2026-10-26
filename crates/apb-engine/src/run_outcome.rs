@@ -1,7 +1,8 @@
 //! What a run produced beyond its node outputs, for the read-only run
 //! surfaces (`run_report`, `run_status`, `apb runs <id>`, the dashboard run
-//! page): its goal criteria and their results (C1) and the commits its
-//! nodes made on a git tree (C7). Every block is
+//! page): its goal criteria and their results (C1), the commits its
+//! nodes made on a git tree (C7), and the inbox gaps its connector reads
+//! journaled. Every block is
 //! absent when the run journaled nothing for it, so a run without them reads
 //! exactly as before.
 
@@ -11,6 +12,22 @@ use serde::Serialize;
 
 use crate::event::{CommittedArtifact, Event, EventPayload};
 use crate::run_view::RunView;
+
+/// One inbox gap a run's connector read journaled (one `inbox_gap`): unread
+/// events a connector inbox read found lost to inbox retention. A run with
+/// any of these did not see its inbox whole.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunInboxGap {
+    /// The node whose connector call made the read.
+    pub node: String,
+    pub connector: String,
+    pub account: String,
+    /// First lost sequence number (the consumer's cursor plus one).
+    pub from: u64,
+    /// Last lost sequence number, inclusive.
+    pub through: u64,
+}
 
 /// The commits one node execution made (one `artifacts_committed`).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -50,11 +67,42 @@ pub fn commits_from_events(events: &[Event]) -> Vec<NodeCommits> {
         .collect()
 }
 
+/// Every `inbox_gap` of `events`, in journal order. The call path appends at
+/// most one event per distinct gap, so no dedup happens here: the journal is
+/// already one-per-gap.
+pub fn inbox_gaps_from(events: &[Event]) -> Vec<RunInboxGap> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::InboxGap {
+                node_id,
+                connector,
+                account,
+                from,
+                through,
+            } => Some(RunInboxGap {
+                node: node_id.clone(),
+                connector: connector.clone(),
+                account: account.clone(),
+                from: *from,
+                through: *through,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 impl RunView {
     /// The commits the run's nodes made, empty when none did (or the tree
     /// is not a git repository).
     pub fn commits(&self) -> Vec<NodeCommits> {
         commits_from_events(&self.events)
+    }
+
+    /// The inbox gaps the run's connector reads journaled, empty when none:
+    /// retention dropped unread events, so the inbox was not seen whole.
+    pub fn inbox_gaps(&self) -> Vec<RunInboxGap> {
+        inbox_gaps_from(&self.events)
     }
 }
 
@@ -201,6 +249,32 @@ pub fn commit_lines(commits: &[NodeCommits]) -> Vec<String> {
     out
 }
 
+/// One plain line per inbox gap, for a terminal or a report: which inbox
+/// lost which unread events, and which node's read found it.
+pub fn inbox_gap_lines(gaps: &[RunInboxGap]) -> Vec<String> {
+    gaps.iter()
+        .map(|g| {
+            // The consumer's cursor may predate this run, so the line says
+            // the events were never read, not that this run missed them.
+            let lost = if g.from == g.through {
+                format!(
+                    "unread event {} was dropped by inbox retention before it was read",
+                    g.from
+                )
+            } else {
+                format!(
+                    "unread events {}-{} were dropped by inbox retention before they were read",
+                    g.from, g.through
+                )
+            };
+            format!(
+                "{}/{}: {lost} (found by {})",
+                g.connector, g.account, g.node
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +345,49 @@ edges:
         assert_eq!(
             after.criteria[1].detail.as_deref(),
             Some("marker `DONE` not found")
+        );
+    }
+
+    #[test]
+    fn inbox_gaps_are_read_in_journal_order_and_serialized_flat() {
+        let ev = |seq: u64, node: &str, from: u64, through: u64| Event {
+            seq,
+            ts: 0,
+            payload: EventPayload::InboxGap {
+                node_id: node.into(),
+                connector: "echo-hooks".into(),
+                account: "main".into(),
+                from,
+                through,
+            },
+        };
+        let events = [ev(1, "watch", 3, 6), ev(2, "watch", 1, 6)];
+        let gaps = inbox_gaps_from(&events);
+        assert_eq!(gaps.len(), 2, "one entry per journaled gap");
+        assert_eq!(gaps[0].from, 3);
+        assert_eq!(gaps[1].from, 1, "journal order, not sorted order");
+        assert!(inbox_gaps_from(&[]).is_empty());
+        assert_eq!(
+            inbox_gap_lines(&gaps[..1]),
+            [
+                "echo-hooks/main: unread events 3-6 were dropped by inbox retention before they were read (found by watch)"
+            ]
+        );
+        let one = RunInboxGap {
+            from: 4,
+            through: 4,
+            ..gaps[0].clone()
+        };
+        assert_eq!(
+            inbox_gap_lines(&[one]),
+            [
+                "echo-hooks/main: unread event 4 was dropped by inbox retention before it was read (found by watch)"
+            ]
+        );
+        // The wire shape the surfaces serialize.
+        assert_eq!(
+            serde_json::to_string(&gaps[0]).unwrap(),
+            r#"{"node":"watch","connector":"echo-hooks","account":"main","from":3,"through":6}"#
         );
     }
 

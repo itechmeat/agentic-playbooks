@@ -556,7 +556,7 @@ fn pending_question_for_node(
 ///
 /// Pure and bounded (spec 2026-07-20, Task 5): no I/O, just one scan of the
 /// given slice. Consumed by the node-timeout exclusion wired into
-/// `check_cancel_timeout` (a no-op for the reprompt path within a single
+/// `adapter::stop::check` (a no-op for the reprompt path within a single
 /// attempt - a park always spans a fresh attempt boundary, so no completed
 /// interval ever falls inside one attempt's own clock) and, later, the live
 /// `ask_user` transport (Task 11), whose single long-lived attempt DOES span

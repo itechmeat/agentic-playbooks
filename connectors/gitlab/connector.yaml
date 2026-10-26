@@ -1,5 +1,5 @@
 name: gitlab
-version: 0.1.0
+version: 0.2.0
 healthcheck: get_user
 auth:
   kind: header
@@ -71,14 +71,16 @@ functions:
       title: "{{args.title}}"
       description: "{{args.description}}"
       labels: "{{args.labels}}"
+    text_args:
+      description: markdown_no_commands
     args_schema:
       type: object
       properties:
         project:
           type: string
           description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
-        title: { type: string }
-        description: { type: string }
+        title: { type: string, description: "one line of plain text, sent as written; GitLab runs no quick action from a title" }
+        description: { type: string, description: "GitLab Markdown; a slash command at the start of a line is escaped and shown as text, never run" }
         labels: { type: string, description: "comma-separated label names" }
       required: [project, title]
     examples:
@@ -97,6 +99,8 @@ functions:
       add_labels: "{{args.add_labels}}"
       remove_labels: "{{args.remove_labels}}"
       assignee_ids: "{{args.assignee_ids}}"
+    text_args:
+      description: markdown_no_commands
     args_schema:
       type: object
       properties:
@@ -104,8 +108,8 @@ functions:
           type: string
           description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
         iid: { type: integer, description: "project-local issue iid, not the global id" }
-        title: { type: string }
-        description: { type: string }
+        title: { type: string, description: "one line of plain text, sent as written; GitLab runs no quick action from a title" }
+        description: { type: string, description: "GitLab Markdown; a slash command at the start of a line is escaped and shown as text, never run" }
         state_event: { type: string, enum: [close, reopen] }
         labels: { type: string, description: "comma-separated label names that replace the current set" }
         add_labels: { type: string, description: "comma-separated label names to add without removing others" }
@@ -127,6 +131,8 @@ functions:
     url: "{{account.api_base}}/projects/{{args.project}}/issues/{{args.iid}}/notes"
     body:
       body: "{{args.body}}"
+    text_args:
+      body: markdown_no_commands
     args_schema:
       type: object
       properties:
@@ -134,7 +140,7 @@ functions:
           type: string
           description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
         iid: { type: integer, description: "project-local issue iid, not the global id" }
-        body: { type: string }
+        body: { type: string, description: "GitLab Markdown; a slash command at the start of a line is escaped and shown as text, never run" }
       required: [project, iid, body]
 
   - name: list_merge_requests
@@ -182,6 +188,8 @@ functions:
       target_branch: "{{args.target_branch}}"
       title: "{{args.title}}"
       description: "{{args.description}}"
+    text_args:
+      description: markdown_no_commands
     args_schema:
       type: object
       properties:
@@ -190,8 +198,8 @@ functions:
           description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
         source_branch: { type: string }
         target_branch: { type: string }
-        title: { type: string }
-        description: { type: string }
+        title: { type: string, description: "one line of plain text, sent as written; GitLab runs no quick action from a title" }
+        description: { type: string, description: "GitLab Markdown; a slash command at the start of a line is escaped and shown as text, never run" }
       required: [project, source_branch, target_branch, title]
     examples:
       - args: { project: "42", source_branch: feature, target_branch: main, title: "Add feature" }
@@ -229,6 +237,8 @@ functions:
     url: "{{account.api_base}}/projects/{{args.project}}/merge_requests/{{args.iid}}/notes"
     body:
       body: "{{args.body}}"
+    text_args:
+      body: markdown_no_commands
     args_schema:
       type: object
       properties:
@@ -236,7 +246,7 @@ functions:
           type: string
           description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
         iid: { type: integer, description: "project-local merge request iid, not the global id" }
-        body: { type: string }
+        body: { type: string, description: "GitLab Markdown; a slash command at the start of a line is escaped and shown as text, never run" }
       required: [project, iid, body]
 
   - name: create_release

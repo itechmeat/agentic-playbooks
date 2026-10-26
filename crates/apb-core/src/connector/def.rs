@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConnectorError, validate_snake_name};
+use super::text_mode::{TextMode, validate_text_args};
 
 /// How the connector authenticates outgoing requests. The tag `kind`
 /// selects the variant; each variant only accepts the fields it needs, so
@@ -320,6 +321,11 @@ pub struct FunctionSpec {
     pub body_form: BTreeMap<String, String>,
     #[serde(default)]
     pub args_schema: Option<serde_json::Value>,
+    /// How named string args are prepared before they are substituted into
+    /// `body` or `body_form` (see `super::text_mode`). Only valid on HTTP
+    /// functions; every key must be a string property of `args_schema`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub text_args: BTreeMap<String, TextMode>,
     #[serde(default)]
     pub examples: Vec<ExampleSpec>,
     #[serde(default)]
@@ -426,6 +432,8 @@ impl ConnectorDoc {
     ///    to HTTP responses; the spec's "warn" on the no-HTTP case is a hard
     ///    error here because the validator has no warning channel and the
     ///    combination has no legitimate use).
+    /// 8. `text_args` sits only on HTTP functions and names string
+    ///    properties of `args_schema`; an unknown mode fails the parse.
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -501,6 +509,20 @@ impl ConnectorDoc {
                     )));
                 }
             }
+
+            let outside = f
+                .url
+                .iter()
+                .chain(f.query.values())
+                .chain(f.headers.values())
+                .map(String::as_str);
+            validate_text_args(
+                &f.name,
+                &f.text_args,
+                f.args_schema.as_ref(),
+                is_http,
+                outside,
+            )?;
 
             // response_pick projects a JSON document (spec 4.5). An HTTP
             // function projects the response body and an inbox function
@@ -1444,6 +1466,82 @@ functions:
     fn response_pick_on_http_is_accepted() {
         let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n    response_pick: [number, user.login]\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
+    }
+
+    fn text_args_doc(text_args: &str, body_type: &str) -> Result<ConnectorDoc, ConnectorError> {
+        let y = format!(
+            "name: x\nversion: 0.1.0\nfunctions:\n  - name: post\n    description: d\n    method: POST\n    url: http://a\n    body: {{ body: \"{{{{args.body}}}}\" }}\n    text_args: {text_args}\n    args_schema: {{ type: object, properties: {{ body: {{ type: {body_type} }} }} }}\n"
+        );
+        ConnectorDoc::from_yaml(&y, "x")
+    }
+
+    #[test]
+    fn text_args_load_with_every_known_mode_on_string_args() {
+        for mode in [
+            TextMode::Markdown,
+            TextMode::MarkdownNoCommands,
+            TextMode::Literal,
+        ] {
+            let doc = text_args_doc(&format!("{{ body: {} }}", mode.as_str()), "string").unwrap();
+            assert_eq!(
+                doc.function("post").unwrap().text_args.get("body"),
+                Some(&mode)
+            );
+        }
+    }
+
+    #[test]
+    fn text_args_with_a_bad_mode_or_key_fail_to_load() {
+        let unknown = text_args_doc("{ body: rich }", "string")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unknown.contains("unknown text mode `rich`")
+                && unknown.contains("markdown_no_commands"),
+            "was: {unknown}"
+        );
+        for (text_args, body_type, key) in [
+            ("{ body: literal }", "integer", "body"),
+            ("{ title: literal }", "string", "title"),
+        ] {
+            let err = text_args_doc(text_args, body_type).unwrap_err().to_string();
+            assert!(
+                err.contains("function `post`")
+                    && err.contains(&format!("`{key}` is not a string property")),
+                "was: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_arg_used_outside_the_body_fails_to_load() {
+        for (place, part) in [
+            ("url", "url: \"http://a/{{args.body}}\""),
+            (
+                "query",
+                "url: http://a\n    query: { q: \"{{args.body}}\" }",
+            ),
+            (
+                "headers",
+                "url: http://a\n    headers: { X-Note: \"{{args.body}}\" }",
+            ),
+        ] {
+            let y = format!(
+                "name: x\nversion: 0.1.0\nfunctions:\n  - name: post\n    description: d\n    method: POST\n    {part}\n    body: {{ body: \"{{{{args.body}}}}\" }}\n    text_args: {{ body: literal }}\n    args_schema: {{ type: object, properties: {{ body: {{ type: string }} }} }}\n"
+            );
+            let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+            assert!(
+                err.contains("`text_args.body`") && err.contains("url, query or headers"),
+                "{place}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_args_on_a_non_http_function_fail_to_load() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    mock: { status: 200, body: {} }\n    text_args: { body: markdown }\n    args_schema: { type: object, properties: { body: { type: string } } }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("not an HTTP function"), "was: {err}");
     }
 
     #[test]

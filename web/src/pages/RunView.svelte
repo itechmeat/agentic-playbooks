@@ -333,7 +333,7 @@
     {/if}
 
     {#if detail}
-      <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
+      <RunOutcomePanel goal={detail.goal} commits={detail.commits} inboxGaps={detail.inbox_gaps} />
       <AttemptModelsPanel models={detail.attempt_models} />
     {/if}
 

@@ -641,7 +641,14 @@ pub(super) fn reap_dead_attempts(
     let journal = Journal::new(log);
     let mut reaped = Vec::with_capacity(dead.len());
     for a in dead {
-        journal_interrupted_attempt(&journal, &a.node, a.attempt, None, None, "", None)?;
+        journal_interrupted_attempt(
+            &journal,
+            super::node::InterruptedAttempt {
+                node_id: &a.node,
+                attempt: a.attempt,
+                ..Default::default()
+            },
+        )?;
         reaped.push(a.node);
     }
     Ok(reaped)

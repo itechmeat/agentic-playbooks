@@ -97,6 +97,7 @@ fn task<'a>(
         status_file: None,
         hermetic_settings: None,
         transcript_dir: None,
+        output_limits: Default::default(),
     }
 }
 

@@ -15,10 +15,11 @@
 //! <account>` and an outcome, never a payload.
 
 use apb_core::connector::def::{InboxOp, InboxSpec};
-use apb_core::connector::inbox::{Inbox, InboxEvent};
+use apb_core::connector::inbox::{Inbox, InboxEvent, InboxGap};
 use serde_json::{Value, json};
 
 use crate::connector::call::{CallError, CallErrorCode, CallOk};
+use crate::event::{EventLog, EventPayload};
 
 /// The consumer a call uses when it names none. One default consumer per
 /// account is the common case (a single playbook draining an inbox); a
@@ -163,16 +164,23 @@ impl InboxCall {
         (None, None)
     }
 
-    /// Runs the op against the local store.
+    /// Runs the op against the local store. A read that found stored-then-
+    /// dropped events this consumer never acknowledged carries their range
+    /// back in the result's `gap`, outside the projected body.
     pub fn send(self) -> Result<CallOk, CallError> {
         let store = Inbox::open(&self.connector, &self.account).map_err(|e| {
             CallError::new(CallErrorCode::Config, format!("inbox unavailable: {e}"))
         })?;
+        let mut gap = None;
         let body = match self.op {
             InboxOp::Read => {
-                let (events, cursor) = store
+                let (events, cursor, lost) = store
                     .read(&self.consumer, self.limit)
                     .map_err(|e| CallError::new(CallErrorCode::Config, e.to_string()))?;
+                // The envelope keeps its fixed shape; the gap travels at the
+                // top level of the result, where no `response_pick` projection
+                // can hide it.
+                gap = lost;
                 read_envelope(&events, cursor)
             }
             InboxOp::Ack => {
@@ -194,7 +202,7 @@ impl InboxCall {
         } else {
             body
         };
-        Ok(CallOk::Inbox { body, picked })
+        Ok(CallOk::Inbox { body, picked, gap })
     }
 }
 
@@ -248,4 +256,42 @@ pub fn ack_envelope(acked_up_to: u64) -> Value {
 /// `{ pending }`.
 pub fn depth_envelope(pending: u64) -> Value {
     json!({ "pending": pending })
+}
+
+/// Records in the run journal that an inbox read found `gap` (unread events
+/// retention dropped), once per distinct gap of an inbox and account per run:
+/// later reads that cross the same gap stay silent, a gap that grew is a new
+/// one. Which node read first is recorded, but does not make a gap distinct.
+/// Best effort like the `connector_call` event: a journal failure never
+/// changes the already-computed call result.
+pub(crate) fn journal_gap(
+    run_dir: &std::path::Path,
+    connector: &str,
+    account: &str,
+    node_id: &str,
+    gap: &InboxGap,
+) {
+    // `apb connector call` runs outside the drive, so the journal is opened
+    // as a foreign writer (a torn last line from a concurrent append is
+    // forgiven), and the "once per gap" check runs on a fresh read under the
+    // append lock: two nodes reading the same gap at once journal it once.
+    let Ok(mut log) = EventLog::open_foreign(run_dir) else {
+        return;
+    };
+    let payload = EventPayload::InboxGap {
+        node_id: node_id.to_string(),
+        connector: connector.to_string(),
+        account: account.to_string(),
+        from: gap.from,
+        through: gap.through,
+    };
+    let _ = log.append_checked(payload, |events| {
+        !events.iter().any(|e| {
+            matches!(
+                &e.payload,
+                EventPayload::InboxGap { connector: c, account: a, from, through, .. }
+                    if c == connector && a == account && *from == gap.from && *through == gap.through
+            )
+        })
+    });
 }

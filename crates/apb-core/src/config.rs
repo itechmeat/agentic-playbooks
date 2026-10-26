@@ -66,6 +66,10 @@ pub struct GlobalConfig {
     /// has no machine switch: a run asks for it.
     pub execution: ExecutionSettings,
     // --- end host execution mode ---
+    /// Size limits on what apb keeps of agent output
+    /// (`crate::output_limits`). Absent keys keep the defaults; a project
+    /// `.apb/config.yaml` may only lower them.
+    pub output_limits: crate::output_limits::OutputLimitSettings,
 }
 
 // --- host execution mode (0.23.0) ---
@@ -372,6 +376,9 @@ impl GlobalConfig {
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let cfg: Self = yaml_serde::from_str(&raw)
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
+        cfg.output_limits
+            .validate()
+            .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         // A policy glob that does not compile would match nothing and refuse
         // every model its rule covers: report it where it is written instead.
         for (i, rule) in cfg.model_policy.iter().enumerate() {
@@ -385,6 +392,20 @@ impl GlobalConfig {
             }
         }
         Ok(cfg)
+    }
+
+    /// The output limits for runs of the project at `root`: defaults, then
+    /// this config's `output_limits`, then the project's (lowering only).
+    pub fn output_limits_for(
+        &self,
+        root: &Path,
+    ) -> Result<crate::output_limits::OutputLimits, String> {
+        let project = project_output_limits(root)?;
+        project.validate()?;
+        Ok(
+            crate::output_limits::OutputLimits::from_global(&self.output_limits)
+                .lowered_by(&project),
+        )
     }
 
     /// Launch command for agent `id`, if it's described in the config.
@@ -458,26 +479,53 @@ impl SuggestionSettings {
     }
 }
 
-/// Partial view of the project `.apb/config.yaml`: only the `suggestions:`
-/// section. Deliberately tolerant of the other keys that file carries
-/// (`skills_dir`, `port`), the same way `crate::skills` reads it.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct ProjectSuggestionsFile {
-    suggestions: SuggestionSettings,
-}
-
-/// The project-level `suggestions:` section. A missing file is an empty
-/// section; a malformed one is an error so a typo is not silently ignored.
-pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, String> {
+/// One section a project may set for its own runs (`suggestions:`,
+/// `output_limits:`) from the project `.apb/config.yaml`, read on its own: a
+/// typo in one section never breaks another, and the other keys that file
+/// carries (`skills_dir`, `port`) are left alone, the same way
+/// `crate::skills` reads it. A missing or empty file or section is the
+/// default; a malformed file or section, or a top level that is not a
+/// mapping, is an error so a typo is not silently ignored.
+fn project_section<T: serde::de::DeserializeOwned + Default>(
+    root: &Path,
+    key: &str,
+) -> Result<T, String> {
     let path = root.join(".apb/config.yaml");
     if !path.is_file() {
-        return Ok(SuggestionSettings::default());
+        return Ok(T::default());
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let parsed: ProjectSuggestionsFile = yaml_serde::from_str(&raw)
-        .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
-    Ok(parsed.suggestions)
+    let invalid =
+        |e: yaml_serde::Error| format!("invalid project config `{}`: {e}", path.display());
+    let doc: yaml_serde::Value = yaml_serde::from_str(&raw).map_err(invalid)?;
+    match doc {
+        // An empty file is a project that sets nothing.
+        yaml_serde::Value::Null => return Ok(T::default()),
+        yaml_serde::Value::Mapping(_) => {}
+        _ => {
+            return Err(format!(
+                "invalid project config `{}`: the top level must be a mapping",
+                path.display()
+            ));
+        }
+    }
+    match doc.get(key) {
+        None | Some(yaml_serde::Value::Null) => Ok(T::default()),
+        Some(section) => yaml_serde::from_value(section.clone())
+            .map_err(|e| format!("invalid project config `{}`: {key}: {e}", path.display())),
+    }
+}
+
+/// The project-level `suggestions:` section.
+pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, String> {
+    project_section(root, "suggestions")
+}
+
+/// The project-level `output_limits:` section (see `crate::output_limits`).
+pub fn project_output_limits(
+    root: &Path,
+) -> Result<crate::output_limits::OutputLimitSettings, String> {
+    project_section(root, "output_limits")
 }
 
 /// The address the dashboard binds when no flag is given. Loopback, because a

@@ -54,6 +54,7 @@ fn acp_success_extracts_result_and_streams_to_log() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap();
 
@@ -94,6 +95,7 @@ fn acp_result_is_error_maps_to_failed_status() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap();
     // agent_reported_failure: the report is valid, status failure - NOT a transport error.
@@ -124,6 +126,7 @@ fn acp_no_result_event_is_structured_output_missing() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap_err();
     assert!(
@@ -155,6 +158,7 @@ fn acp_nonzero_exit_is_process_exit() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap_err();
     assert!(matches!(err.class, ErrorClass::ProcessExit), "got: {err:?}");
@@ -188,6 +192,7 @@ fn acp_stream_result_marker_parses_into_question() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap();
     let q = report
@@ -223,6 +228,7 @@ fn acp_stream_marker_malformed_json_fails_naming_the_node() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap_err();
     assert!(matches!(err.class, ErrorClass::Transport), "got: {err:?}");
@@ -258,6 +264,7 @@ fn acp_stream_marker_ignored_on_non_interactive_node() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap();
     assert!(
@@ -290,6 +297,7 @@ fn acp_timeout_kills_streaming_agent() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap_err();
     let elapsed = started.elapsed();
@@ -327,6 +335,7 @@ fn acp_cancel_stops_streaming_agent() {
                 status_file: None,
                 hermetic_settings: None,
                 transcript_dir: None,
+                output_limits: Default::default(),
             },
             &cancel,
             None,
@@ -376,6 +385,7 @@ fn acp_passes_one_output_format_and_reads_the_result_usage() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap();
 
@@ -399,6 +409,58 @@ fn acp_passes_one_output_format_and_reads_the_result_usage() {
         ),
         (7, 3, 11)
     );
+}
+
+/// A streaming agent stopped by its timeout gets SIGTERM first; the final
+/// result it prints before exiting still gives the attempt its usage, while
+/// the verdict stays a timeout.
+#[test]
+fn acp_timeout_keeps_the_usage_the_agent_printed_on_sigterm() {
+    let dir = tempfile::tempdir().unwrap();
+    let ready = dir.path().join("trap-set");
+    let record = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":5,"output_tokens":2}}"#;
+    // The trap is set before `ready` is left, so a TERM that came earlier
+    // would end the shell without `ready`. `APB_STUB_WARM_UP` stops there.
+    let body = format!(
+        "trap 'echo '\\''{record}'\\''; exit 143' TERM\n: > {}\n[ -n \"$APB_STUB_WARM_UP\" ] && exit 0\nsleep 30 &\nwait $!",
+        ready.display()
+    );
+    let program = stub(dir.path(), &body);
+    // A first launch of a new script can stall past the one-second timeout
+    // on some machines; launch it once and wait for it, so the run's launch
+    // is quick and its TERM finds the trap in place.
+    let warm = std::process::Command::new(&program)
+        .env("APB_STUB_WARM_UP", "1")
+        .status()
+        .unwrap();
+    assert!(warm.success() && ready.exists(), "warm-up: {warm}");
+    fs::remove_file(&ready).unwrap();
+
+    let err = acp(program)
+        .run(&AgentTask {
+            prompt: "go",
+            model: "haiku",
+            workdir: dir.path(),
+            timeout: Some(Duration::from_secs(1)),
+            stream_log: None,
+            soul: None,
+            grant_autonomy: false,
+            connector_policy: &Default::default(),
+            interactive: false,
+            report_contract: true,
+            node: "test",
+            agent: "claude",
+            extract: None,
+            status_file: None,
+            hermetic_settings: None,
+            transcript_dir: None,
+            output_limits: Default::default(),
+        })
+        .unwrap_err();
+    assert!(ready.exists(), "the trap was set before the timeout's TERM");
+    assert_eq!(err.class, ErrorClass::Timeout, "got: {err:?}");
+    let usage = err.usage.expect("usage of the result printed on SIGTERM");
+    assert_eq!((usage.input_tokens, usage.output_tokens), (5, 2));
 }
 
 /// An errored stream-json result that exits non-zero still carries the usage
@@ -427,9 +489,82 @@ fn acp_nonzero_exit_keeps_the_usage_of_the_errored_result() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap_err();
     assert_eq!(err.class, ErrorClass::ProcessExit, "got: {err:?}");
     let usage = err.usage.expect("usage of the errored result");
     assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
+}
+
+/// A streaming task with no stream log and tiny output limits, so the
+/// in-memory copy is the only one.
+fn bounded_task<'a>(
+    dir: &'a Path,
+    policy: &'a apb_engine::adapter::ConnectorEnvPolicy,
+) -> AgentTask<'a> {
+    AgentTask {
+        prompt: "go",
+        model: "haiku",
+        workdir: dir,
+        timeout: None,
+        stream_log: None,
+        soul: None,
+        grant_autonomy: false,
+        connector_policy: policy,
+        interactive: false,
+        report_contract: true,
+        node: "test",
+        agent: "claude",
+        extract: None,
+        status_file: None,
+        hermetic_settings: None,
+        transcript_dir: None,
+        output_limits: apb_core::output_limits::OutputLimits {
+            head_bytes: 256,
+            tail_bytes: 1024,
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn acp_a_line_longer_than_the_tail_is_dropped_and_the_result_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    // One 5000-byte event between the init line and the result.
+    let body = format!(
+        "echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-9\"}}'\n\
+         echo '{{\"type\":\"assistant\",\"text\":\"{}\"}}'\n\
+         echo '{{\"type\":\"result\",\"is_error\":false,\"result\":\"done ok\"}}'",
+        "z".repeat(5000)
+    );
+    let report = acp(stub(dir.path(), &body))
+        .run(&bounded_task(dir.path(), &Default::default()))
+        .unwrap();
+
+    assert_eq!(report.status, NodeStatus::Succeeded);
+    assert_eq!(report.summary, "done ok");
+    // The session id came from the head.
+    assert_eq!(report.session.as_deref(), Some("s-9"));
+    assert!(!report.raw.contains("zzzz"));
+    assert!(!report.capture.transcript_incomplete);
+    let loss = &report.capture.truncated[0];
+    assert_eq!(loss.stream, "stdout");
+    assert!(loss.dropped_bytes_at_least > 5000);
+}
+
+#[test]
+fn acp_a_result_line_longer_than_the_tail_fails_as_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = format!(
+        "echo '{{\"type\":\"result\",\"is_error\":false,\"result\":\"{}\"}}'",
+        "z".repeat(5000)
+    );
+    let err = acp(stub(dir.path(), &body))
+        .run(&bounded_task(dir.path(), &Default::default()))
+        .unwrap_err();
+
+    assert_eq!(err.class, ErrorClass::StructuredOutputMissing);
+    assert_eq!(err.message, apb_engine::capture::INCOMPLETE_RESULT);
+    assert!(err.capture.transcript_incomplete);
 }

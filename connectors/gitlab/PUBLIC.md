@@ -83,6 +83,27 @@ set), `add_labels`, and/or `remove_labels` (comma-separated strings).
 field is a single placeholder and is dropped when absent, so a call that
 only sets `state_event: close` does not touch labels or assignees.
 
+## Text the agent writes
+
+GitLab runs a quick action (`/close`, `/merge`, `/assign`) found at the start
+of a line in a comment or a description. Agent-written text must never do
+that, so these fields are prepared before they are sent (`text_args`, see
+`docs/CONNECTORS.md` in the apb repository):
+
+- `body` of `comment_issue` and `comment_merge_request`, and `description` of
+  `create_issue`, `update_issue` and `create_merge_request`:
+  `markdown_no_commands`. Markdown, mentions and references stay as written;
+  a slash command at the start of any line, fenced code included, gets a
+  backslash and is shown as text. A `/` in the middle of a line is untouched.
+- `title` is sent as written. GitLab runs no quick action from a title, and
+  it stores a title as given, so an escape there would stay as a visible
+  backslash; references and mentions in a title link as GitLab renders them.
+- `name` and `description` of `create_release` are sent as written; GitLab
+  runs no quick action from release text.
+
+To change state, labels, assignees or merge, call the dedicated function
+(`update_issue`, `merge_merge_request`, `approve_merge_request`) instead.
+
 ## Pipelines
 
 `list_pipelines` and `get_pipeline` report status for monitoring.

@@ -53,6 +53,7 @@ fn open_continues_seq_for_resume() {
 #[test]
 fn connector_call_smtp_fields_round_trip() {
     let p = EventPayload::ConnectorCall {
+        response_complete: None,
         node_id: "n".into(),
         connector: "smtp".into(),
         function: "send_email".into(),

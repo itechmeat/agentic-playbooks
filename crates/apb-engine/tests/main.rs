@@ -73,6 +73,9 @@ mod attempt_usage_test;
 mod background_run_test;
 #[path = "suite/background_supervisor_test.rs"]
 mod background_supervisor_test;
+#[cfg(unix)]
+#[path = "suite/bounded_output_test.rs"]
+mod bounded_output_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
 #[cfg(unix)]

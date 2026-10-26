@@ -500,6 +500,11 @@ pub(crate) fn prepare_run_target(
     // The global config is needed to resolve profile invocations (agents, program).
     // A broken config is a start-up error, not a silent default.
     let global = GlobalConfig::load().map_err(EngineError::Invalid)?;
+    // Output limits: resolved once and kept in the run config, so every
+    // attempt of the run (and a re-drive) applies the same ones.
+    let output_limits = global
+        .output_limits_for(root)
+        .map_err(EngineError::Invalid)?;
     // Host execution mode (0.23.0): resolved once, before anything is
     // written, so a refusal leaves no run behind. The manifest keeps it.
     let execution =
@@ -755,6 +760,7 @@ pub(crate) fn prepare_run_target(
             .workdir_queue_wait
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
         eval: opts.eval.clone(),
+        output_limits: Some(output_limits),
     };
     prep_try_unstarted(&mut log, &unstarted, write_run_config(&run_dir, &cfg))?;
 

@@ -180,6 +180,11 @@ impl RunView {
         RunUsage::from_events(&self.events)
     }
 
+    /// The attempts that lost part of their output (bounded agent output).
+    pub fn output_losses(&self) -> Vec<crate::capture::AttemptOutputLoss> {
+        crate::capture::attempt_losses(&self.events)
+    }
+
     /// The failure reason, only for a run that actually ended `failed`.
     pub fn failure_reason(&self) -> Option<String> {
         (self.run_status == RunStatus::Failed)

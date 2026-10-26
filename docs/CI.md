@@ -66,6 +66,14 @@ build artifact to keep the evidence.
 - **Connector accounts.** A connector account config may reference
   `{{env.NAME}}`; set `NAME` from a CI secret. Connector and account approvals
   live in the trust store under `APB_CONFIG_DIR` (`apb connector approve`).
+- **A bot identity for commits and pushes.** When a scheduled playbook commits,
+  pushes, comments or opens pull requests, let it act as a dedicated bot
+  account with a short-lived token scoped to the one repository and the
+  permissions the playbook needs (for example a CI job token or an app
+  installation token), never a person's account or personal token. History
+  then shows which changes a machine made, and a token that leaks from a log
+  or an artifact expires on its own instead of opening the person's whole
+  account.
 - **The agent binary.** Install the agent CLI the profile binds (and pin its
   version). `apb doctor` in the job prints what apb detects and what is missing.
 

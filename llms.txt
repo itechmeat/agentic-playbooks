@@ -103,7 +103,7 @@ apb review          decide a pending human_review node
 apb answer          answer an interactive node's pending question
 apb tasks           list or submit host tasks (host execution mode)
 apb note            post a supervisor note to a run
-apb export          export a playbook (with layout) to a bundle file
+apb export          export a playbook version (YAML, layout, scripts) to a bundle file
 apb import          import a playbook bundle into this project
 apb trash           list deleted playbooks, restore one with its versions
 apb trust           list approvals (trust.json), revoke by digest or id
@@ -154,6 +154,7 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 - [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust
 - [Deployment](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DEPLOYMENT.md): running the dashboard on a server behind a TLS proxy with API keys
 - [Decision models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DECISIONS.md): optional small models for completion checks, judge nodes, retry advice and catalog ranking
+- [Reference scenarios](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/scenarios/README.md): realistic code and routine situations features are checked against, each naming today's gaps
 - [Interactive agents](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INTERACTIVE-AGENTS.md): `interactive: true` nodes that ask the user a question mid-run
 - [Playbook interview](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-interview.md): how an agent interviews a user to capture a process as a playbook
 - [Feedback loop](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/FEEDBACK-LOOP.md): how agents report apb defects found during supervised runs

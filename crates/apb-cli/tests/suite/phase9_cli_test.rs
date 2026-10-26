@@ -129,12 +129,17 @@ fn dev_without_frontend_fails_clearly() {
         .stderr(predicate::str::contains("frontend not found"));
 }
 
-/// `apb import` saves through the one save path, so the imported version is
-/// trusted exactly like a save through MCP or the dashboard: its digest lands
-/// in the trust store. It used to import untrusted.
+/// `apb import` never approves what it imported, even a bundle without
+/// scripts: the bundle came from elsewhere, so its digest stays out of the
+/// trust store and the import says how to approve it.
 #[test]
-fn import_approves_the_imported_digest() {
+fn import_of_a_bundle_without_scripts_leaves_it_untrusted() {
     let src = seeded_dir();
+    fs::remove_dir_all(
+        src.path()
+            .join(".apb/playbooks/implement-task/1.0.0/scripts"),
+    )
+    .unwrap();
     let bundle_path = src.path().join("bundle.json");
     playbook()
         .args(["export", "implement-task", "--out"])
@@ -157,13 +162,55 @@ fn import_approves_the_imported_digest() {
         .env("APB_CONFIG_DIR", cfg.path())
         .current_dir(dst.path())
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("is untrusted until approved"));
     let pdir = dst.path().join(".apb/playbooks/implement-task");
     let version = fs::read_to_string(pdir.join("current")).unwrap();
     let saved = fs::read_to_string(pdir.join(version.trim()).join("playbook.yaml")).unwrap();
     let trust = fs::read_to_string(cfg.path().join("trust.json")).unwrap_or_default();
     assert!(
-        trust.contains(&apb_core::scope::digest_str(&saved)),
-        "the imported digest must be approved, trust store: {trust}"
+        !trust.contains(&apb_core::scope::digest_str(&saved)),
+        "an imported digest must not be approved, trust store: {trust}"
+    );
+}
+
+/// A bundle that carries scripts imports as an untrusted version, and the
+/// import says so with the way to approve it; the scripts arrive with it.
+#[test]
+fn import_of_a_bundle_with_scripts_reports_it_untrusted() {
+    // The seeded version carries the `lint` node's script.
+    let src = seeded_dir();
+    let bundle_path = src.path().join("bundle.json");
+    playbook()
+        .args(["export", "implement-task", "--out"])
+        .arg(&bundle_path)
+        .current_dir(src.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(1 script file(s))"));
+
+    let dst = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    playbook()
+        .arg("init")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success();
+    seed_architect(dst.path());
+    playbook()
+        .arg("import")
+        .arg(&bundle_path)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is untrusted until approved"))
+        .stdout(predicate::str::contains("playbook_approve"));
+    let pdir = dst.path().join(".apb/playbooks/implement-task");
+    let version = fs::read_to_string(pdir.join("current")).unwrap();
+    assert_eq!(
+        fs::read_to_string(pdir.join(version.trim()).join("scripts/node-lint.sh")).unwrap(),
+        "true\n"
     );
 }

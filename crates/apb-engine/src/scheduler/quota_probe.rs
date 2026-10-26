@@ -49,6 +49,7 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent);
+    let run_config = crate::run_config::read_run_config(run_dir);
     let connector_policy = crate::adapter::ConnectorEnvPolicy {
         // The probe calls no connector, so it carries none of their tokens.
         scrub: root
@@ -56,7 +57,8 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
             .unwrap_or_default(),
         run_dir: None,
         node_id: None,
-        overlay: crate::run_config::read_run_config(run_dir)
+        overlay: run_config
+            .as_ref()
             .map(|c| c.spawn_env())
             .unwrap_or_default(),
     };
@@ -77,6 +79,11 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         status_file: None,
         hermetic_settings: None,
         transcript_dir: None,
+        // The limits the run resolved at its start, as every attempt of it.
+        output_limits: run_config
+            .as_ref()
+            .map(crate::run_config::RunConfig::output_limits)
+            .unwrap_or_default(),
     };
     let adapter = crate::adapter::ClaudeAdapter {
         program: ri.canonical_executable.to_string_lossy().into_owned(),
