@@ -67,6 +67,9 @@ mod agent_report_test;
 #[path = "suite/agent_timeout_test.rs"]
 mod agent_timeout_test;
 #[cfg(unix)]
+#[path = "suite/attempt_briefing_test.rs"]
+mod attempt_briefing_test;
+#[cfg(unix)]
 #[path = "suite/attempt_notes_test.rs"]
 mod attempt_notes_test;
 #[cfg(unix)]
@@ -273,6 +276,8 @@ mod scheduler_test;
 mod script_node_test;
 #[path = "suite/script_test.rs"]
 mod script_test;
+#[path = "suite/send_intent_test.rs"]
+mod send_intent_test;
 #[cfg(unix)]
 #[path = "suite/session_handoff_test.rs"]
 mod session_handoff_test;

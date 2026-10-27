@@ -66,6 +66,7 @@ fn seed_run(run_dir: &Path, base_url: &str, function: &str) {
             accounts: vec!["acct1".to_string()],
             functions: vec![function.to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();

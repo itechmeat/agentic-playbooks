@@ -64,6 +64,10 @@ fn connector_call_smtp_fields_round_trip() {
         duration_ms: 12,
         smtp_subject: Some("Hi".into()),
         smtp_recipients: Some(2),
+        attempt: Some(2),
+        attempt_seq: Some(17),
+        intent: Some("si-abc".into()),
+        origin: None,
     };
     let s = serde_json::to_string(&p).unwrap();
     assert!(!s.contains("password"));
@@ -81,6 +85,10 @@ fn old_connector_call_without_smtp_fields_still_parses() {
         EventPayload::ConnectorCall {
             smtp_subject: None,
             smtp_recipients: None,
+            attempt: None,
+            attempt_seq: None,
+            intent: None,
+            origin: None,
             ..
         }
     ));

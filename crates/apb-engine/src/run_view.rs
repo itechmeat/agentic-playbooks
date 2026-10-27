@@ -540,6 +540,7 @@ mod tests {
                     model: None,
                     workdir: None,
                     transcript: None,
+                    token: None,
                 },
             ],
             reaped_pid(),

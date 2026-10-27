@@ -1187,7 +1187,7 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             );
         }
     }
-    for line in apb_engine::run_outcome::commit_lines(&view.commits()) {
+    for line in apb_engine::run_outcome::commit_lines(&view.commits(), run_id) {
         println!(
             "  commit {}",
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)

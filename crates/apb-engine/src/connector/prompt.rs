@@ -89,6 +89,10 @@ pub fn instruction_block(
         );
     }
 
+    if grants_send_once(grants, docs) {
+        out.push_str(&format!("\n{SEND_ONCE_PARAGRAPH}\n"));
+    }
+
     for grant in grants {
         let connector = connectors.iter().find(|c| c.name == grant.connector);
         out.push_str(&format!("\n### {}\n", grant.connector));
@@ -142,7 +146,12 @@ pub fn instruction_block(
                         Some(reason) => format!(" (deprecated: {reason})"),
                         None => String::new(),
                     };
-                    out.push_str(&format!("- {}{dep}: {}\n", f.name, f.description));
+                    let once = if f.idempotency.is_some() {
+                        SEND_ONCE_TAG
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!("- {}{dep}{once}: {}\n", f.name, f.description));
                     if let Some(schema) = &f.args_schema {
                         out.push_str(&format!("  args: {}\n", compact_json(schema)));
                     }
@@ -160,6 +169,32 @@ pub fn instruction_block(
     }
 
     out
+}
+
+/// The tag of a granted function apb sends at most once per intent.
+const SEND_ONCE_TAG: &str =
+    " (send-once: pass --intent <stable name>, the same name on every attempt)";
+
+/// Said once when a granted function is sent at most once per intent.
+const SEND_ONCE_PARAGRAPH: &str = "Functions marked send-once are recorded in apb's send \
+     ledger: send them only through `apb connector call`, never another way, so a retry of \
+     this step can see what was already sent. Give each send a stable `--intent` name and \
+     reuse it on every attempt. The answers `already_sent`, `in_flight` and `unknown_effect` \
+     are final for that intent: do not send it again under another name, and report an \
+     `unknown_effect` as a finding.";
+
+/// Whether any granted function declares `idempotency`.
+fn grants_send_once(
+    grants: &[ManifestConnectorGrant],
+    docs: &BTreeMap<String, ConnectorDoc>,
+) -> bool {
+    grants.iter().any(|g| {
+        docs.get(&g.connector).is_some_and(|d| {
+            g.functions
+                .iter()
+                .any(|name| d.function(name).is_some_and(|f| f.idempotency.is_some()))
+        })
+    })
 }
 
 /// Compact one-line JSON for an args schema. A serialization failure (never
@@ -241,6 +276,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: functions.iter().map(|s| s.to_string()).collect(),
             max_calls: None,
+            on_unknown: None,
         }
     }
 
@@ -283,6 +319,7 @@ functions:
             accounts: vec!["main".to_string()],
             functions: vec!["inbox_read".to_string()],
             max_calls: None,
+            on_unknown: None,
         }
     }
 
@@ -290,6 +327,41 @@ functions:
     fn empty_grants_render_nothing() {
         let out = instruction_block(&[], &[sample_connector()], &sample_docs());
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn a_send_once_function_is_tagged_and_explained_once() {
+        let yaml = r#"
+name: mock-tracker
+version: 0.1.0
+functions:
+  - name: list_items
+    description: List items
+    read_only: true
+    method: GET
+    url: "https://example.com/items"
+  - name: post_note
+    description: Post a note
+    method: POST
+    url: "https://example.com/notes"
+    body: "{{args}}"
+    idempotency: { mode: none }
+"#;
+        let docs = BTreeMap::from([(
+            "mock-tracker".to_string(),
+            ConnectorDoc::from_yaml(yaml, "mock-tracker").unwrap(),
+        )]);
+        let out = instruction_block(
+            &[grant(&["list_items", "post_note"])],
+            &[sample_connector()],
+            &docs,
+        );
+        assert!(out.contains(&format!("- post_note{SEND_ONCE_TAG}: Post a note")));
+        assert!(out.contains("- list_items: List items"));
+        assert_eq!(out.matches(SEND_ONCE_PARAGRAPH).count(), 1);
+        // A grant without such a function gets neither.
+        let plain = instruction_block(&[grant(&["list_items"])], &[sample_connector()], &docs);
+        assert!(!plain.contains("send-once"));
     }
 
     #[test]

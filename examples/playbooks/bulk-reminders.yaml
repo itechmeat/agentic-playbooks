@@ -62,8 +62,13 @@ nodes:
       send one personal reminder email to the row's address with the smtp
       connector's send_email function. Address the debtor by name and name
       the invoice number, the amount and the due date. One message per
-      invoice, never one bulk mail to several recipients. Send nothing to
-      a row marked `paid`. End with a line `REMINDERS SENT: <k> of <u>
+      invoice, never one bulk mail to several recipients. Pass
+      `--intent reminder-<invoice number>` on every send, the invoice number
+      in lowercase with every character other than a-z, 0-9, `.`, `_` and
+      `-` replaced by `-` (INV/2024/001 becomes reminder-inv-2024-001), the
+      same name on every attempt; a row the call answers `already_sent`
+      for was sent before and counts as sent. Send nothing to a row marked
+      `paid`. End with a line `REMINDERS SENT: <k> of <u>
       unpaid rows`, and name every unpaid row you could not send to with
       the error you hit.
     connectors:

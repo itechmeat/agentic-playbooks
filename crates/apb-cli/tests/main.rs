@@ -41,6 +41,8 @@ mod detached_driver_test;
 mod host_mode_cli_test;
 #[path = "suite/ingest_cli_test.rs"]
 mod ingest_cli_test;
+#[path = "suite/intent_cli_test.rs"]
+mod intent_cli_test;
 #[path = "suite/live_smoke_test.rs"]
 mod live_smoke_test;
 #[path = "suite/mcp_cli_test.rs"]

@@ -67,14 +67,14 @@ pub fn spawn_supervisor_agent(
     // Connector env isolation (spec 4.3): the supervisor is a spawned agent, so
     // scrub the union of installed connector tokens and hand it the run-context
     // env (its node id in the manifest is `supervisor`).
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
-        scrub: apb_core::connector::resolve::all_referenced_env_names(root),
-        run_dir: Some(run_dir.clone()),
-        node_id: Some("supervisor".to_string()),
-        overlay: crate::run_config::read_run_config(&run_dir)
+    let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
+        apb_core::connector::resolve::all_referenced_env_names(root),
+        &run_dir,
+        "supervisor",
+        crate::run_config::read_run_config(&run_dir)
             .map(|c| c.spawn_env())
             .unwrap_or_default(),
-    };
+    );
     let mut last_err: Option<String> = None;
     for inv in &entry.chain {
         let adapter = crate::adapter::ClaudeAdapter {

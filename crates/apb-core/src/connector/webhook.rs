@@ -131,38 +131,9 @@ pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &str)
 /// shape a duplicate of the first.
 pub fn dedupe_id(body: &Value, raw: &[u8], path: Option<&str>) -> String {
     if let Some(path) = path
-        && let Some(found) = lookup(body, path)
+        && let Some(found) = super::common::scalar_at_path(body, path)
     {
         return found;
     }
     crate::content::sha256_hex(raw)
-}
-
-/// Resolves a dot path over objects and numeric array indices, returning the
-/// scalar at the end as a string. Objects and arrays are not ids.
-///
-/// Deliberately not the engine's `connector::call::response::lookup_path`,
-/// and deliberately not shared with it. That walker is maps-only by
-/// documented design because it implements `response_pick`, whose semantics
-/// must not change for connectors already relying on them; this one needs
-/// numeric array indices, because `entry.0.id` is the shape real providers
-/// deliver. `apb-core` also cannot depend on `apb-engine`, so sharing would
-/// mean moving `response_pick`'s walker down a crate and widening it. The two
-/// notations stay distinct on purpose (spec 2026-08-16-webhook-ingest-design,
-/// webhook block).
-fn lookup(body: &Value, path: &str) -> Option<String> {
-    let mut cursor = body;
-    for segment in path.split('.') {
-        cursor = match cursor {
-            Value::Object(map) => map.get(segment)?,
-            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
-            _ => return None,
-        };
-    }
-    match cursor {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
 }

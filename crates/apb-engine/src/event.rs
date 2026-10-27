@@ -123,6 +123,13 @@ pub enum EventPayload {
         /// logs and for attempts journaled outside an agent_task.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transcript: Option<String>,
+        /// The random token the attempt's processes carry as
+        /// `APB_ATTEMPT_TOKEN`: a connector call names it to prove which
+        /// attempt it belongs to, since attempt numbers restart with every
+        /// execution of a node. Not a secret, an identity. `None` for old
+        /// logs and for attempts that make no connector calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -680,6 +687,96 @@ pub enum EventPayload {
         /// `incomplete_response`. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         response_complete: Option<bool>,
+        /// The attempt the call ran in, by number and by the seq of its
+        /// `attempt_started` (attempt numbers restart with every execution
+        /// of a node; the seq does not). `None` for old events and for a
+        /// call outside an attempt (a script node, the supervisor).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_seq: Option<u64>,
+        /// The send intent this call carried out (`send_intent_recorded`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<String>,
+        /// Who made the call: `None` for a node (and old events),
+        /// `reconcile` for apb's own lookup of an earlier send.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
+    },
+    /// A send through a connector function that declares `idempotency` is
+    /// about to leave: what it is, who sends it, and the nonce that makes it
+    /// unique. Written durably before the request, under the journal lock,
+    /// so a repeat of the same intent always sees it.
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb keeps no send
+    /// ledger, so skipping loses nothing it would act on. A send usually
+    /// lands before its node's `node_finished`, but not always: a sender
+    /// left behind by an ended attempt, or a lookup, can append it after the
+    /// run paused or ended. Then no checkpoint follows it, and an older apb
+    /// refuses to drive the run on (it asks for an upgrade) while still
+    /// stopping it and showing it. Additive variant.
+    SendIntentRecorded {
+        /// The intent id, unique within the run.
+        #[serde(default)]
+        intent: String,
+        #[serde(default)]
+        nonce: String,
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: Option<u32>,
+        #[serde(default)]
+        attempt_seq: Option<u64>,
+        #[serde(default)]
+        connector: String,
+        #[serde(default)]
+        function: String,
+        #[serde(default)]
+        account: String,
+        /// The function's idempotency mode: `key`, `marker` or `none`.
+        #[serde(default)]
+        mode: String,
+        /// The caller's `--intent` label, or `args:<hash>` without one.
+        #[serde(default)]
+        label: String,
+        /// The process that sends it.
+        #[serde(default)]
+        pid: u32,
+        /// When a pending intent stops being in flight: the call's timeout
+        /// plus a grace period, in wall-clock milliseconds.
+        #[serde(default)]
+        deadline_ms: u64,
+        /// The earlier intent this one repeats with the same nonce (a `key`
+        /// send inside its window).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_of: Option<String>,
+        /// The earlier intent this one sends again (it did not go out, or
+        /// the binding allows a resend).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resend_of: Option<String>,
+    },
+    /// What became of a send intent: `confirmed`, `not_sent` or `unknown`,
+    /// and how that is known (`response`, `reconcile`, `key_replay`, `gate`,
+    /// `person`). Safe to skip up to the next checkpoint for the same reason
+    /// as `send_intent_recorded`, and with the same exception: a person's
+    /// decision (`apb intent resolve`) or a late answer often lands after
+    /// the run paused or ended, past its last checkpoint, where an older apb
+    /// refuses to drive the run on. Additive variant.
+    SendIntentSettled {
+        #[serde(default)]
+        intent: String,
+        #[serde(default)]
+        outcome: String,
+        #[serde(default)]
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        /// The created item's id or link, at most 256 characters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_ref: Option<String>,
+        /// Who decided, for a person's settlement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     /// A connector inbox read found unread events that retention had already
     /// dropped (the consumer's cursor pointed past the oldest stored event).
@@ -1291,6 +1388,12 @@ pub struct CommittedArtifact {
     pub sha: String,
     #[serde(default)]
     pub subject: String,
+    /// The values of the commit's `Apb-Run` trailers: `None` when they were
+    /// not read (an old event, or a git too old to read trailers),
+    /// `Some([])` for a commit without one. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub apb_run: Option<Vec<String>>,
 }
 
 /// One path of an [`EventPayload::ProtectedPathsModified`].
@@ -1328,6 +1431,23 @@ pub struct EventLog {
     /// issue #193), so the next append re-reads the high-water mark first
     /// instead of reusing a seq.
     known_len: u64,
+    /// How far this handle's latest append got into the file, so a caller
+    /// whose append failed knows whether its line is there.
+    last_append: AppendMark,
+}
+
+/// How far an append got into `events.jsonl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppendMark {
+    /// Nothing was written: the append failed (or declined) before its
+    /// write began, so its line is known not to be in the file.
+    NotWritten,
+    /// The write began and failed: part of the line may be in the file,
+    /// with no newline after it.
+    Torn,
+    /// The whole line (JSON and newline) is in the file; a sync after it
+    /// may still have failed.
+    Whole,
 }
 
 impl EventLog {
@@ -1391,7 +1511,15 @@ impl EventLog {
             file,
             next_seq,
             known_len,
+            last_append: AppendMark::NotWritten,
         })
+    }
+
+    /// How far this handle's latest append got into the file: after a
+    /// failed append it tells a line known not to be there from one that
+    /// may be torn or that is whole with only its sync failed.
+    pub(crate) fn last_append(&self) -> AppendMark {
+        self.last_append
     }
 
     /// The seq the next appended event gets.
@@ -1420,7 +1548,7 @@ impl EventLog {
     /// or share a seq. The lock is held only for that write (never across a
     /// model call or an agent run), so the drive is never blocked for long.
     pub fn append(&mut self, payload: EventPayload) -> Result<Event, EngineError> {
-        match self.append_inner(payload, None)? {
+        match self.append_inner(Build::Plain(Box::new(payload)), false)? {
             Some(event) => Ok(event),
             None => unreachable!("an unconditional append always writes"),
         }
@@ -1436,25 +1564,54 @@ impl EventLog {
         payload: EventPayload,
         admit: impl FnOnce(&[Event]) -> bool,
     ) -> Result<Option<Event>, EngineError> {
-        self.append_inner(payload, Some(Box::new(admit)))
+        let build = move |events: &[Event]| admit(events).then_some(payload);
+        self.append_inner(Build::Decided(Box::new(build)), false)
     }
 
-    #[allow(clippy::type_complexity)]
+    /// Appends what `build` makes of the journal as it stands under the
+    /// append lock (nothing when it returns `None`), and syncs the line to
+    /// disk before the lock is released. The lock is required here: a
+    /// journal that cannot be locked fails the append before `build` runs.
+    /// Synced because a send intent must survive a crash
+    /// of the machine, not only of the process, before its request leaves,
+    /// and what it records (its nonce, the intent it replays) depends on the
+    /// journal at that very moment.
+    pub(crate) fn append_decided_synced(
+        &mut self,
+        build: impl FnOnce(&[Event]) -> Option<EventPayload>,
+    ) -> Result<Option<Event>, EngineError> {
+        self.append_inner(Build::Decided(Box::new(build)), true)
+    }
+
     fn append_inner(
         &mut self,
-        payload: EventPayload,
-        admit: Option<Box<dyn FnOnce(&[Event]) -> bool + '_>>,
+        build: Build<'_>,
+        durable: bool,
     ) -> Result<Option<Event>, EngineError> {
+        self.last_append = AppendMark::NotWritten;
         let file = self.file.try_clone()?;
-        let _lock = JournalLock::on(&file);
-        // Only a checked append re-reads the journal; the drive's own
+        // A durable decision (a send intent) must not race another writer:
+        // without the lock it is refused, and nothing is sent.
+        let _lock = if durable {
+            JournalLock::required(&file)?
+        } else {
+            JournalLock::on(&file)
+        };
+        // Only a decided append re-reads the journal; the drive's own
         // appends stay O(1).
-        if let Some(admit) = admit
-            && let Some(dir) = self.run_dir()
-            && !admit(&read_all_lossy_tail(&dir)?)
-        {
-            return Ok(None);
-        }
+        let payload = match build {
+            Build::Plain(payload) => *payload,
+            Build::Decided(decide) => {
+                let events = match self.run_dir() {
+                    Some(dir) => read_all_lossy_tail(&dir)?,
+                    None => Vec::new(),
+                };
+                match decide(&events) {
+                    Some(payload) => payload,
+                    None => return Ok(None),
+                }
+            }
+        };
         // Another handle appended since this one last wrote: settle the seq
         // from the file, which is whole under the lock.
         if self
@@ -1471,12 +1628,28 @@ impl EventLog {
         };
         let mut buf = serde_json::to_vec(&event).map_err(|e| EngineError::Yaml(e.to_string()))?;
         buf.push(b'\n');
+        self.last_append = AppendMark::Torn;
         self.file.write_all(&buf)?;
         self.file.flush()?;
+        // The line is in the file: keep this handle in step with it even
+        // when the sync below fails.
+        self.last_append = AppendMark::Whole;
         self.next_seq += 1;
         self.known_len = self.file.metadata().map_or(0, |m| m.len());
+        if durable {
+            self.file.sync_data()?;
+        }
         Ok(Some(event))
     }
+}
+
+/// What an append writes: a fixed payload, or the one a decision over the
+/// journal under the lock makes (none at all when it declines).
+enum Build<'a> {
+    // Boxed: a payload is far larger than the boxed decision.
+    Plain(Box<EventPayload>),
+    #[allow(clippy::type_complexity)]
+    Decided(Box<dyn FnOnce(&[Event]) -> Option<EventPayload> + 'a>),
 }
 
 /// An advisory exclusive lock on a run's `events.jsonl` (`flock` on unix),
@@ -1494,6 +1667,19 @@ impl<'a> JournalLock<'a> {
         JournalLock {
             file: file.lock().ok().map(|()| file),
         }
+    }
+
+    /// [`Self::on`] for a writer whose decision depends on no other writer
+    /// appending meanwhile: a lock that cannot be taken is an error, never
+    /// a silent no-op.
+    pub(crate) fn required(file: &'a File) -> Result<Self, EngineError> {
+        file.lock().map_err(|e| {
+            EngineError::Io(std::io::Error::new(
+                e.kind(),
+                format!("the run journal could not be locked: {e}"),
+            ))
+        })?;
+        Ok(JournalLock { file: Some(file) })
     }
 }
 
@@ -2075,6 +2261,29 @@ fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Journal
 
 #[cfg(test)]
 mod tests {
+    /// A journal that cannot be locked fails a durable append before its
+    /// decision runs, and writes nothing. On Linux a file opened as a path
+    /// only (`O_PATH`) cannot be locked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_durable_append_needs_the_journal_lock() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let unlockable = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(&path)
+            .unwrap();
+        let err = super::JournalLock::required(&unlockable)
+            .err()
+            .expect("an O_PATH handle cannot be locked");
+        assert!(err.to_string().contains("could not be locked"));
+        let lockable = std::fs::File::open(&path).unwrap();
+        assert!(super::JournalLock::required(&lockable).is_ok());
+    }
+
     use super::*;
 
     /// Writers on separate handles (as separate processes would be) never
@@ -2243,6 +2452,7 @@ mod tests {
             model: None,
             workdir: None,
             transcript: None,
+            token: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"spawn_ms\":37"), "got {s}");

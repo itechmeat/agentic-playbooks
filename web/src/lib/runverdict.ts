@@ -41,8 +41,8 @@ export function gapIsWarning(g: Gap): boolean {
   return g.kind === 'inbox_gap' || g.kind === 'unknown_call' || g.kind === 'incomplete_response'
 }
 
-// `1 regression, 2 findings, 1 warning`, the same text as `apb runs`, or
-// null when nothing calls for a look.
+// `1 regression, 2 findings, 1 warning, 1 unknown send`, the same text as
+// `apb runs`, or null when nothing calls for a look.
 export function needsLookCounts(n: NeedsLook | null | undefined): string | null {
   if (!n) return null
   const parts: string[] = []
@@ -52,6 +52,7 @@ export function needsLookCounts(n: NeedsLook | null | undefined): string | null 
   add(n.regressions, 'regression', 'regressions')
   add(n.findings, 'finding', 'findings')
   add(n.warnings, 'warning', 'warnings')
+  add(n.unknown_sends ?? 0, 'unknown send', 'unknown sends')
   return parts.length ? parts.join(', ') : null
 }
 

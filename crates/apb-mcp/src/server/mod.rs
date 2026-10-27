@@ -367,9 +367,9 @@ impl WfMcp {
     /// The server a background supervisor agent connects to. A supervisor's
     /// authority is its capability set on the token-bearing `supervisor_*`
     /// tools, so this server offers only those and the read-only tools: the
-    /// operator's run control (`run_stop`, `run_pause`, `run_resume`, `review_decide`),
-    /// authoring and run starts take no token and would bypass the
-    /// capabilities. `run_answer` stays for its token path (answered by the
+    /// operator's run control (`run_stop`, `run_pause`, `run_resume`,
+    /// `review_decide`, `run_intent_resolve`), authoring and run starts take
+    /// no token and would bypass the capabilities. `run_answer` stays for its token path (answered by the
     /// supervisor); its `run_id` path, which answers as the human, is refused.
     pub fn for_supervisor(root: PathBuf) -> Self {
         let mut server = Self::new(root);

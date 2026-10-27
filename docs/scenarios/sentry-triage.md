@@ -56,19 +56,29 @@ gaps:
 1. The whole list goes to one agent call: fetch, triage and filing each
    handle all issues in a single attempt, so there is no per-item record the
    engine holds.
-2. No per-item ledger: whether an issue was already filed lives only in the
-   agent's transcript, and a retry after a timeout may file it twice.
-3. No check before filing: that an issue does not exist already is prompt
-   discipline, not a read-only look at GitHub.
-4. max_calls budgets are hand-tuned to the expected list length and clip a
+2. No check before filing: that an issue does not exist already is prompt
+   discipline, not a read-only look at GitHub, beyond apb's lookup of its own
+   earlier sends in the same run.
+3. max_calls budgets are hand-tuned to the expected list length and clip a
    longer list silently.
+
+Closed within a run: each issue is filed with `--intent` named after its
+Sentry shortId, recorded in the run's send ledger and stamped with a hidden
+marker. A retry after the network error answers the 2 filed issues
+`already_sent`, and for a filing whose answer was lost it reads the token's
+account and the recent issues, finds the marker and returns the existing
+issue instead of filing it again (engine test
+`a_github_comment_with_a_lost_answer_is_found_by_its_marker_and_not_posted_again`
+in crates/apb-engine/tests/suite/send_intent_test.rs, and the `create_issue`
+reconcile cases in connectors/github/tests.yaml). A re-run as a new run does
+not see them.
 
 ## 7. Target
 
 The list is a first-class value and the filing runs per item, keyed by the
-Sentry shortId as an idempotency key. Before each file a read-only check
-asks GitHub whether the issue exists; after an interruption the ledger of
-filed keys is read back and the retry skips what is done. The run report
+Sentry shortId, also across runs. Before each file a read-only check asks
+GitHub whether the issue exists; after an interruption, or in a re-run, the
+ledger of filed keys is read back and what is done is skipped. The run report
 shows filed, skipped and failed counts per item. A feature closing this gap
 carries an engine test that interrupts the filing after two items and asserts
-no duplicate issue on the retry.
+no duplicate issue on a re-run.

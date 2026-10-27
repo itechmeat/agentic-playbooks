@@ -55,12 +55,11 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         scrub: root
             .map(apb_core::connector::resolve::all_referenced_env_names)
             .unwrap_or_default(),
-        run_dir: None,
-        node_id: None,
         overlay: run_config
             .as_ref()
             .map(|c| c.spawn_env())
             .unwrap_or_default(),
+        ..Default::default()
     };
     let task = AgentTask {
         prompt: PROBE_PROMPT,

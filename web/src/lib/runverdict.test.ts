@@ -41,6 +41,12 @@ describe('verdict wording', () => {
     expect(needsLookCounts({ reasons: ['regression', 'findings'], regressions: 1, findings: 3, warnings: 0 })).toBe(
       '1 regression, 3 findings',
     )
+    expect(
+      needsLookCounts({ reasons: ['findings', 'unknown_sends'], regressions: 0, findings: 1, warnings: 0, unknown_sends: 2 }),
+    ).toBe('1 finding, 2 unknown sends')
+    expect(needsLookCounts({ reasons: ['unknown_sends'], regressions: 0, findings: 0, warnings: 0, unknown_sends: 1 })).toBe(
+      '1 unknown send',
+    )
   })
 
   it('has no count text when nothing calls for a look', () => {

@@ -82,6 +82,69 @@ pub(crate) fn check_connectors(
                 );
             }
             check_inbox_binding(site, b, ctx, r);
+            check_send_policy(site, b, ctx, r);
+        }
+    }
+}
+
+/// V69 (error): a binding sets `on_unknown`, but none of the functions it
+/// grants declares `idempotency: none` or `key`, the only modes the policy
+/// applies to, so the setting would never take effect. V84 (error):
+/// `on_unknown: resend` on a binding that grants a function flagged
+/// `irreversible`, where a duplicate cannot be taken back.
+///
+/// Both read `ctx.connectors` and are silent when the connector is unknown
+/// there or its manifest no longer loads (V42 reports that).
+fn check_send_policy(
+    site: &str,
+    b: &crate::schema::ConnectorBinding,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
+    use crate::connector::idempotency::IdempotencyMode;
+    use crate::schema::OnUnknown;
+    let Some(policy) = b.on_unknown else {
+        return;
+    };
+    let Some(facts) = ctx.connectors.get(&b.name) else {
+        return;
+    };
+    if facts.load_error.is_some() {
+        return;
+    }
+    let label = crate::connector::sites::site_label(site);
+    let applies: Vec<String> = facts
+        .idempotency
+        .iter()
+        .filter(|(_, mode)| matches!(mode, IdempotencyMode::None | IdempotencyMode::Key))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if super::decisions::granted(b, &applies).is_empty() {
+        r.error(
+            "V69",
+            Some(site),
+            format!(
+                "{label} connector `{}` sets on_unknown, but none of the functions it grants declares idempotency `none` or `key`: a function with no idempotency declaration is not tracked at all, and a `marker` send is never resent automatically",
+                b.name
+            ),
+        );
+    }
+    if policy == OnUnknown::Resend {
+        let irreversible = super::decisions::granted(b, &facts.irreversible_functions);
+        if !irreversible.is_empty() {
+            r.error(
+                "V84",
+                Some(site),
+                format!(
+                    "{label} connector `{}` sets on_unknown: resend but grants irreversible function(s) {}, where a duplicate cannot be taken back",
+                    b.name,
+                    irreversible
+                        .iter()
+                        .map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
         }
     }
 }

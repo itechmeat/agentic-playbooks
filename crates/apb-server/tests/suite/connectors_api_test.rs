@@ -936,6 +936,10 @@ fn write_connector_call_event(
         duration_ms,
         smtp_subject: None,
         smtp_recipients: None,
+        attempt: None,
+        attempt_seq: None,
+        intent: None,
+        origin: None,
     })
     .unwrap();
 }

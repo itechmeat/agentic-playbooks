@@ -7,24 +7,29 @@
 //! exactly as before.
 //!
 //! Submodules: `baseline` (the baseline check's view), `notes` (findings and
-//! warnings), `calls` (connector calls by what they say about the outcome)
-//! and `summary` (the human outcome every surface shows, and the cheap
-//! "needs a look" marker of a run listing).
+//! warnings), `calls` (connector calls by what they say about the outcome),
+//! `commits` (the commits and their `Apb-Run` trailers), `intents` (the send
+//! intents of the send ledger) and `summary` (the human outcome every
+//! surface shows, and the cheap "needs a look" marker of a run listing).
 
 use std::path::Path;
 
 pub mod baseline;
 pub mod calls;
+pub mod commits;
+pub mod intents;
 pub mod notes;
 pub mod summary;
 
 pub use baseline::{RunBaseline, baseline_from};
+pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
+pub use intents::{RunIntent, intents_from};
 pub use notes::RunNotes;
 pub use summary::{NeedsLook, OutcomeSummary};
 
 use serde::Serialize;
 
-use crate::event::{CommittedArtifact, Event, EventPayload};
+use crate::event::{Event, EventPayload};
 use crate::run_view::RunView;
 
 /// One inbox gap a run's connector read journaled (one `inbox_gap`): unread
@@ -41,44 +46,6 @@ pub struct RunInboxGap {
     pub from: u64,
     /// Last lost sequence number, inclusive.
     pub through: u64,
-}
-
-/// The commits one node execution made (one `artifacts_committed`).
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct NodeCommits {
-    pub node: String,
-    /// `HEAD` before the node ran.
-    pub before: String,
-    /// `HEAD` after it.
-    pub after: String,
-    /// Newest first, at most 50.
-    pub commits: Vec<CommittedArtifact>,
-    /// Commits past the listed ones.
-    pub omitted: usize,
-}
-
-/// Every `artifacts_committed` of `events`, in journal order.
-pub fn commits_from_events(events: &[Event]) -> Vec<NodeCommits> {
-    events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::ArtifactsCommitted {
-                node,
-                before,
-                after,
-                commits,
-                omitted,
-            } => Some(NodeCommits {
-                node: node.clone(),
-                before: before.clone(),
-                after: after.clone(),
-                commits: commits.clone(),
-                omitted: *omitted,
-            }),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Every `inbox_gap` of `events`, in journal order. The call path appends at
@@ -295,21 +262,6 @@ impl RunGoal {
 
 // --- end of goal criteria -------------------------------------------------------
 
-/// `abc1234 subject` lines for a terminal: one per commit, the node first.
-pub fn commit_lines(commits: &[NodeCommits]) -> Vec<String> {
-    let mut out = Vec::new();
-    for c in commits {
-        for a in &c.commits {
-            let short: String = a.sha.chars().take(12).collect();
-            out.push(format!("{}: {short} {}", c.node, a.subject));
-        }
-        if c.omitted > 0 {
-            out.push(format!("{}: and {} more", c.node, c.omitted));
-        }
-    }
-    out
-}
-
 /// One plain line per inbox gap, for a terminal or a report: which inbox
 /// lost which unread events, and which node's read found it.
 pub fn inbox_gap_lines(gaps: &[RunInboxGap]) -> Vec<String> {
@@ -449,43 +401,6 @@ edges:
         assert_eq!(
             serde_json::to_string(&gaps[0]).unwrap(),
             r#"{"node":"watch","connector":"echo-hooks","account":"main","from":3,"through":6}"#
-        );
-    }
-
-    #[test]
-    fn commits_are_read_in_journal_order_and_printed_per_node() {
-        let ev = |seq: u64, node: &str, sha: &str, omitted: usize| Event {
-            seq,
-            ts: 0,
-            payload: EventPayload::ArtifactsCommitted {
-                node: node.into(),
-                before: "b".into(),
-                after: sha.into(),
-                commits: vec![CommittedArtifact {
-                    sha: sha.into(),
-                    subject: format!("change {node}"),
-                }],
-                omitted,
-            },
-        };
-        let events = [
-            ev(1, "impl", "0123456789abcdef", 0),
-            ev(2, "docs", "fedcba9876543210", 2),
-        ];
-        let commits = commits_from_events(&events);
-        assert_eq!(commits.len(), 2);
-        assert_eq!(
-            commit_lines(&commits),
-            [
-                "impl: 0123456789ab change impl",
-                "docs: fedcba987654 change docs",
-                "docs: and 2 more",
-            ]
-        );
-        // The wire shape the surfaces serialize.
-        assert_eq!(
-            serde_json::to_string(&commits[0]).unwrap(),
-            r#"{"node":"impl","before":"b","after":"0123456789abcdef","commits":[{"sha":"0123456789abcdef","subject":"change impl"}],"omitted":0}"#
         );
     }
 }

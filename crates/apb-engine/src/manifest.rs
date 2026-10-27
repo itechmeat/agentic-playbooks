@@ -129,8 +129,9 @@ pub struct ManifestConnector {
 }
 
 /// A single node's grant against one connector: which accounts, which
-/// functions, and an optional call budget counted per executor attempt
-/// (`connector::call::attempt_floor`).
+/// functions, an optional call budget counted per executor attempt
+/// (`connector::call::attempt`), and what a repeat of a send with an unknown
+/// outcome does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestConnectorGrant {
     pub connector: String,
@@ -138,6 +139,9 @@ pub struct ManifestConnectorGrant {
     pub accounts: Vec<String>,
     pub functions: Vec<String>,
     pub max_calls: Option<u32>,
+    /// `None` (and every older manifest) reads as `refuse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_unknown: Option<apb_core::schema::OnUnknown>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

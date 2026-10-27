@@ -151,10 +151,26 @@ plus one per question and answer round under `reprompt` or `resume` interaction
 (not under `live`, which spans every round in one attempt). A script node runs
 no executor, so its count restarts per visit instead.
 
+A function that declares `idempotency` (the official ones that send: github
+issues, comments and releases, discord, telegram, smtp, whatsapp) is sent at most once
+per intent: a repeat of a send that went through gets the earlier result
+instead of a second copy. Tell the agent to pass `--intent <stable name>` on
+such a call and the same name on every attempt (the connector block of the
+prompt marks those functions `send-once`). A send whose outcome nobody can
+tell is refused on a repeat until a person decides (`apb intent resolve`,
+which refuses inside a run; an agent step reports such a send as a finding);
+`on_unknown: resend` on the binding lets it go out again instead, where a
+rare duplicate is better than a missing message:
+
+```yaml
+    connectors:
+      - { name: telegram, functions: [send_message], on_unknown: resend }
+```
+
 The binding is covered by the playbook digest, but the connector folder
 and each account are digest-pinned separately and must be approved before a run.
-Installing connectors, configuring accounts, secrets, trust, and the
-`apb connector` CLI are covered in CONNECTORS.md.
+Installing connectors, configuring accounts, secrets, trust, sending once and
+the `apb connector` CLI are covered in CONNECTORS.md.
 
 ## Success checks
 
@@ -323,6 +339,14 @@ Apb-Run: <run id>
 In a prompt: "commit with the trailer `Apb-Run: {{run.id}}`". From a script:
 `git commit -m "..." -m "Apb-Run: $APB_RUN_ID"`. `git log --grep "Apb-Run: <id>"`
 then finds every commit of a run.
+
+The engine reads the trailer back when it records a node's commits. A commit
+without it, or one naming another run, is flagged in `apb runs <id>`
+(`[no Apb-Run trailer]`, `[Apb-Run names <id>]`), on the dashboard's commit
+list, and in the outcome's done line (`impl: 3 commits (1 without an Apb-Run
+trailer)`). apb never adds or rewrites a trailer itself, and leaves the
+repository's git hooks alone; with a git too old to read trailers nothing is
+flagged.
 
 ### Status file (APB_STATUS_FILE)
 
@@ -1529,6 +1553,35 @@ attempt it continues instead of a fresh one. If the agent answers that the
 session does not exist, the engine drops it and starts fresh once, without
 spending a retry.
 
+### The retry briefing
+
+Every attempt that repeats a step gets a briefing on what the earlier attempts
+did, as apb recorded it: a section `What earlier attempts of this step did
+(apb's record)` appended to its prompt, after the continuation note of a
+continued session, after the node prompt of a fresh one, and in the prompt of
+a host task. It covers every attempt since the node last succeeded: retries,
+infrastructure retries, fallback steps, deadline continuations, resumes after
+a pause or a crash, a supervisor retry and a failure route back into the
+node. A first attempt, an answer round, a session handoff and a loop visit
+after a success get none. It lists:
+
+- each earlier attempt with its agent, model and how it ended;
+- the sends of `send-once` functions, grouped as confirmed (do not send
+  again; a repeat with the same `--intent` returns the earlier result),
+  unknown (what apb will do on a repeat; never send it under another name,
+  report it as a finding) and not sent (may be sent again);
+- writes to connector functions without a send-once declaration, by the same
+  three outcomes;
+- the attempts with no connector writes recorded.
+
+At most 30 such lines are listed and the rest is counted. It ends by naming
+what apb does not record, so a missing line is never read as "it did not
+happen": anything done outside `apb connector call` (shell commands, other
+API calls, messages sent another way, git pushes) and the file changes and
+commits in the working tree, which the agent checks with `git status` and
+`git log`. The briefing sits outside the node's cache key, and the default
+retry policy is unchanged.
+
 ### Continuing another node's session (continue_session)
 
 Consecutive nodes on the same profile often need the same understanding of the
@@ -2414,7 +2467,8 @@ both directions so either end leads to the other:
   so `git log --grep 'Apb-Run: <run id>'` finds the run's commits and a
   commit leads back to `.apb/runs/<run id>/`. On a git working tree apb
   also records the commits each node made (HEAD before and after the node)
-  as an `artifacts_committed` event, and the run report lists them. A final
+  as an `artifacts_committed` event, and the run report lists them, flagging
+  a commit whose trailer is missing or names another run. A final
   node that comments on the tracker record with the run id and those
   commits closes the loop from the record side. "Run provenance" above
   has the details.

@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConnectorError, validate_snake_name};
+use super::idempotency::{FunctionKind, FunctionView, Idempotency, IdentitySpec};
 use super::text_mode::{TextMode, validate_text_args};
 
 /// How the connector authenticates outgoing requests. The tag `kind`
@@ -340,6 +341,10 @@ pub struct FunctionSpec {
     pub imap: Option<ImapSpec>,
     #[serde(default)]
     pub inbox: Option<InboxSpec>,
+    /// How a repeat of this send is kept from acting twice (see
+    /// `super::idempotency`). Only on functions that change something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency: Option<Idempotency>,
 }
 
 impl FunctionSpec {
@@ -366,6 +371,29 @@ impl FunctionSpec {
     /// returning a mock, sending mail, or opening a mailbox.
     pub fn is_inbox(&self) -> bool {
         self.inbox.is_some()
+    }
+
+    /// The parts of this function the send-once rules read.
+    fn idempotency_view(&self) -> FunctionView<'_> {
+        let kind = if self.method.is_some() || self.url.is_some() {
+            FunctionKind::Http
+        } else if self.is_mock() {
+            FunctionKind::Mock
+        } else if self.is_smtp() {
+            FunctionKind::Smtp
+        } else {
+            FunctionKind::Other
+        };
+        FunctionView {
+            name: &self.name,
+            kind,
+            read_only: self.read_only,
+            idempotency: self.idempotency.as_ref(),
+            args_schema: self.args_schema.as_ref(),
+            body: self.body.as_ref(),
+            headers: &self.headers,
+            text_args: &self.text_args,
+        }
     }
 }
 
@@ -411,6 +439,10 @@ pub struct ConnectorDoc {
     pub account_fields: Vec<AccountField>,
     #[serde(default)]
     pub functions: Vec<FunctionSpec>,
+    /// How the connector reads its own verified account, for finding its
+    /// own earlier sends again (`idempotency: { mode: marker }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentitySpec>,
 }
 
 impl ConnectorDoc {
@@ -434,6 +466,8 @@ impl ConnectorDoc {
     ///    combination has no legitimate use).
     /// 8. `text_args` sits only on HTTP functions and names string
     ///    properties of `args_schema`; an unknown mode fails the parse.
+    /// 9. `idempotency` and `identity` follow the send-once rules
+    ///    (`super::idempotency::validate`).
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -610,6 +644,12 @@ impl ConnectorDoc {
 
         validate_templates(&doc)?;
         validate_examples(&doc)?;
+        let views: Vec<FunctionView<'_>> = doc
+            .functions
+            .iter()
+            .map(FunctionSpec::idempotency_view)
+            .collect();
+        super::idempotency::validate(doc.identity.as_ref(), &views)?;
 
         Ok(doc)
     }

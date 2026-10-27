@@ -181,9 +181,9 @@ impl SmtpCall {
     }
 
     /// Maps a lettre smtp error into the call taxonomy (spec 4.2): a timeout is
-    /// `timeout`; a connect/DNS failure is `network`; an AUTH rejection is
-    /// `auth`; any other protocol rejection is `service` with the SMTP reply
-    /// carried in the message. Every message is scrubbed through the interim
+    /// `timeout`; a connect/DNS failure, or a send cut off without a reply,
+    /// is `network`; an AUTH rejection is `auth`; any other protocol
+    /// rejection is `service` with the SMTP reply carried in the message. Every message is scrubbed through the interim
     /// literal redaction so a resolved password can never leak.
     fn map_err(&self, stage: Stage, err: lettre::transport::smtp::Error) -> CallError {
         if err.is_timeout() {
@@ -192,11 +192,16 @@ impl SmtpCall {
                 "smtp operation timed out",
             ));
         }
+        // At the send stage only the server's own reply (a 4xx or 5xx code)
+        // says the message was refused; a connection lost meanwhile, after
+        // DATA perhaps, leaves it unknown whether the server took it.
+        let replied = err.is_transient() || err.is_permanent();
         let (code, prefix) = match stage {
             Stage::Connect => (CallErrorCode::Network, "smtp connection failed"),
             Stage::Auth => (CallErrorCode::Auth, "smtp authentication rejected"),
             Stage::Starttls => (CallErrorCode::Service, "smtp STARTTLS failed"),
-            Stage::Send => (CallErrorCode::Service, "smtp send rejected"),
+            Stage::Send if replied => (CallErrorCode::Service, "smtp send rejected"),
+            Stage::Send => (CallErrorCode::Network, "smtp send interrupted"),
         };
         self.redact(CallError::new(code, format!("{prefix}: {err}")))
     }

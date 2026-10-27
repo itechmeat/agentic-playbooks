@@ -6,75 +6,25 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::connector::result::CallErrorCode;
 use crate::event::{Event, EventPayload};
 
-/// How one connector call reads in the outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallClass {
-    /// A read that came back whole.
-    ReadOk,
-    /// A read whose response was cut short: what it saw is not whole.
-    ReadUnknown,
-    /// A write that went through.
-    WriteOk,
-    /// A write that went through but whose response was cut short.
-    WriteIncomplete,
-    /// A write that may or may not have happened: it timed out, the
-    /// network failed, or the service answered with a server error.
-    WriteUnknown,
-    /// A call that was refused or failed before it could act.
-    Failed,
-}
-
-/// The fields of a `connector_call` the class depends on.
-#[derive(Debug, Clone, Copy)]
-pub struct CallFacts<'a> {
-    pub outcome: &'a str,
-    pub http_status: Option<u16>,
-    pub response_complete: Option<bool>,
-}
-
-/// Classifies one call of a function that is `read_only` or not.
-pub fn classify(call: CallFacts<'_>, read_only: bool) -> CallClass {
-    let cut = call.response_complete == Some(false)
-        || call.outcome == CallErrorCode::IncompleteResponse.as_str();
-    let ok = call.outcome == "ok";
-    if read_only {
-        return match (ok, cut) {
-            (_, true) => CallClass::ReadUnknown,
-            (true, false) => CallClass::ReadOk,
-            (false, false) => CallClass::Failed,
-        };
-    }
-    let server_error = call.outcome == CallErrorCode::Service.as_str()
-        && call.http_status.is_some_and(|s| s >= 500);
-    let undetermined = call.outcome == CallErrorCode::Timeout.as_str()
-        || call.outcome == CallErrorCode::Network.as_str()
-        || server_error;
-    let accepted = call.http_status.is_some_and(|s| (200..300).contains(&s));
-    let refused = call.http_status.is_some_and(|s| (400..500).contains(&s));
-    match (ok, cut, undetermined) {
-        (true, true, _) => CallClass::WriteIncomplete,
-        (true, false, _) => CallClass::WriteOk,
-        (false, _, true) => CallClass::WriteUnknown,
-        // A cut response says the write went through only when the service
-        // accepted it; a refusal is a failure, anything else is not known.
-        (false, true, false) if accepted => CallClass::WriteIncomplete,
-        (false, true, false) if refused => CallClass::Failed,
-        (false, true, false) => CallClass::WriteUnknown,
-        (false, false, false) => CallClass::Failed,
-    }
-}
+pub use crate::connector::effect::{CallClass, CallFacts, classify};
 
 /// One classified call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedCall {
+    /// The seq of its `connector_call`.
+    pub seq: u64,
     pub node: String,
     pub connector: String,
     pub function: String,
     pub outcome: String,
     pub class: CallClass,
+    /// The seq of the `attempt_started` the call ran in, when journaled.
+    pub attempt_seq: Option<u64>,
+    /// The send intent the call carried out, for a function that declares
+    /// `idempotency`: the send ledger, not the call, tells its outcome.
+    pub intent: Option<String>,
 }
 
 impl ClassifiedCall {
@@ -84,9 +34,11 @@ impl ClassifiedCall {
     }
 }
 
-/// Every `connector_call` of `events`, classified against the run's
-/// connector snapshots in `run_dir`. A function the snapshot does not
+/// Every `connector_call` a node made in `events`, classified against the
+/// run's connector snapshots in `run_dir`. A function the snapshot does not
 /// describe counts as a write: whether it changed anything is not known.
+/// apb's own lookups of an earlier send (`origin: reconcile`) are left out:
+/// the send ledger reports what they found.
 pub fn classified_calls(run_dir: &Path, events: &[Event]) -> Vec<ClassifiedCall> {
     let mut read_only: BTreeMap<(String, String), bool> = BTreeMap::new();
     events
@@ -99,6 +51,9 @@ pub fn classified_calls(run_dir: &Path, events: &[Event]) -> Vec<ClassifiedCall>
                 outcome,
                 http_status,
                 response_complete,
+                attempt_seq,
+                intent,
+                origin: None,
                 ..
             } => {
                 let ro = *read_only
@@ -110,11 +65,14 @@ pub fn classified_calls(run_dir: &Path, events: &[Event]) -> Vec<ClassifiedCall>
                     response_complete: *response_complete,
                 };
                 Some(ClassifiedCall {
+                    seq: e.seq,
                     node: node_id.clone(),
                     connector: connector.clone(),
                     function: function.clone(),
                     outcome: outcome.clone(),
                     class: classify(facts, ro),
+                    attempt_seq: *attempt_seq,
+                    intent: intent.clone(),
                 })
             }
             _ => None,

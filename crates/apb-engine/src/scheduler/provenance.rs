@@ -12,7 +12,9 @@
 //! an unborn branch) is skipped silently, so such a run journals exactly what
 //! it did before. The other direction, from a commit to its run, is the
 //! `Apb-Run: <run id>` commit trailer a playbook's agents write, with the id
-//! from `APB_RUN_ID` or `{{run.id}}`.
+//! from `APB_RUN_ID` or `{{run.id}}`. The trailer values are read back with
+//! each commit, so the run surfaces can flag a commit without one; apb never
+//! writes or rewrites a trailer itself.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,7 +67,8 @@ fn is_ancestor(dir: &Path, before: &str, after: &str) -> bool {
 /// The commits reachable from `after` but not from `before`, newest first,
 /// and how many there are in all. Callers check [`is_ancestor`] first: the
 /// range means "what the node committed" only when `after` descends from
-/// `before`.
+/// `before`. Each commit carries its `Apb-Run` trailer values; a git that
+/// cannot read trailers lists the commits without them (`apb_run: None`).
 pub(crate) fn commits_between(
     dir: &Path,
     before: &str,
@@ -75,30 +78,64 @@ pub(crate) fn commits_between(
     let total = git(dir, &["rev-list", "--count", &range])
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    let limit = format!("--max-count={MAX_LISTED_COMMITS}");
-    let listed = git(
-        dir,
-        &[
-            "log",
-            "--no-show-signature",
-            &limit,
-            "--format=%H%x09%s",
-            &range,
-        ],
-    )
-    .map(|text| {
-        text.lines()
-            .filter_map(|line| {
-                let (sha, subject) = line.split_once('\t')?;
-                Some(CommittedArtifact {
-                    sha: sha.to_string(),
-                    subject: subject.to_string(),
-                })
-            })
-            .collect::<Vec<_>>()
-    })
-    .unwrap_or_default();
+    let listed = list_commits(dir, &range, true)
+        .or_else(|| list_commits(dir, &range, false))
+        .unwrap_or_default();
     (listed, total)
+}
+
+/// The `Apb-Run` trailer values, unit-separated and unfolded (a folded
+/// value stays on one line), between the sha and the subject.
+const TRAILER_FORMAT: &str =
+    "--format=%H%x09%(trailers:key=Apb-Run,valueonly,unfold,separator=%x1f)%x09%s";
+
+/// `git log` over `range`, at most [`MAX_LISTED_COMMITS`], with the trailer
+/// values when `trailers`; `None` when git fails or cannot read trailers.
+fn list_commits(dir: &Path, range: &str, trailers: bool) -> Option<Vec<CommittedArtifact>> {
+    let limit = format!("--max-count={MAX_LISTED_COMMITS}");
+    let format = if trailers {
+        TRAILER_FORMAT
+    } else {
+        "--format=%H%x09%s"
+    };
+    let text = git(dir, &["log", "--no-show-signature", &limit, format, range])?;
+    parse_log(&text, trailers)
+}
+
+/// The commits of a `git log` printed in [`TRAILER_FORMAT`] (`trailers`) or
+/// as sha and subject. `None` when a line shows the trailer placeholder
+/// itself: a git too old to know its options prints it literally, and its
+/// text is no run id.
+fn parse_log(text: &str, trailers: bool) -> Option<Vec<CommittedArtifact>> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((sha, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        let (apb_run, subject) = if trailers {
+            let Some((values, subject)) = rest.split_once('\t') else {
+                continue;
+            };
+            if values.contains("%(") {
+                return None;
+            }
+            let ids = values
+                .split('\u{1f}')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect();
+            (Some(ids), subject)
+        } else {
+            (None, rest)
+        };
+        out.push(CommittedArtifact {
+            sha: sha.to_string(),
+            subject: subject.to_string(),
+            apb_run,
+        });
+    }
+    Some(out)
 }
 
 /// The directory whose `HEAD` a node's commits land in: the node's own
@@ -249,6 +286,25 @@ mod tests {
         assert!(st.success(), "git {args:?}");
     }
 
+    /// A git that cannot read trailers prints the placeholder as text: that
+    /// line is not a run id, and the listing falls back to sha and subject.
+    #[test]
+    fn a_literal_trailer_placeholder_falls_back_to_the_plain_listing() {
+        let literal = "abc\t%(trailers:key=Apb-Run,valueonly,unfold,separator=\u{1f})\tFix it\n";
+        assert_eq!(parse_log(literal, true), None);
+        let plain = parse_log("abc\tFix it\n", false).unwrap();
+        assert_eq!(plain[0].subject, "Fix it");
+        assert_eq!(plain[0].apb_run, None);
+        let read = parse_log("abc\tr-1\u{1f}r-2\tFix it\ndef\t\tOther\n", true).unwrap();
+        assert_eq!(
+            read.iter().map(|c| c.apb_run.clone()).collect::<Vec<_>>(),
+            vec![
+                Some(vec!["r-1".to_string(), "r-2".to_string()]),
+                Some(Vec::new())
+            ]
+        );
+    }
+
     #[test]
     fn head_is_none_outside_git_and_on_an_unborn_branch() {
         let tmp = tempfile::tempdir().unwrap();
@@ -276,6 +332,13 @@ mod tests {
         let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, ["two", "one"]);
         assert_eq!(commits[0].sha, after);
+        // The trailer is read; a commit without one says so.
+        assert_eq!(commits[0].apb_run, Some(vec!["r1".to_string()]));
+        assert_eq!(commits[1].apb_run, Some(Vec::new()));
+        // Without trailers (a git too old to read them) nothing is claimed.
+        let plain = list_commits(d, &format!("{before}..{after}"), false).unwrap();
+        assert_eq!(plain[0].subject, "two");
+        assert_eq!(plain[0].apb_run, None);
         // A reset back to an older commit is not a forward move.
         assert!(!is_ancestor(d, &after, &before));
     }

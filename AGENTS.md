@@ -30,7 +30,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the rule comparison), the project's own test and lint commands
   (`project_checks.rs`), the findings and warnings an attempt reports and
   their sanitizer (`run_notes.rs`), one walk over every connector binding
-  site, nodes plus the reserved `@baseline` (`connector/sites.rs`), profiles
+  site, nodes plus the reserved `@baseline` (`connector/sites.rs`), a
+  function's send-once declaration and the connector's `identity`
+  (`connector/idempotency.rs`) and the hidden send marker
+  (`connector/marker.rs`), profiles
   (`profile.rs` types incl. `ProfileError`, `profile_store.rs` scope resolution
   and bundle trust, `skills.rs`), registry and versioning, schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
@@ -57,7 +60,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
   `journal` event-log folds, `status_file` the attempt verdict contract and its
-  findings and warnings, `attempt_notes` their journal entry, `baseline` the
+  findings and warnings, `attempt_notes` their journal entry,
+  `attempt_memory` the retry briefing on what earlier attempts did, `baseline` the
   before and after snapshots and comparisons, `resume`,
   `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `handoff` the warm
   session handoff between nodes, `node_workdir` a node's templated working
@@ -72,8 +76,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `project` the project's commands), the read-only goal and commits blocks of the
   run surfaces (`run_outcome.rs`; `run_outcome/`: `baseline` and `notes` the
   baseline and findings views, `calls` connector calls by what they say about
-  the outcome, `summary` the human outcome every surface shows and the
-  "needs a look" marker), the cross-run metrics behind `apb stats`
+  the outcome, `commits` the commits and their `Apb-Run` trailers, `intents`
+  the send intents and the unknown ones a person resolves, `summary` the
+  human outcome every surface shows and the "needs a look" marker), the
+  cross-run metrics behind `apb stats`
   (`run_stats.rs`, `run_stats/`, `findings` for findings and baseline
   results), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
@@ -93,7 +99,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
-  account selection, auth, encoding and response mapping), background
+  account selection, auth, encoding and response mapping, `attempt` the
+  call's attempt binding and `send_once` the send-once flow; `intent/` the
+  send ledger: `identity` what makes two sends the same, `ledger` the fold
+  and the admission table, `stamp` the key and the marker, `reconcile` the
+  lookup of a marker send; `effect` what a call says about its effect), background
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate.rs`), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
@@ -104,14 +114,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   and replay behind `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
-  `meta`); `catalog_rank` is the opt-in decision-model ranking behind
+  `meta`, `intent` for `run_intent_resolve` and `apb intent`); `catalog_rank` is the opt-in decision-model ranking behind
   `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
   subscriptions survey); non-TTY runs skip it. `apb self-update` updates
-  installer-based installs in place.
+  installer-based installs in place. `apb intent list|resolve` shows a run's
+  send intents and records a person's decision on an unknown one.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/`, shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
@@ -171,6 +182,28 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   Findings and warnings (`attempt_notes`) are reported, never acted on. The
   run outcome (`run_outcome::OutcomeSummary`) keeps what the engine checked
   apart from what nobody checked.
+- **Sending once**: a connector function that declares `idempotency`
+  (`key`, `marker` or `none`) is recorded in the run journal before its
+  request leaves (`send_intent_recorded`, synced under the journal lock) and
+  settled afterwards (`send_intent_settled`: `confirmed`, `not_sent` or
+  `unknown`). A repeat of the same intent (node, function, account and the
+  `--intent` label, else an args hash) within the node's effect scope (since
+  its last success) is answered `already_sent`, replayed with the same key,
+  looked up by its marker, or refused (`unknown_effect`, `in_flight`,
+  `attempt_closed`); the binding's `on_unknown: resend` allows a resend.
+  A repeat is decided on the whole chain of a send (the first intent, its
+  replays and resends) through one verdict, `ledger::chain_verdict`: any
+  member confirmed means sent, and a member that did not go out never hides
+  an earlier unknown one. The run outcome and a person's decision read each
+  send on its own (`ledger::send_verdict`): replays share one nonce and one
+  effect, while every resend is a separate send that stays open while
+  unknown. A send binds to its attempt by the token
+  `attempt_started` journals (`APB_ATTEMPT_TOKEN`). An unknown send is an
+  outcome gap only a person resolves (`apb intent resolve` refuses inside
+  a run; MCP `run_intent_resolve` is an instruction-level rule like
+  `review_decide`). The retry briefing
+  (`scheduler/attempt_memory`) tells the next attempt what the ledger holds,
+  outside the node cache key.
 - Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
   implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in
   inside its own cycle stays first-arrival, else loops deadlock). An unreachable

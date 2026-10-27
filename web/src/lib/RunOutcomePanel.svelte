@@ -8,10 +8,16 @@
   // with each criterion's result, manual ones as a checklist for a person,
   // and the commits its nodes made on a git tree. Each block renders only
   // when there is one, so the page of a run without them is unchanged. The
-  // inbox gaps are part of the verdict panel's Not verified list.
-  let { goal, commits }: { goal?: RunGoal | null; commits?: NodeCommits[] | null } = $props()
+  // inbox gaps are part of the verdict panel's Not verified list. A commit
+  // whose `Apb-Run` trailer does not name this run (`runId`) carries a muted
+  // note saying so.
+  let {
+    goal,
+    commits,
+    runId,
+  }: { goal?: RunGoal | null; commits?: NodeCommits[] | null; runId?: string } = $props()
 
-  const lines = $derived(commitLines(commits ?? undefined))
+  const lines = $derived(commitLines(commits ?? undefined, runId))
   const omitted = $derived(omittedCommits(commits ?? undefined))
   const checked = $derived(goal ? goal.criteria.filter((c) => c.check !== 'manual') : [])
   const manual = $derived(goal ? goal.criteria.filter((c) => c.check === 'manual') : [])
@@ -58,6 +64,7 @@
           <span class="mono" title={c.sha}>{c.short}</span>
           <span> {c.subject}</span>
           <span class="muted"> · {c.node}</span>
+          {#if c.trailer}<span class="trailer" data-testid="run-commit-trailer">{c.trailer}</span>{/if}
         </div>
       {/each}
       {#if omitted > 0}
@@ -99,6 +106,15 @@
   }
   .muted {
     color: var(--muted-foreground);
+  }
+  .trailer {
+    margin-left: 0.375rem;
+    padding: 0 0.375rem;
+    border: 1px dashed var(--border);
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+    white-space: nowrap;
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

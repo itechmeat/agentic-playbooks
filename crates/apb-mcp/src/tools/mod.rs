@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod decision;
+pub mod intent;
 pub mod meta;
 pub mod playbook;
 pub mod retro;
@@ -13,6 +14,7 @@ pub mod trial;
 
 pub use capture::*;
 pub use decision::*;
+pub use intent::*;
 pub use meta::*;
 pub use playbook::*;
 pub use retro::*;

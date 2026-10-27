@@ -412,12 +412,13 @@ impl ProfileEmulation<'_, '_> {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };
-        let connector_policy = crate::adapter::ConnectorEnvPolicy {
-            scrub: self.env_scrub.to_vec(),
-            run_dir: Some(self.run_dir.to_path_buf()),
-            node_id: Some(self.node_id.to_string()),
-            overlay: self.overlay.clone(),
-        };
+        let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
+            self.env_scrub.to_vec(),
+            self.run_dir,
+            self.node_id,
+            self.overlay.clone(),
+        )
+        .with_attempt(attempt);
         let stream_log = self
             .run_dir
             .join("agent-stream")
@@ -460,6 +461,7 @@ impl ProfileEmulation<'_, '_> {
             model: None,
             workdir: None,
             transcript: None,
+            token: connector_policy.attempt_token.clone(),
         };
         let on_spawn = |pid: u32, spawn_ms: u64| {
             spawn_at.set(Some(std::time::Instant::now()));

@@ -397,6 +397,15 @@ fn a_failure_report_block_fails_the_attempt_and_a_retry_is_a_new_task() {
             .find(|t| t.task_id != first.task_id)
     });
     assert_eq!(second.attempt, 2);
+    // The retry task carries the retry briefing; the first one none.
+    let header = "## What earlier attempts of this step did (apb's record)";
+    assert!(!first.prompt.contains(header));
+    assert!(second.prompt.contains(header), "{}", second.prompt);
+    assert!(
+        second
+            .prompt
+            .contains("Attempts with no connector writes recorded: attempt 1.")
+    );
     h.submit(&run_id, &second.task_id, SubmitStatus::Succeeded, "done");
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
@@ -448,6 +457,10 @@ fn assert_labelled(t: &PendingHostTask) {
     assert_eq!(t.hint_note, note);
     // Every task a host reads carries how to execute it.
     assert_eq!(t.execution_note, host_task::EXECUTION_CONTRACT);
+    // A connector call the subagent makes binds to this attempt by its
+    // number and, once a resumed drive adopts the task, by the task id.
+    assert_eq!(t.env.get("APB_HOST_TASK"), Some(&t.task_id));
+    assert_eq!(t.env.get("APB_ATTEMPT"), Some(&t.attempt.to_string()));
     let dir = t.env.get("APB_RUN_DIR").expect("APB_RUN_DIR");
     let events = read_all(Path::new(dir)).unwrap();
     assert_eq!(

@@ -96,6 +96,7 @@ fn seed_run(run_dir: &Path, functions: &[&str], max_calls: Option<u32>) {
             accounts: vec!["main".to_string()],
             functions: functions.iter().map(|s| s.to_string()).collect(),
             max_calls,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();

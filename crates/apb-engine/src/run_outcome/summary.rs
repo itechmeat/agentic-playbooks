@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use super::baseline::{RunBaseline, observation_line};
 use super::calls::{CallClass, ClassifiedCall, classified_calls};
+use super::intents::{RunIntent, intents_from};
 use super::notes::{RunFinding, RunNotes, RunWarning, finding_line, warning_line};
 use super::{RunGoal, inbox_gap_lines, inbox_gaps_from};
 use crate::event::{Event, EventPayload};
@@ -156,10 +157,13 @@ pub enum NeedsLookReason {
     Regression,
     Findings,
     Warnings,
+    /// Sends nobody can tell went out: a person resolves each.
+    UnknownSends,
 }
 
-/// A run with a baseline regression, or findings or warnings its attempts
-/// reported. Nothing else sets it: a failed run says so in its status.
+/// A run with a baseline regression, findings or warnings its attempts
+/// reported, or sends whose outcome is not known. Nothing else sets it: a
+/// failed run says so in its status.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NeedsLook {
@@ -167,12 +171,20 @@ pub struct NeedsLook {
     pub regressions: u32,
     pub findings: u32,
     pub warnings: u32,
+    /// Sends whose outcome is not known and that no replay settled.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub unknown_sends: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl NeedsLook {
     /// For the run listing: the current comparisons as
-    /// [`BaselineState`](crate::baseline::BaselineState) reads them, and the
-    /// notes. The playbook snapshot is read only when the journal holds a
+    /// [`BaselineState`](crate::baseline::BaselineState) reads them, the
+    /// notes and the send ledger. The playbook snapshot is read only when the journal holds a
     /// comparison, so a listing stays cheap; `None` when nothing calls for
     /// a look.
     pub fn for_run(run_dir: &Path, events: &[Event]) -> Option<Self> {
@@ -188,16 +200,19 @@ impl NeedsLook {
     /// From the journal and the run's playbook snapshot, when it reads.
     pub fn from_events(playbook: Option<&Playbook>, events: &[Event]) -> Option<Self> {
         let notes = RunNotes::from_events(events);
-        Self::of(current_regressions(playbook, events), &notes)
+        let intents = intents_from(events, apb_core::clock::now_ms_u64());
+        Self::of(current_regressions(playbook, events), &notes, &intents)
     }
 
-    fn of(regressions: u32, notes: &RunNotes) -> Option<Self> {
+    fn of(regressions: u32, notes: &RunNotes, intents: &[RunIntent]) -> Option<Self> {
         let findings = notes.findings.len() as u32;
         let warnings = notes.warnings.len() as u32;
+        let unknown_sends = intents.iter().filter(|i| i.is_open_unknown()).count() as u32;
         let reasons: Vec<NeedsLookReason> = [
             (regressions, NeedsLookReason::Regression),
             (findings, NeedsLookReason::Findings),
             (warnings, NeedsLookReason::Warnings),
+            (unknown_sends, NeedsLookReason::UnknownSends),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
@@ -208,15 +223,17 @@ impl NeedsLook {
             regressions,
             findings,
             warnings,
+            unknown_sends,
         })
     }
 
-    /// `1 regression, 2 findings, 1 warning`.
+    /// `1 regression, 2 findings, 1 warning, 1 unknown send`.
     pub fn line(&self) -> String {
         [
             (self.regressions, "regression", "regressions"),
             (self.findings, "finding", "findings"),
             (self.warnings, "warning", "warnings"),
+            (self.unknown_sends, "unknown send", "unknown sends"),
         ]
         .into_iter()
         .filter(|(n, ..)| *n > 0)
@@ -267,6 +284,9 @@ struct Inputs<'a> {
     baseline: Option<&'a RunBaseline>,
     notes: &'a RunNotes,
     calls: Vec<ClassifiedCall>,
+    intents: Vec<RunIntent>,
+    /// The run's id: the run directory's name.
+    run_id: String,
 }
 
 impl OutcomeSummary {
@@ -293,6 +313,11 @@ impl OutcomeSummary {
             baseline: readout.baseline.as_ref(),
             notes: &readout.notes,
             calls: classified_calls(run_dir, &view.events),
+            intents: intents_from(&view.events, apb_core::clock::now_ms_u64()),
+            run_id: run_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         };
         let mut summary = inputs.summarize();
         summary.agent_summary = answer;
@@ -363,8 +388,11 @@ impl OutcomeSummary {
 impl Inputs<'_> {
     fn summarize(self) -> OutcomeSummary {
         let notes = self.notes;
-        let needs_look =
-            NeedsLook::of(current_regressions(self.playbook, &self.view.events), notes);
+        let needs_look = NeedsLook::of(
+            current_regressions(self.playbook, &self.view.events),
+            notes,
+            &self.intents,
+        );
         let verified = self.verified();
         let unverified = self.unverified();
         let headline = headline(
@@ -413,12 +441,7 @@ impl Inputs<'_> {
             out.push(format!("succeeded: {}", succeeded.join(", ")));
         }
         for c in super::commits_from_events(&self.view.events) {
-            let n = c.commits.len() + c.omitted;
-            out.push(format!(
-                "{}: {n} {}",
-                c.node,
-                plural(n, "commit", "commits")
-            ));
+            out.push(super::commits::done_line(&c, &self.run_id));
         }
         for (target, n) in count_by(&self.calls, |c| {
             (c.class == CallClass::WriteOk).then(|| c.target())
@@ -428,6 +451,7 @@ impl Inputs<'_> {
                 plural(n, "write", "writes")
             ));
         }
+        out.extend(self.intents.iter().filter_map(RunIntent::done_line));
         out
     }
 
@@ -519,6 +543,7 @@ impl Inputs<'_> {
             }
         }
         out.extend(self.call_gaps());
+        out.extend(self.intent_gaps());
         // The line names the inbox, the lost events and the node that found
         // them, so it is the subject whole.
         out.extend(
@@ -541,8 +566,24 @@ impl Inputs<'_> {
         out
     }
 
+    /// One gap per send intent nobody can tell went out, including one
+    /// whose sender vanished before any call was journaled.
+    fn intent_gaps(&self) -> Vec<Gap> {
+        self.intents
+            .iter()
+            .filter(|i| i.is_open_unknown())
+            .map(|i| Gap {
+                kind: GapKind::UnknownCall,
+                subject: i.target(),
+                detail: Some(i.gap_detail(&self.run_id)),
+            })
+            .collect()
+    }
+
     /// One gap per node and function whose calls left the effect or the
-    /// response unknown.
+    /// response unknown. A call that carried a send intent is left to the
+    /// send ledger: its intent tells whether it went out, also after a
+    /// later lookup, replay or a person settled it.
     fn call_gaps(&self) -> Vec<Gap> {
         let mut out = Vec::new();
         for (kind, what) in [
@@ -553,7 +594,7 @@ impl Inputs<'_> {
             (GapKind::IncompleteResponse, "the response was cut short"),
         ] {
             let matches = |c: &ClassifiedCall| match kind {
-                GapKind::UnknownCall => c.class == CallClass::WriteUnknown,
+                GapKind::UnknownCall => c.class == CallClass::WriteUnknown && c.intent.is_none(),
                 _ => matches!(c.class, CallClass::ReadUnknown | CallClass::WriteIncomplete),
             };
             for ((node, target), n) in count_by(&self.calls, |c| {

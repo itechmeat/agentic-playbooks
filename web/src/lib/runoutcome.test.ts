@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { runEventJournal } from './journal'
-import { commitLines, goalSummary, goalTone, inboxGapLine, observationText, omittedCommits } from './runoutcome'
+import { commitLines, goalSummary, goalTone, inboxGapLine, observationText, omittedCommits, trailerNote } from './runoutcome'
 import type { NodeCommits, RunGoal } from './api.gen'
 import type { WfEvent } from './types'
 
@@ -26,6 +26,31 @@ describe('commitLines', () => {
     expect(omittedCommits(commits)).toBe(3)
   })
 
+  it('notes a commit whose Apb-Run trailer does not name the run', () => {
+    const tagged: NodeCommits[] = [
+      {
+        node: 'impl',
+        before: 'aaa',
+        after: '111111111111aaaa',
+        commits: [
+          { sha: '111111111111aaaa', subject: 'ours', apb_run: ['r1'] },
+          { sha: '222222222222aaaa', subject: 'bare', apb_run: [] },
+          { sha: '333333333333aaaa', subject: 'theirs', apb_run: ['r0', 'r9'] },
+          { sha: '444444444444aaaa', subject: 'not read' },
+        ],
+        omitted: 0,
+      },
+    ]
+    expect(commitLines(tagged, 'r1').map((l) => l.trailer)).toEqual([
+      undefined,
+      'no Apb-Run trailer',
+      'Apb-Run names r0, r9',
+      undefined,
+    ])
+    // Without the run id nothing is claimed.
+    expect(trailerNote(tagged[0].commits[1], undefined)).toBeUndefined()
+  })
+
   it('is empty for a run without commits (the block stays hidden)', () => {
     expect(commitLines(undefined)).toEqual([])
     expect(omittedCommits(undefined)).toBe(0)
@@ -49,8 +74,13 @@ describe('RunOutcomePanel', () => {
     expect(shown).toContain('data-testid="run-commits"')
     expect(shown).toContain('fix the parser')
     expect(shown).toContain('and 3 more')
+    expect(shown).not.toContain('run-commit-trailer')
     const hidden = render(Panel, { props: { commits: undefined } }).body
     expect(hidden).not.toContain('run-commits')
+    const bare: NodeCommits[] = [{ ...commits[0], commits: [{ sha: 'abc', subject: 'bare', apb_run: [] }] }]
+    const flagged = render(Panel, { props: { commits: bare, runId: 'r1' } }).body
+    expect(flagged).toContain('data-testid="run-commit-trailer"')
+    expect(flagged).toContain('no Apb-Run trailer')
   })
 })
 

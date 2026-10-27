@@ -144,3 +144,13 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
     }
     out
 }
+
+/// Appends an already-encoded query string to a base URL, choosing `?` or `&`
+/// depending on whether the base already carries a query.
+pub(crate) fn assemble_url(base: &str, query: &str) -> String {
+    if query.is_empty() {
+        return base.to_string();
+    }
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}{query}")
+}
