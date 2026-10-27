@@ -324,11 +324,11 @@ fn stale_status_file_is_removed_before_spawn() {
     );
 }
 
-// 5. The assembled prompt mentions `APB_STATUS_FILE` only when the node has a
+// 5. The assembled prompt states the status-file verdict contract only when the node has a
 //    success_check. Proven end to end: the stub dumps its argv (the prompt is
 //    delivered via argv) to a file and the test asserts on that dump.
 #[test]
-fn prompt_mentions_status_file_only_with_success_check() {
+fn prompt_states_the_verdict_contract_only_with_success_check() {
     let _env = common::env_lock();
 
     // With a success_check: the note is present.
@@ -366,12 +366,18 @@ fn prompt_mentions_status_file_only_with_success_check() {
     }
 
     assert!(
-        with_prompt.contains("APB_STATUS_FILE"),
-        "a node with a success_check must have its prompt mention APB_STATUS_FILE"
+        with_prompt.contains("to decide this step's status"),
+        "a node with a success_check must be told the status-file verdict contract"
+    );
+    // A plain node hears of the file only as the place for optional
+    // findings and warnings, never as its verdict contract.
+    assert!(
+        !without_prompt.contains("to decide this step's status"),
+        "a node without a success_check must not be told the status-file verdict contract"
     );
     assert!(
-        !without_prompt.contains("APB_STATUS_FILE"),
-        "a node without a success_check must not mention APB_STATUS_FILE in its prompt"
+        without_prompt.contains("Findings and warnings:"),
+        "every fresh attempt is told how to report findings and warnings"
     );
 }
 

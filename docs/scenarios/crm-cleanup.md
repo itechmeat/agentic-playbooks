@@ -54,21 +54,33 @@ run is resumed the next morning.
 ## 6. Today
 
 examples/playbooks/crm-cleanup.yaml expresses count, assign, recount with
-the markers. The gaps:
+the markers, and a `baseline_check` the engine runs itself: `unowned` reads
+the CRM's `totalCount` of open deals without an owner through the twenty
+connector's read-only `list_opportunities`, once before the first step that
+can act and once at the finish, and compares it with `equals: 0`. The run
+outcome shows `37 -> 20, equals 0: not met` after a partial failure, and a
+continued run (the next morning's resume) inherits the first run's before
+count. Closed:
+
+- A partial failure leaves an engine-checked count of what is left: the
+  before and after counts come from the CRM, not from an agent's reply, and
+  the comparison is journaled (engine test
+  `a_partial_cleanup_reads_not_met_with_the_change_visible`).
+- Zero is no longer ambiguous: a read that failed, came back cut short or
+  did not hold its count reads unknown, never 0, and an unknown never counts
+  as met (engine tests `a_connector_read_that_fails_is_unknown`,
+  `a_connector_read_that_is_not_complete_is_unknown_never_zero`).
+
+The gaps that remain:
 
 1. The whole list goes to one agent call per step; there is no per-deal
    update the engine holds a verdict for.
-2. A partial failure leaves no engine-checked count of what is left: the
-   recount is the agent recounting itself, and nothing compares the three
-   numbers.
-3. Zero is ambiguous: the recount showing 0 can mean "all assigned" or "the
-   filter or the connection broke"; no independent check tells the two
-   apart.
-4. No per-deal ledger keyed by the deal id: a resume re-runs the whole assign
+2. No per-deal ledger keyed by the deal id: a resume re-runs the whole assign
    step and cannot skip what the earlier pass did (harmless only because the
    rule is a constant).
-5. The 3 deals that closed mid-run are invisible unless the agent happens to
-   report them; nothing requires the skipped set to be accounted for.
+3. The 3 deals that closed mid-run are invisible unless the agent happens to
+   report them; nothing requires the skipped set to be accounted for. The
+   count shows the difference, not which deals make it up.
 
 ## 7. Target
 

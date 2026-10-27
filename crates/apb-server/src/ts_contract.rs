@@ -47,6 +47,25 @@ fn render_types() -> String {
         apb_engine::run_outcome::RunInboxGap::decl(&cfg),
         apb_engine::run_outcome::GoalCriterionResult::decl(&cfg),
         apb_engine::run_outcome::RunGoal::decl(&cfg),
+        // The human run outcome: baseline, notes, the summary.
+        apb_core::baseline::ObservedValue::decl(&cfg),
+        apb_core::baseline::Observation::decl(&cfg),
+        apb_engine::run_outcome::baseline::ObservationView::decl(&cfg),
+        apb_engine::run_outcome::baseline::BaselineCheckView::decl(&cfg),
+        apb_engine::run_outcome::RunBaseline::decl(&cfg),
+        apb_core::run_notes::Finding::decl(&cfg),
+        apb_core::run_notes::NoteWarning::decl(&cfg),
+        apb_engine::run_outcome::notes::RunFinding::decl(&cfg),
+        apb_engine::run_outcome::notes::RunWarning::decl(&cfg),
+        apb_engine::run_outcome::RunNotes::decl(&cfg),
+        apb_engine::run_outcome::summary::EvidenceSource::decl(&cfg),
+        apb_engine::run_outcome::summary::Evidence::decl(&cfg),
+        apb_engine::run_outcome::summary::GapKind::decl(&cfg),
+        apb_engine::run_outcome::summary::Gap::decl(&cfg),
+        apb_engine::run_outcome::summary::BaselineOutcome::decl(&cfg),
+        apb_engine::run_outcome::summary::NeedsLookReason::decl(&cfg),
+        apb_engine::run_outcome::NeedsLook::decl(&cfg),
+        apb_engine::run_outcome::OutcomeSummary::decl(&cfg),
         apb_engine::state::RunStatus::decl(&cfg),
         apb_engine::state::NodeStatus::decl(&cfg),
         apb_engine::progress::WaitingKind::decl(&cfg),
@@ -72,6 +91,10 @@ fn render_types() -> String {
         apb_engine::run_stats::Spend::decl(&cfg),
         apb_engine::run_stats::models::ModelUse::decl(&cfg),
         apb_engine::run_stats::GoalStats::decl(&cfg),
+        apb_engine::run_stats::findings::KindCount::decl(&cfg),
+        apb_engine::run_stats::findings::FindingGroup::decl(&cfg),
+        apb_engine::run_stats::findings::FindingStats::decl(&cfg),
+        apb_engine::run_stats::findings::BaselineStats::decl(&cfg),
         apb_engine::run_stats::NodeStats::decl(&cfg),
         apb_engine::run_stats::VersionStats::decl(&cfg),
         apb_engine::run_stats::Comparison::decl(&cfg),
@@ -107,7 +130,10 @@ fn render_types() -> String {
     out
 }
 
-/// The generated constants module (no imports).
+/// The generated constants module (no imports: `vite.config.ts` reads it
+/// too). The label maps keep their exact keys (`as const`), so the
+/// dashboard can hold them to the generated enums and a variant without a
+/// label fails type-checking.
 fn render_consts() -> String {
     use apb_core::schema;
     let mut out = String::from(HEADER);
@@ -135,11 +161,38 @@ fn render_consts() -> String {
             .collect::<Vec<_>>()
             .join(", ")
     ));
+    {
+        use apb_engine::run_outcome::summary::{EvidenceSource, GapKind};
+        out.push_str(&format!(
+            "\n/** What checked a piece of evidence, in words. */\nexport const EVIDENCE_SOURCE_LABELS = {{ {} }} as const\n",
+            label_entries(EvidenceSource::ALL.iter().map(|s| (serde_key(s), s.label())))
+        ));
+        out.push_str(&format!(
+            "\n/** Why something is not verified, in words. */\nexport const GAP_LABELS = {{ {} }} as const\n",
+            label_entries(GapKind::ALL.iter().map(|k| (serde_key(k), k.label())))
+        ));
+    }
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")
     ));
     out
+}
+
+/// The JSON name serde gives a unit enum variant.
+fn serde_key(v: &impl serde::Serialize) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .expect("a unit variant serializes to a string")
+}
+
+/// `key: 'label', ...` for a TypeScript object literal.
+fn label_entries(pairs: impl Iterator<Item = (String, &'static str)>) -> String {
+    pairs
+        .map(|(k, l)| format!("{k}: {}", serde_json::to_string(l).expect("a string")))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[test]

@@ -435,6 +435,20 @@ fn call_cmd(
         }
     };
 
+    // A site id starting with `@` is reserved for the engine's own calls
+    // (the baseline check reads under `@baseline`); no node can carry one
+    // (validator V68), so a caller naming one is borrowing its grant.
+    if node_id.starts_with('@') {
+        print_call_result(&call_error_json(
+            "config",
+            &format!(
+                "APB_NODE_ID `{node_id}` is reserved for calls the engine makes itself; \
+                 apb connector call runs only for a node of the run"
+            ),
+        ));
+        return ExitCode::FAILURE;
+    }
+
     let req = apb_engine::connector::call::CallRequest {
         run_dir: Path::new(&run_dir),
         root,

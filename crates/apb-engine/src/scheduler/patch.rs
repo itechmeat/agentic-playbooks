@@ -102,6 +102,9 @@ pub(crate) fn apply_patch(
     if let Some(reason) = uncovered_consent_sources(root, run_dir, playbook, &loaded.playbook) {
         return append_patch_rejected(log, reason);
     }
+    if let Some(reason) = super::baseline::patch_refusal(playbook, &loaded.playbook, &events) {
+        return append_patch_rejected(log, reason);
+    }
 
     let from_version = playbook.version.clone();
     let base = playbook.clone();

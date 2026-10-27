@@ -76,6 +76,18 @@ pub struct RunDetail {
         ts(as = "Option<Vec<apb_engine::run_outcome::RunInboxGap>>", optional)
     )]
     pub inbox_gaps: Vec<apb_engine::run_outcome::RunInboxGap>,
+    /// The human outcome: what the run did, what the engine checked, what
+    /// nobody checked, and what the attempts reported.
+    pub outcome: apb_engine::run_outcome::OutcomeSummary,
+    /// The baseline check, each observation before and after; absent for a
+    /// playbook without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub baseline: Option<apb_engine::run_outcome::RunBaseline>,
+    /// The findings and warnings the attempts reported; absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub notes: Option<apb_engine::run_outcome::RunNotes>,
     /// The candidate trial this run was (issue #192), with its verdict;
     /// absent for every other run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,7 +229,18 @@ pub(crate) async fn get_run_handler(
     let commits = view.commits();
     let inbox_gaps = view.inbox_gaps();
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
-    let goal = view.goal(&run_dir);
+    // The goal, the baseline and the outcome are read against the one
+    // playbook snapshot parsed above.
+    let readout = view.readout_of(loaded_pb);
+    let outcome = apb_engine::run_outcome::OutcomeSummary::from_readout(
+        &view,
+        &run_dir,
+        &readout,
+        answer.clone(),
+    );
+    let goal = readout.goal;
+    let baseline = readout.baseline;
+    let notes = Some(readout.notes).filter(|n| !n.is_empty());
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
     let pause = view.pause().cloned();
     let nodes = view.nodes();
@@ -247,6 +270,9 @@ pub(crate) async fn get_run_handler(
         children,
         commits,
         inbox_gaps,
+        outcome,
+        baseline,
+        notes,
         attempt_models,
         goal,
         candidate_trial,

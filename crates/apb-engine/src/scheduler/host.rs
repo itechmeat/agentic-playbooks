@@ -384,18 +384,23 @@ impl HostAdapter<'_, '_> {
         }
         // The submission is the host's explicit completion signal, so it is
         // the attempt's verdict unless the subagent wrote its own status file
-        // (which may carry named outputs and then wins).
-        if let Some(sf) = &task.status_file
-            && !sf.exists()
-        {
+        // with a verdict (which may carry named outputs and then wins); the
+        // submitted findings and warnings join the file's own.
+        if let Some(sf) = &task.status_file {
             let verdict = match status {
                 NodeStatus::Succeeded => "success",
                 _ => "failure",
             };
-            let _ = apb_core::fsutil::atomic_write_private(
-                sf,
-                format!("{{\"status\":\"{verdict}\"}}").as_bytes(),
-            );
+            let notes = super::status_file::HostNotes {
+                findings: &sub.findings,
+                warnings: &sub.warnings,
+            };
+            if let Err(e) = super::status_file::record_host_submission(sf, verdict, &notes) {
+                eprintln!(
+                    "apb: warning: host task `{}` for node `{}`: the submission could not be recorded in the status file: {e}",
+                    sub.task_id, task.node
+                );
+            }
         }
         AgentReport {
             status,
@@ -406,6 +411,10 @@ impl HostAdapter<'_, '_> {
             session: None,
             usage: sub.usage.as_ref().map(|u| u.to_agent_usage()),
             capture: crate::capture::OutputCapture::default(),
+            host_notes_dropped: apb_core::run_notes::DroppedNotes {
+                count: sub.notes_dropped,
+                reasons: sub.notes_dropped_reasons.clone(),
+            },
         }
     }
 }

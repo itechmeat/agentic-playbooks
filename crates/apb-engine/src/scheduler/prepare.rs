@@ -330,11 +330,7 @@ pub(crate) fn build_run_manifest(
     // `expected_connectors` means the run did not go through the gate, which
     // is refused (mirrors the profile-bundle invariant - the CLI/MCP callers
     // must always pass the gate result).
-    let binds_connectors = playbook
-        .nodes
-        .iter()
-        .any(|n| !n.kind.connector_bindings().is_empty());
-    if binds_connectors {
+    if playbook.binds_connectors() {
         if expected_connectors.is_empty() {
             return Err(EngineError::Invalid(
                 "connector bindings present but no connector permit".into(),
@@ -683,19 +679,25 @@ pub(crate) fn prepare_run_target(
     let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
         .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
     let copied = prep_try_unstarted(&mut log, &unstarted, copied)?;
-    // Pinned only for a playbook with goal `script` criteria, the one
-    // reader of the pin, so every other run's `run_provenance` stays as it
-    // was in 0.22.
+    // Pinned only for a playbook with goal `script` criteria or baseline
+    // `script` checks, the two readers of the pin, so every other run's
+    // `run_provenance` stays as it was in 0.22.
     let has_goal_scripts = playbook.goal.as_ref().is_some_and(|g| {
         g.criteria
             .iter()
             .any(|c| matches!(c.check, apb_core::schema::GoalCheck::Script { .. }))
     });
-    let scripts_digest = if has_goal_scripts {
+    let has_baseline_scripts = playbook.baseline_checks().iter().any(|c| {
+        matches!(
+            c.source(),
+            Some(apb_core::baseline::BaselineSource::Script(_))
+        )
+    });
+    let scripts_digest = if has_goal_scripts || has_baseline_scripts {
         Some(prep_try_unstarted(
             &mut log,
             &unstarted,
-            super::goal::scripts_digest(&run_dir),
+            crate::run_scripts::digest(&run_dir),
         )?)
     } else {
         None

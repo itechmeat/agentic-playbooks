@@ -71,7 +71,8 @@ pub(crate) const QUESTION_TEXT_MAX: usize = 160;
 /// must not be interpreted as anything other than literal characters.
 ///
 /// Every control character - including the ESC byte that opens an ANSI CSI
-/// sequence, embedded `\r`, and `\n` - becomes a space, which both strips
+/// sequence, embedded `\r`, and `\n` - and every invisible format character
+/// (bidirectional overrides, zero-width characters) becomes a space, which both strips
 /// the escape channel and guarantees the result cannot break the caller's
 /// single-line indent (a raw `\n` would otherwise let the question text
 /// forge extra report lines). Runs of whitespace then collapse to one
@@ -82,10 +83,7 @@ pub(crate) const QUESTION_TEXT_MAX: usize = 160;
 /// node ids are not routed through this - they are already validated safe
 /// segments, not model output.
 pub(crate) fn sanitize_for_terminal(s: &str, max: usize) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
+    let cleaned = apb_core::text::replace_hidden(s, ' ');
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim();
     if trimmed.chars().count() <= max {

@@ -115,6 +115,11 @@ impl std::fmt::Debug for ImapCall {
 }
 
 impl ImapCall {
+    /// Lowers the timeout to at most `secs`.
+    pub(crate) fn cap_timeout(&mut self, secs: u64) {
+        self.timeout_sec = self.timeout_sec.min(secs);
+    }
+
     /// The event-log endpoint: `imap://host:port`, no credentials.
     pub(crate) fn endpoint(&self) -> String {
         format!("imap://{}:{}", self.host, self.port)

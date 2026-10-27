@@ -21,6 +21,7 @@ pub mod install;
 pub mod official;
 pub mod resolve;
 pub mod secrets;
+pub mod sites;
 pub mod store;
 pub mod template;
 pub mod text_mode;

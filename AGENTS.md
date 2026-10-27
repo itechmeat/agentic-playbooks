@@ -25,7 +25,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
-  `worktree` and `cache.key`), profiles
+  `worktree` and `cache.key`, `baseline` for V62-V68), the baseline check
+  (`baseline/`: the `baseline_check` block, the observation path reader and
+  the rule comparison), the project's own test and lint commands
+  (`project_checks.rs`), the findings and warnings an attempt reports and
+  their sanitizer (`run_notes.rs`), one walk over every connector binding
+  site, nodes plus the reserved `@baseline` (`connector/sites.rs`), profiles
   (`profile.rs` types incl. `ProfileError`, `profile_store.rs` scope resolution
   and bundle trust, `skills.rs`), registry and versioning, schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
@@ -51,7 +56,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
-  `journal` event-log folds, `status_file` the attempt verdict contract, `resume`,
+  `journal` event-log folds, `status_file` the attempt verdict contract and its
+  findings and warnings, `attempt_notes` their journal entry, `baseline` the
+  before and after snapshots and comparisons, `resume`,
   `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `handoff` the warm
   session handoff between nodes, `node_workdir` a node's templated working
   directory, `skills_copy` the shared per-profile skills copy, `transcript`
@@ -60,9 +67,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   checked at run end, `provenance` the run id in the agent env and the
   commits a node made, `host` the host-mode adapter that turns an agent step
   into a host task), the host task store behind `run_task_submit` and
-  `apb tasks` (`host_task.rs`), the read-only goal and commits blocks of the
-  run surfaces (`run_outcome.rs`), the cross-run metrics behind `apb stats`
-  (`run_stats.rs`, `run_stats/`), the irreversible-effects consent a run
+  `apb tasks` (`host_task.rs`), the baseline check's journal fold and its
+  source reads (`baseline.rs`, `baseline/`: `read` a connector or script,
+  `project` the project's commands), the read-only goal and commits blocks of the
+  run surfaces (`run_outcome.rs`; `run_outcome/`: `baseline` and `notes` the
+  baseline and findings views, `calls` connector calls by what they say about
+  the outcome, `summary` the human outcome every surface shows and the
+  "needs a look" marker), the cross-run metrics behind `apb stats`
+  (`run_stats.rs`, `run_stats/`, `findings` for findings and baseline
+  results), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
   `apb eval` (`eval/`),
   the operator pause: who paused a run and how, the pause every run surface
@@ -149,6 +162,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `pause::probe_before_wake` before resuming; a probe that hits the quota
   re-pauses. Probe outcomes are `supervisor_action quota_probe` markers.
   Six quota pauses of a node without a success fail it.
+- A **baseline check** (`baseline_check`) reads its sources once before the
+  first node that can act (`apb_core::effects::node_acts`) and once at the
+  finish, journaled as `baseline_observed` and `baseline_compared`; the
+  before snapshot lives only in the journal, so a resume reuses it. Anything
+  that cannot be read honestly is unknown, never zero or met. It reports the
+  change; whether the goal was reached comes from the goal criteria only.
+  Findings and warnings (`attempt_notes`) are reported, never acted on. The
+  run outcome (`run_outcome::OutcomeSummary`) keeps what the engine checked
+  apart from what nobody checked.
 - Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
   implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in
   inside its own cycle stays first-arrival, else loops deadlock). An unreachable

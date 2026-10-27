@@ -1,5 +1,6 @@
 pub mod adapter;
 mod agent_home;
+pub mod baseline;
 // candidate trials (issue #192)
 pub mod attempt_models;
 pub mod candidate;
@@ -45,6 +46,7 @@ pub mod run_outcome;
 // --- run retrospective (#192 part 3) ---
 pub mod run_retro;
 // --- end of run retrospective ---
+mod run_scripts;
 // --- 0.23.0 stats (C3) ---
 pub mod run_stats;
 // --- end of 0.23.0 stats ---

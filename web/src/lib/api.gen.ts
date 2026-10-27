@@ -60,6 +60,119 @@ enforce: boolean,
  */
 checked: boolean, criteria: Array<GoalCriterionResult>, passed: number, failed: number, manual: number, };
 
+export type ObservedValue = { "type": "number", "value": number } | { "type": "list", "value": Array<string> } | { "type": "text", "value": string } | { "type": "bool", "value": boolean };
+
+export type Observation = { "state": "value", value: ObservedValue, } | { "state": "unknown", reason: string, };
+
+export type ObservationView = { id: string, 
+/**
+ * The rule as journaled (`equals 0`, `change no_new`,
+ * `no_new_failures`).
+ */
+rule: string, before?: Observation, after?: Observation, 
+/**
+ * `37 -> 0`, the change as people read it.
+ */
+change: string, 
+/**
+ * `met`, `not_met`, `unknown`, or `pending` before the finish.
+ */
+verdict: string, 
+/**
+ * The after value is strictly worse than the before one; absent when
+ * either is unknown or not compared yet.
+ */
+regressed?: boolean, detail?: string, };
+
+export type BaselineCheckView = { id: string, description: string, 
+/**
+ * `connector`, `script` or `project_checks`.
+ */
+source: string, 
+/**
+ * `observed`, `unknown` or `missed`; absent before it was taken.
+ */
+before_status?: string, 
+/**
+ * Why the before snapshot could not be read.
+ */
+before_reason?: string, 
+/**
+ * The run a continued run took its before snapshot from.
+ */
+inherited_from?: string, 
+/**
+ * Absent until the finish took the after snapshot.
+ */
+after_status?: string, observations: Array<ObservationView>, };
+
+export type RunBaseline = { 
+/**
+ * `baseline_check.enforce`: anything but met fails the run.
+ */
+enforce: boolean, checks: Array<BaselineCheckView>, met: number, not_met: number, unknown: number, 
+/**
+ * Observations whose after value is worse than the before one.
+ */
+regressions: number, };
+
+export type Finding = { kind: string, location: string, evidence: string, why_not_fixed: string, };
+
+export type NoteWarning = { subject: string, reason: string, };
+
+export type RunFinding = { node: string, attempt: number, kind: string, location: string, evidence: string, why_not_fixed: string, };
+
+export type RunWarning = { node: string, attempt: number, subject: string, reason: string, };
+
+export type RunNotes = { findings: Array<RunFinding>, warnings: Array<RunWarning>, 
+/**
+ * Malformed entries the attempts sent, dropped when they were
+ * journaled.
+ */
+dropped: number, };
+
+export type EvidenceSource = "goal" | "success_check" | "baseline";
+
+export type Evidence = { source: EvidenceSource, subject: string, 
+/**
+ * `passed`, `failed`, `error`, `met` or `not_met`.
+ */
+result: string, detail?: string, };
+
+export type GapKind = "manual_criterion" | "self_reported_node" | "goal_not_checked" | "unknown_call" | "incomplete_response" | "inbox_gap" | "output_truncated" | "baseline_unknown";
+
+export type Gap = { kind: GapKind, subject: string, detail?: string, };
+
+export type BaselineOutcome = { problem: Array<string>, change: Array<string>, 
+/**
+ * From the goal criteria only: every checked criterion passed and no
+ * manual one waits. Absent when that is not known.
+ */
+goal_reached?: boolean, };
+
+export type NeedsLookReason = "regression" | "findings" | "warnings";
+
+export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, };
+
+export type OutcomeSummary = { headline: string, needs_look?: NeedsLook, 
+/**
+ * What the run did: the steps that succeeded, its commits, the
+ * connector writes that went through.
+ */
+done: Array<string>, 
+/**
+ * What the engine checked.
+ */
+verified: Array<Evidence>, 
+/**
+ * What nobody checked.
+ */
+unverified: Array<Gap>, findings: Array<RunFinding>, warnings: Array<RunWarning>, baseline?: BaselineOutcome, 
+/**
+ * The finish node's answer: the agent's own account, not checked.
+ */
+agent_summary?: string, };
+
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
 export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
@@ -398,7 +511,12 @@ tokens: PerRun,
 /**
  * Runs that reported a cost.
  */
-runs_with_cost: number, cost_usd: number, cost_per_run_usd?: number, };
+runs_with_cost: number, 
+/**
+ * Finished attempts that reported a cost, over every finished attempt:
+ * how much of the spend the cost figures cover.
+ */
+cost_known: Rate, cost_usd: number, cost_per_run_usd?: number, };
 
 export type ModelUse = { 
 /**
@@ -424,6 +542,26 @@ checked: number, passed: Rate, failed: number,
  * `error`: the check could not run.
  */
 errors: number, manual: number, };
+
+export type KindCount = { kind: string, occurrences: number, runs: number, };
+
+export type FindingGroup = { kind: string, location: string, runs: number, occurrences: number, 
+/**
+ * The latest run that reported it.
+ */
+last_run: string, };
+
+export type FindingStats = { by_kind: Array<KindCount>, 
+/**
+ * The most widespread groups, by runs, at most [`TOP_GROUPS`].
+ */
+top: Array<FindingGroup>, runs_with_warnings: Rate, };
+
+export type BaselineStats = { check: string, observation: string, 
+/**
+ * Runs that compared it.
+ */
+compared: number, met: Rate, regressed: number, unknown: number, };
 
 export type NodeStats = { node: string, 
 /**
@@ -474,7 +612,16 @@ duration: Waits, spend: Spend, deliverable_missing: number, output_fields_missin
 /**
  * Empty when the runs checked no goal.
  */
-goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, 
+goal: Array<GoalStats>, 
+/**
+ * The findings and warnings the runs' attempts reported.
+ */
+findings: FindingStats, 
+/**
+ * Each baseline observation over the runs that compared it; empty
+ * when the runs had no baseline check.
+ */
+baseline: Array<BaselineStats>, nodes: Array<NodeStats>, note?: string, 
 /**
  * Runs of this version that were candidate trials (issue #192): the
  * version was a forward patch on trial when they ran.
@@ -582,7 +729,12 @@ candidate_trial?: CandidateTrial,
  * when, and `pausing` while a live driver drains toward a queued pause.
  * Absent for a run that is neither paused nor pausing.
  */
-pause?: PauseInfo, };
+pause?: PauseInfo, 
+/**
+ * Why the run needs a person's look: a baseline regression, or
+ * findings or warnings its attempts reported. Absent when none.
+ */
+needs_look?: NeedsLook, };
 
 export type RunListEntry = { 
 /**
@@ -614,7 +766,12 @@ candidate_trial?: CandidateTrial,
  * when, and `pausing` while a live driver drains toward a queued pause.
  * Absent for a run that is neither paused nor pausing.
  */
-pause?: PauseInfo, };
+pause?: PauseInfo, 
+/**
+ * Why the run needs a person's look: a baseline regression, or
+ * findings or warnings its attempts reported. Absent when none.
+ */
+needs_look?: NeedsLook, };
 
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
@@ -656,6 +813,20 @@ commits?: Array<NodeCommits>,
  * retention, one per distinct gap; empty when none.
  */
 inbox_gaps?: Array<RunInboxGap>, 
+/**
+ * The human outcome: what the run did, what the engine checked, what
+ * nobody checked, and what the attempts reported.
+ */
+outcome: OutcomeSummary, 
+/**
+ * The baseline check, each observation before and after; absent for a
+ * playbook without one.
+ */
+baseline?: RunBaseline, 
+/**
+ * The findings and warnings the attempts reported; absent when none.
+ */
+notes?: RunNotes, 
 /**
  * The candidate trial this run was (issue #192), with its verdict;
  * absent for every other run.

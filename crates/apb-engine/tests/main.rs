@@ -67,12 +67,18 @@ mod agent_report_test;
 #[path = "suite/agent_timeout_test.rs"]
 mod agent_timeout_test;
 #[cfg(unix)]
+#[path = "suite/attempt_notes_test.rs"]
+mod attempt_notes_test;
+#[cfg(unix)]
 #[path = "suite/attempt_usage_test.rs"]
 mod attempt_usage_test;
 #[path = "suite/background_run_test.rs"]
 mod background_run_test;
 #[path = "suite/background_supervisor_test.rs"]
 mod background_supervisor_test;
+#[cfg(unix)]
+#[path = "suite/baseline_test.rs"]
+mod baseline_test;
 #[cfg(unix)]
 #[path = "suite/bounded_output_test.rs"]
 mod bounded_output_test;
@@ -251,6 +257,8 @@ mod retry_test;
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[path = "suite/run_outcome_test.rs"]
+mod run_outcome_test;
 #[path = "suite/run_provenance_test.rs"]
 mod run_provenance_test;
 #[path = "suite/run_retro_test.rs"]

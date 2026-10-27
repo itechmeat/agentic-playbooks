@@ -12,7 +12,9 @@
 //! traversals (bounded edges back into a node that ran) per run; human gate wait (`review_requested` to the matching
 //! `review_decided`) and question wait (`question_asked` to
 //! `question_answered`); run duration; tokens and cost per run; missing
-//! deliverables and output fields; and the goal criteria results. Per node:
+//! deliverables and output fields; the goal criteria results; the findings
+//! and warnings the attempts reported, and each baseline observation's
+//! results ([`findings`]). Per node:
 //! runs it ran in, first-pass executions, retries, fallbacks, re-entries,
 //! duration against its declared `expected_duration`.
 
@@ -21,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::decision::report::stats::{median, rate};
+use crate::decision::report::stats::median;
 use crate::decision::report::{RunJournal, run_dirs};
 use crate::event::{Event, EventPayload};
 use crate::run_view::RunUsage;
@@ -92,35 +94,6 @@ impl StatsRun {
     }
 }
 
-/// `count` of `of`, and the share when `of` is not zero.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct Rate {
-    pub count: usize,
-    pub of: usize,
-    #[cfg_attr(feature = "ts", ts(optional))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate: Option<f64>,
-}
-
-impl Rate {
-    fn new(count: usize, of: usize) -> Self {
-        Rate {
-            count,
-            of,
-            rate: rate(count, of),
-        }
-    }
-
-    /// `7/9 (78%)`, or `0/0`.
-    pub fn text(&self) -> String {
-        match self.rate {
-            Some(r) => format!("{}/{} ({:.0}%)", self.count, self.of, r * 100.0),
-            None => format!("{}/{}", self.count, self.of),
-        }
-    }
-}
-
 /// A total over runs and its mean per run.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
@@ -186,6 +159,9 @@ pub struct Spend {
     pub tokens: PerRun,
     /// Runs that reported a cost.
     pub runs_with_cost: usize,
+    /// Finished attempts that reported a cost, over every finished attempt:
+    /// how much of the spend the cost figures cover.
+    pub cost_known: Rate,
     pub cost_usd: f64,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -265,6 +241,11 @@ pub struct VersionStats {
     pub output_fields_missing: usize,
     /// Empty when the runs checked no goal.
     pub goal: Vec<GoalStats>,
+    /// The findings and warnings the runs' attempts reported.
+    pub findings: findings::FindingStats,
+    /// Each baseline observation over the runs that compared it; empty
+    /// when the runs had no baseline check.
+    pub baseline: Vec<findings::BaselineStats>,
     /// The models its attempts actually ran on (issue #193).
     #[serde(flatten)]
     #[cfg_attr(feature = "ts", ts(flatten))]
@@ -669,7 +650,15 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     let (mut dm, mut ofm) = (0usize, 0usize);
     let mut spend = Spend::default();
     let (mut tokens, mut cost) = (0u64, 0f64);
+    let (mut cost_attempts, mut finished_attempts) = (0usize, 0usize);
+    let mut notes = findings::Acc::default();
     for run in runs {
+        notes.add(
+            &run.run_id,
+            run.started_ms().unwrap_or(0),
+            run.snapshot.as_ref(),
+            &run.events,
+        );
         let f = run_facts(run, &mut nodes, &mut goal);
         match f.outcome {
             Some("succeeded") => outcomes.succeeded += 1,
@@ -693,7 +682,10 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         durations.extend(f.duration);
         dm += f.deliverable_missing;
         ofm += f.output_fields_missing;
-        if let Some(u) = RunUsage::from_events(&run.events) {
+        let u = RunUsage::totals(&run.events);
+        cost_attempts += u.cost_attempts as usize;
+        finished_attempts += u.finished_attempts as usize;
+        if u.attempts > 0 {
             spend.runs_with_usage += 1;
             tokens = tokens.saturating_add(u.input_tokens.saturating_add(u.output_tokens));
             if let Some(c) = u.cost_usd {
@@ -704,6 +696,8 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     }
     let finished = outcomes.succeeded + outcomes.failed + outcomes.aborted;
     spend.tokens = PerRun::new(tokens, spend.runs_with_usage);
+    spend.cost_known = Rate::new(cost_attempts, finished_attempts);
+    let (findings, baseline) = notes.finish();
     // `+ 0.0`: an empty float sum is -0.0.
     spend.cost_usd = (cost * 1e8).round() / 1e8 + 0.0;
     spend.cost_per_run_usd = (spend.runs_with_cost > 0)
@@ -776,6 +770,8 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         deliverable_missing: dm,
         output_fields_missing: ofm,
         goal,
+        findings,
+        baseline,
         model_use,
         nodes,
         note: (runs.len() < MIN_RUNS).then(|| {
@@ -871,6 +867,12 @@ pub fn render_text(r: &StatsReport) -> String {
                     s.runs_with_cost, v.runs
                 ));
             }
+            if s.cost_known.of > 0 {
+                line.push_str(&format!(
+                    ", attempts with a known cost {}",
+                    s.cost_known.text()
+                ));
+            }
             out.push_str(&line);
             out.push('\n');
         }
@@ -896,6 +898,9 @@ pub fn render_text(r: &StatsReport) -> String {
                 g.description,
                 g.check
             ));
+        }
+        for line in findings::lines(&v.findings, &v.baseline) {
+            out.push_str(&format!("  {line}\n"));
         }
         for n in &v.nodes {
             let mut line = format!(
@@ -968,7 +973,10 @@ pub fn render_text(r: &StatsReport) -> String {
     out
 }
 
+pub mod findings;
 pub mod models;
+mod rate;
+pub use rate::Rate;
 
 #[cfg(test)]
 mod tests;

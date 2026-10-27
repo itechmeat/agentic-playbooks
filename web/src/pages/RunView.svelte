@@ -14,6 +14,7 @@
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
+  import RunVerdictPanel from '../lib/RunVerdictPanel.svelte'
   import RunPauseControls from '../lib/RunPauseControls.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import type { RunDetail } from '../lib/types'
@@ -333,7 +334,8 @@
     {/if}
 
     {#if detail}
-      <RunOutcomePanel goal={detail.goal} commits={detail.commits} inboxGaps={detail.inbox_gaps} />
+      <RunVerdictPanel outcome={detail.outcome} />
+      <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
       <AttemptModelsPanel models={detail.attempt_models} />
     {/if}
 

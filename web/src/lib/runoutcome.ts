@@ -1,5 +1,6 @@
 import type { NodeCommits, RunGoal, RunInboxGap } from './api.gen'
 import type { WfEvent } from './types'
+import type { Tone } from './runverdict'
 
 // What a run produced beyond its node outputs (0.23.0): its goal criteria and
 // their results (C1), the commits its nodes made on a git tree (C7), and the
@@ -37,15 +38,12 @@ export function omittedCommits(commits: NodeCommits[] | undefined): number {
   return (commits ?? []).reduce((n, c) => n + c.omitted, 0)
 }
 
-export type GoalBadge = 'default' | 'secondary' | 'destructive' | 'outline'
-
-// The badge variant of a criterion status: passed, failed or error, manual,
-// pending (not checked yet).
-export function goalBadge(status: string): GoalBadge {
-  if (status === 'passed') return 'default'
-  if (status === 'failed' || status === 'error') return 'destructive'
-  if (status === 'manual') return 'outline'
-  return 'secondary'
+// The tag tone of a criterion status: passed, failed or error, and manual
+// or pending (not checked yet) as neutral.
+export function goalTone(status: string): Tone {
+  if (status === 'passed') return 'pass'
+  if (status === 'failed' || status === 'error') return 'fail'
+  return 'neutral'
 }
 
 // The goal summary: `2 passed · 1 failed · 1 to confirm · enforced`,
@@ -62,7 +60,8 @@ export function goalSummary(g: RunGoal): string {
   return parts.join(' · ')
 }
 
-// The event journal note of the outcome events (0.23.0, plus inbox gaps).
+// The event journal note of the outcome events (0.23.0, plus inbox gaps,
+// baseline snapshots and comparisons, and attempt notes).
 export function outcomeEventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -98,9 +97,50 @@ export function outcomeEventNote(e: WfEvent): string | undefined {
         through,
       })
     }
+    case 'baseline_observed': {
+      const head = `${str(r.check) ?? '?'} ${str(r.phase) ?? ''}: ${str(r.status) ?? ''}`
+      const reason = str(r.reason)
+      if (reason) return `${head} (${reason})`
+      const obs = r.observations && typeof r.observations === 'object' ? Object.entries(r.observations) : []
+      const values = obs.map(([id, o]) => `${id} ${observationText(o)}`).join(', ')
+      return values ? `${head} (${values})` : head
+    }
+    case 'baseline_compared': {
+      const change = `${observationText(r.before)} -> ${observationText(r.after)}`
+      const rule = str(r.rule) ? `, ${str(r.rule)}` : ''
+      const verdict = (str(r.verdict) ?? '').replace(/_/g, ' ')
+      const worse = r.regressed === true ? ', worse than before' : ''
+      const detail = str(r.detail) ? ` (${str(r.detail)})` : ''
+      return `${str(r.check) ?? '?'}/${str(r.observation) ?? '?'}: ${change}${rule}: ${verdict}${worse}${detail}`
+    }
+    case 'attempt_notes': {
+      const count = (v: unknown, one: string, many: string) => {
+        const n = Array.isArray(v) ? v.length : 0
+        return n ? `${n} ${n === 1 ? one : many}` : ''
+      }
+      const dropped = num(r.dropped) ?? 0
+      const parts = [
+        count(r.findings, 'finding', 'findings'),
+        count(r.warnings, 'warning', 'warnings'),
+        dropped ? `${dropped} dropped as malformed` : '',
+      ].filter(Boolean)
+      return parts.join(', ') || undefined
+    }
     default:
       return undefined
   }
+}
+
+// One journaled baseline observation as people read it: `37`, `3 items`,
+// `unknown`. Read defensively: the shape may come from a newer apb.
+export function observationText(o: unknown): string {
+  const obs = o as { state?: unknown; value?: { type?: unknown; value?: unknown } } | null | undefined
+  if (!obs || obs.state !== 'value' || !obs.value) return 'unknown'
+  const v = obs.value.value
+  if (obs.value.type === 'list' && Array.isArray(v)) return `${v.length} ${v.length === 1 ? 'item' : 'items'}`
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (typeof v === 'string') return `\`${v}\``
+  return 'unknown'
 }
 
 // One warning line per inbox gap: unread events inbox retention dropped

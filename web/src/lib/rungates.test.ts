@@ -25,6 +25,7 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   version: '1.0.0',
   run_status: status,
   failure_reason: null,
+  outcome: { headline: 'Run running', done: [], verified: [], unverified: [], findings: [], warnings: [] },
   driver_alive: null,
   nodes: {},
   outputs: {},

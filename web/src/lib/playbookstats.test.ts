@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render } from 'svelte/server'
 import PlaybookStatsCard from './PlaybookStatsCard.svelte'
-import { modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
+import { costKnownText, modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
 import type { StatsReport, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
@@ -17,10 +17,12 @@ const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => 
   gate_wait: { count: 1, median_ms: 60_000, max_ms: 60_000 },
   question_wait: { count: 0 },
   duration: { count: 3, median_ms: 5_000, max_ms: 82_000 },
-  spend: { runs_with_usage: 0, tokens: { total: 0, runs: 0 }, runs_with_cost: 0, cost_usd: 0 },
+  spend: { runs_with_usage: 0, tokens: { total: 0, runs: 0 }, runs_with_cost: 0, cost_known: { count: 0, of: 0 }, cost_usd: 0 },
   deliverable_missing: 0,
   output_fields_missing: 0,
   goal: [],
+  findings: { by_kind: [], top: [], runs_with_warnings: { count: 0, of: 3 } },
+  baseline: [],
   models: {},
   model_mismatch: 0,
   nodes: [],
@@ -38,7 +40,7 @@ const report: StatsReport = {
         { index: 0, description: 'tests pass', check: 'script', checked: 1, passed: { count: 1, of: 1, rate: 1 }, failed: 0, errors: 0, manual: 0 },
         { index: 1, description: 'a person reads it', check: 'manual', checked: 1, passed: { count: 0, of: 0 }, failed: 0, errors: 0, manual: 1 },
       ],
-      spend: { runs_with_usage: 1, tokens: { total: 1500, runs: 1, per_run: 1500 }, runs_with_cost: 1, cost_usd: 0.02, cost_per_run_usd: 0.02 },
+      spend: { runs_with_usage: 1, tokens: { total: 1500, runs: 1, per_run: 1500 }, runs_with_cost: 1, cost_known: { count: 1, of: 1, rate: 1 }, cost_usd: 0.02, cost_per_run_usd: 0.02 },
     }),
   ],
 }
@@ -73,6 +75,7 @@ describe('PlaybookStatsCard', () => {
     expect(body.match(/data-testid="playbook-stats-goal"/g)?.length).toBe(1)
     expect(body).toContain('$0.0200 per run reported by 1 of 4 runs')
     expect(body).toContain('0.33 per run (1 over 3 runs)')
+    expect(body).toContain('cost known')
   })
 
   it('has a loading, an error and an empty state', () => {
@@ -91,5 +94,13 @@ describe('modelsText', () => {
     expect(modelsText({ models: { opus: 1, 'glm-5.3-flash': 5 }, model_mismatch: 5 })).toBe(
       'glm-5.3-flash x5, opus x1 (5 differ from the profile)',
     )
+  })
+})
+
+describe('costKnownText', () => {
+  it('gives the share of attempts that reported a cost, and nothing before any attempt', () => {
+    const spend = report.versions[1].spend
+    expect(costKnownText({ spend: { ...spend, cost_known: { count: 3, of: 4, rate: 0.75 } } })).toBe('3/4 (75%) attempts')
+    expect(costKnownText({ spend: { ...spend, cost_known: { count: 0, of: 0 } } })).toBeNull()
   })
 })

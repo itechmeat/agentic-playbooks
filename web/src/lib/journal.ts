@@ -70,7 +70,9 @@ function listOf(v: unknown): string {
 // what it lost of its output, which working tree the run moved into, what a decision model answered
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
 // (issue #195), or which inputs a join wrote off and a re-run revived
-// (issue #203), and what a re-run revives. Every other kind has none.
+// (issue #203), and what a re-run revives, the baseline check's snapshots
+// and comparisons, and the notes an attempt reported. Every other kind has
+// none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -83,6 +85,9 @@ function eventNote(e: WfEvent): string | undefined {
     case 'goal_checked':
     case 'protected_paths_modified':
     case 'inbox_gap':
+    case 'baseline_observed':
+    case 'baseline_compared':
+    case 'attempt_notes':
       return outcomeEventNote(e)
     case 'output_fields_missing':
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined

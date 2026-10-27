@@ -664,6 +664,11 @@ pub struct AgentReport {
     /// What the attempt lost of its output (bounded agent output); the drive
     /// loop writes it into `AttemptFinished.output_truncated`.
     pub capture: OutputCapture,
+    /// Findings and warnings a host submission dropped as malformed, and
+    /// why (host mode; empty otherwise): the attempt's `attempt_notes`
+    /// counts them with the status file's own. They travel here, never
+    /// through the status file the subagent can write.
+    pub host_notes_dropped: apb_core::run_notes::DroppedNotes,
 }
 
 /// Captures an agent session id from a finished attempt's raw output, for the
@@ -1452,6 +1457,7 @@ impl ClaudeAdapter {
             session,
             usage,
             capture,
+            host_notes_dropped: Default::default(),
         })
     }
 
@@ -1858,6 +1864,7 @@ fn parse_stream_result(
             session,
             usage,
             capture: capture.clone(),
+            host_notes_dropped: Default::default(),
         });
     }
     Err((

@@ -25,6 +25,37 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// One process env var set for the life of the guard and restored on drop,
+/// even when the test panics. Hold [`env_lock`] for as long as the guard
+/// lives: the lock is what keeps every other env-touching test out while
+/// the value is changed.
+pub struct EnvVar {
+    key: &'static str,
+    prior: Option<std::ffi::OsString>,
+}
+
+impl EnvVar {
+    pub fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prior = std::env::var_os(key);
+        // SAFETY: the caller holds `env_lock`, so no other test reads or
+        // writes the process env while this runs.
+        unsafe { std::env::set_var(key, value) };
+        EnvVar { key, prior }
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`, the env lock is still held.
+        unsafe {
+            match &self.prior {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 /// Writes `content` to `path` and fsyncs. On Linux, `fs::write` without
 /// fsync can cause the following `execve` to fail with `ETXTBSY` when the
 /// file is a shebang script executed directly (not via `sh script.sh`),

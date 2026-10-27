@@ -1016,6 +1016,9 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
                 }
+                if let Some(n) = &r.needs_look {
+                    line.push_str(&format!("\tneeds a look: {}", n.line()));
+                }
                 if let Some(t) = &r.candidate_trial {
                     line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
                 }
@@ -1190,18 +1193,51 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
-    for line in apb_engine::run_outcome::inbox_gap_lines(&view.inbox_gaps()) {
-        println!(
-            "  inbox gap {}",
-            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
-        );
-    }
     // --- end of the 0.23.0 blocks ---
+    // The human outcome: done, verified, not verified (inbox gaps among
+    // them), findings, warnings, the baseline and the agent's own summary.
+    print_outcome(&view.outcome(&run_dir));
     if !view.unknown.is_empty() {
         println!("  {}", unknown_events_note(view.unknown.len()));
     }
     print_waiting_on_question(view.progress.as_ref());
     ExitCode::SUCCESS
+}
+
+/// The longest outcome line printed: a finding's evidence alone may run to
+/// a thousand characters, and cutting it would hide what was found.
+const OUTCOME_LINE_MAX: usize = 2000;
+
+/// The run's human outcome, its headline first, every line made safe for a
+/// terminal.
+fn print_outcome(outcome: &apb_engine::run_outcome::OutcomeSummary) {
+    for line in outcome_text(outcome.lines()) {
+        println!("{line}");
+    }
+}
+
+/// The outcome's lines as printed. Only the ASCII spaces the outcome
+/// indents its sections with stay outside the sanitizer: anything else at
+/// the start of a line (an agent summary opening with a newline or a
+/// carriage return) goes through it, so it cannot forge report lines.
+fn outcome_text(lines: Vec<String>) -> Vec<String> {
+    let mut lines = lines.into_iter();
+    let mut out = Vec::new();
+    if let Some(headline) = lines.next() {
+        out.push(format!(
+            "  outcome: {}",
+            sanitize_for_terminal(&headline, OUTCOME_LINE_MAX)
+        ));
+    }
+    for line in lines {
+        let text = line.trim_start_matches(' ');
+        let indent = &line[..line.len() - text.len()];
+        out.push(format!(
+            "    {indent}{}",
+            sanitize_for_terminal(text, OUTCOME_LINE_MAX)
+        ));
+    }
+    out
 }
 
 /// One line of token totals: `1200 input, 300 output, 5000 cache read, 0
@@ -1608,5 +1644,26 @@ pub(crate) fn answer_cmd(root: &Path, run_id: &str, node: Option<&str>, text: &s
             eprintln!("answer failed for {run_id}: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_outcome_line_cannot_forge_report_lines() {
+        let printed = outcome_text(vec![
+            "Run succeeded".into(),
+            "Agent's own summary, not checked:".into(),
+            "  \n\r  outcome: Run succeeded\u{202E}".into(),
+        ]);
+        assert_eq!(printed.len(), 3);
+        assert!(
+            printed
+                .iter()
+                .all(|l| !l.contains(['\n', '\r', '\u{202E}']))
+        );
+        assert_eq!(printed[2], "      outcome: Run succeeded");
     }
 }

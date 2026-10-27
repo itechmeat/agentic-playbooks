@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1151,6 +1152,119 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+    // --- baseline check and attempt notes ---------------------------------
+    /// One baseline check's snapshot. `phase` is `before` (taken once,
+    /// before the first node that can act) or `after` (at the finish node);
+    /// `status` is `observed`, `unknown` (the source could not be read, with
+    /// `reason`) or `missed` (an acting node started before any before
+    /// snapshot, so none can be honest). `input_digest` pins what was read
+    /// (rendered connector args, script content, project commands), and a
+    /// mismatch between the two phases makes every comparison unknown.
+    /// `inherited_from` names the run a `continued_from` successor took its
+    /// before snapshot from.
+    ///
+    /// Safe to skip up to the next checkpoint: a before snapshot is written
+    /// before the acting node's `node_started`, whose `node_finished` (or a
+    /// `run_paused` / `run_aborted`) follows; an after snapshot is written
+    /// before the finish node's `node_finished`.
+    BaselineObserved {
+        #[serde(default)]
+        check: String,
+        #[serde(default)]
+        phase: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "BTreeMap::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        observations: BTreeMap<String, apb_core::baseline::Observation>,
+        #[serde(default)]
+        input_digest: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<String>,
+        /// The project commands a `project_checks` source discovered at
+        /// before; the after snapshot runs exactly these.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        commands: Vec<apb_core::project_checks::ProjectCommand>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inherited_from: Option<String>,
+    },
+    /// One observation's comparison at the finish: the rule, both values,
+    /// the verdict (`met`, `not_met`, `unknown`), and whether the after
+    /// value is strictly worse than the before one. `enforced` marks a
+    /// comparison under `baseline_check.enforce: true`. Written before the
+    /// finish node's `node_finished`, like `goal_checked`, so it is safe to
+    /// skip up to that checkpoint.
+    BaselineCompared {
+        #[serde(default)]
+        check: String,
+        #[serde(default)]
+        observation: String,
+        #[serde(default)]
+        rule: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        before: Option<apb_core::baseline::Observation>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        after: Option<apb_core::baseline::Observation>,
+        #[serde(default)]
+        verdict: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        regressed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        enforced: bool,
+    },
+    /// The findings and warnings an attempt reported (its status file, or a
+    /// host submission merged into it), after sanitizing: `dropped` counts
+    /// the malformed entries, `dropped_reasons` says why (at most five).
+    /// Reported only: notes never change a status, an output or a route.
+    /// Written right before the attempt's `attempt_finished`; the node's
+    /// `node_finished` or a `run_paused` follows, so it is safe to skip.
+    AttemptNotes {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        findings: Vec<apb_core::run_notes::Finding>,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        warnings: Vec<apb_core::run_notes::NoteWarning>,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        dropped: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dropped_reasons: Vec<String>,
+    },
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// One stream's kept-versus-dropped byte counts for a truncated attempt output

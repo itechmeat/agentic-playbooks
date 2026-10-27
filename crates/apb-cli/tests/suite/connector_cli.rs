@@ -146,6 +146,36 @@ fn call_without_run_context_prints_config_error_json_and_exits_nonzero() {
     );
 }
 
+/// A site id starting with `@` belongs to the engine's own calls (the
+/// baseline check reads under `@baseline`): a process that sets one in
+/// APB_NODE_ID is refused before anything resolves.
+#[test]
+fn call_refuses_a_node_id_reserved_for_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    let run_dir = dir.path().join(".apb/runs/r-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    let out = playbook_env(
+        dir.path(),
+        &["connector", "call", "widget", "ping"],
+        &[
+            ("APB_RUN_DIR", run_dir.to_str().unwrap()),
+            ("APB_NODE_ID", "@baseline"),
+        ],
+    );
+    assert!(!out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["error"]["code"], serde_json::json!("config"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reserved for calls the engine makes itself")
+    );
+}
+
 // --- env ------------------------------------------------------------------
 
 /// `--dry-run` renders a call without executing it or resolving secrets, so

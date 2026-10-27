@@ -44,6 +44,11 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub pause: Option<crate::pause::PauseInfo>,
+    /// Why the run needs a person's look: a baseline regression, or
+    /// findings or warnings its attempts reported. Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub needs_look: Option<crate::run_outcome::NeedsLook>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -90,8 +95,10 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let status = view.run_status.as_str().into();
         let candidate_trial = crate::candidate::trial_of(&entry.path(), &view.events);
         let pause = view.pause().cloned();
+        let needs_look = crate::run_outcome::NeedsLook::for_run(&entry.path(), &view.events);
         let progress = view.progress;
         out.push(RunSummary {
+            needs_look,
             pause,
             run_id,
             playbook,

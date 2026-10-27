@@ -9,6 +9,7 @@ description: >-
 version: 1.0.0
 params:
   - { name: default_owner_id, type: text, label: "Twenty user id (uuid) that unowned open deals are assigned to" }
+  - { name: open_stages, type: text, label: "The open opportunity stages, comma-joined, e.g. NEW,SCREENING,MEETING,PROPOSAL" }
 defaults:
   profile: main
 effects: [network, external]
@@ -26,6 +27,21 @@ goal:
       check: { type: marker, marker: "UNOWNED AFTER:" }
     - description: The recount is zero and every counted deal carries the rule's owner
       check: { type: manual }
+# The engine reads the unowned count itself, before the first step that can
+# act and again at the finish, so the report shows 37 -> 0 (or 37 -> 20 after
+# a failure in the middle) from the CRM, not from an agent's reply. Report
+# only: the goal above decides whether the run reached what it was for.
+baseline_check:
+  checks:
+    - id: unowned
+      description: Open deals without an owner
+      connector:
+        name: twenty
+        account: default
+        function: list_opportunities
+        args: { filter: "ownerId[is]:NULL,stage[in]:[{{params.open_stages}}]", limit: 1 }
+      observe:
+        - { id: count, type: number, path: totalCount, expect: { equals: 0 } }
 nodes:
   - { id: start, type: start }
   - id: count_unowned
@@ -34,7 +50,7 @@ nodes:
     expected_duration: 5m
     prompt: >-
       List open opportunities with the twenty connector's list_opportunities
-      function (filter on stage for the open stages, page through with
+      function (filter on stage for the open stages {{params.open_stages}}, page through with
       starting_after until pageInfo.hasNextPage is false). From them select
       the deals with no owner set. List each such deal's id, name, stage
       and company. Change nothing. End with a line `UNOWNED BEFORE: <n>

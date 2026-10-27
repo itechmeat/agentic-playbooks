@@ -12,31 +12,64 @@ use clap::Subcommand;
 #[derive(Subcommand)]
 pub(crate) enum TasksAction {
     /// Submit the reply to one host task
-    Submit {
-        run_id: String,
-        task_id: String,
-        /// succeeded, failed, or blocked (the output is then the question
-        /// for the person)
-        #[arg(long)]
-        status: String,
-        /// File holding the subagent's final reply, verbatim (`-` reads
-        /// stdin)
-        #[arg(long = "output-file", value_name = "FILE")]
-        output_file: PathBuf,
-        /// A short note for the journal
-        #[arg(long)]
-        note: Option<String>,
-        /// Input tokens the reply consumed, when known
-        #[arg(long)]
-        input_tokens: Option<u64>,
-        /// Output tokens the reply consumed, when known
-        #[arg(long)]
-        output_tokens: Option<u64>,
-        /// The model the reply was actually produced on, when known (the
-        /// task's model hint is only the profile's declaration)
-        #[arg(long)]
-        model: Option<String>,
-    },
+    Submit(SubmitArgs),
+}
+
+/// `apb tasks submit`: one host task's reply.
+#[derive(clap::Args)]
+pub(crate) struct SubmitArgs {
+    run_id: String,
+    task_id: String,
+    /// succeeded, failed, or blocked (the output is then the question
+    /// for the person)
+    #[arg(long)]
+    status: String,
+    /// File holding the subagent's final reply, verbatim (`-` reads
+    /// stdin)
+    #[arg(long = "output-file", value_name = "FILE")]
+    output_file: PathBuf,
+    /// A short note for the journal
+    #[arg(long)]
+    note: Option<String>,
+    /// Input tokens the reply consumed, when known
+    #[arg(long)]
+    input_tokens: Option<u64>,
+    /// Output tokens the reply consumed, when known
+    #[arg(long)]
+    output_tokens: Option<u64>,
+    /// The model the reply was actually produced on, when known (the
+    /// task's model hint is only the profile's declaration)
+    #[arg(long)]
+    model: Option<String>,
+    /// Findings and warnings the subagent reported, as one JSON object
+    /// `{"findings": [...], "warnings": [...]}`; reported only, they never
+    /// change the result
+    #[arg(long, value_name = "JSON")]
+    notes: Option<String>,
+}
+
+/// The `findings` and `warnings` of a `--notes` object.
+fn parse_notes(
+    notes: Option<&str>,
+) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), String> {
+    let Some(raw) = notes else {
+        return Ok((None, None));
+    };
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            let findings = map.remove("findings");
+            let warnings = map.remove("warnings");
+            // A misspelt key would drop every note without a word.
+            match map.keys().next() {
+                Some(k) => Err(format!(
+                    "--notes has an unknown key `{}`; use `findings` and `warnings`",
+                    one_line(k)
+                )),
+                None => Ok((findings, warnings)),
+            }
+        }
+        _ => Err("--notes must be a JSON object with `findings` and `warnings` lists".into()),
+    }
 }
 
 /// Every pending task of `run_id`, or of every run when `None` (a child
@@ -104,25 +137,7 @@ pub(crate) fn tasks_cmd(
     json: bool,
 ) -> ExitCode {
     match action {
-        Some(TasksAction::Submit {
-            run_id,
-            task_id,
-            status,
-            output_file,
-            note,
-            input_tokens,
-            output_tokens,
-            model,
-        }) => submit(
-            root,
-            &run_id,
-            &task_id,
-            &status,
-            &output_file,
-            note,
-            (input_tokens, output_tokens),
-            model,
-        ),
+        Some(TasksAction::Submit(args)) => submit(root, args),
         None => list(root, run_id.as_deref(), full, json),
     }
 }
@@ -192,20 +207,28 @@ fn list(root: &Path, run_id: Option<&str>, full: bool, json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[allow(clippy::too_many_arguments)]
-fn submit(
-    root: &Path,
-    run_id: &str,
-    task_id: &str,
-    status: &str,
-    output_file: &Path,
-    note: Option<String>,
-    (input_tokens, output_tokens): (Option<u64>, Option<u64>),
-    model: Option<String>,
-) -> ExitCode {
-    let Some(status) = SubmitStatus::parse(status) else {
+fn submit(root: &Path, args: SubmitArgs) -> ExitCode {
+    let SubmitArgs {
+        run_id,
+        task_id,
+        status,
+        output_file,
+        note,
+        input_tokens,
+        output_tokens,
+        model,
+        notes,
+    } = args;
+    let Some(status) = SubmitStatus::parse(&status) else {
         eprintln!("submit failed: --status must be succeeded, failed or blocked");
         return ExitCode::from(2);
+    };
+    let (findings, warnings) = match parse_notes(notes.as_deref()) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("submit failed: {e}");
+            return ExitCode::from(2);
+        }
     };
     let output = if output_file == Path::new("-") {
         let mut s = String::new();
@@ -215,7 +238,7 @@ fn submit(
         }
         s
     } else {
-        match std::fs::read_to_string(output_file) {
+        match std::fs::read_to_string(&output_file) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
@@ -233,9 +256,9 @@ fn submit(
     });
     match host_task::submit_to_run(
         root,
-        run_id,
+        &run_id,
         SubmitRequest {
-            task_id: task_id.to_string(),
+            task_id,
             status,
             output,
             usage,
@@ -243,6 +266,8 @@ fn submit(
             submitted_by: "cli".to_string(),
             client: None,
             model,
+            findings,
+            warnings,
         },
     ) {
         Ok(r) => {
@@ -252,6 +277,15 @@ fn submit(
                 one_line(&r.node),
                 r.status.as_str()
             );
+            if r.notes_dropped > 0 {
+                println!(
+                    "  {} malformed finding(s) or warning(s) dropped",
+                    r.notes_dropped
+                );
+                for why in &r.notes_dropped_reasons {
+                    println!("    {}", one_line(why));
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -293,6 +327,17 @@ pub(crate) fn announce_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_take_the_two_lists_of_one_object() {
+        let (f, w) = parse_notes(Some(r#"{"findings":[{"kind":"bug"}],"warnings":[]}"#)).unwrap();
+        assert!(f.unwrap().is_array());
+        assert!(w.unwrap().is_array());
+        assert_eq!(parse_notes(None).unwrap(), (None, None));
+        assert!(parse_notes(Some("[1]")).is_err());
+        let typo = parse_notes(Some(r#"{"finding":[]}"#)).unwrap_err();
+        assert!(typo.contains("unknown key `finding`"), "{typo}");
+    }
 
     #[test]
     fn terminal_text_keeps_lines_and_drops_escapes() {

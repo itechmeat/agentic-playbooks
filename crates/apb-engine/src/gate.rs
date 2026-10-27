@@ -476,22 +476,28 @@ pub(crate) fn live_child_effects(
     None
 }
 
-/// The connector functions flagged `irreversible: true` that node `n` is
-/// granted, as `node <id> (connector <name>: <fn>, ...)` sources. A
-/// connector that is not installed or does not load adds nothing here: the
-/// connector trust gate refuses such a run before it starts.
-fn connector_sources(n: &apb_core::schema::Node) -> Vec<String> {
+/// The connector functions flagged `irreversible: true` that binding site
+/// `site` (a node, or the baseline site) is granted, as
+/// `node <id> (connector <name>: <fn>, ...)` sources (`baseline check
+/// (connector ...)` for the baseline site, which is not a node). A connector that is
+/// not installed or does not load adds nothing here: the connector trust
+/// gate refuses such a run before it starts.
+fn connector_sources(site: &str, bindings: &[apb_core::schema::ConnectorBinding]) -> Vec<String> {
     let mut out = Vec::new();
-    for b in n.kind.connector_bindings() {
+    for b in bindings {
         let Ok(loaded) = apb_core::connector::store::load(&b.name) else {
             continue;
         };
         let irreversible = loaded.doc.irreversible_functions();
         let fns = apb_core::validate::granted_functions(b, &irreversible);
         if !fns.is_empty() {
+            let at = if site == apb_core::baseline::BASELINE_SITE {
+                "baseline check".to_string()
+            } else {
+                format!("node {site}")
+            };
             out.push(format!(
-                "node {} (connector {}: {})",
-                n.id,
+                "{at} (connector {}: {})",
                 b.name,
                 fns.iter()
                     .map(|f| f.as_str())
@@ -518,8 +524,10 @@ pub fn consent_sources(
     pins: Option<&std::collections::BTreeMap<String, ChildExpectation>>,
 ) -> Vec<String> {
     let mut out = crate::consent::own_sources(playbook);
+    for (site, bindings) in playbook.connector_sites() {
+        out.extend(connector_sources(site, &bindings));
+    }
     for n in &playbook.nodes {
-        out.extend(connector_sources(n));
         if !matches!(n.kind, NodeKind::Playbook { .. }) {
             continue;
         }
@@ -997,11 +1005,7 @@ fn check_connectors(
     // Deliberately ignored - see the doc comment above (secret egress).
     let _ = acknowledge_untrusted;
 
-    let binds = playbook
-        .nodes
-        .iter()
-        .any(|n| !n.kind.connector_bindings().is_empty());
-    if !binds {
+    if !playbook.binds_connectors() {
         return Ok((
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
