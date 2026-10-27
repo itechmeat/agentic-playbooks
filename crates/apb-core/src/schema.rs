@@ -188,6 +188,11 @@ pub struct Playbook {
     /// Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<crate::quality::QualityBlock>,
+    /// Whether and how problems earlier runs met with the playbook's tools
+    /// are shown to its agents (see [`crate::known_problems`]). Additive to
+    /// schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_problems: Option<crate::known_problems::block::KnownProblemsBlock>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }

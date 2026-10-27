@@ -84,6 +84,27 @@ pub(crate) const NOTES_NOTE: &str = concat!(
     "this step's result and never replace the `status` field.",
 );
 
+/// Appended after [`NOTES_NOTE`] only for a playbook with a
+/// `known_problems:` block, so every other prompt stays byte-stable: how to
+/// report trouble with a tool so later runs of the playbook are told.
+pub(crate) const TOOL_PROBLEM_NOTE: &str = concat!(
+    " Tool problems: if a tool you used misbehaved, report it as a finding with ",
+    "\"kind\": \"tool_problem\", a \"location\" naming the tool as connector:<name>.<function>, ",
+    "mcp:<server>.<tool>, cli:<program>, skill:<name>, path:<repo-relative path> or node:<id>, ",
+    "and, when you got around it, a \"workaround\" saying how. Later runs of this playbook ",
+    "are shown problems that recur.",
+);
+
+/// The findings paragraph of a fresh attempt: [`NOTES_NOTE`], with
+/// [`TOOL_PROBLEM_NOTE`] when the playbook collects known problems.
+pub(crate) fn notes_note(known_problems: bool) -> String {
+    if known_problems {
+        format!("{NOTES_NOTE}{TOOL_PROBLEM_NOTE}")
+    } else {
+        NOTES_NOTE.to_string()
+    }
+}
+
 /// The status-file prompt note for a node, empty when the node is told nothing
 /// about the file. A `success_check` node has been told the contract since the
 /// file was introduced; a `require_verdict` node is told the stronger form (the
@@ -369,6 +390,7 @@ mod tests {
             location: "a.rs".into(),
             evidence: "e".into(),
             why_not_fixed: "w".into(),
+            workaround: None,
         }]
     }
 
@@ -438,6 +460,9 @@ mod tests {
         // so the notes paragraph must not suggest one.
         assert!(!NOTES_NOTE.contains("textual report"));
         assert!(NOTES_NOTE.contains("never replace the `status` field"));
+        assert_eq!(notes_note(false), NOTES_NOTE);
+        let with = notes_note(true);
+        assert!(with.starts_with(NOTES_NOTE) && with.contains("\"kind\": \"tool_problem\""));
     }
 
     #[test]

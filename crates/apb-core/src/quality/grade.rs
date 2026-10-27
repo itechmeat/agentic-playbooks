@@ -141,6 +141,8 @@ pub enum GraderKind {
     Rules,
     /// The host agent in a bounded reading session.
     Host,
+    /// A decision model, asked through the standalone decider.
+    Model,
 }
 
 /// A grader and its version: grades of different graders or versions are
@@ -161,6 +163,10 @@ impl GraderId {
         kind: GraderKind::Host,
         version: 1,
     };
+    pub const MODEL: GraderId = GraderId {
+        kind: GraderKind::Model,
+        version: 1,
+    };
 }
 
 impl std::fmt::Display for GraderId {
@@ -168,6 +174,7 @@ impl std::fmt::Display for GraderId {
         let kind = match self.kind {
             GraderKind::Rules => "rules",
             GraderKind::Host => "host",
+            GraderKind::Model => "model",
         };
         write!(f, "{kind}/{}", self.version)
     }
@@ -274,6 +281,7 @@ mod tests {
     fn a_grader_reads_as_kind_and_version() {
         assert_eq!(GraderId::RULES.to_string(), "rules/1");
         assert_eq!(GraderId::HOST.to_string(), "host/1");
+        assert_eq!(GraderId::MODEL.to_string(), "model/1");
         assert!(Level::Partial.is_determinate());
         assert!(!Level::NotEnoughData.is_determinate());
     }

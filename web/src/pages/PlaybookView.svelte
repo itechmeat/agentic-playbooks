@@ -4,8 +4,11 @@
   import '@xyflow/svelte/dist/style.css'
   import {
     ApiError,
+    decideKnownProblem,
     fetchCandidate,
     fetchFit,
+    fetchKnownProblem,
+    fetchKnownProblems,
     fetchPlaybook,
     fetchStats,
     fetchVersions,
@@ -25,9 +28,13 @@
     VersionInfo,
     PlaybookNode as PlaybookNodeType,
   } from '../lib/types'
-  import type { CandidateQualityView, FitReport, QualityRecord } from '../lib/api.gen'
+  import type { CandidateQualityView, FitReport, ProblemsView, QualityRecord } from '../lib/api.gen'
+  import type { ProblemAction, ProblemDecision } from '../lib/api'
   import FitCard from '../lib/FitCard.svelte'
   import CandidateQualityCard from '../lib/CandidateQualityCard.svelte'
+  import KnownProblemsCard from '../lib/KnownProblemsCard.svelte'
+  import { groupProblems, recheckResult } from '../lib/knownproblems'
+  import Bug from '@lucide/svelte/icons/bug'
   import { verdictText } from '../lib/quality'
   import ListChecks from '@lucide/svelte/icons/list-checks'
   import CodeEditor from '../lib/CodeEditor.svelte'
@@ -135,6 +142,76 @@
     if (showFit) loadFit()
   }
   // --- end of 0.23.0 stats ---
+
+  // Known problems: read with the playbook (the toolbar counts the ones a
+  // person should look at), shown in a side panel; a person's action on one
+  // in flight. A response for another playbook writes nothing.
+  let showProblems = $state(false)
+  let problems = $state<ProblemsView | null>(null)
+  let problemsError = $state<string | null>(null)
+  // The problems whose action is in flight: each is disabled on its own.
+  let problemsBusy = $state<ReadonlySet<string>>(new Set())
+  const problemsToLook = $derived(problems ? groupProblems(problems.problems).look.length : 0)
+  let problemsToken = 0
+  async function loadProblems() {
+    const token = ++problemsToken
+    try {
+      const v = await fetchKnownProblems(id, workspace)
+      if (token !== problemsToken) return
+      problems = v
+      problemsError = null
+    } catch (e) {
+      if (token === problemsToken) problemsError = String(e)
+    }
+  }
+
+  const ACTION_DONE: Record<ProblemAction, string> = {
+    confirm: 'Problem confirmed: shown to runs',
+    dismiss: 'Problem dismissed',
+    reopen: 'Problem reopened',
+    close: 'Problem closed',
+    recheck: 'Problem rechecked',
+  }
+
+  /** Acts on one problem; resolves to null when it was done, else why not
+   * (the close form keeps itself open and shows it). */
+  async function actOnProblem(
+    problem: string,
+    action: ProblemAction,
+    body: ProblemDecision,
+  ): Promise<string | null> {
+    const on = `${workspace}\u0000${id}`
+    const stillHere = () => on === `${workspace}\u0000${id}`
+    problemsBusy = new Set([...problemsBusy, problem])
+    try {
+      const result = await decideKnownProblem(id, problem, action, body, workspace)
+      if (!stillHere()) return null
+      if (action === 'recheck' && body.verdict === 'holds') {
+        toast.success('Recorded: the problem still holds')
+      } else if (action === 'recheck' && 'verdict' in result) {
+        const r = recheckResult(result)
+        toast[r.tone](r.text)
+      } else {
+        toast.success(ACTION_DONE[action])
+      }
+      await loadProblems()
+      return null
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      // A refused close is shown in its form, where the quote can be fixed.
+      if (stillHere() && action !== 'close') {
+        toast.error('The known-problem action failed', { description: message })
+      }
+      return message
+    } finally {
+      if (stillHere()) problemsBusy = new Set([...problemsBusy].filter((p) => p !== problem))
+    }
+  }
+
+  async function problemPassages(problem: string) {
+    return (await fetchKnownProblem(id, problem, workspace)).changed_passages
+  }
+
   // The playbook's own nodes (not the flow nodes): clicking a node opens the
   // same form the editor uses, read-only, so a prompt can be read here without
   // switching to edit mode.
@@ -156,6 +233,8 @@
       showStats = false
     } else if (showFit) {
       showFit = false
+    } else if (showProblems) {
+      showProblems = false
     }
   })
 
@@ -242,6 +321,7 @@
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load playbook', { description: String(e) })
     }
+    void loadProblems()
     await loadVersions(token)
   }
 
@@ -377,6 +457,11 @@
     fitLoading = false
     fitToken++
     showFit = false
+    showProblems = false
+    problems = null
+    problemsError = null
+    problemsBusy = new Set()
+    problemsToken++
     reload()
     return subscribeChanges(reload)
   })
@@ -459,6 +544,20 @@
       >
         <ListChecks data-icon="inline-start" />
         <span class="pv-label">Fit</span>
+      </Button>
+      <Button
+        variant={showProblems ? 'default' : 'outline'}
+        size="sm"
+        class="pv-tool"
+        onclick={() => (showProblems = !showProblems)}
+        title="Known problems: trouble with this playbook's tools that earlier runs reported"
+        data-testid="known-problems-toggle"
+      >
+        <Bug data-icon="inline-start" />
+        <span class="pv-label">Problems</span>
+        {#if problemsToLook > 0}
+          <span class="pv-count" title="Known problems that need a look">{problemsToLook}</span>
+        {/if}
       </Button>
       <Button
         variant="outline"
@@ -583,6 +682,25 @@
     </aside>
   {/if}
 
+  {#if showProblems}
+    <aside class="side-panel problems-panel" data-testid="known-problems-panel">
+      <div class="side-head">
+        <h2>Known problems</h2>
+        <Button variant="ghost" size="icon" title="Hide the known problems" onclick={() => (showProblems = false)}>
+          <X />
+        </Button>
+      </div>
+      <KnownProblemsCard
+        view={problems}
+        loading={problems === null && !problemsError}
+        error={problemsError}
+        busy={problemsBusy}
+        onAct={actOnProblem}
+        loadPassages={problemPassages}
+      />
+    </aside>
+  {/if}
+
   {#if showHistory}
     <aside class="side-panel history-panel">
       <div class="side-head">
@@ -696,6 +814,19 @@
   .fit-panel {
     width: 22rem;
   }
+  .problems-panel {
+    width: 24rem;
+  }
+  .pv-count {
+    min-width: 1.1rem;
+    padding: 0 0.3rem;
+    border-radius: 999px;
+    background: var(--warning);
+    color: var(--warning-foreground);
+    font-size: 11px;
+    line-height: 1.1rem;
+    text-align: center;
+  }
   /* The toolbar: plain CSS over the app's variables. It wraps with the bar
      (see Topbar), and on a phone the buttons keep only their icons. */
   .pv-title,
@@ -785,7 +916,8 @@
   @media (max-width: 640px) {
     .history-panel,
     .stats-panel,
-    .fit-panel {
+    .fit-panel,
+    .problems-panel {
       width: min(22rem, 85vw);
     }
     .pv-tools :global(.pv-tool) {

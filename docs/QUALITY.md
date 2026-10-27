@@ -10,7 +10,8 @@ comparable:
    `good`, `partial` and `poor` level.
 2. apb grades every run of it by rules as the run ends, for free. A host
    agent grades the playbook's own criteria when a person asks, in a
-   bounded reading session.
+   bounded reading session, or the project's decision model does, when
+   the project turns that on.
 3. Every level cites the records it rests on. The grade keeps references,
    counts and one short redacted `why` per criterion, never the source
    text it read.
@@ -27,6 +28,7 @@ quality:
   grade_on_finish: rules         # rules (the default) | off
   builtins:                      # every built-in is on unless switched off
     scope: { off: "the task is to reorganize the whole repository" }
+  criteria_grader: host          # host (the default) | model
   criteria:                      # at most 3
     - id: reply-tone
       subject: run               # or { node: draft } (an agent_task)
@@ -47,7 +49,13 @@ quality:
   `run_graded` event right before `run_finished`). `off` leaves grading to
   `apb grade` and the dashboard.
 - `builtins.<name>.off` switches a built-in off and says why.
-- `criteria` are the playbook's own, graded by a host. Each one:
+- `criteria_grader` names whose grades of the playbook's own criteria a
+  candidate comparison expects: a host's (`host/1`, the default) or the
+  model grader's (`model/1`). Either may grade a run at any time; the
+  comparison counts only the named one. A forward patch that changes it
+  is refused, like any change to the block.
+- `criteria` are the playbook's own, graded by a host or by the model
+  grader. Each one:
   - `id`: lowercase letters, digits, `_` and `-`, starting with a letter or
     a digit, at most 40 characters, unique, not a built-in's name;
   - `subject`: the whole run, or one `agent_task` node;
@@ -80,6 +88,8 @@ with grades under the new one.
 | V106 | error | a `when: quality` gate that does not read: it falls back to `manual`, so a person decides every candidate until it is fixed |
 | V107 | error | `promote_supervisor_patches: { when: quality }` without a `quality:` block, with no criterion in force, or with the built-in `outcome` switched off |
 | V107 | warning | `when: quality` with `grade_on_finish: off`: no trial is graded unless someone grades it |
+| V110 | error | an unknown `criteria_grader` |
+| V111 | warning | `criteria_grader: model` with no criteria of the playbook's own: the model grader has nothing to grade |
 
 ## Levels
 
@@ -187,6 +197,46 @@ a run never grades its own playbook's runs.
 `run_grades { run_id }` lists a run's grades, and `run_status` carries a
 short `grades` block: the latest grade of each grader (the rules grader
 first), criterion by level.
+
+## The model grader
+
+The decision-model grader (`model/1`) grades the playbook's own criteria
+of an ended run, only when someone asks: `apb grade <run> --model`, `apb
+grade --backfill <playbook> --model`, MCP `run_grade { run_id, grader:
+model }`, `POST /api/runs/{id}/grades` with `{ "grader": "model" }`, or
+Grade by model on the run page. It asks the project's decision model
+(docs/DECISIONS.md, "Model grader"), so it is off until `decisions.yaml`
+turns `uses.grade` on, lets run outputs be sent (`privacy.send` includes
+`outputs`) and a provider resolves; it is capped per project and UTC day
+(50 by default). Per criterion:
+
+- only the views the criterion reads that fit whole within
+  `privacy.max_state_bytes` are sent, scrubbed; a view is never clipped;
+- it asks the level, and for each determinate level the record that
+  supports it, offering only the records of the views sent; the cite is
+  the support of the chosen level, and every view sent counts as read to
+  its end in the trace;
+- `none` on a criterion resting on what happened gives `not_enough_data`;
+  an absence is claimed only when every view the criterion reads was sent
+  whole and is complete, and every record was offered as a cite (at most
+  254);
+- an answer below `uses.grade.thresholds.min_confidence` (0.7 by default)
+  gives `not_enough_data`;
+- everything goes through the one evidence validator, as a host's levels
+  do.
+
+A model grade counts for promoting a candidate only when the use is in
+`enforce` and the provider is calibrated. When nothing is stored the
+answer says why: `skipped` is `off` (the use is off, outputs may not be
+sent, or no provider resolves), `no_criteria`, `budget` (the day's cap is
+spent), `send`, `busy` or `state_too_large`, when the model answered no
+criterion. A stop after the first answer stores the grade: the criteria
+it stopped before are `not_enough_data` under that reason, none of the
+grade counts for a promotion, and a later request grades the run again.
+A reader budget spent part way (`read_budget`) stops it the same way. A model backfill stops at the first run the
+model skips. It suits criteria over outputs and connector
+calls, which fit whole; a criterion over long transcripts is better left
+to a host.
 
 ## Storage
 
@@ -315,10 +365,10 @@ it, a person decides. A decision from a run step is refused.
 
 | Surface | What |
 |---|---|
-| CLI | `apb grade <run>` (rules), `--show`, `--json`, `--reopen` (a host may grade the run once more); `apb grade --backfill <playbook> [--version V] [--last N]` (rules grades for up to N earlier ended runs without one, so a comparison has a history; runs already graded or live are skipped and do not count); `apb candidate <playbook>` with `--promote`, `--keep-current [--reason]`; the `grade` lines of `apb runs <id>` |
-| MCP | `run_grade_start`, `run_grade_read`, `run_grade_submit`, `run_grades`, `playbook_candidate`, the `grades` block of `run_status` |
-| HTTP | `GET` and `POST /api/runs/{id}/grades` (POST grades by rules; 409 while the run is live); `POST /api/runs/{id}/grades/reopen` (409 without a host grade); `GET /api/playbooks/{id}/candidate`; `POST /api/playbooks/{id}/candidate/promote`; `POST /api/playbooks/{id}/candidate/keep-current` with `{ reason? }` |
-| Dashboard | the run page's Quality panel (levels, reasons, citations that open the journal event or name the transcript file, the reading line, "Grade by rules", and "Grade again" once a host graded the run); the playbook page's candidate card |
+| CLI | `apb grade <run>` (rules) or `--model` (the model grader), `--show`, `--json`, `--reopen` (a host may grade the run once more); `apb grade --backfill <playbook> [--version V] [--last N] [--model]` (grades for up to N earlier ended runs without one of that grader, so a comparison has a history; runs already graded or live are skipped and do not count); `apb candidate <playbook>` with `--promote`, `--keep-current [--reason]`; the `grade` lines of `apb runs <id>` |
+| MCP | `run_grade` (`grader` `rules` or `model`), `run_grade_start`, `run_grade_read`, `run_grade_submit`, `run_grades`, `playbook_candidate`, the `grades` block of `run_status` |
+| HTTP | `GET` and `POST /api/runs/{id}/grades` (POST grades by rules, or by the model grader with `{ "grader": "model" }`, answering `skipped` when it stored nothing; 409 while the run is live); `POST /api/runs/{id}/grades/reopen` (409 without a host grade); `GET /api/playbooks/{id}/candidate`; `POST /api/playbooks/{id}/candidate/promote`; `POST /api/playbooks/{id}/candidate/keep-current` with `{ reason? }` |
+| Dashboard | the run page's Quality panel (levels, reasons, citations that open the journal event or name the transcript file, the reading line, "Grade by rules", "Grade by model", and "Grade again" once a host graded the run); the playbook page's candidate card |
 
 ## Example: a code task
 

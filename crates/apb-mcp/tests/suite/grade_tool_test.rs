@@ -15,14 +15,14 @@ use apb_core::scope::{Origin, PlaybookRef};
 use apb_core::step_env::StepCaller;
 use apb_engine::candidate::PersonDecision;
 use apb_engine::forward_patch::{ForwardPatchRequest, create};
-use apb_engine::grade::SubmitOutcome;
 use apb_engine::grade::evidence::Proposal;
 use apb_engine::grade::reader::ReadRequest;
+use apb_engine::grade::{GraderChoice, SubmitOutcome};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_mcp::tools::ToolError;
 use apb_mcp::tools::candidate::{candidate_decide, candidate_view};
 use apb_mcp::tools::grade::{
-    after_stored, backfill, grade_by_rules, grade_read, grade_reopen, grade_start, grade_submit,
+    after_stored, backfill, grade_by, grade_read, grade_reopen, grade_start, grade_submit,
 };
 
 use crate::common::config_sandbox;
@@ -174,8 +174,18 @@ fn a_grade_stored_through_the_surface_re_decides_the_candidate() {
     let host = host_grade(root, &trials[0]).after;
     assert_eq!(host.candidate.expect("re-decided").verdict, Verdict::Wait);
     assert_eq!(host.candidate_error, None);
-    let rules = grade_by_rules(root, &trials[0], &person()).unwrap().after;
-    assert_eq!(rules.candidate.expect("re-decided").verdict, Verdict::Wait);
+    let rules = grade_by(root, &trials[0], GraderChoice::Rules, &person()).unwrap();
+    assert_eq!(rules.grader, "rules");
+    assert!(rules.grade.is_some() && rules.skipped.is_none());
+    assert_eq!(
+        rules.after.candidate.expect("re-decided").verdict,
+        Verdict::Wait
+    );
+    // The model grader asks nothing while the project's `grade` use is
+    // off: nothing stored, the reason named, the candidate untouched.
+    let model = grade_by(root, &trials[0], GraderChoice::Model, &person()).unwrap();
+    assert_eq!((model.grade, model.skipped.as_deref()), (None, Some("off")));
+    assert_eq!(model.after, Default::default());
 }
 
 #[test]
@@ -226,12 +236,14 @@ fn a_run_step_is_refused_every_grading_and_deciding_call() {
             assert!(matches!(e, ToolError::Conflict(_)), "{e:?}");
             assert!(e.to_string().contains("run step"), "{e}");
         };
-        refused(grade_by_rules(root, run, &step).map(drop));
+        refused(grade_by(root, run, GraderChoice::Rules, &step).map(drop));
+        refused(grade_by(root, run, GraderChoice::Model, &step).map(drop));
         refused(grade_start(root, run, None, &step).map(drop));
         refused(grade_read(root, run, "s", &ReadRequest::Outline, &step).map(drop));
         refused(grade_submit(root, run, "s", &[], &step).map(drop));
         refused(grade_reopen(root, run, "cli", &step).map(drop));
-        refused(backfill(root, ID, None, 5, &step).map(drop));
+        refused(backfill(root, ID, None, 5, GraderChoice::Rules, &step).map(drop));
+        refused(backfill(root, ID, None, 5, GraderChoice::Model, &step).map(drop));
         refused(candidate_decide(root, ID, PersonDecision::Promote, "cli", &step).map(drop));
     }
     // Nothing was decided: the candidate is still on trial.
@@ -260,14 +272,23 @@ fn a_grade_without_a_candidate_leaves_the_playbook_untouched() {
     let after = after_stored(&root, "never-saved");
     assert_eq!(after, Default::default());
     assert!(!root.join(".apb/playbooks/never-saved").exists());
-    let refused = backfill(&root, "../escape", None, 5, &person()).unwrap_err();
+    let refused =
+        backfill(&root, "../escape", None, 5, GraderChoice::Rules, &person()).unwrap_err();
     assert!(matches!(refused, ToolError::NotFound(_)));
     assert!(matches!(
         candidate_view(&root, "../escape").unwrap_err(),
         ToolError::NotFound(_)
     ));
     // Nothing ran, so nothing to backfill and nothing re-decided.
-    let report = backfill(&root, "never-saved", None, 5, &person()).unwrap();
+    let report = backfill(
+        &root,
+        "never-saved",
+        None,
+        5,
+        GraderChoice::Model,
+        &person(),
+    )
+    .unwrap();
     assert!(report.runs.is_empty());
     assert_eq!(report.after, Default::default());
 }

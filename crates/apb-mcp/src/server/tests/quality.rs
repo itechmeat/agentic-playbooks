@@ -1,8 +1,11 @@
 //! Run quality on the MCP tools: `run_status` carries the rules grade the
 //! run got as it ended, a host grades the playbook's own criterion through
 //! `run_grade_start`, `run_grade_read` and `run_grade_submit` (arguments
-//! as a client sends them), `run_grades` lists both grades, and
-//! `playbook_candidate` answers `null` without a candidate.
+//! as a client sends them), `run_grades` lists both grades,
+//! `playbook_candidate` answers `null` without a candidate, `run_grade`
+//! grades by rules or names why the model grader stored nothing, and a
+//! server that runs as a run step refuses every grading and known-problem
+//! write while it still reads.
 
 use super::*;
 
@@ -153,6 +156,41 @@ async fn a_host_grades_a_run_through_the_tools_and_run_status_shows_the_grades()
 }
 
 #[tokio::test]
+async fn run_grade_grades_by_rules_or_names_why_the_model_did_not() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    let proj = tempfile::tempdir().unwrap();
+    seed_graded(proj.path());
+    let run_id = apb_engine::run(
+        proj.path(),
+        "graded",
+        None,
+        apb_engine::RunOptions::default(),
+    )
+    .unwrap()
+    .run_id;
+    let server = WfMcp::new(proj.path().to_path_buf());
+    let rules = json_of(&server.run_grade(args(json!({ "run_id": run_id }))).await);
+    assert_eq!(rules["grader"], "rules", "{rules}");
+    assert_eq!(rules["grade"]["grader"]["kind"], "rules");
+    // No decision model is configured: nothing is asked or stored.
+    let model = json_of(
+        &server
+            .run_grade(args(json!({ "run_id": run_id, "grader": "model" })))
+            .await,
+    );
+    assert_eq!(model["skipped"], "off", "{model}");
+    assert!(model.get("grade").is_none());
+    let bad = json_of(
+        &server
+            .run_grade(args(json!({ "run_id": run_id, "grader": "judge" })))
+            .await,
+    );
+    assert_eq!(bad["error"], "invalid_arguments");
+    assert!(bad["detail"].as_str().unwrap().contains("rules or model"));
+}
+
+#[tokio::test]
 async fn the_grade_tools_refuse_an_unknown_run() {
     let proj = tempfile::tempdir().unwrap();
     seed_graded(proj.path());
@@ -191,7 +229,7 @@ impl Drop for RunIdGuard {
 }
 
 #[tokio::test]
-async fn a_server_that_runs_as_a_run_step_refuses_to_grade() {
+async fn a_server_that_runs_as_a_run_step_refuses_to_grade_or_decide() {
     // A server an agent CLI started inside a run inherits `APB_RUN_ID`.
     let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let proj = tempfile::tempdir().unwrap();
@@ -207,7 +245,25 @@ async fn a_server_that_runs_as_a_run_step_refuses_to_grade() {
                 json!({ "run_id": "any", "session": "s", "grades": [] }),
             ))
             .await;
-        [start, submit]
+        let grade = server
+            .run_grade(args(json!({ "run_id": "any", "grader": "model" })))
+            .await;
+        let decide = server
+            .known_problem_decide(args(json!({
+                "id": "graded", "problem": "kp-0000000000", "action": "confirm",
+            })))
+            .await;
+        let recheck = server
+            .known_problem_recheck(args(json!({
+                "id": "graded", "problem": "kp-0000000000", "by": "model",
+            })))
+            .await;
+        // Reading is allowed from a run step.
+        let read = server
+            .playbook_known_problems(args(json!({ "id": "graded" })))
+            .await;
+        assert_ne!(read.is_error, Some(true), "{}", result_text(&read));
+        [start, submit, grade, decide, recheck]
     };
     for res in results {
         assert_eq!(res.is_error, Some(true));

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::criteria::{CriterionDef, CriterionSource};
+use super::criteria::{CriteriaGrader, CriterionDef, CriterionSource, QualityBlock};
 use super::grade::{Grade, GraderId, Level};
 use crate::stats::wilson95;
 
@@ -93,7 +93,8 @@ pub struct ComparableKey {
 }
 
 /// A criterion `current` defines and the grader that grades it: built-ins
-/// by the rules grader, the playbook's own by a host.
+/// by the rules grader, the playbook's own by the block's
+/// `criteria_grader` (a host unless it says `model`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expected {
     pub criterion: String,
@@ -101,15 +102,26 @@ pub struct Expected {
     pub grader: GraderId,
 }
 
-/// The criteria a comparison covers, from `current`'s definitions.
-pub fn expected_of(defs: &[CriterionDef]) -> Vec<Expected> {
+/// The grader of the playbook's own criteria in `quality`: a host, unless
+/// the block's `criteria_grader` says `model` (an unknown value, a V110,
+/// and an absent block read as a host).
+pub fn own_grader_of(quality: Option<&QualityBlock>) -> GraderId {
+    match quality.map(|q| &q.criteria_grader) {
+        Some(CriteriaGrader::Model) => GraderId::MODEL,
+        _ => GraderId::HOST,
+    }
+}
+
+/// The criteria a comparison covers, from `current`'s definitions, with
+/// `own` grading the playbook's own criteria ([`own_grader_of`]).
+pub fn expected_of(defs: &[CriterionDef], own: GraderId) -> Vec<Expected> {
     defs.iter()
         .map(|d| Expected {
             criterion: d.id().to_string(),
             digest: d.digest.clone(),
             grader: match d.source {
                 CriterionSource::Builtin => GraderId::RULES,
-                CriterionSource::Playbook => GraderId::HOST,
+                CriterionSource::Playbook => own,
             },
         })
         .collect()
@@ -385,25 +397,33 @@ fn names(per: &[CriterionComparison], result: CriterionResult) -> Vec<String> {
     out
 }
 
-/// The hint for criteria no trial has a grade of: a host grades the
-/// playbook's own criteria, apb's rules never do.
+/// The hint for criteria no trial has a grade of: a host or the model
+/// grader grades the playbook's own criteria, apb's rules never do.
 fn host_hint(per: &[CriterionComparison], waiting: &[String]) -> String {
-    let host = GraderId::HOST.to_string();
-    let ungraded: Vec<&str> = per
-        .iter()
-        .filter(|c| {
-            c.key.grader == host && c.candidate.total() == 0 && waiting.contains(&c.key.criterion)
-        })
-        .map(|c| c.key.criterion.as_str())
-        .collect();
-    if ungraded.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "; no trial has a host grade for {}: a host grades the trials with run_grade_start",
-            ungraded.join(", ")
-        )
+    let mut out = String::new();
+    for (grader, who, how) in [
+        (GraderId::HOST, "a host", "with run_grade_start"),
+        (GraderId::MODEL, "a model", "with apb grade --model"),
+    ] {
+        let grader = grader.to_string();
+        let ungraded: Vec<&str> = per
+            .iter()
+            .filter(|c| {
+                c.key.grader == grader
+                    && c.candidate.total() == 0
+                    && waiting.contains(&c.key.criterion)
+            })
+            .map(|c| c.key.criterion.as_str())
+            .collect();
+        if !ungraded.is_empty() {
+            out.push_str(&format!(
+                "; no trial has a {} grade for {}: {who} grades the trials {how}",
+                grader.split('/').next().unwrap_or_default(),
+                ungraded.join(", ")
+            ));
+        }
     }
+    out
 }
 
 fn verdict_of(per: &[CriterionComparison], gate: &QualityGate, trials: u32) -> (Verdict, String) {

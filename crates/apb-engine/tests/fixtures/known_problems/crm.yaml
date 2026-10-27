@@ -1,0 +1,14 @@
+name: crm
+version: 0.1.0
+functions:
+  - name: find_contact
+    description: Find a contact by e-mail
+    read_only: true
+    mock: { status: 200, body: { id: 1 } }
+  - name: update_contact
+    description: Update a contact's fields; the CRM allows one write per second per account
+    mock: { status: 200, body: { ok: true } }
+  - name: delete_contact
+    description: Delete a contact for good
+    irreversible: true
+    mock: { status: 200, body: { ok: true } }

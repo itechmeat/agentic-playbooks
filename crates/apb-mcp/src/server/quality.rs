@@ -1,4 +1,5 @@
-//! MCP tool handlers for run quality: a host's grading session over an
+//! MCP tool handlers for run quality: grading an ended run by rules or by
+//! the decision model (`run_grade`), a host's grading session over an
 //! ended run (`run_grade_start`, `run_grade_read`, `run_grade_submit`),
 //! a run's grades (`run_grades`) and a playbook's candidate compared by
 //! quality (`playbook_candidate`, read-only: promoting or keeping current
@@ -95,7 +96,7 @@ fn proposals(grades: Vec<GradeProposalArg>) -> Result<Vec<Proposal>, String> {
 /// to its end even when the request is cancelled: a submission a client
 /// stopped waiting for may still be stored (spending the run's host grade)
 /// and re-decide the candidate. A task that panicked says so.
-async fn off_runtime<F>(work: F) -> CallToolResult
+pub(super) async fn off_runtime<F>(work: F) -> CallToolResult
 where
     F: FnOnce() -> Result<serde_json::Value, tools::ToolError> + Send + 'static,
 {
@@ -111,14 +112,21 @@ where
         } else {
             e.to_string()
         };
-        Err(tools::ToolError::Engine(format!(
-            "run quality task failed: {what}"
-        )))
+        Err(tools::ToolError::Engine(format!("task failed: {what}")))
     });
     to_call_tool_result(result)
 }
 
-fn invalid(detail: String) -> CallToolResult {
+/// The detail of an argument the tool layer refused.
+pub(super) fn detail_of(e: tools::ToolError) -> String {
+    match e {
+        tools::ToolError::Engine(d)
+        | tools::ToolError::NotFound(d)
+        | tools::ToolError::Conflict(d) => d,
+    }
+}
+
+pub(super) fn invalid(detail: String) -> CallToolResult {
     to_call_tool_result(Ok(
         json!({ "error": "invalid_arguments", "detail": detail }),
     ))
@@ -126,6 +134,33 @@ fn invalid(detail: String) -> CallToolResult {
 
 #[tool_router(router = quality_router, vis = "pub(crate)")]
 impl WfMcp {
+    #[tool(
+        description = "Grade an ended run, only when the user asks for it, and store the grade. grader rules (default): the built-in criteria (outcome, loops, scope, consent, skill_use), free, no model. grader model: the playbook's own criteria through the project's decision model, only when decisions.yaml turns its grade use on and lets run outputs be sent; otherwise skipped with the reason (off, no_criteria, budget). A stored grade re-decides the playbook's candidate under a quality policy. Refused from a run step.",
+        annotations(destructive_hint = false)
+    )]
+    pub(crate) async fn run_grade(
+        &self,
+        Parameters(RunGradeArgs {
+            run_id,
+            grader,
+            workspace,
+        }): Parameters<RunGradeArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        let grader = match tools::grade::grader_of(grader.as_deref()) {
+            Ok(g) => g,
+            Err(e) => return invalid(detail_of(e)),
+        };
+        off_runtime(move || {
+            tools::grade::grade_by(&root, &run_id, grader, &StepCaller::from_env())
+                .and_then(to_value)
+        })
+        .await
+    }
+
     #[tool(
         description = "Grade an ended run on its playbook's own quality criteria, only when the user asks for it. Opens a bounded reading session (one per run, one hour; a run takes one host grade, and only a person reopens it for another) and returns the session, the criteria with their good, partial and poor descriptions, and the outline of the run's views. Read with run_grade_read, then submit with run_grade_submit. Cite only records run_grade_read returned whole (citable: true); outline, children and search answers only route you. The built-in criteria (outcome, loops, scope, consent, skill_use) are graded by apb's rules, not here.",
         annotations(destructive_hint = false)

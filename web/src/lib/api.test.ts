@@ -10,7 +10,10 @@ import {
   fetchFit,
   fetchMemory,
   fetchRunGrades,
-  gradeRunByRules,
+  gradeRun,
+  decideKnownProblem,
+  fetchKnownProblem,
+  fetchKnownProblems,
   keepCurrentCandidate,
   reopenRunGrading,
   promoteCandidate,
@@ -229,9 +232,20 @@ describe('run quality', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', grades: [] }))
     await fetchRunGrades('r1', 'w1')
     expect(fetchMock).toHaveBeenCalledWith('/api/runs/r1/grades?workspace=w1', { headers: H })
-    fetchMock.mockResolvedValueOnce(jsonResponse({ grade: {} }))
-    await gradeRunByRules('r1')
-    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades', { method: 'POST', headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ grader: 'rules', grade: {} }))
+    await gradeRun('r1', 'rules')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ grader: 'rules' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ grader: 'model', skipped: 'off' }))
+    await expect(gradeRun('r1', 'model', 'w1')).resolves.toMatchObject({ skipped: 'off' })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades?workspace=w1', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ grader: 'model' }),
+    })
     fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', reopened: true }))
     await reopenRunGrading('r1', 'w1')
     expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades/reopen?workspace=w1', {
@@ -263,6 +277,31 @@ describe('run quality', () => {
       method: 'POST',
       headers: JSON_H,
       body: '{}',
+    })
+  })
+})
+
+describe('known problems', () => {
+  it('reads and decides through /api/playbooks/{id}/known-problems', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ playbook: 'p', scope: 'project', signed: true, problems: [] }))
+    await fetchKnownProblems('p', 'w1')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/known-problems?workspace=w1', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ problem: {}, changed_passages: [] }))
+    await fetchKnownProblem('p', 'kp-1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/known-problems/kp-1', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'kp-1', status: 'closed' }))
+    await decideKnownProblem('p', 'kp-1', 'close', { quote: 'fixed line' }, 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/known-problems/kp-1/close?workspace=w1', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ quote: 'fixed line' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'holds' }))
+    await decideKnownProblem('p', 'kp-1', 'recheck', { verdict: 'holds' })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/known-problems/kp-1/recheck', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ verdict: 'holds' }),
     })
   })
 })

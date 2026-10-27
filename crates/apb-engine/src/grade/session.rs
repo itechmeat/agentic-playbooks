@@ -190,12 +190,6 @@ fn open_key(run_dir: &Path) -> OpenKey {
     )
 }
 
-/// The workspace redactor of the run at `run_dir`.
-fn redactor_of(run_dir: &Path) -> Redactor {
-    let root = crate::run_retro::project_root_of(run_dir).unwrap_or_else(|| run_dir.to_path_buf());
-    Redactor::for_workspace(&root, Vec::new())
-}
-
 /// The ended run at `run_dir`, its sources redacted once: from the cache
 /// while its journal is unchanged, else read anew. An ended run's
 /// transcripts do not change.
@@ -213,7 +207,7 @@ fn open_run(run_dir: &Path) -> Result<Arc<OpenRun>, EngineError> {
             "the run has not ended: a run is graded once it ends".into(),
         ));
     }
-    sources.redact(&redactor_of(run_dir));
+    sources.redact(&super::grader::workspace_redactor(run_dir));
     let defs: Vec<CriterionDef> = super::grader::criteria_for(&sources)
         .into_iter()
         .filter(|d| d.source == CriterionSource::Playbook)
@@ -389,7 +383,7 @@ pub fn submit(
     let mut file = load(run_dir, session)?;
     let run = open_run(run_dir)?;
     let (sources, defs) = (&run.sources, &run.defs);
-    let redactor = redactor_of(run_dir);
+    let redactor = super::grader::workspace_redactor(run_dir);
     let proposals: Vec<Proposal> = proposals
         .iter()
         .cloned()

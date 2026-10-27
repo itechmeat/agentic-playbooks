@@ -585,6 +585,62 @@ then decides on its own.
 counts, latency and cost; they carry no labels (the asker acts on the answer
 itself), and `apb decisions thresholds set` refuses the use.
 
+## Daily-capped uses outside a run
+
+Four uses ask outside any run, so no run budget applies: each is capped per
+project and UTC day instead (`uses.<name>.max_requests_per_day`), and each
+request is logged as one line of `<root>/.apb/decisions.jsonl` under the
+log's lock, as for catalog ranking above. One table holds the defaults:
+
+| Use | Default cap per day | What asks |
+|---|---|---|
+| `catalog_rank` | 200 | `playbook_catalog` with a `query` |
+| `host_task` | 200 | `apb decide` and `decision_ask` outside a run |
+| `grade` | 50 | the model grader: `apb grade --model`, `--backfill --model`, MCP `run_grade { grader: model }`, the dashboard's Grade by model |
+| `problem_recheck` | 50 | a known problem's recheck after its source changed: at a run's start (at most two per start), `apb problems <id> recheck --model`, MCP `known_problem_recheck { by: model }`, the dashboard's Recheck by model |
+
+## Model grader (`grade`)
+
+Off unless `decisions.yaml` sets `uses.grade`. The model grader grades a
+finished run's own quality criteria (docs/QUALITY.md, "The model grader"):
+per criterion one `level` choice over the five levels with the criterion's
+own level texts, and per determinate level the record that supports it,
+chosen from the record references of the views sent (plus `none`). Only
+views that fit whole within `privacy.max_state_bytes` are sent, scrubbed;
+a view is never clipped. A grade sends what the run produced, so the use
+also needs `privacy.send` to include `outputs`; without it nothing is
+asked (`skipped: off`).
+
+- `uses.grade.thresholds.min_confidence` (default 0.7): an answer below it
+  is `not_enough_data`.
+- A model grade counts for promoting a candidate only when the use is in
+  `enforce` and the provider is calibrated; otherwise it is stored and
+  shown, with `counts_for_promotion: false`.
+- Nothing is graded on its own: the grader runs only when a person or a
+  host asks.
+
+## Known-problem recheck (`problem_recheck`)
+
+Off unless `decisions.yaml` sets `uses.problem_recheck`
+(docs/KNOWN-PROBLEMS.md). When a known problem's source changed, one
+request asks a `verdict` choice (`holds`, `closed`, `undetermined`) and a
+`quote` choice over the numbered passages of the new source that the old
+text does not have (plus `none`). The model never types the quote: apb
+copies the chosen passage, and the recheck rule accepts a close only on a
+passage that is new. The mode decides what an answer counts as: `shadow`
+logs it and leaves the problem undetermined, `advise` turns a close into
+`closed_proposed` for a person, `enforce` closes it, but only on a
+calibrated answer (or with `allow_uncalibrated: true`) whose confidence
+is at least `uses.problem_recheck.thresholds.min_confidence` (default
+0.8); any other close is `closed_proposed`.
+
+A recheck sends what agents wrote (the problem's symptom and workaround)
+and changed passages of the source, so it needs `privacy.send` to include
+both `outputs` and `diffs`; without them nothing is asked and the problem
+waits for a person. Nothing is asked either when the source has no new
+passage to judge (its old text was not kept, or the change only removed
+lines) or still looks like it holds a credential after scrubbing.
+
 ## Judge node (`judge_node`)
 
 A playbook's `judge` node (authoring: HOWTO-authoring.md, "Judge nodes and

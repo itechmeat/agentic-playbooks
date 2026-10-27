@@ -45,6 +45,8 @@ mod inbox_store_test;
 mod instruction_draft_test;
 #[path = "suite/interactive_howto_example_test.rs"]
 mod interactive_howto_example_test;
+#[path = "suite/known_problems_test.rs"]
+mod known_problems_test;
 #[path = "suite/list_schema_test.rs"]
 mod list_schema_test;
 #[path = "suite/migration_test.rs"]
@@ -95,6 +97,8 @@ mod validate_fork_test;
 mod validate_goal_test;
 #[path = "suite/validate_inbox_test.rs"]
 mod validate_inbox_test;
+#[path = "suite/validate_known_problems_test.rs"]
+mod validate_known_problems_test;
 #[path = "suite/validate_node_io_test.rs"]
 mod validate_node_io_test;
 #[path = "suite/validate_params_test.rs"]

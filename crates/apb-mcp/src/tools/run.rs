@@ -206,8 +206,8 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     Ok(out)
 }
 
-/// Issue #192: the candidate trial this run was, with its verdict, and
-/// the run's grades; each absent when there is none.
+/// Issue #192: the candidate trial this run was, with its verdict, the
+/// run's grades and its known problems; each absent when there is none.
 fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
     if let Some(t) = apb_engine::candidate::trial_of(dir, &view.events) {
         out["candidate_trial"] = json!(t);
@@ -220,6 +220,11 @@ fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, d
     let grades = super::grade::grade_lines(dir);
     if !grades.is_empty() {
         out["grades"] = json!(grades);
+    }
+    // Known problems: what the run showed its agents and what it hid;
+    // absent for a run whose playbook shows nothing.
+    if let Some(k) = super::problems::run_block(&view.events) {
+        out["known_problems"] = json!(k);
     }
 }
 

@@ -28,7 +28,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
   rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
   param rules V99 and V100, `quality` for the `quality:` block and the
-  supervisor policy V102-V107; `nodes` also holds V68, ids that start with `@`
+  supervisor policy V102-V107, `known_problems` for the `known_problems:`
+  block and `quality.criteria_grader` V108-V111; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, and `precedence` combining them), the run
@@ -62,7 +63,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   detector of values and param names (`token_shape.rs`), run quality
   (`quality/`: `criteria` the `quality:` block, the built-in criteria and
   their digests, `grade` the grade a grader stores, `compare` the comparable
-  key and the deterministic comparison of a candidate with `current`), the
+  key and the deterministic comparison of a candidate with `current`), known
+  problems (`known_problems/`: `block` the `known_problems:` block, `mod` the
+  stored types, ids, significance and the location grammar `scope_of`,
+  `store` the signed per-playbook file under a lock, `recheck` the pure
+  rule that settles a recheck and the changed passages), the one scrubber
+  every stored or sent text goes through (`scrub.rs`: `Scrubber` and its
+  `flags` check), the
   one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
   another scope's store (`scope_move.rs`), schema 1->2 migrator
@@ -155,7 +162,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   self-contained HTML page (`report_html/`), run quality (`grade/`:
   `sources` every view of a run a grader reads, `reader` the bounded,
   redacting, traced reader, `evidence` the one validator every grader's
-  output goes through, `rules/` the rules grader of the built-ins, `session`
+  output goes through, `rules/` the rules grader of the built-ins, `model`
+  the decision-model grader of the playbook's own criteria, `session`
   a host's grading session, `store` the write-once grade files;
   `transcript/` the attempt transcript adapter, claude's session parsed, the
   other agents' streams as plain text; `candidate/`: the gate's choice and
@@ -163,7 +171,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `resettle` after a stored grade and a person's decision; `run_history.rs`
   the earlier runs of a playbook the estimate and the comparison share),
   the redactor every text that
-  leaves the machine goes through (`redact.rs`),
+  leaves the machine goes through (`redact.rs`, over
+  `apb_core::scrub::Scrubber`), known problems (`known_problems/`: `observe`
+  at a run's end, `at_start` what a starting run shows and journals once,
+  `view`, `decide`, `recheck_one` and `scan` for the surfaces; `extract` the
+  sightings of a journal, `source` a problem's current and old source text,
+  `recheck` the model, host and person rechecks, `prompt` the attempt
+  section and the supervisor line),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
@@ -189,7 +203,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`decision/`: the one entry point for decision-model uses, redaction,
   budget, replay, the `decision_made` event, the enforce gate, and one
   module per use: completion check, retry advice, supervisor wake triage,
-  review recommendation, tier routing, the judge node and edge answers
+  review recommendation, tier routing, `bounded` the shared ask over whole
+  views the model grader and the recheck use, the judge node and edge answers
   (`scheduler/judge` runs them), and `report/`: the labellers, statistics
   and replay behind `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
@@ -201,9 +216,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `notify_unavailable` start check, a live change and the run's `notify`
   block, shared with the HTTP API and the CLI, `grade` for grading a run,
   its grades and the `grades` block of `run_status`, where every stored
-  grade re-decides the candidate (`after_stored`), and `candidate` for the
-  candidate comparison and a person's decision, both shared with the HTTP
-  API and the CLI); `promote/` is `playbook_make_global` (the
+  grade re-decides the candidate (`after_stored`), `candidate` for the
+  candidate comparison and a person's decision, and `problems` for a
+  playbook's known problems, a person's decision, a recheck and a scan,
+  all shared with the HTTP API and the CLI); `promote/` is `playbook_make_global` (the
   plan and its blockers in `plan`, the apply in `mod`); `catalog_rank` is the
   opt-in decision-model ranking behind `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
@@ -220,12 +236,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   is `apb notify` and the notify flags of `apb run` (forwarded to the
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
   --html`, `grade.rs` is `apb grade` and the grade lines of `apb runs
-  <id>`, `candidate.rs` is `apb candidate`.
+  <id>`, `candidate.rs` is `apb candidate`, `problems.rs` is `apb
+  problems`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `memory` for remembered run
   input, `notify` for the machine's notify target and a live run's change,
-  `quality` for a run's grades and a playbook's candidate;
+  `quality` for a run's grades and a playbook's candidate, `problems` for
+  a playbook's known problems; `state.rs` also holds the tool-layer
+  answer and refusal mapping they share;
   `runs` also serves the report page), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
@@ -248,7 +267,29 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   and re-decides the candidate through
   `apb_mcp::tools::grade::after_stored`, which every grading surface calls.
   Grading and deciding a candidate are refused from a run step
-  (`StepCaller`).
+  (`StepCaller`). The model grader (`model/1`) grades the playbook's own
+  criteria only on request, through the standalone decider's daily-capped
+  `grade` use; `quality.criteria_grader` says whose grades a comparison
+  expects.
+- **Known problems** (`docs/KNOWN-PROBLEMS.md`): every run that ends adds
+  the tool problems it saw (findings with `kind: tool_problem` or a
+  location in the grammar, and a connector function failing alike at least
+  twice in one run) to its playbook's signed, scrubbed store
+  (`.apb/problems/<scope>/<id>.json`). A playbook with a `known_problems:`
+  block gets one `known_problems_shown` event at start, after
+  `run_provenance`; attempt prompts rebuild their `## known problems`
+  section from that event alone, so a resume shows the same. A problem
+  whose source digest changed is rechecked first (by model only with
+  `uses.problem_recheck` on, at most two per start); a close stands only on
+  a quote of new source text (`known_problems::recheck::settle`), a host's
+  or an advising model's close becomes `closed_proposed`, and so does an
+  enforcing model's unless its answer is calibrated (or
+  `allow_uncalibrated`) at `min_confidence`. A wording of an agent's text
+  is shown only once it recurs in `min_runs` runs; an unsigned store is
+  only counted. Every write (decide, recheck, scan) goes through
+  `apb_mcp::tools::problems`, which refuses a run step (and, on MCP, a
+  decision or recheck while a run of the playbook waits on a host task);
+  reading is allowed anywhere.
 
 - A **profile** is the single executor binding for an `agent_task` node: agent +
   model + ordered fallbacks + SOUL (role prompt) + skills, with a scope

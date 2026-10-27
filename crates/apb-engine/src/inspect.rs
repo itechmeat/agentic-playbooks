@@ -158,7 +158,12 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
     let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
     let pending_supervisor = progress.as_ref().and_then(|p| p.pending_supervisor.clone());
 
-    Ok(serde_json::json!({
+    // The known problems shown to the run's agents and the ones hidden, when
+    // its playbook shows any (the supervisor reports new ones, never closes
+    // one).
+    let known_problems = crate::known_problems::of_run(&events);
+
+    let mut out = serde_json::json!({
         "run_id": run_id,
         "run_status": run_status.as_str(),
         "nodes": nodes,
@@ -169,7 +174,11 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
         "pending_review": pending_review,
         "pending_supervisor": pending_supervisor,
         "events": events,
-    }))
+    });
+    if let Some(k) = known_problems {
+        out["known_problems"] = serde_json::json!(k);
+    }
+    Ok(out)
 }
 
 /// Writes the supervisor report to `run_dir/supervisor/report.md` atomically.

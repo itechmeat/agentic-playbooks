@@ -66,13 +66,70 @@ fn capture_rejects_secret_like_values() {
     let _g = EnvGuard;
     init_project(proj.path()).unwrap();
 
-    let synopsis = json!({ "title": "Deploy", "token": "abcd1234efgh5678 zz" });
-    // A secret directly in the synopsis.
+    // A credential after a key name, in the synopsis: refused by kind, and
+    // the report never echoes the value.
     let synopsis_secret = json!({ "note": "api_key: abcd1234efgh5678" });
     let res =
         playbook_capture(proj.path(), &synopsis_secret, "project", &good_yaml("dep")).unwrap();
     assert_eq!(res["rejected"], "secret_like_value");
-    let _ = synopsis;
+    assert_eq!(res["match"], "credential-shaped value");
+    assert!(!res.to_string().contains("abcd1234efgh5678"));
+
+    // A token shape inside the yaml is refused too.
+    let yaml = good_yaml("dep2").replace("name: dep2", "name: \"ghp_abcdefghijklmnop1234\"");
+    let res = playbook_capture(
+        proj.path(),
+        &json!({ "title": "Token in yaml" }),
+        "project",
+        &yaml,
+    )
+    .unwrap();
+    assert_eq!(res["rejected"], "secret_like_value");
+
+    // A keyed value of one case, as a nested object: the shape the earlier
+    // capture check refused is still refused.
+    let res = playbook_capture(
+        proj.path(),
+        &json!({ "title": "Login", "auth": { "password": "correcthorsebatterystaple" } }),
+        "project",
+        &good_yaml("dep3"),
+    )
+    .unwrap();
+    assert_eq!(res["rejected"], "secret_like_value");
+}
+
+#[test]
+fn capture_keeps_git_hashes_and_uuids() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+
+    // Identifiers are not credentials: a synopsis that names a commit and a
+    // run is captured.
+    let synopsis = json!({
+        "title": "Revert a commit",
+        "note": "revert 0123456789abcdef0123456789abcdef01234567 seen in run 123e4567-e89b-12d3-a456-426614174000",
+        "trigger": { "when": ["revert a bad commit"] }
+    });
+    let res = playbook_capture(proj.path(), &synopsis, "project", &good_yaml("revert")).unwrap();
+    assert!(res.get("rejected").is_none(), "{res}");
+    assert_eq!(res["lifecycle"], "draft");
+
+    let dismissed = suggestion_dismiss(
+        proj.path(),
+        DismissRequest {
+            pattern: "revert-commit",
+            synopsis: "Revert commit 0123456789abcdef0123456789abcdef01234567",
+            kind: Some("soft"),
+            scope: None,
+            ttl_days: None,
+        },
+    )
+    .unwrap();
+    assert!(dismissed.get("rejected").is_none(), "{dismissed}");
 }
 
 #[test]

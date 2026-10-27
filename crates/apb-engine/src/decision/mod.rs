@@ -23,6 +23,7 @@
 //! 9. With `privacy.debug_state`, the redacted state and the full answers go
 //!    to `runs/<id>/decisions/<seq>.json`.
 
+pub mod bounded;
 mod budget;
 pub(crate) mod completion;
 pub mod host_task;

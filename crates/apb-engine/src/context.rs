@@ -277,9 +277,10 @@ On conflict, higher-priority sources override lower ones: supervisor notes overr
 
 /// Assembles the trailing instruction-source blocks appended to an agent
 /// attempt prompt after the rendered template (issue #56 finding 4): the run
-/// instruction, then the applied supervisor notes, then the precedence frame
-/// naming the on-conflict order (supervisor notes > run instruction > node
-/// template). Shared by `execute_node` and `execute_finish_answer` so the two
+/// instruction, then the known problems shown to `node`
+/// ([`crate::known_problems::prompt::section`]), then the applied supervisor
+/// notes, then the precedence frame naming the on-conflict order
+/// (supervisor notes > run instruction > node template). Shared by `execute_node` and `execute_finish_answer` so the two
 /// assembly sites cannot drift. The run instruction and supervisor notes are
 /// appended as explicit trailing sections (not placeholder substitutions), so a
 /// node template that references neither `{{run.context}}` nor
@@ -289,6 +290,7 @@ On conflict, higher-priority sources override lower ones: supervisor notes overr
 pub fn assemble_agent_prompt(
     template: &str,
     instruction: Option<&str>,
+    node: &str,
     events: &[Event],
 ) -> String {
     // A template that places `{{run.context}}` already carries the instruction:
@@ -303,6 +305,7 @@ pub fn assemble_agent_prompt(
     } else {
         with_run_instruction(template, instruction)
     };
+    text.push_str(&crate::known_problems::prompt::section(events, node));
     text = with_supervisor_notes(&text, events);
     text.push_str(&precedence_frame(instruction, events));
     text
@@ -1033,7 +1036,7 @@ mod tests {
     fn assemble_agent_prompt_delivers_instruction_without_placeholder() {
         let template = "Follow your SOUL and lock the branch scope.";
         let instruction = "Exclude the docs/reviews artifacts from the branch and the PR.";
-        let assembled = assemble_agent_prompt(template, Some(instruction), &[]);
+        let assembled = assemble_agent_prompt(template, Some(instruction), "n", &[]);
 
         assert!(assembled.starts_with(template), "template stays first");
         assert!(
@@ -1068,7 +1071,7 @@ mod tests {
                 detail: "prefer approach B".into(),
             },
         )];
-        let assembled = assemble_agent_prompt(template, Some("stay within budget"), &events);
+        let assembled = assemble_agent_prompt(template, Some("stay within budget"), "n", &events);
 
         let tmpl = assembled.find("TEMPLATE BODY").expect("template");
         let instr = assembled.find("## run instruction").expect("instruction");
@@ -1089,7 +1092,7 @@ mod tests {
         let template = "exact template body, no placeholders";
         // No instruction, no notes: assembly must be a pure no-op so cache keys
         // and byte-for-byte prompt expectations do not shift.
-        assert_eq!(assemble_agent_prompt(template, None, &[]), template);
+        assert_eq!(assemble_agent_prompt(template, None, "n", &[]), template);
         let events = vec![ev(
             0,
             EventPayload::NodeFinished {
@@ -1100,9 +1103,12 @@ mod tests {
                 artifacts: Vec::new(),
             },
         )];
-        assert_eq!(assemble_agent_prompt(template, None, &events), template);
         assert_eq!(
-            assemble_agent_prompt(template, Some("  "), &events),
+            assemble_agent_prompt(template, None, "n", &events),
+            template
+        );
+        assert_eq!(
+            assemble_agent_prompt(template, Some("  "), "n", &events),
             template
         );
     }

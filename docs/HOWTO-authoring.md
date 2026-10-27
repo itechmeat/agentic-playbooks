@@ -419,7 +419,14 @@ should check, next to its result. Both go in the same status file:
   `location` (a path with an optional `:line`, or a record; at most 200
   characters), the `evidence` (at most 1000) and `why_not_fixed` (at most
   500). A warning has a `subject` (at most 200) and a `reason` (at most 500).
-  Every field is required.
+  Every field is required, except a finding's optional `workaround` (at
+  most 500): how the attempt got around the problem.
+- A finding about a tool rather than the work (`kind: tool_problem`, or a
+  `location` such as `connector:crm.update_contact`, `mcp:notion.search`,
+  `cli:make`, `skill:release-notes`, `path:scripts/build.sh` or
+  `node:review`) is also collected as a known problem of the playbook
+  (`docs/KNOWN-PROBLEMS.md`); a playbook with a `known_problems:` block
+  shows the ones that recur to its later runs.
 - At most 20 of each per attempt. An entry with an empty or over-long field,
   a control character or a wrong type is dropped whole and counted; nothing
   is truncated.
@@ -2774,6 +2781,38 @@ The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may
 change them.
 
+## known_problems (what earlier runs met with the tools)
+
+Optional. Every run adds the trouble it met with its tools to the
+playbook's store: findings about a tool (above), and connector calls of one
+function that failed alike at least twice in the run. With the block, the
+problems that recur are shown to later runs' agents, in a trailing
+`## known problems` section of the attempt prompt, as facts to check
+(docs/KNOWN-PROBLEMS.md has the full reference):
+
+```yaml
+known_problems:
+  show: significant   # significant (default) | confirmed (a person's only) | off
+  min_runs: 2         # 1 to 20 distinct runs make a problem significant
+  max_shown: 5        # 1 to 10 per attempt prompt
+```
+
+- A problem about a connector function is shown only to the agent nodes
+  that bind that connector, one about a skill only to the nodes whose
+  profile carries it, one about a node to that node (none of them matching:
+  it is not shown); the rest go to every agent node.
+- An agent's symptom or workaround text is shown only once that exact
+  wording recurs in `min_runs` runs (or a person confirmed it).
+- With the block, the attempt's status-file paragraph also asks for
+  `tool_problem` findings with a `workaround`.
+- A problem whose source (the connector function, the skill, the file, the
+  node's prompt) changed is rechecked before it is shown again; it closes
+  only on a quote of the new source that shows the fix, and a person
+  decides with `apb problems` or the dashboard's Problems panel.
+- Without the block nothing is shown or journaled: prompts stay as they
+  were. V108 refuses a malformed block, V109 warns when there is no
+  `agent_task` node to show anything to.
+
 ## quality (run quality)
 
 A run that succeeded can still have gone badly. The `quality:` block names
@@ -2807,10 +2846,16 @@ quality:
   records it read in full. A grade keeps references, counts and one short
   redacted `why`, never the source text it read. A run takes one host
   grade until a person reopens it (`apb grade <run> --reopen`).
+- Or by the project's decision model (`apb grade <run> --model`, MCP
+  `run_grade { grader: model }`), only when `decisions.yaml` turns
+  `uses.grade` on; `criteria_grader: model` makes a candidate comparison
+  expect those grades instead of a host's (V110 refuses an unknown value,
+  V111 warns when there are no criteria of the playbook's own).
 - Write each level as something checkable against a record. Editing a
   criterion starts a new comparison history (its digest changes).
-- `apb grade <run>` grades a run by rules, `apb grade --backfill <id>`
-  grades earlier runs, `apb candidate <id>` shows and decides a candidate.
+- `apb grade <run>` grades a run by rules (`--model` by the decision
+  model), `apb grade --backfill <id>` grades earlier runs, `apb candidate
+  <id>` shows and decides a candidate.
 
 ## baseline_check (before and after)
 

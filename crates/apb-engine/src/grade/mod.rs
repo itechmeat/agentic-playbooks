@@ -6,11 +6,12 @@
 //! - [`reader`]: the bounded, redacting, traced reader;
 //! - [`evidence`]: the one validator every grader's output goes through;
 //! - [`rules`]: the rules grader for the built-in criteria;
+//! - [`model`]: the decision-model grader for the playbook's own criteria;
 //! - [`session`]: a host's grading session for the playbook's own criteria;
 //! - [`store`]: the grade files.
 //!
-//! Entry points: [`grade_rules`] (any finished run, on request),
-//! [`grade_ending`] (the inline grade as a run ends), [`start_session`],
+//! Entry points: [`grade_rules`] and [`grade_model`] (any finished run, on
+//! request), [`grade_ending`] (the inline grade as a run ends), [`start_session`],
 //! [`read`] and [`submit`] (a host's session), [`grades_of`] and
 //! [`backfill`]. A stored grade may change a candidate's standing: the
 //! caller runs [`crate::candidate::resettle`] after storing one outside a
@@ -18,6 +19,7 @@
 
 pub mod evidence;
 mod grader;
+pub mod model;
 pub mod reader;
 pub mod rules;
 pub mod session;
@@ -37,17 +39,112 @@ pub use grader::Grader;
 pub use session::{SessionStart, SubmitOutcome, read, reopen, start_session, submit};
 pub use store::grades_of;
 
-/// Grades the finished run at `run_dir` by rules and stores the grade.
-pub fn grade_rules(run_dir: &Path) -> Result<Grade, EngineError> {
+/// The sources of the ended run at `run_dir`.
+fn ended_sources(run_dir: &Path) -> Result<RunSources, EngineError> {
     let sources = RunSources::load(run_dir, RunEnd::Journaled)?;
     if sources.outcome.is_none() {
         return Err(EngineError::Conflict(
             "the run has not ended: a run is graded once it ends".into(),
         ));
     }
+    Ok(sources)
+}
+
+/// Grades the finished run at `run_dir` by rules and stores the grade.
+pub fn grade_rules(run_dir: &Path) -> Result<Grade, EngineError> {
+    let sources = ended_sources(run_dir)?;
     let grade = run_grader(&rules::RulesGrader, &sources);
     store::write(run_dir, &grade)?;
     Ok(grade)
+}
+
+/// What [`grade_model`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelGraded {
+    /// A `model/1` grade, stored.
+    Graded(Box<Grade>),
+    /// Nothing stored: `off` (the use is off, run outputs may not be sent,
+    /// or no provider resolves),
+    /// `no_criteria` (the playbook has none of its own), or the decider's
+    /// reason (`budget`, `send`, `busy`, `state_too_large`) before it
+    /// answered any criterion. A stop after the first answer stores the
+    /// grade, the remaining criteria `not_enough_data` under that reason.
+    Skipped { reason: String },
+}
+
+/// Grades the playbook's own criteria of the finished run at `run_dir` with
+/// the decision-model grader and stores the grade. Asks a model only when
+/// the project's `uses.grade` is not `off`; never on its own.
+pub fn grade_model(run_dir: &Path) -> Result<ModelGraded, EngineError> {
+    let sources = ended_sources(run_dir)?;
+    let skipped = |reason: &str| {
+        Ok(ModelGraded::Skipped {
+            reason: reason.to_string(),
+        })
+    };
+    let root = crate::run_retro::project_root_of(run_dir).unwrap_or_else(|| run_dir.to_path_buf());
+    let Some(decider) = crate::decision::standalone::StandaloneDecider::for_project(&root)
+        .filter(|d| {
+            d.mode_for(apb_decide::UseSite::Grade) != apb_core::decisions::DecisionMode::Off
+        })
+        // A grade sends what the run produced, not only prompts.
+        .filter(|d| d.sends(apb_core::decisions::SendClass::Outputs))
+        .filter(|d| d.available())
+    else {
+        return skipped("off");
+    };
+    let grader = model::ModelGrader::new(&decider);
+    if !grader::criteria_for(&sources)
+        .iter()
+        .any(|d| grader.grades(d))
+    {
+        return skipped("no_criteria");
+    }
+    let grade = run_grader(&grader, &sources);
+    // A stop before any answer stores nothing. A stop part way keeps the
+    // answers already paid for: the criteria it stopped before are
+    // `not_enough_data` under the stop reason, and a later request grades
+    // the run again.
+    if let Some(reason) = grader.stopped()
+        && !grader.answered_any()
+    {
+        return skipped(reason);
+    }
+    store::write(run_dir, &grade)?;
+    Ok(ModelGraded::Graded(Box::new(grade)))
+}
+
+/// Which grader grades on request (a backfill, `apb grade`, MCP
+/// `run_grade`, the dashboard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraderChoice {
+    Rules,
+    Model,
+}
+
+impl GraderChoice {
+    /// `rules` or `model`, as the surfaces name a grader.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "rules" => Some(GraderChoice::Rules),
+            "model" => Some(GraderChoice::Model),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GraderChoice::Rules => "rules",
+            GraderChoice::Model => "model",
+        }
+    }
+
+    pub fn id(self) -> GraderId {
+        match self {
+            GraderChoice::Rules => GraderId::RULES,
+            GraderChoice::Model => GraderId::MODEL,
+        }
+    }
 }
 
 /// The inline grade of a run that is ending now: by rules, when its
@@ -99,11 +196,19 @@ pub struct Backfilled {
 /// How many run directories a backfill looks through.
 pub const BACKFILL_SCAN: usize = 500;
 
-/// Grades by rules up to `last` of the latest ended runs of playbook `id`
-/// (of `version` when given) under the project `root` that have no rules
-/// grade yet, so a comparison has a history. Runs already graded or still
-/// live are reported as skipped and do not count toward `last`.
-pub fn backfill(root: &Path, id: &str, version: Option<&str>, last: usize) -> Vec<Backfilled> {
+/// Grades with `grader` up to `last` of the latest ended runs of playbook
+/// `id` (of `version` when given) under the project `root` that have no
+/// grade of that grader yet, so a comparison has a history. Runs already
+/// graded or still live are reported as skipped and do not count toward
+/// `last`. A model backfill stops at the first run the decider skips (the
+/// use off, the daily cap spent), reported with that reason.
+pub fn backfill(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    last: usize,
+    grader: GraderChoice,
+) -> Vec<Backfilled> {
     let dirs: Vec<PathBuf> =
         crate::run_history::runs_of(&[root.to_path_buf()], id, version, BACKFILL_SCAN);
     let mut out = Vec::new();
@@ -121,7 +226,7 @@ pub fn backfill(root: &Path, id: &str, version: Option<&str>, last: usize) -> Ve
             grade_id: None,
             skipped: Some(why.to_string()),
         };
-        if store::latest_of(&d, GraderId::RULES).is_some() {
+        if store::latest_of(&d, grader.id()).is_some() {
             out.push(skip(SKIP_GRADED));
             continue;
         }
@@ -145,19 +250,30 @@ pub fn backfill(root: &Path, id: &str, version: Option<&str>, last: usize) -> Ve
             continue;
         }
         tried += 1;
-        out.push(match grade_rules(&d) {
-            Ok(g) => Backfilled {
+        let graded = match grader {
+            GraderChoice::Rules => grade_rules(&d).map(|g| ModelGraded::Graded(Box::new(g))),
+            GraderChoice::Model => grade_model(&d),
+        };
+        match graded {
+            Ok(ModelGraded::Graded(g)) => out.push(Backfilled {
                 run_id: run_id.clone(),
                 grade_id: Some(g.grade_id),
                 skipped: None,
-            },
-            Err(e) => skip(&e.to_string()),
-        });
+            }),
+            Ok(ModelGraded::Skipped { reason }) => {
+                let stops = reason != "no_criteria";
+                out.push(skip(&reason));
+                if stops {
+                    break;
+                }
+            }
+            Err(e) => out.push(skip(&e.to_string())),
+        }
     }
     out
 }
 
-/// Why a backfill skipped a run that has a rules grade.
+/// Why a backfill skipped a run that has a grade of its grader.
 pub const SKIP_GRADED: &str = "graded";
 /// Why a backfill skipped a run that has not ended.
 pub const SKIP_LIVE: &str = "live";

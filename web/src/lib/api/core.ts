@@ -22,9 +22,13 @@ import type {
 import type {
   FitReport,
   Graded,
+  KnownProblem,
   MachineNotify,
   PlaybookCandidate,
+  ProblemDetail,
+  ProblemsView,
   QualityRecord,
+  RecheckRecord,
   Recall,
   Refused,
   Remembered,
@@ -208,13 +212,19 @@ export const fetchRun = (id: string, workspace = '') =>
 export const fetchRunReport = (id: string, workspace = '') =>
   getJson<{ report: string }>(`${run(id)}/report${qs({ workspace })}`)
 
-// Run quality: a run's stored grades, a rules grade of an ended run (a
-// stored grade re-decides the playbook's candidate), a playbook's candidate
-// compared with current, and a person's decision on it.
+// Run quality: a run's stored grades, a grade of an ended run by rules or
+// by the project's decision model (a stored grade re-decides the
+// playbook's candidate), a playbook's candidate compared with current, and
+// a person's decision on it.
+export type GraderChoice = 'rules' | 'model'
 export const fetchRunGrades = (id: string, workspace = '') =>
   getJson<RunGrades>(`${run(id)}/grades${qs({ workspace })}`)
-export const gradeRunByRules = (id: string, workspace = '') =>
-  requestJson<Graded>(`${run(id)}/grades${qs({ workspace })}`, { method: 'POST' })
+export const gradeRun = (id: string, grader: GraderChoice, workspace = '') =>
+  requestJson<Graded>(`${run(id)}/grades${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ grader }),
+  })
 // POST /api/runs/{id}/grades/reopen: a person lets a host grade the run
 // once more (a run takes one host grade until then).
 export const reopenRunGrading = (id: string, workspace = '') =>
@@ -231,6 +241,33 @@ export const keepCurrentCandidate = (id: string, reason: string, workspace = '')
     headers: jsonHeaders,
     body: JSON.stringify(reason.trim() ? { reason: reason.trim() } : {}),
   })
+
+// Known problems: a playbook's problems, one with the passages of its
+// source that are new since it was seen, and a person's decision or
+// recheck (`verdict`: the person's own recheck, `holds` when it still holds;
+// without it the project's decision model rechecks).
+export type ProblemAction = 'confirm' | 'dismiss' | 'reopen' | 'close' | 'recheck'
+export interface ProblemDecision {
+  reason?: string
+  quote?: string
+  verdict?: 'holds' | 'closed' | 'undetermined'
+}
+const problems = (id: string) => `${pb(id)}/known-problems`
+export const fetchKnownProblems = (id: string, workspace = '') =>
+  getJson<ProblemsView>(`${problems(id)}${qs({ workspace })}`)
+export const fetchKnownProblem = (id: string, problem: string, workspace = '') =>
+  getJson<ProblemDetail>(`${problems(id)}/${encodeURIComponent(problem)}${qs({ workspace })}`)
+export const decideKnownProblem = (
+  id: string,
+  problem: string,
+  action: ProblemAction,
+  body: ProblemDecision = {},
+  workspace = '',
+) =>
+  requestJson<KnownProblem | RecheckRecord>(
+    `${problems(id)}/${encodeURIComponent(problem)}/${action}${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
+  )
 
 // GET /api/runs/{id}/report.html: the run report as one self-contained page,
 // served as a download (the run page's "Save report" link).

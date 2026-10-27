@@ -253,3 +253,42 @@ pub(crate) fn versioning_error(e: VersioningError) -> Response {
 pub(crate) struct WorkspaceQuery {
     pub(crate) workspace: Option<String>,
 }
+
+/// The status a tool-layer refusal answers with: 404 for what is not
+/// there, 409 for a conflict (a run step, a live run, a stale state), 422
+/// for anything else the tool refused.
+pub(crate) fn tool_refusal(e: apb_mcp::tools::ToolError) -> Response {
+    use apb_mcp::tools::ToolError;
+    match e {
+        ToolError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
+        ToolError::Conflict(what) => (StatusCode::CONFLICT, what).into_response(),
+        ToolError::Engine(what) => (StatusCode::UNPROCESSABLE_ENTITY, what).into_response(),
+    }
+}
+
+/// Runs `work` on the project the request names, off the runtime, and
+/// answers its value as JSON. `id` (a playbook or run id) must be a safe
+/// path segment, else 404.
+pub(crate) async fn answer<T, F>(
+    state: &AppState,
+    id: &str,
+    workspace: Option<&str>,
+    work: F,
+) -> Response
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce(PathBuf) -> Result<T, apb_mcp::tools::ToolError> + Send + 'static,
+{
+    if !is_safe_id(id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(state, workspace) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match tokio::task::spawn_blocking(move || work(root)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => tool_refusal(e),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}

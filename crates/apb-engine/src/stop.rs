@@ -190,6 +190,7 @@ pub fn stop_run_by(root: &Path, run_id: &str, by: PauseBy) -> Result<StopOutcome
         reason: STOP_REASON.into(),
         by: Some(by),
     })?;
+    crate::known_problems::observe_ended(&run_dir);
     // A run paused with `--keep-lock` (issue #200) gives its lock back.
     crate::workdir::release_paused(root, run_id);
     Ok(StopOutcome::FinalizedDeadRun)

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 
 use apb_core::candidate::{PromotePolicy, lineage_reaches, promote_policy};
 use apb_core::quality::QualityRecord;
-use apb_core::quality::compare::{QualityDecision, QualityGate, Verdict, decide, expected_of};
+use apb_core::quality::compare::{
+    QualityDecision, QualityGate, Verdict, decide, expected_of, own_grader_of,
+};
 use apb_core::quality::criteria::criteria_of;
 use apb_core::quality::grade::Grade;
 use apb_core::schema::Playbook;
@@ -118,7 +120,8 @@ fn evaluate(
     gate: &QualityGate,
     ending: Option<&str>,
 ) -> (QualityDecision, u32) {
-    let expected = expected_of(&criteria_of(current.quality.as_ref()));
+    let quality = current.quality.as_ref();
+    let expected = expected_of(&criteria_of(quality), own_grader_of(quality));
     let cand = side(line, &line.candidate, Runs::Trials { ending });
     let cur = side(
         line,

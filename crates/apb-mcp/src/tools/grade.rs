@@ -1,5 +1,5 @@
 //! Run quality on the surfaces: grading a finished run and reading its
-//! grades. MCP (`run_grade_*`, `run_grades`, the `grades` block of
+//! grades. MCP (`run_grade`, `run_grade_*`, `run_grades`, the `grades` block of
 //! `run_status`), the CLI (`apb grade`, the grade line of `apb runs <id>`)
 //! and the HTTP API (`/api/runs/{id}/grades`) all go through this module,
 //! so every stored grade is followed by the same candidate re-settle
@@ -16,7 +16,7 @@ use apb_core::quality::grade::{Grade, GraderId, Level};
 use apb_core::step_env::StepCaller;
 use apb_engine::grade::evidence::Proposal;
 use apb_engine::grade::reader::{ReadRequest, ReadResponse};
-use apb_engine::grade::{Backfilled, SessionStart, SubmitOutcome};
+use apb_engine::grade::{Backfilled, GraderChoice, ModelGraded, SessionStart, SubmitOutcome};
 use serde::Serialize;
 
 use super::{ToolError, outside_run, resolve_run_dir};
@@ -61,23 +61,65 @@ pub fn after_stored(root: &Path, id: &str) -> CandidateAfter {
     }
 }
 
-/// A rules grade just stored, and what it did to the candidate.
+/// A grade on request: the stored grade and what it did to the candidate,
+/// or why the grader stored nothing (a model grader whose use is off, over
+/// its daily cap, or with no criteria of the playbook's own).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Graded {
-    pub grade: Grade,
+    /// `rules` or `model`.
+    pub grader: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub grade: Option<Grade>,
+    /// Why nothing was stored: `off`, `no_criteria`, `budget`, `send`,
+    /// `busy`, `state_too_large`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub skipped: Option<String>,
     #[serde(flatten)]
     pub after: CandidateAfter,
 }
 
-/// Grades the ended run `run_id` by rules (the built-in criteria), stores
-/// the grade and re-decides the candidate.
-pub fn grade_by_rules(root: &Path, run_id: &str, step: &StepCaller) -> Result<Graded, ToolError> {
+/// Grades the ended run `run_id` with `grader` (rules: the built-in
+/// criteria, free; model: the playbook's own criteria through the
+/// project's decision model, only when its `grade` use is on), stores the
+/// grade and re-decides the candidate.
+pub fn grade_by(
+    root: &Path,
+    run_id: &str,
+    grader: GraderChoice,
+    step: &StepCaller,
+) -> Result<Graded, ToolError> {
     outside_run(step, GRADING)?;
     let dir = resolve_run_dir(root, run_id)?;
-    let grade = apb_engine::grade::grade_rules(&dir)?;
-    let after = after_stored(root, &grade.playbook);
-    Ok(Graded { grade, after })
+    let graded = match grader {
+        GraderChoice::Rules => ModelGraded::Graded(Box::new(apb_engine::grade::grade_rules(&dir)?)),
+        GraderChoice::Model => apb_engine::grade::grade_model(&dir)?,
+    };
+    Ok(match graded {
+        ModelGraded::Graded(grade) => Graded {
+            grader: grader.as_str().to_string(),
+            after: after_stored(root, &grade.playbook),
+            grade: Some(*grade),
+            skipped: None,
+        },
+        ModelGraded::Skipped { reason } => Graded {
+            grader: grader.as_str().to_string(),
+            grade: None,
+            skipped: Some(reason),
+            after: CandidateAfter::default(),
+        },
+    })
+}
+
+/// A grader name from a surface argument (`rules` when absent).
+pub fn grader_of(name: Option<&str>) -> Result<GraderChoice, ToolError> {
+    match name {
+        None => Ok(GraderChoice::Rules),
+        Some(n) => GraderChoice::parse(n)
+            .ok_or_else(|| ToolError::Engine(format!("unknown grader `{n}`: use rules or model"))),
+    }
 }
 
 /// Opens a host grading session over the ended run `run_id` for its
@@ -167,21 +209,23 @@ pub struct BackfillReport {
     pub after: CandidateAfter,
 }
 
-/// Grades by rules the latest `last` ended runs of playbook `id` (of
-/// `version` when given) that have no rules grade yet, then re-decides the
-/// candidate once.
+/// Grades with `grader` the latest `last` ended runs of playbook `id` (of
+/// `version` when given) that have no grade of that grader yet, then
+/// re-decides the candidate once. A model backfill stops at the first run
+/// the decision model skips (its use off, its daily cap spent).
 pub fn backfill(
     root: &Path,
     id: &str,
     version: Option<&str>,
     last: usize,
+    grader: GraderChoice,
     step: &StepCaller,
 ) -> Result<BackfillReport, ToolError> {
     outside_run(step, GRADING)?;
     if !apb_core::registry::is_safe_segment(id) {
         return Err(ToolError::NotFound(format!("playbook `{id}`")));
     }
-    let runs = apb_engine::grade::backfill(root, id, version, last);
+    let runs = apb_engine::grade::backfill(root, id, version, last, grader);
     let after = if runs.iter().any(|r| r.grade_id.is_some()) {
         after_stored(root, id)
     } else {

@@ -1,11 +1,13 @@
 <script lang="ts">
   import type { Grade } from './api.gen'
+  import type { GraderChoice } from './api'
   import type { WfEvent } from './types'
   import OutcomeSection from '$lib/components/OutcomeSection.svelte'
   import OutcomeTag from '$lib/components/OutcomeTag.svelte'
   import { Button } from '$lib/components/ui/button'
   import {
     citeTarget,
+    graderLabel,
     graderName,
     hasHostGrade,
     latestGrades,
@@ -17,9 +19,12 @@
   // The run's quality: the latest grade of each grader, criterion by
   // criterion, with the records each level cites. A cite that stands for a
   // journal event opens it in the events list (onCite); a transcript or a
-  // status file also names the file under the run directory. The run is
-  // graded by rules on request once it ended. A run takes one host grade:
-  // Grade again lets a host grade it once more (onReopen).
+  // status file also names the file under the run directory. Once the run
+  // ended it is graded on request: by rules (free), or by the project's
+  // decision model on the playbook's own criteria (only when the project
+  // turns that use on; otherwise nothing is stored and the reason is said).
+  // A run takes one host grade: Grade again lets a host grade it once more
+  // (onReopen).
   let {
     grades,
     events,
@@ -33,7 +38,7 @@
     events: WfEvent[]
     ended: boolean
     grading?: boolean
-    onGrade: () => void
+    onGrade: (grader: GraderChoice) => void
     onReopen: () => void
     onCite: (seq: number) => void
   } = $props()
@@ -55,7 +60,7 @@
   {#each shown as g (g.grade_id)}
     <div class="grade" data-testid="run-quality-grade" data-grader={graderName(g)}>
       <div class="grade-head">
-        <span class="mono">{graderName(g)}</span>
+        <span class="mono" title={graderName(g)}>{graderLabel(g)}</span>
         <span class="muted">{when(g.created_at)} UTC</span>
       </div>
       <ul class="criteria">
@@ -114,7 +119,17 @@
       <Button
         variant="outline"
         size="sm"
-        onclick={onGrade}
+        onclick={() => onGrade('model')}
+        disabled={grading}
+        data-testid="run-quality-grade-model"
+        title="Grade the playbook's own criteria by the project's decision model; only when decisions.yaml turns its grade use on and lets run outputs be sent"
+      >
+        Grade by model
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onclick={() => onGrade('rules')}
         disabled={grading}
         data-testid="run-quality-grade-rules"
         title="Grade the built-in criteria (outcome, loops, scope, consent, skill use) from the journal and transcripts; no model is called"

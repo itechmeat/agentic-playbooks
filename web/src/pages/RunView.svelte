@@ -6,11 +6,12 @@
     fetchRun,
     fetchRunGrades,
     fetchRunReport,
-    gradeRunByRules,
+    gradeRun,
     postAnswer,
     postReview,
     reopenRunGrading,
     runReportHtmlUrl,
+    type GraderChoice,
   } from '../lib/api'
   import type { Grade } from '../lib/api.gen'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
@@ -32,7 +33,9 @@
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import RunBudgetPanel from '../lib/RunBudgetPanel.svelte'
   import QualityPanel from '../lib/QualityPanel.svelte'
-  import { verdictText } from '../lib/quality'
+  import RunKnownProblemsCard from '../lib/RunKnownProblemsCard.svelte'
+  import { hasRunProblems } from '../lib/knownproblems'
+  import { gradeSkippedText, verdictText } from '../lib/quality'
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
@@ -104,13 +107,21 @@
   // A grading request answers for the run it was made on: once the page
   // moved to another run it neither reports nor unlocks that run's buttons
   // (the route effect resets `grading`).
-  async function gradeRequest(work: () => Promise<{ done: string; warning?: string }>, failed: string) {
+  // A model grade that stored nothing (`skipped`) says why as a warning.
+  async function gradeRequest(
+    work: () => Promise<{ done: string; warning?: string; skipped?: boolean }>,
+    failed: string,
+  ) {
     const target = loadTarget()
     const stillHere = () => target === loadTarget()
     grading = true
     try {
-      const { done, warning } = await work()
+      const { done, warning, skipped } = await work()
       if (!stillHere()) return
+      if (skipped) {
+        toast.warning(done, { description: warning })
+        return
+      }
       toast.success(done)
       if (warning) toast.warning('The candidate was not re-decided', { description: warning })
       await load()
@@ -121,11 +132,15 @@
     }
   }
 
-  function gradeByRules() {
+  function grade(grader: GraderChoice) {
     return gradeRequest(async () => {
-      const graded = await gradeRunByRules(id, workspace)
+      const graded = await gradeRun(id, grader, workspace)
+      const by = grader === 'model' ? 'the decision model' : 'rules'
+      if (graded.skipped) {
+        return { done: `Not graded by ${by}`, warning: gradeSkippedText(graded.skipped), skipped: true }
+      }
       const after = graded.candidate ? `; candidate: ${verdictText(graded.candidate.verdict)}` : ''
-      return { done: `Graded by rules${after}`, warning: graded.candidate_error }
+      return { done: `Graded by ${by}${after}`, warning: graded.candidate_error }
     }, 'Grading failed')
   }
 
@@ -455,10 +470,13 @@
         events={detail.events}
         ended={isTerminalRunStatus(detail.run_status)}
         {grading}
-        onGrade={gradeByRules}
+        onGrade={grade}
         onReopen={reopenGrading}
         onCite={showCite}
       />
+      {#if hasRunProblems(detail.known_problems)}
+        <RunKnownProblemsCard problems={detail.known_problems} {workspace} playbook={detail.playbook} />
+      {/if}
     {/if}
 
     {#if detail?.candidate_trial}

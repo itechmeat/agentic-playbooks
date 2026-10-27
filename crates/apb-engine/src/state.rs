@@ -645,7 +645,9 @@ impl RunState {
                 | EventPayload::ListItemSettled { .. } => {}
                 // The budget and its gate; `crate::budget::BudgetFold` folds
                 // them.
-                EventPayload::BudgetSet { .. } | EventPayload::BudgetGate { .. } => {}
+                EventPayload::BudgetSet { .. }
+                | EventPayload::BudgetGate { .. }
+                | EventPayload::KnownProblemsShown { .. } => {}
                 // The notification subscription; `crate::notify::NotifyState`
                 // folds it.
                 EventPayload::NotifySet { .. } => {}

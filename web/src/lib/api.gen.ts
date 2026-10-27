@@ -122,11 +122,19 @@ enforce: boolean, checks: Array<BaselineCheckView>, met: number, not_met: number
  */
 regressions: number, };
 
-export type Finding = { kind: string, location: string, evidence: string, why_not_fixed: string, };
+export type Finding = { kind: string, location: string, evidence: string, why_not_fixed: string, 
+/**
+ * How the attempt got around the problem, when it did.
+ */
+workaround?: string, };
 
 export type NoteWarning = { subject: string, reason: string, };
 
-export type RunFinding = { node: string, attempt: number, kind: string, location: string, evidence: string, why_not_fixed: string, };
+export type RunFinding = { node: string, attempt: number, kind: string, location: string, evidence: string, why_not_fixed: string, 
+/**
+ * How the attempt got around the problem, when it did.
+ */
+workaround?: string, };
 
 export type RunWarning = { node: string, attempt: number, subject: string, reason: string, };
 
@@ -1144,6 +1152,11 @@ lists?: Array<RunList>,
  */
 candidate_trial?: CandidateTrial, 
 /**
+ * The known problems the run showed its agents and the ones it hid;
+ * absent for a run whose playbook shows none.
+ */
+known_problems?: RunKnownProblems, 
+/**
  * The run's pause (issue #200): who paused it, why, since and until
  * when, and `pausing` while a live driver drains toward a queued
  * pause. Absent for a run that is neither paused nor pausing.
@@ -1504,7 +1517,7 @@ read_share: number, };
 
 export type ReadTrace = { budget_chars: number, read_chars: number, ops?: Array<ReadOp>, views?: Array<ViewRead>, };
 
-export type GraderKind = "rules" | "host";
+export type GraderKind = "rules" | "host" | "model";
 
 export type GraderId = { kind: GraderKind, version: number, };
 
@@ -1570,11 +1583,208 @@ decision?: QualityDecision,
  */
 recorded?: QualityRecord, };
 
-export type Graded = { grade: Grade, candidate?: QualityRecord, candidate_error?: string, };
+export type Graded = { 
+/**
+ * `rules` or `model`.
+ */
+grader: string, grade?: Grade, 
+/**
+ * Why nothing was stored: `off`, `no_criteria`, `budget`, `send`,
+ * `busy`, `state_too_large`.
+ */
+skipped?: string, candidate?: QualityRecord, candidate_error?: string, };
 
 export type RunGrades = { run_id: string, grades: Array<Grade>, };
 
 export type PlaybookCandidate = { id: string, candidate: CandidateQualityView | null, };
+
+export type ScopeKind = "connector" | "mcp_tool" | "cli" | "skill" | "path" | "node" | "other";
+
+export type ProblemScope = { kind: ScopeKind, name: string, };
+
+export type ProblemOrigin = { "type": "finding", kind: string, } | { "type": "connector_failures", outcome: string, http_status?: number, };
+
+export type EvidenceRef = { run_id: string, seq: number, node?: string, };
+
+export type SourceKind = "connector_def" | "skill" | "project_file" | "playbook_node";
+
+export type ProblemSource = { kind: SourceKind, name: string, digest: string, excerpt?: string, };
+
+export type ProblemStatus = "open" | "closed" | "dismissed";
+
+export type Decided = { by: string, at_ms: number, reason?: string, };
+
+export type RecheckVerdict = "holds" | "closed" | "closed_proposed" | "undetermined";
+
+export type RecheckBasis = "unchanged" | "model" | "host" | "person";
+
+export type Quote = { text: string, lines: [number, number], };
+
+export type RecheckRecord = { 
+/**
+ * The source digest it was checked against.
+ */
+digest: string, verdict: RecheckVerdict, basis: RecheckBasis, quote?: Quote, 
+/**
+ * A short slug for why (`holds`, `quote_not_found`, ...).
+ */
+reason_code: string, 
+/**
+ * The decision mode a model's answer was taken in.
+ */
+mode?: string, at_ms: number, by: string, };
+
+export type KnownProblem = { id: string, scope: ProblemScope, 
+/**
+ * The leading wording of [`KnownProblem::symptoms`].
+ */
+symptom: string, 
+/**
+ * The leading wording of [`KnownProblem::workarounds`].
+ */
+workaround?: string, 
+/**
+ * The distinct symptom wordings runs reported, at most [`TEXTS_KEPT`].
+ */
+symptoms?: Array<ReportedText>, 
+/**
+ * The distinct workaround wordings runs reported, at most
+ * [`TEXTS_KEPT`].
+ */
+workarounds?: Array<ReportedText>, origin: ProblemOrigin, 
+/**
+ * The latest [`EVIDENCE_KEPT`] sightings.
+ */
+evidence: Array<EvidenceRef>, 
+/**
+ * Distinct runs that reported it.
+ */
+runs: number, first_seen_ms: number, last_seen_ms: number, source?: ProblemSource, status: ProblemStatus, confirmed?: Decided, 
+/**
+ * A person's latest status decision (dismiss, reopen, close).
+ */
+decided?: Decided, 
+/**
+ * The latest recheck.
+ */
+check?: RecheckRecord, 
+/**
+ * The latest [`CHECKS_KEPT`] rechecks, oldest first.
+ */
+checks?: Array<RecheckRecord>, };
+
+export type ReportedText = { text: string, runs: number, last_seen_ms: number, };
+
+export type ShownProblem = { id: string, scope: string, symptom: string, workaround?: string, 
+/**
+ * Empty: every agent node (a problem scoped to nodes none of which
+ * matches is hidden, never shown to all).
+ */
+nodes?: Array<string>, 
+/**
+ * `unchanged`, `model`, `host` or `person`.
+ */
+basis: string, };
+
+export type HiddenProblem = { id: string, 
+/**
+ * `source_changed_unchecked`, `undetermined`, `closed_proposed`,
+ * `over_limit`, `source_unreadable` or `no_matching_node`.
+ */
+reason: string, };
+
+export type SourceNow = "unchanged" | "changed" | "unreadable";
+
+export type ProblemView = { 
+/**
+ * Shown to a run that starts now (before any recheck), under the
+ * playbook's block or the default one.
+ */
+significant: boolean, 
+/**
+ * A person should look at it: it is open and its latest recheck could
+ * not settle it or proposes a close, or it is significant and its
+ * source changed since it was checked or cannot be read now.
+ */
+needs_look: boolean, 
+/**
+ * Its source now, for a problem that has one (`cli:`, `mcp:` and
+ * `other` problems have none and are never rechecked).
+ */
+source_now?: SourceNow, id: string, scope: ProblemScope, 
+/**
+ * The leading wording of [`KnownProblem::symptoms`].
+ */
+symptom: string, 
+/**
+ * The leading wording of [`KnownProblem::workarounds`].
+ */
+workaround?: string, 
+/**
+ * The distinct symptom wordings runs reported, at most [`TEXTS_KEPT`].
+ */
+symptoms?: Array<ReportedText>, 
+/**
+ * The distinct workaround wordings runs reported, at most
+ * [`TEXTS_KEPT`].
+ */
+workarounds?: Array<ReportedText>, origin: ProblemOrigin, 
+/**
+ * The latest [`EVIDENCE_KEPT`] sightings.
+ */
+evidence: Array<EvidenceRef>, 
+/**
+ * Distinct runs that reported it.
+ */
+runs: number, first_seen_ms: number, last_seen_ms: number, source?: ProblemSource, status: ProblemStatus, confirmed?: Decided, 
+/**
+ * A person's latest status decision (dismiss, reopen, close).
+ */
+decided?: Decided, 
+/**
+ * The latest recheck.
+ */
+check?: RecheckRecord, 
+/**
+ * The latest [`CHECKS_KEPT`] rechecks, oldest first.
+ */
+checks?: Array<RecheckRecord>, };
+
+export type ProblemsView = { playbook: string, scope: string, 
+/**
+ * Whether this installation wrote the file. An unsigned file's
+ * problems are never shown nor listed, only counted.
+ */
+signed: boolean, 
+/**
+ * How many problems an unsigned file holds.
+ */
+unsigned_problems: number, problems: Array<ProblemView>, };
+
+export type RunKnownProblems = { shown: Array<ShownProblem>, hidden: Array<HiddenProblem>, 
+/**
+ * Problems of a file this installation did not write: never shown,
+ * and only counted.
+ */
+unsigned: number, };
+
+export type ChangedPassage = { index: number, 
+/**
+ * 1-based, inclusive, in the current text.
+ */
+lines: [number, number], text: string, };
+
+export type ScanReport = { 
+/**
+ * Ended runs looked at.
+ */
+runs: number, 
+/**
+ * Sightings they had (a run observed before adds nothing again).
+ */
+sightings: number, };
+
+export type ProblemDetail = { problem: ProblemView, changed_passages: Array<ChangedPassage>, };
 
 export type TrialRecord = { 
 /**

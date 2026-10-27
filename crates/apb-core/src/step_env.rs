@@ -31,13 +31,13 @@ impl StepCaller {
         }
     }
 
-    /// The refusal of `what` when this process is a run step: a step does
-    /// not judge or decide a playbook's runs (grading, promoting); `None`
-    /// outside a run.
+    /// The refusal of `what` when this process is a run step: a step never
+    /// makes a decision that is a person's (grading a run, deciding a
+    /// candidate, deciding or closing a known problem); `None` outside a run.
     pub fn refusal(&self, what: &str) -> Option<String> {
         self.describe().map(|from| {
             format!(
-                "{what} is refused {from}: a run step does not grade runs or decide a playbook's candidate; do it outside a run (the CLI, the dashboard, or an agent session that is not a run step)"
+                "{what} is refused {from}: a run step does not decide what a person decides about a playbook and its runs; do it outside a run (the CLI, the dashboard, or an agent session that is not a run step)"
             )
         })
     }

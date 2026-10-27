@@ -44,6 +44,8 @@ mod memory_tools_test;
 mod patch_tool_test;
 #[path = "suite/policy_test.rs"]
 mod policy_test;
+#[path = "suite/problems_tool_test.rs"]
+mod problems_tool_test;
 #[cfg(unix)]
 #[path = "suite/profile_e2e_test.rs"]
 mod profile_e2e_test;

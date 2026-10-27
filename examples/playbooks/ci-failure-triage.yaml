@@ -46,6 +46,12 @@ quality:
         good: "likely_cause cites the first error in the log, before any follow-up errors"
         partial: "likely_cause names the failing step but cites a later follow-up error"
         poor: "likely_cause names an error or a step the log does not show"
+# Known problems (docs/KNOWN-PROBLEMS.md): the agent reports trouble with
+# its tools as a tool_problem finding (say, path:scripts/ci/build.sh when a
+# script masks the real error); once two runs report the same one, later
+# runs are shown it as a fact to check, and a change to that file is
+# rechecked before it is shown again.
+known_problems: { min_runs: 2, max_shown: 3 }
 nodes:
   - { id: start, type: start }
   - id: triage

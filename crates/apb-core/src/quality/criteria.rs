@@ -42,9 +42,52 @@ pub struct QualityBlock {
     /// Per built-in settings; a built-in not named here is on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub builtins: BTreeMap<String, BuiltinSetting>,
-    /// The playbook's own criteria, graded by a host.
+    /// The playbook's own criteria, graded by a host or a model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub criteria: Vec<Criterion>,
+    /// Whose grades of the playbook's own criteria a candidate comparison
+    /// expects.
+    #[serde(default, skip_serializing_if = "CriteriaGrader::is_default")]
+    pub criteria_grader: CriteriaGrader,
+}
+
+/// Who grades the playbook's own criteria for a comparison: a host in a
+/// reading session (the default) or the decision-model grader. Read from
+/// any string, so an unknown value is a validator error (V110) rather than
+/// a definition that does not load.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum CriteriaGrader {
+    #[default]
+    Host,
+    Model,
+    Unknown(String),
+}
+
+impl CriteriaGrader {
+    fn is_default(&self) -> bool {
+        *self == CriteriaGrader::Host
+    }
+}
+
+impl From<String> for CriteriaGrader {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "host" => CriteriaGrader::Host,
+            "model" => CriteriaGrader::Model,
+            _ => CriteriaGrader::Unknown(s),
+        }
+    }
+}
+
+impl From<CriteriaGrader> for String {
+    fn from(g: CriteriaGrader) -> Self {
+        match g {
+            CriteriaGrader::Host => "host".into(),
+            CriteriaGrader::Model => "model".into(),
+            CriteriaGrader::Unknown(s) => s,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +360,18 @@ mod tests {
             .collect();
         assert_eq!(ids, ["outcome", "loops", "consent", "skill_use"]);
         assert!(block.grades_on_finish());
+        assert_eq!(block.criteria_grader, CriteriaGrader::Host);
+    }
+
+    #[test]
+    fn the_criteria_grader_reads_any_word() {
+        let model: QualityBlock = yaml_serde::from_str("criteria_grader: model\n").unwrap();
+        assert_eq!(model.criteria_grader, CriteriaGrader::Model);
+        let odd: QualityBlock = yaml_serde::from_str("criteria_grader: robot\n").unwrap();
+        assert_eq!(odd.criteria_grader, CriteriaGrader::Unknown("robot".into()));
+        // The default is not written back.
+        let plain = yaml_serde::to_string(&QualityBlock::default()).unwrap();
+        assert!(!plain.contains("criteria_grader"), "{plain}");
     }
 
     #[test]

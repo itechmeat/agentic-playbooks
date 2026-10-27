@@ -34,6 +34,8 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "decisions.jsonl",
     // Remembered run input: personal values of this machine.
     "memory/",
+    // Known problems of the playbooks' tools, signed by this installation.
+    "problems/",
 ];
 
 /// The workspace id recorded in `<root>/.apb/workspace.local`, read only when

@@ -89,11 +89,7 @@ pub fn spawn_supervisor_agent(
             supervisor_wait_ms(&inv.agent_id),
             &skills_line,
         );
-        // Only when the run's wakes can carry an advisory triage (issue #165
-        // Part 10): the brief is otherwise byte-identical.
-        if triage_advised(&manifest) {
-            brief.push_str(crate::decision::supervisor_triage::BRIEF_LINE);
-        }
+        brief.push_str(&brief_lines(&manifest, playbook));
         // The supervisor profile's `process_env`, for this chain element's
         // agent. Not journaled: a supervisor spawn is no attempt.
         let step_env = spawn_env.with_process(crate::agent_env::plan_for_entry(
@@ -964,6 +960,21 @@ fn park_triage(
     ))
 }
 
+/// The lines a run's features add to the supervisor brief; empty (the
+/// brief stays byte-identical) for a run with none of them: the advisory
+/// triage line when the run's wakes can carry one (issue #165 Part 10), the
+/// known-problems line for a playbook that shows known problems.
+fn brief_lines(manifest: &crate::manifest::RunExecutionManifest, playbook: &Playbook) -> String {
+    let mut out = String::new();
+    if triage_advised(manifest) {
+        out.push_str(crate::decision::supervisor_triage::BRIEF_LINE);
+    }
+    if playbook.known_problems.as_ref().is_some_and(|b| b.shows()) {
+        out.push_str(crate::known_problems::prompt::BRIEF_LINE);
+    }
+    out
+}
+
 /// Whether `supervisor_triage` is in advise or enforce for this run (its
 /// manifest snapshot, and not switched off since).
 fn triage_advised(manifest: &crate::manifest::RunExecutionManifest) -> bool {
@@ -1005,5 +1016,24 @@ mod triage_brief_tests {
         uses.get_mut("supervisor_triage").unwrap().mode = apb_core::decisions::DecisionMode::Advise;
         m.decisions = Some(eff(uses));
         assert!(triage_advised(&m));
+    }
+
+    #[test]
+    fn the_known_problems_line_reaches_the_brief_only_when_the_block_shows() {
+        let m = crate::manifest::RunExecutionManifest::default();
+        let with = |block: &str| {
+            Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: P\nversion: 1.0.0\n{block}nodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+            ))
+            .unwrap()
+        };
+        assert_eq!(brief_lines(&m, &with("")), "");
+        assert_eq!(
+            brief_lines(&m, &with("known_problems: { show: off }\n")),
+            ""
+        );
+        let line = brief_lines(&m, &with("known_problems: {}\n"));
+        assert_eq!(line, crate::known_problems::prompt::BRIEF_LINE);
+        assert!(line.contains("never close or dismiss"));
     }
 }

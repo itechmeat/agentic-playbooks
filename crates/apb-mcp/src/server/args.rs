@@ -1074,3 +1074,81 @@ pub struct RunGradesArgs {
     #[serde(default)]
     pub workspace: Option<String>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeArgs {
+    pub run_id: String,
+    /// `rules` (default): the built-in criteria, free. `model`: the
+    /// playbook's own criteria through the project's decision model, only
+    /// when its `grade` use is on.
+    #[serde(default)]
+    pub grader: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KnownProblemsArgs {
+    /// The playbook id.
+    pub id: String,
+    /// `project` or `global`; defaults to where the playbook lives.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// One problem id (`kp-...`): returns it with the passages of its
+    /// source that are new since it was seen.
+    #[serde(default)]
+    pub problem: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KnownProblemDecideArgs {
+    /// The playbook id.
+    pub id: String,
+    /// The problem id (`kp-...`).
+    pub problem: String,
+    /// `confirm`, `dismiss`, `reopen` or `close`.
+    pub action: String,
+    /// With `close`: text the person copied exactly from the source's new
+    /// text that shows the fix.
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// The person's reason, kept with the decision.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// `project` or `global`; defaults to where the playbook lives.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KnownProblemRecheckArgs {
+    /// The playbook id.
+    pub id: String,
+    /// The problem id (`kp-...`).
+    pub problem: String,
+    /// `model` (the project's decision model, when its `problem_recheck`
+    /// use is on) or `host` (your own reading of the changed passages).
+    pub by: String,
+    /// With `host`: `holds`, `closed` or `undetermined`.
+    #[serde(default)]
+    pub verdict: Option<String>,
+    /// With `host` and `closed`: a changed passage copied exactly.
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// With `host`: a short reason.
+    #[serde(default)]
+    pub why: Option<String>,
+    /// `project` or `global`; defaults to where the playbook lives.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
