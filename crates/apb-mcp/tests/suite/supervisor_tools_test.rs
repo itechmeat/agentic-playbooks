@@ -214,18 +214,9 @@ fn playbook_run_supervised_prepares_the_run_and_hands_off_the_drive() {
         dir.path(),
         "noagent_sv",
         None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            ..Default::default()
+        },
     )
     .unwrap();
     let elapsed = started.elapsed();

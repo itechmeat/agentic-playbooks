@@ -28,6 +28,10 @@ pub struct PlaybookGetArgs {
     /// playbook + layout). Any other value falls back to summary.
     #[serde(default)]
     pub detail: Option<String>,
+    /// true adds `estimate`: how long a run of this version takes and what
+    /// it spends, from comparable past runs in this workspace. Read-only.
+    #[serde(default)]
+    pub estimate: Option<bool>,
 }
 
 /// An argument with only an optional workspace - for read tools without any
@@ -98,6 +102,86 @@ pub struct PlaybookRunArgs {
     #[serde(default)]
     pub execution: Option<String>,
     // --- end host execution mode ---
+    /// The run's budget: a token and/or dollar limit and what happens
+    /// before a node with no estimate; each field overrides the playbook's
+    /// `budget:` block. A start refused with budget_needs_decision is
+    /// started again with on_no_estimate set to the person's answer.
+    #[serde(default)]
+    pub budget: Option<BudgetArg>,
+}
+
+/// A run's budget argument. A predictive stop, not a security control: the
+/// run pauses before a node whose median spend from comparable runs no
+/// longer fits.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct BudgetArg {
+    /// Input plus output tokens over the run's agent attempts.
+    #[serde(default)]
+    pub tokens: Option<u64>,
+    /// Reported cost in US dollars.
+    #[serde(default)]
+    pub usd: Option<f64>,
+    /// ask (default), pause or continue: what the run does before a node
+    /// it cannot estimate.
+    #[serde(default)]
+    pub on_no_estimate: Option<String>,
+}
+
+impl BudgetArg {
+    /// The engine request, or the `invalid_budget` refusal.
+    pub fn request(
+        arg: Option<&Self>,
+    ) -> Result<Option<apb_core::budget::BudgetRequest>, serde_json::Value> {
+        match arg {
+            None => Ok(None),
+            Some(a) => {
+                crate::tools::budget::start_request(a.tokens, a.usd, a.on_no_estimate.as_deref())
+            }
+        }
+    }
+}
+
+/// A resume's budget change: raise or set a limit, change on_no_estimate,
+/// or let the node the budget paused before run once over it.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct BudgetResumeArg {
+    /// Tokens added to the token limit in force.
+    #[serde(default)]
+    pub raise_tokens: Option<u64>,
+    /// Dollars added to the dollar limit in force.
+    #[serde(default)]
+    pub raise_usd: Option<f64>,
+    /// A new token limit.
+    #[serde(default)]
+    pub tokens: Option<u64>,
+    /// A new dollar limit.
+    #[serde(default)]
+    pub usd: Option<f64>,
+    /// ask, pause or continue.
+    #[serde(default)]
+    pub on_no_estimate: Option<String>,
+    /// Let the paused node run once over the budget.
+    #[serde(default)]
+    pub once: bool,
+}
+
+impl BudgetResumeArg {
+    /// The engine request, or the `invalid_budget` refusal.
+    pub fn request(
+        arg: Option<&Self>,
+    ) -> Result<Option<apb_engine::budget::BudgetResume>, serde_json::Value> {
+        match arg {
+            None => Ok(None),
+            Some(a) => crate::tools::budget::resume_request(crate::tools::budget::ResumeArgs {
+                raise_tokens: a.raise_tokens,
+                raise_usd: a.raise_usd,
+                tokens: a.tokens,
+                usd: a.usd,
+                on_no_estimate: a.on_no_estimate.as_deref(),
+                once: a.once,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -265,6 +349,14 @@ pub struct RunResumeArgs {
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// The budget change a run its budget paused needs to continue (a plain
+    /// resume of it is refused with budget_paused); ask the person first.
+    #[serde(default)]
+    pub budget: Option<BudgetResumeArg>,
+    /// The person's confirmation of `budget`: the `budget_nonce` of the
+    /// `budget_change_requires_confirmation` refusal they were shown.
+    #[serde(default)]
+    pub confirm_budget: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -672,6 +764,9 @@ pub struct PlaybookExecutePlanArgs {
     /// for one release) `true`.
     #[serde(default)]
     pub confirm_irreversible: Option<ConfirmIrreversibleArg>,
+    /// The run's budget (see playbook_run).
+    #[serde(default)]
+    pub budget: Option<BudgetArg>,
 }
 
 /// `confirm_irreversible`: the refusal's `consent_nonce` (a string), or a

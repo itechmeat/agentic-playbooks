@@ -43,6 +43,7 @@ pub use crate::run_config::RunMode;
 mod attempt_memory;
 mod attempt_notes;
 mod baseline;
+pub(crate) mod budget_gate;
 mod cache;
 mod continuation;
 mod control_apply;
@@ -73,6 +74,7 @@ mod rebind;
 mod resume;
 mod review_gate;
 mod revive;
+mod run_ref;
 mod skills_copy;
 mod status_file;
 mod supervisor;
@@ -109,14 +111,16 @@ pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
 pub(crate) use resume::resume_detached_pause;
 pub use resume::{
-    PAUSE_SUPERSEDED, RESUME_SUPERSEDED, record_run_error, resume, resume_by, resume_detached,
-    resume_detached_by, resume_detached_with, resume_pause, resume_with,
+    PAUSE_SUPERSEDED, RESUME_SUPERSEDED, ResumeRequest, record_run_error, resume, resume_by,
+    resume_detached, resume_detached_by, resume_detached_req, resume_detached_with, resume_pause,
+    resume_req, resume_with,
 };
 pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
 };
-pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
+pub use resume::{ResumeDecision, ResumeReason, StartMode, lifecycle_seq, plan_resume};
 use revive::{reoffer_revived_joins, restore_revived_frontier};
+pub use run_ref::{run_playbook_ref, run_profile_origin};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -246,9 +250,8 @@ fn fallback_finish_answer(node: &str) -> String {
     )
 }
 
-/// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
-/// would exceed this depth fails its parent node.
-pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
+/// See [`apb_core::schema::MAX_SUBPLAYBOOK_DEPTH`].
+pub const MAX_SUBPLAYBOOK_DEPTH: usize = apb_core::schema::MAX_SUBPLAYBOOK_DEPTH;
 
 /// See [`apb_core::schema::DEFAULT_MAX_PARALLEL`].
 pub const DEFAULT_MAX_PARALLEL: usize = apb_core::schema::DEFAULT_MAX_PARALLEL;
@@ -271,57 +274,6 @@ fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
         .or(cfg.max_parallel)
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_MAX_PARALLEL)
-}
-
-/// Returns (playbook id, run's active version). The active version is
-/// the latest `RunMigrated.to_version`; if there were no migrations - `RunStarted.version`.
-/// Used by the `playbook_patch` tool to choose the base of the patch version.
-pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), EngineError> {
-    if !is_safe_segment(run_id) {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let events = read_all(&run_dir)?;
-    let mut id: Option<String> = None;
-    let mut version: Option<String> = None;
-    for event in &events {
-        match &event.payload {
-            EventPayload::RunStarted {
-                playbook,
-                version: v,
-            } => {
-                id = Some(playbook.clone());
-                version = Some(v.clone());
-            }
-            EventPayload::RunMigrated { to_version, .. } => {
-                version = Some(to_version.clone());
-            }
-            _ => {}
-        }
-    }
-    match (id, version) {
-        (Some(id), Some(version)) => Ok((id, version)),
-        _ => Err(EngineError::NotFound(format!(
-            "run `{run_id}` has no RunStarted event"
-        ))),
-    }
-}
-
-/// The origin (project vs global) a run was started under, from its provenance.
-/// Used by the MCP rebind gate to resolve and trust-check a new profile the same
-/// way run start resolved the run's node profiles (issue #45 finding 5).
-pub fn run_profile_origin(root: &Path, run_id: &str) -> Result<PlaybookOrigin, EngineError> {
-    if !is_safe_segment(run_id) {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    rebind::run_origin(&run_dir)
 }
 
 /// The shared execution loop: advances the run from `start_node` to a finish node,
@@ -656,6 +608,7 @@ fn drive_inner(
     // returned true, so later acting nodes do not re-read the journal. A
     // patch cannot change `baseline_check` once an acting node started.
     let mut baseline_before_done = false;
+    let gate = budget_gate::DriveGate::load(run_dir)?;
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
@@ -740,6 +693,18 @@ fn drive_inner(
                 continue;
             }
             baseline_before_done = true;
+        }
+        // The budget gate before a new visit; a batch reuses `reserved`.
+        let mut reserved = budget_gate::Reservations::default();
+        let admit = gate.admit_node(
+            run_dir,
+            &Journal::new(&mut *log),
+            current_node,
+            &mut reserved,
+        );
+        if let budget_gate::Admission::Pause(p) = admit? {
+            journal::post_engine_pause(run_dir, p)?;
+            continue;
         }
 
         if let NodeKind::Finish {
@@ -1081,6 +1046,9 @@ fn drive_inner(
                                             std::slice::from_ref(&n),
                                         )
                                     })?;
+                                    // `current` was admitted (and reserved)
+                                    // before the batch; it spends nothing now.
+                                    reserved.release(&n);
                                     continue;
                                 }
                                 // A pause: no NEW work, and NOTHING is written
@@ -1090,6 +1058,17 @@ fn drive_inner(
                                 // `pending_heads` skip it forever and the resume
                                 // would drop that branch.
                                 if halt.load(Ordering::SeqCst) {
+                                    queue.clear();
+                                    break;
+                                }
+                                // `current` passed the gate above already.
+                                if n != current
+                                    && let Some(member) = playbook.node(&n)
+                                    && let budget_gate::Admission::Pause(p) =
+                                        gate.admit_node(run_dir, &journal, member, &mut reserved)?
+                                {
+                                    journal::post_engine_pause(run_dir, p)?;
+                                    halt.store(true, Ordering::SeqCst);
                                     queue.clear();
                                     break;
                                 }
@@ -1154,6 +1133,9 @@ fn drive_inner(
                                             NodeStatus::Succeeded,
                                             output,
                                         ));
+                                        // A hit spent nothing: its reservation
+                                        // goes back before the next admission.
+                                        reserved.release(&n);
                                         done.push((n, NodeStatus::Succeeded));
                                     }
                                     cache::CacheProbe::Miss { ctx, events } => {
@@ -1241,6 +1223,7 @@ fn drive_inner(
                                     )
                                 })?;
                                 running -= 1;
+                                reserved.release(&node);
                                 if solo.as_deref() == Some(node.as_str()) {
                                     solo = None;
                                 }
@@ -1265,11 +1248,11 @@ fn drive_inner(
                                     // `node_finished`; the siblings in flight
                                     // finish, no chunk is admitted, and the
                                     // control scan applies the pause.
-                                    AttemptOutcome::QuotaPaused { pause, events } => {
+                                    AttemptOutcome::EnginePaused { pause, events } => {
                                         for ev in events {
                                             journal.append(ev)?;
                                         }
-                                        journal::post_quota_pause(run_dir, pause)?;
+                                        journal::post_engine_pause(run_dir, pause)?;
                                         halt.store(true, Ordering::SeqCst);
                                         continue;
                                     }
@@ -2352,11 +2335,11 @@ fn drive_inner(
                         continue;
                     }
                     // A quota pause (issue #200), as in the sequential arm.
-                    AttemptOutcome::QuotaPaused { pause, events } => {
+                    AttemptOutcome::EnginePaused { pause, events } => {
                         for ev in events {
                             log.append(ev)?;
                         }
-                        journal::post_quota_pause(run_dir, pause)?;
+                        journal::post_engine_pause(run_dir, pause)?;
                         continue;
                     }
                     // An interactive node is never a list node (V85).
@@ -2446,6 +2429,7 @@ fn drive_inner(
                             stop: Some(&exec_stop),
                             max_parallel: resolved_max_parallel(&playbook, cfg),
                             control_after: control_cursor,
+                            budget: Some(&gate),
                             ..ExecOptions::default()
                         },
                     )?
@@ -2465,11 +2449,11 @@ fn drive_inner(
                     }
                     // A quota pause (issue #200): no `node_finished`; the
                     // control scan applies the pause and ends the drive.
-                    AttemptOutcome::QuotaPaused { pause, events } => {
+                    AttemptOutcome::EnginePaused { pause, events } => {
                         for ev in events {
                             log.append(ev)?;
                         }
-                        journal::post_quota_pause(run_dir, pause)?;
+                        journal::post_engine_pause(run_dir, pause)?;
                         continue;
                     }
                     // A list node stopped between items for a pause: no

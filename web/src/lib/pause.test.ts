@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canPause, canResume, pauseBody, pauseDetails, pauseLine, pauseMarker, pauseWord, when } from './pause'
+import { canPause, canResume, isBudgetPause, pauseBody, pauseCauseLabel, pauseDetails, pauseLine, pauseMarker, pauseWord, when } from './pause'
 import type { PauseInfo } from './types'
 
 const paused: PauseInfo = {
@@ -79,5 +79,15 @@ describe('pause times', () => {
     expect(when(18446744073709552000)).toBe('18446744073709552000 ms after the epoch')
     expect(() => pauseDetails({ ...paused, until: 18446744073709552000 })).not.toThrow()
     expect(when(undefined)).toBeNull()
+  })
+})
+
+describe('pause cause', () => {
+  it('labels a budget and a quota pause and nothing else', () => {
+    expect(pauseCauseLabel({ ...paused, by: 'engine', cause: 'budget' })).toBe('by its budget')
+    expect(pauseCauseLabel({ ...paused, by: 'engine', cause: 'quota' })).toBe('by a provider quota')
+    expect(pauseCauseLabel(paused)).toBeNull()
+    expect(isBudgetPause({ ...paused, cause: 'budget' })).toBe(true)
+    expect(isBudgetPause(paused)).toBe(false)
   })
 })

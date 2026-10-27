@@ -1,4 +1,4 @@
-import type { PerRun, Rate, StatsReport, VersionStats, Waits } from './api.gen'
+import type { DigestStats, PerRun, Rate, StatsReport, VersionStats, Waits } from './api.gen'
 
 // The playbook page's stats card (C3): pure formatting of `GET /api/stats`.
 // Every rate is shown with its count, because small samples mislead.
@@ -57,6 +57,24 @@ export function modelsText(v: Pick<VersionStats, 'models' | 'model_mismatch'>): 
   let line = entries.map(([m, n]) => `${m} x${n}`).join(', ')
   if (v.model_mismatch > 0) line += ` (${v.model_mismatch} differ from the profile)`
   return line
+}
+
+// `profile 1a2b3c4d5e6f (bundle 9f8e7d6c5b4a): 3 runs, first pass 2/3 (67%),
+// median 1.0 min, 200 tokens per visit`: one executor group of a node, as
+// `apb stats` prints it.
+export function digestText(d: DigestStats): string {
+  let line = `profile ${d.profile} (bundle ${d.bundle}): ${d.runs} ${d.runs === 1 ? 'run' : 'runs'}, first pass ${rateText(d.first_pass)}`
+  if (d.duration.median_ms !== undefined) line += `, median ${dur(d.duration.median_ms)}`
+  if (d.tokens_per_visit !== undefined) line += `, ${d.tokens_per_visit} tokens per visit`
+  return line
+}
+
+// The nodes of a version that ran under more than one executor (a profile,
+// its model, SOUL or skills changed between runs), each with its groups.
+export function executorGroups(v: Pick<VersionStats, 'nodes'>): { node: string; groups: string[] }[] {
+  return (v.nodes ?? [])
+    .filter((n) => (n.digests?.length ?? 0) > 1)
+    .map((n) => ({ node: n.node, groups: (n.digests ?? []).map(digestText) }))
 }
 
 // The versions newest first (the API lists them oldest first).

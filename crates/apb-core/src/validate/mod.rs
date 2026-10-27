@@ -8,6 +8,7 @@
 //! one long file.
 
 mod baseline;
+mod budget;
 mod connectors;
 mod decisions;
 mod forks;
@@ -173,6 +174,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_decision_opt_ins(playbook, ctx, &mut r); // V70, V71, V72, V73, V74
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
     list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
+    budget::check_budget(playbook, &mut r); // V96-V98
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

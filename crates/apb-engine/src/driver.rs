@@ -227,6 +227,20 @@ impl DriveClaim {
     }
 }
 
+/// What a detached driver is asked to do: a fresh drive, or a resume (where
+/// it restarts, drift accepted, who resumes, the engine resume of one pause,
+/// and the budget change the resume journals next to its `run_resumed`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DriverArgs<'a> {
+    pub from_node: Option<&'a str>,
+    pub resume: bool,
+    pub allow_environment_drift: bool,
+    pub by: Option<crate::pause::PauseBy>,
+    pub pause_seq: Option<u64>,
+    /// The resume's budget change, as the JSON the child reads back.
+    pub budget_json: Option<&'a str>,
+}
+
 /// Re-execs this binary as `apb __drive-run ...` in a separate, detached OS
 /// process and returns its pid. The child drives the run at `runs/<run_id>` to
 /// completion on its own and outlives us.
@@ -240,16 +254,17 @@ impl DriveClaim {
 /// journaled on the child's `run_resumed`. Only meaningful with `resume`.
 /// `pause_seq` (the engine's resume of one pause) is forwarded as
 /// `--pause-seq`: the child journals `run_resumed` only while that pause
-/// still holds the run.
-pub fn spawn_detached_driver(
-    root: &Path,
-    run_id: &str,
-    from_node: Option<&str>,
-    resume: bool,
-    allow_environment_drift: bool,
-    by: Option<crate::pause::PauseBy>,
-    pause_seq: Option<u64>,
-) -> io::Result<u32> {
+/// still holds the run. `budget` is forwarded as `--budget-json`: the child
+/// journals it next to its `run_resumed`, so a refused resume leaves none.
+pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -> io::Result<u32> {
+    let DriverArgs {
+        from_node,
+        resume,
+        allow_environment_drift,
+        by,
+        pause_seq,
+        budget_json,
+    } = *args;
     let exe = apb_core::fsutil::reexec_exe()?;
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
@@ -275,6 +290,9 @@ pub fn spawn_detached_driver(
         }
         if let Some(seq) = pause_seq {
             cmd.arg("--pause-seq").arg(seq.to_string());
+        }
+        if let Some(b) = budget_json {
+            cmd.arg("--budget-json").arg(b);
         }
     }
     cmd.current_dir(&root);

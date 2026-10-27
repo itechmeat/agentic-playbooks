@@ -3,6 +3,7 @@
   import { Spinner } from '$lib/components/ui/spinner'
   import {
     costKnownText,
+    executorGroups,
     modelsText,
     perRunText,
     rateText,
@@ -34,6 +35,7 @@
     <p class="muted" data-testid="playbook-stats-empty">No runs of this playbook yet.</p>
   {:else}
     {#each versions as v (v.version)}
+      {@const executors = executorGroups(v)}
       <section class="version" data-testid="playbook-stats-version">
         <div class="version-head">
           <span class="version-name">{v.version}</span>
@@ -68,6 +70,17 @@
             <dd data-testid="playbook-stats-models">{modelsText(v)}</dd>
           {/if}
         </dl>
+        {#if executors.length}
+          <ul class="executors" data-testid="playbook-stats-executors">
+            {#each executors as n (n.node)}
+              <li>
+                <span class="muted">{n.node}, per executor:</span>
+                <!-- Two executors may print alike (shortened digests): key by position. -->
+                {#each n.groups as g, i (i)}<div class="group">{g}</div>{/each}
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#if v.goal.length}
           <ul class="goal" data-testid="playbook-stats-goal">
             {#each v.goal as g (g.index)}
@@ -128,6 +141,17 @@
   }
   .error {
     color: var(--destructive);
+  }
+  .executors {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+    overflow-wrap: anywhere;
+  }
+  .group {
+    padding-left: 0.75rem;
+    font-family: var(--font-mono, ui-monospace, monospace);
   }
   .goal {
     display: flex;

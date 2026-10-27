@@ -44,7 +44,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Phase 1 of running a playbook in ANOTHER workspace: resolve the target, run preflight, and return a plan plus a short-lived signed plan_token. Read-only. Show the plan to the user, then call playbook_execute_plan after confirmation.",
+        description = "Phase 1 of running a playbook in ANOTHER workspace: resolve the target, run preflight, and return a plan plus a short-lived signed plan_token. Read-only. The plan carries the estimate (time, tokens, cost from comparable runs there). Show the plan to the user, then call playbook_execute_plan after confirmation; a budget is its argument.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_prepare_run(
@@ -87,7 +87,7 @@ impl WfMcp {
 
     #[tool(
         name = "playbook_execute_plan",
-        description = "Phase 2: execute a previously prepared cross-workspace plan by its plan_token. Verifies signature, expiry, single-use and that the playbook digest has not drifted, then runs it in the target workspace. An irreversible plan needs confirm_irreversible (the refusal's consent_nonce) after asking the person; acknowledge_untrusted answers trust only.",
+        description = "Phase 2: execute a previously prepared cross-workspace plan by its plan_token. Verifies signature, expiry, single-use and that the playbook digest has not drifted, then runs it in the target workspace. An irreversible plan needs confirm_irreversible (the refusal's consent_nonce) after asking the person; acknowledge_untrusted answers trust only. budget works as in playbook_run.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_execute_plan_tool(
@@ -115,6 +115,7 @@ impl WfMcp {
             plan_token,
             acknowledge_untrusted,
             confirm_irreversible,
+            budget,
         }): Parameters<PlaybookExecutePlanArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -202,6 +203,22 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
         };
+        // The run's budget, checked like playbook_run's before the nonce burns,
+        // so a budget refusal allows a retry with the person's decision.
+        let budget = match BudgetArg::request(budget.as_ref()) {
+            Ok(b) => b,
+            Err(refusal) => return to_call_tool_result(Ok(refusal)),
+        };
+        let execution_mode = match apb_core::execution::resolve_for(&root_b, &Default::default()) {
+            Ok(r) => r.mode,
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
+        let checked =
+            match tools::budget::preflight(&resolved, execution_mode.as_str(), budget.as_ref()) {
+                Ok(p) => p,
+                Err(refusal) => return to_call_tool_result(Ok(refusal)),
+            };
+        let warnings = checked.warnings;
         // Burn the nonce right before launch (all gates passed): check-and-insert
         // atomically, so a race between two execute calls does not run the
         // plan twice.
@@ -231,15 +248,25 @@ impl WfMcp {
             expected_profile_bundles: Some(expected_bundles),
             expected_children: Some(permit.children),
             consent,
+            budget,
+            estimate: checked.estimate,
             ..Default::default()
         };
         // Driven by a detached process, like every other background start:
         // the run must not die with this MCP session.
         super::with_deprecation(
             match apb_engine::start_detached_resolved(&resolved, opts) {
-                Ok(run_id) => to_call_tool_result(Ok(json!({
-                    "run_ref": { "workspace_id": payload.workspace_id, "run_id": run_id }
-                }))),
+                Ok(run_id) => {
+                    let blocks = tools::budget::with_start_blocks(
+                        &root_b,
+                        json!({ "run_id": run_id.clone() }),
+                    );
+                    let mut out = json!({
+                        "run_ref": { "workspace_id": payload.workspace_id, "run_id": run_id }
+                    });
+                    tools::budget::carry_blocks(&blocks, &mut out);
+                    to_call_tool_result(with_warnings(Ok(out), &warnings))
+                }
                 Err(e) => to_call_tool_result(Err(ToolError::from(e))),
             },
             deprecation,
@@ -248,7 +275,7 @@ impl WfMcp {
 
     #[tool(
         name = "playbook_run",
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both.",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run_tool(
@@ -282,6 +309,7 @@ impl WfMcp {
             continued_from,
             worktree,
             execution,
+            budget,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -383,140 +411,91 @@ impl WfMcp {
         };
         // --- end 0.24.0 irreversible consent ---
 
+        // supervise:"self" does not combine with a global scope: refused
+        // before the budget check, so nobody is asked about a start that
+        // cannot happen.
+        if supervise.as_deref() == Some("self") && matches!(origin, apb_core::scope::Origin::Global)
+        {
+            return to_call_tool_result(Ok(json!({
+                "error": "supervise_self_global_unsupported",
+            })));
+        }
+        // The budget argument and the pre-start budget check: a policy the
+        // person must decide first is refused here with the estimate, and
+        // what may surprise them (a dollar limit with no cost history, an
+        // estimate over the limit) joins the gate's warnings.
+        let budget = match BudgetArg::request(budget.as_ref()) {
+            Ok(b) => b,
+            Err(refusal) => return to_call_tool_result(Ok(refusal)),
+        };
+        let run_ref = apb_core::scope::PlaybookRef {
+            version: version.clone(),
+            ..wref
+        };
+        let resolved_def = match apb_core::store::resolve(&self.root, &run_ref) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
+        };
         // Consent-time warnings the gate produced (finding 11: a bound connector
         // with zero configured accounts). Surfaced on every successful run
         // response so the caller can show them to the user; never a refusal.
-        let warnings = permit.warnings.clone();
+        let mut warnings = permit.warnings.clone();
+        let checked = match tools::budget::preflight(
+            &resolved_def,
+            resolved.mode.as_str(),
+            budget.as_ref(),
+        ) {
+            Ok(p) => p,
+            Err(refusal) => return to_call_tool_result(Ok(refusal)),
+        };
+        warnings.extend(checked.warnings);
+        let start = tools::StartArgs {
+            params,
+            instruction,
+            expected_digest: Some(permit.playbook_digest),
+            expected_profile_bundles: Some(permit.profile_bundles),
+            expected_children: Some(permit.children),
+            expected_connectors: permit.connectors,
+            expected_connector_accounts: permit.connector_accounts,
+            continued_from,
+            worktree,
+            execution,
+            consent,
+            candidate_skipped: candidate.skipped.clone(),
+            budget,
+            estimate: checked.estimate,
+        };
 
-        // supervise:"self" - a project-scoped supervised run; it does not
-        // combine with a global scope.
+        // supervise:"self" - a project-scoped supervised run (a global scope
+        // was refused before the budget check).
         if supervise.as_deref() == Some("self") {
-            if matches!(origin, apb_core::scope::Origin::Global) {
-                return to_call_tool_result(Ok(json!({
-                    "error": "supervise_self_global_unsupported",
-                })));
-            }
             return with_execution(
-                self.run_supervised_self(
-                    id,
-                    version,
-                    params,
-                    instruction,
-                    permit.playbook_digest,
-                    permit.profile_bundles,
-                    permit.children,
-                    permit.connectors,
-                    permit.connector_accounts,
-                    continued_from,
-                    worktree,
-                    warnings,
-                    execution,
-                    consent,
-                    candidate.skipped.clone(),
-                ),
+                self.run_supervised_self(id, version, start, warnings),
                 &resolved,
                 deprecation,
                 &candidate,
             );
         }
 
-        if matches!(origin, apb_core::scope::Origin::Global) {
-            let resolved_def = match apb_core::store::resolve(&self.root, &wref) {
-                Ok(r) => r,
-                Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
-            };
-            let opts = apb_engine::RunOptions {
-                instruction,
-                params,
-                expected_digest: Some(permit.playbook_digest),
-                expected_profile_bundles: Some(permit.profile_bundles),
-                expected_children: Some(permit.children),
-                expected_connectors: permit.connectors,
-                expected_connector_accounts: permit.connector_accounts,
-                continued_from,
-                worktree,
-                execution,
-                consent,
-                candidate_skipped: candidate.skipped.clone(),
-                ..Default::default()
-            };
+        let started = if matches!(origin, apb_core::scope::Origin::Global) {
+            let opts = tools::start_options(start, apb_engine::RunMode::Autonomous);
             if background == Some(true) {
-                return with_execution(
-                    match apb_engine::start_detached_resolved(&resolved_def, opts) {
-                        Ok(run_id) => to_call_tool_result(with_warnings(
-                            Ok(json!({ "run_id": run_id, "scope": "global" })),
-                            &warnings,
-                        )),
-                        Err(e) => to_call_tool_result(Err(ToolError::from(e))),
-                    },
-                    &resolved,
-                    deprecation,
-                    &candidate,
-                );
+                apb_engine::start_detached_resolved(&resolved_def, opts)
+                    .map(|run_id| json!({ "run_id": run_id, "scope": "global" }))
+            } else {
+                apb_engine::run_resolved(&resolved_def, opts).map(|res| {
+                    json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" })
+                })
             }
-            return with_execution(
-                match apb_engine::run_resolved(&resolved_def, opts) {
-                    Ok(res) => to_call_tool_result(with_warnings(
-                        Ok(
-                            json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
-                        ),
-                        &warnings,
-                    )),
-                    Err(e) => to_call_tool_result(Err(ToolError::from(e))),
-                },
-                &resolved,
-                deprecation,
-                &candidate,
-            );
-        }
-        if background == Some(true) {
-            return with_execution(
-                to_call_tool_result(with_warnings(
-                    tools::playbook_run_background(
-                        &self.root,
-                        &id,
-                        version.as_deref(),
-                        params,
-                        instruction,
-                        Some(permit.playbook_digest),
-                        Some(permit.profile_bundles),
-                        Some(permit.children),
-                        permit.connectors,
-                        permit.connector_accounts,
-                        continued_from,
-                        worktree,
-                        execution,
-                        consent,
-                        candidate.skipped.clone(),
-                    ),
-                    &warnings,
-                )),
-                &resolved,
-                deprecation,
-                &candidate,
-            );
-        }
+            .map(|out| tools::budget::with_start_blocks(&self.root, out))
+            .map_err(ToolError::from)
+        } else if background == Some(true) {
+            tools::playbook_run_background(&self.root, &id, version.as_deref(), start)
+        } else {
+            tools::playbook_run(&self.root, &id, version.as_deref(), start)
+        };
         with_execution(
-            to_call_tool_result(with_warnings(
-                tools::playbook_run(
-                    &self.root,
-                    &id,
-                    version.as_deref(),
-                    params,
-                    instruction,
-                    Some(permit.playbook_digest),
-                    Some(permit.profile_bundles),
-                    Some(permit.children),
-                    permit.connectors,
-                    permit.connector_accounts,
-                    continued_from,
-                    worktree,
-                    execution,
-                    consent,
-                    candidate.skipped.clone(),
-                ),
-                &warnings,
-            )),
+            to_call_tool_result(with_warnings(started, &warnings)),
             &resolved,
             deprecation,
             &candidate,
@@ -539,7 +518,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis. The answer is large (every node output); to wait for a run to finish or need input, call run_wait instead of calling this repeatedly.",
+        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis. `estimate` is what the run was expected to take at start; `budget` (when the run has one) gives the limits, what was spent and is left per dimension, and the node a budget pause holds the run before. The answer is large (every node output); to wait for a run to finish or need input, call run_wait instead of calling this repeatedly.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_status(
@@ -555,7 +534,7 @@ impl WfMcp {
 
     #[tool(
         description = concat!(
-            "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
+            "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. A run its budget paused (pause.cause budget) carries budget and a next that says to ask the person, then call run_resume with budget. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
             apb_engine::host_task_contract!(),
             " For each pending task tell your subagent to read `prompt_path` as its task and `role_path` as its system context (`prompt` and `role_prompt` carry the same text inline; pass inline_prompt: false to drop them), have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
         ),
@@ -755,7 +734,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Resume a run, optionally from a given node. Also continues a paused run; before its pause `until` that is an early resume, and the ack says so (resumed_early). Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway. A run with no valid consent to its irreversible effects (one an older apb started) is refused once with irreversible_requires_confirmation; pass confirm_irreversible set to its consent_nonce after asking the person.",
+        description = "Resume a run, optionally from a given node. Also continues a paused run; before its pause `until` that is an early resume, and the ack says so (resumed_early). Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway. A run with no valid consent to its irreversible effects (one an older apb started) is refused once with irreversible_requires_confirmation; pass confirm_irreversible set to its consent_nonce after asking the person. A run its budget paused is refused with budget_paused until budget asks for a change: raise_tokens or raise_usd (added to the limit), tokens or usd (a new limit), on_no_estimate, or once (the paused node runs once over the budget); ask the person which first. A budget change is refused once with budget_change_requires_confirmation and a budget_nonce: show the person the change, and if they agree call again with the same budget and confirm_budget set to budget_nonce. A run a supervisor agent watches refuses budget changes here (budget_change_refused): a person uses apb resume or the dashboard.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_resume(
@@ -767,6 +746,8 @@ impl WfMcp {
             acknowledge_untrusted,
             confirm_irreversible,
             workspace,
+            budget,
+            confirm_budget,
         }): Parameters<RunResumeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -779,6 +760,8 @@ impl WfMcp {
                 acknowledge_untrusted,
                 confirm_irreversible,
                 workspace,
+                budget,
+                confirm_budget,
             },
             client,
         )
@@ -793,6 +776,8 @@ impl WfMcp {
             acknowledge_untrusted,
             confirm_irreversible,
             workspace,
+            budget,
+            confirm_budget,
         }: RunResumeArgs,
         client: Option<String>,
     ) -> CallToolResult {
@@ -800,10 +785,22 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
+        let budget = match BudgetResumeArg::request(budget.as_ref()) {
+            Ok(b) => b,
+            Err(refusal) => return to_call_tool_result(Ok(refusal)),
+        };
         if let Err(refusal) =
             crate::policy::check_resume(&root, &run_id, acknowledge_untrusted == Some(true))
         {
             return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
+        }
+        // A budget change over MCP needs a person: the first call returns a
+        // nonce to show them the change with, the second applies it.
+        if let Some(b) = &budget
+            && let Err(refusal) =
+                tools::budget::confirm_budget_change(&root, &run_id, b, confirm_budget.as_deref())
+        {
+            return to_call_tool_result(Ok(refusal));
         }
         // 0.24.0 irreversible consent: a run with no valid consent recorded
         // (one an older apb started) asks once; the consent is then written
@@ -826,6 +823,7 @@ impl WfMcp {
                 &run_id,
                 from_node.as_deref(),
                 allow_environment_drift,
+                budget.as_ref(),
             )),
             note,
         )

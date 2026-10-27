@@ -1,3 +1,4 @@
+mod budget;
 mod cache;
 mod connector;
 mod consent;
@@ -48,9 +49,9 @@ use crate::manage::{
 use crate::pause::pause_cmd;
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
-    answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd, resume_all_cmd,
-    resume_cmd, review_cmd, run_cmd, run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
-    wait_cmd,
+    DriveRunArgs, answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd,
+    resume_all_cmd, resume_cmd, review_cmd, run_cmd, run_doctor, run_list, run_validate, runs_cmd,
+    stop_cmd, wait_cmd,
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
@@ -161,73 +162,7 @@ enum Command {
         action: TrustAction,
     },
     /// Run a playbook
-    Run {
-        name: String,
-        #[arg(long)]
-        version: Option<String>,
-        #[arg(long)]
-        instruction: Option<String>,
-        /// key=value, repeatable
-        #[arg(long = "param", value_name = "K=V")]
-        params: Vec<String>,
-        #[arg(long)]
-        allow_shared_workdir: bool,
-        /// Run in the background under supervision: the engine spawns a
-        /// background supervisor agent and watches its heartbeat
-        #[arg(long)]
-        supervise: bool,
-        /// Start the run in a detached background process, print its id and
-        /// return at once; follow it with `apb wait <run_id>`
-        #[arg(long, conflicts_with = "supervise")]
-        detach: bool,
-        /// Run-level overrides YAML file (spec 11): swap models/executors
-        /// without creating a new version
-        #[arg(long)]
-        overrides: Option<PathBuf>,
-        /// Disable the node result cache for this run: no lookup and no
-        /// admission anywhere in the run, regardless of what individual
-        /// nodes declare
-        #[arg(long, conflicts_with = "refresh_cache")]
-        no_cache: bool,
-        /// Skip cache lookup (never a hit) but still write fresh results, so
-        /// a fresh execution overwrites any stale cached result
-        #[arg(long)]
-        refresh_cache: bool,
-        /// Run id to continue as a fresh top-level retry (issue #42 finding 10).
-        /// Links the new run to the predecessor in `apb runs`.
-        #[arg(long = "continued-from", value_name = "RUN_ID")]
-        continued_from: Option<String>,
-        /// The run's working tree: agent and script nodes run in this
-        /// directory (absolute, or relative to the project) and the run takes
-        /// its busy lock instead of the project's, so runs over different git
-        /// worktrees do not wait on each other. Overrides the playbook's
-        /// `worktree`
-        #[arg(long, value_name = "DIR")]
-        worktree: Option<String>,
-        /// Who executes the agent steps: cli (the default, the profiles'
-        /// agent CLIs) or host (no CLI is spawned; every agent step becomes
-        /// a host task that `apb tasks` lists and `apb tasks submit`
-        /// answers, meant for an MCP host session)
-        #[arg(long, value_name = "MODE")]
-        execution: Option<String>,
-        /// Consent to the playbook's irreversible effects (a push, a merge,
-        /// a deploy) for a start without a person at a terminal, such as a
-        /// CI step: pass the consent_nonce the refusal printed, which binds
-        /// the consent to that version of the playbook. A bare flag is
-        /// deprecated. At a terminal, apb asks instead
-        #[arg(
-            long,
-            value_name = "CONSENT_NONCE",
-            num_args = 0..=1,
-            default_missing_value = "true",
-            require_equals = true
-        )]
-        confirm_irreversible: Option<String>,
-        /// Internal: the eval settings of a run `apb eval` starts (a JSON
-        /// file with the spawn env overlay and the wall-clock deadline).
-        #[arg(long, value_name = "FILE", hide = true)]
-        eval_settings: Option<PathBuf>,
-    },
+    Run(run::RunArgs),
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
     #[command(args_conflicts_with_subcommands = true)]
@@ -321,6 +256,8 @@ enum Command {
             require_equals = true
         )]
         confirm_irreversible: Option<String>,
+        #[command(flatten)]
+        budget: budget::ResumeBudgetFlags,
     },
     /// Block until a run finishes, needs input (a question, a review, a
     /// supervisor decision) or stops, then print why. A single call that
@@ -531,6 +468,9 @@ enum Command {
         /// it and exit without waiting for the run itself to finish.
         #[arg(long)]
         handshake: PathBuf,
+        /// The run's budget argument, forwarded from `apb run --supervise`.
+        #[command(flatten)]
+        budget: budget::BudgetFlags,
     },
     /// Drives an already-prepared run at `<root>/.apb/runs/<run-id>` to
     /// completion in THIS process. Spawned detached by
@@ -564,6 +504,10 @@ enum Command {
         /// when `run_resumed` is journaled. Only meaningful with `--resume`.
         #[arg(long = "pause-seq")]
         pause_seq: Option<u64>,
+        /// The budget change of the resume, as JSON, journaled next to its
+        /// `run_resumed`. Only meaningful with `--resume`.
+        #[arg(long = "budget-json")]
+        budget_json: Option<String>,
     },
     /// The waker of a paused run with an `until` (issue #200): sleeps until
     /// then and resumes the run only if the same pause still holds it. Spawned
@@ -645,40 +589,7 @@ fn main() -> ExitCode {
         Some(Command::Trash { action }) => trash_cmd(&root, action),
         Some(Command::Trust { action }) => trust_cmd(action),
         Some(Command::Intent { action }) => intent_cmd(&root, action),
-        Some(Command::Run {
-            name,
-            version,
-            instruction,
-            params,
-            allow_shared_workdir,
-            supervise,
-            detach,
-            overrides,
-            no_cache,
-            refresh_cache,
-            continued_from,
-            worktree,
-            execution,
-            confirm_irreversible,
-            eval_settings,
-        }) => run_cmd(
-            &root,
-            &name,
-            version.as_deref(),
-            instruction,
-            params,
-            allow_shared_workdir,
-            supervise,
-            detach,
-            overrides.as_deref(),
-            no_cache,
-            refresh_cache,
-            continued_from,
-            worktree,
-            execution.as_deref(),
-            confirm_irreversible,
-            eval_settings.as_deref(),
-        ),
+        Some(Command::Run(args)) => run_cmd(&root, args),
         Some(Command::Tasks {
             action,
             run_id,
@@ -708,12 +619,23 @@ fn main() -> ExitCode {
             keep_lock,
             ..
         }) => pause_cmd(&root, &run_id, now, reason, until.as_deref(), keep_lock),
-        Some(Command::Resume { all: true, .. }) => resume_all_cmd(&root),
+        Some(Command::Resume {
+            all: true, budget, ..
+        }) => match budget.request() {
+            Ok(None) => resume_all_cmd(&root),
+            _ => {
+                eprintln!(
+                    "--all takes no budget flags: change a run's budget with `apb resume <run-id>`"
+                );
+                ExitCode::from(2)
+            }
+        },
         Some(Command::Resume {
             run_id,
             from_node,
             allow_environment_drift,
             confirm_irreversible,
+            budget,
             ..
         }) => resume_cmd(
             &root,
@@ -721,6 +643,7 @@ fn main() -> ExitCode {
             from_node.as_deref(),
             allow_environment_drift,
             confirm_irreversible,
+            &budget,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
@@ -824,6 +747,7 @@ fn main() -> ExitCode {
             consent,
             consent_nonce,
             handshake,
+            budget,
         }) => drive_supervised_child(
             &root,
             &name,
@@ -835,6 +759,7 @@ fn main() -> ExitCode {
             worktree,
             consent.zip(consent_nonce),
             &handshake,
+            &budget,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:
         // the spawning parent knows which project the run belongs to.
@@ -846,14 +771,18 @@ fn main() -> ExitCode {
             allow_environment_drift,
             by,
             pause_seq,
+            budget_json,
         }) => drive_run_child(
             &run_root,
             &run_id,
-            from_node.as_deref(),
-            resume,
-            allow_environment_drift,
-            by.as_deref(),
-            pause_seq,
+            &DriveRunArgs {
+                from_node: from_node.as_deref(),
+                resume,
+                allow_environment_drift,
+                by: by.as_deref(),
+                pause_seq,
+                budget_json: budget_json.as_deref(),
+            },
         ),
         Some(Command::PauseWaker {
             root: run_root,

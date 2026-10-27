@@ -82,6 +82,16 @@ pub fn median(values: &mut [u64]) -> Option<u64> {
     Some(values[(values.len() - 1) / 2])
 }
 
+/// The `q` quantile (0 to 1) of already sorted values, linearly
+/// interpolated between the two nearest ranks; `None` for no values.
+pub fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
+    let last = sorted.len().checked_sub(1)?;
+    let pos = q.clamp(0.0, 1.0) * last as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    let (a, b) = (sorted[lo], sorted[hi]);
+    Some(a + (b - a) * (pos - lo as f64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

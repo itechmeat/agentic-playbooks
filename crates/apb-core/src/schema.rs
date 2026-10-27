@@ -180,6 +180,10 @@ pub struct Playbook {
     /// [`crate::baseline`]). Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_check: Option<crate::baseline::BaselineBlock>,
+    /// The run's default budget (see [`crate::budget`]); a run argument
+    /// overrides it per dimension. Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<crate::budget::BudgetBlock>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
@@ -532,6 +536,13 @@ impl NodeKind {
             | NodeKind::Finish { prompt: None, .. }
             | NodeKind::Playbook { .. } => false,
         }
+    }
+
+    /// Whether the run budget's gate weighs this node (see [`crate::budget`]):
+    /// one that runs an agent, or a `playbook` node, whose child's spend
+    /// counts toward the parent.
+    pub fn budget_gated(&self) -> bool {
+        self.runs_agent() || matches!(self, NodeKind::Playbook { .. })
     }
 
     /// Whether executing this node writes to the shared working directory and
@@ -1082,6 +1093,10 @@ impl Serialize for ConnectorBinding {
 /// 1.3). Wide enough that a fan-out is worth batching, small enough that a
 /// fan-out of twenty nodes cannot spawn twenty agent processes at once.
 pub const DEFAULT_MAX_PARALLEL: usize = 4;
+
+/// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
+/// would exceed this depth fails its parent node.
+pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Node {

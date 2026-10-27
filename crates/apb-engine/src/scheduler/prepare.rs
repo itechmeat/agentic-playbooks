@@ -881,6 +881,22 @@ pub(crate) fn prepare_run_target(
         scripts_digest,
         profiles: profiles_prov,
     })?;
+    // The estimate snapshot and the budget in force (not for a child).
+    if opts.parent_run.is_none() && opts.depth == 0 {
+        let recorded = budget_gate::record_start(
+            &mut log,
+            &budget_gate::StartRecord {
+                run_dir: &run_dir,
+                root,
+                playbook: &playbook,
+                manifest: &manifest,
+                budget: opts.budget.as_ref(),
+                shown: opts.estimate.as_ref(),
+                overridden: has_overrides,
+            },
+        );
+        prep_try(&mut log, recorded)?;
+    }
     // Right after provenance, so a reader of the journal alone can tell an
     // admitted-but-waiting run from one whose first node is simply slow.
     if queued_workdir.is_some() {

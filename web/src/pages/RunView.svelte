@@ -18,6 +18,7 @@
   import RunVerdictPanel from '../lib/RunVerdictPanel.svelte'
   import RunPauseControls from '../lib/RunPauseControls.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
+  import RunBudgetPanel from '../lib/RunBudgetPanel.svelte'
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
@@ -151,6 +152,7 @@
     {workspace}
     status={detail.run_status}
     pause={detail.pause ?? null}
+    budget={detail.budget ?? null}
     driverDead={detail.driver_alive === false}
     playbookId={detail.playbook}
     onchange={load}
@@ -349,6 +351,7 @@
       {/key}
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
       <AttemptModelsPanel models={detail.attempt_models} />
+      <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
     {/if}
 
     {#if detail?.candidate_trial}

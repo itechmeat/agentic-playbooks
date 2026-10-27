@@ -79,6 +79,7 @@ pub(crate) fn execute(
         template,
         stop: opts.stop,
         control_after: opts.control_after,
+        budget: opts.budget,
         workers: spec.workers(opts.max_parallel),
         root: super::judge::cfg_root(ctx.run_dir),
         spawn_env: ctx.cfg.spawn_env(),
@@ -99,7 +100,7 @@ pub(crate) fn execute(
             events: Vec::new(),
         }),
         batch::End::Halted => Ok(AttemptOutcome::Halted { events: Vec::new() }),
-        batch::End::Quota(pause) => Ok(AttemptOutcome::QuotaPaused {
+        batch::End::Pause(pause) => Ok(AttemptOutcome::EnginePaused {
             pause,
             events: Vec::new(),
         }),

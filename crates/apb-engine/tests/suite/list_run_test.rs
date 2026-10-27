@@ -73,7 +73,7 @@ pub(crate) fn seed(root: &Path, yaml: &str, scripts: &[(&str, &str)]) {
 
 /// Makes `root` a git work tree with one commit: an item check script runs
 /// only where apb can tell it left the tree as it found it.
-fn git_tree(root: &Path) {
+pub(crate) fn git_tree(root: &Path) {
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
             .args(args)
@@ -89,6 +89,7 @@ fn git_tree(root: &Path) {
         ".apb/
 stub/
 agent.sh
+out.json
 ",
     )
     .unwrap();

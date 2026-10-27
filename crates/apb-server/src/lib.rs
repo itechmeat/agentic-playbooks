@@ -53,6 +53,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/playbooks/{id}/diff", get(routes::playbooks::get_diff))
         .route(
+            "/api/playbooks/{id}/estimate",
+            get(routes::estimate::get_estimate_handler),
+        )
+        .route(
             "/api/playbooks/{id}/versions",
             get(routes::playbooks::list_versions_handler),
         )

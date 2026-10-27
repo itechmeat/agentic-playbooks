@@ -14,11 +14,16 @@
 
 #[path = "suite/common.rs"]
 mod common;
+#[path = "../../apb-engine/tests/support/driver_reaper.rs"]
+mod driver_reaper;
 
 #[path = "suite/advisory_tools_test.rs"]
 mod advisory_tools_test;
 #[path = "suite/ask_server_test.rs"]
 mod ask_server_test;
+#[cfg(unix)]
+#[path = "suite/budget_tools_test.rs"]
+mod budget_tools_test;
 #[path = "suite/capture_tools_test.rs"]
 mod capture_tools_test;
 #[path = "suite/catalog_rank_test.rs"]

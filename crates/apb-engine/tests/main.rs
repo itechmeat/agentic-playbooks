@@ -94,6 +94,9 @@ mod baseline_test;
 #[cfg(unix)]
 #[path = "suite/bounded_output_test.rs"]
 mod bounded_output_test;
+#[cfg(unix)]
+#[path = "suite/budget_gate_test.rs"]
+mod budget_gate_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
 #[cfg(unix)]
@@ -281,6 +284,9 @@ mod review_panel_test;
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[cfg(unix)]
+#[path = "suite/run_estimate_test.rs"]
+mod run_estimate_test;
 #[path = "suite/run_outcome_list_test.rs"]
 mod run_outcome_list_test;
 #[path = "suite/run_outcome_test.rs"]

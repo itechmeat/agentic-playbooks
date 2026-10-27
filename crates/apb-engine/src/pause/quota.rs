@@ -47,17 +47,10 @@ pub const PROBE_ERROR: &str = "error";
 
 /// The `run_paused.reason` of a quota pause.
 pub fn quota_reason(agent: &str, model: &str) -> String {
-    format!("quota ({agent}/{model})")
+    format!("{}{agent}/{model})", super::cause::QUOTA_PREFIX)
 }
 
-/// The `(agent, model)` a quota pause names, read back from its reason. An
-/// agent id holds no `/`, so the first one separates it from the model
-/// (which may hold more, `zai-start/GLM-5.3`).
-pub fn parse_quota_reason(reason: &str) -> Option<(String, String)> {
-    let inner = reason.strip_prefix("quota (")?.strip_suffix(')')?;
-    let (agent, model) = inner.split_once('/')?;
-    (!agent.is_empty()).then(|| (agent.to_string(), model.to_string()))
-}
+pub use super::cause::parse_quota_reason;
 
 /// The pause schedule in effect, honoring [`QUOTA_BACKOFF_ENV`].
 fn schedule() -> Vec<Duration> {

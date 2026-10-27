@@ -1470,6 +1470,69 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<String>,
     },
+    /// The run's budget (see `crate::budget`): at start, from the playbook's
+    /// block and the run argument, and at each resume that sets or raises
+    /// it. The latest one is in force. Safe to skip up to the next
+    /// checkpoint: an older apb then drives the run without its budget.
+    /// Additive variant.
+    BudgetSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usd: Option<f64>,
+        #[serde(default, deserialize_with = "lenient_default")]
+        on_no_estimate: apb_core::budget::OnNoEstimate,
+        /// `playbook`, `run` or `resume`; a source a newer apb wrote reads
+        /// as absent.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        source: Option<apb_core::budget::BudgetSource>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        by: Option<crate::pause::kind::PauseBy>,
+    },
+    /// One budget gate decision other than a plain admission, before a
+    /// gated node or (`batch`) a list batch. A `paused` decision is always
+    /// followed by `run_paused`, a checkpoint. Additive variant.
+    BudgetGate {
+        #[serde(default)]
+        node: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<u32>,
+        decision: crate::budget::kind::GateDecision,
+        basis: crate::budget::kind::GateBasis,
+        /// The node's median spend the gate weighed. Read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        need: Option<crate::budget::kind::BudgetAmount>,
+        /// What was left per limited dimension, where known. Read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        remaining: Option<crate::budget::kind::BudgetAmount>,
+        /// What the run had spent. Read leniently.
+        #[serde(default, deserialize_with = "lenient_default")]
+        spent: crate::budget::kind::BudgetSpent,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        by: Option<crate::pause::kind::PauseBy>,
+    },
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -3052,5 +3115,76 @@ mod tests {
             ev.payload,
             EventPayload::WakeRaised { triage: None, .. }
         ));
+    }
+
+    #[test]
+    fn budget_events_decode_without_optional_fields_and_a_future_amount_shape_reads_as_absent() {
+        use crate::budget::kind::{GateBasis, GateDecision};
+        let set: Event =
+            serde_json::from_str(r#"{"seq":1,"ts":1,"type":"budget_set","tokens":1000}"#).unwrap();
+        let EventPayload::BudgetSet {
+            tokens,
+            usd,
+            on_no_estimate,
+            source,
+            by,
+        } = set.payload
+        else {
+            panic!("a budget_set")
+        };
+        assert_eq!((tokens, usd, source, by), (Some(1000), None, None, None));
+        assert_eq!(on_no_estimate, apb_core::budget::OnNoEstimate::Ask);
+        // A policy and a source a newer apb wrote read as the defaults.
+        let newer: Event = serde_json::from_str(
+            r#"{"seq":1,"ts":1,"type":"budget_set","usd":2.5,"on_no_estimate":"ask_twice","source":"schedule"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            newer.payload,
+            EventPayload::BudgetSet {
+                source: None,
+                usd: Some(_),
+                ..
+            }
+        ));
+        let gate: Event = serde_json::from_str(
+            r#"{"seq":2,"ts":1,"type":"budget_gate","node":"a","decision":"paused","basis":"median"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            gate.payload,
+            EventPayload::BudgetGate {
+                decision: GateDecision::Paused,
+                basis: GateBasis::Median,
+                need: None,
+                remaining: None,
+                ..
+            }
+        ));
+        // A future amount shape, spent shape and decision read as absent.
+        let future: Event = serde_json::from_str(
+            r#"{"seq":3,"ts":1,"type":"budget_gate","node":"a","decision":"deferred","basis":"forecast","need":{"tokens":"lots"},"remaining":"left","spent":"x"}"#,
+        )
+        .unwrap();
+        let EventPayload::BudgetGate {
+            decision,
+            basis,
+            need,
+            remaining,
+            spent,
+            ..
+        } = future.payload
+        else {
+            panic!("a budget_gate")
+        };
+        assert_eq!(
+            (decision, basis),
+            (GateDecision::Unknown, GateBasis::Unknown)
+        );
+        assert!(need.is_none() && remaining.is_none());
+        assert_eq!(spent, crate::budget::BudgetSpent::default());
+        // Neither is a checkpoint: each is safe to skip up to the next one.
+        let raw = serde_json::from_str::<Event>(r#"{"seq":4,"ts":1,"type":"budget_set"}"#);
+        assert!(!raw.unwrap().payload.is_checkpoint());
     }
 }

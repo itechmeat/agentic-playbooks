@@ -27,11 +27,12 @@ pub(crate) enum AttemptOutcome {
         question: String,
         options: Vec<String>,
     },
-    /// The node hit a provider quota it cannot wait out (issue #200, design
-    /// 6): the attempt is journaled `interrupted` already, the node gets no
-    /// `node_finished`, and the drive pauses the run with `pause`, so the
-    /// resume runs the node again.
-    QuotaPaused {
+    /// The engine pauses the run: the node hit a provider quota it cannot
+    /// wait out (issue #200, design 6; the attempt is journaled
+    /// `interrupted` already), or the budget gate refused a list batch. The
+    /// node gets no `node_finished`, and the drive pauses the run with
+    /// `pause`, so the resume runs the node again.
+    EnginePaused {
         pause: crate::pause::PauseRequest,
         events: Vec<EventPayload>,
     },
@@ -88,6 +89,8 @@ pub(crate) struct ExecOptions<'a> {
     /// The drive's control cursor: a list node admits no item while a
     /// Pause or an Abort after it waits to be applied.
     pub control_after: Option<u64>,
+    /// The run's budget gate: a list node weighs it before each batch.
+    pub budget: Option<&'a super::budget_gate::DriveGate>,
 }
 
 /// What every node execution runs against: the run, its state, the flag

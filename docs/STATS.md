@@ -104,6 +104,73 @@ models its attempts ran on and `model_mismatch`.
 Every rate is printed with its count (`7/9 (78%)`), and a version with fewer
 than 10 runs carries a note: small samples mislead.
 
+**Per executor digest.** When the runs of one version bound a node to more
+than one executor (its profile, model, SOUL or skills changed between runs),
+the node lists its figures per digest pair: `profile` (the profile digest:
+`profile.yaml` plus SOUL) and `bundle` (the profile plus its skills), each
+shortened to 12 characters, the runs, first pass, median duration and the
+median tokens of a visit that reported usage on every attempt (`digests` in
+the JSON; text: `    profile 1a2b3c4d5e6f (bundle 9f8e7d6c5b4a): 3 runs,
+first pass 2/3 (67%), median 1.0 min, 200 tokens per visit`). With
+`--compare`, `executor_changes` names each node whose latest executor
+differs between the two versions (`node`, `base_profile`, `against_profile`,
+`base_bundle`, `against_bundle`; text: `executor of a: profile X -> Y,
+bundle X -> Y`), so a change in the figures can be told from a change of
+model or prompt. The dashboard's stats card shows the same groups.
+
+## The run estimate
+
+`apb run --estimate`, MCP `playbook_get(estimate: true)`, the dashboard's
+Run dialog and `GET /api/playbooks/{id}/estimate` estimate a run before it
+starts; a top-level run with a budget, or one a launch surface showed an
+estimate for (MCP and HTTP starts, `apb run` with a budget), keeps the
+estimate it started with in `runs/<id>/estimate.json`, which its budget gate
+weighs (see "budget" in `docs/HOWTO-authoring.md`). A run started with run
+overrides keeps an estimate computed for its overridden bindings instead of
+the one shown. A run with neither reads
+no history at start. The method:
+
+- **Comparable runs.** The newest 50 runs of the same playbook id, version
+  and execution mode (`cli` or `host`: host steps often report no usage,
+  and their cost differs) that apb created on this machine, among the
+  project's newest 200 run directories (by the time their journal was last
+  written), so a long history is never read in full. A run whose execution
+  mode this apb does not know (a newer apb's) is never comparable. A node's spend samples come only from runs where it was bound to
+  the same profile digest (its `profile.yaml` and SOUL, so its model and the
+  run's overrides): a run where another profile drove the node is left out
+  for that node alone and counted in `comparable.profile_mismatch`. Skills
+  (the bundle digest) and params are not matched.
+- **Samples.** Time comes from succeeded runs only (active time, paused time
+  left out; `human_wait_p50_ms` is the part spent waiting for gates and
+  questions). Spend comes from every finished visit, failed ones too. A
+  visit is a token sample only when every attempt in it reported usage, and
+  a cost sample only when every attempt reported a cost: a partial sum is no
+  sample; such attempts are counted (`attempts_without_usage`,
+  `attempts_without_cost`, `runs_without_usage`). Tokens are input plus
+  output, cache excluded, as in the stats above. A `playbook` node's spend
+  is its child run's total.
+- **Figures.** Per node: the median and range of one visit (what the budget
+  gate weighs), of one run (all visits, so loops and retries as they
+  happened), the median visits per run, and the median of one attempt (what
+  an attempt that reported nothing is estimated as). A range is p25 to p75
+  from 4 samples, the smallest and largest from 2 or 3, the value alone from
+  one. A list node's run figure is its spend per item times its item count
+  (the inline list after its filter, else the median count of earlier
+  visits; unknown otherwise), and its time the median batch time times its
+  batches. The run figures add up the nodes' medians, lows and highs: the
+  sum of the medians stands in for the median of the sum, and the range
+  assumes the nodes move together, so it is wide on purpose.
+- **Without history** time falls back to the nodes' declared
+  `expected_duration` (`basis: declared`). A gated node with no spend
+  sample is listed in `unestimated` and left out of the run figures; below
+  3 comparable runs the estimate carries a note that it is indicative only.
+  Per dimension, `unestimated_tokens` and `unestimated_cost` list the gated
+  nodes with no token or no cost figure (a node with token samples only is
+  in `unestimated_cost`): the run's figure in that dimension leaves them
+  out, and a limit in that dimension cannot weigh them. A visit with no
+  finished attempt (a cache hit, a child run whose journal does not read)
+  is no sample, never a zero one.
+
 ## JSON shape
 
 ```

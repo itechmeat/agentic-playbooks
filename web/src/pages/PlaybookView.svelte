@@ -15,10 +15,12 @@
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
   import { provenanceLabel, trialBadge } from '../lib/versioninfo'
-  import type { VersionInfo, PlaybookNode as PlaybookNodeType } from '../lib/types'
+  import type { PlaybookDetail, VersionInfo, PlaybookNode as PlaybookNodeType } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
+  import RunStartDialog from '../lib/RunStartDialog.svelte'
+  import type { RunBudget } from '../lib/api'
   import { consentStep } from '../lib/irreversibleconsent'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -150,6 +152,7 @@
       version = detail.version
       validation = detail.validation
       frozen = detail.frozen
+      budgetBlock = detail.playbook.budget ?? null
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load playbook', { description: String(e) })
     }
@@ -165,11 +168,30 @@
   let irreversibleOpen = $state(false)
   let irreversibleSources = $state<string[]>([])
   let irreversibleNonce = $state('')
+  // The Run dialog (estimate and budget) opens first; the budget it returns
+  // rides every retry of the same start, the consent one included.
+  let startOpen = $state(false)
+  let budgetBlock = $state<PlaybookDetail['playbook']['budget']>(null)
+  let startBudget = $state<RunBudget | undefined>(undefined)
+  // The dialog reopened after a `budget_needs_decision` refusal: it keeps
+  // the typed values and shows the pause or continue choice.
+  let startRetry = $state(false)
+
+  function openStart() {
+    startRetry = false
+    startOpen = true
+  }
+
+  function startWith(budget: RunBudget | undefined) {
+    startBudget = budget
+    void run()
+  }
 
   async function run(consentNonce?: string) {
     starting = true
     try {
-      const { run_id } = await runPlaybook(id, workspace, consentNonce)
+      const { run_id, warnings } = await runPlaybook(id, workspace, { consentNonce, budget: startBudget })
+      for (const w of warnings ?? []) toast.warning(w)
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
       starting = false
@@ -182,6 +204,15 @@
         irreversibleSources = step.sources
         irreversibleNonce = step.nonce
         irreversibleOpen = true
+        return
+      }
+      if (e instanceof ApiError && e.code === 'budget_needs_decision') {
+        // Show the dialog again, the typed values kept and the choice shown.
+        toast.error('The budget needs a decision', {
+          description: 'Some nodes have no estimate: choose pause or continue.',
+        })
+        startRetry = true
+        startOpen = true
         return
       }
       toast.error('Failed to start run', { description: String(e) })
@@ -333,7 +364,7 @@
     <Button
       size="sm"
       class="max-sm:px-2 bg-success text-success-foreground hover:bg-success/90"
-      onclick={() => run()}
+      onclick={openStart}
       disabled={starting}
       title="Start a run of this playbook"
     >
@@ -479,6 +510,16 @@
     </aside>
   {/if}
 </div>
+
+<RunStartDialog
+  bind:open={startOpen}
+  playbookId={id}
+  {workspace}
+  block={budgetBlock}
+  busy={starting}
+  retry={startRetry}
+  onrun={startWith}
+/>
 
 <!-- 0.24.0 irreversible consent -->
 <IrreversibleRunDialog

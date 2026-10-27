@@ -149,6 +149,14 @@ pub struct ManifestConnectorGrant {
     pub on_unknown: Option<apb_core::schema::OnUnknown>,
 }
 
+/// A node's executor digests in a run: its profile (`profile.yaml` plus
+/// SOUL, so the model and run overrides) and its bundle (plus skills).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeDigests {
+    pub profile: String,
+    pub bundle: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunExecutionManifest {
     /// Profiles used, one per unique `(scope, name)`.
@@ -308,6 +316,24 @@ impl RunExecutionManifest {
             && self.consent.is_none()
             && !self.candidate_trial
             && self.candidate_skipped.is_none()
+    }
+
+    /// Each bound node's profile and bundle digests (the supervisor's
+    /// binding included), through the profiles the bindings name.
+    pub fn node_digests(&self) -> BTreeMap<String, NodeDigests> {
+        self.node_bindings
+            .keys()
+            .filter_map(|node| {
+                let p = self.for_node(node)?;
+                Some((
+                    node.clone(),
+                    NodeDigests {
+                        profile: p.profile_digest.clone(),
+                        bundle: p.bundle_digest.clone(),
+                    },
+                ))
+            })
+            .collect()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {

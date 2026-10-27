@@ -114,9 +114,14 @@ pub fn same_model(a: &str, b: &str) -> bool {
 /// (`node_bindings` and the profile's first chain step). Empty when the run
 /// has no manifest.
 pub fn primary_models(run_dir: &Path) -> BTreeMap<String, String> {
-    let Ok(Some(m)) = crate::manifest::read(run_dir) else {
-        return BTreeMap::new();
-    };
+    match crate::manifest::read(run_dir) {
+        Ok(Some(m)) => primary_models_of(&m),
+        _ => BTreeMap::new(),
+    }
+}
+
+/// [`primary_models`] over a manifest already read.
+pub fn primary_models_of(m: &crate::manifest::RunExecutionManifest) -> BTreeMap<String, String> {
     m.node_bindings
         .iter()
         .filter_map(|(node, key)| {

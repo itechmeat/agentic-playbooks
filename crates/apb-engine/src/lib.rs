@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod agent_env;
 mod agent_home;
 pub mod baseline;
+pub mod budget;
 // candidate trials (issue #192)
 pub mod attempt_models;
 pub mod candidate;
@@ -44,6 +45,7 @@ pub mod question;
 pub mod review;
 pub mod run_config;
 pub mod run_doctor;
+pub mod run_estimate;
 mod run_lineage;
 pub mod run_outcome;
 // --- run retrospective (#192 part 3) ---
@@ -112,12 +114,12 @@ pub use question::{
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
 pub use run_doctor::{RunCheck, diagnose_run};
 pub use scheduler::{
-    PreparedRun, ResumeDecision, ResumeReason, RunMode, RunOptions, RunResult, RunSummary,
-    StartMode, drive_prepared, drive_run_from_dir, list_runs, plan_resume, post_supervisor_command,
-    prepare_supervised_background, record_run_error, resume, resume_by, resume_detached,
-    resume_detached_by, resume_detached_with, resume_with, run, run_background,
-    run_background_resolved, run_cancel, run_profile_origin, run_resolved, spawn_supervisor_agent,
-    start_detached, start_detached_resolved,
+    PreparedRun, ResumeDecision, ResumeReason, ResumeRequest, RunMode, RunOptions, RunResult,
+    RunSummary, StartMode, drive_prepared, drive_run_from_dir, list_runs, plan_resume,
+    post_supervisor_command, prepare_supervised_background, record_run_error, resume, resume_by,
+    resume_detached, resume_detached_by, resume_detached_req, resume_detached_with, resume_req,
+    resume_with, run, run_background, run_background_resolved, run_cancel, run_profile_origin,
+    run_resolved, spawn_supervisor_agent, start_detached, start_detached_resolved,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};
 pub use stop::{StopOutcome, stop_run};

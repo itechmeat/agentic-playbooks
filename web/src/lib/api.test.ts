@@ -325,9 +325,28 @@ describe('runPlaybook', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({})
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-1' }))
-    await expect(runPlaybook('p', '', 'consent-0123')).resolves.toEqual({ run_id: 'p-1' })
+    await expect(runPlaybook('p', '', { consentNonce: 'consent-0123' })).resolves.toEqual({
+      run_id: 'p-1',
+    })
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
       confirm_irreversible: 'consent-0123',
+    })
+  })
+
+  // The run budget rides the start, and a start the budget needs a decision
+  // for comes back with its structured body (the estimate, the nodes).
+  it('sends the budget and surfaces budget_needs_decision with its body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: 'budget_needs_decision', unestimated: ['a'], options: ['pause', 'continue'] }, 409),
+    )
+    const err = runPlaybook('p', '', { budget: { tokens: 300000 } }).catch((e: unknown) => e)
+    await expect(err).resolves.toMatchObject({
+      status: 409,
+      code: 'budget_needs_decision',
+      body: { unestimated: ['a'] },
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      budget: { tokens: 300000 },
     })
   })
 })

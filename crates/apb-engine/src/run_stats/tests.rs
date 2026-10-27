@@ -1,4 +1,5 @@
 use super::*;
+use crate::event::Event;
 
 fn ev(seq: u64, ts: u128, v: serde_json::Value) -> Event {
     Event {
@@ -32,6 +33,8 @@ fn run(
         snapshot: snapshot.map(|y| apb_core::schema::Playbook::from_yaml(y).unwrap()),
         candidate_trial: false,
         expected_models: BTreeMap::new(),
+        execution: Some("cli".into()),
+        node_profiles: BTreeMap::new(),
     }
 }
 
@@ -656,5 +659,100 @@ fn baseline_observations_count_met_regressed_and_unknown() {
     assert!(
         text.contains("baseline deals.count: met 1/3 (33%), regressed in 1, unknown in 1"),
         "{text}"
+    );
+}
+
+fn bind(mut r: StatsRun, profile: &str) -> StatsRun {
+    r.node_profiles.insert(
+        "work".into(),
+        crate::manifest::NodeDigests {
+            profile: format!("{profile}0123456789abcdef"),
+            bundle: format!("b{profile}0123456789abcdef"),
+        },
+    );
+    r
+}
+
+fn attempt_with(tokens: u64) -> serde_json::Value {
+    serde_json::json!({"type": "attempt_finished", "node": "work", "attempt": 1, "status": "succeeded", "usage": {"input_tokens": tokens, "output_tokens": 0, "source": "reported"}})
+}
+
+fn one_visit(id: &str, version: &str, tokens: u64) -> StatsRun {
+    run(
+        id,
+        version,
+        Some(SNAPSHOT),
+        &[
+            (1_000, started("work")),
+            (2_000, attempt_with(tokens)),
+            (3_000, finished("work", "succeeded", 1)),
+            (4_000, end("succeeded")),
+        ],
+    )
+}
+
+#[test]
+fn a_profile_change_within_a_version_splits_the_node_by_digest() {
+    let runs = vec![
+        bind(one_visit("r1", "1.0.0", 100), "aaa"),
+        bind(one_visit("r2", "1.0.0", 300), "aaa"),
+        bind(one_visit("r3", "1.0.0", 900), "bbb"),
+    ];
+    let report = build(&runs, &StatsFilter::default());
+    let work = report.versions[0]
+        .nodes
+        .iter()
+        .find(|n| n.node == "work")
+        .unwrap();
+    let groups: Vec<_> = work
+        .digests
+        .iter()
+        .map(|d| (d.profile.as_str(), d.runs, d.tokens_per_visit))
+        .collect();
+    assert_eq!(
+        groups,
+        vec![
+            ("aaa012345678", 2, Some(100)),
+            ("bbb012345678", 1, Some(900))
+        ]
+    );
+    let text = render_text(&report);
+    assert!(
+        text.contains("    profile aaa012345678 (bundle baaa01234567): 2 runs, first pass 2/2")
+    );
+    // One executor throughout: no groups.
+    let same = vec![bind(one_visit("r1", "1.0.0", 1), "aaa")];
+    let report = build(&same, &StatsFilter::default());
+    assert!(
+        report.versions[0]
+            .nodes
+            .iter()
+            .all(|n| n.digests.is_empty())
+    );
+}
+
+#[test]
+fn compare_names_the_nodes_whose_latest_executor_changed() {
+    let runs = vec![
+        bind(one_visit("r1", "1.0.0", 1), "aaa"),
+        bind(one_visit("r2", "1.1.0", 1), "bbb"),
+    ];
+    let filter = StatsFilter {
+        playbook: Some("p".into()),
+        compare: Some("1.0.0".into()),
+        ..StatsFilter::default()
+    };
+    let report = build(&runs, &filter);
+    let c = report.compare.as_ref().unwrap();
+    assert_eq!(c.executor_changes.len(), 1);
+    assert_eq!(
+        (
+            c.executor_changes[0].node.as_str(),
+            c.executor_changes[0].against_profile.as_str()
+        ),
+        ("work", "bbb012345678")
+    );
+    assert!(
+        render_text(&report).contains("  executor of work: profile aaa012345678 -> bbb012345678")
     );
 }

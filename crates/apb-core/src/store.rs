@@ -26,6 +26,17 @@ pub struct ResolvedPlaybook {
     pub origin_label: &'static str,
 }
 
+impl ResolvedPlaybook {
+    /// The store the playbook's profiles resolve from, as its origin says.
+    pub fn profile_origin(&self) -> crate::profile_store::PlaybookOrigin {
+        if self.origin_label == "global" {
+            crate::profile_store::PlaybookOrigin::Global
+        } else {
+            crate::profile_store::PlaybookOrigin::Project
+        }
+    }
+}
+
 /// Directory of the global store: `<config_dir>`, inside which `playbooks/`
 /// lives. `None` if the config directory does not resolve (no-config
 /// environment).

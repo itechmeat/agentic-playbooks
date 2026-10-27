@@ -46,6 +46,8 @@ pub(super) struct ListRun<'r, 'a, 'j> {
     pub stop: Option<&'r crate::stop::StopFlags>,
     /// The drive's control cursor (see `ExecOptions::control_after`).
     pub control_after: Option<u64>,
+    /// The run's budget gate, weighed before each batch.
+    pub budget: Option<&'r crate::scheduler::budget_gate::DriveGate>,
     pub workers: usize,
     /// The execution root (connector secrets resolve against it).
     pub root: PathBuf,
