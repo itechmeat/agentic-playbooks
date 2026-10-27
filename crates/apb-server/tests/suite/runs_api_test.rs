@@ -675,6 +675,38 @@ async fn post_playbook_run_continued_from_establishes_lineage() {
     assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
 }
 
+/// The Run dialog's "Remember for this project": a start with `remember`
+/// keeps its params and instruction for the next start of this playbook.
+#[tokio::test]
+async fn post_playbook_run_remembers_its_input() {
+    let dir = seed_with_run();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({
+            "params": { "who": "world" },
+            "instruction": "greet briefly",
+            "remember": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["remembered"],
+        serde_json::json!(["who", "instruction"])
+    );
+    assert_eq!(json["not_remembered"], serde_json::json!([]));
+    let (_, memory) = get_json(app.clone(), "/api/playbooks/noagent/memory").await;
+    assert_eq!(memory["instruction"], "greet briefly");
+    assert_eq!(memory["values"][0]["value"], "world");
+
+    // A start without input says what it took from memory.
+    let (status, json) = post_json(app, "/api/playbooks/noagent/run", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["recalled"], serde_json::json!(["who", "instruction"]));
+}
+
 /// Posts a start for the script playbook and returns the response.
 async fn post_script_run(state: AppState) -> axum::response::Response {
     let app = build_router(state);

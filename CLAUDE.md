@@ -25,7 +25,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V68, `list` for the list
-  rules V85-V89 and V93-V95, `budget` for V96-V98), the run budget's schema,
+  rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
+  param rules V99 and V100), the run budget's schema,
   the precedence of a run argument over the playbook's block and the amount
   parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
   loading with ids and the `where` filter in `items`, the per-item state
@@ -44,7 +45,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `profile_store.rs` scope resolution and bundle trust, `skills.rs`), a
   profile's `process_env` (`process_env.rs`: the policy, the `allow` syntax and
   the name-only plan; `process_env/sets.rs`: the base set and each agent CLI's
-  variables), registry and versioning, schema 1->2 migrator
+  variables), registry and versioning (`versioning/`: `diff` the definition
+  diff, `imported` the import provenance, `approval` the approval of a
+  version by its exact digest), bundle export, import and the import preview
+  (`bundle/`), remembered run input per project (`run_memory/`: `key`,
+  `schema` the params digest and the value check, `store` the file, bound
+  to the installation by a MAC for a global playbook), the credential-shape
+  detector of values and param names (`token_shape.rs`), copying a playbook into
+  another scope's store (`scope_move.rs`), schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
   shared by the validator and the engine (`graphutil.rs`), content/bundle digests
@@ -140,7 +148,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   and the admission table, `stamp` the key and the marker, `reconcile` the
   lookup of a marker send; `effect` what a call says about its effect), background
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
-  policy gate every launch surface calls (`gate.rs`), and the decision runner
+  policy gate every launch surface calls (`gate/`, with `trust_scan` the
+  connector and profile-bundle trust facts collected before any refusal),
+  the "will it fit here?" report (`fit/`: compatibility, `setup`, `trust` and
+  consent kept apart, `report` the shapes), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
   budget, replay, the `decision_made` event, the enforce gate, and one
   module per use: completion check, retry advice, supervisor wake triage,
@@ -151,8 +162,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `meta`, `intent` for `run_intent_resolve` and `apb intent`, `budget` for the
   budget arguments, the pre-start decision and the estimate and budget blocks
-  the HTTP API reuses); `catalog_rank` is the opt-in decision-model ranking behind
-  `playbook_catalog(query)`, asked through the engine's standalone decider
+  the HTTP API reuses, `memory` for `playbook_memory` and the `remember` of a
+  start, shared with the HTTP API); `promote/` is `playbook_make_global` (the
+  plan and its blockers in `plan`, the apply in `mod`); `catalog_rank` is the
+  opt-in decision-model ranking behind `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
@@ -161,10 +174,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   installer-based installs in place. `apb intent list|resolve` shows a run's
   send intents and records a person's decision on an unknown one. `budget.rs`
   holds the budget flags of `apb run` and `apb resume`, the estimate printing
-  and the terminal question of `on_no_estimate: ask`.
+  and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb
+  memory`, `make_global.rs` is `apb make-global`, `import_preview.rs` prints
+  the preview `apb import` shows before it asks for acceptance.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
-  resume budgets), shared request state in `state.rs`, and the svelte
+  resume budgets, `fit` for the fit report, `memory` for remembered run
+  input), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
@@ -191,6 +207,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   MCP, the dashboard and the CLI all call it; they differ only in
   `acknowledge_untrusted` (a person clicking Run or typing `apb run` is the
   confirmation, MCP asks the user first). `apb_mcp::policy` re-exports it.
+- Import approval: a version `apb import` wrote with scripts records its
+  import (`VersionProvenance.imported`) and runs only after an approval that
+  names its exact trust digest (`versioning::approval::approve_version`,
+  behind `apb trust approve --digest` and `playbook_approve.digest`); the gate
+  refuses it with `imported_scripts_require_approval` for the playbook and
+  every sub-playbook, and `acknowledge_untrusted` does not bypass it.
+- Remembered run input lives in the project (`.apb/memory/<scope>/<id>.json`,
+  git-ignored), bound to a digest of the params; a start applies explicit
+  input, then compatible remembered values, then defaults. Secret params and
+  credential-shaped values are never stored. The legacy
+  `meta/instruction-draft.md` is a read-only seed.
 - Anti-TOCTOU: the gate returns a `RunPermit`
   (playbook digest + the exact verified profile-bundle map) in one pass; the
   engine is handed that map verbatim as `expected_*` and rejects any drift.

@@ -124,6 +124,8 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "suggestion_dismiss",
         "playbook_trial",
         "playbook_approve",
+        "playbook_memory",
+        "playbook_make_global",
         "playbook_prepare_run",
         "playbook_execute_plan",
         "playbook_get",
@@ -329,6 +331,8 @@ fn tools_carry_safety_annotations() {
     }
     for n in [
         "playbook_run",
+        "playbook_memory",
+        "playbook_make_global",
         "playbook_create",
         "playbook_update",
         "playbook_delete",
@@ -579,6 +583,7 @@ async fn supervise_self_returns_token() {
             worktree: None,
             execution: None,
             budget: None,
+            remember: None,
         }))
         .await;
 
@@ -593,6 +598,110 @@ async fn supervise_self_returns_token() {
         text.contains("supervisor_token"),
         "expected supervisor_token in response, got: {text}"
     );
+}
+
+/// `remember: true` keeps the start's params and instruction for the next
+/// start in this project, once the gate let it through; the answer names
+/// what was remembered and refuses a credential-shaped value by name only.
+#[tokio::test]
+async fn playbook_run_remember_keeps_the_input_for_this_project() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_noagent(dir.path());
+    let vdir = dir.path().join(".apb/playbooks/noagent_sv/1.0.0");
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT.replace(
+            "version: 1.0.0\n",
+            "version: 1.0.0\nparams:\n  - { name: who, type: text }\n  - { name: key, type: text }\n",
+        ),
+    )
+    .expect("write playbook");
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let token = format!("ghp_{}", "b".repeat(36));
+    let result = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent_sv".to_string(),
+            version: None,
+            params: BTreeMap::from([
+                ("who".to_string(), "world".to_string()),
+                ("key".to_string(), token.clone()),
+            ]),
+            instruction: Some("greet".to_string()),
+            supervise: None,
+            background: None,
+            acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
+            scope: None,
+            continued_from: None,
+            worktree: None,
+            execution: None,
+            budget: None,
+            remember: Some(true),
+        }))
+        .await;
+    let text = result_text(&result);
+    assert_eq!(result.is_error, Some(false), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("json body");
+    assert_eq!(v["remembered"], serde_json::json!(["who", "instruction"]));
+    assert_eq!(
+        v["not_remembered"],
+        serde_json::json!([{ "name": "key", "reason": "value_looks_secret" }])
+    );
+    assert!(!text.contains(&token), "a refused value is never echoed");
+
+    let memory = tools::memory::playbook_memory(
+        dir.path(),
+        &tools::memory::MemoryTarget {
+            id: "noagent_sv",
+            scope: "project",
+            version: None,
+        },
+        tools::memory::MemoryAction::Get,
+    )
+    .expect("memory");
+    assert_eq!(memory["instruction"], "greet");
+    assert_eq!(memory["values"][0]["value"], "world");
+
+    let start = |version: Option<&str>, who: &str| PlaybookRunArgs {
+        id: "noagent_sv".to_string(),
+        version: version.map(str::to_string),
+        params: if who.is_empty() {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("who".to_string(), who.to_string())])
+        },
+        instruction: None,
+        supervise: None,
+        background: None,
+        acknowledge_untrusted: Some(true),
+        confirm_irreversible: None,
+        scope: None,
+        continued_from: None,
+        worktree: None,
+        execution: None,
+        budget: None,
+        remember: Some(true),
+    };
+    // A refused start remembers nothing.
+    let refused = server
+        .playbook_run(Parameters(start(Some("9.9.9"), "nobody")))
+        .await;
+    assert!(!result_text(&refused).contains("\"run_id\""));
+    // A start without input says what it took from memory.
+    let again = server.playbook_run(Parameters(start(None, ""))).await;
+    let v: serde_json::Value = serde_json::from_str(&result_text(&again)).expect("json body");
+    assert_eq!(v["recalled"], serde_json::json!(["who", "instruction"]));
+    let memory = tools::memory::playbook_memory(
+        dir.path(),
+        &tools::memory::MemoryTarget {
+            id: "noagent_sv",
+            scope: "project",
+            version: None,
+        },
+        tools::memory::MemoryAction::Get,
+    )
+    .expect("memory");
+    assert_eq!(memory["values"][0]["value"], "world");
 }
 
 /// Non-blocking start (`background: true`): a run with a script node
@@ -626,6 +735,7 @@ async fn background_run_returns_run_id_without_blocking() {
             worktree: None,
             execution: None,
             budget: None,
+            remember: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -1754,6 +1864,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             worktree: None,
             execution: None,
             budget: None,
+            remember: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1842,6 +1953,7 @@ async fn catalog_ranking_runs_off_the_runtime_and_keeps_tier0() {
                     limit: None,
                     workspace: None,
                     query: Some("implement the task".into()),
+                    fit: None,
                 }))
                 .await
         })
@@ -1899,6 +2011,7 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             worktree: None,
             execution: Some("host".to_string()),
             budget: None,
+            remember: None,
         }))
         .await;
     unsafe {
@@ -2009,6 +2122,7 @@ fn rel_args(
         worktree: None,
         execution: None,
         budget: None,
+        remember: None,
     }
 }
 

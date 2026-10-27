@@ -1234,3 +1234,210 @@ id: string, kind: TrustKind, origin_kind: OriginKind,
 approved_at_ms: number, };
 
 export type TrustRevoked = { revoked: Array<TrustEntry>, };
+
+export type FitSeverity = "blocking" | "note";
+
+export type FitItem = { code: string, 
+/**
+ * What it is about: a profile, a param, a connector, a node.
+ */
+subject: string | null, detail: string, severity: FitSeverity, };
+
+export type TrustItem = { 
+/**
+ * `playbook`, `imported_scripts`, `profile_bundle`, `connector`,
+ * `connector_account` or `sub_playbook`.
+ */
+kind: string, subject: string, digest: string | null, approved: boolean, 
+/**
+ * Whether an acknowledge at start stands in for the approval.
+ */
+acknowledge_covers: boolean, };
+
+export type ConsentView = { 
+/**
+ * The consent sources (`playbook`, `node <id>`, a connector function,
+ * `sub-playbook node <id>`); empty when no consent is needed.
+ */
+irreversible: Array<string>, 
+/**
+ * The effects of the whole tree.
+ */
+effects: Array<string>, };
+
+export type FitReport = { id: string, 
+/**
+ * `project` or `global`.
+ */
+scope: string, version: string, 
+/**
+ * No blocking compatibility or setup item. Not the same as a start
+ * going through unasked: see `trusted` and `needs_consent`.
+ */
+ready: boolean, 
+/**
+ * Every trust item is approved.
+ */
+trusted: boolean, needs_consent: boolean, compatibility: Array<FitItem>, setup: Array<FitItem>, trust: Array<TrustItem>, consent: ConsentView, };
+
+export type FitSummary = { ready: boolean, 
+/**
+ * No blocking compatibility item.
+ */
+compatible: boolean, 
+/**
+ * How many setup items there are.
+ */
+setup: number, trusted: boolean, needs_consent: boolean, };
+
+export type Incompat = "removed" | "type_changed" | "option_gone" | "now_secret";
+
+export type InstructionSource = "memory" | "legacy_draft" | "none";
+
+export type ValueStatus = { "status": "compatible" } | { "status": "incompatible", reason: Incompat, };
+
+export type RecalledValue = { name: string, 
+/**
+ * The value; `None` when the param became a secret (the old value is
+ * never shown).
+ */
+value: string | null, status: ValueStatus, };
+
+export type Recall = { 
+/**
+ * The instruction a start without one would use (a blank one counts as
+ * none).
+ */
+instruction: string | null, instruction_source: InstructionSource, values: Array<RecalledValue>, 
+/**
+ * Params with neither a compatible remembered value nor a default: a
+ * start must pass them.
+ */
+missing: Array<string>, 
+/**
+ * The params changed since the values were saved.
+ */
+schema_changed: boolean, diagnostics: Array<string>, };
+
+export type Refused = { name: string, reason: string, };
+
+export type Remembered = { stored: Array<string>, refused: Array<Refused>, 
+/**
+ * The earlier memory could not be used (corrupt, or not saved on this
+ * machine) and was replaced.
+ */
+diagnostics?: Array<string>, };
+
+export type BundleOrigin = { 
+/**
+ * The exporter's trust digest of the version (YAML plus scripts).
+ */
+digest: string, 
+/**
+ * `project` or `global`.
+ */
+scope: string, apb_version: string, exported_at_ms: number, };
+
+export type ScriptEntry = { 
+/**
+ * Path relative to `scripts/`.
+ */
+path: string, 
+/**
+ * `sha256:<hex>` of the file bytes.
+ */
+sha256: string, bytes: number, executable: boolean, };
+
+export type ImportProvenance = { 
+/**
+ * `sha256:<hex>` of the bundle file as read.
+ */
+bundle_digest: string, 
+/**
+ * The base name of the bundle file, sanitized, when it was a file.
+ */
+file_name?: string, 
+/**
+ * The id and version the bundle declared.
+ */
+source_id: string, source_version: string, 
+/**
+ * The exporter's own view, when the bundle carried one. Informational:
+ * nothing local vouches for it.
+ */
+source?: BundleOrigin, imported_at_ms: number, 
+/**
+ * The scripts the import wrote (empty when it carried none).
+ */
+scripts?: Array<ScriptEntry>, 
+/**
+ * The trust digest of the version the import wrote: what an approval
+ * of the import must name.
+ */
+digest: string, };
+
+export type TrialRecord = { 
+/**
+ * Trial runs that succeeded with every goal criterion holding.
+ */
+successes: number, 
+/**
+ * `promoted`, `rejected` or `superseded`; absent while it is still on
+ * trial.
+ */
+outcome?: string, 
+/**
+ * The trial run that decided the outcome (for `superseded`: the run
+ * whose forward patch replaced it).
+ */
+run_id?: string, 
+/**
+ * Why it was rejected, or the version that superseded it.
+ */
+reason?: string, };
+
+export type VersionProvenance = { created_by: string, run_id: string | null, classification: string | null, 
+/**
+ * `next_runs` for a forward patch (a candidate for the next runs);
+ * absent for a patch the run migrated onto (`current_run`).
+ */
+scope?: string, 
+/**
+ * The version the patch was made from: the lineage of a candidate that
+ * replaced an earlier one.
+ */
+base_version?: string, 
+/**
+ * Why the supervisor made the forward patch.
+ */
+rationale?: string, 
+/**
+ * What the rationale rests on: journal seqs, node ids, durations.
+ */
+evidence?: Array<string>, 
+/**
+ * How the candidate fared in its trials; absent until a trial run ends.
+ */
+trial?: TrialRecord, 
+/**
+ * Where an imported version came from (`created_by: import`).
+ */
+imported?: ImportProvenance, };
+
+export type VersionInfo = { version: string, 
+/**
+ * Whether `current` points at this version: the one source for "in use"
+ * (promoted) and the only one the listings report.
+ */
+is_current: boolean, 
+/**
+ * Whether the `candidate` pointer names this version: a forward patch
+ * on trial in the next runs (issue #192, see `crate::candidate`).
+ */
+is_candidate?: boolean, 
+/**
+ * An import wrote this version with scripts and its content is not
+ * approved: it runs only after an approval naming its digest
+ * ([`approval`]).
+ */
+awaiting_approval?: boolean, provenance: VersionProvenance | null, };

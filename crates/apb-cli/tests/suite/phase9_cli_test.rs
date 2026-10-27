@@ -44,6 +44,219 @@ fn seed_architect(root: &std::path::Path) {
     fs::write(pdir.join("SOUL.md"), "").unwrap();
 }
 
+/// The bundle digest `apb import --preview` prints for `bundle` (what
+/// `--accept` must name).
+fn previewed_digest(
+    bundle: &std::path::Path,
+    dst: &std::path::Path,
+    cfg: &std::path::Path,
+) -> String {
+    let out = playbook()
+        .args(["import", "--preview"])
+        .arg(bundle)
+        .env("APB_CONFIG_DIR", cfg)
+        .current_dir(dst)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("bundle digest: "))
+        .expect("the preview prints the bundle digest")
+        .trim()
+        .to_string()
+}
+
+/// A project with the architect profile, ready to import the fixture.
+fn import_target() -> (tempfile::TempDir, tempfile::TempDir) {
+    let dst = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    playbook()
+        .arg("init")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success();
+    seed_architect(dst.path());
+    (dst, cfg)
+}
+
+fn exported(src: &tempfile::TempDir) -> std::path::PathBuf {
+    let bundle_path = src.path().join("bundle.json");
+    playbook()
+        .args(["export", "implement-task", "--out"])
+        .arg(&bundle_path)
+        .current_dir(src.path())
+        .assert()
+        .success();
+    bundle_path
+}
+
+/// Without a terminal and without --accept, an import prints the preview
+/// and exits 3 without writing; an --accept that names another digest is
+/// refused (2) without writing; the previewed digest imports.
+#[test]
+fn import_without_a_terminal_needs_the_previewed_digest() {
+    let src = seeded_dir();
+    let bundle = exported(&src);
+    let (dst, cfg) = import_target();
+    let pdir = dst.path().join(".apb/playbooks/implement-task");
+
+    playbook()
+        .arg("import")
+        .arg(&bundle)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("new playbook"))
+        .stdout(predicate::str::contains("scripts added: node-lint.sh"))
+        .stderr(predicate::str::contains("--accept sha256:"));
+    assert!(!pdir.exists(), "nothing is written without an acceptance");
+
+    playbook()
+        .args(["import", "--accept", "sha256:0000"])
+        .arg(&bundle)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .code(2);
+    assert!(!pdir.exists(), "a wrong digest writes nothing");
+
+    let digest = previewed_digest(&bundle, dst.path(), cfg.path());
+    playbook()
+        .args(["import", "--accept", &digest])
+        .arg(&bundle)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imported implement-task"));
+    assert!(pdir.join("current").is_file());
+}
+
+/// The same bundle again writes nothing and exits 0; a bundle whose version
+/// exists with other content stops after the preview with exit 2, before
+/// anyone is asked to accept it.
+#[test]
+fn import_of_the_same_or_a_conflicting_bundle_asks_nothing() {
+    let src = seeded_dir();
+    let bundle = exported(&src);
+    let (dst, cfg) = import_target();
+    let digest = previewed_digest(&bundle, dst.path(), cfg.path());
+    let import = |file: &std::path::Path| {
+        let mut cmd = playbook();
+        cmd.arg("import")
+            .arg(file)
+            .env("APB_CONFIG_DIR", cfg.path())
+            .current_dir(dst.path());
+        cmd
+    };
+    import(&bundle)
+        .arg("--accept")
+        .arg(&digest)
+        .assert()
+        .success();
+    import(&bundle)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to import"));
+
+    let mut changed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&bundle).unwrap()).unwrap();
+    let yaml = changed["playbook"].as_str().unwrap().to_string();
+    changed["playbook"] = serde_json::json!(yaml.replacen("name: ", "name: changed ", 1));
+    let other = src.path().join("other.json");
+    fs::write(&other, changed.to_string()).unwrap();
+    import(&other)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("import refused: see the preview"));
+}
+
+/// A version imported with scripts is approved only by naming its digest:
+/// `apb trust approve` without --digest prints the digest and the scripts
+/// and exits 2; with the digest it approves and activates the version.
+#[test]
+fn trust_approve_of_imported_scripts_needs_the_digest() {
+    let src = seeded_dir();
+    let bundle = exported(&src);
+    let (dst, cfg) = import_target();
+    let digest = previewed_digest(&bundle, dst.path(), cfg.path());
+    playbook()
+        .args(["import", "--accept", &digest])
+        .arg(&bundle)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success();
+
+    let out = playbook()
+        .args(["trust", "approve", "implement-task"])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout_has(&out.stdout, "node-lint.sh"),
+        "the scripts are listed"
+    );
+    let trust_digest = stdout
+        .lines()
+        .find_map(|l| l.split("--digest ").nth(1))
+        .expect("the refusal names the digest")
+        .trim()
+        .to_string();
+    assert!(
+        !fs::read_to_string(cfg.path().join("trust.json"))
+            .unwrap_or_default()
+            .contains(&trust_digest)
+    );
+
+    playbook()
+        .args([
+            "trust",
+            "approve",
+            "implement-task",
+            "--digest",
+            "sha256:0000",
+        ])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(format!(
+            "digests to {trust_digest}, not sha256:0000"
+        )));
+    playbook()
+        .args([
+            "trust",
+            "approve",
+            "implement-task",
+            "--digest",
+            &trust_digest,
+        ])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(cfg.path().join("trust.json"))
+            .unwrap()
+            .contains(&trust_digest)
+    );
+}
+
+fn stdout_has(stdout: &[u8], needle: &str) -> bool {
+    String::from_utf8_lossy(stdout).contains(needle)
+}
+
 #[test]
 fn doctor_runs_and_reports_playbook() {
     let dir = seeded_dir();
@@ -70,16 +283,12 @@ fn export_then_import_round_trip_via_cli() {
     // Import into a clean project (the architect profile must be set up -
     // it's a project-level dependency of the playbook, and import validates
     // references).
-    let dst = tempfile::tempdir().unwrap();
+    let (dst, cfg) = import_target();
+    let digest = previewed_digest(&bundle_path, dst.path(), cfg.path());
     playbook()
-        .arg("init")
-        .current_dir(dst.path())
-        .assert()
-        .success();
-    seed_architect(dst.path());
-    playbook()
-        .arg("import")
+        .args(["import", "--accept", &digest])
         .arg(&bundle_path)
+        .env("APB_CONFIG_DIR", cfg.path())
         .current_dir(dst.path())
         .assert()
         .success()
@@ -88,6 +297,7 @@ fn export_then_import_round_trip_via_cli() {
     // The imported playbook shows up in the list.
     playbook()
         .arg("list")
+        .env("APB_CONFIG_DIR", cfg.path())
         .current_dir(dst.path())
         .assert()
         .success()
@@ -147,17 +357,10 @@ fn import_of_a_bundle_without_scripts_leaves_it_untrusted() {
         .current_dir(src.path())
         .assert()
         .success();
-    let dst = tempfile::tempdir().unwrap();
-    let cfg = tempfile::tempdir().unwrap();
+    let (dst, cfg) = import_target();
+    let digest = previewed_digest(&bundle_path, dst.path(), cfg.path());
     playbook()
-        .arg("init")
-        .env("APB_CONFIG_DIR", cfg.path())
-        .current_dir(dst.path())
-        .assert()
-        .success();
-    seed_architect(dst.path());
-    playbook()
-        .arg("import")
+        .args(["import", "--accept", &digest])
         .arg(&bundle_path)
         .env("APB_CONFIG_DIR", cfg.path())
         .current_dir(dst.path())
@@ -189,24 +392,19 @@ fn import_of_a_bundle_with_scripts_reports_it_untrusted() {
         .success()
         .stdout(predicate::str::contains("(1 script file(s))"));
 
-    let dst = tempfile::tempdir().unwrap();
-    let cfg = tempfile::tempdir().unwrap();
+    let (dst, cfg) = import_target();
+    let digest = previewed_digest(&bundle_path, dst.path(), cfg.path());
     playbook()
-        .arg("init")
-        .env("APB_CONFIG_DIR", cfg.path())
-        .current_dir(dst.path())
-        .assert()
-        .success();
-    seed_architect(dst.path());
-    playbook()
-        .arg("import")
+        .args(["import", "--accept", &digest])
         .arg(&bundle_path)
         .env("APB_CONFIG_DIR", cfg.path())
         .current_dir(dst.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("is untrusted until approved"))
-        .stdout(predicate::str::contains("playbook_approve"));
+        .stdout(predicate::str::contains(
+            "does not run until approved by digest",
+        ))
+        .stdout(predicate::str::contains("apb trust approve implement-task"));
     let pdir = dst.path().join(".apb/playbooks/implement-task");
     let version = fs::read_to_string(pdir.join("current")).unwrap();
     assert_eq!(

@@ -69,10 +69,12 @@ pub fn build_router(state: AppState) -> Router {
             put(routes::playbooks::set_frozen_handler),
         )
         .route(
-            "/api/playbooks/{id}/input-draft",
-            get(routes::playbooks::get_input_draft_handler)
-                .put(routes::playbooks::put_input_draft_handler),
+            "/api/playbooks/{id}/memory",
+            get(routes::memory::get_memory_handler)
+                .put(routes::memory::put_memory_handler)
+                .delete(routes::memory::delete_memory_handler),
         )
+        .route("/api/playbooks/{id}/fit", get(routes::fit::get_fit_handler))
         .route(
             "/api/playbooks/{id}/run",
             post(routes::playbooks::run_playbook_handler),

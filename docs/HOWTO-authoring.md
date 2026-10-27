@@ -13,7 +13,7 @@ A playbook is a YAML document with these top-level fields:
 - `name` (string, display name, any language)
 - `description` (string, free text, any language; not used for matching)
 - `version` (string, `X.Y.Z`)
-- `params` (list): each `{ name, type, label?, options?, default? }`
+- `params` (list): each `{ name, type, label?, options?, default?, secret? }`
 - `defaults` (profile, retries, timeout, on_failure)
 - `trigger`, `requires`, `effects`, `budget`, `goal` (see below)
 - `nodes` (list) and `edges` (list)
@@ -36,7 +36,9 @@ version that was current. An imported version is never approved by the
 import, with or without scripts: it stays untrusted until it is approved
 (`playbook_approve`, or a run confirmation). Older bundles (format 1) predate
 scripts: they still import, carry no scripts themselves, and their version
-keeps the current version's scripts as an ordinary save does.
+keeps the current version's scripts as an ordinary save does. Sharing a
+playbook, the preview before an import and the approval of imported scripts
+are described in "Sharing a playbook" below.
 
 ### One playbook with params, or several playbooks
 
@@ -59,6 +61,30 @@ graph, and each of them gets harder to read, test and trust.
 params:
   - { name: channel, type: text, label: "Channel to post the report to", default: "#sales" }
 ```
+
+### Secret params
+
+A param that carries a credential (an API token, a password) is marked
+`secret: true`. apb never remembers its value for the next start (see
+"Remembered run input" below), the dashboard asks for it in a password field
+at every start and never prefills it, and a remembered value of a param that
+became secret is never used. Two validator errors keep a secret out of the
+definition itself:
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V99 | error | a `secret: true` param has a `default`: the secret would sit in the YAML |
+| V100 | error | a `secret: true` param is not `type: text` |
+
+```yaml
+params:
+  - { name: deploy_token, type: text, label: "Deploy token", secret: true }
+```
+
+A secret param still reaches the run like any param (the run's
+configuration records the values it started with), so prefer a connector
+account or an environment variable for a credential the playbook uses on
+every run.
 
 ## Visual editor and graph check
 
@@ -2192,12 +2218,67 @@ zero work, so leave their estimate at the default.
 ## Run input prompt (Start node)
 
 Every run can carry a free-form "input prompt": the text available to node
-prompts as `{{run.instruction}}`. Edit it on the Start node in the web editor.
-Typing autosaves a draft that is NOT part of the playbook definition: it does
-not create a version and does not change trust, and a frozen playbook still
-accepts draft edits. At run start the value is resolved once: an explicitly
-passed instruction wins, otherwise the current draft, otherwise none. The chosen
-value is snapshotted immutably into the run.
+prompts as `{{run.instruction}}`. Edit it on the Start node in the web editor,
+or in the Run dialog. What you type there is remembered for this project
+(see "Remembered run input" below): it is NOT part of the playbook
+definition, does not create a version and does not change trust, and a frozen
+playbook still accepts it. At run start the value is resolved once and
+snapshotted immutably into the run.
+
+### Remembered run input
+
+A person who runs a playbook with the same values every time does not have to
+type them again: the param values and the instruction can be remembered per
+project. The Run dialog's "Remember for this project", `apb run --remember`
+and `playbook_run` with `remember: true` keep what the start passed;
+`playbook_memory` and `apb memory show|clear` read and forget it.
+
+- Where: `.apb/memory/<project|global>/<id>.json` in the project, git
+  ignored. A global playbook remembers different values in every project.
+  Its memory file carries a MAC under this installation's key, so a file
+  that came with a checkout (not saved by apb on this machine) is ignored
+  with a diagnostic, as is a signed file put under another playbook's
+  name: a repository cannot seed a trusted global playbook. Without a
+  usable config directory for the key, saving a global playbook's input
+  fails instead of writing a file the next read would ignore. Making a
+  playbook global re-checks the moved values like a save.
+- Precedence at start: an explicit value wins, then a compatible remembered
+  value, then the param's `default`. For the instruction: an explicit one
+  (an explicit empty one too), then the remembered one, then the legacy
+  draft. A sub-playbook child takes nothing from memory or the old draft:
+  the parent's consent covers its defaults and the instruction the parent
+  passes. The
+  run's `run_provenance` event lists what came from memory (`remembered`),
+  and every start surface says it: `recalled` in the `playbook_run` and
+  dashboard answers, a `used remembered input:` line from `apb run`.
+- A start remembers its input only once it succeeded (for `apb run`, once
+  the run gate and the budget check passed), checked against the
+  playbook's current version; a refused start changes nothing.
+- Values are bound to the params as they were saved. After the params
+  change, each value is checked again: one whose param is gone, whose value
+  no longer parses as the param's type, that is not one of the options now,
+  or whose param became secret is reported as incompatible with the
+  reason, never used. A value that still fits a changed type is used
+  (`schema_changed` says the params changed). The next save drops every
+  value that no longer fits, so the file never keeps one.
+- Never stored: a `secret: true` param, a param whose name says it holds a
+  credential (`password`, `token`, `secret`, `api_key` and the like), and
+  any value or instruction that looks like a credential (a token prefix
+  such as `ghp_`, a JWT, a bearer header, a value after `password=` or
+  `api_key:`, a URL with a password, a Slack webhook, a long random
+  string). They are refused by name with a reason; the value is not
+  echoed. Making a playbook global does not carry an old instruction draft
+  that looks like a credential either.
+- Reading memory changes nothing: a file that does not parse reads as
+  empty with a diagnostic, and the next save moves it aside
+  (`<id>.json.corrupt-<time>`). A file of a newer format is left alone.
+
+Behaviour change for an existing project: the old instruction draft lived in
+the definition (`meta/instruction-draft.md`), so a project that committed it
+shared one draft through git, and a global playbook shared one draft across
+every project. That file is now read only, as a seed: it is used when
+nothing is remembered, and an edit goes to the project's local memory
+instead. Delete the committed file once nobody needs the seed.
 
 `playbook_trial` accepts the same `instruction` argument as `playbook_run`, so
 an instruction-driven draft can be trialed with a real instruction before it
@@ -2372,6 +2453,40 @@ server runs a preflight before a run and reports anything missing:
 Scope (project vs global) is only about where the definition is stored, not
 about applicability. A global playbook still declares `requires` to stay honest
 about where it can run.
+
+## Will it fit here?
+
+Before a playbook runs in a project, one read-only report tells whether it
+can, in four separate sections, so a missing trust approval never hides a
+missing file and the other way round:
+
+- **Compatibility**: what the project cannot change by configuration: the
+  lifecycle, `requires`, the sub-playbook tree, scripts the version lacks
+  (V92) and connectors that do not resolve. Cold session handoffs and
+  `protect` globs that match nothing are notes.
+- **Setup**: what a person can provide: profiles, skills and the models of
+  their executor chains, connector accounts and secret env vars, and param
+  values a start must pass (`param_needs_value`) or that memory holds in a
+  form that no longer fits (`remembered_incompatible`).
+- **Trust**: each digest of the tree (the playbook, imported scripts,
+  profile bundles, connectors and accounts, sub-playbooks) with whether it is
+  approved and whether an acknowledge at start stands in for it.
+- **Consent**: the irreversible sources a start must be agreed to, and the
+  effects of the whole tree.
+
+`ready` (no blocking compatibility or setup item) and `trusted` are reported
+apart: an untrusted playbook can be ready. `ready` does not mean a start goes
+through unasked: `trusted` and `needs_consent` say what a start must still
+be approved or agreed to. When the sub-playbook tree cannot be resolved, a
+`tree_not_assessed` note says the effects and trust items cover the
+playbook alone; memory that cannot be read is a `remembered_unreadable`
+note, and memory that is ignored (corrupt, or not saved by this
+installation) a `remembered_ignored` note, never a failed report. The same report backs
+`playbook_adopt_report` (with `scope` and `workspace`), `playbook_catalog`
+with `fit: true` (a summary per entry), `apb adopt [--scope]` and the
+dashboard's Fit panel. For a global playbook the report answers for the
+project it is asked about: the same playbook may fit one project and not
+another while its trust stays the same.
 
 ## effects
 
@@ -2810,8 +2925,103 @@ processed with none left for a look, and an `events` check may name
 ## Secrets
 
 Never put secret values in a playbook or in a capture synopsis. Reference them
-by env or config key name, or a placeholder param. Concrete secret-looking
-values are rejected at capture and should never be committed to a definition.
+by env or config key name, or a `secret: true` param (see "Secret params").
+Concrete secret-looking values are rejected at capture and should never be
+committed to a definition.
+
+## Sharing a playbook
+
+`apb export <id> --out file.json` writes one version as a bundle: the YAML
+(in the form a save writes it, so a hand-edited version loses its comments
+and formatting here, as on any save), the editor layout, the scripts, and an
+`origin` block (the exporter's digest of the version, its scope, the apb
+version and the export time). The digest in `origin` is the one an import
+of the bundle under the same id and version computes. Nothing in `origin`
+is trusted by the importer; it only tells where the file says it came
+from.
+
+`apb import file.json` always prints a preview first: whether the playbook is
+new or the bundle equals the current version, the definition diff against the
+current version (nodes added, removed and changed, edges added and removed),
+the scripts it adds, removes and changes, the validation errors that would
+refuse it, and the bundle digest. `--preview` stops there. A bundle equal to
+the current version (naming no other version) writes nothing: apb prints
+"nothing to import" and exits 0, with or without a terminal. A bundle the
+import would refuse (validation errors, or a version that already exists
+with other content) stops after the preview with exit 2, before anyone is
+asked to accept it. Otherwise, to import, accept that exact file: on a
+terminal apb asks y/N; without a terminal pass `--accept <bundle digest>`
+from the preview.
+
+Behaviour change: without a terminal and without `--accept`, `apb import`
+now exits 3 and writes nothing (it used to import at once), except for the
+unchanged and refused cases above. A wrong `--accept` is refused with
+exit 2.
+
+The version an import writes records where it came from (`created_by:
+import`, the bundle digest, the file's base name, the declared id and
+version, the scripts by sha256 and the final trust digest); the dashboard's
+version history shows "imported from <file>". A version imported with
+scripts carries code nobody on this machine wrote, so it runs only after an
+approval that names its exact digest, for the playbook and every
+sub-playbook:
+
+```sh
+apb trust approve <id> --version <version> --digest <digest>
+```
+
+(MCP: `playbook_approve` with `digest`). Without a digest the approval is
+refused and prints the digest and the scripts as they are now; an
+acknowledge at start does not stand in for it (refusal
+`imported_scripts_require_approval`), and a script changed after the approval
+needs a new one. The rule holds for every way a version runs: a trial
+(`playbook_trial`) and a sub-playbook child are refused the same way. It
+follows the scripts too: a version saved or patched on top of an imported
+version nobody approved yet keeps the import record, so it needs the same
+approval by digest. Once an imported version is approved, a save that
+carries its scripts unchanged is trusted like any save. The dashboard marks
+a waiting version "awaiting approval".
+
+Over MCP this approval records consent; it does not stop an agent. The
+refusal names the digest, so an agent can approve by sending it back: the
+tool asks the agent to show the scripts to the person first, and the
+approval is recorded as the agent's (`agent_generated`). A person approves
+on the CLI or the dashboard by naming the digest themselves.
+
+## Making a playbook global
+
+A project playbook that every project could use is made global in one
+command:
+
+```sh
+apb make-global <id> --dry-run
+apb make-global <id> --variant trash|retire|keep [--move-profiles]
+```
+
+(MCP: `playbook_make_global`). It copies the playbook with every version to
+the global store; digests depend on content only, so the copy keeps its
+trust. The project's remembered input moves to the global scope (with
+`keep` it is copied, since the project copy keeps running here). The
+`variant` decides what happens to the project copy: `trash` moves it to the
+project trash (restorable), `retire` keeps it retired so the global one wins
+here, `keep` leaves both: while both are active and trusted the catalog
+marks the pair ambiguous until one is retired, otherwise the global one
+shadows the project copy. A step that fails undoes the earlier ones (the
+global copy, the copied profiles, the memory), so a retry starts from the
+same state.
+
+The dry run lists what stops it (a global playbook with the same id, a
+candidate version on trial, a version that fails validation as a global
+playbook, an `auto` profile only this project has: pass `--move-profiles` to
+copy it, unless it uses project skills, an `auto` sub-playbook only this
+project has) and what to know (an explicit `scope: project` sub-playbook
+resolves per project, connector accounts this project configures, a global
+profile of the same name that differs, other projects on this machine with
+their own playbook of this id, which are reported and never changed; a
+global profile counts as different when its own files or the content of a
+skill it uses differ). Once applied, the answer ends with the global
+playbook's fit report for this project (none, with a warning, when it
+cannot be built); a dry run and a blocked run answer with the plan only.
 
 ## Recurring review findings go into project memory
 

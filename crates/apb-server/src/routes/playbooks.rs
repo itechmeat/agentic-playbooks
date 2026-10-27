@@ -138,66 +138,6 @@ pub(crate) async fn set_frozen_handler(
     }
 }
 
-/// GET /api/playbooks/{id}/input-draft: the saved run "input prompt" draft for
-/// this playbook (spec A), or `null` if none has been saved yet.
-pub(crate) async fn get_input_draft_handler(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-    Query(q): Query<WorkspaceQuery>,
-) -> impl IntoResponse {
-    if !is_safe_id(&id) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    let reg = match Registry::open(&root) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    match reg.read_instruction_draft(&id) {
-        Ok(v) => Json(serde_json::json!({ "instruction": v })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-pub(crate) struct InputDraftBody {
-    #[serde(default)]
-    instruction: Option<String>,
-}
-
-/// PUT /api/playbooks/{id}/input-draft: stores (or, for an empty/absent
-/// `instruction`, clears) the run input draft.
-pub(crate) async fn put_input_draft_handler(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-    Query(q): Query<WorkspaceQuery>,
-    Json(body): Json<InputDraftBody>,
-) -> impl IntoResponse {
-    if !is_safe_id(&id) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    let reg = match Registry::open(&root) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let text = body.instruction.unwrap_or_default();
-    match reg.write_instruction_draft(&id, &text) {
-        Ok(()) => {
-            let out = if text.is_empty() { None } else { Some(text) };
-            Json(serde_json::json!({ "instruction": out })).into_response()
-        }
-        Err(RegistryError::NotFound(what)) => (StatusCode::NOT_FOUND, what).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
 #[derive(Deserialize, Default)]
 pub(crate) struct RunBody {
     #[serde(default)]
@@ -227,6 +167,13 @@ pub(crate) struct RunBody {
     /// with the estimate) until the person picks pause or continue.
     #[serde(default)]
     budget: Option<super::estimate::BudgetBody>,
+    /// Remember `params` and `instruction` for this playbook in this
+    /// project once the start passes the gate (the Run dialog's "Remember
+    /// for this project"). The answer lists `remembered` and
+    /// `not_remembered` (secret params and credential-shaped values are
+    /// never stored).
+    #[serde(default)]
+    remember: bool,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -335,6 +282,10 @@ pub(crate) async fn run_playbook_handler(
         Ok(Err(refusal)) => return refusal.into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+    // What the person chose to keep is remembered once the start succeeded.
+    let keep = body
+        .remember
+        .then(|| (opts.params.clone(), opts.instruction.clone()));
     let candidate_trial = permit.candidate.clone();
     let candidate_skipped = permit.candidate_skipped.clone();
     permit.apply(&mut opts);
@@ -352,6 +303,20 @@ pub(crate) async fn run_playbook_handler(
             }
             if let Some(note) = deprecation {
                 answer["deprecation"] = serde_json::json!(note);
+            }
+            let after = {
+                let (root, id, run_id) = (root.clone(), id.clone(), run_id.clone());
+                tokio::task::spawn_blocking(move || after_start(&root, &id, &run_id, keep)).await
+            };
+            match after {
+                Ok(serde_json::Value::Object(m)) => {
+                    if let Some(obj) = answer.as_object_mut() {
+                        obj.extend(m);
+                    }
+                }
+                Ok(_) => {}
+                // The start stands; the answer says the memory step did not run.
+                Err(e) => answer["memory_error"] = serde_json::json!(e.to_string()),
             }
             // The estimate the run started with and its budget.
             Json(apb_mcp::tools::budget::with_start_blocks(&root, answer)).into_response()
@@ -378,6 +343,39 @@ pub(crate) async fn run_playbook_handler(
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// What a dashboard start reports once its run exists: `recalled` (the
+/// params and instruction the start took from memory) and, for a start
+/// with `remember`, what was remembered for the project playbook `id`
+/// (checked against its current version). A memory failure is reported in
+/// the answer (`memory_error`), never a failure of the start.
+fn after_start(
+    root: &std::path::Path,
+    id: &str,
+    run_id: &str,
+    keep: Option<(std::collections::BTreeMap<String, String>, Option<String>)>,
+) -> serde_json::Value {
+    let mut out = serde_json::json!({});
+    let recalled = apb_engine::run_view::recalled_input(&root.join(".apb/runs").join(run_id));
+    if !recalled.is_empty() {
+        out["recalled"] = serde_json::json!(recalled);
+    }
+    let Some((params, instruction)) = keep else {
+        return out;
+    };
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: id.to_string(),
+        version: None,
+    };
+    let memory =
+        apb_mcp::tools::memory::remember_for_ref(root, &wref, &params, instruction.as_deref())
+            .unwrap_or_else(|e| serde_json::json!({ "memory_error": e.to_string() }));
+    if let (Some(o), serde_json::Value::Object(m)) = (out.as_object_mut(), memory) {
+        o.extend(m);
+    }
+    out
 }
 
 pub(crate) async fn delete_playbook_handler(

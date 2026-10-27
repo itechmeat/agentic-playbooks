@@ -93,7 +93,7 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
-apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal)
+apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --remember: keep its params and instruction for this project)
 apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item)
 apb wait <run>      block until a run finishes, needs input or stops
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
@@ -105,13 +105,15 @@ apb answer          answer an interactive node's pending question
 apb tasks           list or submit host tasks (host execution mode; --notes: findings and warnings)
 apb note            post a supervisor note to a run
 apb export          export a playbook version (YAML, layout, scripts) to a bundle file
-apb import          import a playbook bundle into this project
+apb import          preview and import a playbook bundle into this project (--preview; --accept <bundle digest> without a terminal, else exit 3)
 apb trash           list deleted playbooks, restore one with its versions
-apb trust           list approvals (trust.json), revoke by digest or id
+apb trust           list approvals (trust.json), revoke by digest or id, approve a version (--digest for imported scripts)
 apb profile         manage agent profiles
 apb connector       list or manage connectors
 apb detect          detect installed coding agents
-apb adopt           adoption readiness report for a playbook
+apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
+apb memory          show or clear the remembered run input of a playbook in this project
+apb make-global     make a project playbook available in every project (--variant trash|retire|keep, --dry-run)
 apb subscriptions   view or declare agent subscriptions
 apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2

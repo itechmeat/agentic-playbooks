@@ -107,7 +107,41 @@ pub fn verify(run_dir: &Path, run_id: &str) -> bool {
     let Ok(expected) = mac(&key, run_dir, run_id) else {
         return false;
     };
-    // Compared in constant time: the stamp is a MAC.
-    let (a, b) = (expected.as_bytes(), stored.trim().as_bytes());
+    same_tag(&expected, stored.trim())
+}
+
+/// Compares two MACs in constant time.
+fn same_tag(expected: &str, stored: &str) -> bool {
+    let (a, b) = (expected.as_bytes(), stored.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// A MAC of `bytes` for the purpose `domain` under this installation's key,
+/// creating the key when there is none yet. An error when there is no
+/// config directory or the key cannot be written or read: a caller that
+/// binds state with it must not pretend it did. Other state apb keeps
+/// inside a workspace (remembered run input) is bound to the installation
+/// with it, the way run directories are.
+pub fn tag(domain: &str, bytes: &[u8]) -> std::io::Result<String> {
+    ensure_key()?;
+    let key = load_key().ok_or_else(|| {
+        std::io::Error::other("this installation has no key (no usable config directory)")
+    })?;
+    keyed_tag(&key, domain, bytes).ok_or_else(|| std::io::Error::other("the key is unusable"))
+}
+
+/// Whether `stored` is [`tag`] of `bytes` for `domain` under this
+/// installation's key. False without a key.
+pub fn verify_tag(domain: &str, bytes: &[u8], stored: &str) -> bool {
+    load_key()
+        .and_then(|key| keyed_tag(&key, domain, bytes))
+        .is_some_and(|expected| same_tag(&expected, stored))
+}
+
+fn keyed_tag(key: &[u8], domain: &str, bytes: &[u8]) -> Option<String> {
+    let mut m = HmacSha256::new_from_slice(key).ok()?;
+    m.update(domain.as_bytes());
+    m.update(b"\0");
+    m.update(&Sha256::digest(bytes));
+    Some(crate::content::hex_lower(&m.finalize().into_bytes()))
 }

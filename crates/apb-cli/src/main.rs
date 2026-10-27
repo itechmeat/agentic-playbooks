@@ -10,8 +10,11 @@ mod decisions;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
+mod import_preview;
 mod intent;
+mod make_global;
 mod manage;
+mod memory;
 mod onboarding;
 mod pause;
 mod profile;
@@ -96,8 +99,45 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
-    /// Adoption readiness report for a playbook (or all project playbooks)
-    Adopt { name: Option<String> },
+    /// Will it fit here: the readiness report of a playbook (or of every
+    /// project and global playbook) for a run in this project, in four
+    /// sections (compatibility, setup, trust, consent) plus the profile and
+    /// model findings
+    Adopt {
+        name: Option<String>,
+        /// Only this definition scope: project or global (with NAME: the
+        /// playbook's scope, default project)
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Show or forget the run input a playbook remembers in this project
+    Memory {
+        #[command(subcommand)]
+        cmd: memory::MemoryCmd,
+    },
+    /// Make a project playbook available in every project: copies it with
+    /// all versions to the global store (digests and trust carry over),
+    /// carries this project's remembered input along and applies the chosen
+    /// fate of the project copy; a failed step undoes the earlier ones.
+    /// Exit codes: 0 done (or a dry run with no blockers), 2 blocked or
+    /// refused
+    MakeGlobal {
+        id: String,
+        /// What happens to the project copy: trash (restorable), retire
+        /// (the global one wins here) or keep (with its remembered input;
+        /// the pair reads ambiguous while both are active and trusted)
+        #[arg(long, required_unless_present = "dry_run")]
+        variant: Option<String>,
+        /// Also copy the project profiles it binds to the global scope
+        #[arg(long)]
+        move_profiles: bool,
+        /// Only print the plan: blockers, actions and warnings
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// View or declare agent subscriptions (spec 8). Bare command lists them;
     /// on a terminal with no prior survey it offers an interactive one.
     Subscriptions {
@@ -138,12 +178,24 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Import a playbook bundle file into this project
+    /// Import a playbook bundle file into this project. Always prints a
+    /// preview first (definition diff, scripts added, removed or changed,
+    /// validation errors, the bundle digest). On a terminal it then asks;
+    /// without a terminal it imports only with --accept naming the bundle
+    /// digest, and otherwise exits 3 without writing anything. Exit codes:
+    /// 0 imported or previewed, 2 refused or error, 3 needs --accept
     Import {
         file: PathBuf,
         /// Do not set the imported version as current
         #[arg(long)]
         no_current: bool,
+        /// Only print the preview; write nothing
+        #[arg(long, conflicts_with = "accept")]
+        preview: bool,
+        /// Accept this exact file: its bundle digest as the preview prints
+        /// it (`sha256:...`)
+        #[arg(long, value_name = "BUNDLE_DIGEST")]
+        accept: Option<String>,
     },
     /// List deleted playbooks or restore one with all its versions
     Trash {
@@ -585,9 +637,22 @@ fn main() -> ExitCode {
         Some(Command::Export { name, version, out }) => {
             export_cmd(&root, &name, version.as_deref(), out.as_deref())
         }
-        Some(Command::Import { file, no_current }) => import_cmd(&root, &file, !no_current),
+        Some(Command::Import {
+            file,
+            no_current,
+            preview,
+            accept,
+        }) => import_cmd(
+            &root,
+            &file,
+            &crate::manage::ImportFlags {
+                make_current: !no_current,
+                preview_only: preview,
+                accept: accept.as_deref(),
+            },
+        ),
         Some(Command::Trash { action }) => trash_cmd(&root, action),
-        Some(Command::Trust { action }) => trust_cmd(action),
+        Some(Command::Trust { action }) => trust_cmd(&root, action),
         Some(Command::Intent { action }) => intent_cmd(&root, action),
         Some(Command::Run(args)) => run_cmd(&root, args),
         Some(Command::Tasks {
@@ -733,7 +798,24 @@ fn main() -> ExitCode {
         // --- end 0.24.0 eval suites ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
-        Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),
+        Some(Command::Adopt { name, scope }) => adopt_cmd(&root, name.as_deref(), scope.as_deref()),
+        Some(Command::Memory { cmd }) => memory::memory_cmd(&root, cmd),
+        Some(Command::MakeGlobal {
+            id,
+            variant,
+            move_profiles,
+            dry_run,
+            json,
+        }) => make_global::make_global_cmd(
+            &root,
+            make_global::MakeGlobalArgs {
+                id,
+                variant,
+                move_profiles,
+                dry_run,
+                json,
+            },
+        ),
         Some(Command::Subscriptions { decline, set }) => subscriptions_cmd(set, decline),
         Some(Command::Suggestions { action }) => suggestions_cmd(&root, action),
         Some(Command::DriveSupervised {

@@ -4,6 +4,7 @@
   import '@xyflow/svelte/dist/style.css'
   import {
     ApiError,
+    fetchFit,
     fetchPlaybook,
     fetchStats,
     fetchVersions,
@@ -14,19 +15,26 @@
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
-  import { provenanceLabel, trialBadge } from '../lib/versioninfo'
-  import type { PlaybookDetail, VersionInfo, PlaybookNode as PlaybookNodeType } from '../lib/types'
+  import { approvalBadge, approvalHint, provenanceLabel, trialBadge } from '../lib/versioninfo'
+  import type {
+    PlaybookDetail,
+    PlaybookParam,
+    VersionInfo,
+    PlaybookNode as PlaybookNodeType,
+  } from '../lib/types'
+  import type { FitReport } from '../lib/api.gen'
+  import FitCard from '../lib/FitCard.svelte'
+  import ListChecks from '@lucide/svelte/icons/list-checks'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
   import RunStartDialog from '../lib/RunStartDialog.svelte'
-  import type { RunBudget } from '../lib/api'
+  import type { RunBudget, RunInput } from '../lib/api'
   import { consentStep } from '../lib/irreversibleconsent'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
-  import { Separator } from '$lib/components/ui/separator'
   import { Spinner } from '$lib/components/ui/spinner'
   import { toast } from 'svelte-sonner'
   import Play from '@lucide/svelte/icons/play'
@@ -88,6 +96,35 @@
     showStats = !showStats
     if (showStats) loadStats()
   }
+
+  // "Will it fit here?": read each time the panel opens, since profiles,
+  // connectors and trust change outside this page.
+  let showFit = $state(false)
+  let fit = $state<FitReport | null>(null)
+  let fitLoading = $state(false)
+  let fitError = $state<string | null>(null)
+
+  // Each load bumps the token; a response for an older load (another
+  // playbook, or a toggle since) writes nothing.
+  let fitToken = 0
+  async function loadFit() {
+    const token = ++fitToken
+    fitLoading = true
+    fitError = null
+    try {
+      const r = await fetchFit(id, workspace)
+      if (token === fitToken) fit = r
+    } catch (e) {
+      if (token === fitToken) fitError = String(e)
+    } finally {
+      if (token === fitToken) fitLoading = false
+    }
+  }
+
+  function toggleFit() {
+    showFit = !showFit
+    if (showFit) loadFit()
+  }
   // --- end of 0.23.0 stats ---
   // The playbook's own nodes (not the flow nodes): clicking a node opens the
   // same form the editor uses, read-only, so a prompt can be read here without
@@ -108,6 +145,8 @@
       showHistory = false
     } else if (showStats) {
       showStats = false
+    } else if (showFit) {
+      showFit = false
     }
   })
 
@@ -153,6 +192,7 @@
       validation = detail.validation
       frozen = detail.frozen
       budgetBlock = detail.playbook.budget ?? null
+      runParams = detail.playbook.params ?? []
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load playbook', { description: String(e) })
     }
@@ -173,6 +213,10 @@
   let startOpen = $state(false)
   let budgetBlock = $state<PlaybookDetail['playbook']['budget']>(null)
   let startBudget = $state<RunBudget | undefined>(undefined)
+  // The params and instruction the dialog collected, and whether to keep
+  // them for this project; they ride every retry of the same start.
+  let runParams = $state<PlaybookParam[]>([])
+  let startInput = $state<RunInput>({})
   // The dialog reopened after a `budget_needs_decision` refusal: it keeps
   // the typed values and shows the pause or continue choice.
   let startRetry = $state(false)
@@ -182,16 +226,26 @@
     startOpen = true
   }
 
-  function startWith(budget: RunBudget | undefined) {
+  function startWith(budget: RunBudget | undefined, input: RunInput) {
     startBudget = budget
+    startInput = input
     void run()
   }
 
   async function run(consentNonce?: string) {
     starting = true
     try {
-      const { run_id, warnings } = await runPlaybook(id, workspace, { consentNonce, budget: startBudget })
+      const started = await runPlaybook(id, workspace, {
+        consentNonce,
+        budget: startBudget,
+        input: startInput,
+      })
+      const { run_id, warnings } = started
       for (const w of warnings ?? []) toast.warning(w)
+      for (const r of started.not_remembered ?? []) {
+        toast.warning(`Not remembered: ${r.name} (${r.reason.replace(/_/g, ' ')})`)
+      }
+      if (started.memory_error) toast.warning('The input was not remembered', { description: started.memory_error })
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
       starting = false
@@ -270,6 +324,11 @@
     validation = []
     stats = null
     showStats = false
+    fit = null
+    fitError = null
+    fitLoading = false
+    fitToken++
+    showFit = false
     reload()
     return subscribeChanges(reload)
   })
@@ -277,100 +336,102 @@
 
 <Topbar active="playbooks">
   {#snippet title()}
-    <span class="truncate text-sm font-semibold">{name}</span>
-    <Badge variant="outline" class="font-mono text-xs">{version}</Badge>
-    {#if frozen}
-      <Badge variant="outline" class="gap-1 border-info/30 bg-info/15 text-info">
-        <Snowflake class="size-3" />
-        frozen
-      </Badge>
-    {/if}
+    <span class="pv-title">
+      <span class="pv-name">{name}</span>
+      <span class="pv-chip mono">{version}</span>
+      {#if frozen}
+        <span class="pv-chip info">
+          <Snowflake class="pv-chip-icon" />
+          frozen
+        </span>
+      {/if}
+    </span>
   {/snippet}
   {#snippet actions()}
-    {#if errors.length > 0}
-      <Badge
-        variant="outline"
-        class="gap-1 border-destructive/30 bg-destructive/15 text-destructive"
-        title={issuesTitle}
+    <span class="pv-tools">
+      {#if errors.length > 0}
+        <span class="pv-chip danger" title={issuesTitle}>
+          <TriangleAlert class="pv-chip-icon" />
+          {errors.length} errors
+        </span>
+      {:else if validation.length > 0}
+        <span class="pv-chip warn" title={issuesTitle}>
+          <TriangleAlert class="pv-chip-icon" />
+          {validation.length} warnings
+        </span>
+      {:else}
+        <span class="pv-chip ok">
+          <CircleCheck class="pv-chip-icon" />
+          valid
+        </span>
+      {/if}
+      <Button variant={showYaml ? 'default' : 'outline'} size="sm" class="pv-tool" onclick={() => (showYaml = !showYaml)}>
+        <Code data-icon="inline-start" />
+        <span class="pv-label">yaml</span>
+      </Button>
+      <Button
+        variant={showHistory ? 'default' : 'outline'}
+        size="sm"
+        class="pv-tool"
+        onclick={() => (showHistory = !showHistory)}
+        title="Show the version history of this playbook"
       >
-        <TriangleAlert class="size-3" />
-        {errors.length} errors
-      </Badge>
-    {:else if validation.length > 0}
-      <Badge
-        variant="outline"
-        class="gap-1 border-warning/30 bg-warning/15 text-warning"
-        title={issuesTitle}
+        <History data-icon="inline-start" />
+        <span class="pv-label">History</span>
+      </Button>
+      <!-- 0.23.0 stats (C3) -->
+      <Button
+        variant={showStats ? 'default' : 'outline'}
+        size="sm"
+        class="pv-tool"
+        onclick={toggleStats}
+        title="Show how the runs of this playbook went, per version"
       >
-        <TriangleAlert class="size-3" />
-        {validation.length} warnings
-      </Badge>
-    {:else}
-      <Badge variant="outline" class="gap-1 border-success/30 bg-success/15 text-success">
-        <CircleCheck class="size-3" />
-        valid
-      </Badge>
-    {/if}
-    <Button
-      variant={showYaml ? 'default' : 'outline'}
-      size="sm"
-      class="max-sm:px-2"
-      onclick={() => (showYaml = !showYaml)}
-    >
-      <Code data-icon="inline-start" />
-      <span class="max-sm:sr-only">yaml</span>
-    </Button>
-    <Button
-      variant={showHistory ? 'default' : 'outline'}
-      size="sm"
-      class="max-sm:px-2"
-      onclick={() => (showHistory = !showHistory)}
-      title="Show the version history of this playbook"
-    >
-      <History data-icon="inline-start" />
-      <span class="max-sm:sr-only">History</span>
-    </Button>
-    <!-- 0.23.0 stats (C3) -->
-    <Button
-      variant={showStats ? 'default' : 'outline'}
-      size="sm"
-      class="max-sm:px-2"
-      onclick={toggleStats}
-      title="Show how the runs of this playbook went, per version"
-    >
-      <ChartColumn data-icon="inline-start" />
-      <span class="max-sm:sr-only">Stats</span>
-    </Button>
-    <Button
-      variant="outline"
-      size="sm"
-      class="max-sm:px-2"
-      onclick={toggleFreeze}
-      disabled={freezing}
-      title={frozen ? 'Allow changes to this playbook again' : 'Lock this playbook against any definition change'}
-    >
-      <Snowflake data-icon="inline-start" />
-      <span class="max-sm:sr-only">{frozen ? 'Unfreeze' : 'Freeze'}</span>
-    </Button>
-    <Button
-      variant="outline"
-      size="sm"
-      class="max-sm:px-2 border-warning/50 text-warning hover:border-warning hover:bg-warning/10 hover:text-warning"
-      href={`#/edit/${encodeURIComponent(workspace)}/${encodeURIComponent(id)}`}
-    >
-      <Pencil data-icon="inline-start" />
-      <span class="max-sm:sr-only">Edit</span>
-    </Button>
-    <Button
-      size="sm"
-      class="max-sm:px-2 bg-success text-success-foreground hover:bg-success/90"
-      onclick={openStart}
-      disabled={starting}
-      title="Start a run of this playbook"
-    >
-      {#if starting}<Spinner data-icon="inline-start" />{:else}<Play data-icon="inline-start" />{/if}
-      <span class="max-sm:sr-only">{starting ? 'Starting...' : 'Run'}</span>
-    </Button>
+        <ChartColumn data-icon="inline-start" />
+        <span class="pv-label">Stats</span>
+      </Button>
+      <Button
+        variant={showFit ? 'default' : 'outline'}
+        size="sm"
+        class="pv-tool"
+        onclick={toggleFit}
+        title="Will this playbook run in this project: compatibility, setup, trust and consent"
+        data-testid="fit-toggle"
+      >
+        <ListChecks data-icon="inline-start" />
+        <span class="pv-label">Fit</span>
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        class="pv-tool"
+        onclick={toggleFreeze}
+        disabled={freezing}
+        title={frozen ? 'Allow changes to this playbook again' : 'Lock this playbook against any definition change'}
+      >
+        <Snowflake data-icon="inline-start" />
+        <span class="pv-label">{frozen ? 'Unfreeze' : 'Freeze'}</span>
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        class="pv-tool pv-edit"
+        href={`#/edit/${encodeURIComponent(workspace)}/${encodeURIComponent(id)}`}
+      >
+        <Pencil data-icon="inline-start" />
+        <span class="pv-label">Edit</span>
+      </Button>
+      <Button
+        size="sm"
+        class="pv-tool pv-run"
+        onclick={openStart}
+        disabled={starting}
+        title="Start a run of this playbook"
+      >
+        {#if starting}<Spinner data-icon="inline-start" />{:else}<Play data-icon="inline-start" />{/if}
+        <span class="pv-label">{starting ? 'Starting...' : 'Run'}</span>
+      </Button>
+    </span>
   {/snippet}
 </Topbar>
 
@@ -451,38 +512,53 @@
     </aside>
   {/if}
 
+  {#if showFit}
+    <aside class="side-panel fit-panel" data-testid="fit-panel">
+      <div class="side-head">
+        <h2>Will it fit here?</h2>
+        <Button variant="ghost" size="icon" title="Hide the fit report" onclick={() => (showFit = false)}>
+          <X />
+        </Button>
+      </div>
+      <FitCard report={fit} loading={fitLoading} error={fitError} />
+    </aside>
+  {/if}
+
   {#if showHistory}
-    <aside class="min-h-0 w-72 shrink-0 overflow-auto border-l border-border p-4">
-      <div class="mb-3 flex items-center justify-between gap-2">
-        <h2 class="text-sm font-semibold">Version history</h2>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="size-7"
-          title="Hide version history"
-          onclick={() => (showHistory = false)}
-        >
+    <aside class="side-panel history-panel">
+      <div class="side-head">
+        <h2>Version history</h2>
+        <Button variant="ghost" size="icon" title="Hide version history" onclick={() => (showHistory = false)}>
           <X />
         </Button>
       </div>
       {#if versions.length === 0}
-        <p class="text-sm text-muted-foreground">no versions</p>
+        <p class="muted">no versions</p>
       {:else}
-        <ul class="flex flex-col">
+        <ul class="versions">
           {#each versionsDesc as v (v.version)}
-            <li class="py-2">
-              <div class="flex items-center gap-2">
-                <span class="font-mono text-sm" class:font-semibold={v.is_current}>{v.version}</span>
+            <li>
+              <div class="version-row">
+                <span class="version-name" class:current={v.is_current}>{v.version}</span>
                 {#if v.is_current}
-                  <Badge variant="secondary" class="text-[10px]">current</Badge>
+                  <Badge variant="secondary">current</Badge>
                 {/if}
                 {#if trialBadge(v)}
-                  <Badge variant="outline" class="text-[10px]" title={v.provenance?.trial?.reason ?? ''}>
+                  <Badge variant="outline" title={v.provenance?.trial?.reason ?? ''}>
                     {trialBadge(v)}
                   </Badge>
                 {/if}
+                {#if approvalBadge(v)}
+                  <Badge
+                    variant="outline"
+                    title={approvalHint(id, v.version)}
+                    data-testid="version-awaiting-approval"
+                  >
+                    {approvalBadge(v)}
+                  </Badge>
+                {/if}
               </div>
-              <div class="mt-0.5 text-xs text-muted-foreground">{provenanceLabel(v)}</div>
+              <div class="muted provenance">{provenanceLabel(v)}</div>
               <!-- Any stored version can become the current one, which is what
                    the store allows; the old condition offered the switch only
                    for an unpromoted supervisor patch, so ordinary versions -
@@ -491,7 +567,7 @@
                 <Button
                   variant="outline"
                   size="sm"
-                  class="mt-1 h-7"
+                  class="use-version"
                   onclick={() => useVersion(v.version)}
                   disabled={activating !== null || frozen}
                   title={frozen
@@ -502,7 +578,6 @@
                   Use
                 </Button>
               {/if}
-              <Separator class="mt-2" />
             </li>
           {/each}
         </ul>
@@ -516,6 +591,7 @@
   playbookId={id}
   {workspace}
   block={budgetBlock}
+  params={runParams}
   busy={starting}
   retry={startRetry}
   onrun={startWith}
@@ -528,3 +604,160 @@
   sources={irreversibleSources}
   onconfirm={confirmIrreversibleRun}
 />
+
+<style>
+  /* Plain CSS over the app's variables for the side panels. */
+  .side-panel {
+    min-height: 0;
+    flex-shrink: 0;
+    overflow: auto;
+    border-left: 1px solid var(--border);
+    padding: 16px;
+  }
+  .history-panel {
+    width: 18rem;
+  }
+  .fit-panel {
+    width: 22rem;
+  }
+  /* The toolbar: plain CSS over the app's variables. It wraps with the bar
+     (see Topbar), and on a phone the buttons keep only their icons. */
+  .pv-title,
+  .pv-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .pv-tools {
+    justify-content: flex-end;
+  }
+  .pv-name {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .pv-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .pv-chip.mono {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .pv-chip :global(.pv-chip-icon) {
+    width: 12px;
+    height: 12px;
+  }
+  .pv-chip.info {
+    color: var(--info);
+    border-color: color-mix(in oklab, var(--info) 30%, transparent);
+    background: color-mix(in oklab, var(--info) 15%, transparent);
+  }
+  .pv-chip.ok {
+    color: var(--success);
+    border-color: color-mix(in oklab, var(--success) 30%, transparent);
+    background: color-mix(in oklab, var(--success) 15%, transparent);
+  }
+  .pv-chip.warn {
+    color: var(--warning);
+    border-color: color-mix(in oklab, var(--warning) 30%, transparent);
+    background: color-mix(in oklab, var(--warning) 15%, transparent);
+  }
+  .pv-chip.danger {
+    color: var(--destructive);
+    border-color: color-mix(in oklab, var(--destructive) 30%, transparent);
+    background: color-mix(in oklab, var(--destructive) 15%, transparent);
+  }
+  .pv-tools :global(.pv-edit) {
+    border-color: color-mix(in oklab, var(--warning) 50%, transparent);
+    color: var(--warning);
+  }
+  .pv-tools :global(.pv-edit:hover) {
+    border-color: var(--warning);
+    background: color-mix(in oklab, var(--warning) 10%, transparent);
+  }
+  .pv-tools :global(.pv-run) {
+    background: var(--success);
+    color: var(--success-foreground);
+  }
+  .pv-tools :global(.pv-run:hover) {
+    background: color-mix(in oklab, var(--success) 90%, transparent);
+  }
+  @media (max-width: 640px) {
+    .history-panel,
+    .fit-panel {
+      width: min(22rem, 85vw);
+    }
+    .pv-tools :global(.pv-tool) {
+      padding-inline: 8px;
+    }
+    .pv-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+  .side-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .side-head h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .muted {
+    color: var(--muted-foreground);
+    font-size: 12px;
+  }
+  .versions {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .versions li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .version-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .version-name {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 14px;
+  }
+  .version-name.current {
+    font-weight: 600;
+  }
+  .provenance {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }
+  .versions :global(.use-version) {
+    margin-top: 4px;
+    height: 28px;
+  }
+</style>

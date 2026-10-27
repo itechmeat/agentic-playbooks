@@ -71,6 +71,10 @@ pub enum EventPayload {
         /// profiles (the executor path).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         profiles: Vec<ProfileProvenance>,
+        /// The param names (and `instruction`) this start took from the
+        /// project's remembered input.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remembered: Vec<String>,
     },
     NodeStarted {
         node: String,

@@ -50,6 +50,41 @@ fn stringify_param_default(v: &yaml_serde::Value) -> String {
     }
 }
 
+/// What this project remembers for playbook `id` of origin `origin_label`,
+/// checked against `params`, with the definition's legacy draft as the
+/// instruction fallback. The draft is read only when the start passes no
+/// instruction. A sub-playbook child (`opts.parent_run`) takes nothing from
+/// memory or the draft: the parent's consent and pins cover the declared
+/// defaults and the instruction the parent passes, not what someone last
+/// typed for the child.
+fn recall_input(
+    root: &Path,
+    origin_label: &str,
+    id: &str,
+    reg: &Registry,
+    params: &[apb_core::schema::Param],
+    opts: &RunOptions,
+) -> Result<apb_core::run_memory::Recall, EngineError> {
+    use apb_core::run_memory::{MemoryError, MemoryKey, recall};
+    let to_engine = |e: MemoryError| match e {
+        MemoryError::Io(e) => EngineError::Io(e),
+        other => EngineError::Invalid(other.to_string()),
+    };
+    let key = MemoryKey::for_label(origin_label, id).map_err(to_engine)?;
+    let child = opts.parent_run.is_some();
+    let legacy = match (&opts.instruction, child) {
+        (None, false) => reg.read_instruction_draft(id)?,
+        _ => None,
+    };
+    let mut recalled = recall(root, &key, params, legacy).map_err(to_engine)?;
+    if child {
+        recalled.values.clear();
+        recalled.instruction = None;
+        recalled.instruction_source = apb_core::run_memory::InstructionSource::None;
+    }
+    Ok(recalled)
+}
+
 /// Best-effort: a prepare failure that happens after the run directory (and
 /// its event log) already exist would otherwise leave that directory with no
 /// explanation - an empty or `RunStarted`-only journal that never reaches
@@ -504,6 +539,19 @@ pub(crate) fn prepare_run_target(
             "playbook `{id}` changed since it was checked (digest mismatch)"
         )));
     }
+    // The import approval rule holds for every start, gated or not (a
+    // trial, a sub-playbook child): the gate's own check, so the rule has
+    // one copy.
+    let playbook_dir = t.definition_parent.join("playbooks").join(id);
+    crate::gate::check_import_approval(&playbook_dir, id, &loaded.version, &digest).map_err(
+        |refusal| {
+            EngineError::Invalid(format!(
+                "playbook `{id}` {}: {} (digest {digest})",
+                loaded.version,
+                refusal["detail"].as_str().unwrap_or_default()
+            ))
+        },
+    )?;
     let mut playbook = loaded.playbook.clone();
 
     // The global config is needed to resolve profile invocations (agents, program).
@@ -614,7 +662,16 @@ pub(crate) fn prepare_run_target(
     // alike - so a playbook that relies on a param default renders the default
     // instead of the empty string the template renderer substitutes for a
     // missing param.
-    let mut params = opts.params.clone();
+    //
+    // Before the defaults, remembered run input (`run_memory`): a value the
+    // caller did not pass comes from this project's memory of the playbook
+    // when it still fits the params (not for a child); the instruction
+    // likewise, then the definition's legacy draft. A real IO error fails the start rather than
+    // starting with different input; nothing has been written yet.
+    let recall = recall_input(root, t.origin_label, id, &reg, &playbook.params, &opts)?;
+    let applied = apb_core::run_memory::apply(&opts.params, opts.instruction.clone(), &recall);
+    let remembered = applied.remembered;
+    let mut params = applied.params;
     for p in &playbook.params {
         if let Some(default) = &p.default
             && !params.contains_key(&p.name)
@@ -747,21 +804,10 @@ pub(crate) fn prepare_run_target(
         crate::hooks::generate_hooks(&run_dir, &playbook),
     )?;
 
-    // Run input precedence (spec A): an explicitly passed instruction wins;
-    // otherwise the playbook's autosaved draft, read at start time; otherwise
-    // None. Resolved once here so every surface (MCP, CLI, server, and a Part C
-    // sub-playbook child) shares the rule. A blank draft is treated as absent.
-    //
-    // Honest errors (review I7/R1-I9): a real IO error reading the draft
-    // (unreadable file, permission fault) must fail the run start, not silently
-    // start with different input. `read_instruction_draft` already returns
-    // Ok(None) for an absent draft, so only a genuine fault propagates through
-    // `?`; the old `.ok().flatten()` swallowed both cases alike.
-    let instruction = match opts.instruction.clone() {
-        Some(i) => Some(i),
-        None => prep_try_unstarted(&mut log, &unstarted, reg.read_instruction_draft(id))?
-            .filter(|s| !s.trim().is_empty()),
-    };
+    // Run input precedence (spec A): resolved with the params above, so
+    // every surface (MCP, CLI, server, and a sub-playbook child) shares the
+    // rule.
+    let instruction = applied.instruction;
 
     let cfg = RunConfig {
         params,
@@ -880,6 +926,7 @@ pub(crate) fn prepare_run_target(
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
         scripts_digest,
         profiles: profiles_prov,
+        remembered,
     })?;
     // The estimate snapshot and the budget in force (not for a child).
     if opts.parent_run.is_none() && opts.depth == 0 {

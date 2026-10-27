@@ -41,6 +41,22 @@ pub fn fell_back_nodes(events: &[Event]) -> Vec<String> {
     out
 }
 
+/// The param names (and `instruction`) the start of the run in `run_dir`
+/// took from the project's remembered input, as its journal records them.
+/// Every start surface reports them, so input the caller never passed is
+/// never silent. Empty when nothing was recalled or the journal does not
+/// read.
+pub fn recalled_input(run_dir: &Path) -> Vec<String> {
+    read_events(run_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|e| match e.payload {
+            crate::event::EventPayload::RunProvenance { remembered, .. } => Some(remembered),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// One observation of a run, with the process-table overlay applied once.
 #[derive(Debug)]
 pub struct RunView {

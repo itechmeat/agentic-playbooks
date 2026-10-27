@@ -173,6 +173,8 @@ mod finish_answer_test;
 #[cfg(unix)]
 #[path = "suite/finish_context_test.rs"]
 mod finish_context_test;
+#[path = "suite/fit_test.rs"]
+mod fit_test;
 #[cfg(unix)]
 #[path = "suite/fork_failure_test.rs"]
 mod fork_failure_test;

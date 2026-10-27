@@ -108,6 +108,13 @@ pub struct PlaybookRunArgs {
     /// started again with on_no_estimate set to the person's answer.
     #[serde(default)]
     pub budget: Option<BudgetArg>,
+    /// Remember the given params and instruction for this playbook in this
+    /// project, for the next start that passes none. Applied once the start
+    /// succeeded. Secret params, params named like a credential and
+    /// credential-shaped values are never stored; the answer lists what was
+    /// (`remembered`) and was not (`not_remembered`).
+    #[serde(default)]
+    pub remember: Option<bool>,
 }
 
 /// A run's budget argument. A predictive stop, not a security control: the
@@ -541,6 +548,11 @@ pub struct PlaybookCatalogArgs {
     /// `needs_playbook_p` and `covered_by`; otherwise ignored.
     #[serde(default)]
     pub query: Option<String>,
+    /// Add `fit` to each entry that is not shadowed: whether it can run in
+    /// this project (ready, compatible, setup items, trusted,
+    /// needs_consent). Not part of the revision.
+    #[serde(default)]
+    pub fit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -606,6 +618,57 @@ pub struct PlaybookApproveArgs {
     /// Definition scope: "project" (default) or "global".
     #[serde(default)]
     pub scope: Option<String>,
+    /// The exact trust digest being approved. Required for a version an
+    /// import wrote with scripts (the refusal `digest_required` names it and
+    /// lists the scripts to show the user first); a digest that is not the
+    /// version's content now is refused with `digest_mismatch`.
+    #[serde(default)]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookMemoryArgs {
+    pub id: String,
+    /// Definition scope: "project" (default) or "global".
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// "get" (default), "set" or "clear".
+    #[serde(default)]
+    pub action: Option<String>,
+    /// set: param values to remember (merged into what is stored).
+    #[serde(default)]
+    pub params: Option<BTreeMap<String, String>>,
+    /// set: the instruction to remember; an empty string clears it on
+    /// purpose (no fallback to a legacy draft).
+    #[serde(default)]
+    pub instruction: Option<String>,
+    /// clear: "all" (default), "params" or "instruction".
+    #[serde(default)]
+    pub what: Option<String>,
+    /// get only: workspace_id of another workspace whose memory to read.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookMakeGlobalArgs {
+    /// The project playbook to make available in every project.
+    pub id: String,
+    /// What happens to the project copy: "trash" (moved to the project
+    /// trash, restorable), "retire" (kept, retired, so the global one wins)
+    /// or "keep" (both stay, the project copy with its remembered input;
+    /// the catalog marks the pair ambiguous while both are active and
+    /// trusted, else the global one shadows it).
+    /// Required unless dry_run.
+    #[serde(default)]
+    pub variant: Option<String>,
+    /// Also copy project profiles the playbook binds to the global scope
+    /// (refused for a profile with project skills).
+    #[serde(default)]
+    pub move_profiles: bool,
+    /// Only report the plan: blockers, actions and warnings. Changes nothing.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -635,9 +698,16 @@ pub struct AgentsDetectArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AdoptReportArgs {
-    /// A specific playbook; None - all playbooks of the project.
+    /// A specific playbook; None - every project and global playbook.
     #[serde(default)]
     pub id: Option<String>,
+    /// "project" or "global": only that scope (with `id`: the definition's
+    /// scope, default project).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace to assess in. None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// One declared subscription (for subscriptions_set).

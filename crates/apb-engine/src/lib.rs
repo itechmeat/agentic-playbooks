@@ -22,6 +22,7 @@ pub mod exec_key;
 pub mod eval;
 // --- end 0.24.0 eval suites ---
 pub mod failure_class;
+pub mod fit;
 // fork branch-failure policies and join refusals on the run surfaces (issue #195)
 pub mod fork_view;
 // forward patches (issue #192)

@@ -12,7 +12,7 @@
   import { parseBinding, serializeBinding, toggleListEntry, type ConnectorBinding } from './connectorbinding'
   import { trustBadge, type ConnectorCard, type ConnectorDetail } from './connectors'
   import { NODE_FIELDS, type NodeFieldKey } from './nodefields'
-  import { fetchInputDraft, saveInputDraft, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
+  import { fetchMemory, saveMemory, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
   import FieldInfo from '$lib/components/FieldInfo.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -299,8 +299,9 @@
     muted: '',
   } as const
 
-  // Start-node "input prompt" run draft: a per-run seed the operator can edit
-  // before running, stored server-side outside the playbook YAML/version.
+  // Start-node "input prompt" run draft: the instruction this project
+  // remembers for the playbook (`/memory`), stored outside the playbook
+  // YAML/version and git-ignored. A committed legacy draft only seeds it.
   const DRAFT_AUTOSAVE_DEBOUNCE_MS = 500
   let draft = $state('')
   // Quiet inline status for the last load/save attempt (review I9 frontend
@@ -309,11 +310,15 @@
   // successful save/load; null renders nothing.
   let draftError = $state<string | null>(null)
   let draftTimer: ReturnType<typeof setTimeout> | undefined
+  // Bumped by every node switch and every save: a save answer that lands
+  // after either says nothing about what is on screen now.
+  let draftSeq = 0
   $effect(() => {
     void node.id
+    draftSeq++
     if (node.type !== 'start') return
     let cancelled = false
-    fetchInputDraft(id, workspace)
+    fetchMemory(id, workspace)
       .then((r) => {
         if (cancelled) return
         draft = r.instruction ?? ''
@@ -340,12 +345,18 @@
     const saveId = id
     const saveWs = workspace
     draftTimer = setTimeout(() => {
-      saveInputDraft(saveId, v, saveWs)
-        .then(() => {
-          draftError = null
+      const seq = ++draftSeq
+      saveMemory(saveId, { instruction: v }, saveWs)
+        .then((r) => {
+          if (seq !== draftSeq) return
+          // A text that looks like a credential is refused, never stored:
+          // the instruction remembered before stays the one a start uses.
+          draftError = r.refused.length
+            ? 'draft not saved: it looks like a secret; a start still uses the instruction remembered before'
+            : null
         })
         .catch(() => {
-          draftError = 'draft not saved'
+          if (seq === draftSeq) draftError = 'draft not saved'
         })
     }, DRAFT_AUTOSAVE_DEBOUNCE_MS)
   }
@@ -452,13 +463,13 @@
         <Textarea
           id="np-input"
           rows={4}
-          class="max-h-[300px] overflow-auto"
+          class="draft-input"
           {readonly}
           value={draft}
           oninput={(e) => onDraftInput(e.currentTarget.value)}
         />
         {#if draftError}
-          <p class="text-xs text-muted-foreground">{draftError}</p>
+          <p class="draft-status">{draftError}</p>
         {/if}
       </Field.Field>
     {/if}
@@ -852,3 +863,16 @@
     {/if}
   </Field.FieldGroup>
 </div>
+
+<style>
+  /* Plain CSS over the app's variables. */
+  :global(textarea.draft-input) {
+    max-height: 300px;
+    overflow: auto;
+  }
+  .draft-status {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted-foreground);
+  }
+</style>

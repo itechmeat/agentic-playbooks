@@ -5,6 +5,8 @@
 pub mod auth;
 pub mod connectors;
 pub mod estimate;
+pub mod fit;
+pub mod memory;
 pub mod meta;
 pub mod playbooks;
 pub mod profiles;

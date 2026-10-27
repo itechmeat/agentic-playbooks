@@ -427,6 +427,93 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     Ok(out)
 }
 
+/// Why a profile could not be copied to another scope.
+#[derive(Debug, thiserror::Error)]
+pub enum CopyProfileError {
+    #[error("profile `{0}` not found")]
+    NotFound(String),
+    /// A profile copied to the global scope may not use project skills.
+    #[error(
+        "profile references project skill `{0}`; move it, drop it, or keep the profile in project scope"
+    )]
+    ProjectSkill(String),
+    #[error("target scope already has this profile")]
+    Exists,
+    /// The name is not a profile name, or the scopes are not two distinct
+    /// concrete ones.
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Io(String),
+}
+
+/// Copies profile `name` from scope `from` to scope `to` under both
+/// per-profile locks (taken in a fixed order, so two copies cannot
+/// deadlock, and held for the whole read, check and copy so the source
+/// cannot change under it). The source stays. Refuses a profile with
+/// project skills when copying to the global scope, a name the target
+/// already has, an unsafe name, and anything but two distinct concrete
+/// scopes, before it touches the filesystem.
+pub fn copy_profile_locked(
+    root: &Path,
+    name: &str,
+    from: ProfileScope,
+    to: ProfileScope,
+) -> Result<(), CopyProfileError> {
+    apb_core::profile::validate_profile_name(name).map_err(CopyProfileError::Invalid)?;
+    if from == to || from == ProfileScope::Auto || to == ProfileScope::Auto {
+        return Err(CopyProfileError::Invalid(
+            "from and to must be two distinct scopes, project or global".into(),
+        ));
+    }
+    let io = |e: std::io::Error| CopyProfileError::Io(e.to_string());
+    let src_parent = scope_dir(root, from).map_err(|e| CopyProfileError::Io(e.to_string()))?;
+    let dst_parent = scope_dir(root, to).map_err(|e| CopyProfileError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&dst_parent).map_err(io)?;
+    let lock_name = format!("{name}.lock");
+    let (first, second) = if src_parent <= dst_parent {
+        (&src_parent, &dst_parent)
+    } else {
+        (&dst_parent, &src_parent)
+    };
+    let _l1 = apb_core::fsutil::lock_dir(first, &lock_name).map_err(io)?;
+    let _l2 = apb_core::fsutil::lock_dir(second, &lock_name).map_err(io)?;
+
+    let src = src_parent.join(name);
+    if !src.join("profile.yaml").is_file() {
+        return Err(CopyProfileError::NotFound(name.to_string()));
+    }
+    if to == ProfileScope::Global
+        && let Some(skill) = project_skill(&src)?
+    {
+        return Err(CopyProfileError::ProjectSkill(skill));
+    }
+    let dst = dst_parent.join(name);
+    if dst.exists() {
+        return Err(CopyProfileError::Exists);
+    }
+    // A copy that fails part way leaves nothing: a half profile would read
+    // as an existing one to the next attempt.
+    apb_core::fsutil::copy_tree(&src, &dst).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dst);
+        io(e)
+    })
+}
+
+/// The first project skill the profile in `profile_dir` uses, if any. A
+/// profile that does not parse is an error, never "no project skills".
+pub fn project_skill(profile_dir: &Path) -> Result<Option<String>, CopyProfileError> {
+    let yaml = std::fs::read_to_string(profile_dir.join("profile.yaml"))
+        .map_err(|e| CopyProfileError::Io(e.to_string()))?;
+    let doc = ProfileDoc::from_yaml(&yaml)
+        .map_err(|e| CopyProfileError::Invalid(format!("profile.yaml does not parse: {e}")))?;
+    Ok(doc
+        .skills
+        .iter()
+        .find(|s| s.scope == ProfileScope::Project)
+        .map(|s| s.name.clone()))
+}
+
 /// Moving a profile between scopes: copy semantics (spec 4.2). The source
 /// remains; deletion is a separate `profile_delete`.
 pub fn profile_move(root: &Path, name: &str, from: &str, to: &str) -> Result<Value, ToolError> {
@@ -436,52 +523,17 @@ pub fn profile_move(root: &Path, name: &str, from: &str, to: &str) -> Result<Val
     if from_s == to_s {
         return Err(ToolError::Engine("from and to scopes are the same".into()));
     }
-    let src_parent = scope_dir(root, from_s)?;
-    let dst_parent = scope_dir(root, to_s)?;
-    std::fs::create_dir_all(&dst_parent).map_err(|e| ToolError::Engine(e.to_string()))?;
-
-    // Both per-profile locks in a deterministic order (by parent path) -
-    // a concurrent move cannot deadlock. We hold both for the whole duration of
-    // read/validate/conflict/copy so the source cannot change under us.
-    let lock_name = format!("{name}.lock");
-    let (first, second) = if src_parent <= dst_parent {
-        (&src_parent, &dst_parent)
-    } else {
-        (&dst_parent, &src_parent)
-    };
-    let _l1 = apb_core::fsutil::lock_dir(first, &lock_name)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
-    let _l2 = apb_core::fsutil::lock_dir(second, &lock_name)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
-
-    let src = src_parent.join(name);
-    if !src.join("profile.yaml").is_file() {
-        return Err(ToolError::NotFound(format!("profile `{name}` in `{from}`")));
-    }
-    let dst = dst_parent.join(name);
-    // A move from project -> global with references to project skills is forbidden.
-    if to_s == ProfileScope::Global {
-        let yaml = std::fs::read_to_string(src.join("profile.yaml"))
-            .map_err(|e| ToolError::Engine(e.to_string()))?;
-        if let Ok(doc) = ProfileDoc::from_yaml(&yaml) {
-            for s in &doc.skills {
-                if s.scope == ProfileScope::Project {
-                    return Err(ToolError::Engine(format!(
-                        "profile references project skill `{}`; move it, drop it, or keep the profile in project scope",
-                        s.name
-                    )));
-                }
-            }
+    match copy_profile_locked(root, name, from_s, to_s) {
+        Ok(()) => Ok(json!({ "name": name, "from": from, "to": to, "copied": true })),
+        Err(CopyProfileError::NotFound(_)) => {
+            Err(ToolError::NotFound(format!("profile `{name}` in `{from}`")))
         }
-    }
-    if dst.exists() {
-        return Err(ToolError::Engine(
+        Err(CopyProfileError::Exists) => Err(ToolError::Engine(
             json!({ "error": "conflict", "detail": "target scope already has this profile" })
                 .to_string(),
-        ));
+        )),
+        Err(e) => Err(ToolError::Engine(e.to_string())),
     }
-    apb_core::fsutil::copy_tree(&src, &dst).map_err(|e| ToolError::Engine(e.to_string()))?;
-    Ok(json!({ "name": name, "from": from, "to": to, "copied": true }))
 }
 
 /// Deleting a profile with a scan of playbook references (spec 4.2).

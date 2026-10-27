@@ -3,6 +3,7 @@
 //! a key resolves, the ranking is advisory (entries unchanged), shadow only
 //! logs, failures fail open, answers are cached and capped per day.
 
+use apb_mcp::catalog::CatalogRequest;
 use std::path::Path;
 
 use apb_core::registry::init_project;
@@ -105,7 +106,7 @@ fn log_lines(root: &Path) -> Vec<Value> {
 }
 
 fn ranked(root: &Path, query: &str, cache: &RankCache) -> Value {
-    playbook_catalog_ranked(root, root, None, None, None, query, cache).unwrap()
+    playbook_catalog_ranked(root, root, &CatalogRequest::default(), query, cache).unwrap()
 }
 
 #[test]
@@ -115,9 +116,17 @@ fn a_query_changes_nothing_without_configuration_key_or_use() {
     let _e = Env::new(cfg.path());
     let root = project();
     let cache = RankCache::default();
-    let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+    let plain = playbook_catalog(root.path(), &CatalogRequest::default()).unwrap();
     let revision = plain["catalog_revision"].as_str().unwrap().to_string();
-    let unchanged = playbook_catalog(root.path(), None, Some(&revision), Some(1)).unwrap();
+    let unchanged = playbook_catalog(
+        root.path(),
+        &CatalogRequest {
+            revision: Some(&revision),
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let same = |label: &str| {
         assert_eq!(
@@ -130,9 +139,11 @@ fn a_query_changes_nothing_without_configuration_key_or_use() {
                 &playbook_catalog_ranked(
                     root.path(),
                     root.path(),
-                    None,
-                    Some(&revision),
-                    Some(1),
+                    &CatalogRequest {
+                        revision: Some(&revision),
+                        limit: Some(1),
+                        ..Default::default()
+                    },
                     "deploy the site",
                     &cache
                 )
@@ -185,7 +196,7 @@ fn advise_ranks_without_touching_the_entries() {
     )
     .unwrap();
     let cache = RankCache::default();
-    let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+    let plain = playbook_catalog(root.path(), &CatalogRequest::default()).unwrap();
     let out = ranked(root.path(), "publish the new crate version", &cache);
 
     assert_eq!(out["entries"], plain["entries"], "entries unchanged");
@@ -269,7 +280,7 @@ fn shadow_asks_and_logs_but_answers_the_plain_catalog() {
     let _e = Env::new(cfg.path());
     let root = project();
     fake_config(cfg.path(), "shadow", "");
-    let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+    let plain = playbook_catalog(root.path(), &CatalogRequest::default()).unwrap();
     let out = ranked(root.path(), "deploy the site", &RankCache::default());
     assert_eq!(bytes(&out), bytes(&plain));
     let lines = log_lines(root.path());
@@ -298,7 +309,7 @@ fn a_failed_decision_fails_open_and_is_not_cached() {
     )
     .unwrap();
     let cache = RankCache::default();
-    let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+    let plain = playbook_catalog(root.path(), &CatalogRequest::default()).unwrap();
     let out = ranked(root.path(), "deploy the site", &cache);
     assert_eq!(out["entries"], plain["entries"]);
     assert_eq!(out["ranking"], json!({"error": "unavailable"}));
@@ -386,7 +397,7 @@ fn the_kill_switch_turns_ranking_off() {
     let _e = Env::new(cfg.path());
     let root = project();
     fake_config(cfg.path(), "advise", "");
-    let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+    let plain = playbook_catalog(root.path(), &CatalogRequest::default()).unwrap();
     unsafe {
         std::env::set_var("APB_DECISIONS", "off");
     }
@@ -404,7 +415,7 @@ fn an_off_ceiling_or_a_project_opt_out_turns_ranking_off() {
         let _e = Env::new(cfg.path());
         let root = project();
         fake_config(cfg.path(), "advise", "");
-        let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+        let plain = playbook_catalog(root.path(), &CatalogRequest::default()).unwrap();
         if case == "ceiling" {
             let path = cfg.path().join("decisions.yaml");
             let body = std::fs::read_to_string(&path).unwrap();
@@ -449,13 +460,11 @@ fn a_cross_workspace_query_applies_the_stricter_project_setting() {
             target.path()
         });
         let cache = RankCache::default();
-        let plain = playbook_catalog(target.path(), None, None, None).unwrap();
+        let plain = playbook_catalog(target.path(), &CatalogRequest::default()).unwrap();
         let out = playbook_catalog_ranked(
             caller.path(),
             target.path(),
-            None,
-            None,
-            None,
+            &CatalogRequest::default(),
             "publish the new crate version",
             &cache,
         )
@@ -472,9 +481,7 @@ fn a_cross_workspace_query_applies_the_stricter_project_setting() {
     let out = playbook_catalog_ranked(
         caller.path(),
         target.path(),
-        None,
-        None,
-        None,
+        &CatalogRequest::default(),
         "publish the new crate version",
         &RankCache::default(),
     )

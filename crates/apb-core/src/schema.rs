@@ -683,6 +683,11 @@ pub struct Param {
     pub options: Option<Vec<String>>,
     #[serde(default)]
     pub default: Option<yaml_serde::Value>,
+    /// The value is a secret: asked at every start, never remembered and
+    /// never written into the definition (V99: no `default`; V100: only
+    /// `type: text`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

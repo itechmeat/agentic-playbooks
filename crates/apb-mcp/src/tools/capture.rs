@@ -87,16 +87,16 @@ pub fn playbook_capture(
         .map_err(|e| ToolError::Engine(format!("invalid yaml: {e}")))?;
     let id = parsed.id.clone();
 
-    let parent = match selected_scope {
-        "project" => root.join(".apb"),
-        "global" => apb_core::store::global_playbooks_parent()
-            .ok_or_else(|| ToolError::Engine("no global config dir".into()))?,
-        other => return Err(ToolError::Engine(format!("unknown scope `{other}`"))),
-    };
+    let (_, parent) = super::scope_parent(root, selected_scope)?;
 
     // Dedup: a close trigger among the existing ones (both scopes). An exact
     // match of the normalized when string -> possible_duplicate.
-    let catalog = crate::catalog::build(root, None, None, None, Vec::new(), Vec::new());
+    let catalog = crate::catalog::build(
+        root,
+        &crate::catalog::CatalogRequest::default(),
+        Vec::new(),
+        Vec::new(),
+    );
     if let Some(entries) = catalog["entries"].as_array() {
         let new_whens: Vec<String> = synopsis
             .get("trigger")

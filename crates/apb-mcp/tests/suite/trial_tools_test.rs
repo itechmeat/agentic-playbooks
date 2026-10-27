@@ -167,7 +167,7 @@ fn approve_activates_and_unlocks_run() {
         "draft_requires_trial"
     );
 
-    let res = playbook_approve(proj.path(), "p", None, "project").unwrap();
+    let res = playbook_approve(proj.path(), "p", None, "project", None).unwrap();
     assert_eq!(res["lifecycle"], "active");
     assert_eq!(res["trusted"], true);
 
@@ -243,7 +243,7 @@ fn global_draft_can_be_trialed_and_approved() {
     assert_eq!(res["status"], "succeeded", "global trial result: {res}");
 
     // approve of a global draft.
-    let ap = playbook_approve(proj.path(), "g", None, "global").unwrap();
+    let ap = playbook_approve(proj.path(), "g", None, "global", None).unwrap();
     assert_eq!(ap["lifecycle"], "active");
     assert_eq!(ap["trusted"], true);
     assert_eq!(ap["scope"], "global");
@@ -355,4 +355,51 @@ fn trial_instruction_reaches_a_node_prompt_of_run_instruction() {
          and show up in the trial diff: {}",
         res["diff"]
     );
+}
+
+/// A version an import wrote with scripts and nobody approved by digest is
+/// not trialed either: the trial is refused like a run, before anything
+/// starts.
+#[test]
+fn an_unapproved_imported_version_is_not_trialed() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+    let bundle = apb_core::bundle::PlaybookBundle {
+        apb_bundle: 2,
+        id: "imp".to_string(),
+        version: "1.0.0".to_string(),
+        playbook: PLAIN
+            .replace("__ID__", "imp")
+            .replace("schema: 1", "schema: 2"),
+        layout: None,
+        scripts: vec![apb_core::bundle::BundleScript {
+            path: "x.sh".to_string(),
+            content_base64: "ZWNobwo=".to_string(),
+            executable: false,
+        }],
+        origin: None,
+    };
+    apb_core::bundle::import_bundle(proj.path(), &bundle, true, None).unwrap();
+
+    let res = playbook_trial(
+        proj.path(),
+        "imp",
+        None,
+        Default::default(),
+        None,
+        "project",
+    )
+    .unwrap();
+    assert_eq!(
+        res["policy_refusal"]["policy"], "imported_scripts_require_approval",
+        "{res}"
+    );
+    let runs = fs::read_dir(proj.path().join(".apb/runs")).map_or(0, |d| d.count());
+    assert_eq!(runs, 0, "nothing ran");
 }

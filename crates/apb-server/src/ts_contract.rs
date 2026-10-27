@@ -150,6 +150,28 @@ fn render_types() -> String {
         apb_core::trust::OriginKind::decl(&cfg),
         apb_core::trust::TrustEntry::decl(&cfg),
         crate::routes::trust::TrustRevoked::decl(&cfg),
+        // "Will it fit here?"
+        apb_engine::fit::FitSeverity::decl(&cfg),
+        apb_engine::fit::FitItem::decl(&cfg),
+        apb_engine::fit::TrustItem::decl(&cfg),
+        apb_engine::fit::ConsentView::decl(&cfg),
+        apb_engine::fit::FitReport::decl(&cfg),
+        apb_engine::fit::FitSummary::decl(&cfg),
+        // Remembered run input.
+        apb_core::run_memory::Incompat::decl(&cfg),
+        apb_core::run_memory::InstructionSource::decl(&cfg),
+        apb_core::run_memory::ValueStatus::decl(&cfg),
+        apb_core::run_memory::RecalledValue::decl(&cfg),
+        apb_core::run_memory::Recall::decl(&cfg),
+        apb_core::run_memory::Refused::decl(&cfg),
+        apb_core::run_memory::Remembered::decl(&cfg),
+        // Version history and import provenance.
+        apb_core::versioning::BundleOrigin::decl(&cfg),
+        apb_core::versioning::ScriptEntry::decl(&cfg),
+        apb_core::versioning::ImportProvenance::decl(&cfg),
+        apb_core::versioning::TrialRecord::decl(&cfg),
+        apb_core::versioning::VersionProvenance::decl(&cfg),
+        apb_core::versioning::VersionInfo::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"

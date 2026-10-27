@@ -6,6 +6,7 @@ pub mod budget;
 pub mod capture;
 pub mod decision;
 pub mod intent;
+pub mod memory;
 pub mod meta;
 pub mod playbook;
 pub mod retro;
@@ -87,6 +88,22 @@ impl From<VersioningError> for ToolError {
 /// of the same `Vec<Issue>`.
 fn render_validation_issues(issues: &[Issue]) -> String {
     apb_core::validate::render_issues(issues)
+}
+
+/// A playbook scope argument (`project` or `global`) and the definition
+/// parent it names: `<root>/.apb` or the global store's parent.
+pub(crate) fn scope_parent(
+    root: &Path,
+    scope: &str,
+) -> Result<(apb_core::scope::Scope, std::path::PathBuf), ToolError> {
+    use apb_core::scope::Scope;
+    match Scope::parse(scope) {
+        Some(Scope::Project) => Ok((Scope::Project, root.join(".apb"))),
+        Some(Scope::Global) => apb_core::store::global_playbooks_parent()
+            .map(|p| (Scope::Global, p))
+            .ok_or_else(|| ToolError::Engine("no global config dir".into())),
+        None => Err(ToolError::Engine(format!("unknown scope `{scope}`"))),
+    }
 }
 
 fn open(root: &Path) -> Result<Registry, ToolError> {

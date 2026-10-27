@@ -329,7 +329,9 @@ fn script_in_run_copy(version_dir: &Path, file: &Path) -> bool {
     target.starts_with(&scripts) && target.is_file()
 }
 
-fn missing_scripts(version_dir: &Path, playbook: &Playbook) -> Vec<crate::validate::Issue> {
+/// The V92 half of [`missing_references`]: script nodes whose file the
+/// version directory `version_dir` lacks.
+pub fn missing_scripts(version_dir: &Path, playbook: &Playbook) -> Vec<crate::validate::Issue> {
     use crate::schema::{GoalCheck, NodeKind, SuccessCheck};
     let mut out = Vec::new();
     let mut check = |node: &str, what: &str, path: &str| {

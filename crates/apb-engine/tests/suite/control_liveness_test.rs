@@ -84,13 +84,14 @@ fn sleepy_agent(dir: &Path) -> (String, PathBuf) {
 
 /// A stub agent that HANGS on its first invocation (sleeps 30s) and SUCCEEDS on
 /// every one after. The hang is the wedged attempt the interrupt must break; the
-/// success is what the patched re-run reaches once the boundary is forced.
+/// success is what the patched re-run reaches once the boundary is forced. The
+/// running marker comes after the seen marker (see [`symmetric_fork_agent`]).
 fn flaky_sleepy_agent(dir: &Path) -> (String, PathBuf) {
     let running = dir.join("agent_running.marker");
     let seen = dir.join("agent_seen.marker");
     let path = dir.join("flaky_sleepy.sh");
     let body = format!(
-        "#!/bin/sh\ntouch '{r}'\nif [ -f '{s}' ]; then echo ok; exit 0; fi\ntouch '{s}'\nsleep {sl}\necho late\n",
+        "#!/bin/sh\nif [ -f '{s}' ]; then echo ok; exit 0; fi\ntouch '{s}'\ntouch '{r}'\nsleep {sl}\necho late\n",
         r = running.display(),
         s = seen.display(),
         sl = AGENT_SLEEP_SECS
@@ -199,20 +200,22 @@ const BRANCH_OF_PROMPT: &str = "case \"$APB_NODE_ID\" in\n\
 /// something to spare: `alpha` hangs on its first invocation (the wedged branch)
 /// and succeeds on every one after, while `beta` publishes its start marker and
 /// then waits - bounded - for the test to release it, so it is genuinely in
-/// flight when the interrupt lands and completes normally afterwards.
+/// flight when the interrupt lands and completes normally afterwards. Alpha's
+/// running marker comes after its seen marker (see [`symmetric_fork_agent`]).
 fn fork_agent(dir: &Path) -> String {
     let d = dir.display();
     let path = dir.join("fork_agent.sh");
     let body = format!(
         "#!/bin/sh\n{branch}\
-         touch '{d}/running_'\"$n\"\n\
          if [ \"$n\" = alpha ]; then\n\
          \x20 if [ -f '{d}/seen_alpha' ]; then echo ok; exit 0; fi\n\
          \x20 touch '{d}/seen_alpha'\n\
+         \x20 touch '{d}/running_alpha'\n\
          \x20 sleep {sleep}\n\
          \x20 echo late\n\
          \x20 exit 0\n\
          fi\n\
+         touch '{d}/running_'\"$n\"\n\
          i=0\n\
          while [ ! -f '{d}/release_beta' ]; do\n\
          \x20 i=$((i + 1))\n\
@@ -231,14 +234,21 @@ fn fork_agent(dir: &Path) -> String {
 /// The SYMMETRIC fork stub: every branch hangs on its first invocation and
 /// succeeds on every one after. A broadcast interrupt has to kill both, and both
 /// then recover through their own retry.
+///
+/// Marker order matters in every hanging stub here: `seen_` first, `running_`
+/// right before the sleep. The test posts its interrupt as soon as it sees
+/// `running_`; a kill that landed between the two would leave no `seen_`, so the
+/// retry would hang the whole sleep instead of succeeding and the drive would
+/// miss the test's deadline. Each `touch` is a separate process, and on a slow
+/// macOS runner that gap was wide enough to lose the race now and then.
 fn symmetric_fork_agent(dir: &Path) -> String {
     let d = dir.display();
     let path = dir.join("symmetric_fork_agent.sh");
     let body = format!(
         "#!/bin/sh\n{branch}\
-         touch '{d}/running_'\"$n\"\n\
          if [ -f '{d}/seen_'\"$n\" ]; then echo ok; exit 0; fi\n\
          touch '{d}/seen_'\"$n\"\n\
+         touch '{d}/running_'\"$n\"\n\
          sleep {sleep}\n\
          echo late\n",
         branch = BRANCH_OF_PROMPT,

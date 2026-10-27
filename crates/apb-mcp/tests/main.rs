@@ -36,6 +36,8 @@ mod connector_policy;
 mod decision_ask_test;
 #[path = "suite/forward_patch_tool_test.rs"]
 mod forward_patch_tool_test;
+#[path = "suite/memory_tools_test.rs"]
+mod memory_tools_test;
 #[path = "suite/patch_tool_test.rs"]
 mod patch_tool_test;
 #[path = "suite/policy_test.rs"]
@@ -45,6 +47,8 @@ mod policy_test;
 mod profile_e2e_test;
 #[path = "suite/profile_tools_test.rs"]
 mod profile_tools_test;
+#[path = "suite/promote_tools_test.rs"]
+mod promote_tools_test;
 #[path = "suite/read_tools_test.rs"]
 mod read_tools_test;
 #[path = "suite/retro_tool_test.rs"]

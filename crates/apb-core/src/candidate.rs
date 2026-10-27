@@ -193,6 +193,7 @@ pub fn create_forward_patch(
             rationale: patch.rationale.clone(),
             evidence: patch.evidence.clone(),
             trial: None,
+            imported: None,
         },
     )?;
     let dir = playbook_dir(root, id);

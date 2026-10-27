@@ -19,6 +19,7 @@ import type {
   TrustRevoked,
   WriteResult,
 } from '../types'
+import type { FitReport, Recall, Refused, Remembered } from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
 
@@ -145,15 +146,50 @@ export const fetchPlaybooks = () => getJson<PlaybookSummary[]>('/api/playbooks')
 export const fetchPlaybook = (id: string, workspace = '', version?: string) =>
   getJson<PlaybookDetail>(`${pb(id)}${qs({ workspace, version })}`)
 
-export const fetchInputDraft = (id: string, workspace = '') =>
-  getJson<{ instruction: string | null }>(`${pb(id)}/input-draft${qs({ workspace })}`)
+// Remembered run input of a playbook in a project (`/memory`): the param
+// values and instruction a start that passes none uses. `scope` names the
+// definition (project or global); the memory always lives in the project.
+export type MemoryScope = 'project' | 'global'
+export type MemoryView = Recall & { id: string; scope: string; version: string }
+export type MemorySaved = Remembered & { id: string; scope: string }
+export interface MemoryInput {
+  params?: Record<string, string>
+  /** An empty string clears the instruction on purpose. */
+  instruction?: string
+}
 
-export const saveInputDraft = (id: string, instruction: string, workspace = '') =>
-  requestJson<{ instruction: string | null }>(`${pb(id)}/input-draft${qs({ workspace })}`, {
+export const fetchMemory = (
+  id: string,
+  workspace = '',
+  opts: { scope?: MemoryScope; version?: string } = {},
+) => getJson<MemoryView>(`${pb(id)}/memory${qs({ workspace, scope: opts.scope, version: opts.version })}`)
+
+export const saveMemory = (
+  id: string,
+  input: MemoryInput,
+  workspace = '',
+  scope?: MemoryScope,
+) =>
+  requestJson<MemorySaved>(`${pb(id)}/memory${qs({ workspace, scope })}`, {
     method: 'PUT',
     headers: jsonHeaders,
-    body: JSON.stringify({ instruction }),
+    body: JSON.stringify(input),
   })
+
+export const clearMemory = (
+  id: string,
+  what: 'all' | 'params' | 'instruction' = 'all',
+  workspace = '',
+  scope?: MemoryScope,
+) =>
+  requestJson<{ id: string; scope: string; cleared: string }>(
+    `${pb(id)}/memory${qs({ workspace, scope, what })}`,
+    { method: 'DELETE' },
+  )
+
+// "Will it fit here?": the four-section report of a run in this project.
+export const fetchFit = (id: string, workspace = '', scope?: MemoryScope) =>
+  getJson<FitReport>(`${pb(id)}/fit${qs({ workspace, scope })}`)
 
 export const fetchRuns = () => getJson<RunSummary[]>('/api/runs')
 export const fetchRun = (id: string, workspace = '') =>
@@ -311,17 +347,39 @@ export const fetchVersions = (id: string, workspace = '') =>
 // (409 `budget_needs_decision`).
 export type { RunBudget } from '../types'
 
+// What a start passes besides its budget: the param values, the
+// instruction and whether to remember both for this project.
+export interface RunInput {
+  params?: Record<string, string>
+  instruction?: string
+  remember?: boolean
+}
+
+export interface RunStarted {
+  run_id: string
+  warnings?: string[]
+  remembered?: string[]
+  not_remembered?: Refused[]
+  memory_error?: string
+}
+
 export const runPlaybook = (
   id: string,
   workspace = '',
-  opts: { consentNonce?: string; budget?: RunBudget } = {},
+  opts: { consentNonce?: string; budget?: RunBudget; input?: RunInput } = {},
 ) =>
-  requestJson<{ run_id: string; warnings?: string[] }>(`${pb(id)}/run${qs({ workspace })}`, {
+  requestJson<RunStarted>(`${pb(id)}/run${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify({
       ...(opts.consentNonce ? { confirm_irreversible: opts.consentNonce } : {}),
       ...(opts.budget ? { budget: opts.budget } : {}),
+      ...(opts.input?.params && Object.keys(opts.input.params).length
+        ? { params: opts.input.params }
+        : {}),
+      // An empty instruction is sent on purpose: the person cleared it.
+      ...(opts.input?.instruction !== undefined ? { instruction: opts.input.instruction } : {}),
+      ...(opts.input?.remember ? { remember: true } : {}),
     }),
   })
 

@@ -32,6 +32,8 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "locks/",
     // The log of decisions asked outside a run (issue #165 Part 16).
     "decisions.jsonl",
+    // Remembered run input: personal values of this machine.
+    "memory/",
 ];
 
 /// The workspace id recorded in `<root>/.apb/workspace.local`, read only when

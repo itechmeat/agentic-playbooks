@@ -18,26 +18,6 @@ use regex::Regex;
 /// every occurrence of that pair in the text. Token shapes still apply.
 const MIN_SECRET_LEN: usize = 6;
 
-static JWT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}").expect("valid")
-});
-static PREFIXED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"\b(?:sk-|sk_|pk_live_|rk_live_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|AKIA|ASIA|AIza|hf_|npm_)[A-Za-z0-9_\-]{8,}",
-    )
-    .expect("valid")
-});
-/// A value after `bearer`, `token` (also `access_token`, `refresh_token`)
-/// or `api_key`, written as `Bearer v`, `token=v`, `token: v` or the JSON
-/// `"token": "v"`. Group 1 is everything before the value.
-static BEARER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)(\b(?:bearer|[a-z0-9_]*token|api[_-]?key)["']?(?:\s+|\s*[=:]\s*)["']?)[A-Za-z0-9._~+/=\-]{12,}"#,
-    )
-    .expect("valid")
-});
-static LONG_RUN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z0-9_+/=\-]{32,}").expect("valid"));
 static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
         .expect("valid")
@@ -52,26 +32,6 @@ static HOME_PATH: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid")
 });
-static UUID: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-        .expect("valid")
-});
-
-/// Whether a long run of token characters looks like a credential: mixed
-/// case with digits, and neither a hex hash nor a UUID nor a plain path.
-fn looks_like_token(run: &str) -> bool {
-    if run.chars().all(|c| c.is_ascii_hexdigit()) || UUID.is_match(run) {
-        return false;
-    }
-    let core = run.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    let has = |f: fn(&char) -> bool| core.chars().any(|c| f(&c));
-    let slashes = core.matches('/').count();
-    has(char::is_ascii_digit)
-        && has(char::is_ascii_uppercase)
-        && has(char::is_ascii_lowercase)
-        && slashes <= 1
-}
-
 /// Redacts text for one run. `Debug` never prints the secret values.
 #[derive(Default)]
 pub(crate) struct Redactor {
@@ -127,21 +87,7 @@ impl Redactor {
             out = out.replace(&format!("{home}/"), "~/");
         }
         out = HOME_PATH.replace_all(&out, "~").into_owned();
-        out = JWT.replace_all(&out, "[redacted-token]").into_owned();
-        out = PREFIXED.replace_all(&out, "[redacted-token]").into_owned();
-        out = BEARER
-            .replace_all(&out, "${1}[redacted-token]")
-            .into_owned();
-        out = LONG_RUN
-            .replace_all(&out, |c: &regex::Captures| {
-                let run = &c[0];
-                if looks_like_token(run) {
-                    "[redacted-token]".to_string()
-                } else {
-                    run.to_string()
-                }
-            })
-            .into_owned();
+        out = apb_core::token_shape::redact_tokens(&out);
         EMAIL.replace_all(&out, "[email]").into_owned()
     }
 }
