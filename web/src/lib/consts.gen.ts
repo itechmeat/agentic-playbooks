@@ -27,5 +27,9 @@ export const EVIDENCE_SOURCE_LABELS = { goal: "goal", success_check: "success ch
 /** Why something is not verified, in words. */
 export const GAP_LABELS = { manual_criterion: "to confirm by hand", self_reported_node: "self-reported", goal_not_checked: "goal not checked", unknown_call: "call outcome unknown", incomplete_response: "response cut short", inbox_gap: "inbox gap", output_truncated: "output cut", baseline_unknown: "baseline unknown", item_needs_look: "item needs a look", self_reported_items: "items self-reported" } as const
 
+/** The shortest and the longest quote a known problem's close may rest on. */
+export const QUOTE_MIN = 12
+export const QUOTE_MAX = 400
+
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

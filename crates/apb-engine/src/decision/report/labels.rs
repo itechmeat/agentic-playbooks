@@ -619,6 +619,14 @@ impl PendingLabeller {
                 "host_task",
                 "none: the host task that asked acts on the answer itself (counts, latency and cost only)",
             ),
+            "grade" => (
+                "grade",
+                "pending: a host or a person grading the same run on the same criterion",
+            ),
+            "problem_recheck" => (
+                "problem_recheck",
+                "pending: the problem reported again after the recheck, or a person's decision on it",
+            ),
             _ => ("unknown", "no labeller for this use"),
         };
         PendingLabeller { use_site, source }

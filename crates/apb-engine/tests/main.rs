@@ -218,6 +218,9 @@ mod join_revive_test;
 mod journal_compat_test;
 #[path = "suite/judge_test.rs"]
 mod judge_test;
+#[cfg(unix)]
+#[path = "suite/known_problems_test.rs"]
+mod known_problems_test;
 #[path = "suite/lineage_test.rs"]
 mod lineage_test;
 #[cfg(unix)]
@@ -238,6 +241,8 @@ mod max_loops_test;
 mod migrate_test;
 #[path = "suite/missing_input_test.rs"]
 mod missing_input_test;
+#[path = "suite/model_grade_test.rs"]
+mod model_grade_test;
 #[cfg(unix)]
 #[cfg(unix)]
 #[path = "suite/named_outputs_test.rs"]

@@ -87,7 +87,7 @@ fn loops_digest() -> String {
 }
 
 fn expected() -> Vec<Expected> {
-    expected_of(&[builtin(LOOPS).unwrap()])
+    expected_of(&[builtin(LOOPS).unwrap()], GraderId::HOST)
 }
 
 /// A rules grade of one run with `level` on `loops`.
@@ -377,4 +377,47 @@ fn on_a_tie_the_grade_listed_later_counts() {
         5,
     );
     assert_eq!(d.per_criterion[0].candidate.poor, 1);
+}
+
+#[test]
+fn a_model_criterion_no_trial_graded_says_a_model_grades_it() {
+    let block: apb_core::quality::QualityBlock = yaml_serde::from_str(
+        "criteria_grader: model\ncriteria:\n  - id: reply-tone\n    levels: { good: polite, partial: curt, poor: rude }\n",
+    )
+    .unwrap();
+    let defs = block.criteria_defs();
+    let expected = expected_of(
+        &defs,
+        apb_core::quality::compare::own_grader_of(Some(&block)),
+    );
+    let own = expected
+        .iter()
+        .find(|e| e.criterion == "reply-tone")
+        .unwrap();
+    assert_eq!(own.grader, GraderId::MODEL);
+    assert!(
+        expected
+            .iter()
+            .filter(|e| e.criterion != "reply-tone")
+            .all(|e| e.grader == GraderId::RULES)
+    );
+    let d = decide(
+        std::slice::from_ref(own),
+        &[],
+        &[],
+        &gate(CompareMode::NotWorse),
+        2,
+    );
+    assert!(d.reason.contains("apb grade --model"), "{}", d.reason);
+    // An unknown grader (a V110) and an absent block both expect a host.
+    let odd: apb_core::quality::QualityBlock =
+        yaml_serde::from_str("criteria_grader: robot\n").unwrap();
+    assert_eq!(
+        apb_core::quality::compare::own_grader_of(Some(&odd)),
+        GraderId::HOST
+    );
+    assert_eq!(
+        apb_core::quality::compare::own_grader_of(None),
+        GraderId::HOST
+    );
 }

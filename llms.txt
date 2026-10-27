@@ -123,8 +123,9 @@ apb cache           inspect and manage the node result cache
 apb decide          ask the configured decision providers a bounded question (host tasks, scripts)
 apb decisions       decision-model report, stored thresholds, replay
 apb stats           cross-run metrics per playbook version and node (read-only)
-apb grade <run>     grade an ended run by rules (built-in quality criteria; --show, --json, --reopen; --backfill <playbook> [--version] [--last N])
+apb grade <run>     grade an ended run by rules (built-in quality criteria) or by the decision model (--model: the playbook's own criteria); --show, --json, --reopen; --backfill <playbook> [--version] [--last N] [--model]
 apb candidate <id>  a playbook's candidate compared with current by quality (--promote, --keep-current [--reason])
+apb problems <id>   a playbook's known problems (--json); confirm|dismiss|reopen <pid> [--reason]; close <pid> --quote; recheck [<pid>] [--holds|--model]; scan [--last N]
 apb eval <id>       run a playbook's eval cases in scratch repositories, store and compare pass counts
 apb projects        list or manage the workspace registry
 apb dashboard       web UI on port 7321
@@ -151,7 +152,8 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 - [Install guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INSTALL.md): detailed installation methods and environment checks
 - [MCP tools reference](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/MCP.md): full tool surface, annotations, safety model, the run outcome (done, verified, not verified, findings, warnings, baseline, unknown sends)
 - [Run stats](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/STATS.md): `apb stats`, cross-run metrics from the run journals, per executor digest, and the run estimate (`apb run --estimate`)
-- [Run quality](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/QUALITY.md): the `quality:` block, built-in criteria graded by rules as a run ends, a host's bounded grading session with cited evidence, promotion of a candidate by quality (`apb grade`, `apb candidate`)
+- [Run quality](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/QUALITY.md): the `quality:` block, built-in criteria graded by rules as a run ends, a host's bounded grading session with cited evidence, the opt-in decision-model grader (`criteria_grader`), promotion of a candidate by quality (`apb grade`, `apb candidate`)
+- [Known problems](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/KNOWN-PROBLEMS.md): the `known_problems:` block, tool-problem findings and repeated connector failures collected per playbook, shown to later runs as facts to check, rechecked when their source changes and closed only on a quote of the new source (`apb problems`, MCP `playbook_known_problems`, `known_problem_decide`, `known_problem_recheck`)
 - [Eval suites](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
 - [Host integration](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
 - [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills; `process_env: allowlist` limits which operator environment variables an agent process inherits

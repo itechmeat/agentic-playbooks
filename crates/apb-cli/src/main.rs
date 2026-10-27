@@ -20,6 +20,7 @@ mod memory;
 mod notify;
 mod onboarding;
 mod pause;
+mod problems;
 mod profile;
 mod report;
 mod run;
@@ -386,11 +387,17 @@ enum Command {
         action: DecisionsAction,
     },
     /// Grade an ended run by rules (the built-in quality criteria: outcome,
-    /// loops, scope, consent, skill use), show its stored grades, or grade
-    /// a playbook's earlier runs so a candidate comparison has a history.
-    /// A stored grade re-decides the playbook's candidate under a quality
-    /// policy. Free: no model is called
+    /// loops, scope, consent, skill use) or, with --model, its playbook's
+    /// own criteria by the project's decision model; show its stored
+    /// grades, or grade a playbook's earlier runs so a candidate comparison
+    /// has a history. A stored grade re-decides the playbook's candidate
+    /// under a quality policy. By rules no model is called
     Grade(crate::grade::GradeArgs),
+    /// A playbook's known problems: trouble with its tools that earlier
+    /// runs reported. Without a subcommand, list them; confirm, dismiss,
+    /// reopen or close one (a close quotes the source's new text); recheck
+    /// the ones whose source changed; scan earlier runs to collect them
+    Problems(crate::problems::ProblemsArgs),
     /// Show a playbook's candidate version and how it compares with
     /// current by quality, or decide it: --promote makes it current,
     /// --keep-current drops it and changes nothing
@@ -811,6 +818,7 @@ fn main() -> ExitCode {
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
         Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
         Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
+        Some(Command::Problems(args)) => problems::problems_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Stats {
             playbook,

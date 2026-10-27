@@ -19,10 +19,15 @@ pub const KIND_MAX: usize = 40;
 pub const LOCATION_MAX: usize = 200;
 pub const EVIDENCE_MAX: usize = 1000;
 pub const WHY_NOT_FIXED_MAX: usize = 500;
+pub const WORKAROUND_MAX: usize = 500;
 pub const SUBJECT_MAX: usize = 200;
 pub const REASON_MAX: usize = 500;
+/// The kind of a problem with a tool the run used (a connector, an MCP
+/// tool, a program, a skill): its location names the tool in the grammar of
+/// [`crate::known_problems::scope_of`].
+pub const TOOL_PROBLEM: &str = "tool_problem";
 /// The kinds the docs recommend; any slug is accepted.
-pub const RECOMMENDED_KINDS: [&str; 10] = [
+pub const RECOMMENDED_KINDS: [&str; 11] = [
     "bug",
     "regression",
     "security",
@@ -32,6 +37,7 @@ pub const RECOMMENDED_KINDS: [&str; 10] = [
     "test_gap",
     "performance",
     "dependency",
+    TOOL_PROBLEM,
     "other",
 ];
 
@@ -43,6 +49,10 @@ pub struct Finding {
     pub location: String,
     pub evidence: String,
     pub why_not_fixed: String,
+    /// How the attempt got around the problem, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub workaround: Option<String>,
 }
 
 /// Something a person should know about the attempt's result.
@@ -152,6 +162,12 @@ fn finding(entry: &Value) -> Result<Finding, String> {
         location: text(entry, "location", LOCATION_MAX)?,
         evidence: text(entry, "evidence", EVIDENCE_MAX)?,
         why_not_fixed: text(entry, "why_not_fixed", WHY_NOT_FIXED_MAX)?,
+        // Optional: absent, null and a blank string all mean "none".
+        workaround: match entry.get("workaround") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(w)) if w.trim().is_empty() => None,
+            Some(_) => Some(text(entry, "workaround", WORKAROUND_MAX)?),
+        },
     })
 }
 
@@ -205,20 +221,27 @@ pub fn sanitize(findings: &Value, warnings: &Value) -> SanitizedNotes {
 /// A location for grouping across runs: trimmed, without a trailing
 /// `:line` or `:line:col`.
 pub fn location_key(location: &str) -> String {
-    let mut key = location.trim();
+    strip_line(location.trim()).to_string()
+}
+
+/// `name` without up to two trailing `:<digits>` segments (a line and a
+/// column): the one rule the grouping key and a known problem's scope name
+/// share.
+pub fn strip_line(name: &str) -> &str {
+    let mut name = name;
     for _ in 0..2 {
-        match key.rsplit_once(':') {
+        match name.rsplit_once(':') {
             Some((head, tail))
                 if !head.is_empty()
                     && !tail.is_empty()
                     && tail.chars().all(|c| c.is_ascii_digit()) =>
             {
-                key = head;
+                name = head;
             }
             _ => break,
         }
     }
-    key.to_string()
+    name
 }
 
 #[cfg(test)]
@@ -273,6 +296,28 @@ mod tests {
         assert_eq!(s.dropped, 4);
         assert!(s.reasons.contains(&"warnings is not a list".to_string()));
         assert!(s.reasons.len() <= MAX_REASONS);
+    }
+
+    #[test]
+    fn a_workaround_is_kept_and_a_malformed_one_drops_the_entry() {
+        let with = json!({"kind": "tool_problem", "location": "connector:crm.update_contact", "evidence": "429 three times", "why_not_fixed": "not ours", "workaround": "wait 60 s and retry once"});
+        let bad = json!({"kind": "tool_problem", "location": "cli:make", "evidence": "e", "why_not_fixed": "w", "workaround": 3});
+        let s = sanitize(&json!([with, bad, f("bug")]), &Value::Null);
+        assert_eq!(s.notes.findings.len(), 2);
+        assert_eq!(
+            s.notes.findings[0].workaround.as_deref(),
+            Some("wait 60 s and retry once")
+        );
+        assert_eq!(s.notes.findings[1].workaround, None);
+        assert_eq!(s.dropped, 1);
+        // An entry without the field serializes as before.
+        let plain = serde_json::to_string(&s.notes.findings[1]).unwrap();
+        assert!(!plain.contains("workaround"), "{plain}");
+        // A blank workaround is none: the finding stays.
+        let blank = json!({"kind": "tool_problem", "location": "cli:make", "evidence": "exits 2", "why_not_fixed": "w", "workaround": "  "});
+        let s = sanitize(&json!([blank]), &Value::Null);
+        assert_eq!((s.notes.findings.len(), s.dropped), (1, 0));
+        assert_eq!(s.notes.findings[0].workaround, None);
     }
 
     #[test]

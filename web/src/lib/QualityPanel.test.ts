@@ -84,21 +84,31 @@ describe('QualityPanel', () => {
     expect(q('run-quality-reading')[0].textContent).toContain('read 0 of 0 chars')
   })
 
-  it('grades an ended run by rules on request', () => {
+  it('grades an ended run by rules or by model on request', () => {
     const { onGrade } = render({})
     expect(q('run-quality-empty')[0].textContent).toContain('Not graded yet.')
     ;(q('run-quality-grade-rules')[0] as HTMLButtonElement).click()
-    expect(onGrade).toHaveBeenCalledOnce()
+    ;(q('run-quality-grade-model')[0] as HTMLButtonElement).click()
+    expect(onGrade.mock.calls).toEqual([['rules'], ['model']])
+  })
+
+  it('names a model grade by its grader', () => {
+    render({ grades: [{ ...rules, grade_id: 'm1', grader: { kind: 'model', version: 1 } }] })
+    const head = q('run-quality-grade')[0]
+    expect(head.getAttribute('data-grader')).toBe('model/1')
+    expect(head.textContent).toContain('decision model')
   })
 
   it('offers no grading while the run is live or a grade is running', () => {
     render({ ended: false })
     expect(q('run-quality-grade-rules').length).toBe(0)
+    expect(q('run-quality-grade-model').length).toBe(0)
     expect(q('run-quality-empty')[0].textContent).toContain('once the run ends')
     unmount(app!)
     app = null
     render({ grading: true })
     expect((q('run-quality-grade-rules')[0] as HTMLButtonElement).disabled).toBe(true)
+    expect((q('run-quality-grade-model')[0] as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('offers Grade again only once a host graded the run', () => {

@@ -641,7 +641,12 @@ fn drive_inner(
             &mut last_applied_patch,
             &run_cancel,
         )? {
-            ControlScan::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
+            ControlScan::Terminal(outcome) => {
+                if outcome == RunStatus::Aborted {
+                    crate::known_problems::observe_ended(run_dir);
+                }
+                return Ok(RunResult { run_id, outcome });
+            }
             ControlScan::Migrated => {
                 frontier.clear();
                 continue;
@@ -2584,7 +2589,12 @@ fn drive_inner(
                 &output,
                 decisions.as_ref(),
             )? {
-                WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
+                WakeOutcome::Terminal(outcome) => {
+                    if outcome == RunStatus::Aborted {
+                        crate::known_problems::observe_ended(run_dir);
+                    }
+                    return Ok(RunResult { run_id, outcome });
+                }
                 // Every directive the park resumes on (a retry, a
                 // continue-from, a patch) runs `current` again: the same
                 // revival as a batch retry (issue #203).

@@ -1,5 +1,6 @@
 //! Run quality on the HTTP API: `GET` and `POST /api/runs/{id}/grades`
-//! (the rules grade of an ended run, refused while the run is live),
+//! (the rules grade of an ended run, refused while the run is live; the
+//! model grader names why it stored nothing),
 //! `POST /api/runs/{id}/grades/reopen` (409 without a host grade), and a
 //! playbook's candidate: `GET /api/playbooks/{id}/candidate` and a
 //! person's Keep current or Promote from the dashboard.
@@ -42,7 +43,7 @@ fn seed_playbook(root: &Path) {
     fs::write(root.join(".apb/playbooks/demo/current"), "1.0.0").unwrap();
 }
 
-async fn call(
+pub(crate) async fn call(
     router: &axum::Router,
     method: &str,
     uri: &str,
@@ -71,6 +72,7 @@ async fn call(
 
 #[tokio::test]
 async fn an_ended_run_is_graded_by_rules_and_its_grades_listed() {
+    let _sandbox = common::config_sandbox().await;
     let dir = tempfile::tempdir().unwrap();
     seed_playbook(dir.path());
     seed_run(dir.path(), "r1", Some("succeeded"));
@@ -92,6 +94,32 @@ async fn an_ended_run_is_graded_by_rules_and_its_grades_listed() {
     // No candidate on trial: nothing re-decided.
     assert!(v.get("candidate").is_none());
 
+    let (_, v) = call(&router, "GET", "/api/runs/r1/grades", None).await;
+    assert_eq!(v["grades"].as_array().unwrap().len(), 1);
+
+    // The model grader: no decision model is on, so nothing is stored and
+    // the reason is named; an unknown grader is refused.
+    let (st, v) = call(
+        &router,
+        "POST",
+        "/api/runs/r1/grades",
+        Some(json!({ "grader": "model" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["grader"].clone(), v["skipped"].clone()),
+        (json!("model"), json!("off"))
+    );
+    assert!(v.get("grade").is_none());
+    let (st, _) = call(
+        &router,
+        "POST",
+        "/api/runs/r1/grades",
+        Some(json!({ "grader": "judge" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, v) = call(&router, "GET", "/api/runs/r1/grades", None).await;
     assert_eq!(v["grades"].as_array().unwrap().len(), 1);
 

@@ -32,6 +32,7 @@ pub mod grade;
 pub mod hooks;
 pub mod inspect;
 pub mod invocation;
+pub mod known_problems;
 pub mod legacy_snapshot;
 pub mod list;
 pub mod liveness;

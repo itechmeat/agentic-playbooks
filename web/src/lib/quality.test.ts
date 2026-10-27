@@ -3,6 +3,7 @@ import type { Grade, ReadTrace } from './api.gen'
 import type { WfEvent } from './types'
 import {
   citeTarget,
+  gradeSkippedText,
   hasHostGrade,
   latestGrades,
   levelText,
@@ -143,5 +144,20 @@ describe('comparison', () => {
     expect(tallyText(none)).toBe('no graded runs yet')
     expect(tallyText(none, 'no graded trials yet')).toBe('no graded trials yet')
     expect(tallyText({ ...none, not_applicable: 3 })).toBe('0/0/0')
+  })
+})
+
+describe('gradeSkippedText', () => {
+  it('puts every model skip code in words', () => {
+    for (const code of ['off', 'no_criteria', 'budget', 'send', 'busy', 'state_too_large']) {
+      const text = gradeSkippedText(code)
+      expect(text).not.toBe(code)
+      expect(text).toContain(' ')
+    }
+    expect(gradeSkippedText('off')).toContain('a provider available')
+  })
+
+  it('passes an unknown code through readably', () => {
+    expect(gradeSkippedText('some_new_reason')).toBe('some new reason')
   })
 })

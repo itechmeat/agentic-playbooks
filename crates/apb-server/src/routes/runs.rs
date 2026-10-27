@@ -98,6 +98,11 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub candidate_trial: Option<apb_engine::candidate::CandidateTrial>,
+    /// The known problems the run showed its agents and the ones it hid;
+    /// absent for a run whose playbook shows none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub known_problems: Option<apb_engine::known_problems::RunKnownProblems>,
     /// The run's pause (issue #200): who paused it, why, since and until
     /// when, and `pausing` while a live driver drains toward a queued
     /// pause. Absent for a run that is neither paused nor pausing.
@@ -262,6 +267,7 @@ pub(crate) async fn get_run_handler(
     let notes = Some(readout.notes).filter(|n| !n.is_empty());
     let lists = readout.lists;
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
+    let known_problems = apb_mcp::tools::problems::run_block(&view.events);
     let pause = view.pause().cloned();
     let nodes = view.nodes();
     let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
@@ -300,6 +306,7 @@ pub(crate) async fn get_run_handler(
         attempt_models,
         goal,
         candidate_trial,
+        known_problems,
         pause,
         budget,
         notify,

@@ -454,13 +454,20 @@ fn a_backfill_grades_the_runs_without_a_rules_grade_once() {
     let root = dir.path();
     seed(root, "quality:\n  grade_on_finish: off");
     let runs: Vec<String> = (0..2).map(|_| start(root).0).collect();
-    let first = apb_engine::grade::backfill(root, ID, Some("1.0.0"), 10);
+    let first = apb_engine::grade::backfill(
+        root,
+        ID,
+        Some("1.0.0"),
+        10,
+        apb_engine::grade::GraderChoice::Rules,
+    );
     assert_eq!(first.len(), 2);
     assert!(first.iter().all(|b| b.grade_id.is_some()));
     for run in &runs {
         assert_eq!(grades_of(&run_dir(root, run)).len(), 1);
     }
-    let again = apb_engine::grade::backfill(root, ID, None, 10);
+    let again =
+        apb_engine::grade::backfill(root, ID, None, 10, apb_engine::grade::GraderChoice::Rules);
     assert!(again.iter().all(|b| b.skipped.as_deref() == Some("graded")));
 }
 
@@ -473,7 +480,8 @@ fn a_backfill_counts_only_the_runs_it_grades() {
     // The newest run is graded already: `last: 1` still grades one run,
     // the next newest.
     apb_engine::grade::grade_rules(&run_dir(root, &runs[2])).unwrap();
-    let report = apb_engine::grade::backfill(root, ID, None, 1);
+    let report =
+        apb_engine::grade::backfill(root, ID, None, 1, apb_engine::grade::GraderChoice::Rules);
     let graded: Vec<&str> = report
         .iter()
         .filter(|b| b.grade_id.is_some())

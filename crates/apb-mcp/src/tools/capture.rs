@@ -1,4 +1,4 @@
-//! Turning a finished session into a playbook draft, plus the secret scan
+//! Turning a finished session into a playbook draft, plus the secret check
 //! that keeps captured text from carrying credentials into a definition.
 
 use std::path::Path;
@@ -6,59 +6,23 @@ use std::path::Path;
 use super::ToolError;
 use serde_json::{Value, json};
 
-/// A "looks like a secret" heuristic (spec 8.3): a crude scan without a regex crate.
-/// Catches `key: value` with an indicator key and a value of length >= 8 with no
-/// whitespace, as well as long (>= 32) contiguous base64/hex-like tokens.
-/// Returns a masked fragment. This is an extra safety net, not a
-/// guarantee: the main contract is that the host does not put secrets into the synopsis.
-fn secret_like(text: &str) -> Option<String> {
-    const KEYS: [&str; 6] = [
-        "api_key", "apikey", "api-key", "secret", "token", "password",
-    ];
-    for raw in text.lines() {
-        let line = raw.trim();
-        let lower = line.to_lowercase();
-        // Look for the indicator key anywhere in the line (robust to a JSON wrapper
-        // like `"note":"api_key: ..."`), then take the value after the nearest ':'/'='.
-        // We take offsets and slice using the same `lower` string throughout - otherwise on Unicode
-        // (to_lowercase can change length) a byte index from `lower` could
-        // point into the middle of a character in `line` and panic.
-        for key in KEYS {
-            let Some(kpos) = lower.find(key) else {
-                continue;
-            };
-            let after = &lower[kpos + key.len()..];
-            if let Some(sep) = after.find([':', '=']) {
-                let val = after[sep + 1..].trim();
-                let val: &str = val
-                    .split(|c: char| {
-                        c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}'
-                    })
-                    .find(|s| !s.is_empty())
-                    .unwrap_or("");
-                if val.len() >= 8 {
-                    return Some(mask(val));
-                }
-            }
-        }
-        for tok in line.split(|c: char| c.is_whitespace() || c == '"' || c == '\'') {
-            if tok.len() >= 32
-                && tok
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
-            {
-                return Some(mask(tok));
-            }
-        }
-    }
-    None
-}
-
-/// A candidate secret is reported by shape only. Echoing even a prefix would
-/// put part of the value into a capture report that is meant to prove the
-/// value was kept out.
-fn mask(s: &str) -> String {
-    format!("redacted ({} chars)", s.chars().count())
+/// The secret check of captured text: the workspace scrubber's wide refusal
+/// ([`apb_core::scrub::Scrubber::refuses`]: token and keyed-value shapes, bare
+/// keys, and the values installed connectors reference). Reported by kind
+/// only, never by value: echoing even a prefix would put part of the value
+/// into a capture report that is meant to prove the value was kept out.
+/// An extra safety net, not a guarantee: the main contract is that the host
+/// does not put secrets into the synopsis.
+/// A structured synopsis is checked string by string
+/// ([`apb_core::scrub::Scrubber::refuses_value`]), where escaping cannot hide
+/// a configured value, and serialised as well, where a key name and its
+/// value (`{"password": "..."}`) sit together.
+fn secret_flag(root: &Path, synopsis: Option<&Value>, texts: &[&str]) -> Option<Value> {
+    let scrubber = apb_core::scrub::Scrubber::for_workspace(root, Vec::new());
+    synopsis
+        .and_then(|v| scrubber.refuses_value(v))
+        .or_else(|| texts.iter().find_map(|t| scrubber.refuses(t)))
+        .map(|flag| json!({ "rejected": "secret_like_value", "match": flag.as_str() }))
 }
 
 fn normalize(s: &str) -> String {
@@ -76,10 +40,8 @@ pub fn playbook_capture(
 ) -> Result<Value, ToolError> {
     // Secret scan over the synopsis and over the yaml (spec 8.3).
     let synopsis_text = serde_json::to_string(synopsis).unwrap_or_default();
-    for src in [synopsis_text.as_str(), yaml] {
-        if let Some(m) = secret_like(src) {
-            return Ok(json!({ "rejected": "secret_like_value", "match": m }));
-        }
+    if let Some(rejected) = secret_flag(root, Some(synopsis), &[synopsis_text.as_str(), yaml]) {
+        return Ok(rejected);
     }
 
     // Take the id from the yaml itself (the canonical source).
@@ -189,8 +151,8 @@ pub fn suggestion_dismiss(root: &Path, req: DismissRequest<'_>) -> Result<Value,
     };
     // A synopsis is prose the user will see again in `apb suggestions list`;
     // the same secret-shape net that guards a capture synopsis applies here.
-    if let Some(m) = secret_like(req.synopsis) {
-        return Ok(json!({ "rejected": "secret_like_value", "match": m }));
+    if let Some(rejected) = secret_flag(root, None, &[req.synopsis]) {
+        return Ok(rejected);
     }
     let outcome = apb_core::dismiss::record_decision(
         root,

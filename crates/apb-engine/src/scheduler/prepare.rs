@@ -982,6 +982,17 @@ pub(crate) fn prepare_run_target(
         profiles: profiles_prov,
         remembered,
     })?;
+    // The known problems this run shows its agents, rechecked where their
+    // source changed, journaled once (only for a playbook whose
+    // `known_problems:` block shows anything).
+    if let Some(shown) = crate::known_problems::at_start(
+        root,
+        apb_core::scope::Scope::parse(t.origin_label).unwrap_or(apb_core::scope::Scope::Project),
+        &playbook,
+        &manifest,
+    ) {
+        log.append(shown)?;
+    }
     // The estimate snapshot and the budget in force (not for a child).
     if opts.parent_run.is_none() && opts.depth == 0 {
         let recorded = budget_gate::record_start(

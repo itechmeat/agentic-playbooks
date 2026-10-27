@@ -12,6 +12,7 @@ pub mod memory;
 pub mod meta;
 pub mod notify;
 pub mod playbook;
+pub mod problems;
 pub mod retro;
 pub mod run;
 pub mod supervisor;
@@ -48,8 +49,10 @@ pub enum ToolError {
 }
 
 /// Refuses `what` when `step` is a run step (see
-/// [`apb_core::step_env::StepCaller::refusal`]): grading a run and deciding
-/// a candidate are never done by a step of a run.
+/// [`apb_core::step_env::StepCaller::refusal`]): grading a run, deciding
+/// a candidate and deciding, rechecking or collecting known problems are
+/// never done by a step of a run. The one guard every surface (MCP, the
+/// CLI, the HTTP API) reaches through this tool layer.
 pub(crate) fn outside_run(
     step: &apb_core::step_env::StepCaller,
     what: &str,

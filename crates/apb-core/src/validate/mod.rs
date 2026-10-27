@@ -14,6 +14,7 @@ mod decisions;
 mod forks;
 mod graph;
 mod judge;
+mod known_problems;
 mod list;
 mod node_io;
 mod nodes;
@@ -183,6 +184,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     budget::check_budget(playbook, &mut r); // V96-V98
     params::check_params(playbook, &mut r); // V99, V100
     quality::check_quality(playbook, &mut r); // V102-V107
+    known_problems::check_known_problems(playbook, &mut r); // V108-V111
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

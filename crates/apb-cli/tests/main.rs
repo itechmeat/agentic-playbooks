@@ -68,6 +68,8 @@ mod pause_cli_test;
 mod pause_waker_cli_test;
 #[path = "suite/phase9_cli_test.rs"]
 mod phase9_cli_test;
+#[path = "suite/problems_cli_test.rs"]
+mod problems_cli_test;
 #[path = "suite/profile_cli_test.rs"]
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]

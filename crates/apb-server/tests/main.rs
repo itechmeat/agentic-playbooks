@@ -37,6 +37,8 @@ mod memory_api_test;
 mod meta_api_test;
 #[path = "suite/notify_api_test.rs"]
 mod notify_api_test;
+#[path = "suite/problems_api_test.rs"]
+mod problems_api_test;
 #[path = "suite/profiles_api_test.rs"]
 mod profiles_api_test;
 #[path = "suite/quality_api_test.rs"]

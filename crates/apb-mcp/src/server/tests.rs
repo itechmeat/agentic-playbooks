@@ -145,11 +145,15 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_report",
         "run_report_html",
         "run_retro_context",
+        "run_grade",
         "run_grade_start",
         "run_grade_read",
         "run_grade_submit",
         "run_grades",
         "playbook_candidate",
+        "playbook_known_problems",
+        "known_problem_decide",
+        "known_problem_recheck",
         "run_resume",
         "run_stop",
         "run_pause",
@@ -2544,5 +2548,7 @@ mod budget;
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
 mod notify;
+// Known problems: the read, a person's decision and a recheck.
+mod problems;
 // Run quality: grading sessions, grades and the candidate.
 mod quality;

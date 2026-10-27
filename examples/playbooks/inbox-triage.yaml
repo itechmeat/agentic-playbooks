@@ -42,6 +42,12 @@ quality:
         good: "every task name says what the sender asks for, in a few words"
         partial: "every task exists but at least one name is vague or generic"
         poor: "a task name misstates the request, or a newsletter was filed as work"
+# Known problems (docs/KNOWN-PROBLEMS.md) without any code: an Asana or
+# IMAP function that fails alike twice in a run (rate limited, say) is
+# collected on its own, as is a tool_problem finding about it. Once three
+# runs met it, the nodes that bind that connector are shown it; a change to
+# the connector's function definition is rechecked before it is shown again.
+known_problems: { min_runs: 3 }
 nodes:
   - { id: start, type: start }
   - id: search_inbox

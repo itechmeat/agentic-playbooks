@@ -80,6 +80,18 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::quality::get_candidate_handler),
         )
         .route(
+            "/api/playbooks/{id}/known-problems",
+            get(routes::problems::get_problems_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/known-problems/{problem}",
+            get(routes::problems::get_problem_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/known-problems/{problem}/{action}",
+            post(routes::problems::post_problem_handler),
+        )
+        .route(
             "/api/playbooks/{id}/candidate/promote",
             post(routes::quality::post_promote_handler),
         )

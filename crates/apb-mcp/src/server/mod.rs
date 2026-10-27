@@ -24,6 +24,7 @@ pub use args::*;
 
 mod decision;
 mod playbook;
+mod problems;
 mod profile;
 mod quality;
 mod run;
@@ -573,7 +574,7 @@ impl WfMcp {
 
     /// Combined tool router: the per-domain routers (defined in the
     /// `playbook` / `run` / `profile` / `supervisor` / `decision` /
-    /// `quality` submodules) merged into
+    /// `quality` / `problems` submodules) merged into
     /// one. `#[tool_handler]` on the `ServerHandler` impl calls this.
     fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         Self::playbook_router()
@@ -582,6 +583,7 @@ impl WfMcp {
             + Self::supervisor_router()
             + Self::decision_router()
             + Self::quality_router()
+            + Self::problems_router()
     }
 }
 

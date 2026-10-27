@@ -40,9 +40,34 @@ export function levelText(level: Level): string {
   return level.replace(/_/g, ' ')
 }
 
-/** `rules/1`, `host/1`. */
+/** `rules/1`, `host/1`, `model/1`. */
 export function graderName(g: Grade): string {
   return `${g.grader.kind}/${g.grader.version}`
+}
+
+/** Who graded, as a person reads it: rules, host, decision model. */
+export function graderLabel(g: Grade): string {
+  return g.grader.kind === 'model' ? 'decision model' : g.grader.kind
+}
+
+/** Why a model grade stored nothing, in words. */
+export function gradeSkippedText(reason: string): string {
+  switch (reason) {
+    case 'off':
+      return 'the decision model is off for grading in this project (uses.grade in decisions.yaml, run outputs allowed to be sent, and a provider available)'
+    case 'no_criteria':
+      return 'the playbook has no criteria of its own'
+    case 'budget':
+      return "today's cap of model grades is spent"
+    case 'send':
+      return 'privacy.send in decisions.yaml does not allow sending prompts to the decision model'
+    case 'busy':
+      return 'the decision model is busy; try again shortly'
+    case 'state_too_large':
+      return 'the run is too large to send whole'
+    default:
+      return reason.replace(/_/g, ' ')
+  }
 }
 
 /**

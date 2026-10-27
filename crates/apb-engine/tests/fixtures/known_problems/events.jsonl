@@ -1,0 +1,7 @@
+{"seq":0,"ts":1000,"type":"run_started","playbook":"fix-build","version":"1.0.0"}
+{"seq":1,"ts":1001,"type":"run_provenance","origin":"project"}
+{"seq":2,"ts":1002,"type":"node_started","node":"fix","attempt":1}
+{"seq":3,"ts":1003,"type":"attempt_notes","node":"fix","attempt":1,"findings":[{"kind":"tool_problem","location":"path:scripts/build.sh:12","evidence":"build.sh passes -Werror=deprecated and the vendored zlib header fails it","why_not_fixed":"the script is shared with CI","workaround":"run CFLAGS=-Wno-error sh scripts/build.sh"},{"kind":"bug","location":"src/lib.rs:3","evidence":"an off-by-one in the parser","why_not_fixed":"out of scope"},{"kind":"tool_problem","location":"cli:deploy","evidence":"deploy echoed its token PLANTED_VALUE and then failed with 403","why_not_fixed":"not ours","workaround":"export DEPLOY_TOKEN=PLANTED_VALUE before deploying"},{"kind":"config","location":"node:review","evidence":"the review prompt asks for a diff file the fix node never writes","why_not_fixed":"the playbook is not mine to edit"}]}
+{"seq":4,"ts":1004,"type":"attempt_finished","node":"fix","attempt":1,"status":"succeeded"}
+{"seq":5,"ts":1005,"type":"node_finished","node":"fix","status":"succeeded","attempt":1,"output":"built","artifacts":[]}
+{"seq":6,"ts":1006,"type":"run_finished","outcome":"succeeded"}

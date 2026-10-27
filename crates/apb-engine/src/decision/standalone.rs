@@ -1,22 +1,21 @@
-//! Decisions outside a run (issue #165 Part 16): the MCP catalog ranking
-//! asks through the same configuration, provider chain and redaction as a
-//! run, but has no run journal. Each decision is logged as one JSON line in
+//! Decisions outside a run (issue #165 Part 16): the MCP catalog ranking,
+//! host tasks, the model grader and the known-problem recheck ask through
+//! the same configuration, provider chain and redaction as a run, but have
+//! no run journal. Each decision is logged as one JSON line in
 //! `<root>/.apb/decisions.jsonl` (git-ignored, `workspace::LOCAL_ENTRIES`)
 //! with the `decision_made` fields minus node and attempt, and a use's
 //! `max_requests_per_day` caps the requests per project and UTC day.
 //!
 //! Every step fails open: the caller gets an outcome and keeps today's
 //! behaviour on anything but `Answered`. Nothing here is ever applied by the
-//! engine; the one caller (catalog ranking) is advisory by definition.
+//! engine on its own: each caller applies its own mode rule.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use apb_core::decisions::{
-    CATALOG_RANK_MAX_REQUESTS_PER_DAY, DecisionMode, EffectiveDecisions, SendClass,
-};
+use apb_core::decisions::{DecisionMode, EffectiveDecisions, SendClass};
 use apb_decide::{Answer, DecisionRequest, ProviderChain, Question, UseSite};
 use serde_json::{Value, json};
 
@@ -125,11 +124,21 @@ impl StandaloneDecider {
         self.settings.threshold(site.as_str(), name)
     }
 
+    /// Whether an `enforce` use may act on an uncalibrated answer.
+    pub fn allows_uncalibrated(&self, site: UseSite) -> bool {
+        self.settings.allows_uncalibrated(site.as_str())
+    }
+
     /// Whether any configured provider resolved (its key and account id):
     /// without one nothing can be asked, and a caller keeps today's
     /// behaviour without saying so.
     pub fn available(&self) -> bool {
         !self.chain().0.is_empty()
+    }
+
+    /// Whether `privacy.send` allows material of `class`.
+    pub fn sends(&self, class: SendClass) -> bool {
+        self.settings.sends(class)
     }
 
     /// The byte budget of one request's state.
@@ -169,10 +178,8 @@ impl StandaloneDecider {
             .uses
             .get(site.as_str())
             .and_then(|u| u.max_requests_per_day)
-            .unwrap_or(match site {
-                UseSite::HostTask => apb_core::decisions::HOST_TASK_MAX_REQUESTS_PER_DAY,
-                _ => CATALOG_RANK_MAX_REQUESTS_PER_DAY,
-            })
+            .or_else(|| apb_core::decisions::default_daily_cap(site.as_str()))
+            .unwrap_or(0)
     }
 
     /// Opens the log without following a link, and only as a regular file:

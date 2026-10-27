@@ -3,8 +3,10 @@
 //! stored here re-decides the candidate exactly as elsewhere:
 //!
 //! - `GET /api/runs/{id}/grades`: the run's stored grades, oldest first;
-//! - `POST /api/runs/{id}/grades`: grade the ended run by rules (409 while
-//!   it is live);
+//! - `POST /api/runs/{id}/grades` (`{ grader? }`): grade the ended run by
+//!   `rules` (the default) or by `model` (409 while it is live; a model
+//!   grade that stored nothing answers `skipped` with the reason, 422 for
+//!   an unknown grader);
 //! - `POST /api/runs/{id}/grades/reopen`: a person lets a host grade the
 //!   run once more (409 without a host grade);
 //! - `GET /api/playbooks/{id}/candidate`: the candidate and how it compares
@@ -20,12 +22,10 @@
 use apb_core::quality::grade::Grade;
 use apb_core::step_env::StepCaller;
 use apb_engine::candidate::{CandidateQualityView, PersonDecision};
-use apb_mcp::tools::ToolError;
 use apb_mcp::tools::candidate::{candidate_decide, candidate_view};
-use apb_mcp::tools::grade::{grade_by_rules, grade_reopen, run_grades};
+use apb_mcp::tools::grade::{grade_by, grade_reopen, grader_of, run_grades};
 use axum::extract::{Path as AxPath, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{Json, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::state::*;
@@ -57,36 +57,6 @@ pub(crate) struct KeepCurrentBody {
     reason: Option<String>,
 }
 
-/// The status a tool refusal answers with.
-fn refusal(e: ToolError) -> Response {
-    match e {
-        ToolError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
-        ToolError::Conflict(what) => (StatusCode::CONFLICT, what).into_response(),
-        ToolError::Engine(what) => (StatusCode::UNPROCESSABLE_ENTITY, what).into_response(),
-    }
-}
-
-/// Runs `work` on the project the request names, off the runtime, and
-/// answers its value as JSON.
-async fn answer<T, F>(state: &AppState, id: &str, workspace: Option<&str>, work: F) -> Response
-where
-    T: Serialize + Send + 'static,
-    F: FnOnce(std::path::PathBuf) -> Result<T, ToolError> + Send + 'static,
-{
-    if !is_safe_id(id) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    let root = match resolve_root(state, workspace) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    match tokio::task::spawn_blocking(move || work(root)).await {
-        Ok(Ok(v)) => Json(v).into_response(),
-        Ok(Err(e)) => refusal(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
 pub(crate) async fn get_grades_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -99,14 +69,25 @@ pub(crate) async fn get_grades_handler(
     .await
 }
 
+/// Body of `POST /api/runs/{id}/grades`.
+#[derive(Deserialize, Default)]
+pub(crate) struct GradeBody {
+    /// `rules` (default) or `model`.
+    #[serde(default)]
+    grader: Option<String>,
+}
+
 pub(crate) async fn post_grades_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<WorkspaceQuery>,
+    body: Option<Json<GradeBody>>,
 ) -> Response {
     let run_id = id.clone();
+    let grader = body.and_then(|Json(b)| b.grader);
     answer(&state, &id, q.workspace.as_deref(), move |root| {
-        grade_by_rules(&root, &run_id, &StepCaller::from_env())
+        let grader = grader_of(grader.as_deref())?;
+        grade_by(&root, &run_id, grader, &StepCaller::from_env())
     })
     .await
 }

@@ -1,4 +1,5 @@
-//! `apb grade` and `apb candidate`: grading an ended run by rules, its
+//! `apb grade` and `apb candidate`: grading an ended run by rules (and
+//! the model grader naming why it stored nothing), its
 //! stored grades in text and JSON, the grade line of `apb runs <id>`, a
 //! backfill that skips what is graded, and the candidate command without a
 //! candidate on trial.
@@ -171,8 +172,60 @@ fn candidate_without_a_candidate_says_so_and_refuses_a_decision() {
 }
 
 #[test]
+fn grade_model_names_why_it_stored_nothing() {
+    let dir = project();
+    // No decision model is configured: nothing is asked or stored.
+    apb()
+        .args(["grade", "demo-1", "--model"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "demo-1: not graded by model: the project's decision model is off for grading",
+        ));
+    let out = apb()
+        .args(["grade", "demo-1", "--model", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (v["grader"].as_str(), v["skipped"].as_str()),
+        (Some("model"), Some("off"))
+    );
+    assert_eq!(
+        grades_of(dir.path(), "demo-1")["grades"],
+        serde_json::json!([])
+    );
+    apb()
+        .args(["grade", "--backfill", "demo", "--model"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "demo: graded 0 of 1 runs by model",
+        ))
+        .stdout(predicate::str::contains(
+            "skipped: the project's decision model is off for grading",
+        ));
+    // --model does not go with --show.
+    apb()
+        .args(["grade", "demo-1", "--model", "--show"])
+        .current_dir(dir.path())
+        .assert()
+        .failure();
+}
+
+#[test]
 fn a_run_step_may_look_at_grades_but_not_grade_or_decide() {
     let dir = project();
+    apb()
+        .args(["grade", "demo-2", "--model"])
+        .env("APB_RUN_ID", "r-step")
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("run step"));
     apb()
         .args(["grade", "demo-2"])
         .env("APB_RUN_ID", "r-step")

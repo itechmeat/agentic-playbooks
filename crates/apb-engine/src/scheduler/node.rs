@@ -814,6 +814,7 @@ fn execute_node_kind(
                 text = crate::context::assemble_agent_prompt(
                     &text,
                     cfg.instruction.as_deref(),
+                    node_id,
                     events,
                 );
             }
@@ -825,6 +826,9 @@ fn execute_node_kind(
                 _ => text.clone(),
             };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
+            // How to report findings, tool problems too when the playbook
+            // collects known problems.
+            let notes_note = super::status_file::notes_note(playbook.known_problems.is_some());
             // Required verdict (spec 2026-08-05 section 2.2). The node field is a
             // plain bool, so it can only turn the requirement ON; a playbook-wide
             // `defaults.require_verdict` turns it on for every agent_task. Same
@@ -1598,12 +1602,12 @@ fn execute_node_kind(
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
                             "{step_text}\n\n{}\n\n{}{item_section}{}",
                             super::status_file::INTERRUPTION_NOTE,
-                            super::status_file::NOTES_NOTE,
+                            notes_note,
                             super::attempt_memory::retry_briefing_now(run_dir, key)
                         )),
                         None => std::borrow::Cow::Owned(format!(
                             "{step_text}\n\n{}{item_section}{}",
-                            super::status_file::NOTES_NOTE,
+                            notes_note,
                             super::attempt_memory::retry_briefing_now(run_dir, key)
                         )),
                     };

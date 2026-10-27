@@ -202,6 +202,31 @@ fn render_types() -> String {
         apb_mcp::tools::grade::Graded::decl(&cfg),
         crate::routes::quality::RunGrades::decl(&cfg),
         crate::routes::quality::PlaybookCandidate::decl(&cfg),
+        // Known problems: the store as the surfaces show it, a run's shown
+        // and hidden problems, and one problem with its changed passages.
+        apb_core::known_problems::ScopeKind::decl(&cfg),
+        apb_core::known_problems::ProblemScope::decl(&cfg),
+        apb_core::known_problems::ProblemOrigin::decl(&cfg),
+        apb_core::known_problems::EvidenceRef::decl(&cfg),
+        apb_core::known_problems::SourceKind::decl(&cfg),
+        apb_core::known_problems::ProblemSource::decl(&cfg),
+        apb_core::known_problems::ProblemStatus::decl(&cfg),
+        apb_core::known_problems::Decided::decl(&cfg),
+        apb_core::known_problems::RecheckVerdict::decl(&cfg),
+        apb_core::known_problems::RecheckBasis::decl(&cfg),
+        apb_core::known_problems::Quote::decl(&cfg),
+        apb_core::known_problems::RecheckRecord::decl(&cfg),
+        apb_core::known_problems::KnownProblem::decl(&cfg),
+        apb_core::known_problems::ReportedText::decl(&cfg),
+        apb_core::known_problems::ShownProblem::decl(&cfg),
+        apb_core::known_problems::HiddenProblem::decl(&cfg),
+        apb_engine::known_problems::SourceNow::decl(&cfg),
+        apb_engine::known_problems::ProblemView::decl(&cfg),
+        apb_engine::known_problems::ProblemsView::decl(&cfg),
+        apb_engine::known_problems::RunKnownProblems::decl(&cfg),
+        apb_engine::known_problems::ChangedPassage::decl(&cfg),
+        apb_engine::known_problems::ScanReport::decl(&cfg),
+        apb_mcp::tools::problems::ProblemDetail::decl(&cfg),
         apb_core::versioning::TrialRecord::decl(&cfg),
         apb_core::versioning::VersionProvenance::decl(&cfg),
         apb_core::versioning::VersionInfo::decl(&cfg),
@@ -265,6 +290,12 @@ fn render_consts() -> String {
         out.push_str(&format!(
             "\n/** Why something is not verified, in words. */\nexport const GAP_LABELS = {{ {} }} as const\n",
             label_entries(GapKind::ALL.iter().map(|k| (serde_key(k), k.label())))
+        ));
+    }
+    {
+        use apb_core::known_problems::recheck::{QUOTE_MAX, QUOTE_MIN};
+        out.push_str(&format!(
+            "\n/** The shortest and the longest quote a known problem's close may rest on. */\nexport const QUOTE_MIN = {QUOTE_MIN}\nexport const QUOTE_MAX = {QUOTE_MAX}\n"
         ));
     }
     out.push_str(&format!(

@@ -1521,6 +1521,25 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<String>,
     },
+    /// The known problems shown to the run's agents (see
+    /// `crate::known_problems`), worked out once at start: each shown
+    /// problem's stored texts (already scrubbed and capped) and the agent
+    /// nodes it is shown to, and why the other significant ones are hidden.
+    /// Written right after `run_provenance`, only for a playbook whose
+    /// `known_problems:` block shows anything; the prompt section of every
+    /// later attempt, resume included, is rebuilt from it. Safe to skip up to
+    /// the next checkpoint: an older apb's prompts simply lack the section.
+    /// Additive variant.
+    KnownProblemsShown {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        shown: Vec<apb_core::known_problems::ShownProblem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hidden: Vec<apb_core::known_problems::HiddenProblem>,
+        /// Problems of a file this installation did not write: only
+        /// counted, never named.
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        unsigned: u32,
+    },
     /// The run's budget (see `crate::budget`): at start, from the playbook's
     /// block and the run argument, and at each resume that sets or raises
     /// it. The latest one is in force. Safe to skip up to the next

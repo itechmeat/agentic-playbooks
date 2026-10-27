@@ -95,6 +95,33 @@ pub fn looks_like_credential(text: &str) -> bool {
             .any(|m| looks_like_token(m.as_str()))
 }
 
+/// The shortest value after a key name that a refusal counts.
+const REFUSED_KEYED_MIN: usize = 8;
+/// The lengths of a bare key a refusal counts.
+const REFUSED_BARE: std::ops::RangeInclusive<usize> = 32..=64;
+
+/// Whether a text a writer stores verbatim (a playbook draft, a stored
+/// problem) must be refused: [`looks_like_credential`], or the wider rule
+/// a refusal can afford because it rewrites nothing. A value of 8 or more
+/// characters after a key name and `:` or `=`, in any case
+/// (`{"password": "correcthorsebatterystaple"}`, `secret=abcdefghijk`), and
+/// a bare run of 32 to 64 key characters with a digit, in one case or
+/// several. Git hashes, other bare hex strings and UUIDs stay identifiers.
+pub fn refuses_to_store(text: &str) -> bool {
+    looks_like_credential(text)
+        || KEYED
+            .captures_iter(text)
+            .any(|c| c[2].contains(['=', ':']) && c[3].chars().count() >= REFUSED_KEYED_MIN)
+        || LONG_RUN.find_iter(text).any(|m| {
+            let run = m.as_str();
+            REFUSED_BARE.contains(&run.len())
+                && !run.chars().all(|c| c.is_ascii_hexdigit())
+                && !UUID.is_match(run)
+                && run.chars().any(|c| c.is_ascii_digit())
+                && run.matches('/').count() <= 1
+        })
+}
+
 /// Whether a param named `name` holds a credential by its name: one of its
 /// words (split at `_`, `-`, case changes and between letters and digits)
 /// is `password(s)`, `passwd`, `passphrase`, `pwd`, `secret(s)`, `apikey`
