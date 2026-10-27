@@ -26,6 +26,9 @@ with two files:
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
   environment: full          # optional; default minimal. See "Agent environment" below
   zcode_mode: edit           # optional, zcode steps only: yolo (default) | edit. See "ZCode (zcode)"
+  process_env:               # optional; default inherit. See "Process environment" below
+    policy: allowlist
+    allow: [GH_TOKEN, NPM_CONFIG_*]
   skills:                    # names (scope auto) or { name, scope }
     - coding-standards
     - { name: writing-plans, scope: global }
@@ -107,6 +110,127 @@ not anyone chose it, so it cannot mean the opt-in, and `hermetic: true` is what
 the default does anyway. Rewrites drop it. On the write surfaces (`--hermetic`,
 the MCP and HTTP `hermetic` field) it is a deprecated alias: `true` means
 `minimal`, `false` means `full`.
+
+## Process environment
+
+`process_env` says which of the operator's environment variables an agent
+process inherits. It is separate from `environment`, which is about the
+agent's own configuration (settings, plugins, MCP servers), not the process
+environment.
+
+```yaml
+process_env:
+  policy: allowlist          # inherit (the default, written as the absence of the key) | allowlist
+  allow:                     # names added to the built-in sets
+    - GH_TOKEN
+    - NPM_CONFIG_*           # a trailing * matches by prefix
+    - SSH_AUTH_SOCK
+```
+
+- `inherit` passes everything apb itself runs with, as before.
+- `allowlist` clears the inherited environment and passes back only:
+  - the base set every agent gets: `PATH HOME USER LOGNAME SHELL LANG LANGUAGE
+    TZ TERM`, the locale categories by name (`LC_ALL LC_CTYPE LC_COLLATE
+    LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME LC_ADDRESS LC_IDENTIFICATION
+    LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE`, never an `LC_` prefix),
+    `TMPDIR TMP TEMP`, the `XDG_*_HOME` dirs and
+    `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY HTTPS_PROXY NO_PROXY
+    ALL_PROXY` and their lowercase forms), the certificate bundles
+    (`SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE
+    CURL_CA_BUNDLE`), `APB_CONFIG_DIR` and, on Windows, `SYSTEMROOT USERPROFILE
+    APPDATA LOCALAPPDATA PATHEXT COMSPEC`;
+  - the variables the agent CLI reads (the table below);
+  - the names in `allow`.
+- apb's own variables (`APB_RUN_DIR`, `APB_NODE_ID`, `APB_ATTEMPT_TOKEN`,
+  `APB_STATUS_FILE`, `CODEX_HOME`, the zcode provider config, an eval overlay)
+  are set after the plan, so they always arrive.
+- A variable a connector references is withheld under either policy, even when
+  `allow` names it.
+
+| Agent | Always | Only when the trigger is on | Derived |
+|---|---|---|---|
+| claude | `ANTHROPIC_* CLAUDE_CODE_* CLAUDE_CONFIG_DIR MCP_TIMEOUT MCP_TOOL_TIMEOUT DISABLE_TELEMETRY DISABLE_AUTOUPDATER MAX_THINKING_TOKENS` | `CLAUDE_CODE_USE_BEDROCK`: `AWS_*`; `CLAUDE_CODE_USE_VERTEX`: `GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT GCLOUD_PROJECT CLOUD_ML_REGION VERTEX_REGION_* CLOUDSDK_CONFIG`; `CLAUDE_CODE_USE_FOUNDRY`: `AZURE_*` | |
+| codex | `CODEX_* OPENAI_*` | | every `env_key` and `env_http_headers` value of the `[model_providers.*]` tables in your codex `config.toml` (as tables, dotted keys or inline tables; exact names only, a `*` there is ignored) |
+| opencode | `OPENCODE_*` | | the key of the model's provider (`anthropic/`, `openai/`, `openrouter/`, `zai/`, `zai-coding-plan/`, `google/`, `google-vertex/`, `amazon-bedrock/` (`AWS_*`), `xai/`, `deepseek/`, `groq/`, `mistral/`, `moonshotai/`, `opencode/`, `github-copilot/`) |
+| zcode | `ZCODE_*` | | |
+| hermes | `HERMES_*` | | its keys come from `~/.hermes/.env`, found through `HOME` |
+| grok | `GROK_* XAI_API_KEY` | | |
+| cursor | `CURSOR_*` (not verified against an installed CLI) | | |
+| qoder | `QODER_* QODERCLI_*` | | |
+| agy | `AGY_* ANTIGRAVITY_* GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG` | | |
+| any other agent (config `agents:`) | the base set and `allow` only | | |
+
+A trigger is on when its value is `1`, `true`, `yes` or `on` in any case;
+`CLAUDE_CODE_USE_BEDROCK=0` or `=false` keeps the cloud credentials withheld.
+
+Anything else the agent's own tools need comes through `allow`: for example
+`SSH_AUTH_SOCK` for git over ssh, `GH_TOKEN` for `gh`, or `NPM_CONFIG_*` for a
+private registry.
+
+Rules for `allow`: each entry is `[A-Za-z_][A-Za-z0-9_]*`, optionally followed by
+one `*`; the part before `*` needs at least 2 characters (a bare `*` is refused);
+no duplicates; at most 64 entries; names only, never values. `allow` under
+`policy: inherit` is refused as meaningless. A malformed block is reported as
+`profile_process_env_invalid` by `apb validate`, refused by every profile write
+and refuses a run start.
+
+The plan is made per chain step, so a fallback onto another agent gets that
+agent's set from the same profile policy. The policy applies to every agent
+process apb spawns for the profile: node attempts in their start and resume
+forms, the finish answer, the judge, the background supervisor and the quota
+probe. It is snapshotted into the run manifest at start, so a retry, a fallback
+or a resume runs under the policy the run began with, whatever the live profile
+says by then. Setting `process_env` changes `profile_digest`, so the bundle needs
+trust again. An apb older than this field rejects a profile that has it, and
+ignores it when it resumes a run: resume a run started with an allowlist with
+this apb version or a later one.
+
+Every attempt under `allowlist` journals `agent_env_applied`: the agent, how many
+variables it kept, the names it did not get (sorted, the first 200) and the
+profile's own exact `allow` names that the operator does not set. Values are
+never written anywhere. When an attempt fails under an allowlist, `apb doctor
+--run <id>` names those variables and suggests adding the one the agent needs to
+`allow`.
+
+What it does not cover:
+
+- `script` nodes, `success_check` commands, goal scripts and baseline commands
+  run author code and inherit the operator environment as before.
+- A connector call (`apb connector call`, a child of the agent) inherits the
+  agent's allowlisted environment. `{{env.VAR}}` secrets resolve from the dotenv
+  files as before; a `{{cmd:...}}` helper that needs variables such as
+  `PASSWORD_STORE_DIR`, `GNUPGHOME`, `OP_SESSION_*` or `DBUS_SESSION_BUS_ADDRESS`
+  gets them only when `allow` names them (see CONNECTORS.md).
+- Context compaction (the internal summarizer) has no profile of its own: in
+  a run where any profile (a node's, the supervisor's or a rebound one) sets
+  `allowlist`, it runs under an empty allowlist for claude (the base set and
+  claude's set); in any other run it inherits.
+- In host execution mode the host's own subagent runs the step: nothing is
+  applied there, and `apb doctor --run` says so.
+
+What `allowlist` is, and what it is not: it stops the agent from inheriting
+the operator's variables. On Linux, apb also makes itself non-dumpable before
+its first allowlisted spawn (`prctl(PR_SET_DUMPABLE, 0)`), so the agent cannot
+read apb's own environment back through `/proc/$PPID/environ` (apb's
+`/proc/<pid>/stat` and `ps` stay readable; apb then writes no core dump and
+cannot be attached to with a debugger by the same user). Should the call
+fail, apb prints one `apb: warning: could not make apb non-dumpable ...` line
+with the OS error and spawns the agent anyway, without that protection. It is
+not isolation
+from a hostile agent running as the same user: the operator's other processes
+(a shell, an editor, another apb) stay readable through `/proc`, and files the
+user can read stay readable. Real isolation needs a separate user or a
+sandbox. macOS has no equivalent of the `/proc` hiding: there, `ps eww` by the
+same user can show another process's environment.
+
+On macOS, a claude login kept in the Keychain does not depend on environment
+variables; check a profile with `allowlist` once on the machine it runs on.
+
+Set it with `apb profile write --process-env allowlist --env-allow GH_TOKEN`
+(`--env-allow` is repeatable and implies `allowlist`), the MCP `profile_write`
+field `process_env: { policy, allow }`, or `POST /api/profiles` with the same
+object (on every surface `allow` without `policy` means `allowlist`). A write that leaves it out keeps the stored value; `policy: inherit`
+clears it.
 
 ## Host execution mode: what a profile still means
 

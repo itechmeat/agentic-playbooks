@@ -11,6 +11,7 @@
 
 use std::sync::LazyLock;
 
+use apb_core::secret::Secret;
 use regex::Regex;
 
 /// Shorter values are not redacted by value: a two-letter secret would blank
@@ -76,7 +77,7 @@ fn looks_like_token(run: &str) -> bool {
 pub(crate) struct Redactor {
     /// Secret values, longest first so a value containing another is
     /// replaced whole.
-    secrets: Vec<String>,
+    secrets: Vec<Secret>,
     /// The project root, as written in paths (no trailing slash).
     root: Option<String>,
     home: Option<String>,
@@ -92,10 +93,10 @@ impl std::fmt::Debug for Redactor {
 }
 
 impl Redactor {
-    pub(crate) fn new(mut secrets: Vec<String>, root: &std::path::Path) -> Self {
+    pub(crate) fn new(mut secrets: Vec<Secret>, root: &std::path::Path) -> Self {
         secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        secrets.dedup();
+        secrets.dedup_by(|a, b| a.ct_eq(b.expose_secret()));
         let root = std::fs::canonicalize(root)
             .unwrap_or_else(|_| root.to_path_buf())
             .to_string_lossy()
@@ -115,9 +116,7 @@ impl Redactor {
     pub(crate) fn redact(&self, text: &str) -> String {
         let mut out = text.to_string();
         for s in &self.secrets {
-            if out.contains(s.as_str()) {
-                out = out.replace(s.as_str(), "[redacted]");
-            }
+            out = s.scrub_as(&out, "[redacted]");
         }
         if let Some(root) = &self.root {
             out = out
@@ -194,7 +193,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let canon = std::fs::canonicalize(root.path()).unwrap();
         let r = Redactor::new(
-            vec!["hunter2-secret-value".into(), "ab".into()],
+            vec![Secret::new("hunter2-secret-value"), Secret::new("ab")],
             root.path(),
         );
         let text = format!(
@@ -232,7 +231,7 @@ mod tests {
     #[test]
     fn home_paths_and_token_fields_are_redacted_in_every_spelling() {
         let root = tempfile::tempdir().unwrap();
-        let r = Redactor::new(vec!["hunter2-secret-value".into()], root.path());
+        let r = Redactor::new(vec![Secret::new("hunter2-secret-value")], root.path());
         let text = r#"u https://api.example.com/users/octo a c:\users\alice\x b C:/Users/bob/x c file:///C:/Users/carol/x d /mnt/c/users/dave/x e C:\\Users\\erin\\x f {"token": "a1b2c3d4e5f6g7h8i9j0"} g access_token=Zz9Yy8Xx7Ww6Vv5 h "api_key":"k1k2k3k4k5k6k7k8""#;
         let out = r.redact(text);
         for gone in [

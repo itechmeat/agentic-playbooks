@@ -235,6 +235,106 @@ fn profile_edit_preserves_the_environment_opt_in() {
     );
 }
 
+/// `--process-env` and `--env-allow` write the allowlist; an update without
+/// them keeps it; a malformed name is refused; `apb validate` names a
+/// malformed block in profile.yaml by its code.
+#[test]
+fn profile_write_sets_and_keeps_the_process_env() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("cfg")).unwrap();
+    fs::create_dir_all(dir.path().join("home")).unwrap();
+    apb_ok(dir.path(), &["init"]);
+    let yaml_path = dir.path().join(".apb/profiles/p1/profile.yaml");
+    let base = [
+        "profile", "write", "p1", "--agent", "claude", "--model", "haiku",
+    ];
+    let mut create = base.to_vec();
+    create.extend([
+        "--process-env",
+        "allowlist",
+        "--env-allow",
+        "GH_TOKEN",
+        "--env-allow",
+        "NPM_CONFIG_*",
+    ]);
+    let out = apb_ok(dir.path(), &create);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let digest = v["profile_digest"].as_str().unwrap().to_string();
+    let written = fs::read_to_string(&yaml_path).unwrap();
+    assert!(written.contains("policy: allowlist"), "{written}");
+    assert!(written.contains("NPM_CONFIG_*"), "{written}");
+
+    let mut update = base.to_vec();
+    update.extend(["--description", "changed", "--expected-digest", &digest]);
+    apb_ok(dir.path(), &update);
+    let kept = fs::read_to_string(&yaml_path).unwrap();
+    assert!(kept.contains("policy: allowlist"), "{kept}");
+
+    let mut bad = base.to_vec();
+    bad[2] = "p2";
+    bad.extend(["--env-allow", "*"]);
+    let out = playbook(dir.path(), &bad);
+    assert!(!out.status.success(), "a bare `*` must be refused");
+    assert!(!dir.path().join(".apb/profiles/p2").exists());
+
+    fs::write(
+        &yaml_path,
+        kept.replace("policy: allowlist", "policy: inherit"),
+    )
+    .unwrap();
+    // An empty PATH: no agent CLI is probed for its model list.
+    let out = crate::common::apb_std()
+        .arg("validate")
+        .current_dir(dir.path())
+        .env("APB_CONFIG_DIR", dir.path().join("cfg"))
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", dir.path().join("home"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("profile p1: error profile_process_env_invalid"),
+        "{stdout}"
+    );
+}
+
+/// `apb profile edit` refuses `allow` under `policy: inherit` like every
+/// other surface, keeping the stored allowlist and the edited files.
+#[test]
+fn profile_edit_refuses_allow_under_inherit() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("cfg")).unwrap();
+    fs::create_dir_all(dir.path().join("home")).unwrap();
+    apb_ok(dir.path(), &["init"]);
+    apb_ok(
+        dir.path(),
+        &[
+            "profile",
+            "write",
+            "p1",
+            "--agent",
+            "claude",
+            "--model",
+            "haiku",
+            "--env-allow",
+            "GH_TOKEN",
+        ],
+    );
+    let yaml_path = dir.path().join(".apb/profiles/p1/profile.yaml");
+    let before = fs::read_to_string(&yaml_path).unwrap();
+    let editor = dir.path().join("editor_inherit.sh");
+    write_script(
+        &editor,
+        "sed 's/policy: allowlist/policy: inherit/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"",
+    );
+    let out = apb_with_editor(dir.path(), &editor, &["profile", "edit", "p1"]);
+    assert!(!out.status.success(), "allow under inherit must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("profile_process_env_invalid"), "{err}");
+    assert!(err.contains("edited files kept"), "{err}");
+    assert_eq!(fs::read_to_string(&yaml_path).unwrap(), before);
+}
+
 #[test]
 fn migrate_dry_run_then_apply_then_profile_list_show() {
     let dir = tempfile::tempdir().unwrap();

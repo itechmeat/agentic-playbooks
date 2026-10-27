@@ -14,8 +14,8 @@ use apb_core::config::{GlobalConfig, InvocationDef};
 use apb_core::zcode_tasks_index::{self as index, Host, HostFacts, Retry, TaskRecord};
 
 use crate::adapter::{
-    AgentAdapter, AgentFailure, AgentReport, AgentTask, ConnectorEnvPolicy, ControlHooks,
-    ErrorClass, LiveHooks, StallHooks,
+    AgentAdapter, AgentFailure, AgentReport, AgentTask, ControlHooks, ErrorClass, LiveHooks,
+    SpawnEnv, StallHooks,
 };
 
 /// [`wrap`] for one step of a run: a no-op for every agent but zcode, else
@@ -148,7 +148,7 @@ impl ZcodeUiSync {
 /// attempt belongs to one.
 fn title(task: &AgentTask) -> String {
     let run = task
-        .connector_policy
+        .spawn_env
         .run_dir
         .as_deref()
         .and_then(Path::file_name)
@@ -203,7 +203,7 @@ impl AgentAdapter for ZcodeUiSync {
         model: &str,
         workdir: &Path,
         soul: Option<&str>,
-        policy: &ConnectorEnvPolicy,
+        policy: &SpawnEnv,
     ) -> Result<(), (ErrorClass, String)> {
         self.inner
             .spawn_supervisor(brief, model, workdir, soul, policy)

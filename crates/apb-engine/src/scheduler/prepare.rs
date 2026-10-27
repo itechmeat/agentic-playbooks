@@ -222,16 +222,24 @@ pub(crate) fn snapshot_loaded_profile(
     let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
     // Executor tiers (issue #165 Part 12), resolved like the chain so an
     // unknown agent fails the run start the same way. An ephemeral executor
-    // replaces the chain, so its entry is never routed.
+    // replaces the chain, so its entry is never routed and only the
+    // profile's other problems (its `process_env`, which applies to an
+    // ephemeral executor too) refuse the start.
     let mut tiers = Vec::new();
+    let problems: Vec<String> = loaded
+        .doc
+        .problems()
+        .iter()
+        .filter(|p| eph.is_none() || p.code != apb_core::profile::PROFILE_TIERS_INVALID)
+        .map(ToString::to_string)
+        .collect();
+    if !problems.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "profile `{key}`: {}",
+            problems.join("; ")
+        )));
+    }
     if eph.is_none() {
-        let problems = loaded.doc.tiers.problems();
-        if !problems.is_empty() {
-            return Err(EngineError::Invalid(format!(
-                "profile `{key}`: {}",
-                problems.join("; ")
-            )));
-        }
         for (name, t) in loaded.doc.tiers.iter() {
             let invocation = match t.executor() {
                 Some((agent, model)) => {
@@ -271,6 +279,11 @@ pub(crate) fn snapshot_loaded_profile(
         // run's value, not the live profile (issue #136 item 4).
         hermetic: loaded.doc.environment() == apb_core::profile::AgentEnvironment::Minimal,
         zcode_mode: loaded.doc.zcode_mode,
+        // Snapshotted so a resume runs under the policy the run started
+        // with, whatever the live profile says by then.
+        process_env: apb_core::process_env::ProcessEnvPolicy::stored(
+            loaded.doc.process_env.clone(),
+        ),
         tiers,
         routed_tier: None,
         cascade: 0,

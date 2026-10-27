@@ -5,6 +5,7 @@
 //! call module has to depend on the other (keeps the file graph acyclic).
 
 use apb_core::connector::inbox::InboxGap;
+use apb_core::secret::Redaction;
 use serde_json::{Value, json};
 
 use crate::connector::completeness::Incompleteness;
@@ -268,13 +269,11 @@ impl CallOk {
 /// occurrence of a resolved secret value is replaced with
 /// `[redacted:<LABEL>]`. Used for error messages by both call kinds (the HTTP
 /// body path uses `redact_value` over its string leaves).
-pub(crate) fn redact_message(mut msg: String, redactions: &[(String, String)]) -> String {
-    for (secret, var) in redactions {
-        if msg.contains(secret.as_str()) {
-            msg = msg.replace(secret.as_str(), &format!("[redacted:{var}]"));
-        }
+pub(crate) fn redact_message(msg: String, redactions: &[Redaction]) -> String {
+    if redactions.is_empty() {
+        return msg;
     }
-    msg
+    Redaction::apply_all_owned(msg, redactions)
 }
 
 #[cfg(test)]
@@ -283,11 +282,14 @@ mod tests {
 
     #[test]
     fn redact_message_scrubs_secret_in_error_text() {
-        let redactions = vec![("super-secret-xyz".to_string(), "MOCK_TOKEN".to_string())];
+        let redactions = vec![Redaction::new(
+            apb_core::secret::Secret::new("super-secret-xyz"),
+            "MOCK_TOKEN",
+        )];
         let msg = "Connection Failed: http://127.0.0.1:9/items?api_key=super-secret-xyz refused"
             .to_string();
         let out = redact_message(msg, &redactions);
-        assert!(!out.contains("super-secret-xyz"), "secret leaked: {out}");
-        assert!(out.contains("[redacted:MOCK_TOKEN]"), "not redacted: {out}");
+        assert!(!out.contains("super-secret-xyz"), "secret leaked");
+        assert!(out.contains("[redacted:MOCK_TOKEN]"), "not redacted");
     }
 }

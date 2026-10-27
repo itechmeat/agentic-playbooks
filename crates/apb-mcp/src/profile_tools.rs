@@ -150,15 +150,54 @@ pub struct ProfileWrite {
     /// creates a new profile.
     pub expected_digest: Option<String>,
     pub soul_requirement: SoulRequirement,
+    /// The optional settings a surface may leave out (see
+    /// [`ProfileOptions`]).
+    pub options: ProfileOptions,
+}
+
+/// The optional profile settings. Each `None` keeps the stored profile's
+/// value on an update (absent for a new profile), so a surface that cannot
+/// express a setting never strips it.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ProfileOptions {
     /// The agent environment (`minimal`, the default, or `full`, the opt-in
-    /// to the operator's whole personal setup). `None` keeps the stored
-    /// profile's value on an update (absent, so minimal, for a new profile),
-    /// so a surface that cannot express it never strips an opt-in.
+    /// to the operator's whole personal setup).
     pub environment: Option<apb_core::profile::AgentEnvironment>,
     /// The ZCode mode for the profile's zcode steps in an autonomous run.
-    /// `None` keeps the stored value on an update (absent for a new profile),
-    /// like `environment`.
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    /// Which operator variables the agent process inherits. `Some` with
+    /// `inherit` clears a stored allowlist.
+    pub process_env: Option<apb_core::process_env::ProcessEnvPolicy>,
+}
+
+impl ProfileOptions {
+    /// Fills every setting left out from `stored`, the profile the update
+    /// replaces (read under the lock, from the exact content the CAS
+    /// matched).
+    pub fn keep_stored(&mut self, stored: Option<&ProfileDoc>) {
+        let Some(stored) = stored else {
+            return;
+        };
+        if self.environment.is_none() {
+            self.environment = stored.environment;
+        }
+        if self.zcode_mode.is_none() {
+            self.zcode_mode = stored.zcode_mode;
+        }
+        if self.process_env.is_none() {
+            self.process_env = stored.process_env.clone();
+        }
+    }
+
+    /// Writes the settings into `doc`, each default as the absence of its
+    /// key (`minimal`, `inherit`).
+    fn apply(self, doc: &mut ProfileDoc) {
+        doc.environment = self
+            .environment
+            .filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal);
+        doc.zcode_mode = self.zcode_mode;
+        doc.process_env = apb_core::process_env::ProcessEnvPolicy::stored(self.process_env);
+    }
 }
 
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
@@ -172,8 +211,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         executor,
         expected_digest,
         soul_requirement,
-        environment,
-        zcode_mode,
+        mut options,
     } = req;
     apb_core::profile::validate_profile_name(&name).map_err(ToolError::Engine)?;
     let scope_enum = parse_scope(&scope)?;
@@ -209,11 +247,11 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         },
         soul: soul_requirement,
         skills,
-        // `minimal` is the default and is written as the absence of the key.
-        environment: environment.filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal),
+        environment: None,
         hermetic: None,
-        zcode_mode,
+        zcode_mode: None,
         tiers: Default::default(),
+        process_env: None,
     };
 
     // Validation: the agent is known (builtin or config) - both the primary and EVERY
@@ -269,22 +307,24 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
                     "expected_digest does not match current".into(),
                 ));
             }
-            // An update that does not state `environment` keeps the stored
-            // value (read under the lock, from the exact content the CAS
-            // matched).
-            let stored = ProfileDoc::from_yaml(&cur_yaml).ok();
-            if environment.is_none() {
-                doc.environment = stored.as_ref().and_then(|d| d.environment);
-            }
-            // Likewise `zcode_mode`.
-            if zcode_mode.is_none() {
-                doc.zcode_mode = stored.as_ref().and_then(|d| d.zcode_mode);
-            }
+            // A stored profile that does not parse is refused, not treated
+            // as empty: an update that leaves a setting out would otherwise
+            // drop it silently (an allowlist would become `inherit`).
+            let stored = ProfileDoc::from_yaml(&cur_yaml).map_err(|e| {
+                ToolError::Engine(format!(
+                    "the stored profile.yaml does not parse ({e}); fix it before updating"
+                ))
+            })?;
+            options.keep_stored(Some(&stored));
             // No write surface edits tiers yet (issue #165 Part 12): an
             // update keeps the stored ones.
-            doc.tiers = stored.map(|d| d.tiers).unwrap_or_default();
+            doc.tiers = stored.tiers;
         }
     }
+    options.apply(&mut doc);
+    // The structural checks a run start makes, refused here before anything
+    // is written.
+    doc.check().map_err(ToolError::Engine)?;
     let yaml = yaml_serde::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
     // The bundle as it stands before this write (old profile, live skills),
     // read under the lock: whether its skill content was approved decides

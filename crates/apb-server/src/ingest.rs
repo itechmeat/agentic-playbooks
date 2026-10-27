@@ -37,6 +37,7 @@ use apb_core::connector::secrets;
 use apb_core::connector::store;
 use apb_core::connector::template::{Namespace, RenderCtx, placeholders, render_raw};
 use apb_core::connector::webhook::{self, Challenge};
+use apb_core::secret::Secret;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as AxPath, Query, State};
@@ -150,27 +151,12 @@ impl Windows {
 
 /// One cached resolution outcome and when it was taken. `secret: None` is a
 /// remembered failure (unresolvable or empty), kept for the shorter
-/// [`NEGATIVE_CACHE_TTL_MS`]. Its `Debug` redacts the value so an accidental
-/// debug-print of [`IngestState`] cannot leak a secret.
-#[derive(Clone)]
+/// [`NEGATIVE_CACHE_TTL_MS`]. The value is sealed, so an accidental
+/// debug-print of [`IngestState`] cannot leak it.
+#[derive(Clone, Debug)]
 struct CachedSecret {
-    secret: Option<Arc<str>>,
+    secret: Option<Secret>,
     resolved_at: u128,
-}
-
-impl std::fmt::Debug for CachedSecret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CachedSecret")
-            .field(
-                "secret",
-                match self.secret {
-                    Some(_) => &"<redacted>",
-                    None => &"<unresolved>",
-                },
-            )
-            .field("resolved_at", &self.resolved_at)
-            .finish()
-    }
 }
 
 /// Everything the ingest listener keeps between requests: rate windows, drop
@@ -328,7 +314,7 @@ impl IngestState {
     /// where `None` is a remembered failure (see [`NEGATIVE_CACHE_TTL_MS`]).
     /// Successes and failures carry different TTLs, so each entry is judged
     /// against the one that applies to it.
-    fn cached_secret(&self, key: &str, now: u128) -> Option<Option<Arc<str>>> {
+    fn cached_secret(&self, key: &str, now: u128) -> Option<Option<Secret>> {
         let guard = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.get(key)?;
         let ttl = match entry.secret {
@@ -341,7 +327,7 @@ impl IngestState {
     /// Stores a resolution outcome for `key`, success or failure. The map is
     /// bounded by the number of configured accounts; it is cleared defensively
     /// if it ever grows past the shared cap, matching the rolling-window maps.
-    fn store_secret(&self, key: String, secret: Option<Arc<str>>, now: u128) {
+    fn store_secret(&self, key: String, secret: Option<Secret>, now: u128) {
         let mut guard = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
         if guard.len() > MAX_RATE_LIMIT_ENTRIES {
             guard.clear();
@@ -387,7 +373,7 @@ impl IngestState {
         doc: ConnectorDoc,
         acct: Account,
         template: String,
-    ) -> Option<Arc<str>> {
+    ) -> Option<Secret> {
         if let Some(outcome) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
             return outcome;
         }
@@ -398,13 +384,12 @@ impl IngestState {
         if let Some(outcome) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
             return outcome;
         }
-        let resolved =
+        let outcome =
             tokio::task::spawn_blocking(move || render_from_account(&template, &doc, &acct))
                 .await
                 .ok()
                 .flatten()
                 .filter(|value| !value.is_empty());
-        let outcome: Option<Arc<str>> = resolved.map(|value| Arc::from(value.as_str()));
         self.store_secret(cache_key, outcome.clone(), apb_core::clock::now_ms());
         outcome
     }
@@ -420,7 +405,7 @@ impl IngestState {
         doc: ConnectorDoc,
         acct: Account,
         template: String,
-    ) -> Option<Arc<str>> {
+    ) -> Option<Secret> {
         self.resolve_cached(
             format!("sig:{}", pair(connector, account)),
             doc,
@@ -444,7 +429,7 @@ impl IngestState {
         doc: ConnectorDoc,
         acct: Account,
         template: String,
-    ) -> Option<Arc<str>> {
+    ) -> Option<Secret> {
         self.resolve_cached(
             format!("verify:{}", pair(connector, account)),
             doc,
@@ -876,15 +861,24 @@ fn load_connector_doc(name: &str) -> Option<ConnectorDoc> {
 /// fields that template actually references. Resolving lazily matters: a
 /// `{{cmd:...}}` reference runs a command, and a delivery must not run one
 /// for a field it does not need.
-fn render_from_account(template: &str, doc: &ConnectorDoc, account: &Account) -> Option<String> {
+///
+/// The chain is deliberately narrow: the process environment, then the global
+/// `<config_dir>/secrets.env`. The resolution root is the config dir, which
+/// has no project `.apb/secrets.env`, so that step of the chain is a no-op by
+/// construction. The resolved value is never logged; the ingest handler
+/// caches it per account for [`SECRET_CACHE_TTL_MS`] only (see
+/// [`IngestState::webhook_secret`]) so a bad-signature flood cannot re-run
+/// this resolution on every request.
+fn render_from_account(template: &str, doc: &ConnectorDoc, account: &Account) -> Option<Secret> {
+    let root = apb_core::config::config_dir()?;
     let secret_names = doc.secret_fields();
     let mut account_fields: BTreeMap<String, String> = BTreeMap::new();
-    let mut resolved: BTreeMap<String, String> = BTreeMap::new();
+    let mut resolved: BTreeMap<String, Secret> = BTreeMap::new();
     for (ns, name) in placeholders(template).ok()? {
         let raw = account.fields.get(&name)?;
         match ns {
             Namespace::Secret if secret_names.contains(&name) => {
-                resolved.insert(name, resolve_reference(raw)?);
+                resolved.insert(name, secrets::resolve_reference(&root, raw)?);
             }
             Namespace::Account => {
                 account_fields.insert(name, raw.clone());
@@ -900,27 +894,7 @@ fn render_from_account(template: &str, doc: &ConnectorDoc, account: &Account) ->
         args: &args,
         secrets: &resolved,
     };
-    render_raw(template, &ctx).ok()
-}
-
-/// Resolves one `secret: true` account field value to its concrete secret.
-///
-/// The chain is deliberately narrow: the process environment, then the global
-/// `<config_dir>/secrets.env`. `resolve_var` also consults a project
-/// `.apb/secrets.env` under the root it is given, and the config dir has no
-/// such file, so that step is a no-op by construction. The resolved value is
-/// never logged or returned to a caller; the ingest handler caches it per
-/// account for [`SECRET_CACHE_TTL_MS`] only (see [`IngestState::webhook_secret`])
-/// so a bad-signature flood cannot re-run this resolution on every request.
-fn resolve_reference(raw: &str) -> Option<String> {
-    let root = apb_core::config::config_dir()?;
-    if let Some(var) = secrets::parse_env_ref(raw) {
-        return secrets::resolve_var(&root, &var);
-    }
-    if let Some(cmd) = secrets::parse_cmd_ref(raw) {
-        return secrets::resolve_cmd(&cmd, secrets::CMD_SECRET_TIMEOUT).ok();
-    }
-    None
+    render_raw(template, &ctx).ok().map(Secret::new)
 }
 
 #[cfg(test)]

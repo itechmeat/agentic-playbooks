@@ -195,3 +195,28 @@ describe('host execution mode rows', () => {
     expect(rows[3].note).toBe('no CLI could start, running as a host task: spawn `claude` failed')
   })
 })
+
+describe('process env rows', () => {
+  it('counts what an allowlist kept and names what it withheld', () => {
+    const rows = runEventJournal([
+      {
+        seq: 1,
+        ts: 1,
+        type: 'agent_env_applied',
+        node: 'build',
+        attempt: 2,
+        agent: 'codex',
+        kept: 23,
+        withheld: ['AWS_PROFILE', 'GH_TOKEN', 'A', 'B', 'C', 'D'],
+        withheld_more: 35,
+        absent: ['NPM_TOKEN'],
+      },
+      { seq: 2, ts: 2, type: 'agent_env_applied', node: 'build', attempt: 3, agent: 'claude', kept: 4, withheld: [] },
+    ] as unknown as WfEvent[])
+    expect(rows[0]).toMatchObject({
+      node: 'build',
+      note: 'env allowlist (codex): kept 23, withheld 41 (AWS_PROFILE, GH_TOKEN, A, B, C, ...), not set: NPM_TOKEN',
+    })
+    expect(rows[1].note).toBe('env allowlist (claude): kept 4, withheld 0')
+  })
+})

@@ -26,7 +26,7 @@ fn task<'a>(
     workdir: &'a std::path::Path,
     interactive: bool,
     node: &'a str,
-    policy: &'a apb_engine::adapter::ConnectorEnvPolicy,
+    policy: &'a apb_engine::adapter::SpawnEnv,
 ) -> AgentTask<'a> {
     AgentTask {
         prompt,
@@ -36,7 +36,7 @@ fn task<'a>(
         stream_log: None,
         soul: None,
         grant_autonomy: false,
-        connector_policy: policy,
+        spawn_env: policy,
         interactive,
         report_contract: true,
         node,

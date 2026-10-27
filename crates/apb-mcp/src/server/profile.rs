@@ -96,6 +96,7 @@ impl WfMcp {
             environment,
             hermetic,
             zcode_mode,
+            process_env,
         }): Parameters<ProfileWriteArgs>,
     ) -> CallToolResult {
         let executor = crate::profile_tools::ExecutorInput {
@@ -122,6 +123,15 @@ impl WfMcp {
             Ok(m) => m,
             Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
         };
+        let process_env = match process_env
+            .map(|p| {
+                apb_core::process_env::ProcessEnvPolicy::from_surface(p.policy.as_deref(), &p.allow)
+            })
+            .transpose()
+        {
+            Ok(p) => p.flatten(),
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
         to_call_tool_result(crate::profile_tools::profile_write(
             &self.root,
             crate::profile_tools::ProfileWrite {
@@ -133,8 +143,11 @@ impl WfMcp {
                 executor,
                 expected_digest,
                 soul_requirement,
-                environment,
-                zcode_mode,
+                options: crate::profile_tools::ProfileOptions {
+                    environment,
+                    zcode_mode,
+                    process_env,
+                },
             },
         ))
     }

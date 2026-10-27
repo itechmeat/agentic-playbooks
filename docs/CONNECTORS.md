@@ -87,6 +87,29 @@ so changing it requires re-approval. Secret values never appear in the run
 manifest, the event log, CLI output, or generated prompts, and the connector
 env names are scrubbed from every spawned agent's environment.
 
+Inside `apb` a resolved value is a sealed type: it prints as `***` in any log,
+error or debug output, cannot be written to a state file, and is compared in
+constant time. The value is read out only where it must leave the process: the
+rendered auth of the outgoing request, the SMTP or IMAP login, and the webhook
+signature check. Text that comes back from a call (a response body, an error
+message) has every resolved value replaced with `[redacted:<VAR>]`, or
+`[redacted:cmd:<field>]` for a command-sourced one: as resolved and in its
+percent-encoded forms (a query or form value, a path segment). A Basic
+credential echoed back as the base64 of `user:password` becomes
+`[redacted:basic]`. Other transformations (a hash, a different encoding) are
+not recognized.
+
+A connector call from a node runs as a child of the node's agent, so it
+inherits the agent's environment. Under a profile's `process_env: allowlist`
+(PROFILES.md "Process environment") that environment holds only the allowed
+names. `{{env.VAR}}` secrets are unaffected (the connector names are scrubbed
+from every agent anyway, and the dotenv files are read by `apb` itself), and
+`APB_CONFIG_DIR` and the run context always arrive. A `{{cmd:...}}` helper,
+however, runs with that same environment: a password manager or keyring helper
+that needs `PASSWORD_STORE_DIR`, `GNUPGHOME`, `OP_SESSION_*` or
+`DBUS_SESSION_BUS_ADDRESS` gets them only when the profile's `allow` names them.
+`apb doctor --run <id>` points at this when such a node fails.
+
 List the variables an account still needs (names only, never values) with:
 
 ```sh

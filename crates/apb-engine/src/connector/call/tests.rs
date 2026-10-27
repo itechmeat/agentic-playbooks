@@ -398,7 +398,7 @@ fn map_status_fails_a_read_only_incomplete_body_without_returning_it() {
 
 #[test]
 fn redact_replaces_secret_in_string_leaves() {
-    let redactions = vec![("shh-1".to_string(), "MOCK_TOKEN".to_string())];
+    let redactions = vec![Redaction::new(Secret::new("shh-1"), "MOCK_TOKEN")];
     let body = json!({ "echo": "prefix shh-1 suffix", "n": 3, "list": ["shh-1"] });
     let out = redact_value(body, &redactions);
     assert_eq!(

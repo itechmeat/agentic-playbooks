@@ -55,6 +55,10 @@ export interface ProfileWriteBody {
   // Agent environment: 'minimal' (the default) or 'full', the opt-in to the
   // operator's whole personal setup. Absent keeps the stored value.
   environment?: 'minimal' | 'full'
+  // Which operator environment variables the agent process inherits:
+  // 'inherit' (everything) or 'allowlist' (a base set, the agent CLI's own
+  // variables and `allow`). Absent keeps the stored value.
+  process_env?: { policy?: 'inherit' | 'allowlist'; allow?: string[] }
 }
 
 export const fetchProfiles = () =>

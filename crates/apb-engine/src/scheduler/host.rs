@@ -13,8 +13,9 @@ use crate::host_task::{self, SubmitStatus, TaskRecord};
 const HOST_POLL: Duration = Duration::from_millis(100);
 
 /// The agent id journaled for a host-task attempt (`attempt_started.agent`,
-/// fallback events): the host executes it, not the profile's CLI.
-pub(crate) const HOST_AGENT: &str = "host";
+/// fallback events): the host executes it, not the profile's CLI. One
+/// constant with the readers of that field.
+pub(crate) use crate::attempt_models::HOST_AGENT;
 
 /// `session_handoff.reason` of a `continue_session` node in host mode.
 pub(crate) const HOST_MODE_REASON: &str = "host_mode";
@@ -121,7 +122,7 @@ const HOST_TASK_ENV: &str = "APB_HOST_TASK";
 /// sets for its subagent.
 fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
-    if let Some(run_dir) = &task.connector_policy.run_dir {
+    if let Some(run_dir) = &task.spawn_env.run_dir {
         env.insert(
             "APB_RUN_DIR".to_string(),
             run_dir.to_string_lossy().into_owned(),
@@ -132,15 +133,15 @@ fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
             env.insert("APB_RUN_ID".to_string(), id.to_string_lossy().into_owned());
         }
     }
-    if let Some(node) = &task.connector_policy.node_id {
+    if let Some(node) = &task.spawn_env.node_id {
         env.insert("APB_NODE_ID".to_string(), node.clone());
     }
     // The attempt a connector call binds to; the task id joins it once the
     // task is opened (`HostAdapter::request`).
-    if let Some(attempt) = task.connector_policy.attempt {
+    if let Some(attempt) = task.spawn_env.attempt {
         env.insert("APB_ATTEMPT".to_string(), attempt.to_string());
     }
-    if let Some(token) = &task.connector_policy.attempt_token {
+    if let Some(token) = &task.spawn_env.attempt_token {
         env.insert(crate::adapter::ATTEMPT_TOKEN_ENV.to_string(), token.clone());
     }
     if let Some(sf) = &task.status_file {
@@ -629,6 +630,7 @@ mod tests {
             ephemeral: false,
             hermetic: false,
             zcode_mode: None,
+            process_env: None,
             tiers: vec![
                 tier("light", Some("l")),
                 tier("mid", Some("m")),

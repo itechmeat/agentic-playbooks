@@ -16,7 +16,7 @@ pub fn spawn_supervisor_agent(
     root: &Path,
     run_id: &str,
     playbook: &Playbook,
-) -> Result<Option<String>, EngineError> {
+) -> Result<Option<apb_core::secret::Secret>, EngineError> {
     let run_dir = root.join(".apb/runs").join(run_id);
     let Some(manifest) = crate::manifest::read(&run_dir)? else {
         return Ok(None);
@@ -67,8 +67,9 @@ pub fn spawn_supervisor_agent(
     // Connector env isolation (spec 4.3): the supervisor is a spawned agent, so
     // scrub the union of installed connector tokens and hand it the run-context
     // env (its node id in the manifest is `supervisor`).
-    let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
-        apb_core::connector::resolve::all_referenced_env_names(root),
+    let scrub = apb_core::connector::resolve::all_referenced_env_names(root);
+    let spawn_env = crate::adapter::SpawnEnv::for_node(
+        scrub.clone(),
         &run_dir,
         "supervisor",
         crate::run_config::read_run_config(&run_dir)
@@ -84,7 +85,7 @@ pub fn spawn_supervisor_agent(
         let mut brief = supervisor_brief(
             run_id,
             playbook,
-            &token,
+            token.expose_secret(),
             supervisor_wait_ms(&inv.agent_id),
             &skills_line,
         );
@@ -93,7 +94,15 @@ pub fn spawn_supervisor_agent(
         if triage_advised(&manifest) {
             brief.push_str(crate::decision::supervisor_triage::BRIEF_LINE);
         }
-        match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &connector_policy) {
+        // The supervisor profile's `process_env`, for this chain element's
+        // agent. Not journaled: a supervisor spawn is no attempt.
+        let step_env = spawn_env.with_process(crate::agent_env::plan_for_entry(
+            entry.process_env.as_ref(),
+            &inv.agent_id,
+            &inv.model,
+            &scrub,
+        ));
+        match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &step_env) {
             Ok(()) => {
                 apb_core::fsutil::atomic_write_under(
                     &run_dir,

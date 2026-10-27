@@ -180,7 +180,26 @@ pub struct ProfileDoc {
     /// (`deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "ProfileTiers::is_empty")]
     pub tiers: ProfileTiers,
+    /// Which operator variables the agent process inherits (see
+    /// [`crate::process_env`]). Absent means `inherit`. Covered by the
+    /// profile digest; an apb older than this field rejects a profile that
+    /// has it (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_env: Option<crate::process_env::ProcessEnvPolicy>,
 }
+
+/// A structural problem of a profile document, with the stable code every
+/// surface reports it under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileProblem {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// The code of a malformed `tiers` block.
+pub const PROFILE_TIERS_INVALID: &str = "profile_tiers_invalid";
+/// The code of a malformed `process_env` block.
+pub const PROFILE_PROCESS_ENV_INVALID: &str = "profile_process_env_invalid";
 
 // --- executor tiers (issue #165 Part 12) ---
 
@@ -322,6 +341,45 @@ impl ProfileDoc {
     /// [`AgentEnvironment::Minimal`].
     pub fn environment(&self) -> AgentEnvironment {
         self.environment.unwrap_or_default()
+    }
+
+    /// Every structural problem of the document: the one check a run
+    /// start, `apb validate` and every profile write share.
+    pub fn problems(&self) -> Vec<ProfileProblem> {
+        let tiers = self
+            .tiers
+            .problems()
+            .into_iter()
+            .map(|message| ProfileProblem {
+                code: PROFILE_TIERS_INVALID,
+                message,
+            });
+        let env = self
+            .process_env
+            .iter()
+            .flat_map(crate::process_env::ProcessEnvPolicy::problems)
+            .map(|message| ProfileProblem {
+                code: PROFILE_PROCESS_ENV_INVALID,
+                message,
+            });
+        tiers.chain(env).collect()
+    }
+
+    /// [`Self::problems`] as one refusal (`code message; ...`), `Ok` when
+    /// there is none.
+    pub fn check(&self) -> Result<(), String> {
+        let problems = self.problems();
+        if problems.is_empty() {
+            return Ok(());
+        }
+        let lines: Vec<String> = problems.iter().map(ProfileProblem::to_string).collect();
+        Err(lines.join("; "))
+    }
+}
+
+impl std::fmt::Display for ProfileProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.code, self.message)
     }
 }
 

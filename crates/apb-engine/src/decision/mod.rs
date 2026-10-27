@@ -405,18 +405,17 @@ impl DecisionRunner {
 
     fn redactor(&self) -> &redact::Redactor {
         self.redactor.get_or_init(|| {
-            let mut secrets: Vec<String> = self
-                .scrub_names
-                .iter()
-                .filter_map(|n| apb_core::connector::secrets::resolve_var(&self.root, n))
-                .collect();
+            let mut secrets = apb_core::connector::secrets::resolve_each(
+                &self.root,
+                self.scrub_names.iter().map(String::as_str),
+            );
             secrets.extend(self.chains().keys.iter().cloned());
             // A webhook's secret is a capability: `{{run.hooks.<key>}}` in a
             // rendered state must not leave the machine.
             secrets.extend(
                 crate::hooks::read_hooks(&self.run_dir)
                     .unwrap_or_default()
-                    .into_values(),
+                    .secrets(),
             );
             redact::Redactor::new(secrets, &self.root)
         })

@@ -19,16 +19,15 @@ pub(crate) fn non_secret_fields(account: &ManifestAccount) -> BTreeMap<String, S
         .collect()
 }
 
-/// The resolved secrets map (field name -> value) plus the redaction pairs
-/// (resolved value, redaction label) the response body is scrubbed against.
-/// The label is the ENV var name for env-sourced secrets and `cmd:<field>`
-/// for command-sourced ones.
-pub(crate) type ResolvedSecrets = (BTreeMap<String, String>, Vec<(String, String)>);
+/// The resolved secrets map (field name -> value) plus the redactions the
+/// response body is scrubbed against. The label is the ENV var name for
+/// env-sourced secrets and `cmd:<field>` for command-sourced ones.
+pub(crate) type ResolvedSecrets = (BTreeMap<String, Secret>, Vec<Redaction>);
 
 /// Resolves every secret field to its value: env-ref fields via the secrets
 /// resolution chain, cmd-ref fields by executing the command (spec 4.1).
 /// Returns the secrets map keyed by FIELD name (for the render context) and
-/// the redaction pairs (resolved value, redaction label). A var that resolves
+/// the redactions. A var that resolves
 /// nowhere, or a command that fails, is a Config error naming the field.
 pub(crate) fn resolve_secrets(
     root: &Path,
@@ -45,7 +44,7 @@ pub(crate) fn resolve_secrets(
         })?;
         // Empty secrets would redact every empty run in the body; skip them.
         if !value.is_empty() {
-            redactions.push((value.clone(), var.clone()));
+            redactions.push(Redaction::new(value.clone(), var.clone()));
         }
         secrets.insert(field.clone(), value);
     }
@@ -54,7 +53,7 @@ pub(crate) fn resolve_secrets(
             .map_err(|e| cmd_secret_error(&account.name, field, e))?;
         // resolve_cmd rejects empty output, so the value is always non-empty
         // and safe to register for redaction. The label carries no secret.
-        redactions.push((value.clone(), format!("cmd:{field}")));
+        redactions.push(Redaction::new(value.clone(), format!("cmd:{field}")));
         secrets.insert(field.clone(), value);
     }
     Ok((secrets, redactions))

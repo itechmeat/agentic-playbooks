@@ -13,7 +13,7 @@ use std::path::Path;
 use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::schema::Playbook;
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ConnectorEnvPolicy};
+use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, SpawnEnv};
 use apb_engine::connector::run::snapshot_connectors;
 use apb_engine::invocation::builtin;
 
@@ -167,7 +167,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
         program: env_dump_agent(dir.path()),
         spec: builtin("claude").unwrap(),
     };
-    let policy = ConnectorEnvPolicy::for_node(
+    let policy = SpawnEnv::for_node(
         vec!["MOCK_SCRUB_TOKEN".to_string()],
         dir.path(),
         "node-a",
@@ -183,7 +183,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
-            connector_policy: &policy,
+            spawn_env: &policy,
             interactive: false,
             report_contract: true,
             node: "test",

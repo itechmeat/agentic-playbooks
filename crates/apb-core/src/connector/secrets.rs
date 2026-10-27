@@ -5,8 +5,9 @@
 //! out of version control.
 //!
 //! Secret values themselves are never logged, cached, or embedded into a
-//! prompt (see the crate-level rule in the project CLAUDE.md); this module
-//! only reads them from disk/env on demand for the resolving apb process.
+//! prompt; this module only reads them from disk/env on demand for the
+//! resolving apb process, and hands every resolved value out sealed as a
+//! [`Secret`].
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -16,6 +17,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::secret::Secret;
 
 /// How long the pipe-drain threads get to hand back what they read once the
 /// command itself has exited. Generous, because it is not a work budget: the
@@ -102,25 +105,71 @@ fn load_dotenv(path: &Path) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+/// The resolution chain (spec 4.2) over one root: the process environment
+/// of the resolving apb process, then the project dotenv
+/// `<root>/.apb/secrets.env`, then the global dotenv. Each dotenv is read at
+/// most once, on the first name the scopes before it do not define.
+struct Chain<'a> {
+    root: &'a Path,
+    project: Option<BTreeMap<String, String>>,
+    global: Option<BTreeMap<String, String>>,
+}
+
+impl<'a> Chain<'a> {
+    fn new(root: &'a Path) -> Self {
+        Chain {
+            root,
+            project: None,
+            global: None,
+        }
+    }
+
+    fn lookup(&mut self, var: &str) -> Option<Secret> {
+        if let Ok(value) = std::env::var(var) {
+            return Some(Secret::new(value));
+        }
+        let root = self.root;
+        let project = self
+            .project
+            .get_or_insert_with(|| load_dotenv(&project_secrets_path(root)));
+        if let Some(value) = project.get(var) {
+            return Some(Secret::new(value.clone()));
+        }
+        let global = self.global.get_or_insert_with(|| {
+            global_secrets_path()
+                .map(|p| load_dotenv(&p))
+                .unwrap_or_default()
+        });
+        global.get(var).cloned().map(Secret::new)
+    }
+}
+
 /// Resolves one env var name through the chain (spec 4.2): the process
 /// environment of the resolving apb process, then the project dotenv
 /// `<root>/.apb/secrets.env`, then the global dotenv. The first scope that
 /// defines the variable wins; a variable absent from all three is `None`.
-pub fn resolve_var(root: &Path, var: &str) -> Option<String> {
-    if let Ok(value) = std::env::var(var) {
-        return Some(value);
+pub fn resolve_var(root: &Path, var: &str) -> Option<Secret> {
+    Chain::new(root).lookup(var)
+}
+
+/// Every name of `names` that resolves through the chain of
+/// [`resolve_var`], resolved, in order, reading each dotenv once. The values
+/// a redactor scrubs: unresolved names contribute nothing.
+pub fn resolve_each<'a>(root: &Path, names: impl IntoIterator<Item = &'a str>) -> Vec<Secret> {
+    let mut chain = Chain::new(root);
+    names.into_iter().filter_map(|n| chain.lookup(n)).collect()
+}
+
+/// Resolves one secret account field value, a `{{env.VAR}}` or a
+/// `{{cmd:...}}` reference, against `root` (whose project dotenv is the
+/// second scope of [`resolve_var`]). `None` for a value that is neither
+/// reference, a variable that resolves nowhere, or a command that fails.
+pub fn resolve_reference(root: &Path, raw: &str) -> Option<Secret> {
+    if let Some(var) = parse_env_ref(raw) {
+        return resolve_var(root, &var);
     }
-    let project = load_dotenv(&project_secrets_path(root));
-    if let Some(value) = project.get(var) {
-        return Some(value.clone());
-    }
-    if let Some(path) = global_secrets_path() {
-        let global = load_dotenv(&path);
-        if let Some(value) = global.get(var) {
-            return Some(value.clone());
-        }
-    }
-    None
+    let cmd = parse_cmd_ref(raw)?;
+    resolve_cmd(&cmd, CMD_SECRET_TIMEOUT).ok()
 }
 
 /// The wall-clock budget for a command-sourced secret (spec 4.1): a helper
@@ -189,8 +238,8 @@ fn spawn_retrying_etxtbsy(cmd: &mut Command) -> std::io::Result<std::process::Ch
 /// binary is resolved via `PATH`. Stdout with trailing whitespace trimmed is
 /// the secret value. A parse failure, a spawn failure, a non-zero exit, a
 /// timeout, or empty stdout is an error. The resolved value lives only in the
-/// returned `String`; it is never logged here.
-pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecretError> {
+/// returned [`Secret`]; it is never logged here.
+pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<Secret, CmdSecretError> {
     let argv = shell_words::split(cmdline).map_err(|e| CmdSecretError::Parse(e.to_string()))?;
     let (program, args) = argv
         .split_first()
@@ -274,7 +323,7 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
     if trimmed.is_empty() {
         return Err(CmdSecretError::Empty { stderr: excerpt });
     }
-    Ok(trimmed.to_string())
+    Ok(Secret::new(trimmed))
 }
 
 /// The subset of `vars` that `resolve_var` cannot resolve in any scope,
@@ -495,9 +544,9 @@ mod tests {
             std::env::remove_var(VAR);
         }
         std::fs::remove_file(project_secrets_path(root.path())).unwrap();
-        assert_eq!(
-            resolve_var(root.path(), VAR),
-            Some("global-value".to_string())
+        assert!(
+            resolve_var(root.path(), VAR).is_some_and(|s| s.ct_eq("global-value")),
+            "expected the global scope to win"
         );
 
         // Project beats global once the project file defines it too.
@@ -505,18 +554,18 @@ mod tests {
             &project_secrets_path(root.path()),
             &format!("{VAR}=project-value\n"),
         );
-        assert_eq!(
-            resolve_var(root.path(), VAR),
-            Some("project-value".to_string())
+        assert!(
+            resolve_var(root.path(), VAR).is_some_and(|s| s.ct_eq("project-value")),
+            "expected the project scope to win"
         );
 
         // Process env beats both files.
         unsafe {
             std::env::set_var(VAR, "process-value");
         }
-        assert_eq!(
-            resolve_var(root.path(), VAR),
-            Some("process-value".to_string())
+        assert!(
+            resolve_var(root.path(), VAR).is_some_and(|s| s.ct_eq("process-value")),
+            "expected the process scope to win"
         );
     }
 
@@ -541,7 +590,53 @@ mod tests {
             std::env::remove_var(VAR);
         }
 
-        assert_eq!(resolve_var(root.path(), VAR), None);
+        assert!(resolve_var(root.path(), VAR).is_none());
+    }
+
+    #[test]
+    fn resolve_reference_follows_env_and_cmd_references_only() {
+        let _lock = crate::env_test_lock();
+        const VAR: &str = "APB_TEST_SECRET_REF_K4T";
+
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _cfg_guard = ConfigDirGuard {
+            prior: std::env::var_os("APB_CONFIG_DIR"),
+        };
+        let _env_guard = EnvGuard {
+            var: VAR,
+            prior: std::env::var_os(VAR),
+        };
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+            std::env::remove_var(VAR);
+        }
+        write(
+            &project_secrets_path(root.path()),
+            &format!("{VAR}=from-project\n"),
+        );
+
+        let env_ref = format!("{{{{env.{VAR}}}}}");
+        assert!(
+            resolve_reference(root.path(), &env_ref).is_some_and(|s| s.ct_eq("from-project")),
+            "an env reference resolves through the chain"
+        );
+        assert!(resolve_reference(root.path(), "{{env.APB_TEST_UNSET_REF_Q2}}").is_none());
+        assert!(
+            resolve_reference(root.path(), "a-literal-value").is_none(),
+            "a literal is not a reference"
+        );
+        #[cfg(unix)]
+        {
+            let stub = write_stub(root.path(), "ref-secret", "#!/bin/sh\necho from-cmd\n");
+            let cmd_ref = format!("{{{{cmd:{}}}}}", stub.to_string_lossy());
+            assert!(
+                resolve_reference(root.path(), &cmd_ref).is_some_and(|s| s.ct_eq("from-cmd")),
+                "a cmd reference runs its command"
+            );
+        }
+        let each = resolve_each(root.path(), [VAR, "APB_TEST_UNSET_REF_Q2"]);
+        assert_eq!(each.len(), 1, "only the resolving name contributes");
     }
 
     #[test]
@@ -753,7 +848,7 @@ mod tests {
             std::time::Duration::from_secs(10),
         )
         .unwrap();
-        assert_eq!(out, "resolved-token-value");
+        assert!(out.ct_eq("resolved-token-value"), "trimmed stdout expected");
     }
 
     #[cfg(unix)]

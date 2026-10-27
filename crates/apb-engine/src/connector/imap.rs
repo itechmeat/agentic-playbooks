@@ -25,6 +25,7 @@ use apb_core::connector::def::{ImapOp, ImapSpec};
 use apb_core::connector::template::{
     Namespace, RenderCtx, placeholders, render_raw, resolve_optional_arg, single_args_placeholder,
 };
+use apb_core::secret::{Redaction, Secret};
 use mail_parser::{MessageParser, MimeHeaders};
 use serde_json::{Map, Value, json};
 
@@ -80,6 +81,7 @@ enum ImapOpPlan {
 /// A rendered, ready-to-run imap call. Holds the resolved connection parameters
 /// (including the secret password or token, never logged), the typed op plan,
 /// the deadline budget, and the redaction pairs.
+#[derive(Debug)]
 pub struct ImapCall {
     host: String,
     port: u16,
@@ -87,31 +89,14 @@ pub struct ImapCall {
     auth_method: AuthMethod,
     username: String,
     /// The secret: an account password (LOGIN) or a bearer token (XOAUTH2).
-    /// Never logged; scrubbed out of every error via `redactions`.
-    secret: String,
+    /// Sealed, exposed only by `authenticate`; scrubbed out of every error
+    /// via `redactions`.
+    secret: Secret,
     plan: ImapOpPlan,
     timeout_sec: u64,
-    /// (resolved secret value, redaction label) pairs; every error message is
+    /// The resolved secrets with their labels; every error message is
     /// scrubbed against these before it leaves the process.
-    redactions: Vec<(String, String)>,
-}
-
-/// Manual, secret-free: a derived `Debug` would print the resolved password or
-/// token (and the redaction pairs, which hold the same values verbatim), which
-/// is exactly what the redaction machinery exists to prevent.
-impl std::fmt::Debug for ImapCall {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImapCall")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("use_tls", &self.use_tls)
-            .field("auth_method", &self.auth_method)
-            .field("username", &self.username)
-            .field("secret", &"[redacted]")
-            .field("plan", &self.plan)
-            .field("timeout_sec", &self.timeout_sec)
-            .finish_non_exhaustive()
-    }
+    redactions: Vec<Redaction>,
 }
 
 impl ImapCall {
@@ -236,12 +221,12 @@ impl ImapCall {
     fn authenticate(&self, client: imap::Client<ImapStream>) -> Result<Session, CallError> {
         match self.auth_method {
             AuthMethod::Password => client
-                .login(&self.username, &self.secret)
+                .login(&self.username, self.secret.expose_secret())
                 .map_err(|(e, _)| self.map_err(Stage::Auth, e)),
             AuthMethod::XOauth2 => {
                 let authenticator = XOauth2 {
                     user: self.username.clone(),
-                    token: self.secret.clone(),
+                    token: self.secret.expose_secret().to_string(),
                 };
                 client
                     .authenticate("XOAUTH2", &authenticator)
@@ -536,8 +521,8 @@ pub fn build(
     spec: &ImapSpec,
     account: &BTreeMap<String, String>,
     args: &Value,
-    secrets: &BTreeMap<String, String>,
-    redactions: Vec<(String, String)>,
+    secrets: &BTreeMap<String, Secret>,
+    redactions: Vec<Redaction>,
     dry_run: bool,
     timeout_sec: u64,
 ) -> Result<ImapBuild, CallError> {
@@ -590,7 +575,7 @@ struct Connection {
     use_tls: bool,
     auth_method: AuthMethod,
     username: String,
-    secret: String,
+    secret: Secret,
 }
 
 /// Builds a config-kind render error naming the imap field.
@@ -629,7 +614,7 @@ fn render_connection(spec: &ImapSpec, ctx: &RenderCtx) -> Result<Connection, Cal
     let use_tls = render_use_tls(&c.use_tls, ctx)?;
     let auth_method = render_auth_method(&c.auth_method, ctx)?;
     let username = render_field("username", &c.username, ctx)?;
-    let secret = render_field("password", &c.password, ctx)?;
+    let secret = Secret::new(render_field("password", &c.password, ctx)?);
     Ok(Connection {
         host,
         port,

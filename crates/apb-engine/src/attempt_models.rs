@@ -27,8 +27,9 @@ use crate::event::{Event, EventPayload};
 pub const EXECUTED_BY_CLI: &str = "cli";
 /// `executed_by` of an attempt a host executed (host execution mode).
 pub const EXECUTED_BY_HOST: &str = "host";
-/// The `attempt_started.agent` of a host attempt.
-const HOST_AGENT: &str = "host";
+/// The `attempt_started.agent` of a host attempt: what the scheduler writes
+/// and every reader matches.
+pub(crate) const HOST_AGENT: &str = "host";
 
 /// One attempt and the model it ran on.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

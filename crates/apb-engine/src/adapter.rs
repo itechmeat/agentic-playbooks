@@ -13,9 +13,11 @@ use serde::Deserialize;
 
 mod failure;
 mod output;
+mod spawn_env;
 mod stop;
 
 pub use failure::{AgentFailure, ErrorClass};
+pub use spawn_env::{ATTEMPT_TOKEN_ENV, ITEM_ID_ENV, SpawnEnv};
 
 use output::{headless_capture, incomplete_failure, pipes_failure, stream_capture};
 
@@ -143,12 +145,6 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
     }
 }
 
-/// The variable that carries an attempt's token to its processes.
-pub const ATTEMPT_TOKEN_ENV: &str = "APB_ATTEMPT_TOKEN";
-
-/// The variable that names the list item an attempt runs (`list:`).
-pub const ITEM_ID_ENV: &str = "APB_ITEM_ID";
-
 /// The variable that names the file holding a list item's JSON.
 pub const ITEM_FILE_ENV: &str = "APB_ITEM_FILE";
 
@@ -166,169 +162,15 @@ pub fn item_env(id: &str, file: &std::path::Path) -> Result<Vec<(&'static str, S
     ])
 }
 
-/// Connector isolation applied to every spawned agent process (spec 4.3).
-/// `scrub` is the union of env var names referenced by ANY installed connector
-/// config (both scopes), removed from the child so a connector token can never
-/// be inherited by an agent. `run_dir`/`node_id`, when set, become the
-/// `APB_RUN_DIR`/`APB_NODE_ID` context env that `apb connector call` (a child
-/// of the agent) reads to locate the run manifest and check its grants, plus
-/// `APB_RUN_ID` (the run directory's name) for provenance, and `APB_ATTEMPT`
-/// (the attempt number) with `APB_ATTEMPT_TOKEN` (the attempt's token) so a
-/// connector call binds to the attempt that made it. The default is empty: no scrub and no context env, so non-connector
-/// spawn paths are untouched.
-#[derive(Debug, Clone, Default)]
-pub struct ConnectorEnvPolicy {
-    pub scrub: Vec<String>,
-    pub run_dir: Option<PathBuf>,
-    pub node_id: Option<String>,
-    /// The attempt number the spawned agent runs as.
-    pub attempt: Option<u32>,
-    /// The attempt's random token (`APB_ATTEMPT_TOKEN`), journaled on its
-    /// `attempt_started`: what binds a connector call to this very attempt.
-    pub attempt_token: Option<String>,
-    /// The list item the agent runs (`APB_ITEM_ID`), for a list node.
-    pub item: Option<String>,
-    /// An eval run's env overlay (`RunConfig::spawn_env`), set after the
-    /// scrub and the run-context env. Empty for every other run.
-    pub overlay: Vec<(String, String)>,
-}
-
-impl ConnectorEnvPolicy {
-    /// The policy of an agent a run spawns for `node`: inherited connector
-    /// tokens scrubbed, the run context set, the run's env overlay applied.
-    /// The attempt is set per attempt with [`Self::with_attempt`].
-    pub fn for_node(
-        scrub: Vec<String>,
-        run_dir: &std::path::Path,
-        node: &str,
-        overlay: Vec<(String, String)>,
-    ) -> Self {
-        ConnectorEnvPolicy {
-            scrub,
-            run_dir: Some(run_dir.to_path_buf()),
-            node_id: Some(node.to_string()),
-            attempt: None,
-            attempt_token: None,
-            item: None,
-            overlay,
-        }
+/// What [`spawn_env::prepare`] needs of an attempt.
+fn spawn_target<'a>(task: &'a AgentTask) -> spawn_env::SpawnTarget<'a> {
+    spawn_env::SpawnTarget {
+        env: task.spawn_env,
+        agent: task.agent,
+        model: task.model,
+        node: task.node,
+        status_file: task.status_file.as_deref(),
     }
-
-    /// This policy for list item `id`.
-    pub fn with_item(&self, id: Option<&str>) -> Self {
-        ConnectorEnvPolicy {
-            item: id.map(str::to_string),
-            ..self.clone()
-        }
-    }
-
-    /// This policy for attempt `attempt`, with a fresh attempt token.
-    pub fn with_attempt(&self, attempt: u32) -> Self {
-        ConnectorEnvPolicy {
-            attempt: Some(attempt),
-            attempt_token: Some(apb_core::connector::marker::new_nonce()),
-            ..self.clone()
-        }
-    }
-
-    /// Removes every scrubbed var from `cmd`'s environment and, when set,
-    /// injects the run-context env. Called at every agent spawn site.
-    fn apply(&self, cmd: &mut Command) {
-        for name in &self.scrub {
-            cmd.env_remove(name);
-        }
-        if let Some(dir) = &self.run_dir {
-            cmd.env("APB_RUN_DIR", dir);
-            // The run id (C7), for an `Apb-Run:` commit trailer or a tracker
-            // record: the run directory's name is the id.
-            if let Some(id) = dir.file_name() {
-                cmd.env("APB_RUN_ID", id);
-            }
-        }
-        if let Some(node) = &self.node_id {
-            cmd.env("APB_NODE_ID", node);
-        }
-        match self.attempt {
-            Some(n) => cmd.env("APB_ATTEMPT", n.to_string()),
-            // Never inherit another attempt's number from the parent.
-            None => cmd.env_remove("APB_ATTEMPT"),
-        };
-        match &self.attempt_token {
-            Some(token) => cmd.env(ATTEMPT_TOKEN_ENV, token),
-            None => cmd.env_remove(ATTEMPT_TOKEN_ENV),
-        };
-        match &self.item {
-            Some(id) => cmd.env(ITEM_ID_ENV, id),
-            // Never inherit another item's id from the parent.
-            None => cmd.env_remove(ITEM_ID_ENV),
-        };
-        // A host task id belongs to the host's subagent, never to an agent
-        // apb spawns itself.
-        cmd.env_remove("APB_HOST_TASK");
-        // Spawned agents are headless; force a pass-through pager so CLI
-        // porcelain (notably `gh issue view`) cannot exit 0 with empty stdout
-        // when a TTY-like pager path is engaged (see issue #42 finding 12).
-        cmd.env("GH_PAGER", "cat");
-        cmd.env("PAGER", "cat");
-        for (k, v) in &self.overlay {
-            cmd.env(k, v);
-        }
-    }
-}
-
-/// Run-scoped agent config isolation (spec 2026-07-21 run-reliability), applied
-/// at every node-agent spawn right after the connector env scrub. For an agent
-/// with an isolation strategy (codex today) it prepares a private config home
-/// under the run dir and points the spawned process at it via that agent's
-/// config-root env var, so the agent can never inherit the user's interactive
-/// MCP configuration. A no-op for every other agent and for spawn paths that
-/// carry no run dir (internal, connector-less calls such as compaction).
-fn apply_agent_home(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
-    let Some(run_dir) = task.connector_policy.run_dir.as_deref() else {
-        return Ok(());
-    };
-    match crate::agent_home::env_for_agent(task.agent, run_dir, task.node) {
-        Ok(Some((name, home))) => {
-            cmd.env(name, home);
-            Ok(())
-        }
-        Ok(None) => Ok(()),
-        Err(e) => Err((
-            ErrorClass::ProcessExit,
-            format!(
-                "prepare isolated agent home for `{}` failed: {e}",
-                task.agent
-            ),
-        )),
-    }
-}
-
-/// Sets the environment a spawned zcode needs (see
-/// `apb_core::zcode::spawn_env`): the built-in provider config location, and a
-/// run-scoped personal provider config carrying the attempt's model selection
-/// as ZCode's default selection. zcode has no `--model` flag, so this IS
-/// its model passing. The scoped copy lives in the run's agent home
-/// (`agent-home/zcode/<node>`) when the attempt belongs to a run. A no-op for
-/// every other agent.
-fn apply_zcode_env(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
-    if task.agent != apb_core::zcode::AGENT_ID {
-        return Ok(());
-    }
-    let scoped = task
-        .connector_policy
-        .run_dir
-        .as_deref()
-        .map(|d| d.join("agent-home").join("zcode").join(task.node));
-    let env = apb_core::zcode::spawn_env(task.model, scoped.as_deref()).map_err(|e| {
-        (
-            ErrorClass::ProcessExit,
-            format!("prepare zcode provider config failed: {e}"),
-        )
-    })?;
-    for (name, value) in env {
-        cmd.env(name, value);
-    }
-    Ok(())
 }
 
 /// The reply of an attempt's stdout and whether the CLI itself marked the
@@ -366,10 +208,11 @@ pub struct AgentTask<'a> {
     /// the file-writes and network access the run already declared; kept false
     /// for internal, side-effect-free calls (e.g. context compaction).
     pub grant_autonomy: bool,
-    /// Connector env isolation (spec 4.3): scrubbed var names + optional run
-    /// context env, applied at spawn. Defaults to empty for spawn paths that
-    /// carry no connector exposure.
-    pub connector_policy: &'a ConnectorEnvPolicy,
+    /// The process environment (see [`SpawnEnv`]): the profile's
+    /// `process_env` plan, the connector scrub and the run context, applied
+    /// at spawn. Defaults to empty for spawn paths that carry no connector
+    /// exposure.
+    pub spawn_env: &'a SpawnEnv,
     /// Whether this attempt runs an interactive node (spec 2026-07-20). Only
     /// then does the adapter scan stdout for the question marker; on a
     /// non-interactive node the marker line is ordinary output. Internal,
@@ -905,7 +748,7 @@ pub trait AgentAdapter {
         _model: &str,
         _workdir: &Path,
         _soul: Option<&str>,
-        _policy: &ConnectorEnvPolicy,
+        _policy: &SpawnEnv,
     ) -> Result<(), (ErrorClass, String)> {
         Ok(())
     }
@@ -1270,8 +1113,8 @@ impl ClaudeAdapter {
             return 0;
         }
         let (Some(run_dir), Some(node_id)) = (
-            task.connector_policy.run_dir.as_deref(),
-            task.connector_policy.node_id.as_deref(),
+            task.spawn_env.run_dir.as_deref(),
+            task.spawn_env.node_id.as_deref(),
         ) else {
             return 0;
         };
@@ -1323,19 +1166,10 @@ impl ClaudeAdapter {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Connector env isolation (spec 4.3): scrub inherited connector tokens
-        // and inject the run-context env before spawning the agent.
-        task.connector_policy.apply(&mut cmd);
-        // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
-        // spawned codex cannot inherit the user's interactive MCP config.
-        apply_agent_home(&mut cmd, task)?;
-        // zcode's provider config and model selection (no `--model` flag).
-        apply_zcode_env(&mut cmd, task)?;
-        // Per-attempt status file (subtask S2): the agent may write its final
-        // verdict as JSON here, which the engine reads before the textual report.
-        if let Some(sf) = &task.status_file {
-            cmd.env("APB_STATUS_FILE", sf);
-        }
+        // The process env, the connector scrub, the run context, the agent
+        // home, zcode's provider config and the status file, in one place
+        // for every form (start and resume) of every transport.
+        spawn_env::prepare(&mut cmd, &spawn_target(task))?;
         let started = std::time::Instant::now();
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
@@ -1597,19 +1431,10 @@ impl ClaudeAdapter {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Connector env isolation (spec 4.3): scrub inherited connector tokens
-        // and inject the run-context env before spawning the agent.
-        task.connector_policy.apply(&mut cmd);
-        // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
-        // spawned codex cannot inherit the user's interactive MCP config.
-        apply_agent_home(&mut cmd, task)?;
-        // zcode's provider config and model selection (no `--model` flag).
-        apply_zcode_env(&mut cmd, task)?;
-        // Per-attempt status file (subtask S2): the agent may write its final
-        // verdict as JSON here, which the engine reads before the textual report.
-        if let Some(sf) = &task.status_file {
-            cmd.env("APB_STATUS_FILE", sf);
-        }
+        // The process env, the connector scrub, the run context, the agent
+        // home, zcode's provider config and the status file, in one place
+        // for every form (start and resume) of every transport.
+        spawn_env::prepare(&mut cmd, &spawn_target(task))?;
         let started = std::time::Instant::now();
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
@@ -1994,7 +1819,7 @@ impl AgentAdapter for ClaudeAdapter {
         model: &str,
         workdir: &Path,
         soul: Option<&str>,
-        policy: &ConnectorEnvPolicy,
+        policy: &SpawnEnv,
     ) -> Result<(), (ErrorClass, String)> {
         // Goes through build_command using the invocation form (not hardcoded
         // -p/--model), otherwise codex/opencode/custom argv and stdin
@@ -2015,15 +1840,15 @@ impl AgentAdapter for ClaudeAdapter {
             })
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // Connector env isolation (spec 4.3): the supervisor is a spawned agent
-        // too, so its inherited connector tokens are scrubbed before spawn.
+        // The supervisor is a spawned agent too: its process env, connector
+        // scrub and run context, as for a node attempt.
         policy.apply(&mut cmd);
         // Let a Claude Code supervisor block in `supervisor_wait_event` for as
         // long as the server allows (30 min) instead of returning to the model
         // every few seconds: each return is a paid turn. The variable is
         // Claude Code's MCP tool-call timeout; other agents ignore it. A value
-        // the operator set explicitly wins.
-        if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+        // the operator set explicitly wins when it reaches the process.
+        if !policy.passes("MCP_TOOL_TIMEOUT") {
             cmd.env(
                 "MCP_TOOL_TIMEOUT",
                 SUPERVISOR_MCP_TOOL_TIMEOUT_MS.to_string(),
@@ -2179,7 +2004,7 @@ mod tests {
     }
 
     fn hermetic_task<'a>(
-        policy: &'a ConnectorEnvPolicy,
+        policy: &'a SpawnEnv,
         agent: &'a str,
         settings: Option<HermeticEnv>,
     ) -> AgentTask<'a> {
@@ -2191,7 +2016,7 @@ mod tests {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
-            connector_policy: policy,
+            spawn_env: policy,
             interactive: false,
             report_contract: true,
             node: "test",
@@ -2206,7 +2031,7 @@ mod tests {
 
     #[test]
     fn hermetic_settings_flag_injected_for_claude_and_absent_otherwise() {
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
         let path = std::path::PathBuf::from("/run/agent-settings/n.json");
         let env = HermeticEnv {
             settings: path.clone(),
@@ -2361,56 +2186,7 @@ mod tests {
         assert_eq!(interpret_report(two).status, NodeStatus::Succeeded);
     }
 
-    #[test]
-    fn connector_env_policy_forces_pass_through_pager() {
-        // No network: spawn `env` under the default policy and assert the
-        // pager vars land on the child. This is the only defense against gh
-        // porcelain swallowing stdout under a TTY-like pager path.
-        let policy = ConnectorEnvPolicy::default();
-        let mut cmd = Command::new("env");
-        policy.apply(&mut cmd);
-        let out = cmd.output().expect("spawn env");
-        assert!(
-            out.status.success(),
-            "env exited {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.lines().any(|l| l == "GH_PAGER=cat"),
-            "GH_PAGER=cat missing from child env:\n{stdout}"
-        );
-        assert!(
-            stdout.lines().any(|l| l == "PAGER=cat"),
-            "PAGER=cat missing from child env:\n{stdout}"
-        );
-    }
-
-    /// An eval run's env overlay lands on the spawned agent after the
-    /// connector scrub: a scrubbed name the overlay sets keeps the overlay's
-    /// value, and the overlay's own variables arrive.
-    #[test]
-    fn the_eval_overlay_is_applied_after_the_scrub() {
-        let policy = ConnectorEnvPolicy {
-            scrub: vec!["PATH_PROBE_TOKEN".into()],
-            overlay: vec![
-                ("PATH_PROBE_TOKEN".into(), String::new()),
-                ("EVAL_PROBE".into(), "1".into()),
-            ],
-            ..Default::default()
-        };
-        let mut cmd = Command::new("env");
-        cmd.env("PATH_PROBE_TOKEN", "secret");
-        policy.apply(&mut cmd);
-        let out = cmd.output().expect("spawn env");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = stdout.lines().collect();
-        assert!(lines.contains(&"PATH_PROBE_TOKEN="), "{stdout}");
-        assert!(lines.contains(&"EVAL_PROBE=1"), "{stdout}");
-    }
-
-    fn stream_task<'a>(policy: &'a ConnectorEnvPolicy, extract: Option<&'a str>) -> AgentTask<'a> {
+    fn stream_task<'a>(policy: &'a SpawnEnv, extract: Option<&'a str>) -> AgentTask<'a> {
         AgentTask {
             prompt: "go",
             model: "haiku",
@@ -2419,7 +2195,7 @@ mod tests {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
-            connector_policy: policy,
+            spawn_env: policy,
             interactive: false,
             report_contract: true,
             node: "test",
@@ -2434,7 +2210,7 @@ mod tests {
 
     #[test]
     fn transport_prompt_gates_report_contract() {
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
         // With the report contract on, the spec 6.2 status/summary block is
         // appended.
         let mut t = stream_task(&policy, None);
@@ -2510,7 +2286,7 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Nothing to log."}]},"session_id":"s1"}"#.to_string(),
             r#"{"type":"result","subtype":"success","is_error":false,"result":"Nothing to log.","session_id":"s1"}"#.to_string(),
         ];
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
 
         let with_extract = parse_stream_result(
             &lines,
@@ -2545,7 +2321,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"final answer"}"#
                 .to_string(),
         ];
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
         let report = parse_stream_result(
             &lines,
             &stream_task(&policy, Some("node_output")),

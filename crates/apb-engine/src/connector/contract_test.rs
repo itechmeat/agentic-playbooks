@@ -14,6 +14,7 @@ use apb_core::connector::contract::{
 use apb_core::connector::def::{ConnectorDoc, FunctionSpec, InboxOp};
 use apb_core::connector::idempotency::Idempotency;
 use apb_core::connector::inbox::InboxEvent;
+use apb_core::secret::Secret;
 use serde_json::Value;
 
 use crate::connector::call::render_http;
@@ -23,6 +24,14 @@ use crate::connector::intent::stamp::Stamp;
 /// The fixed value every secret account field resolves to in the offline
 /// runner. A real secret is never read (spec 4.6).
 const SECRET_STUB: &str = "test-secret";
+
+/// Every secret field of `doc` bound to [`SECRET_STUB`].
+fn stub_secrets(doc: &ConnectorDoc) -> BTreeMap<String, Secret> {
+    doc.secret_fields()
+        .into_iter()
+        .map(|f| (f, Secret::new(SECRET_STUB)))
+        .collect()
+}
 
 /// The result of one contract-test case.
 pub struct CaseResult {
@@ -172,11 +181,7 @@ fn eval_http(
             function.name
         ));
     }
-    let secrets: BTreeMap<String, String> = doc
-        .secret_fields()
-        .into_iter()
-        .map(|f| (f, SECRET_STUB.to_string()))
-        .collect();
+    let secrets = stub_secrets(doc);
     let rendered = render_http(function, input.account, input.args, &secrets, input.stamp)
         .map_err(|e| format!("render failed: {}", e.message))?;
     if !rendered.method.eq_ignore_ascii_case(method) {
@@ -320,11 +325,7 @@ fn eval_smtp(
             function.name
         )
     })?;
-    let secrets: BTreeMap<String, String> = doc
-        .secret_fields()
-        .into_iter()
-        .map(|f| (f, SECRET_STUB.to_string()))
-        .collect();
+    let secrets = stub_secrets(doc);
     let built = crate::connector::smtp::build(
         spec,
         account,
@@ -411,11 +412,7 @@ fn eval_imap(
             function.name
         )
     })?;
-    let secrets: BTreeMap<String, String> = doc
-        .secret_fields()
-        .into_iter()
-        .map(|f| (f, SECRET_STUB.to_string()))
-        .collect();
+    let secrets = stub_secrets(doc);
     let built = crate::connector::imap::build(
         spec,
         account,

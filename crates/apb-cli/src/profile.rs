@@ -33,7 +33,7 @@ pub(crate) enum ProfileAction {
         force: bool,
     },
     /// Create or update a profile (auto-approves its bundle)
-    Write(ProfileWriteArgs),
+    Write(Box<ProfileWriteArgs>),
     /// Edit a profile's profile.yaml and SOUL.md in $EDITOR (CAS on save)
     Edit {
         name: String,
@@ -81,6 +81,16 @@ pub(crate) struct ProfileWriteArgs {
     /// keeps the stored value.
     #[arg(long = "zcode-mode", value_name = "MODE", value_parser = apb_core::profile::ZcodeMode::parse)]
     zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    /// Which operator environment variables the agent process inherits:
+    /// inherit (everything, the default) or allowlist (a base set, the
+    /// agent CLI's own variables and --env-allow). Omitted: an update keeps
+    /// the stored value.
+    #[arg(long = "process-env", value_name = "POLICY")]
+    process_env: Option<String>,
+    /// A variable name (or PREFIX*) an allowlisted agent also inherits;
+    /// repeatable. Given without --process-env it implies allowlist.
+    #[arg(long = "env-allow", value_name = "NAME")]
+    env_allow: Vec<String>,
 }
 
 pub(crate) fn profile_cmd(root: &Path, action: ProfileAction) -> ExitCode {
@@ -94,7 +104,7 @@ pub(crate) fn profile_cmd(root: &Path, action: ProfileAction) -> ExitCode {
         ProfileAction::Delete { name, scope, force } => {
             profile_tools::profile_delete(root, &name, &scope, force)
         }
-        ProfileAction::Write(args) => profile_write_cmd(root, args),
+        ProfileAction::Write(args) => profile_write_cmd(root, *args),
         ProfileAction::Edit { name, scope } => return profile_edit_cmd(root, &name, &scope),
     };
     match res {
@@ -141,6 +151,11 @@ pub(crate) fn profile_write_cmd(
             .map_err(|e| apb_mcp::tools::ToolError::Engine(format!("read soul file: {e}")))?,
         None => String::new(),
     };
+    let process_env = apb_core::process_env::ProcessEnvPolicy::from_surface(
+        args.process_env.as_deref(),
+        &args.env_allow,
+    )
+    .map_err(apb_mcp::tools::ToolError::Engine)?;
     profile_tools::profile_write(
         root,
         ProfileWrite {
@@ -156,12 +171,15 @@ pub(crate) fn profile_write_cmd(
             },
             expected_digest: args.expected_digest,
             soul_requirement,
-            environment: args.environment.or_else(|| {
-                apb_core::profile::AgentEnvironment::from_surface(None, args.hermetic)
-                    .ok()
-                    .flatten()
-            }),
-            zcode_mode: args.zcode_mode,
+            options: profile_tools::ProfileOptions {
+                environment: args.environment.or_else(|| {
+                    apb_core::profile::AgentEnvironment::from_surface(None, args.hermetic)
+                        .ok()
+                        .flatten()
+                }),
+                zcode_mode: args.zcode_mode,
+                process_env,
+            },
         },
     )
 }
@@ -332,6 +350,16 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
         );
         return ExitCode::from(2);
     }
+    // The structural checks every other write surface makes on the text it
+    // was given: `allow` under `policy: inherit` is refused here too, not
+    // dropped when the edit is stored.
+    if let Err(problems) = doc.check() {
+        eprintln!(
+            "profile error: {problems}; edited files kept in {}",
+            tmp.display()
+        );
+        return ExitCode::from(2);
+    }
     let res = profile_tools::profile_write(
         root,
         profile_tools::ProfileWrite {
@@ -352,8 +380,13 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             },
             expected_digest: Some(digest_before),
             soul_requirement: doc.soul,
-            environment: doc.environment,
-            zcode_mode: doc.zcode_mode,
+            options: profile_tools::ProfileOptions {
+                environment: doc.environment,
+                zcode_mode: doc.zcode_mode,
+                // The edited text is the whole truth for process_env: a
+                // removed key means inherit.
+                process_env: Some(doc.process_env.clone().unwrap_or_default()),
+            },
         },
     );
     match res {

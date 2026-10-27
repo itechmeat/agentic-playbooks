@@ -27,6 +27,35 @@ pub async fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().await
 }
 
+/// Sets one environment variable for a test and restores its prior value
+/// (or unsets it) on drop, a panic included. The caller holds [`ENV_LOCK`]
+/// for the guard's whole life.
+pub struct EnvVar {
+    key: &'static str,
+    prior: Option<std::ffi::OsString>,
+}
+
+impl EnvVar {
+    pub fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prior = std::env::var_os(key);
+        // SAFETY: the caller holds ENV_LOCK, so no other test touches the env.
+        unsafe { std::env::set_var(key, value) };
+        EnvVar { key, prior }
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`, ENV_LOCK is still held.
+        unsafe {
+            match &self.prior {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 /// A private global config dir (`APB_CONFIG_DIR`) for one test, holding
 /// [`ENV_LOCK`] for its lifetime and restoring the previous value on drop.
 /// Any test whose request writes global state - a playbook save approves the

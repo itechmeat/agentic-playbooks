@@ -1,3 +1,4 @@
+use apb_core::secret::Secret;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
@@ -278,11 +279,12 @@ pub struct PersistedSession {
 /// unpadded base64url. The token is the supervisor tools' only credential and
 /// is handed to an agent process, so it must not be guessable from the clock
 /// or from a counter. Every surface that issues one (the MCP server and the
-/// background supervisor spawn) goes through here.
-pub fn mint_supervisor_token() -> Result<String, EngineError> {
-    let body = apb_core::server_auth::random_token()
+/// background supervisor spawn) goes through here. Sealed: it is exposed
+/// only into the supervisor's brief and the tool reply that hands it over.
+pub fn mint_supervisor_token() -> Result<Secret, EngineError> {
+    let body = apb_core::server_auth::random_secret()
         .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
-    Ok(format!("sv-{body}"))
+    Ok(Secret::new(format!("sv-{}", body.expose_secret())))
 }
 
 /// The fingerprint a supervisor session is stored and looked up under. The
@@ -296,13 +298,13 @@ pub fn supervisor_token_fingerprint(token: &str) -> String {
 pub fn write_supervisor_session(
     root: &Path,
     run_id: &str,
-    token: &str,
+    token: &Secret,
     capabilities: &[String],
 ) -> Result<(), EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
     let session_path = run_dir.join("supervisor").join("session.json");
     let session = PersistedSession {
-        token_hash: supervisor_token_fingerprint(token),
+        token_hash: supervisor_token_fingerprint(token.expose_secret()),
         capabilities: capabilities.to_vec(),
     };
     let bytes = serde_json::to_vec(&session).map_err(|e| EngineError::Yaml(e.to_string()))?;
@@ -348,7 +350,7 @@ pub fn find_session_by_token(
         // Compare the fingerprint of the presented token with the stored
         // fingerprint (the token itself is never stored on disk), in constant
         // time.
-        if apb_core::server_auth::ct_eq_str(&session.token_hash, &presented) {
+        if apb_core::secret::ct_eq_str(&session.token_hash, &presented) {
             return Ok(Some((run_id, session.capabilities)));
         }
     }

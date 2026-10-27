@@ -786,6 +786,57 @@ fn run_proceeds_past_the_connector_gate_once_approved() {
     );
 }
 
+/// Under `process_env: allowlist` the agent's own `apb connector call` still
+/// works: the run context and `APB_CONFIG_DIR` reach it, so the call finds
+/// its run, its grant and the approved account and renders the request (a
+/// dry run: no secret is resolved and nothing is sent).
+#[cfg(unix)]
+#[test]
+fn an_allowlisted_agent_still_reaches_its_connector() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    setup_run_fixture(dir.path());
+    let profile = dir.path().join(".apb/profiles/main/profile.yaml");
+    let mut yaml = fs::read_to_string(&profile).unwrap();
+    yaml.push_str("process_env:\n  policy: allowlist\n");
+    fs::write(&profile, yaml).unwrap();
+    let secrets = dir.path().join(".apb/secrets.env");
+    fs::write(&secrets, "WIDGET_TOKEN=shh-secret-value\n").unwrap();
+    fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600)).unwrap();
+    apb_ok(dir.path(), &["connector", "approve", "widget"]);
+    apb_ok(
+        dir.path(),
+        &["connector", "approve", "widget", "--account", "default"],
+    );
+    let reply = dir.path().join("call.json");
+    let stub = dir.path().join("calling-agent.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n'{}' connector call widget get_item --args '{{\"id\":\"42\"}}' --dry-run > '{}'\necho done\n",
+            crate::common::apb_bin().display(),
+            reply.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = playbook_env(
+        dir.path(),
+        &["run", RUN_PLAYBOOK_ID],
+        &[("APB_AGENT_CMD", stub.to_str().unwrap())],
+    );
+    assert!(
+        out.status.success(),
+        "the run must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&reply).unwrap().trim()).expect("JSON reply");
+    assert_eq!(v["dry_run"], serde_json::json!(true), "{v}");
+    assert_eq!(v["url"], serde_json::json!("https://example.com/items/42"));
+}
+
 #[test]
 fn call_accepts_the_full_flag() {
     let dir = tempfile::tempdir().unwrap();

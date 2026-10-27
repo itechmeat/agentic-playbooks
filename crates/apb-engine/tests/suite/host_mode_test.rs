@@ -1722,3 +1722,36 @@ fn a_cli_attempt_shows_the_model_it_ran_on() {
     assert_eq!(models[0].model.as_deref(), Some("haiku"));
     assert!(!models[0].mismatch);
 }
+
+/// A profile's `process_env: allowlist` does not reach a host task (the
+/// host's subagent runs in the host process): no `agent_env_applied` is
+/// journaled, and `apb doctor --run` says the allowlist was not applied.
+#[test]
+fn an_allowlist_profile_in_host_mode_journals_nothing_and_doctor_warns() {
+    let h = Host::new(&one_node(""), &[]);
+    let profile = h.path(".apb/profiles/main/profile.yaml");
+    let mut yaml = fs::read_to_string(&profile).unwrap();
+    yaml.push_str("process_env:\n  policy: allowlist\n");
+    fs::write(&profile, yaml).unwrap();
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(
+        count(&events, |p| matches!(
+            p,
+            EventPayload::AgentEnvApplied { .. }
+        )),
+        0
+    );
+    let checks = apb_engine::run_doctor::diagnose_run(h.root.path(), &run_id).unwrap();
+    assert!(
+        checks.iter().any(|c| c.subject == "process env"
+            && c.status == apb_engine::run_doctor::WARN
+            && c.detail.contains("host tasks")),
+        "{checks:?}"
+    );
+}

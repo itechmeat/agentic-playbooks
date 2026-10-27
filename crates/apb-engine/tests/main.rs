@@ -62,6 +62,15 @@ mod adapter_bounded_waits_test;
 mod adapter_output_test;
 #[path = "suite/adapter_test.rs"]
 mod adapter_test;
+#[cfg(unix)]
+#[path = "suite/agent_env_live_test.rs"]
+mod agent_env_live_test;
+#[cfg(unix)]
+#[path = "suite/agent_env_run_test.rs"]
+mod agent_env_run_test;
+#[cfg(unix)]
+#[path = "suite/agent_env_spawn_test.rs"]
+mod agent_env_spawn_test;
 #[path = "suite/agent_report_test.rs"]
 mod agent_report_test;
 #[path = "suite/agent_timeout_test.rs"]

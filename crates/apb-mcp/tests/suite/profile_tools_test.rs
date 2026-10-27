@@ -100,7 +100,10 @@ fn profile_write_persists_the_environment_opt_in() {
                 description: "desc".into(),
                 soul_md: "role".into(),
                 executor: exec(),
-                environment,
+                options: profile_tools::ProfileOptions {
+                    environment,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
@@ -158,8 +161,11 @@ fn profile_update_without_environment_keeps_stored_value() {
             description: "desc".into(),
             soul_md: "role".into(),
             executor: exec(),
-            environment: Some(AgentEnvironment::Full),
-            zcode_mode: Some(apb_core::profile::ZcodeMode::Edit),
+            options: profile_tools::ProfileOptions {
+                environment: Some(AgentEnvironment::Full),
+                zcode_mode: Some(apb_core::profile::ZcodeMode::Edit),
+                process_env: allowlist(&["GH_TOKEN"]),
+            },
             ..Default::default()
         },
     )
@@ -178,6 +184,110 @@ fn profile_update_without_environment_keeps_stored_value() {
         doc.zcode_mode,
         Some(apb_core::profile::ZcodeMode::Edit),
         "an update that omits zcode_mode must keep it; yaml:\n{yaml}"
+    );
+    assert_eq!(
+        doc.process_env,
+        allowlist(&["GH_TOKEN"]),
+        "an update that omits process_env must keep it; yaml:\n{yaml}"
+    );
+}
+
+fn allowlist(names: &[&str]) -> Option<apb_core::process_env::ProcessEnvPolicy> {
+    let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    apb_core::process_env::ProcessEnvPolicy::from_surface(Some("allowlist"), &names).unwrap()
+}
+
+/// `process_env: inherit` is stored as the absence of the key, clearing a
+/// stored allowlist; a malformed allowlist is refused before anything is
+/// written.
+#[test]
+fn process_env_inherit_clears_and_an_invalid_allowlist_is_refused() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    let write = |expected: Option<String>,
+                 process_env: Option<apb_core::process_env::ProcessEnvPolicy>| {
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: "envp".into(),
+                scope: "project".into(),
+                soul_md: "role".into(),
+                executor: exec(),
+                expected_digest: expected,
+                options: profile_tools::ProfileOptions {
+                    process_env,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+    };
+    let path = proj.path().join(".apb/profiles/envp/profile.yaml");
+    let created = write(None, allowlist(&["NPM_CONFIG_*"])).expect("create");
+    assert!(fs::read_to_string(&path).unwrap().contains("NPM_CONFIG_*"));
+    let digest = created["profile_digest"].as_str().unwrap().to_string();
+    let inherit =
+        apb_core::process_env::ProcessEnvPolicy::from_surface(Some("inherit"), &[]).unwrap();
+    write(Some(digest), inherit).expect("update");
+    assert!(!fs::read_to_string(&path).unwrap().contains("process_env"));
+
+    let bad = apb_core::process_env::ProcessEnvPolicy {
+        policy: apb_core::process_env::ProcessEnvMode::Allowlist,
+        allow: vec![serde_json::from_value(serde_json::json!("*")).unwrap()],
+    };
+    let err = profile_tools::profile_write(
+        proj.path(),
+        profile_tools::ProfileWrite {
+            name: "envbad".into(),
+            scope: "project".into(),
+            soul_md: "role".into(),
+            executor: exec(),
+            options: profile_tools::ProfileOptions {
+                process_env: Some(bad),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect_err("a bare `*` is refused");
+    assert!(
+        err.to_string().contains("profile_process_env_invalid"),
+        "{err}"
+    );
+    assert!(!proj.path().join(".apb/profiles/envbad").exists());
+}
+
+/// An update over a stored profile that does not parse (an unknown key in
+/// its `process_env`) is refused and leaves the file as it was, instead of
+/// rewriting it without the allowlist.
+#[test]
+fn an_update_over_an_unparseable_profile_is_refused() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    let dir = proj.path().join(".apb/profiles/broken");
+    fs::create_dir_all(&dir).unwrap();
+    let stored = "name: broken\nexecutor: { agent: claude, model: sonnet }\nprocess_env: { policy: allowlist, deny: [X] }\n";
+    fs::write(dir.join("profile.yaml"), stored).unwrap();
+    fs::write(dir.join("SOUL.md"), "").unwrap();
+    let digest = apb_core::profile::profile_digest(stored, "");
+    let err = profile_tools::profile_write(
+        proj.path(),
+        profile_tools::ProfileWrite {
+            name: "broken".into(),
+            scope: "project".into(),
+            soul_md: "role".into(),
+            executor: exec(),
+            expected_digest: Some(digest),
+            ..Default::default()
+        },
+    )
+    .expect_err("an unparseable stored profile is refused");
+    assert!(err.to_string().contains("does not parse"), "{err}");
+    assert_eq!(
+        fs::read_to_string(dir.join("profile.yaml")).unwrap(),
+        stored
     );
 }
 
