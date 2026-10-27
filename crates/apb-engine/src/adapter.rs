@@ -146,6 +146,26 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
 /// The variable that carries an attempt's token to its processes.
 pub const ATTEMPT_TOKEN_ENV: &str = "APB_ATTEMPT_TOKEN";
 
+/// The variable that names the list item an attempt runs (`list:`).
+pub const ITEM_ID_ENV: &str = "APB_ITEM_ID";
+
+/// The variable that names the file holding a list item's JSON.
+pub const ITEM_FILE_ENV: &str = "APB_ITEM_FILE";
+
+/// The env a list item's script step and its item check both get: its id
+/// and the file holding its JSON. A file path that is not valid UTF-8 is
+/// refused rather than passed on with replaced bytes, which would name a
+/// file that does not exist.
+pub fn item_env(id: &str, file: &std::path::Path) -> Result<Vec<(&'static str, String)>, String> {
+    let file = file
+        .to_str()
+        .ok_or_else(|| "the item file path is not valid UTF-8".to_string())?;
+    Ok(vec![
+        (ITEM_ID_ENV, id.to_string()),
+        (ITEM_FILE_ENV, file.to_string()),
+    ])
+}
+
 /// Connector isolation applied to every spawned agent process (spec 4.3).
 /// `scrub` is the union of env var names referenced by ANY installed connector
 /// config (both scopes), removed from the child so a connector token can never
@@ -166,6 +186,8 @@ pub struct ConnectorEnvPolicy {
     /// The attempt's random token (`APB_ATTEMPT_TOKEN`), journaled on its
     /// `attempt_started`: what binds a connector call to this very attempt.
     pub attempt_token: Option<String>,
+    /// The list item the agent runs (`APB_ITEM_ID`), for a list node.
+    pub item: Option<String>,
     /// An eval run's env overlay (`RunConfig::spawn_env`), set after the
     /// scrub and the run-context env. Empty for every other run.
     pub overlay: Vec<(String, String)>,
@@ -187,7 +209,16 @@ impl ConnectorEnvPolicy {
             node_id: Some(node.to_string()),
             attempt: None,
             attempt_token: None,
+            item: None,
             overlay,
+        }
+    }
+
+    /// This policy for list item `id`.
+    pub fn with_item(&self, id: Option<&str>) -> Self {
+        ConnectorEnvPolicy {
+            item: id.map(str::to_string),
+            ..self.clone()
         }
     }
 
@@ -225,6 +256,11 @@ impl ConnectorEnvPolicy {
         match &self.attempt_token {
             Some(token) => cmd.env(ATTEMPT_TOKEN_ENV, token),
             None => cmd.env_remove(ATTEMPT_TOKEN_ENV),
+        };
+        match &self.item {
+            Some(id) => cmd.env(ITEM_ID_ENV, id),
+            // Never inherit another item's id from the parent.
+            None => cmd.env_remove(ITEM_ID_ENV),
         };
         // A host task id belongs to the host's subagent, never to an agent
         // apb spawns itself.

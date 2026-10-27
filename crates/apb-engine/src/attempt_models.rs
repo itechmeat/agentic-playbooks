@@ -35,6 +35,10 @@ const HOST_AGENT: &str = "host";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AttemptModel {
     pub node: String,
+    /// The list item the attempt ran, for an item of a list node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub item: Option<String>,
     pub attempt: u32,
     /// [`EXECUTED_BY_CLI`] or [`EXECUTED_BY_HOST`].
     pub executed_by: String,
@@ -148,11 +152,15 @@ impl AttemptWalk {
     /// The open slot of `(node, attempt)`, or a new one. `starting`: the
     /// event is the attempt's `attempt_started`, so a slot that already
     /// started belongs to an earlier execution.
-    fn slot(&mut self, node: &str, attempt: u32, starting: bool) -> usize {
+    fn slot(&mut self, node: &str, item: Option<&str>, attempt: u32, starting: bool) -> usize {
         let open = self
             .slots
             .iter()
-            .rposition(|s| s.model.node == node && s.model.attempt == attempt)
+            .rposition(|s| {
+                s.model.node == node
+                    && s.model.item.as_deref() == item
+                    && s.model.attempt == attempt
+            })
             .filter(|&i| !self.slots[i].finished && !(starting && self.slots[i].started));
         if let Some(i) = open {
             return i;
@@ -160,6 +168,7 @@ impl AttemptWalk {
         self.slots.push(Slot {
             model: AttemptModel {
                 node: node.to_string(),
+                item: item.map(str::to_string),
                 attempt,
                 executed_by: EXECUTED_BY_CLI.to_string(),
                 agent: None,
@@ -184,7 +193,7 @@ impl AttemptWalk {
                 attempt,
                 ..
             } => {
-                let i = self.slot(node, *attempt, false);
+                let i = self.slot(node, None, *attempt, false);
                 self.tasks.insert(task_id.clone(), i);
                 let s = &mut self.slots[i].model;
                 if s.executed_by != EXECUTED_BY_HOST {
@@ -199,9 +208,10 @@ impl AttemptWalk {
                 attempt,
                 agent,
                 model,
+                item,
                 ..
             } => {
-                let i = self.slot(node, *attempt, true);
+                let i = self.slot(node, item.as_deref(), *attempt, true);
                 self.slots[i].started = true;
                 let s = &mut self.slots[i].model;
                 if agent == HOST_AGENT {
@@ -212,8 +222,13 @@ impl AttemptWalk {
                 }
                 Some(i)
             }
-            EventPayload::AttemptFinished { node, attempt, .. } => {
-                let i = self.slot(node, *attempt, false);
+            EventPayload::AttemptFinished {
+                node,
+                attempt,
+                item,
+                ..
+            } => {
+                let i = self.slot(node, item.as_deref(), *attempt, false);
                 self.slots[i].finished = true;
                 Some(i)
             }

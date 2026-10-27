@@ -27,6 +27,7 @@ pub mod fork;
 pub mod fsutil;
 pub mod graphutil;
 pub mod judge;
+pub mod list;
 pub mod migration;
 pub mod model_check;
 pub mod models_table;

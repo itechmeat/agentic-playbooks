@@ -345,6 +345,28 @@ trigger: string,
  */
 instruction: string, options: Array<string>, how_to_decide: string, };
 
+export type ListProgress = { node: string, total: number, processed: number, passed: number, needs_look: number, running: number, };
+
+export type RunListItem = { id: string, 
+/**
+ * `pending`, `running`, `passed` or `needs_look`.
+ */
+state: string, round: number, verdict?: string, note?: string, 
+/**
+ * Why it needs a look.
+ */
+reason?: string, attempts: number, };
+
+export type RunList = { node: string, title?: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, pending: number, running: number, 
+/**
+ * The batch running or last run (from 1).
+ */
+batch: number, 
+/**
+ * How many batches the visit needs at its batch size.
+ */
+batches: number, items: Array<RunListItem>, };
+
 export type ProgressSummary = { percent: number, label: string | null, waiting_on: string | null, 
 /**
  * The kind of node the run is waiting on when `waiting_on` is set.
@@ -398,6 +420,11 @@ pending_waits: Array<string>,
  * Absent when empty, so a run without host tasks serializes as before.
  */
 pending_tasks?: Array<PendingHostTask>, 
+/**
+ * The counts of every list node that started a visit, in playbook
+ * order. Absent when empty.
+ */
+lists?: Array<ListProgress>, 
 /**
  * Deterministic identity of the work plan behind this percent (spec
  * section 3): the playbook version bound to the run plus the latest
@@ -474,7 +501,11 @@ applied: number,
  */
 shadow_would_change: number, };
 
-export type AttemptModel = { node: string, attempt: number, 
+export type AttemptModel = { node: string, 
+/**
+ * The list item the attempt ran, for an item of a list node.
+ */
+item?: string, attempt: number, 
 /**
  * [`EXECUTED_BY_CLI`] or [`EXECUTED_BY_HOST`].
  */

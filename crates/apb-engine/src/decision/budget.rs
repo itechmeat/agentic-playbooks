@@ -172,6 +172,7 @@ mod tests {
 
     fn made(cost: Option<f64>) -> EventPayload {
         EventPayload::DecisionMade {
+            item: None,
             use_site: "host_task".into(),
             node: None,
             attempt: None,

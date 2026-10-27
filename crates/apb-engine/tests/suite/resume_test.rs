@@ -120,6 +120,7 @@ fn keep_journal_through<F: Fn(&EventPayload) -> bool>(root: &Path, run_id: &str,
 
 fn attempt_started(node: &str) -> EventPayload {
     EventPayload::AttemptStarted {
+        item: None,
         node: node.into(),
         attempt: 1,
         agent: "claude-code".into(),

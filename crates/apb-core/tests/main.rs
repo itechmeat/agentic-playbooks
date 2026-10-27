@@ -45,6 +45,8 @@ mod inbox_store_test;
 mod instruction_draft_test;
 #[path = "suite/interactive_howto_example_test.rs"]
 mod interactive_howto_example_test;
+#[path = "suite/list_schema_test.rs"]
+mod list_schema_test;
 #[path = "suite/migration_test.rs"]
 mod migration_test;
 #[path = "suite/models_table_test.rs"]

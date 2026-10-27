@@ -1282,6 +1282,7 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
     // first attempt and every later one.
     let mut log = apb_engine::event::EventLog::open(run_dir).unwrap();
     log.append(EventPayload::AttemptStarted {
+        item: None,
         node: NODE.to_string(),
         attempt,
         agent: "test-agent".to_string(),

@@ -13,6 +13,8 @@
 //!   every script criterion is `error` and none runs.
 //! - `marker`: the literal marker must appear in the finish answer or in the
 //!   latest output of any node.
+//! - `list`: the list node's latest visit processed every item and none
+//!   needs a look.
 //! - `manual`: never checked by the engine; journaled `manual` so every
 //!   surface shows it as an item for a person to confirm.
 //!
@@ -55,6 +57,27 @@ fn check_name(c: &GoalCheck) -> &'static str {
         GoalCheck::Manual => "manual",
         GoalCheck::Marker { .. } => "marker",
         GoalCheck::Script { .. } => "script",
+        GoalCheck::List { .. } => "list",
+    }
+}
+
+/// A `list` criterion: the list node's latest visit processed every item
+/// and none needs a look.
+fn list_status(events: &[crate::event::Event], node: &str) -> (&'static str, Option<String>) {
+    let Some(fold) = crate::list::ListFold::of(events, node) else {
+        return (status::FAILED, Some(format!("list `{node}` never ran")));
+    };
+    let c = fold.counts();
+    if c.processed == c.total && c.needs_look == 0 {
+        (status::PASSED, None)
+    } else {
+        (
+            status::FAILED,
+            Some(format!(
+                "list `{node}`: {}",
+                crate::list::progress_label(&c)
+            )),
+        )
     }
 }
 
@@ -111,6 +134,7 @@ pub(crate) fn check(
                     )
                 }
             }
+            GoalCheck::List { node } => list_status(&events, node),
             GoalCheck::Script { .. } if tampered.is_some() => (status::ERROR, tampered.clone()),
             GoalCheck::Script { path } => {
                 let mut env = crate::script::run_env(run_dir, None);

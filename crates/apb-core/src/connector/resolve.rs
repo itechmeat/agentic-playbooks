@@ -110,6 +110,7 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
 
     let mut grants: BTreeMap<String, Vec<ResolvedGrant>> = BTreeMap::new();
     for (site, bindings) in playbook.connector_sites() {
+        let site: &str = &site;
         if bindings.is_empty() {
             continue;
         }

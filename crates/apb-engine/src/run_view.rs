@@ -363,6 +363,7 @@ mod decision_tests {
             seq,
             ts: seq as u128,
             payload: EventPayload::DecisionMade {
+                item: None,
                 enforce_refused: None,
                 join: BTreeMap::new(),
                 use_site: "completion_check".into(),
@@ -530,6 +531,7 @@ mod tests {
                     attempt: 1,
                 },
                 EventPayload::AttemptStarted {
+                    item: None,
                     node: "agent".into(),
                     attempt: 1,
                     agent: "stub".into(),

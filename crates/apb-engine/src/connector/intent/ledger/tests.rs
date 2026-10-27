@@ -15,6 +15,7 @@ const NOW: u64 = 1_000_000_000;
 
 fn key(label: &str) -> IntentKey {
     IntentKey {
+        item: None,
         node: "n".into(),
         connector: "c".into(),
         function: "send".into(),
@@ -70,6 +71,7 @@ impl Journal {
         self.push(
             ts,
             EventPayload::SendIntentRecorded {
+                item: None,
                 intent: id.into(),
                 // A replay carries the nonce of the send it repeats.
                 nonce: format!("nonce-{}", replay_of.unwrap_or(id)),

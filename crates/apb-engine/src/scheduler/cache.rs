@@ -75,7 +75,11 @@ fn cache_eligible<'a>(playbook: &'a Playbook, node_id: &str, cfg: &RunConfig) ->
     let node = playbook.node(node_id)?;
     // A node with its own `workdir` (issue #67 item 4) runs outside the tree
     // the cache fingerprints and stores into, so it never participates.
-    if node.cache_mode() != CacheMode::Auto || node.kind.workdir_template().is_some() {
+    // A list node's output is its items' settlements, never a cache entry.
+    if node.cache_mode() != CacheMode::Auto
+        || node.kind.workdir_template().is_some()
+        || node.list().is_some()
+    {
         return None;
     }
     match &node.kind {

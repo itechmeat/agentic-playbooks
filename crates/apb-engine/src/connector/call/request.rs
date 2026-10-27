@@ -53,6 +53,18 @@ impl<'a> CallContext<'a> {
             origin: CallOrigin::Node,
         }
     }
+
+    /// apb's check of list item `item`, through the `<node>#check` grant.
+    pub(crate) fn item_check(item: &str) -> Self {
+        CallContext {
+            intent: None,
+            claim: AttemptClaim {
+                item: Some(item.to_string()),
+                ..AttemptClaim::default()
+            },
+            origin: CallOrigin::Check,
+        }
+    }
 }
 
 /// Who makes a call.
@@ -65,6 +77,9 @@ pub(crate) enum CallOrigin {
     /// function of the granted connector and is never charged to
     /// `max_calls`.
     Reconcile,
+    /// apb itself, checking a list item through the `<node>#check` grant:
+    /// read-only functions only, never charged to `max_calls`.
+    Check,
 }
 
 impl CallOrigin {
@@ -73,6 +88,7 @@ impl CallOrigin {
         match self {
             CallOrigin::Node => None,
             CallOrigin::Reconcile => Some("reconcile".to_string()),
+            CallOrigin::Check => Some("check".to_string()),
         }
     }
 }

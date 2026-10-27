@@ -1,6 +1,11 @@
-//! What makes two sends the same send: the node, the connector function,
-//! the account, and a label. The label is the caller's `--intent` name when
-//! it gives one, and otherwise a short hash of the arguments, so a retry that
+//! What makes two sends the same send: the node (and list item), the
+//! connector function, the account, and a label. The label is the caller's
+//! `--intent` name when it gives one. Without one it is, for a list item's
+//! send, [`ITEM_LABEL`]: one send per item and function, so a rerun of the
+//! item that writes the payload differently is still the same send (and
+//! answers `already_sent` once it went out); an item that sends one
+//! function more than once names each send with its own `--intent`.
+//! Outside a list it is a short hash of the arguments, so a retry that
 //! repeats a call word for word is recognised even without a name.
 
 use serde_json::Value;
@@ -13,13 +18,38 @@ pub struct IntentKey {
     pub function: String,
     pub account: String,
     pub label: String,
+    /// The list item the send belongs to: a send of one item is never the
+    /// same send as another item's, whatever its label.
+    pub item: Option<String>,
+}
+
+impl IntentKey {
+    /// The execution the send belongs to.
+    pub fn exec_key(&self) -> crate::exec_key::ExecKey<'_> {
+        crate::exec_key::ExecKey::new(&self.node, self.item.as_deref())
+    }
 }
 
 /// What every label of a send made without `--intent` starts with; a
 /// caller's `--intent` never does (`:` is not allowed in one).
 pub const ARGS_LABEL_PREFIX: &str = "args:";
 
-/// The label of a send made without `--intent`: `args:` plus the first 16
+/// The label of a list item's send made without `--intent`: the item
+/// itself is the send (the key already names the node, the item, the
+/// connector function and the account). A caller's `--intent` never
+/// equals it (`:` is not allowed in one).
+pub const ITEM_LABEL: &str = "item:send";
+
+/// The label of a send made without `--intent`: [`ITEM_LABEL`] for a list
+/// item's send, else [`args_label`].
+pub fn default_label(item: Option<&str>, args: &Value) -> String {
+    match item {
+        Some(_) => ITEM_LABEL.to_string(),
+        None => args_label(args),
+    }
+}
+
+/// The label of a send outside a list made without `--intent`: `args:` plus the first 16
 /// hex characters of the SHA-256 of the arguments' canonical JSON (object
 /// keys sorted at every level), taken as the caller wrote them, before any
 /// text mode or stamp.
@@ -93,6 +123,15 @@ mod tests {
             a,
             args_label(&json!({ "b": 2, "a": { "y": [1, 2], "x": "s" } }))
         );
+    }
+
+    #[test]
+    fn an_item_send_without_a_name_is_one_send_whatever_its_args() {
+        let one = default_label(Some("a"), &json!({ "text": "hi" }));
+        assert_eq!(one, default_label(Some("a"), &json!({ "text": "hello" })));
+        assert!(validate_label(&one).is_err(), "no --intent can take it");
+        let outside = default_label(None, &json!({ "text": "hi" }));
+        assert_eq!(outside, args_label(&json!({ "text": "hi" })));
     }
 
     #[test]

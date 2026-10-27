@@ -68,6 +68,8 @@ impl BaselineRun<'_> {
             cancel,
             phase,
             events,
+            guard_tree: true,
+            scripts_label: "baseline scripts",
         }
     }
 }

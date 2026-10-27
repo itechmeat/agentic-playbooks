@@ -125,6 +125,7 @@ impl Run {
     fn start_attempt(&self, attempt: u32) -> u64 {
         let token = apb_core::connector::marker::new_nonce();
         let seq = self.journal(EventPayload::AttemptStarted {
+            item: None,
             node: NODE.into(),
             attempt,
             agent: "claude".into(),
@@ -138,6 +139,7 @@ impl Run {
             token: Some(token.clone()),
         });
         *self.current.lock().unwrap() = AttemptClaim {
+            item: None,
             attempt: Some(attempt),
             token: Some(token),
             host_task: None,
@@ -149,6 +151,7 @@ impl Run {
     fn finish_attempt(&self, status: &str) {
         let attempt = self.current.lock().unwrap().attempt.unwrap_or(1);
         self.journal(EventPayload::AttemptFinished {
+            item: None,
             node: NODE.into(),
             attempt,
             status: status.into(),
@@ -306,6 +309,7 @@ fn seed_old_unknown_intent(run: &Run, function: &str, label: &str, mode: &str) {
             seq: next,
             ts: old,
             payload: EventPayload::SendIntentRecorded {
+                item: None,
                 intent: "si-old".into(),
                 nonce: "oldnonce".into(),
                 node: NODE.into(),
@@ -887,6 +891,7 @@ fn a_call_from_an_adopted_host_task_binds_to_the_adopting_attempt() {
         discord_args(),
         None,
         AttemptClaim {
+            item: None,
             attempt: Some(3),
             token: Some("the-opening-attempts-token".into()),
             host_task: Some("announce-t1".into()),
@@ -1092,6 +1097,7 @@ fn a_person_may_not_decide_a_send_in_flight_but_may_once_its_sender_is_gone() {
     let gone_pid = i32::MAX as u32;
     for (id, pid) in [("si-live", std::process::id()), ("si-gone", gone_pid)] {
         run.journal(EventPayload::SendIntentRecorded {
+            item: None,
             intent: id.into(),
             nonce: format!("n-{id}"),
             node: NODE.into(),
@@ -1122,4 +1128,63 @@ fn a_person_may_not_decide_a_send_in_flight_but_may_once_its_sender_is_gone() {
         resolve_by_person(dir, "si-none", true, None, "ana"),
         Err(ResolveError::NotFound(_))
     ));
+}
+
+/// A made-up `APB_ITEM_ID` buys nothing: on a plain node and on a list node
+/// whose item attempt is running, a caller that names an item with no
+/// attempt of its own may neither send nor make another call past a spent
+/// `max_calls`.
+#[test]
+fn a_made_up_item_id_may_neither_send_nor_reset_the_budget() {
+    let _lock = common::env_lock();
+    for list in [false, true] {
+        let stub = spawn_script(vec![Reply::Respond(200, r#"{"id":"m-1"}"#.into())]);
+        let run = run_with(
+            "discord",
+            &stub.base_url,
+            Grant {
+                functions: &["send_message"],
+                on_unknown: None,
+                max_calls: Some(1),
+            },
+        );
+        if list {
+            run.journal(EventPayload::ListStarted {
+                node: NODE.into(),
+                total: 1,
+                filtered_out: 0,
+                items_digest: String::new(),
+                batch_size: 1,
+                parallel: 1,
+                reopened: false,
+            });
+            run.journal(EventPayload::ListBatchStarted {
+                node: NODE.into(),
+                batch: 1,
+                items: vec!["a".into()],
+            });
+            let mut started = read_all(run.run.path())
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find_map(|e| match e.payload {
+                    p @ EventPayload::AttemptStarted { .. } => Some(p),
+                    _ => None,
+                })
+                .unwrap();
+            started.stamp_item("a");
+            run.journal(started);
+            run.current.lock().unwrap().item = Some("a".into());
+        }
+        assert!(run.call("send_message", discord_args(), Some("one")).1);
+        let forged = AttemptClaim {
+            item: Some("bogus".into()),
+            ..run.current.lock().unwrap().clone()
+        };
+        let (refused, ok) = run.call_as("send_message", discord_args(), Some("two"), forged);
+        assert!(!ok, "list node: {list}");
+        assert_ne!(code(&refused), "", "list node: {list}");
+        assert_eq!(stub.requests().len(), 1, "list node: {list}");
+        assert_eq!(run.ledger().records().len(), 1, "list node: {list}");
+    }
 }

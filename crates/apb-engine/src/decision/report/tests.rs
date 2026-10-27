@@ -20,6 +20,7 @@ fn decision_event(seq: u64, p: Option<f64>, regex_flag: bool, output_chars: u64)
         seq,
         ts: 1_000 + u128::from(seq),
         payload: EventPayload::DecisionMade {
+            item: None,
             enforce_refused: None,
             join: BTreeMap::new(),
             use_site: "completion_check".into(),
@@ -72,6 +73,7 @@ fn attempt(seq: u64, node: &str, ms: u64) -> Event {
     ev(
         seq,
         EventPayload::AttemptFinished {
+            item: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: node.into(),
@@ -591,6 +593,7 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
         let decision = ev(
             2,
             EventPayload::DecisionMade {
+                item: None,
                 enforce_refused: None,
                 join: BTreeMap::new(),
                 use_site: "review_triage".into(),

@@ -19,9 +19,11 @@ use std::path::Path;
 use apb_core::connector::idempotency::IdempotencyMode;
 
 use crate::connector::intent::{
-    ARGS_LABEL_PREFIX, IntentRecord, IntentState, Ledger, chain_verdict, effect_scope_floor,
+    ARGS_LABEL_PREFIX, ITEM_LABEL, IntentRecord, IntentState, Ledger, chain_verdict,
+    effect_scope_floor,
 };
 use crate::event::{Event, EventPayload};
+use crate::exec_key::ExecKey;
 use crate::run_outcome::calls::{CallClass, classified_calls};
 
 /// At most this many effect lines are listed; the rest is counted.
@@ -30,10 +32,12 @@ const MAX_EFFECT_LINES: usize = 30;
 /// The longest failure line quoted from an attempt.
 const MAX_FAILURE_CHARS: usize = 160;
 
-/// What the earlier attempts of one node did.
+/// What the earlier attempts of one node (or one list item) did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttemptMemory {
     attempts: Vec<AttemptRecall>,
+    /// A list item's check rejections in scope: `(round, note)`.
+    rejections: Vec<(u32, String)>,
 }
 
 /// One earlier attempt and its effects.
@@ -66,12 +70,12 @@ struct Effect {
     what: String,
 }
 
-/// The attempts of `node` in its effect scope, with their effects; `None`
+/// The attempts of `key` in its effect scope, with their effects; `None`
 /// when there is none (a first attempt, or a loop visit after a success).
 /// `run_dir` holds the connector snapshots that tell a write from a read.
-pub(crate) fn recall(run_dir: &Path, events: &[Event], node: &str) -> Option<AttemptMemory> {
-    let floor = effect_scope_floor(events, node);
-    let mut attempts = started_attempts(events, node, floor);
+pub(crate) fn recall(run_dir: &Path, events: &[Event], key: ExecKey<'_>) -> Option<AttemptMemory> {
+    let floor = effect_scope_floor(events, key);
+    let mut attempts = started_attempts(events, key, floor);
     if attempts.is_empty() {
         return None;
     }
@@ -83,7 +87,7 @@ pub(crate) fn recall(run_dir: &Path, events: &[Event], node: &str) -> Option<Att
     for tip in ledger
         .records()
         .iter()
-        .filter(|r| r.seq >= floor && r.key.node == node && r.superseded_by.is_none())
+        .filter(|r| r.seq >= floor && r.key.exec_key() == key && r.superseded_by.is_none())
     {
         let verdict = chain_verdict(&ledger, tip, now);
         let rec = verdict.member;
@@ -92,27 +96,75 @@ pub(crate) fn recall(run_dir: &Path, events: &[Event], node: &str) -> Option<Att
             .effects
             .push(intent_effect(rec, &verdict.state));
     }
-    for call in classified_calls(run_dir, events)
-        .into_iter()
-        .filter(|c| c.seq >= floor && c.node == node && c.intent.is_none())
-    {
+    for call in classified_calls(run_dir, events).into_iter().filter(|c| {
+        c.seq >= floor && c.node == key.node && c.item.as_deref() == key.item && c.intent.is_none()
+    }) {
         if let Some(effect) = write_effect(&call.target(), &call.outcome, call.class) {
             let at = owner(&attempts, call.attempt_seq, call.seq);
             attempts[at].effects.push(effect);
         }
     }
-    Some(AttemptMemory { attempts })
+    Some(AttemptMemory {
+        attempts,
+        rejections: rejections(events, key, floor),
+    })
 }
 
-/// Every `attempt_started` of `node` from `floor` on, with how it ended.
-fn started_attempts(events: &[Event], node: &str, floor: u64) -> Vec<AttemptRecall> {
+/// A list item's check rejections from `floor` on, as `(round, note)`.
+fn rejections(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<(u32, String)> {
+    let Some(id) = key.item else {
+        return Vec::new();
+    };
+    events
+        .iter()
+        .filter(|e| e.seq >= floor)
+        .filter_map(|e| match &e.payload {
+            EventPayload::ListItemSettled {
+                node,
+                item,
+                state,
+                note,
+                round,
+                ..
+            } if node == key.node
+                && item == id
+                && state == crate::list::ledger::settled::REJECTED =>
+            {
+                Some((
+                    round.saturating_sub(1),
+                    note.clone().unwrap_or_else(|| "no note".to_string()),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The retry briefing of `key` as a paragraph to append to an attempt's
+/// prompt, empty when no earlier attempt is in scope. Appended outside
+/// `render_node_prompt`, so the node's cache key does not move.
+pub(crate) fn retry_briefing(run_dir: &Path, events: &[Event], key: ExecKey<'_>) -> String {
+    recall(run_dir, events, key)
+        .map(|m| format!("\n\n{}", m.briefing()))
+        .unwrap_or_default()
+}
+
+/// [`retry_briefing`] over the journal as it stands. Processes outside the
+/// drive (`apb connector call`) append to it while it is read, so a torn
+/// last line is forgiven; a journal that cannot be read leaves the advisory
+/// briefing out rather than failing the attempt.
+pub(crate) fn retry_briefing_now(run_dir: &Path, key: ExecKey<'_>) -> String {
+    crate::event::read_all_lossy_tail(run_dir)
+        .map(|events| retry_briefing(run_dir, &events, key))
+        .unwrap_or_default()
+}
+
+/// Every `attempt_started` of `key` from `floor` on, with how it ended.
+fn started_attempts(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<AttemptRecall> {
     let starts: Vec<(usize, &Event)> = events
         .iter()
         .enumerate()
-        .filter(|(_, e)| {
-            e.seq >= floor
-                && matches!(&e.payload, EventPayload::AttemptStarted { node: n, .. } if n == node)
-        })
+        .filter(|(_, e)| e.seq >= floor && key.started(e))
         .collect();
     starts
         .iter()
@@ -130,14 +182,13 @@ fn started_attempts(events: &[Event], node: &str, floor: u64) -> Vec<AttemptReca
             let until = starts.get(i + 1).map_or(events.len(), |(next, _)| *next);
             let finished = events[*at..until].iter().find_map(|f| match &f.payload {
                 EventPayload::AttemptFinished {
-                    node: n,
                     attempt: a,
                     status,
                     failure_kind,
                     summary,
                     partial_output,
                     ..
-                } if n == node && a == attempt => Some(ending(
+                } if key.finished(f) && a == attempt => Some(ending(
                     status,
                     failure_kind.as_deref(),
                     summary.as_deref().or(partial_output.as_deref()),
@@ -265,9 +316,12 @@ fn intent_effect(rec: &IntentRecord, state: &IntentState) -> Effect {
 }
 
 /// How the agent repeats the send of `rec`: with its `--intent`, or, for a
-/// send made without one, as the same call word for word.
+/// send made without one, as the item's send of the function (a list item)
+/// or the same call word for word.
 fn repeat_of(rec: &IntentRecord) -> String {
-    if rec.key.label.starts_with(ARGS_LABEL_PREFIX) {
+    if rec.key.label == ITEM_LABEL {
+        "a call of the same function for this item with no --intent".to_string()
+    } else if rec.key.label.starts_with(ARGS_LABEL_PREFIX) {
         "the same call with byte-identical arguments and no --intent".to_string()
     } else {
         format!("a call with --intent {}", rec.key.label)
@@ -310,6 +364,12 @@ impl AttemptMemory {
                 None => a.agent.clone(),
             };
             let _ = writeln!(out, "Attempt {} ({binding}): {}.", a.ordinal, a.ending);
+        }
+        for (round, note) in &self.rejections {
+            // The check's note is data: its first line, bounded, quoted.
+            let note = first_line(note).unwrap_or_else(|| "no note".to_string());
+            let note = serde_json::to_string(&note).unwrap_or_default();
+            let _ = writeln!(out, "Check rejected round {round}, its note: {note}");
         }
         let mut listed = 0usize;
         let mut total = 0usize;
@@ -389,6 +449,7 @@ mod tests {
         ev(
             seq,
             EventPayload::AttemptStarted {
+                item: None,
                 node: "send".into(),
                 attempt,
                 agent: agent.into(),
@@ -408,6 +469,7 @@ mod tests {
         ev(
             seq,
             EventPayload::AttemptFinished {
+                item: None,
                 node: "send".into(),
                 attempt,
                 status: status.into(),
@@ -428,6 +490,7 @@ mod tests {
         ev(
             seq,
             EventPayload::SendIntentRecorded {
+                item: None,
                 intent: id.into(),
                 nonce: format!("n-{id}"),
                 node: "send".into(),
@@ -475,7 +538,7 @@ mod tests {
 
     fn briefing(events: &[Event]) -> Option<String> {
         let dir = tempfile::tempdir().unwrap();
-        recall(dir.path(), events, "send").map(|m| m.briefing())
+        recall(dir.path(), events, ExecKey::node("send")).map(|m| m.briefing())
     }
 
     #[test]

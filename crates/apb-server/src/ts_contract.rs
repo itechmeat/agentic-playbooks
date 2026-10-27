@@ -76,6 +76,10 @@ fn render_types() -> String {
         apb_engine::event::ReviewRecommendation::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
+        // List mode: a list node's counts and its items.
+        apb_engine::list::ListProgress::decl(&cfg),
+        apb_engine::list::RunListItem::decl(&cfg),
+        apb_engine::list::RunList::decl(&cfg),
         apb_engine::progress::ProgressSummary::decl(&cfg),
         apb_engine::run_view::ChildRun::decl(&cfg),
         apb_engine::run_view::RunUsage::decl(&cfg),

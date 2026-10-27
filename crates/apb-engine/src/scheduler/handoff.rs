@@ -42,6 +42,7 @@ fn source_attempt(events: &[Event], source: &str) -> Result<SourceAttempt, Strin
                 attempt,
                 status,
                 session,
+                item: None,
                 ..
             } if node == source && status == NodeStatus::Succeeded.as_str() => {
                 Some((i, *attempt, session.clone()))
@@ -64,6 +65,7 @@ fn source_attempt(events: &[Event], source: &str) -> Result<SourceAttempt, Strin
                 agent,
                 model,
                 workdir,
+                item: None,
                 ..
             } if node == source && *a == attempt => Some(SourceAttempt {
                 session: session.clone(),

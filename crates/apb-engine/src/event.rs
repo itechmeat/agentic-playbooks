@@ -130,6 +130,10 @@ pub enum EventPayload {
         /// logs and for attempts that make no connector calls.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// The list item this belongs to, for an item of a list node
+        /// (`list:`). Absent everywhere else. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -141,6 +145,10 @@ pub enum EventPayload {
     AttemptExited {
         node: String,
         attempt: u32,
+        /// The list item this belongs to, for an item of a list node
+        /// (`list:`). Absent everywhere else. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
     },
     AttemptFinished {
         node: String,
@@ -225,6 +233,10 @@ pub enum EventPayload {
         /// success. Additive, old logs read unchanged.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         transcript_incomplete: bool,
+        /// The list item this belongs to, for an item of a list node
+        /// (`list:`). Absent everywhere else. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -601,6 +613,10 @@ pub enum EventPayload {
         )]
         join: std::collections::BTreeMap<String, serde_json::Value>,
         // --- end labels and enforce ---
+        /// The list item this belongs to, for an item of a list node
+        /// (`list:`). Absent everywhere else. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
     },
     /// An explicit cycle-progress report (spec 2026-07-17): the current
     /// iteration `done` of `total` for the cycle group anchored at `node_id`.
@@ -702,6 +718,10 @@ pub enum EventPayload {
         /// `reconcile` for apb's own lookup of an earlier send.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        /// The list item this belongs to, for an item of a list node
+        /// (`list:`). Absent everywhere else. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
     },
     /// A send through a connector function that declares `idempotency` is
     /// about to leave: what it is, who sends it, and the nonce that makes it
@@ -754,6 +774,10 @@ pub enum EventPayload {
         /// the binding allows a resend).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resend_of: Option<String>,
+        /// The list item this belongs to, for an item of a list node
+        /// (`list:`). Absent everywhere else. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
     },
     /// What became of a send intent: `confirmed`, `not_sent` or `unknown`,
     /// and how that is known (`response`, `reconcile`, `key_replay`, `gate`,
@@ -1357,6 +1381,67 @@ pub enum EventPayload {
         dropped: u32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dropped_reasons: Vec<String>,
+    },
+    /// A visit of a list node (`list:`) started: the items it holds after
+    /// the filter, how many the filter dropped, and their digest. `reopened`
+    /// marks a supervisor retry after a failed visit. Written before any
+    /// item runs; safe to skip up to the node's `node_finished` or a
+    /// `run_paused`, which always follows. Additive variant.
+    ListStarted {
+        node: String,
+        #[serde(default)]
+        total: u32,
+        #[serde(default)]
+        filtered_out: u32,
+        #[serde(default)]
+        items_digest: String,
+        #[serde(default)]
+        batch_size: u32,
+        #[serde(default)]
+        parallel: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reopened: bool,
+    },
+    /// The ids admitted into batch `batch` (from 1) of a list visit. Safe to
+    /// skip like `list_started`. Additive variant.
+    ListBatchStarted {
+        node: String,
+        #[serde(default)]
+        batch: u32,
+        #[serde(default)]
+        items: Vec<String>,
+    },
+    /// Where one item of a list visit went: `passed`, `rejected` (it runs
+    /// again), `needs_look` or `interrupted` (back to pending). `output` is
+    /// the compact JSON of the item's declared outputs, clipped. `carried`
+    /// marks an item a `rerun: not_passed` visit kept from the previous one.
+    /// Every item of a batch settles before the next batch starts. Safe to
+    /// skip like `list_started`. Additive variant.
+    ListItemSettled {
+        node: String,
+        #[serde(default)]
+        item: String,
+        #[serde(default)]
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default)]
+        round: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        carried: bool,
+        /// Which check decided (`output`, `script`, `connector`, `judge`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check: Option<String>,
+        /// The digest of the item's content, on a pass: `rerun: not_passed`
+        /// carries a passed item only while its content is the same.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
     },
 }
 
@@ -2442,6 +2527,7 @@ mod tests {
     #[test]
     fn attempt_started_spawn_ms_round_trips() {
         let p = EventPayload::AttemptStarted {
+            item: None,
             node: "a".into(),
             attempt: 1,
             agent: "claude".into(),
@@ -2542,6 +2628,7 @@ mod tests {
     #[test]
     fn attempt_finished_with_rejected_output_round_trips() {
         let payload = EventPayload::AttemptFinished {
+            item: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),
@@ -2580,6 +2667,7 @@ mod tests {
     #[test]
     fn attempt_finished_with_failure_kind_round_trips() {
         let payload = EventPayload::AttemptFinished {
+            item: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),
@@ -2651,6 +2739,7 @@ mod tests {
     #[test]
     fn attempt_finished_with_session_round_trips() {
         let payload = EventPayload::AttemptFinished {
+            item: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),

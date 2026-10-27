@@ -70,6 +70,7 @@ fn attempt_finished_rejected_output_populates_rejected_outputs() {
         ev(
             1,
             EventPayload::AttemptFinished {
+                item: None,
                 output_truncated: Vec::new(),
                 transcript_incomplete: false,
                 node: "a".into(),
@@ -114,6 +115,7 @@ fn open_attempt_marks_interrupted() {
         ev(
             1,
             EventPayload::AttemptStarted {
+                item: None,
                 node: "ping".into(),
                 attempt: 1,
                 agent: "claude-code".into(),
@@ -209,6 +211,7 @@ fn a_legacy_resume_marker_followed_by_a_crash_reads_interrupted() {
         ev(
             3,
             EventPayload::AttemptStarted {
+                item: None,
                 node: "a".into(),
                 attempt: 1,
                 agent: "claude".into(),
@@ -260,6 +263,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
         ev(
             1,
             EventPayload::AttemptStarted {
+                item: None,
                 node: "ping".into(),
                 attempt: 1,
                 agent: "claude-code".into(),
@@ -276,6 +280,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
         ev(
             2,
             EventPayload::AttemptFinished {
+                item: None,
                 output_truncated: Vec::new(),
                 transcript_incomplete: false,
                 node: "ping".into(),
@@ -300,6 +305,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
         ev(
             4,
             EventPayload::AttemptStarted {
+                item: None,
                 node: "ping".into(),
                 attempt: 2,
                 agent: "claude-code".into(),

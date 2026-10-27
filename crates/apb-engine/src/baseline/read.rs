@@ -102,7 +102,7 @@ fn render_params(v: &Value, ctx: &ReadCtx<'_>) -> Value {
 
 /// Why a call result cannot be read as a whole, current answer, or the body
 /// it carries.
-fn readable_body(result: &Value) -> Result<&Value, String> {
+pub(crate) fn readable_body(result: &Value) -> Result<&Value, String> {
     if result.get("ok") != Some(&Value::Bool(true)) {
         let err = &result["error"];
         return Err(format!(
@@ -120,6 +120,42 @@ fn readable_body(result: &Value) -> Result<&Value, String> {
         return Err("the inbox reported a gap".into());
     }
     Ok(&result["body"])
+}
+
+/// One read-only connector function a source names.
+pub(crate) struct ConnectorRead<'a> {
+    /// The grant site the call is made through.
+    pub site: &'a str,
+    pub name: &'a str,
+    pub account: Option<&'a str>,
+    pub function: &'a str,
+    pub args: Value,
+    pub timeout_seconds: u64,
+}
+
+/// Calls `read` and returns the body it read whole, or why it could not:
+/// a failed call, a cut response or an inbox gap.
+pub(crate) fn call_connector_json(
+    read: ConnectorRead<'_>,
+    ctx: &ReadCtx<'_>,
+    call: crate::connector::call::CallContext<'_>,
+) -> Result<Value, String> {
+    let (result, _) = crate::connector::call::execute_with_within(
+        crate::connector::call::CallRequest {
+            run_dir: ctx.run_dir,
+            root: ctx.root,
+            node_id: read.site,
+            connector: read.name,
+            function: read.function,
+            account: read.account,
+            args: read.args,
+            dry_run: false,
+            full: false,
+        },
+        call,
+        read.timeout_seconds,
+    );
+    readable_body(&result).cloned()
 }
 
 fn connector(check: &BaselineCheck, conn: &BaselineConnector, ctx: &ReadCtx<'_>) -> Snapshot {
@@ -142,27 +178,21 @@ fn connector(check: &BaselineCheck, conn: &BaselineConnector, ctx: &ReadCtx<'_>)
         .as_bytes(),
     );
     let inputs = vec![format!("{}.{}", conn.name, conn.function)];
-    let (result, _) = crate::connector::call::execute_within(
-        crate::connector::call::CallRequest {
-            run_dir: ctx.run_dir,
-            root: ctx.root,
-            node_id: apb_core::baseline::BASELINE_SITE,
-            connector: &conn.name,
-            function: &conn.function,
-            account: conn.account.as_deref(),
-            args,
-            dry_run: false,
-            full: false,
-        },
-        check.timeout_seconds,
-    );
-    let body = match readable_body(&result) {
+    let read = ConnectorRead {
+        site: apb_core::baseline::BASELINE_SITE,
+        name: &conn.name,
+        account: conn.account.as_deref(),
+        function: &conn.function,
+        args,
+        timeout_seconds: check.timeout_seconds,
+    };
+    let body = match call_connector_json(read, ctx, Default::default()) {
         Ok(b) => b,
         Err(why) => return unknown(why, input_digest, inputs, ctx),
     };
     if let Some(cw) = &check.complete_when {
         let equals = render_params(&cw.equals, ctx);
-        if !apb_core::baseline::extract::holds(body, &cw.path, &equals) {
+        if !apb_core::baseline::extract::holds(&body, &cw.path, &equals) {
             return unknown(
                 format!(
                     "the response is not complete: `{}` is not {equals}",
@@ -174,7 +204,7 @@ fn connector(check: &BaselineCheck, conn: &BaselineConnector, ctx: &ReadCtx<'_>)
             );
         }
     }
-    observed(check, body, input_digest, inputs, ctx)
+    observed(check, &body, input_digest, inputs, ctx)
 }
 
 /// The last non-empty stdout line as one JSON object.
@@ -187,6 +217,72 @@ fn last_object(stdout: &str) -> Result<Value, String> {
     match serde_json::from_str::<Value>(line.trim()) {
         Ok(v @ Value::Object(_)) => Ok(v),
         _ => Err("the last line the script printed is not one JSON object".into()),
+    }
+}
+
+/// What a check script said.
+#[derive(Debug)]
+pub(crate) enum ScriptJson {
+    /// It exited 0 and its last line is this JSON object.
+    Doc(Value),
+    /// It exited non-zero; the tail of its stderr.
+    Exited { stderr: String },
+    /// It could not be read honestly (tampered, timed out, printed too
+    /// much or no object, changed the tree, could not run).
+    Unknown(String),
+}
+
+/// Runs `path` (under the run directory's `scripts/` copy) in the working
+/// tree with the run context env plus `env`, and reads what it printed.
+pub(crate) fn run_script_json(
+    path: &str,
+    timeout_seconds: u64,
+    env: &[(&'static str, String)],
+    ctx: &ReadCtx<'_>,
+) -> ScriptJson {
+    if let Some(why) = crate::run_scripts::tampered(ctx.run_dir, ctx.events, ctx.scripts_label) {
+        return ScriptJson::Unknown(why);
+    }
+    let mut all = crate::script::run_env(ctx.run_dir, None);
+    all.extend(env.iter().cloned());
+    all.extend(ctx.spawn_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
+    let ran = ctx.tree_guarded(|| {
+        crate::script::run_script_with_env_removed(
+            ctx.run_dir,
+            ctx.workdir,
+            path,
+            "sh",
+            Some(Duration::from_secs(timeout_seconds)),
+            Some(ctx.cancel),
+            &all,
+            &ctx.scrub_names(),
+        )
+    });
+    let r = match ran {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return ScriptJson::Unknown(e.to_string()),
+        Err(why) => return ScriptJson::Unknown(why.to_string()),
+    };
+    match r.status {
+        NodeStatus::Succeeded => {}
+        NodeStatus::Failed => {
+            return ScriptJson::Exited {
+                stderr: crate::list::prompt::clip_tail(&r.stderr, 1024).to_string(),
+            };
+        }
+        NodeStatus::TimedOut => {
+            return ScriptJson::Unknown(format!("`{path}` ran past {timeout_seconds} s"));
+        }
+        other => return ScriptJson::Unknown(format!("`{path}` ended {}", other.as_str())),
+    }
+    if r.stdout.len() > SCRIPT_STDOUT_CAP {
+        return ScriptJson::Unknown(format!(
+            "`{path}` printed more than {SCRIPT_STDOUT_CAP} bytes"
+        ));
+    }
+    match last_object(&r.stdout) {
+        Ok(doc) => ScriptJson::Doc(doc),
+        Err(why) => ScriptJson::Unknown(why),
     }
 }
 
@@ -204,31 +300,10 @@ fn script(check: &BaselineCheck, path: &str, ctx: &ReadCtx<'_>) -> Snapshot {
         }
     };
     let input_digest = sha256_hex(&content);
-    if let Some(why) = crate::run_scripts::tampered(ctx.run_dir, ctx.events, "baseline scripts") {
-        return unknown(why, input_digest, inputs, ctx);
-    }
-    let mut env = crate::script::run_env(ctx.run_dir, None);
-    env.push(("APB_BASELINE_PHASE", ctx.phase.to_string()));
-    env.extend(ctx.spawn_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
-    let ran = ctx.tree_guarded(|| {
-        crate::script::run_script_with_env_removed(
-            ctx.run_dir,
-            ctx.workdir,
-            path,
-            "sh",
-            Some(Duration::from_secs(check.timeout_seconds)),
-            Some(ctx.cancel),
-            &env,
-            &ctx.scrub_names(),
-        )
-    });
-    let ran = match ran {
-        Ok(r) => r,
-        Err(why) => return unknown(why, input_digest, inputs, ctx),
-    };
-    let out = match ran {
-        Ok(r) if r.status == NodeStatus::Succeeded => r.stdout,
-        Ok(r) if r.status == NodeStatus::Failed => {
+    let env = [("APB_BASELINE_PHASE", ctx.phase.to_string())];
+    let doc = match run_script_json(path, check.timeout_seconds, &env, ctx) {
+        ScriptJson::Doc(doc) => doc,
+        ScriptJson::Exited { .. } => {
             return unknown(
                 format!("`{path}` exited non-zero"),
                 input_digest,
@@ -236,35 +311,7 @@ fn script(check: &BaselineCheck, path: &str, ctx: &ReadCtx<'_>) -> Snapshot {
                 ctx,
             );
         }
-        Ok(r) if r.status == NodeStatus::TimedOut => {
-            return unknown(
-                format!("`{path}` ran past {} s", check.timeout_seconds),
-                input_digest,
-                inputs,
-                ctx,
-            );
-        }
-        Ok(r) => {
-            return unknown(
-                format!("`{path}` ended {}", r.status.as_str()),
-                input_digest,
-                inputs,
-                ctx,
-            );
-        }
-        Err(e) => return unknown(e.to_string(), input_digest, inputs, ctx),
-    };
-    if out.len() > SCRIPT_STDOUT_CAP {
-        return unknown(
-            format!("`{path}` printed more than {SCRIPT_STDOUT_CAP} bytes"),
-            input_digest,
-            inputs,
-            ctx,
-        );
-    }
-    let doc = match last_object(&out) {
-        Ok(d) => d,
-        Err(why) => return unknown(why, input_digest, inputs, ctx),
+        ScriptJson::Unknown(why) => return unknown(why, input_digest, inputs, ctx),
     };
     if doc.get("complete") == Some(&Value::Bool(false)) {
         return unknown(

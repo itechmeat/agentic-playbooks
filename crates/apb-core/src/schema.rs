@@ -219,6 +219,9 @@ pub enum GoalCheck {
     Marker { marker: String },
     /// A check script confirms the criterion.
     Script { path: String },
+    /// A list node accounted for every item: everything processed and
+    /// nothing needing a look.
+    List { node: String },
 }
 
 /// One verifiable fact confirming the goal was reached.
@@ -436,6 +439,11 @@ impl ContextBudget {
 }
 
 impl Node {
+    /// The node's `list:` block, when it runs in list mode.
+    pub fn list(&self) -> Option<&crate::list::ListSpec> {
+        self.list.as_ref()
+    }
+
     /// Expected seconds for progress weighting: the parsed `expected_duration`
     /// if present and valid, otherwise the per-kind default (agent_task/script
     /// = `duration::DEFAULT_TASK_SECONDS`, every other kind = 0).
@@ -1069,6 +1077,12 @@ impl Serialize for ConnectorBinding {
     }
 }
 
+/// How many batch members (and list items) a run executes at once when
+/// neither the playbook nor the run declares a cap (spec 2026-08-05 section
+/// 1.3). Wide enough that a fan-out is worth batching, small enough that a
+/// fan-out of twenty nodes cannot spawn twenty agent processes at once.
+pub const DEFAULT_MAX_PARALLEL: usize = 4;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Node {
     pub id: String,
@@ -1145,6 +1159,10 @@ pub struct Node {
     /// `wait` default. Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<ForkSpec>,
+    /// List mode on an `agent_task` or `script` (see [`crate::list`]): the
+    /// step runs once per item. Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<crate::list::ListSpec>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }

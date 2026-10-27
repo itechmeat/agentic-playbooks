@@ -120,7 +120,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
                 .map_err(|m| CallError::new(CallErrorCode::InvalidArgs, m))?;
             label.to_string()
         }
-        None => intent::args_label(&req.args),
+        None => intent::default_label(ctx.claim.item.as_deref(), &req.args),
     };
     let key = IntentKey {
         node: req.node_id.to_string(),
@@ -128,6 +128,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
         function: req.function.to_string(),
         account: input.account.to_string(),
         label,
+        item: ctx.claim.item.clone(),
     };
     let decided = decide(input, idem, &key)?;
     match decided.admission {
