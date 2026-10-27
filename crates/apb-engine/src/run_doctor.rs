@@ -623,6 +623,7 @@ mod tests {
             &run_dir,
             Control::Abort {
                 reason: "stop requested".into(),
+                by: None,
             },
         )
         .unwrap();

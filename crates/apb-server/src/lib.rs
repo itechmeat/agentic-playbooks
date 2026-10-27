@@ -159,6 +159,15 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::runs::get_run_report_handler),
         )
         .route(
+            "/api/runs/{id}/report.html",
+            get(routes::runs::get_run_report_html_handler),
+        )
+        .route(
+            "/api/runs/{id}/notify",
+            post(routes::notify::post_run_notify_handler),
+        )
+        .route("/api/notify", get(routes::notify::get_notify_handler))
+        .route(
             "/api/runs/{id}/review",
             post(routes::runs::post_review_handler),
         )

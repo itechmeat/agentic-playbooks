@@ -1,11 +1,11 @@
-//! Baseline check rules (V62-V68): the `baseline_check` block's structure,
-//! the safety of its sources, its rules and paths, its templates, and the
-//! reserved grant site.
+//! Baseline check rules (V62-V67): the `baseline_check` block's structure,
+//! the safety of its sources, its rules and paths, and its templates. The
+//! reserved grant site is V68, for every engine site (`nodes.rs`).
 
 use std::collections::HashSet;
 
 use super::*;
-use crate::baseline::{BASELINE_SITE, BaselineCheck, BaselineSource, MAX_TIMEOUT_SECONDS};
+use crate::baseline::{BaselineCheck, BaselineSource, MAX_TIMEOUT_SECONDS};
 
 const ID_MAX: usize = 40;
 
@@ -22,7 +22,6 @@ pub(crate) fn check_baseline(
     ctx: &ValidationContext,
     r: &mut ValidationReport,
 ) {
-    check_reserved_site(playbook, r);
     let Some(block) = &playbook.baseline_check else {
         return;
     };
@@ -46,17 +45,6 @@ pub(crate) fn check_baseline(
     }
     check_goal_pairing(playbook, r);
     check_tree(playbook, r);
-}
-
-/// V68: no node may take the reserved baseline grant site as its id.
-fn check_reserved_site(playbook: &Playbook, r: &mut ValidationReport) {
-    for n in playbook.nodes.iter().filter(|n| n.id == BASELINE_SITE) {
-        r.error(
-            "V68",
-            Some(&n.id),
-            format!("node id `{BASELINE_SITE}` is reserved for the baseline check"),
-        );
-    }
 }
 
 /// V62: id format, exactly one source, `observe` present exactly when the

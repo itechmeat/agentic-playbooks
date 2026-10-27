@@ -12,6 +12,9 @@ export type NodeType = (typeof NODE_TYPES)[number]
 /** The decisions a human_review gate without options offers. */
 export const DEFAULT_REVIEW_OPTIONS = ['approve', 'reject'] as const
 
+/** Every run transition a person can be notified about, in report order. */
+export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished'] as const
+
 /** The dashboard's default port (the dev server proxies to it). */
 export const DEFAULT_PORT = 7321
 

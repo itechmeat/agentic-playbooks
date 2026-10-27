@@ -39,6 +39,8 @@ pub struct StartArgs {
     pub budget: Option<apb_core::budget::BudgetRequest>,
     /// The estimate the pre-start check showed, kept as the run's snapshot.
     pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
+    /// The run's notification request, checked by `notify::start_check`.
+    pub notify: Option<apb_core::notify::NotifyRequest>,
 }
 
 /// The engine options of an MCP start in `mode`. Fail-fast on a busy
@@ -63,6 +65,7 @@ pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
         candidate_skipped: a.candidate_skipped,
         budget: a.budget,
         estimate: a.estimate,
+        notify: a.notify,
         ..RunOptions::default()
     }
 }
@@ -193,6 +196,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     );
     add_candidate_trial(&mut out, &view, &dir);
     super::budget::add_run_blocks(&mut out, &dir, &view);
+    super::notify::add_run_block(&mut out, &dir, &view.events);
     // Issue #195: what a fork's branch-failure policy cancelled and which
     // joins refused; absent when nothing did.
     let branch_failures = apb_engine::fork_view::entries(&view.events);
@@ -554,28 +558,6 @@ pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Va
     )
 }
 
-/// Per-node expected vs measured durations for calibration (spec 5). Measured
-/// comes from the run's events; expected from the playbook version bound to
-/// the run. The maintaining agent uses this to update estimates via
-/// playbook_update; the engine never rewrites the playbook.
-pub(crate) fn build_duration_table_from(
-    playbook: &apb_core::schema::Playbook,
-    measured: &BTreeMap<String, u64>,
-) -> Vec<Value> {
-    playbook
-        .nodes
-        .iter()
-        .map(|n| {
-            json!({
-                "node": n.id,
-                "kind": n.kind.type_str(),
-                "expected_seconds": n.expected_seconds(),
-                "measured_seconds": measured.get(&n.id),
-            })
-        })
-        .collect()
-}
-
 pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // There is no supervisor agent in Phase 3: the report is a light state
     // summary. The full supervisor report is Phase 4. events.jsonl is read once
@@ -608,7 +590,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let table = match pb {
         Some(playbook) => {
             let measured = apb_engine::progress::node_durations_seconds(events);
-            build_duration_table_from(playbook, &measured)
+            apb_engine::progress::build_duration_table_from(playbook, &measured)
         }
         None => Vec::new(),
     };
@@ -627,8 +609,30 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
             )),
         );
     }
+    super::notify::add_run_block(&mut base, &dir, events);
 
     Ok(base)
+}
+
+/// The file `run_report` with format html writes, inside the run's
+/// directory.
+pub const REPORT_HTML_FILE: &str = "report.html";
+
+/// `run_report_html`: renders the run's report as one self-contained page,
+/// writes it to `runs/<id>/report.html` and answers with its path and
+/// size. The page never travels in the answer: it is for a person to open,
+/// not for the model to read.
+pub fn run_report_html(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    let html = apb_engine::report_html::render(root, &dir)?;
+    let path = dir.join(REPORT_HTML_FILE);
+    apb_core::fsutil::atomic_write(&path, html.as_bytes())
+        .map_err(|e| ToolError::Engine(format!("cannot write {}: {e}", path.display())))?;
+    Ok(json!({
+        "run_id": run_id,
+        "path": path.to_string_lossy(),
+        "bytes": html.len(),
+    }))
 }
 
 pub fn run_resume(

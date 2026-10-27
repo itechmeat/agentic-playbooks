@@ -220,3 +220,43 @@ describe('process env rows', () => {
     expect(rows[1].note).toBe('env allowlist (claude): kept 4, withheld 0')
   })
 })
+
+describe('notification rows', () => {
+  it('labels notify_set and the sends of the engine site @notify', () => {
+    const entries = runEventJournal([
+      {
+        seq: 1,
+        ts: 1,
+        type: 'notify_set',
+        target: { connector: 'telegram', account: 'me', function: 'send_message', to: '42' },
+        on: ['review', 'finished'],
+        source: 'run',
+      },
+      { seq: 2, ts: 2, type: 'notify_set', on: [], source: 'person', by: 'operator' },
+      { seq: 3, ts: 3, type: 'notify_set', on: [], source: 'machine', problem: 'connector `telegram` is not approved' },
+      {
+        seq: 4,
+        ts: 4,
+        type: 'send_intent_recorded',
+        node: '@notify',
+        connector: 'telegram',
+        function: 'send_message',
+        label: 'notify:review.12',
+      },
+      { seq: 5, ts: 5, type: 'connector_call', node_id: '@notify', origin: 'notify', connector: 'telegram', function: 'send_message', outcome: 'ok' },
+      { seq: 6, ts: 6, type: 'send_intent_recorded', node: 'post', connector: 'slack', function: 'send_message', label: 'x' },
+      { seq: 7, ts: 7, type: 'connector_call', node_id: '@notify', origin: 'notify', connector: 'telegram', function: 'send_message', outcome: 'rate_limited' },
+      { seq: 8, ts: 8, type: 'connector_call', node_id: '@notify', origin: 'reconcile', connector: 'telegram', function: 'get_updates', outcome: 'ok' },
+    ] as WfEvent[])
+    expect(entries.map((e) => e.note)).toEqual([
+      'notifications on: telegram/me about review, finished (from run)',
+      'notifications off (from person), changed by a person',
+      'notifications off (from machine): connector `telegram` is not approved',
+      'notification review.12: telegram.send_message',
+      'notification sent through telegram.send_message',
+      undefined,
+      'notification through telegram.send_message failed (rate_limited)',
+      undefined,
+    ])
+  })
+})

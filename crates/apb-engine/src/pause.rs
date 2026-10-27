@@ -447,6 +447,7 @@ mod tests {
                 600,
                 EventPayload::RunAborted {
                     reason: "stop".into(),
+                    by: None,
                 },
             ),
         ];

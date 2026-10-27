@@ -33,15 +33,26 @@ pub struct CallRequest<'a> {
 
 /// Who makes a call, beyond the request itself: the caller's `--intent`
 /// label for a send, the attempt it claims to belong to, and whether it is
-/// a node's own call or apb's lookup of an earlier send. The default is a
-/// node's call with no label and no claim. Only the call path itself makes
-/// a lookup (`origin` is not public): a lookup skips the grant's function
-/// list and its budget.
+/// a node's own call or one apb makes itself (a lookup of an earlier send,
+/// an item check, a run notification). The default is a node's call with no
+/// label and no claim. Only the engine makes its own calls (`origin` is not
+/// public).
 #[derive(Debug, Clone, Default)]
 pub struct CallContext<'a> {
     pub intent: Option<&'a str>,
     pub claim: AttemptClaim,
     pub(super) origin: CallOrigin,
+    /// For a notification: the digests its target was trusted with when the
+    /// subscription was set. The live connector and account must still
+    /// match them.
+    pub(super) pins: Option<TargetPins>,
+}
+
+/// The digests a live call target was approved with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TargetPins {
+    pub connector: String,
+    pub account: String,
 }
 
 impl<'a> CallContext<'a> {
@@ -51,6 +62,7 @@ impl<'a> CallContext<'a> {
             intent,
             claim,
             origin: CallOrigin::Node,
+            pins: None,
         }
     }
 
@@ -63,6 +75,18 @@ impl<'a> CallContext<'a> {
                 ..AttemptClaim::default()
             },
             origin: CallOrigin::Check,
+            pins: None,
+        }
+    }
+
+    /// apb's notification of a person, under the engine-made `label`, to a
+    /// live target that must still match `pins`.
+    pub(crate) fn notify(label: &'a str, pins: TargetPins) -> Self {
+        CallContext {
+            intent: Some(label),
+            claim: AttemptClaim::default(),
+            origin: CallOrigin::Notify,
+            pins: Some(pins),
         }
     }
 }
@@ -80,6 +104,13 @@ pub(crate) enum CallOrigin {
     /// apb itself, checking a list item through the `<node>#check` grant:
     /// read-only functions only, never charged to `max_calls`.
     Check,
+    /// apb itself, telling a person about a run transition through their
+    /// own subscription: a live, trust-checked target instead of a grant,
+    /// sent once per transition through the ledger.
+    Notify,
+    /// apb itself, reading back an earlier notification: the same live,
+    /// pinned target as [`CallOrigin::Notify`], read-only functions only.
+    NotifyReconcile,
 }
 
 impl CallOrigin {
@@ -87,9 +118,58 @@ impl CallOrigin {
     pub(super) fn journal_tag(self) -> Option<String> {
         match self {
             CallOrigin::Node => None,
-            CallOrigin::Reconcile => Some("reconcile".to_string()),
+            CallOrigin::Reconcile | CallOrigin::NotifyReconcile => Some("reconcile".to_string()),
             CallOrigin::Check => Some("check".to_string()),
+            CallOrigin::Notify => Some("notify".to_string()),
         }
+    }
+
+    /// Whether a send through a function that declares `idempotency` goes
+    /// through the send-once ledger.
+    pub(super) fn tracks_sends(self) -> bool {
+        matches!(self, CallOrigin::Node | CallOrigin::Notify)
+    }
+
+    /// Whether the call counts against the grant's `max_calls` and must
+    /// come from the node's open attempt.
+    pub(super) fn charges_budget(self) -> bool {
+        self == CallOrigin::Node
+    }
+
+    /// Whether the grant must list the function. A lookup of an earlier
+    /// send reads functions the node may not call itself; a notification
+    /// has no grant at all.
+    pub(super) fn needs_grant(self) -> bool {
+        matches!(self, CallOrigin::Node | CallOrigin::Check)
+    }
+
+    /// Whether only read-only functions may be called.
+    pub(super) fn read_only_only(self) -> bool {
+        matches!(
+            self,
+            CallOrigin::Reconcile | CallOrigin::Check | CallOrigin::NotifyReconcile
+        )
+    }
+
+    /// Whether the call goes to a live, trust-checked target rather than
+    /// the run's snapshotted grant.
+    pub(super) fn is_live(self) -> bool {
+        matches!(self, CallOrigin::Notify | CallOrigin::NotifyReconcile)
+    }
+
+    /// The origin of apb's read-back of an earlier send made by this one:
+    /// it reads where the send went.
+    pub(super) fn read_back(self) -> CallOrigin {
+        match self {
+            CallOrigin::Notify | CallOrigin::NotifyReconcile => CallOrigin::NotifyReconcile,
+            _ => CallOrigin::Reconcile,
+        }
+    }
+
+    /// Whether the send label is the engine's own (`notify:<transition>`)
+    /// rather than a caller's `--intent`, which must follow the slug rule.
+    pub(super) fn labels_itself(self) -> bool {
+        self == CallOrigin::Notify
     }
 }
 

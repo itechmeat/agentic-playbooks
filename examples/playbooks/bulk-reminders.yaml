@@ -68,6 +68,9 @@ nodes:
     type: agent_task
     title: Send one reminder per unpaid row
     expected_duration: 15m
+    # The reminder is read by the debtor: apb adds its writing brief
+    # (conclusion first, who acts next, facts, no internal terms).
+    audience: people
     prompt: >-
       Send one personal reminder email for the unpaid row in the item
       section with the smtp connector's send_email function, to the row's
@@ -98,7 +101,17 @@ nodes:
             reject: Missing the name or the invoice, or addressed to someone else.
           min_confidence: 0.6
           on_unavailable: accept_with_note
-  - { id: finish, type: finish, outcome: success }
+  - id: finish
+    type: finish
+    outcome: success
+    # The closing answer goes to the person who runs collections, not to
+    # another agent (`audience: people` is the default for a finish).
+    audience: people
+    prompt: >-
+      Write the closing summary for the person who runs collections: how
+      many rows the list had, how many were already paid, how many
+      reminders went out, and which rows need a look and why. Name rows by
+      invoice number.
 edges:
   - { from: start, to: load_list }
   - { from: load_list, to: check_payments }

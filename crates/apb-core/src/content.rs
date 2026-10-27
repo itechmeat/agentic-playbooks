@@ -421,3 +421,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     h.update(bytes);
     format!("sha256:{}", hex_lower(&h.finalize()))
 }
+
+/// The SHA-256 of `bytes` in standard base64, the form a Content Security
+/// Policy hash source (`'sha256-...'`) takes.
+pub fn sha256_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(bytes))
+}

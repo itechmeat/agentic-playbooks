@@ -97,6 +97,13 @@ impl RunIntent {
         format!("{}.{}", self.connector, self.function)
     }
 
+    /// Whether this is a notification apb sent a person about the run (see
+    /// `crate::notify`), not one of the run's own sends. `apb intent list`
+    /// shows it; the outcome views leave it out.
+    pub fn is_notification(&self) -> bool {
+        self.node == apb_core::connector::sites::NOTIFY_SITE
+    }
+
     /// Whether nobody can tell if this send went out, and no replay of it
     /// tells either: a person has to resolve it.
     pub fn is_open_unknown(&self) -> bool {
@@ -177,6 +184,14 @@ impl RunIntent {
             self.state
         )
     }
+}
+
+/// The send intents the outcome views weigh: every one of `events` but
+/// the notifications about the run.
+pub fn outcome_intents(events: &[Event], now_ms: u64) -> Vec<RunIntent> {
+    let mut rows = intents_from(events, now_ms);
+    rows.retain(|r| !r.is_notification());
+    rows
 }
 
 /// Every send intent of `events`, in journal order, read as of `now_ms`.

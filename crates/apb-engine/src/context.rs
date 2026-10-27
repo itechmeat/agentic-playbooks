@@ -367,11 +367,16 @@ const RECORDED_CONTEXT_HEADING: &str = "\n\n## recorded run context\n\n";
 /// a prompt that does place the context itself keeps today's byte-identical
 /// assembly. A blank context adds no section. The section goes last but one, so
 /// the deliverable statement stays the final word and "above" is literally true.
+///
+/// `for_people` adds apb's writing brief ([`crate::people::brief`]) right
+/// before the deliverable statement: the closing answer is read by a person
+/// unless the finish node says `audience: agents`.
 pub fn assemble_finish_answer_prompt(
     template: &str,
     instruction: Option<&str>,
     events: &[Event],
     recorded_context: Option<&str>,
+    for_people: bool,
 ) -> String {
     let mut text = with_supervisor_notes(template, events);
     text.push_str(&finish_answer_reference(instruction));
@@ -379,6 +384,9 @@ pub fn assemble_finish_answer_prompt(
         text.push_str(RECORDED_CONTEXT_HEADING);
         text.push_str(recorded);
         text.push('\n');
+    }
+    if for_people {
+        crate::people::brief::append_to(&mut text);
     }
     text.push_str(FINISH_ANSWER_DELIVERABLE);
     text
@@ -1112,6 +1120,7 @@ mod tests {
             Some("Ship the dashboard feature and open a PR"),
             &[],
             None,
+            false,
         );
         // The node template still leads the prompt.
         assert!(
@@ -1181,6 +1190,7 @@ mod tests {
             None,
             &[],
             Some("## a (succeeded, attempt 1)\n\nshipped it\n\n"),
+            false,
         );
         assert!(
             assembled.contains("shipped it"),
@@ -1198,18 +1208,18 @@ mod tests {
     fn finish_answer_prompt_is_byte_identical_without_an_auto_context() {
         // A prompt that reads context itself (auto context None) and an empty
         // recorded context must both leave the assembly exactly as it was.
-        let baseline = assemble_finish_answer_prompt("BODY", None, &[], None);
+        let baseline = assemble_finish_answer_prompt("BODY", None, &[], None, false);
         assert!(
             !baseline.contains("## recorded run context"),
             "no section without an auto context:\n{baseline}"
         );
         assert_eq!(
-            assemble_finish_answer_prompt("BODY", None, &[], Some("")),
+            assemble_finish_answer_prompt("BODY", None, &[], Some(""), false),
             baseline,
             "an empty context must not add an empty section"
         );
         assert_eq!(
-            assemble_finish_answer_prompt("BODY", None, &[], Some("  \n ")),
+            assemble_finish_answer_prompt("BODY", None, &[], Some("  \n "), false),
             baseline,
             "a blank context must not add an empty section"
         );
@@ -1219,7 +1229,7 @@ mod tests {
     fn finish_answer_prompt_states_deliverable_without_instruction() {
         // With no run instruction there is no reference block, but the composer is
         // still told its whole reply is the closing message.
-        let assembled = assemble_finish_answer_prompt("BODY", None, &[], None);
+        let assembled = assemble_finish_answer_prompt("BODY", None, &[], None, false);
         assert!(
             !assembled.contains("## reference"),
             "no reference block:\n{assembled}"

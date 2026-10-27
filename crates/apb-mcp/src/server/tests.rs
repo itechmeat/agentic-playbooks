@@ -143,10 +143,12 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_wait",
         "run_events",
         "run_report",
+        "run_report_html",
         "run_retro_context",
         "run_resume",
         "run_stop",
         "run_pause",
+        "run_notify",
         "run_intent_resolve",
         "review_decide",
         "run_answer",
@@ -341,6 +343,7 @@ fn tools_carry_safety_annotations() {
         "run_resume",
         "run_stop",
         "run_pause",
+        "run_notify",
         "run_intent_resolve",
         "review_decide",
         "run_answer",
@@ -361,6 +364,20 @@ fn tools_carry_safety_annotations() {
             "destructive tool `{n}` must not be read-only"
         );
     }
+    // Writes a file in the workspace, so a host that runs read-only tools
+    // unasked must ask first; it replaces only its own derived page.
+    assert_eq!(read_only("run_report_html"), Some(false));
+    assert_eq!(destructive("run_report_html"), Some(false));
+    // The supervisor's server offers read-only tools only.
+    let supervisor = WfMcp::for_supervisor(PathBuf::from("."));
+    let offered: Vec<String> = supervisor
+        .tool_router
+        .list_all()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(offered.contains(&"run_report".to_string()));
+    assert!(!offered.contains(&"run_report_html".to_string()));
 }
 
 #[tokio::test]
@@ -584,6 +601,7 @@ async fn supervise_self_returns_token() {
             execution: None,
             budget: None,
             remember: None,
+            notify: None,
         }))
         .await;
 
@@ -637,6 +655,7 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
             execution: None,
             budget: None,
             remember: Some(true),
+            notify: None,
         }))
         .await;
     let text = result_text(&result);
@@ -681,6 +700,7 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
         execution: None,
         budget: None,
         remember: Some(true),
+        notify: None,
     };
     // A refused start remembers nothing.
     let refused = server
@@ -736,6 +756,7 @@ async fn background_run_returns_run_id_without_blocking() {
             execution: None,
             budget: None,
             remember: None,
+            notify: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -1865,6 +1886,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             execution: None,
             budget: None,
             remember: None,
+            notify: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -2012,6 +2034,7 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             execution: Some("host".to_string()),
             budget: None,
             remember: None,
+            notify: None,
         }))
         .await;
     unsafe {
@@ -2123,6 +2146,7 @@ fn rel_args(
         execution: None,
         budget: None,
         remember: None,
+        notify: None,
     }
 }
 
@@ -2503,3 +2527,4 @@ fn the_run_outcome_fields_are_documented_where_they_are_returned() {
 mod budget;
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
+mod notify;

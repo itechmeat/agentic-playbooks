@@ -91,12 +91,11 @@ fn resolve(root: &Path, run_id: &str, intent: &str, sent: bool, note: Option<Str
     // The CLI runs in its caller's process, so its environment tells an
     // agent step or a host task's subagent apart from a person: inside a
     // run the decision is refused.
-    let var = |name: &str| std::env::var(name).ok();
-    let (in_run, in_task) = (var("APB_RUN_ID"), var("APB_HOST_TASK"));
+    let step = crate::util::StepCaller::from_env();
     let caller = IntentCaller {
         by: RESOLVED_BY,
-        run_id: in_run.as_deref(),
-        host_task: in_task.as_deref(),
+        run_id: step.run_id.as_deref(),
+        host_task: step.host_task.as_deref(),
     };
     match run_intent_resolve(root, run_id, intent, sent, note, caller) {
         Ok(_) => {

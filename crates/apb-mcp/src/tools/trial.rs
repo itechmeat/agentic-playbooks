@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::ToolError;
-use super::run::build_duration_table_from;
 use apb_core::registry::Registry;
 use apb_engine::RunOptions;
+use apb_engine::progress::build_duration_table_from;
 use apb_engine::run_view::read_events;
 use apb_engine::state::{RunState, RunStatus};
 use serde_json::{Value, json};

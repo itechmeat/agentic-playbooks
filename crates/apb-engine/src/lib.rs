@@ -37,12 +37,16 @@ pub mod liveness;
 // host execution mode (0.23.0)
 pub mod host_task;
 pub mod manifest;
+pub mod notify;
 pub mod parallel;
 // operator pause (issue #200)
 pub mod pause;
+pub mod people;
 pub mod proc;
 pub mod progress;
 pub mod question;
+pub(crate) mod redact;
+pub mod report_html;
 pub mod review;
 pub mod run_config;
 pub mod run_doctor;
@@ -123,4 +127,4 @@ pub use scheduler::{
     run_resolved, spawn_supervisor_agent, start_detached, start_detached_resolved,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};
-pub use stop::{StopOutcome, stop_run};
+pub use stop::{StopOutcome, stop_run, stop_run_by};

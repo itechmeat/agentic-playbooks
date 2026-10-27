@@ -115,6 +115,15 @@ pub struct PlaybookRunArgs {
     /// (`remembered`) and was not (`not_remembered`).
     #[serde(default)]
     pub remember: Option<bool>,
+    /// Tell the person about this run's transitions (a review or a question
+    /// waiting, a pause they did not make, the end) through a connector:
+    /// true uses the machine's notify target, false turns notifications off
+    /// for this run, an object sets `on` (review, question, paused,
+    /// finished) and/or `target`. Pass it only when the person asked. A
+    /// target that cannot carry notifications or is not approved refuses
+    /// the start (notify_unavailable).
+    #[serde(default)]
+    pub notify: Option<crate::tools::notify::NotifyArg>,
 }
 
 /// A run's budget argument. A predictive stop, not a security control: the
@@ -226,6 +235,31 @@ pub struct TrashRestoreArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunRefArgs {
     pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunReportArgs {
+    pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Gone: the page is written by `run_report_html`. Not offered in the
+    /// schema; a host that still sends it is told where the page went.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub format: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunNotifyArgs {
+    pub run_id: String,
+    /// true: notify through the run's current target or the machine's;
+    /// false: stop notifying; `{ on: [...] }` keeps only these
+    /// transitions. Never a target: a person changes that.
+    pub notify: crate::tools::notify::NotifyChangeArg,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,

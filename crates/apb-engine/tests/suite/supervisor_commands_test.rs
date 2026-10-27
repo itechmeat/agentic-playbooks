@@ -372,6 +372,7 @@ fn autonomous_preseeded_abort_via_post_supervisor_command() {
         &first.run_id,
         Control::Abort {
             reason: "preseeded via post_supervisor_command".into(),
+            by: None,
         },
     )
     .unwrap();
@@ -385,7 +386,7 @@ fn autonomous_preseeded_abort_via_post_supervisor_command() {
 
     let events = read_all(&run_dir).unwrap();
     assert!(
-        events.iter().any(|e| matches!(&e.payload, EventPayload::RunAborted { reason } if reason.contains("preseeded"))),
+        events.iter().any(|e| matches!(&e.payload, EventPayload::RunAborted { reason, .. } if reason.contains("preseeded"))),
         "expected a RunAborted event carrying the posted reason"
     );
 }

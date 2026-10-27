@@ -55,6 +55,8 @@ mod live_smoke_test;
 mod mcp_cli_test;
 #[path = "suite/mcp_supervise_test.rs"]
 mod mcp_supervise_test;
+#[path = "suite/notify_cli_test.rs"]
+mod notify_cli_test;
 #[path = "suite/official_connectors_gate.rs"]
 mod official_connectors_gate;
 #[cfg(unix)]

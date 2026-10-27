@@ -93,8 +93,9 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
-apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --remember: keep its params and instruction for this project)
-apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item)
+apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
+apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item; --html <path|->: the report as one self-contained page)
+apb notify          the machine's notify target, a run's notifications or a person's change of them (--on[=LIST], --off, --via, --to; refused inside a run step); apb notify test sends a test message
 apb wait <run>      block until a run finishes, needs input or stops
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
 apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
@@ -154,6 +155,7 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 - [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, list processing (`list:` runs a step once per item, in batches, with an engine check per item and per-item state kept across retries, pauses and loops), a run `budget:` (a token or dollar limit; the run pauses before a node whose median spend in comparable runs no longer fits, `on_no_estimate: ask|pause|continue`), goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings, the retry briefing, `Apb-Run` trailer reporting
 - [Guardrails](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
 - [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
+- [Notifications](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/NOTIFY.md): "Notify me": a run tells a person about a waiting review or question, a pause they did not make and its end, through a connector they configured; trust checked at set time and at every send
 - [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust, sending once (the send ledger, `--intent`, `on_unknown`)
 - [Deployment](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DEPLOYMENT.md): running the dashboard on a server behind a TLS proxy with API keys
 - [Decision models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DECISIONS.md): optional small models for completion checks, judge nodes, retry advice and catalog ranking

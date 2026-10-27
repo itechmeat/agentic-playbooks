@@ -235,6 +235,10 @@ mod missing_input_test;
 #[cfg(unix)]
 #[path = "suite/named_outputs_test.rs"]
 mod named_outputs_test;
+#[path = "suite/notify_send_test.rs"]
+mod notify_send_test;
+#[path = "suite/notify_transitions_test.rs"]
+mod notify_transitions_test;
 #[cfg(unix)]
 #[path = "suite/operator_pause_test.rs"]
 mod operator_pause_test;
@@ -271,6 +275,8 @@ mod reap_test;
 #[cfg(unix)]
 #[path = "suite/rebind_test.rs"]
 mod rebind_test;
+#[path = "suite/report_html_test.rs"]
+mod report_html_test;
 #[path = "suite/report_summary_test.rs"]
 mod report_summary_test;
 #[path = "suite/resume_capture_test.rs"]
@@ -347,6 +353,9 @@ mod wake_events_test;
 mod workdir_test;
 #[path = "suite/worktree_test.rs"]
 mod worktree_test;
+#[cfg(unix)]
+#[path = "suite/writing_brief_test.rs"]
+mod writing_brief_test;
 #[cfg(unix)]
 #[path = "suite/zcode_adapter_test.rs"]
 mod zcode_adapter_test;

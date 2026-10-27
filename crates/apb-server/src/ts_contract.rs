@@ -140,6 +140,12 @@ fn render_types() -> String {
         apb_engine::run_estimate::ListEstimate::decl(&cfg),
         apb_engine::run_estimate::NodeEstimate::decl(&cfg),
         apb_engine::run_estimate::RunEstimate::decl(&cfg),
+        // "Notify me".
+        apb_core::notify::Transition::decl(&cfg),
+        apb_core::notify::NotifyTarget::decl(&cfg),
+        apb_engine::notify::view::NotifySent::decl(&cfg),
+        apb_engine::notify::RunNotify::decl(&cfg),
+        crate::routes::notify::MachineNotify::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),
@@ -202,6 +208,14 @@ fn render_consts() -> String {
     out.push_str(&format!(
         "\n/** The decisions a human_review gate without options offers. */\nexport const DEFAULT_REVIEW_OPTIONS = {}\n",
         ts_string_array(&schema::DEFAULT_REVIEW_OPTIONS)
+    ));
+    let transitions: Vec<&str> = apb_core::notify::Transition::ALL
+        .iter()
+        .map(|t| t.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every run transition a person can be notified about, in report order. */\nexport const NOTIFY_TRANSITIONS = {}\n",
+        ts_string_array(&transitions)
     ));
     out.push_str(&format!(
         "\n/** The dashboard's default port (the dev server proxies to it). */\nexport const DEFAULT_PORT = {}\n",

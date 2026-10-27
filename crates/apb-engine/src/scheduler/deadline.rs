@@ -32,6 +32,7 @@ impl DeadlineWatch {
                         &dir,
                         Control::Abort {
                             reason: DEADLINE_REASON.into(),
+                            by: Some(crate::pause::kind::PauseBy::Engine),
                         },
                     );
                     return;

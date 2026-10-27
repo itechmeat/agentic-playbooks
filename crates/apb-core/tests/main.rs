@@ -51,6 +51,8 @@ mod list_schema_test;
 mod migration_test;
 #[path = "suite/models_table_test.rs"]
 mod models_table_test;
+#[path = "suite/notify_config_test.rs"]
+mod notify_config_test;
 #[path = "suite/overrides_test.rs"]
 mod overrides_test;
 #[path = "suite/process_env_test.rs"]
@@ -77,6 +79,8 @@ mod scope_move_test;
 mod send_policy_validate_test;
 #[path = "suite/server_auth_test.rs"]
 mod server_auth_test;
+#[path = "suite/validate_audience_test.rs"]
+mod validate_audience_test;
 #[path = "suite/validate_baseline_test.rs"]
 mod validate_baseline_test;
 #[path = "suite/validate_budget_test.rs"]

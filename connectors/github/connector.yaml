@@ -1,5 +1,5 @@
 name: github
-version: 0.1.0
+version: 0.2.0
 healthcheck: get_rate_limit
 # How the connector reads its own verified account, so a repeat of a
 # marker send can find the item the earlier attempt created. A GitHub App
@@ -324,6 +324,7 @@ functions:
         body: { type: string }
         draft: { type: boolean }
       required: [owner, repo, title, head, base]
+    people: { subject: title, text: body }
     headers:
       Accept: application/vnd.github+json
       X-GitHub-Api-Version: "2022-11-28"

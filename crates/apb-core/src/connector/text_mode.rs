@@ -119,13 +119,7 @@ pub fn validate_text_args<'a>(
         )));
     }
     for name in modes.keys() {
-        let is_string = args_schema
-            .and_then(|schema| schema.get("properties"))
-            .and_then(|properties| properties.get(name))
-            .and_then(|property| property.get("type"))
-            .and_then(Value::as_str)
-            == Some("string");
-        if !is_string {
+        if !super::common::is_string_arg(args_schema, name) {
             return Err(ConnectorError::Invalid(format!(
                 "function `{function}` sets `text_args.{name}`, but `{name}` is not a string property of its args_schema"
             )));

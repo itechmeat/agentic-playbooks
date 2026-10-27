@@ -1,5 +1,5 @@
 name: telegram
-version: 0.1.0
+version: 0.2.0
 healthcheck: get_me
 auth:
   kind: path
@@ -31,6 +31,7 @@ functions:
         text: { type: string }
         parse_mode: { type: string, enum: [MarkdownV2, HTML] }
       required: [chat_id, text]
+    people: { to: chat_id, text: text }
     idempotency: { mode: none, result_ref: result.message_id }
     examples:
       - args: { chat_id: "-1001234567890", text: "*Build failed* on `main`", parse_mode: MarkdownV2 }

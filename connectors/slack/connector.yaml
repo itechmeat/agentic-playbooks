@@ -1,5 +1,5 @@
 name: slack
-version: 0.1.0
+version: 0.2.0
 healthcheck: auth_test
 auth:
   kind: header
@@ -113,6 +113,8 @@ functions:
         channel: { type: string, description: "channel id, e.g. C0123456789" }
         text: { type: string, description: "message text in Slack mrkdwn" }
       required: [channel, text]
+    people: { to: channel, text: text }
+    idempotency: { mode: none, result_ref: ts }
     examples:
       - args: { channel: "C0123456789", text: "Release pipeline is green." }
         note: "posts a top-level message; use reply_in_thread to reply inside a thread."
@@ -132,6 +134,7 @@ functions:
         thread_ts: { type: string, description: "ts of the thread's parent message" }
         text: { type: string, description: "reply text in Slack mrkdwn" }
       required: [channel, thread_ts, text]
+    people: { text: text }
     examples:
       - args:
           channel: "C0123456789"

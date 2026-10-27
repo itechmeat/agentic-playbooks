@@ -1015,9 +1015,12 @@ fn execute_node_kind(
             // call and how. Built only from the run snapshot (manifest non-secret
             // fields + snapshotted ConnectorDocs), so no secret reaches the prompt.
             let grants = manifest.grants_for(node_id);
-            if first_turn && !grants.is_empty() {
-                let docs =
-                    crate::connector::prompt::load_snapshot_docs(run_dir, &manifest.connectors);
+            if first_turn {
+                let docs = if grants.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    crate::connector::prompt::load_snapshot_docs(run_dir, &manifest.connectors)
+                };
                 let block = crate::connector::prompt::instruction_block(
                     grants,
                     &manifest.connectors,
@@ -1025,6 +1028,12 @@ fn execute_node_kind(
                 );
                 if !block.is_empty() {
                     text = format!("{text}\n\n{block}");
+                }
+                // The writing brief, once, for a node whose output people
+                // read: marked `audience: people`, or granted a function
+                // that writes to people.
+                if crate::people::brief::applies(&node.kind, grants, &docs) {
+                    crate::people::brief::append_to(&mut text);
                 }
             }
 
@@ -1692,6 +1701,7 @@ fn execute_node_kind(
                     let timeout_msg: std::cell::RefCell<Option<String>> =
                         std::cell::RefCell::new(None);
                     let abort = AtomicBool::new(false);
+                    let notifier = crate::notify::send::Notifier::of_run_dir(run_dir);
                     let on_tick = || {
                         if tick_err.borrow().is_some() || abort.load(Ordering::Relaxed) {
                             return;
@@ -1704,6 +1714,7 @@ fn execute_node_kind(
                             journal,
                             live_q_timeout,
                             live_default.as_deref(),
+                            notifier.as_ref(),
                         ) {
                             Ok(Some(msg)) => {
                                 *timeout_msg.borrow_mut() = Some(msg);
@@ -3000,11 +3011,15 @@ pub(crate) fn execute_finish_answer(
     // missing-input hole as any node template, and it does not pass through
     // `execute_node` where that check lives (Task 4 handover note 5).
     journal_missing_inputs(journal, run_dir, node_id, prompt, state)?;
+    let for_people = playbook
+        .node(node_id)
+        .is_some_and(|n| n.kind.writes_for_people());
     let text = crate::context::assemble_finish_answer_prompt(
         &text,
         cfg.instruction.as_deref(),
         &events,
         auto_context,
+        for_people,
     );
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);

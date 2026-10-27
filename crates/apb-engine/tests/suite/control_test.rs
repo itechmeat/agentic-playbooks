@@ -20,6 +20,7 @@ fn post_and_read_control_with_cursor() {
         dir.path(),
         Control::Abort {
             reason: "cancel".into(),
+            by: None,
         },
     )
     .unwrap();

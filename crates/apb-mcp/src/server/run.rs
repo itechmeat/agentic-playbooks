@@ -275,7 +275,7 @@ impl WfMcp {
 
     #[tool(
         name = "playbook_run",
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one.",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one. notify (only when the person asked to hear about the run): true uses the machine's notify target, false turns notifications off, an object sets on and/or target; a target that cannot be used refuses the start with notify_unavailable.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run_tool(
@@ -311,6 +311,7 @@ impl WfMcp {
             execution,
             budget,
             remember,
+            notify,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -450,6 +451,18 @@ impl WfMcp {
             Err(refusal) => return to_call_tool_result(Ok(refusal)),
         };
         warnings.extend(checked.warnings);
+        // The notification request: one the person made that cannot be
+        // honoured refuses the start before anything is written; a machine
+        // default that cannot be used only warns.
+        let notify = match tools::notify::NotifyArg::request_of(notify.as_ref())
+            .and_then(|req| tools::notify::start_check(&self.root, req.as_ref()).map(|w| (req, w)))
+        {
+            Ok((req, notes)) => {
+                warnings.extend(notes);
+                req
+            }
+            Err(refusal) => return to_call_tool_result(Ok(refusal.body())),
+        };
         // What the person chose to keep is remembered once the start
         // succeeded (`StartNotes::annotate`).
         if remember == Some(true) {
@@ -474,6 +487,7 @@ impl WfMcp {
             candidate_skipped: candidate.skipped.clone(),
             budget,
             estimate: checked.estimate,
+            notify,
         };
 
         // supervise:"self" - a project-scoped supervised run (a global scope
@@ -657,10 +671,40 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get a summary report of a run; outcome says what was done, what the engine verified, what nobody verified, and the findings and warnings to look at",
+        description = "Get a summary report of a run; outcome says what was done, what the engine verified, what nobody verified, and the findings and warnings to look at; notify (when the run has a subscription) says where its notifications go and what was sent.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_report(
+        &self,
+        Parameters(RunReportArgs {
+            run_id,
+            workspace,
+            format,
+        }): Parameters<RunReportArgs>,
+    ) -> CallToolResult {
+        if format.is_some() {
+            return to_call_tool_result(Ok(json!({
+                "error": "unknown_format",
+                "detail": "run_report answers JSON only; run_report_html writes the report as a page",
+            })));
+        }
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_report(&root, &run_id))
+    }
+
+    #[tool(
+        description = "Write a run's report as one self-contained page (no script, no network) to runs/<id>/report.html, replacing the one there, and return only path and bytes: give the person the path, do not read the page. Call it when the person asks for the report as a file to keep or share.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub(crate) async fn run_report_html(
         &self,
         Parameters(RunRefArgs { run_id, workspace }): Parameters<RunRefArgs>,
     ) -> CallToolResult {
@@ -668,7 +712,33 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::run_report(&root, &run_id))
+        to_call_tool_result(tools::run_report_html(&root, &run_id))
+    }
+
+    #[tool(
+        description = "Change whether a person hears about a live run: notify true sends its transitions (a review or a question waiting, a pause nobody asked for, the end) through the run's current target, or the machine's notify target; false stops them; { on: [...] } keeps only these of the transitions it notifies about (review, question, paused, finished). It never sets a target or widens the transitions: the person does that in the dashboard or with apb notify. Call it only when the person asked. The target is checked now (it can carry notifications, the connector and the account are approved) and its digests are pinned: a target that fails is refused with notify_unavailable and nothing changes. A run that has ended is refused with run_ended. Returns the run's notify block.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_notify(
+        &self,
+        Parameters(RunNotifyArgs {
+            run_id,
+            notify,
+            workspace,
+        }): Parameters<RunNotifyArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        let res = tools::notify::set_by_host(&root, &run_id, &notify);
+        match res {
+            Ok(v) => to_call_tool_result(Ok(v)),
+            Err(tools::notify::NotifyError::NotFound(m)) => {
+                to_call_tool_result(Err(ToolError::NotFound(m)))
+            }
+            Err(e) => to_call_tool_result(Ok(e.body())),
+        }
     }
 
     #[tool(

@@ -2,11 +2,12 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { flushSync, mount, unmount } from 'svelte'
 
-const { fetchEstimate, fetchMemory } = vi.hoisted(() => ({
+const { fetchEstimate, fetchMemory, fetchNotify } = vi.hoisted(() => ({
   fetchEstimate: vi.fn(),
   fetchMemory: vi.fn(),
+  fetchNotify: vi.fn(),
 }))
-vi.mock('./api', () => ({ fetchEstimate, fetchMemory }))
+vi.mock('./api', () => ({ fetchEstimate, fetchMemory, fetchNotify }))
 
 import RunStartDialog from './RunStartDialog.svelte'
 import type { RunEstimate } from './api.gen'
@@ -16,6 +17,8 @@ beforeEach(() => {
   fetchEstimate.mockReset()
   fetchMemory.mockReset()
   fetchMemory.mockResolvedValue(emptyRecall)
+  fetchNotify.mockReset()
+  fetchNotify.mockResolvedValue({ on: [], default_on: false })
 })
 afterEach(() => {
   if (app) unmount(app)
@@ -152,6 +155,60 @@ describe('RunStartDialog', () => {
   it('a retry after a refusal shows the choice even when the estimate has none', async () => {
     await open({ tokens: 1000 }, [], { retry: true })
     expect(byTestId('run-start-policy')).not.toBeNull()
+  })
+
+  it('offers Notify me only with a machine target and sends the choice when it differs', async () => {
+    const onrun = await open(null, [])
+    expect(byTestId('run-start-notify')).toBeNull()
+    submit()
+    expect(onrun).toHaveBeenLastCalledWith(undefined, { params: {} })
+    unmount(app!)
+    app = null
+
+    const target = { connector: 'telegram', account: 'me', function: 'send_message', to: '42' }
+    fetchNotify.mockResolvedValue({ target, on: ['review'], default_on: false })
+    const optIn = await open(null, [])
+    const box = byTestId('run-start-notify-me') as HTMLInputElement
+    expect(byTestId('run-start-notify')?.textContent).toContain('telegram/me send_message to 42')
+    expect(box.checked).toBe(false)
+    box.click()
+    flushSync()
+    submit()
+    expect(optIn).toHaveBeenLastCalledWith(undefined, { params: {}, notify: true })
+    unmount(app!)
+    app = null
+
+    fetchNotify.mockResolvedValue({ target, on: ['review'], default_on: true })
+    const byDefault = await open(null, [])
+    expect((byTestId('run-start-notify-me') as HTMLInputElement).checked).toBe(true)
+    // The hint names what this machine sends, not every transition.
+    expect(byTestId('run-start-notify')?.textContent).toContain('About a review waiting, through')
+    expect(byTestId('run-start-notify')?.textContent).not.toContain('the end of the run')
+    submit()
+    expect(byDefault).toHaveBeenLastCalledWith(undefined, { params: {} })
+    unmount(app!)
+    app = null
+
+    // Unticking a default is the one way to turn it off for this run.
+    const optOut = await open(null, [])
+    ;(byTestId('run-start-notify-me') as HTMLInputElement).click()
+    flushSync()
+    submit()
+    expect(optOut).toHaveBeenLastCalledWith(undefined, { params: {}, notify: false })
+  })
+
+  it('says when the notification settings cannot be read', async () => {
+    fetchNotify.mockRejectedValue(new Error('offline'))
+    await open(null, [])
+    expect(byTestId('run-start-notify')).toBeNull()
+    expect(byTestId('run-start-notify-note')?.textContent).toBe('The notification settings could not be read.')
+    unmount(app!)
+    app = null
+
+    const target = { connector: 'telegram', account: 'me', function: 'send_message', to: '42' }
+    fetchNotify.mockResolvedValue({ target, on: ['review'], default_on: false, problem: 'invalid project config' })
+    await open(null, [])
+    expect(byTestId('run-start-notify-note')?.textContent).toBe('invalid project config')
   })
 
   it('starts without a budget when none is set', async () => {

@@ -372,6 +372,16 @@ pub enum EventPayload {
     },
     RunAborted {
         reason: String,
+        /// Who stopped the run: `operator` for `apb stop` and the run_stop
+        /// tool, `supervisor` for the supervisor's abort, `engine` for an
+        /// eval deadline. Absent in older journals and for a stop that
+        /// propagated from a parent. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        by: Option<crate::pause::kind::PauseBy>,
     },
     SupervisorLost {
         detail: String,
@@ -1536,6 +1546,36 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         by: Option<crate::pause::kind::PauseBy>,
+    },
+    /// The run's notification subscription (see `crate::notify`): at start,
+    /// at a sub-playbook's start (`source: parent`), and when a person
+    /// changes it on the live run (`by: operator`). The latest one is in
+    /// force; `target: None` turns notifications off, with `problem` saying
+    /// why when a default could not be used. Safe to skip up to the next
+    /// checkpoint: an older apb then sends no notifications. Additive
+    /// variant.
+    NotifySet {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        target: Option<crate::notify::record::NotifyTargetRecord>,
+        /// `review`, `question`, `paused`, `finished`; a name a newer apb
+        /// wrote is ignored.
+        #[serde(default)]
+        on: Vec<String>,
+        /// `run`, `project`, `machine`, `person` or `parent`.
+        #[serde(default)]
+        source: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        by: Option<crate::pause::kind::PauseBy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problem: Option<String>,
     },
 }
 

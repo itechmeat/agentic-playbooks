@@ -20,7 +20,7 @@ use apb_core::schema::OnUnknown;
 use serde_json::{Value, json};
 
 use super::attempt::{self, AttemptBinding};
-use super::request::{CallContext, CallOrigin, CallRequest, validate_args};
+use super::request::{CallContext, CallRequest, validate_args};
 use crate::connector::effect::{CallClass, CallFacts, classify};
 use crate::connector::intent::ledger::{self, Admission, AdmitQuery, IntentRecord, Ledger};
 use crate::connector::intent::reconcile::{self, ReconcileInput, Reconciled};
@@ -107,7 +107,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
     let Some(idem) = function.idempotency.as_ref() else {
         return Ok(SendGate::Untracked);
     };
-    if req.dry_run || ctx.origin != CallOrigin::Node {
+    if req.dry_run || !ctx.origin.tracks_sends() {
         return Ok(SendGate::Untracked);
     }
     // Invalid args must not leave a pending intent behind.
@@ -115,6 +115,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
         validate_args(schema, &req.args)?;
     }
     let label = match ctx.intent {
+        Some(label) if ctx.origin.labels_itself() => label.to_string(),
         Some(label) => {
             intent::validate_label(label)
                 .map_err(|m| CallError::new(CallErrorCode::InvalidArgs, m))?;
@@ -345,7 +346,9 @@ fn reconcile_marker(
 
 /// One read of the reconciliation, through the ordinary call path as apb's
 /// own call (journaled with `origin: reconcile`, never charged to the
-/// budget), on the account the send used, with the raw body.
+/// budget), on the account the send used, with the raw body. A
+/// notification's read goes to the same live target, checked against the
+/// same pins.
 fn read_back(input: &GateInput<'_>, function: &str, args: Value) -> Result<(Value, bool), String> {
     let req = input.req;
     let (value, ok) = (input.read)(
@@ -363,7 +366,8 @@ fn read_back(input: &GateInput<'_>, function: &str, args: Value) -> Result<(Valu
         CallContext {
             intent: None,
             claim: input.ctx.claim.clone(),
-            origin: CallOrigin::Reconcile,
+            origin: input.ctx.origin.read_back(),
+            pins: input.ctx.pins.clone(),
         },
     );
     if !ok {
@@ -378,14 +382,16 @@ fn read_back(input: &GateInput<'_>, function: &str, args: Value) -> Result<(Valu
 }
 
 /// Settles an intent whose request never left because the call failed
-/// after the intent was recorded (a render or secret error).
+/// after the intent was recorded (a render or secret error). The source
+/// tells it apart from a refusal of the trust gate: nothing went out, and a
+/// later try may well go.
 pub(super) fn settle_unsent(run_dir: &Path, tracked: &Tracked, err: &CallError) {
     settle_logged(
         run_dir,
         &tracked.id,
         Settlement {
             outcome: ledger::NOT_SENT,
-            source: "gate",
+            source: "unsent",
             detail: Some(error_detail(err)),
             effect_ref: None,
             by: None,
@@ -477,7 +483,7 @@ fn settle_unsynced(run_dir: &Path, intent: &str, why: &EngineError) {
         intent,
         Settlement {
             outcome: ledger::NOT_SENT,
-            source: "gate",
+            source: "journal",
             detail: Some(format!("the journal failed: {why}")),
             effect_ref: None,
             by: None,

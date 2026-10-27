@@ -509,6 +509,8 @@ pub(crate) struct RunArgs {
     pub eval_settings: Option<PathBuf>,
     #[command(flatten)]
     pub budget: crate::budget::BudgetFlags,
+    #[command(flatten)]
+    pub notify: crate::notify::NotifyFlags,
     /// Print the estimate (time, tokens and cost from comparable runs) and
     /// exit without starting a run. It is the playbook's own executors'
     /// estimate, so it does not combine with --overrides or the start-only
@@ -615,6 +617,7 @@ struct CliStart {
     worktree: Option<String>,
     mode: RunMode,
     budget: Option<apb_core::budget::BudgetRequest>,
+    notify: Option<apb_core::notify::NotifyRequest>,
 }
 
 impl CliStart {
@@ -631,6 +634,7 @@ impl CliStart {
             workdir_queue_wait: None,
             worktree: self.worktree,
             budget: self.budget,
+            notify: self.notify,
             ..RunOptions::default()
         }
     }
@@ -668,6 +672,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         confirm_irreversible,
         eval_settings,
         budget,
+        notify,
         estimate,
         remember,
     } = args;
@@ -716,6 +721,13 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let notify = match notify.request() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("bad notify flags: {e}");
             return ExitCode::from(2);
         }
     };
@@ -794,6 +806,10 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
+        if let Err(e) = crate::notify::start_check(root, notify.as_ref()) {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
         if remember {
             remember_input(root, name, &parsed, instruction.as_deref());
         }
@@ -819,6 +835,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             worktree.as_deref(),
             granted.as_ref(),
             budget.as_ref(),
+            notify.as_ref(),
         );
     }
     let mut opts = CliStart {
@@ -829,6 +846,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         worktree,
         mode: RunMode::Autonomous,
         budget: None,
+        notify: None,
     }
     .options();
     opts.overrides = overrides;
@@ -864,6 +882,11 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    if let Err(e) = crate::notify::start_check(root, notify.as_ref()) {
+        eprintln!("run failed: {e}");
+        return ExitCode::from(2);
+    }
+    opts.notify = notify;
     if remember {
         remember_input(root, name, &opts.params, opts.instruction.as_deref());
     }
@@ -972,6 +995,7 @@ pub(crate) fn spawn_detached_supervised(
     worktree: Option<&str>,
     consent: Option<&crate::consent::Granted>,
     budget: Option<&apb_core::budget::BudgetRequest>,
+    notify: Option<&apb_core::notify::NotifyRequest>,
 ) -> ExitCode {
     let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
@@ -1012,6 +1036,9 @@ pub(crate) fn spawn_detached_supervised(
     }
     if let Some(b) = budget {
         cmd.args(crate::budget::BudgetFlags::args_of(b));
+    }
+    if let Some(n) = notify {
+        cmd.args(crate::notify::NotifyFlags::args_of(n));
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -1075,9 +1102,13 @@ pub(crate) fn drive_supervised_child(
     consent: Option<(String, String)>,
     handshake: &Path,
     budget: &crate::budget::BudgetFlags,
+    notify: &crate::notify::NotifyFlags,
 ) -> ExitCode {
-    let parsed = parse_params(params).and_then(|p| budget.request().map(|b| (p, b)));
-    let (parsed, budget) = match parsed {
+    let parsed = parse_params(params).and_then(|p| {
+        let b = budget.request()?;
+        notify.request().map(|n| (p, b, n))
+    });
+    let (parsed, budget, notify) = match parsed {
         Ok(v) => v,
         Err(e) => {
             let _ = atomic_write(handshake, format!("ERR: {e}").as_bytes());
@@ -1094,6 +1125,7 @@ pub(crate) fn drive_supervised_child(
         worktree,
         mode: RunMode::AgentSupervised,
         budget,
+        notify,
     }
     .options();
     // The consent the parent obtained, checked against this process's own
@@ -1407,6 +1439,11 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     }
     if let Some(b) = view.budget(&run_dir) {
         for line in crate::budget::status_lines(&b) {
+            println!("  {line}");
+        }
+    }
+    if let Some(n) = apb_mcp::tools::notify::run_block(&run_dir, &view.events) {
+        for line in crate::notify::block_lines(&n) {
             println!("  {line}");
         }
     }

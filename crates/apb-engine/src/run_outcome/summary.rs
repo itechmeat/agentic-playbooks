@@ -18,7 +18,7 @@ use serde::Serialize;
 use super::baseline::{RunBaseline, observation_line};
 use super::calls::{CallClass, ClassifiedCall, classified_calls};
 pub use super::claims::{Evidence, EvidenceSource, Gap, GapKind};
-use super::intents::{RunIntent, intents_from};
+use super::intents::{RunIntent, outcome_intents};
 use super::lists::{ListOutcome, list_evidence, list_gaps, list_outcomes};
 use super::notes::{RunFinding, RunNotes, RunWarning, finding_line, warning_line};
 use super::{RunGoal, inbox_gap_lines, inbox_gaps_from};
@@ -100,7 +100,7 @@ impl NeedsLook {
     /// From the journal and the run's playbook snapshot, when it reads.
     pub fn from_events(playbook: Option<&Playbook>, events: &[Event]) -> Option<Self> {
         let notes = RunNotes::from_events(events);
-        let intents = intents_from(events, apb_core::clock::now_ms_u64());
+        let intents = outcome_intents(events, apb_core::clock::now_ms_u64());
         Self::of(
             current_regressions(playbook, events),
             &notes,
@@ -235,7 +235,7 @@ impl OutcomeSummary {
             baseline: readout.baseline.as_ref(),
             notes: &readout.notes,
             calls: classified_calls(run_dir, &view.events),
-            intents: intents_from(&view.events, apb_core::clock::now_ms_u64()),
+            intents: outcome_intents(&view.events, apb_core::clock::now_ms_u64()),
             lists: &readout.lists,
             list_outcomes: list_outcomes(readout.playbook.as_ref(), &readout.lists),
             run_id: run_dir
@@ -253,10 +253,21 @@ impl OutcomeSummary {
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![self.headline.clone()];
         out.extend(self.lists.iter().map(ListOutcome::line));
-        let mut section = |title: &str, items: Vec<String>| {
+        for (title, items) in self.sections() {
+            out.push(format!("{title}:"));
+            out.extend(items.into_iter().map(|i| format!("  {i}")));
+        }
+        out
+    }
+
+    /// The non-empty sections after the headline and the lists, each a
+    /// title and its items as one line each. The agent's own summary is
+    /// the last one; every rendering reads it from here.
+    pub fn sections(&self) -> Vec<(&'static str, Vec<String>)> {
+        let mut out = Vec::new();
+        let mut section = |title: &'static str, items: Vec<String>| {
             if !items.is_empty() {
-                out.push(format!("{title}:"));
-                out.extend(items.into_iter().map(|i| format!("  {i}")));
+                out.push((title, items));
             }
         };
         section("Done", self.done.clone());
@@ -304,11 +315,14 @@ impl OutcomeSummary {
             section("Baseline", items);
         }
         if let Some(a) = &self.agent_summary {
-            section("Agent's own summary, not checked", vec![a.clone()]);
+            section(AGENT_SUMMARY_TITLE, vec![a.clone()]);
         }
         out
     }
 }
+
+/// The title of the agent's own closing answer, never checked by apb.
+pub const AGENT_SUMMARY_TITLE: &str = "Agent's own summary, not checked";
 
 impl Inputs<'_> {
     fn summarize(self) -> OutcomeSummary {

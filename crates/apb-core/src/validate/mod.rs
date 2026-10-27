@@ -45,8 +45,9 @@ use node_io::{
     check_cache_key, check_declared_fields, check_session_handoff, check_workdir, check_worktree,
 };
 use nodes::{
-    check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
-    check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
+    check_audience, check_cache, check_engine_ids, check_expected_duration, check_finish,
+    check_goal, check_interactive, check_isolation, check_playbook_ref, check_scripts,
+    check_success_check, check_trigger,
 };
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
@@ -158,11 +159,13 @@ impl ValidationContext {
 pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
     let mut r = ValidationReport::default();
     check_unique_ids(playbook, &mut r); // V01, V02
+    check_engine_ids(playbook, &mut r); // V68
     check_expected_duration(playbook, &mut r); // V19, V20
     check_finish(playbook, &mut r); // V21
+    check_audience(playbook, &mut r); // V101
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, ctx, &mut r); // V23-V26, V42, V43, V69, V84
-    baseline::check_baseline(playbook, ctx, &mut r); // V62-V68
+    baseline::check_baseline(playbook, ctx, &mut r); // V62-V67
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32

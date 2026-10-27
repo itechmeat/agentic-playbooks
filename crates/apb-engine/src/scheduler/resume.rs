@@ -1087,6 +1087,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
         log.append(EventPayload::RunAborted {
             reason: "stopped".into(),
+            by: None,
         })
         .unwrap();
         drop(stop_lock);

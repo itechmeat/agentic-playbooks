@@ -13,11 +13,15 @@
   // used); "Remember for this project" keeps what this start uses. What the
   // person types before the memory answer arrives is kept, and Run waits for
   // that answer, so a start never uses remembered input the dialog did not
-  // show. Run hands the budget and the input to `onrun`; the page starts the
-  // run (and its irreversible-consent dialog, when needed).
+  // show. "Notify me" appears when the machine has a notify target; it
+  // starts checked when runs here notify by default, and a start sends the
+  // choice only when it differs from that. Run hands the budget and the
+  // input to `onrun`; the page starts the run (and its irreversible-consent
+  // dialog, when needed).
   import { untrack } from 'svelte'
-  import { fetchEstimate, fetchMemory, type RunBudget, type RunInput } from './api'
-  import type { RunEstimate } from './api.gen'
+  import { fetchEstimate, fetchMemory, fetchNotify, type RunBudget, type RunInput } from './api'
+  import type { MachineNotify, RunEstimate } from './api.gen'
+  import { NOTIFY_UNREADABLE, onWords, startNotify, targetText } from './notify'
   import type { PlaybookParam } from './types'
   import {
     instructionFrom,
@@ -69,6 +73,9 @@
   let remember = $state(false)
   let memoryNote = $state<string | null>(null)
   let memoryLoading = $state(false)
+  let machineNotify = $state<MachineNotify | null>(null)
+  let notifyMe = $state(false)
+  let notifyNote = $state<string | null>(null)
 
   let estimate = $state<(RunEstimate & { summary: string }) | null>(null)
   let loadError = $state<string | null>(null)
@@ -104,6 +111,9 @@
         initialInstruction = ''
         remember = false
         memoryNote = null
+        machineNotify = null
+        notifyMe = false
+        notifyNote = null
       }
       formError = null
       estimate = null
@@ -139,6 +149,20 @@
         })
         .finally(() => {
           if (live) memoryLoading = false
+        })
+    }
+    if (fresh) {
+      fetchNotify(ws)
+        .then((m) => {
+          if (!live) return
+          machineNotify = m
+          notifyMe = m.default_on
+          notifyNote = m.problem ?? null
+        })
+        .catch(() => {
+          if (!live) return
+          machineNotify = null
+          notifyNote = NOTIFY_UNREADABLE
         })
     }
     fetchEstimate(id, ws)
@@ -177,7 +201,10 @@
     }
     formError = null
     open = false
-    onrun(budget, runInputFrom(fields, instruction, remember, initialInstruction))
+    const input = runInputFrom(fields, instruction, remember, initialInstruction)
+    const notify = startNotify(machineNotify, notifyMe)
+    if (notify !== undefined) input.notify = notify
+    onrun(budget, input)
   }
 </script>
 
@@ -263,6 +290,21 @@
           Secret params and values that look like credentials are never remembered.
         </p>
       </fieldset>
+      {#if machineNotify?.target}
+        <fieldset data-testid="run-start-notify">
+          <legend>Notifications</legend>
+          <label class="check">
+            <input type="checkbox" data-testid="run-start-notify-me" bind:checked={notifyMe} />
+            Notify me about this run
+          </label>
+          <p class="muted hint">
+            About {onWords(machineNotify.on)}, through {targetText(machineNotify.target)}.
+          </p>
+          {#if notifyNote}<p class="muted hint" data-testid="run-start-notify-note">{notifyNote}</p>{/if}
+        </fieldset>
+      {:else if notifyNote}
+        <p class="muted hint" data-testid="run-start-notify-note">{notifyNote}</p>
+      {/if}
       <fieldset>
         <legend>Budget (optional)</legend>
         <p class="muted hint">

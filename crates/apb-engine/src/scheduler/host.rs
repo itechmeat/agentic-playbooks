@@ -334,6 +334,7 @@ impl HostAdapter<'_, '_> {
         cancel: &AtomicBool,
         control: Option<&ControlHooks>,
     ) -> Result<String, AgentFailure> {
+        let notifier = crate::notify::send::Notifier::of_run_dir(self.run_dir);
         loop {
             if cancel.load(Ordering::Relaxed) {
                 self.mark("cancelled");
@@ -358,6 +359,7 @@ impl HostAdapter<'_, '_> {
                 self.journal,
                 self.question_timeout,
                 self.default_answer.as_deref(),
+                notifier.as_ref(),
             )
             .map_err(failure)?
             {
