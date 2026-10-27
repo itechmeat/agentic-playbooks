@@ -15,7 +15,7 @@ yaml_serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 anyhow = "1.0"
-rmcp = { version = "=3.5.0", features = ["transport-io"] }
+rmcp = { version = "=3.7.0", features = ["transport-io"] }
 schemars = "1.2.1"
 hmac.workspace = true
 sha2.workspace = true

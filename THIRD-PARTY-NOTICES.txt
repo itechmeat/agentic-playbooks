@@ -1361,8 +1361,8 @@ Apache License 2.0 (Apache-2.0)
 
 Used by:
   aws-lc-sys 0.45.0 https://github.com/aws/aws-lc-rs
-  rmcp-macros 3.5.1 https://github.com/modelcontextprotocol/rust-sdk/
-  rmcp 3.5.0 https://github.com/modelcontextprotocol/rust-sdk/
+  rmcp-macros 3.8.0 https://github.com/modelcontextprotocol/rust-sdk/
+  rmcp 3.7.0 https://github.com/modelcontextprotocol/rust-sdk/
   ryu 1.0.23 https://github.com/dtolnay/ryu
   sync_wrapper 1.0.2 https://github.com/Actyx/sync_wrapper
 
@@ -2153,7 +2153,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  uuid 1.27.0 https://github.com/uuid-rs/uuid
+  uuid 1.29.0 https://github.com/uuid-rs/uuid
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -2920,7 +2920,7 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  sha2 0.11.0 https://github.com/RustCrypto/hashes
+  sha2 0.11.1 https://github.com/RustCrypto/hashes
 
 Copyright (c) 2016-2026 The RustCrypto Project Developers
 Copyright (c) 2016 Artyom Pavlov
@@ -4406,7 +4406,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  libc 0.2.190 https://github.com/rust-lang/libc
+  libc 0.2.191 https://github.com/rust-lang/libc
 
 Copyright (c) The Rust Project Developers
 
@@ -4565,7 +4565,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  ureq-proto 0.6.4 https://github.com/algesten/ureq-proto
+  ureq-proto 0.6.5 https://github.com/algesten/ureq-proto
 
 Copyright 2022 Martin Algesten
 
@@ -4830,8 +4830,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 
 Used by:
-  schemars 1.2.2 https://github.com/GREsau/schemars
-  schemars_derive 1.2.2 https://github.com/GREsau/schemars
+  schemars 1.2.3 https://github.com/GREsau/schemars
+  schemars_derive 1.2.3 https://github.com/GREsau/schemars
 
 MIT License
 
@@ -4859,7 +4859,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  ureq 3.4.2 https://github.com/algesten/ureq
+  ureq 3.5.0 https://github.com/algesten/ureq
 
 MIT License
 
@@ -5290,7 +5290,7 @@ MIT License (MIT)
 
 Used by:
   aws-lc-sys 0.45.0 https://github.com/aws/aws-lc-rs
-  axoupdater 0.10.2 https://github.com/axodotdev/axoupdater
+  axoupdater 0.10.3 https://github.com/axodotdev/axoupdater
   hashify 0.2.9 https://github.com/stalwartlabs/hashify
   imap-proto 0.10.2 https://github.com/djc/tokio-imap
   jsonschema-regex 0.58.5 https://github.com/Stranger6667/jsonschema
@@ -5525,7 +5525,7 @@ Used by:
   serde_core 1.0.229 https://github.com/serde-rs/serde
   serde_derive 1.0.229 https://github.com/serde-rs/serde
   serde_derive_internals 0.30.0 https://github.com/serde-rs/serde
-  serde_json 1.0.151 https://github.com/serde-rs/json
+  serde_json 1.0.154 https://github.com/serde-rs/json
   serde_path_to_error 0.1.20 https://github.com/dtolnay/path-to-error
   syn 2.0.118 https://github.com/dtolnay/syn
   syn 3.0.2 https://github.com/dtolnay/syn
@@ -5939,9 +5939,9 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  rust-embed-impl 8.12.0 https://pyrossh.dev/repos/rust-embed
-  rust-embed-utils 8.12.0 https://pyrossh.dev/repos/rust-embed
-  rust-embed 8.12.0 https://pyrossh.dev/repos/rust-embed
+  rust-embed-impl 8.13.0 https://pyrossh.dev/repos/rust-embed
+  rust-embed-utils 8.13.0 https://pyrossh.dev/repos/rust-embed
+  rust-embed 8.13.0 https://pyrossh.dev/repos/rust-embed
 
 The MIT License (MIT)
 
@@ -6025,7 +6025,7 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  open 5.4.4 https://github.com/Byron/open-rs
+  open 5.4.5 https://github.com/Byron/open-rs
 
 The MIT License (MIT)
 =====================
