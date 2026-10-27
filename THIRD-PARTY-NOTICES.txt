@@ -6313,11 +6313,11 @@ the following restrictions:
 PART 2. WEB DASHBOARD (NPM PACKAGES)
 ================================================================================
 
-The web frontend embedded in apb includes 54 npm packages.
+The web frontend embedded in apb includes 55 npm packages.
 
   BSD-3-Clause: 1
   ISC: 10
-  MIT: 42
+  MIT: 43
   OFL-1.1: 1
 
 --------------------------------------------------------------------------------
@@ -6375,7 +6375,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@codemirror/language 6.12.4
+@codemirror/language 6.13.1
 License: MIT
 Source: https://code.haverbeke.berlin/codemirror/language
 
@@ -6429,7 +6429,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@codemirror/view 6.43.13
+@codemirror/streamparser 6.0.0
+License: MIT
+Source: https://code.haverbeke.berlin/codemirror/streamparser
+
+MIT License
+
+Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+@codemirror/view 6.43.15
 License: MIT
 Source: https://code.haverbeke.berlin/codemirror/view
 
@@ -6456,7 +6483,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@dagrejs/dagre 3.1.1
+@dagrejs/dagre 3.1.2
 License: MIT
 Source: https://github.com/dagrejs/dagre
 
@@ -6792,7 +6819,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@lucide/svelte 1.51.0
+@lucide/svelte 1.61.0
 License: ISC
 Source: https://github.com/lucide-icons/lucide
 
@@ -6949,7 +6976,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-bits-ui 2.19.5
+bits-ui 2.20.2
 License: MIT
 Source: https://github.com/huntabyte/bits-ui
 
@@ -7245,7 +7272,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-rolldown 1.2.11
+rolldown 1.2.15
 License: MIT
 Source: https://github.com/rolldown/rolldown
 
@@ -7388,7 +7415,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-shadcn-svelte 1.7.0
+shadcn-svelte 1.7.1
 License: MIT
 Source: https://github.com/huntabyte/shadcn-svelte
 
@@ -7470,7 +7497,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-svelte 5.57.1
+svelte 5.57.2
 License: MIT
 Source: https://github.com/sveltejs/svelte
 
@@ -7699,7 +7726,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-vite 8.3.2
+vite 8.3.5
 License: MIT
 Source: https://github.com/vitejs/vite
 
