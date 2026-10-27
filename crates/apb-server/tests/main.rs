@@ -39,6 +39,8 @@ mod meta_api_test;
 mod notify_api_test;
 #[path = "suite/profiles_api_test.rs"]
 mod profiles_api_test;
+#[path = "suite/quality_api_test.rs"]
+mod quality_api_test;
 #[path = "suite/runs_api_test.rs"]
 mod runs_api_test;
 #[path = "suite/runs_watch_test.rs"]

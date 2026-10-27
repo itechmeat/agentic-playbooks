@@ -977,3 +977,100 @@ pub struct DecisionAskArgs {
     pub workspace: Option<String>,
 }
 // --- end issue #193 ---
+
+// --- run quality ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeStartArgs {
+    /// The ended run to grade.
+    pub run_id: String,
+    /// The characters the session may read (default 200000).
+    #[serde(default)]
+    pub budget_chars: Option<u64>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeReadArgs {
+    pub run_id: String,
+    /// The session run_grade_start returned.
+    pub session: String,
+    /// outline | children | read | page | search.
+    pub op: String,
+    /// read: the record reference (`j:<seq>`, `o:<node>`, `s:<stem>`,
+    /// `t:<stem>/<session|stdout|stderr>#<record>`).
+    #[serde(default, rename = "ref")]
+    pub r#ref: Option<String>,
+    /// read: a character span `[from, to]` of the record instead of all of
+    /// it (a span is not a full read).
+    #[serde(default)]
+    pub span: Option<[u64; 2]>,
+    /// children, page: the view (`journal`, `outputs`, `t:<stem>/session`,
+    /// ...); search: only this view.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// children, page: the first record index (default 0).
+    #[serde(default)]
+    pub from: Option<u64>,
+    /// children, page: how many records (at most 200).
+    #[serde(default)]
+    pub count: Option<u64>,
+    /// search: the phrase to find.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// One citation of a grade: a record the session read in full.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GradeCiteArg {
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    #[serde(default)]
+    pub span: Option<[u64; 2]>,
+}
+
+/// The level of one criterion and what it rests on.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GradeProposalArg {
+    /// The criterion id.
+    pub criterion: String,
+    /// good | partial | poor | not_applicable | not_enough_data.
+    pub level: String,
+    /// A short machine slug for why (`checked_replies`).
+    #[serde(default)]
+    pub reason_code: String,
+    /// One sentence for a person; never quote the run.
+    #[serde(default)]
+    pub why: String,
+    /// The records the level rests on, each read in full.
+    #[serde(default)]
+    pub cites: Vec<GradeCiteArg>,
+    /// true claims that something did not happen: every view the criterion
+    /// reads must be complete and read to its end.
+    #[serde(default)]
+    pub absence: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeSubmitArgs {
+    pub run_id: String,
+    pub session: String,
+    /// One entry per criterion of the session.
+    pub grades: Vec<GradeProposalArg>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradesArgs {
+    pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}

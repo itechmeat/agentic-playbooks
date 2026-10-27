@@ -48,6 +48,9 @@ pub const HOST_TASK_MAX_REQUESTS_PER_DAY: u32 = 200;
 /// by default (`advise`) whenever the file configures a provider; the file
 /// can switch it off with `uses.host_task: { mode: off }`.
 pub const HOST_TASK_USE: &str = "host_task";
+/// The uses that run outside any run budget, so `decisions.yaml` caps them
+/// per project and UTC day (`uses.<name>.max_requests_per_day`).
+pub const DAILY_CAPPED_USES: [&str; 2] = ["catalog_rank", HOST_TASK_USE];
 /// The known use names (`uses.<name>`).
 pub const USE_NAMES: [&str; 9] = [
     "judge_node",
@@ -554,11 +557,14 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
     if let Some(name) = doc.uses.keys().find(|k| !USE_NAMES.contains(&k.as_str())) {
         return Err(format!("unknown use `{name}` under uses"));
     }
-    if let Some((name, _)) = doc.uses.iter().find(|(k, u)| {
-        u.max_requests_per_day.is_some() && !matches!(k.as_str(), "catalog_rank" | "host_task")
-    }) {
+    if let Some((name, _)) = doc
+        .uses
+        .iter()
+        .find(|(k, u)| u.max_requests_per_day.is_some() && !DAILY_CAPPED_USES.contains(&k.as_str()))
+    {
         return Err(format!(
-            "uses.{name}.max_requests_per_day is only for catalog_rank and host_task"
+            "uses.{name}.max_requests_per_day is only for {}",
+            DAILY_CAPPED_USES.join(" and ")
         ));
     }
     let mut providers = Vec::new();

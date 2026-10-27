@@ -4,28 +4,39 @@
 //!   version per `supervisor.policy.trial_candidates` ([`choose_at_gate`]),
 //!   and preparation marks a run that starts on the candidate a trial
 //!   (`candidate_trial: true` in the manifest, [`is_trial_start`]).
-//! - At the end, a trial's outcome decides the candidate ([`settle`]): a
-//!   failure (or a goal criterion that did not hold) drops the pointer and
-//!   journals `candidate_rejected`; a success counts towards
-//!   `promote_supervisor_patches` and, once it is met, moves `current` and
-//!   journals `candidate_promoted`. Both land right before `run_finished`.
-//! - The run surfaces read the verdict back with [`trial_of`].
+//! - At the end, a trial decides the candidate ([`settle`]) per
+//!   `promote_supervisor_patches` of `current`: by successes ([`settle`]
+//!   module: a failure or a goal criterion that did not hold rejects, enough
+//!   successes promote) or by quality ([`quality`]: the graded trials are
+//!   compared with `current`'s graded runs; one failure alone decides
+//!   nothing). What it decided is journaled right before `run_finished`
+//!   (`candidate_promoted`, `candidate_rejected`, `candidate_held`).
+//! - A grade stored after a run ended re-decides a candidate under the
+//!   quality policy ([`resettle`]), and a person may decide at any time
+//!   ([`decide_by_person`]); neither writes to a journal.
+//! - The run surfaces read the verdict back with [`trial_of`], the
+//!   playbook surfaces the comparison with [`quality_view`].
+
+mod line;
+mod quality;
+mod settle;
+
+pub use quality::{CandidateQualityView, PersonDecision, decide_by_person, quality_view, resettle};
 
 use std::path::Path;
 
 use apb_core::candidate::{
-    OUTCOME_PROMOTED, OUTCOME_REJECTED, choose_for_start, clear_candidate_if, lineage_reaches,
-    random_draw, read_candidate, update_trial,
+    OUTCOME_PROMOTED, OUTCOME_REJECTED, PromotePolicy, choose_for_start, lineage_reaches,
+    promote_policy, random_draw, read_candidate,
 };
 use apb_core::registry::{LoadedPlaybook, Registry};
-use apb_core::versioning::{
-    PromotePolicy, promote_policy, promote_version, supersede_candidate, supersede_candidate_locked,
-};
+use apb_core::versioning::{supersede_candidate, supersede_candidate_locked};
 use serde::Serialize;
 
 use crate::error::EngineError;
 use crate::event::{Event, EventLog, EventPayload, read_all};
 use crate::state::{RunState, RunStatus};
+use line::{Line, Trial, current_of};
 
 /// The gate's choice for a start without an explicit version: the candidate
 /// and its definition when the policy admits it, else `None` (the start
@@ -64,10 +75,7 @@ pub(crate) fn choose_at_gate(
 /// `current` does not. A start that asked for the candidate by version is a
 /// trial too: its outcome is the same evidence.
 pub(crate) fn is_trial_start(playbook_dir: &Path, version: &str) -> bool {
-    let current = std::fs::read_to_string(playbook_dir.join("current"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    read_candidate(playbook_dir).as_deref() == Some(version) && current != version
+    read_candidate(playbook_dir).as_deref() == Some(version) && current_of(playbook_dir) != version
 }
 
 /// Decides the candidate after a trial run, right before its `run_finished`
@@ -91,7 +99,9 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
     if events.iter().any(|e| {
         matches!(
             e.payload,
-            EventPayload::CandidatePromoted { .. } | EventPayload::CandidateRejected { .. }
+            EventPayload::CandidatePromoted { .. }
+                | EventPayload::CandidateRejected { .. }
+                | EventPayload::CandidateHeld { .. }
         )
     }) {
         return Ok(());
@@ -102,96 +112,75 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
     }) else {
         return Ok(());
     };
-    // Runs live in `<root>/.apb/runs/<id>`, next to `<root>/.apb/playbooks`.
-    let (Some(apb_dir), Some(run_id)) = (
-        run_dir.parent().and_then(Path::parent),
+    let (Some(root), Some(run_id)) = (
+        crate::run_retro::project_root_of(run_dir),
         run_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned()),
     ) else {
         return Ok(());
     };
-    let Some(root) = apb_dir.parent() else {
-        return Ok(());
-    };
-    let playbook_dir = apb_dir.join("playbooks").join(&id);
+    let playbook_dir = apb_core::candidate::playbook_dir(&root, &id);
+    // A quality comparison reads every run of both versions: it is taken
+    // before the lock, and confirmed under it (see `quality::Taken`).
+    let taken = Line::open(&root, &id)
+        .filter(|l| l.candidate == version)
+        .and_then(|l| {
+            let current = l.current_definition().ok()?;
+            match promote_policy(&current.playbook) {
+                PromotePolicy::Quality(gate) => Some((
+                    l.current.clone(),
+                    quality::Taken::of(&l, &current.playbook, &gate, Some(&run_id)),
+                )),
+                _ => None,
+            }
+        });
     let lock = apb_core::candidate::lock(&playbook_dir)?;
     // Replaced by a newer forward patch or already decided: not ours to judge.
-    if read_candidate(&playbook_dir).as_deref() != Some(version.as_str()) {
+    let Some(line) = Line::open(&root, &id).filter(|l| l.candidate == version) else {
         return Ok(());
-    }
+    };
     // `current` moved past the candidate's base while the trial ran: the
     // trial judged a line a person left, so it neither promotes nor
     // rejects; the candidate ends as superseded.
-    let current = std::fs::read_to_string(playbook_dir.join("current"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    if !lineage_reaches(&playbook_dir, &version, &current) {
+    if !lineage_reaches(&playbook_dir, &version, &line.current) {
         supersede_candidate_locked(
             &playbook_dir,
             None,
-            &format!("`current` moved to {current} during the trial"),
+            &format!("`current` moved to {} during the trial", line.current),
             &lock,
         )?;
         return Ok(());
     }
-    let goal_failed = events.iter().find_map(|e| match &e.payload {
-        EventPayload::GoalChecked {
-            status,
-            description,
-            ..
-        } if status == "failed" => Some(description.clone()),
-        _ => None,
-    });
-    if !succeeded || goal_failed.is_some() {
-        let reason = match goal_failed {
-            Some(d) if succeeded => format!("goal criterion did not hold: {d}"),
-            _ => "the trial run failed".to_string(),
-        };
-        clear_candidate_if(&playbook_dir, &version)?;
-        update_trial(root, &id, &version, |t| {
-            t.outcome = Some(OUTCOME_REJECTED.to_string());
-            t.run_id = Some(run_id.clone());
-            t.reason = Some(reason.clone());
-        })?;
-        log.append(EventPayload::CandidateRejected {
-            version,
-            run_id,
-            reason,
-        })?;
-        return Ok(());
-    }
-    // A trial that migrated onto an in-run patch did not run the candidate
-    // as it is: its success proves nothing about it (its failure does).
-    if events
-        .iter()
-        .any(|e| matches!(e.payload, EventPayload::RunMigrated { .. }))
-    {
-        return Ok(());
-    }
-    let record = update_trial(root, &id, &version, |t| {
-        t.successes = t.successes.saturating_add(1);
-    })?;
-    let candidate = Registry::open_dir(apb_dir)?.load(&id, Some(&version))?;
-    let required = match promote_policy(&candidate.playbook) {
-        PromotePolicy::Manual => None,
-        PromotePolicy::OnSuccess | PromotePolicy::Always => Some(1),
-        PromotePolicy::AfterNSuccesses(n) => Some(n.max(1)),
+    // The policy and the criteria come from `current`. A forward patch can
+    // change neither its `supervisor` nor its `quality:` block, so when
+    // `current` does not load (a person left it broken) the candidate's
+    // own definition carries the same ones, and a failed trial is still
+    // judged.
+    let current = match line.current_definition() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "apb: `current` of `{id}` does not load ({e}); the candidate's policy decides"
+            );
+            Registry::open(&root)?.load(&id, Some(&version))?
+        }
     };
-    if !required.is_some_and(|n| record.successes >= n) {
-        return Ok(());
-    }
-    promote_version(root, &id, &version)?;
-    update_trial(root, &id, &version, |t| {
-        t.outcome = Some(OUTCOME_PROMOTED.to_string());
-        t.run_id = Some(run_id.clone());
-    })?;
-    log.append(EventPayload::CandidatePromoted {
-        version,
+    let trial = Trial {
+        line,
         run_id,
-        successes: record.successes,
-    })?;
-    Ok(())
+        events,
+    };
+    match promote_policy(&current.playbook) {
+        PromotePolicy::Quality(gate) => {
+            // Taken on the same `current` only.
+            let taken = taken
+                .filter(|(at, _)| *at == trial.line.current)
+                .map(|(_, t)| t);
+            quality::settle_trial(log, &trial, &current.playbook, &gate, succeeded, taken)
+        }
+        policy => settle::by_successes(log, &trial, policy, succeeded),
+    }
 }
 
 /// A run's candidate trial, for the run surfaces (`run_status`, `apb runs`,
@@ -201,7 +190,10 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
 pub struct CandidateTrial {
     /// The candidate version the run tried.
     pub version: String,
-    /// `running`; `promoted` or `rejected` once the run decided it; `passed`
+    /// `running`; `promoted` or `rejected` once the run decided it; `wait`
+    /// or `needs_person` for a quality comparison it left open (or, once
+    /// that comparison was decided after the run, what the candidate's
+    /// trial record says now); `passed`
     /// for a success that did not promote yet (`after_n_successes`,
     /// `manual`); `undecided` for an end that judges nothing (a stop, a
     /// replaced candidate).
@@ -210,6 +202,44 @@ pub struct CandidateTrial {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+
+/// What the trial record of candidate `version` says now, for a held
+/// trial run: its outcome once promoted or rejected; `undecided` once it
+/// ended any other way (superseded, or no longer the candidate); else the
+/// verdict recorded last. `None` when it cannot be read.
+fn decided_since(run_dir: &Path, events: &[Event], version: &str) -> Option<CandidateTrial> {
+    let playbook = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunStarted { playbook, .. } => Some(playbook.clone()),
+        _ => None,
+    })?;
+    let root = crate::run_retro::project_root_of(run_dir)?;
+    let trial = apb_core::versioning::read_provenance(&root, &playbook, version)
+        .ok()
+        .flatten()?
+        .trial?;
+    let reason = trial
+        .quality
+        .as_ref()
+        .map(|q| q.reason.clone())
+        .or(trial.reason.clone());
+    let still_candidate = read_candidate(&apb_core::candidate::playbook_dir(&root, &playbook))
+        .as_deref()
+        == Some(version);
+    let verdict = match trial.outcome.as_deref() {
+        Some(o @ (OUTCOME_PROMOTED | OUTCOME_REJECTED)) => o.to_string(),
+        Some(_) => UNDECIDED.to_string(),
+        None if !still_candidate => UNDECIDED.to_string(),
+        None => trial.quality.as_ref()?.verdict.as_str().to_string(),
+    };
+    Some(CandidateTrial {
+        version: version.to_string(),
+        verdict,
+        reason,
+    })
+}
+
+/// The verdict of a trial whose end judged nothing.
+const UNDECIDED: &str = "undecided";
 
 /// Why the start of the run in `run_dir` left a waiting candidate out and
 /// ran `current` (`untrusted`, or `refused: <policy>`); `None` otherwise.
@@ -247,12 +277,25 @@ pub fn trial_of(run_dir: &Path, events: &[Event]) -> Option<CandidateTrial> {
                     reason: Some(reason.clone()),
                 });
             }
+            EventPayload::CandidateHeld {
+                verdict, reason, ..
+            } => {
+                // A held candidate is decided later (a grade stored after
+                // the run, a person) without a journal event: the trial
+                // record says what stands now.
+                let decided = decided_since(run_dir, events, &version);
+                return Some(decided.unwrap_or(CandidateTrial {
+                    version,
+                    verdict: verdict.clone(),
+                    reason: Some(reason.clone()),
+                }));
+            }
             _ => {}
         }
     }
     let verdict = match RunState::fold(events).run_status {
         RunStatus::Succeeded => "passed",
-        s if s.is_terminal() => "undecided",
+        s if s.is_terminal() => UNDECIDED,
         _ => "running",
     };
     Some(CandidateTrial {

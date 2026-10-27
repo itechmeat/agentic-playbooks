@@ -11,7 +11,7 @@ use apb_core::registry::{Registry, is_safe_segment};
 use apb_core::schema::{FailurePolicy, Isolation, NodeKind, Outcome, Playbook, WaitFor};
 use apb_core::store::ResolvedPlaybook;
 use apb_core::validate::{Severity, ValidationContext, validate};
-use apb_core::versioning::{promote_policy, promote_version, should_promote};
+use apb_core::versioning::{promote_policy, promote_version};
 use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};
@@ -51,6 +51,7 @@ mod deadline;
 mod dispatch;
 mod entry;
 mod finish_answer;
+mod finish_hooks;
 mod fork;
 mod goal;
 mod handoff;
@@ -196,7 +197,7 @@ fn stop_on_unhandled_failure(
         reason: failure_detail(output),
     })?;
     if let Some(run_dir) = log.run_dir() {
-        crate::candidate::settle(log, &run_dir, false);
+        finish_hooks::finish_hooks(log, &run_dir, false);
     }
     log.append(EventPayload::RunFinished {
         outcome: "failed".into(),
@@ -342,7 +343,7 @@ fn drive(
                 node: None,
                 reason: e.to_string(),
             });
-            crate::candidate::settle(log, run_dir, false);
+            finish_hooks::finish_hooks(log, run_dir, false);
             let _ = log.append(EventPayload::RunFinished {
                 outcome: "failed".into(),
             });
@@ -884,7 +885,7 @@ fn drive_inner(
             {
                 promote_applied_patch(root, run_dir, log, &playbook, applied)?;
             }
-            crate::candidate::settle(log, run_dir, outcome == RunStatus::Succeeded);
+            finish_hooks::finish_hooks(log, run_dir, outcome == RunStatus::Succeeded);
             log.append(EventPayload::RunFinished { outcome: s.into() })?;
             return Ok(RunResult { run_id, outcome });
         }
@@ -2641,7 +2642,7 @@ fn drive_inner(
                     None => {
                         // No fallback path - the run fails without waiting for
                         // the hard max_steps limit.
-                        crate::candidate::settle(log, run_dir, false);
+                        finish_hooks::finish_hooks(log, run_dir, false);
                         log.append(EventPayload::RunFinished {
                             outcome: "failed".into(),
                         })?;

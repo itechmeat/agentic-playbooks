@@ -4,10 +4,13 @@
   import '@xyflow/svelte/dist/style.css'
   import {
     ApiError,
+    fetchCandidate,
     fetchFit,
     fetchPlaybook,
     fetchStats,
     fetchVersions,
+    keepCurrentCandidate,
+    promoteCandidate,
     promoteVersion,
     runPlaybook,
     setFrozen,
@@ -22,8 +25,10 @@
     VersionInfo,
     PlaybookNode as PlaybookNodeType,
   } from '../lib/types'
-  import type { FitReport } from '../lib/api.gen'
+  import type { CandidateQualityView, FitReport, QualityRecord } from '../lib/api.gen'
   import FitCard from '../lib/FitCard.svelte'
+  import CandidateQualityCard from '../lib/CandidateQualityCard.svelte'
+  import { verdictText } from '../lib/quality'
   import ListChecks from '@lucide/svelte/icons/list-checks'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
@@ -60,6 +65,10 @@
     { code: string; severity: string; message: string; node?: string | null }[]
   >([])
   let versions = $state<VersionInfo[]>([])
+  // The candidate on trial and how it compares with current, read with the
+  // version list; a person's decision on it in flight.
+  let candidate = $state<CandidateQualityView | null>(null)
+  let deciding = $state(false)
   let activating = $state<string | null>(null)
   let frozen = $state<boolean>(false)
   let freezing = $state<boolean>(false)
@@ -176,6 +185,43 @@
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load versions', { description: String(e) })
     }
+    try {
+      const c = await fetchCandidate(id, workspace)
+      if (token === loadToken) candidate = c.candidate
+    } catch (e) {
+      // `candidate: null` is how "none on trial" reads; a failure says so
+      // instead of looking the same.
+      if (token === loadToken) {
+        candidate = null
+        toast.error('Failed to load the candidate', { description: String(e) })
+      }
+    }
+  }
+
+  // Promote or keep current: the decision is recorded on the candidate's
+  // trial record as made in the dashboard, then the history reloads. A
+  // decision answers for the playbook it was made on: once the page moved
+  // to another playbook, it neither reloads nor reports here, and a reload
+  // that fails is not a failed decision.
+  async function decideCandidate(decide: () => Promise<QualityRecord>) {
+    const decidedOn = `${workspace}\u0000${id}`
+    const stillHere = () => decidedOn === `${workspace}\u0000${id}`
+    deciding = true
+    let rec: QualityRecord
+    try {
+      rec = await decide()
+    } catch (e) {
+      // Another playbook's card is not this decision's to unlock.
+      if (stillHere()) {
+        toast.error('The decision failed', { description: String(e) })
+        deciding = false
+      }
+      return
+    }
+    if (!stillHere()) return
+    deciding = false
+    toast.success(`Candidate: ${verdictText(rec.verdict)}`)
+    await reload()
   }
 
   async function load(token: number) {
@@ -321,6 +367,8 @@
     playbookNodes = []
     selectedNodeId = null
     versions = []
+    candidate = null
+    deciding = false
     validation = []
     stats = null
     showStats = false
@@ -344,6 +392,17 @@
           <Snowflake class="pv-chip-icon" />
           frozen
         </span>
+      {/if}
+      {#if candidate}
+        <button
+          type="button"
+          class="pv-chip warn pv-chip-button"
+          title="A candidate version is on trial: open the history to compare and decide"
+          data-testid="candidate-chip"
+          onclick={() => (showHistory = true)}
+        >
+          candidate {candidate.version}
+        </button>
       {/if}
     </span>
   {/snippet}
@@ -501,10 +560,10 @@
 
   <!-- 0.23.0 stats (C3) -->
   {#if showStats}
-    <aside class="min-h-0 w-80 shrink-0 overflow-auto border-l border-border p-4" data-testid="playbook-stats-panel">
-      <div class="mb-3 flex items-center justify-between gap-2">
-        <h2 class="text-sm font-semibold">Run stats</h2>
-        <Button variant="ghost" size="icon" class="size-7" title="Hide the run stats" onclick={() => (showStats = false)}>
+    <aside class="side-panel stats-panel" data-testid="playbook-stats-panel">
+      <div class="side-head">
+        <h2>Run stats</h2>
+        <Button variant="ghost" size="icon" title="Hide the run stats" onclick={() => (showStats = false)}>
           <X />
         </Button>
       </div>
@@ -532,6 +591,17 @@
           <X />
         </Button>
       </div>
+      {#if candidate}
+        <div class="candidate-slot">
+          <CandidateQualityCard
+            {candidate}
+            {frozen}
+            busy={deciding}
+            onPromote={() => decideCandidate(() => promoteCandidate(id, workspace))}
+            onKeepCurrent={(reason) => decideCandidate(() => keepCurrentCandidate(id, reason, workspace))}
+          />
+        </div>
+      {/if}
       {#if versions.length === 0}
         <p class="muted">no versions</p>
       {:else}
@@ -615,7 +685,13 @@
     padding: 16px;
   }
   .history-panel {
-    width: 18rem;
+    width: 22rem;
+  }
+  .stats-panel {
+    width: 20rem;
+  }
+  .candidate-slot {
+    margin-bottom: 12px;
   }
   .fit-panel {
     width: 22rem;
@@ -675,6 +751,17 @@
     border-color: color-mix(in oklab, var(--warning) 30%, transparent);
     background: color-mix(in oklab, var(--warning) 15%, transparent);
   }
+  .pv-chip-button {
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .pv-chip-button:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
   .pv-chip.danger {
     color: var(--destructive);
     border-color: color-mix(in oklab, var(--destructive) 30%, transparent);
@@ -697,6 +784,7 @@
   }
   @media (max-width: 640px) {
     .history-panel,
+    .stats-panel,
     .fit-panel {
       width: min(22rem, 85vw);
     }

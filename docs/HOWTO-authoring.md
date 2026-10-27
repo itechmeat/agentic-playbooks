@@ -2422,7 +2422,7 @@ patches become the norm:
 supervisor:
   policy:
     capabilities: [observe, retry, rebind, patch_playbook]  # default: all
-    promote_supervisor_patches: on_success  # | always | manual | { after_n_successes: 3 }
+    promote_supervisor_patches: on_success  # | always | manual | { after_n_successes: 3 } | { when: quality }
     trial_candidates: next_run              # | off | { share: 0.3 }
 ```
 
@@ -2434,6 +2434,14 @@ supervisor:
   runs: `on_success` and `always` promote on the first successful trial,
   `{ after_n_successes: N }` on the N-th, `manual` never (a person promotes it
   with the dashboard's "Use"; the trials still count and still reject).
+  `{ when: quality, compare, min_runs, max_trials, window, margin }`
+  compares the candidate's graded trial runs with the graded runs of
+  `current`, criterion by criterion, and promotes (only when shown not
+  worse, within `margin`), keeps `current`, waits for more trials or hands
+  the decision to a person; one failed trial alone rejects nothing. It
+  needs a `quality:` block with criteria in force, `outcome` among them
+  (V107); a gate that does not read falls back to `manual` (V106); see
+  "quality (run quality)" below and docs/QUALITY.md.
 - `trial_candidates`: whether a run started without an explicit version runs
   the playbook's candidate version. `next_run` (default): every such start
   does; `off`: none (the candidate runs only when asked for by version);
@@ -2457,8 +2465,8 @@ children never do.
 
 A forward patch may not change the goal, the declared or effective effects,
 the irreversible steps, `requires`, the `supervisor` block, the decision
-opt-ins in `defaults` (`host_decisions`, `retry_advice`), `worktree`, a
-node's connector grants or the sub-playbook a node runs; it must pass the
+opt-ins in `defaults` (`host_decisions`, `retry_advice`), `worktree`, the
+`quality:` block, a node's connector grants or the sub-playbook a node runs; it must pass the
 validator and be classified `improvement`. It may bind another profile: the
 run gate checks the candidate's profiles on their own. Its base must be
 `current` or the candidate on trial (`stale_base` otherwise).
@@ -2765,6 +2773,44 @@ the goal with each criterion's result (`pending` until the run is checked).
 The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may
 change them.
+
+## quality (run quality)
+
+A run that succeeded can still have gone badly. The `quality:` block names
+what a good run looks like, so every run is graded and versions compare
+on more than success (docs/QUALITY.md has the full reference):
+
+```yaml
+quality:
+  task_type: "{{params.kind}}"   # optional, params only: runs compare within one type
+  grade_on_finish: rules         # the default; off leaves grading to apb grade
+  builtins:
+    scope: { off: "the task is to reorganize the whole repository" }
+  criteria:                      # at most 3 of the playbook's own
+    - id: first-error
+      subject: { node: triage }  # or run
+      evidence: presence         # presence | absence | both
+      reads: [outputs, transcripts]
+      levels:
+        good: "likely_cause cites the first error in the log"
+        partial: "likely_cause names the step but cites a follow-up error"
+        poor: "likely_cause names an error the log does not show"
+```
+
+- The built-ins (`outcome`, `loops`, `scope`, `consent`, `skill_use`) are
+  graded by rules as every run ends, from the journal and the transcripts,
+  without a model. They grade a mail or CRM run as well as a code run:
+  irreversible connector calls without consent and repeated failing calls
+  come from the journal.
+- The playbook's own criteria are graded by a host agent when a person asks
+  (MCP `run_grade_start`, `run_grade_read`, `run_grade_submit`), citing the
+  records it read in full. A grade keeps references, counts and one short
+  redacted `why`, never the source text it read. A run takes one host
+  grade until a person reopens it (`apb grade <run> --reopen`).
+- Write each level as something checkable against a record. Editing a
+  criterion starts a new comparison history (its digest changes).
+- `apb grade <run>` grades a run by rules, `apb grade --backfill <id>`
+  grades earlier runs, `apb candidate <id>` shows and decides a candidate.
 
 ## baseline_check (before and after)
 

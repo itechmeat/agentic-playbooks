@@ -547,3 +547,42 @@ fn run_aborted_carries_who_stopped_it_only_when_known() {
     let e: Event = serde_json::from_str(new).unwrap();
     assert_eq!(serde_json::to_string(&e).unwrap(), new);
 }
+
+/// The run quality events round-trip, are no checkpoints, and an older
+/// binary that does not know them skips them: each is followed by
+/// `run_finished`. `candidate_promoted` reads without its `basis`.
+#[test]
+fn quality_events_round_trip_and_are_skippable_before_run_finished() {
+    let graded = r#"{"seq":3,"ts":4,"type":"run_graded","grade_id":"rules-1-4-abcd1234","grader":"rules/1","levels":{"loops":"good","outcome":"good"}}"#;
+    let held = r#"{"seq":4,"ts":5,"type":"candidate_held","version":"1.0.1","run_id":"r1","verdict":"wait","reason":"not enough comparable grades yet"}"#;
+    for line in [graded, held] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    let old = r#"{"seq":4,"ts":5,"type":"candidate_promoted","version":"1.0.1","run_id":"r1","successes":2}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::CandidatePromoted { basis: None, .. }
+    ));
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        r#"{"seq":2,"ts":3,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        graded.replace("run_graded", "run_graded_from_the_future"),
+        held.replace("candidate_held", "candidate_held_from_the_future"),
+        r#"{"seq":5,"ts":6,"type":"run_finished","outcome":"succeeded"}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        [0, 1, 2, 5]
+    );
+}

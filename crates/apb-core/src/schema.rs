@@ -184,6 +184,10 @@ pub struct Playbook {
     /// overrides it per dimension. Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<crate::budget::BudgetBlock>,
+    /// How a finished run is graded and compared (see [`crate::quality`]).
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<crate::quality::QualityBlock>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }

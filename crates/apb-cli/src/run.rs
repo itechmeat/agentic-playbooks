@@ -1471,6 +1471,9 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             sanitize_for_terminal(&why, QUESTION_TEXT_MAX)
         );
     }
+    for line in crate::grade::run_lines(&run_dir) {
+        println!("  grade {line}");
+    }
     // --- 0.23.0: run outcome blocks (C1, C7) ---
     if let Some(goal) = view.goal(&run_dir) {
         println!(

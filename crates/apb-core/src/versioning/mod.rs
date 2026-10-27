@@ -25,6 +25,7 @@ pub mod approval;
 mod diff;
 mod imported;
 
+pub use crate::candidate::policy::{PromotePolicy, promote_policy};
 pub use diff::{VersionDiff, diff_definitions, line_diff};
 pub use imported::{
     BundleOrigin, ImportProvenance, MAX_FILE_NAME, ScriptEntry, sanitize_file_name,
@@ -113,14 +114,11 @@ pub struct TrialRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromotePolicy {
-    OnSuccess,
-    AfterNSuccesses(u32),
-    Manual,
-    Always,
+    /// The latest quality decision under `promote_supervisor_patches:
+    /// { when: quality }`; absent under every other policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub quality: Option<crate::quality::QualityRecord>,
 }
 
 fn advance_minor_pair(major: u32, minor: u32) -> Result<(u32, u32), ()> {
@@ -997,62 +995,6 @@ pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), Versi
     // A candidate a person promotes by hand is no longer on trial.
     crate::candidate_pointer::clear_candidate_if(&playbook_dir, version)?;
     Ok(())
-}
-
-/// Reads supervisor patch promotion policy from playbook description.
-pub fn promote_policy(playbook: &Playbook) -> PromotePolicy {
-    let Some(policy) = playbook
-        .supervisor
-        .as_ref()
-        .and_then(|supervisor| supervisor.policy.as_ref())
-    else {
-        return PromotePolicy::OnSuccess;
-    };
-    let Ok(value) = serde_json::to_value(policy) else {
-        return PromotePolicy::OnSuccess;
-    };
-    let Some(promotion) = value.get("promote_supervisor_patches") else {
-        return PromotePolicy::OnSuccess;
-    };
-
-    match promotion {
-        serde_json::Value::String(value) => match value.as_str() {
-            "manual" => PromotePolicy::Manual,
-            "always" => PromotePolicy::Always,
-            "on_success" => PromotePolicy::OnSuccess,
-            _ => PromotePolicy::OnSuccess,
-        },
-        serde_json::Value::Object(values) => values
-            .get("after_n_successes")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|count| u32::try_from(count).ok())
-            .map(PromotePolicy::AfterNSuccesses)
-            .unwrap_or(PromotePolicy::OnSuccess),
-        _ => PromotePolicy::OnSuccess,
-    }
-}
-
-pub fn should_promote(
-    policy: PromotePolicy,
-    classification: &str,
-    run_succeeded: bool,
-    changed_nodes_succeeded: bool,
-    prior_successes: u32,
-) -> bool {
-    if classification == "workaround" {
-        return false;
-    }
-
-    match policy {
-        PromotePolicy::Manual => false,
-        PromotePolicy::Always => true,
-        PromotePolicy::OnSuccess => run_succeeded && changed_nodes_succeeded,
-        PromotePolicy::AfterNSuccesses(required) => {
-            run_succeeded
-                && changed_nodes_succeeded
-                && prior_successes.saturating_add(1) >= required
-        }
-    }
 }
 
 /// Soft deletion of playbook: moves `.apb/playbooks/<id>` to

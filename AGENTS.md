@@ -27,7 +27,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
   rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
-  param rules V99 and V100; `nodes` also holds V68, ids that start with `@`
+  param rules V99 and V100, `quality` for the `quality:` block and the
+  supervisor policy V102-V107; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, and `precedence` combining them), the run
@@ -58,7 +59,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`bundle/`), remembered run input per project (`run_memory/`: `key`,
   `schema` the params digest and the value check, `store` the file, bound
   to the installation by a MAC for a global playbook), the credential-shape
-  detector of values and param names (`token_shape.rs`), copying a playbook into
+  detector of values and param names (`token_shape.rs`), run quality
+  (`quality/`: `criteria` the `quality:` block, the built-in criteria and
+  their digests, `grade` the grade a grader stores, `compare` the comparable
+  key and the deterministic comparison of a candidate with `current`), the
+  one supervisor policy reader (`candidate/policy.rs`), the pure statistics
+  (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
   another scope's store (`scope_move.rs`), schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
@@ -146,7 +152,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   test`), the text apb writes for people (`people/`: `brief` the writing
   brief and where it applies, `instruction` the review and supervisor
   instructions, `link` a run's dashboard link), the run report as one
-  self-contained HTML page (`report_html/`), the redactor every text that
+  self-contained HTML page (`report_html/`), run quality (`grade/`:
+  `sources` every view of a run a grader reads, `reader` the bounded,
+  redacting, traced reader, `evidence` the one validator every grader's
+  output goes through, `rules/` the rules grader of the built-ins, `session`
+  a host's grading session, `store` the write-once grade files;
+  `transcript/` the attempt transcript adapter, claude's session parsed, the
+  other agents' streams as plain text; `candidate/`: the gate's choice and
+  the trial view in `mod`, `settle` by successes, `quality` by quality with
+  `resettle` after a stored grade and a person's decision; `run_history.rs`
+  the earlier runs of a playbook the estimate and the comparison share),
+  the redactor every text that
   leaves the machine goes through (`redact.rs`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
@@ -183,7 +199,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the HTTP API reuses, `memory` for `playbook_memory` and the `remember` of a
   start, shared with the HTTP API, `notify` for the notify argument, the
   `notify_unavailable` start check, a live change and the run's `notify`
-  block, shared with the HTTP API and the CLI); `promote/` is `playbook_make_global` (the
+  block, shared with the HTTP API and the CLI, `grade` for grading a run,
+  its grades and the `grades` block of `run_status`, where every stored
+  grade re-decides the candidate (`after_stored`), and `candidate` for the
+  candidate comparison and a person's decision, both shared with the HTTP
+  API and the CLI); `promote/` is `playbook_make_global` (the
   plan and its blockers in `plan`, the apply in `mod`); `catalog_rank` is the
   opt-in decision-model ranking behind `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
@@ -199,15 +219,36 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the preview `apb import` shows before it asks for acceptance. `notify.rs`
   is `apb notify` and the notify flags of `apb run` (forwarded to the
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
-  --html`.
+  --html`, `grade.rs` is `apb grade` and the grade lines of `apb runs
+  <id>`, `candidate.rs` is `apb candidate`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `memory` for remembered run
-  input, `notify` for the machine's notify target and a live run's change;
+  input, `notify` for the machine's notify target and a live run's change,
+  `quality` for a run's grades and a playbook's candidate;
   `runs` also serves the report page), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
+
+- **Run quality** (`docs/QUALITY.md`): a playbook's `quality:` block names
+  the built-in criteria and at most three of its own. The rules grader
+  grades the built-ins as a run ends (`run_graded` before `run_finished`); a
+  host grades the playbook's own in a bounded MCP reading session. Every
+  grade goes through `grade::evidence` (cite only records read whole, in
+  the views the criterion reads; an absence needs complete views read to
+  their end) and keeps references, counts and one short redacted `why`,
+  never the source text it read; it is signed with the installation key.
+  A run takes one host grade until a person reopens it. A candidate under
+  `promote_supervisor_patches: { when: quality }` is compared with
+  `current` per comparable key (criterion digest, grader, task type; runs
+  created on this machine and grades signed here only) and promoted on its
+  own only when shown not worse (a non-inferiority margin; no evidence
+  never promotes); a grade stored after a run ended writes no journal event
+  and re-decides the candidate through
+  `apb_mcp::tools::grade::after_stored`, which every grading surface calls.
+  Grading and deciding a candidate are refused from a run step
+  (`StepCaller`).
 
 - A **profile** is the single executor binding for an `agent_task` node: agent +
   model + ordered fallbacks + SOUL (role prompt) + skills, with a scope

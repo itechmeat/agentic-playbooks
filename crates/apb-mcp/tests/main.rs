@@ -36,6 +36,8 @@ mod connector_policy;
 mod decision_ask_test;
 #[path = "suite/forward_patch_tool_test.rs"]
 mod forward_patch_tool_test;
+#[path = "suite/grade_tool_test.rs"]
+mod grade_tool_test;
 #[path = "suite/memory_tools_test.rs"]
 mod memory_tools_test;
 #[path = "suite/patch_tool_test.rs"]

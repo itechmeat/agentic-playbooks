@@ -194,7 +194,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         &view.readout(&dir),
         ListItems::NeedingALook,
     );
-    add_candidate_trial(&mut out, &view, &dir);
+    add_trial_and_grades(&mut out, &view, &dir);
     super::budget::add_run_blocks(&mut out, &dir, &view);
     super::notify::add_run_block(&mut out, &dir, &view.events);
     // Issue #195: what a fork's branch-failure policy cancelled and which
@@ -206,14 +206,20 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     Ok(out)
 }
 
-/// Issue #192: the candidate trial this run was, with its verdict; absent
-/// for every other run.
-fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
+/// Issue #192: the candidate trial this run was, with its verdict, and
+/// the run's grades; each absent when there is none.
+fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
     if let Some(t) = apb_engine::candidate::trial_of(dir, &view.events) {
         out["candidate_trial"] = json!(t);
     }
     if let Some(why) = apb_engine::candidate::skipped_of(dir) {
         out["candidate_skipped"] = json!(why);
+    }
+    // Run quality: the latest grade of each grader, criterion by level;
+    // absent for a run nobody graded. `run_grades` returns the grades whole.
+    let grades = super::grade::grade_lines(dir);
+    if !grades.is_empty() {
+        out["grades"] = json!(grades);
     }
 }
 

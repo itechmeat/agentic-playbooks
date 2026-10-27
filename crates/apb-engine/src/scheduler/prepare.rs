@@ -85,6 +85,38 @@ fn recall_input(
     Ok(recalled)
 }
 
+/// The run's task type: `quality.task_type` over the start's params (V104
+/// keeps it to `params.*`), [`DEFAULT_TASK_TYPE`] when absent or empty.
+///
+/// [`DEFAULT_TASK_TYPE`]: apb_core::quality::criteria::DEFAULT_TASK_TYPE
+fn task_type_at_start(
+    quality: &apb_core::quality::QualityBlock,
+    root: &Path,
+    params: &BTreeMap<String, String>,
+) -> String {
+    let rendered = quality.task_type.as_deref().map(|t| {
+        render(
+            t,
+            params,
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "",
+            &crate::context::OutputClip {
+                run_dir: root,
+                max_bytes: 0,
+                retro: None,
+            },
+        )
+    });
+    rendered
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| apb_core::quality::criteria::DEFAULT_TASK_TYPE.to_string())
+}
+
 /// Best-effort: a prepare failure that happens after the run directory (and
 /// its event log) already exist would otherwise leave that directory with no
 /// explanation - an empty or `RunStarted`-only journal that never reaches
@@ -915,6 +947,10 @@ pub(crate) fn prepare_run_target(
             &t.definition_parent.join("playbooks").join(id),
             &loaded.version,
         );
+    manifest.task_type = playbook
+        .quality
+        .as_ref()
+        .map(|q| task_type_at_start(q, root, &cfg.params));
     if !manifest.is_empty() {
         prep_try_unstarted(
             &mut log,

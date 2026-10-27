@@ -19,12 +19,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::attempt_models::{AttemptModel, AttemptWalk, EXECUTED_BY_HOST};
-use crate::decision::report::stats::median;
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
 use crate::manifest::RunExecutionManifest;
 use crate::run_outcome::{RunGoal, goal_from};
 use crate::run_stats::{Rate, StatsFilter, StatsRun};
+use apb_core::stats::median;
 
 pub mod text;
 

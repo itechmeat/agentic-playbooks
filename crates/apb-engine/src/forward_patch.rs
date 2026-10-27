@@ -12,7 +12,8 @@
 //! - `max_patches`: the run's `max_patches_per_run` (in-run patches handled
 //!   plus forward patches created) is spent;
 //! - `goal_changed`, `effects_changed`, `irreversible_added`,
-//!   `trust_fields_changed`: the definition guard ([`definition_guard`]);
+//!   `trust_fields_changed`, `quality_changed`: the definition guard
+//!   ([`definition_guard`]);
 //! - the validator and the frozen flag, as for every patch version.
 //!
 //! Nothing is written to the run's journal (the drive loop is its only
@@ -241,14 +242,59 @@ fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
     serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
 }
 
+/// Whether a protected part of the definition is unchanged.
+type Unchanged = fn(&Playbook, &Playbook) -> bool;
+
+/// The parts of the definition a forward patch may not change, as (the
+/// refusal code, why, the comparison), in the order they are checked.
+fn protected_fields() -> [(&'static str, &'static str, Unchanged); 7] {
+    [
+        (
+            "goal_changed",
+            "the goal and its criteria are the run's contract: only a person may change them",
+            |a, b| a.goal == b.goal,
+        ),
+        (
+            "effects_changed",
+            "the declared `effects` are not a supervisor's to change",
+            |a, b| a.effects == b.effects,
+        ),
+        (
+            "quality_changed",
+            "the `quality:` block decides how runs are graded and compared: only a person may change it",
+            |a, b| a.quality == b.quality,
+        ),
+        ("trust_fields_changed", "`requires` changed", |a, b| {
+            json(&a.requires) == json(&b.requires)
+        }),
+        (
+            "trust_fields_changed",
+            "the decision opt-ins in `defaults` (`host_decisions`, `retry_advice`) changed",
+            |a, b| {
+                json(&a.defaults.host_decisions) == json(&b.defaults.host_decisions)
+                    && json(&a.defaults.retry_advice) == json(&b.defaults.retry_advice)
+            },
+        ),
+        ("trust_fields_changed", "`worktree` changed", |a, b| {
+            a.worktree == b.worktree
+        }),
+        (
+            "trust_fields_changed",
+            "the `supervisor` block (capabilities, promotion and trial policies) changed",
+            |a, b| json(&a.supervisor) == json(&b.supervisor),
+        ),
+    ]
+}
+
 /// What a forward patch may not touch: the goal (the run's contract, a
 /// person's to change), the declared and effective effects (`secrets`,
 /// `irreversible` and the rest; a patch may drop effects, never add them),
-/// the irreversible sources a run start asks consent for, and the fields
-/// trust and policy rest on: `requires`, the `supervisor` block (its
-/// capabilities and promotion and trial policies), the decision opt-ins in
-/// `defaults` (`host_decisions`, `retry_advice`), the run's `worktree`,
-/// each node's connector grants and each sub-playbook a node runs.
+/// the irreversible sources a run start asks consent for, the `quality:`
+/// block (what a candidate is compared on), and the fields trust and policy
+/// rest on: `requires`, the `supervisor` block (its capabilities and
+/// promotion and trial policies), the decision opt-ins in `defaults`
+/// (`host_decisions`, `retry_advice`), the run's `worktree`, each node's
+/// connector grants and each sub-playbook a node runs.
 ///
 /// A node may still bind another profile: profile trust is not inherited
 /// from the base version, the run gate checks every profile bundle of the
@@ -258,18 +304,20 @@ pub fn definition_guard(
     base: &Playbook,
     patched: &Playbook,
 ) -> Result<(), EngineError> {
-    if base.goal != patched.goal {
-        return Err(refused(
-            "goal_changed",
-            "the goal and its criteria are the run's contract: only a person may change them",
-        ));
+    if let Some((code, why, _)) = protected_fields()
+        .into_iter()
+        .find(|(_, _, unchanged)| !unchanged(base, patched))
+    {
+        return Err(refused(code, why));
     }
-    if base.effects != patched.effects {
-        return Err(refused(
-            "effects_changed",
-            "the declared `effects` are not a supervisor's to change",
-        ));
-    }
+    check_effects(root, base, patched)?;
+    check_nodes(base, patched)
+}
+
+/// Effects may be dropped, never added: neither the effective effects, nor
+/// a node's declared ones, nor an irreversible step a start asks consent
+/// for.
+fn check_effects(root: &Path, base: &Playbook, patched: &Playbook) -> Result<(), EngineError> {
     let base_effects = apb_core::effects::effective(base);
     let added: Vec<String> = apb_core::effects::effective(patched)
         .difference(&base_effects)
@@ -305,26 +353,11 @@ pub fn definition_guard(
             ),
         ));
     }
-    if json(&base.requires) != json(&patched.requires) {
-        return Err(refused("trust_fields_changed", "`requires` changed"));
-    }
-    if json(&base.defaults.host_decisions) != json(&patched.defaults.host_decisions)
-        || json(&base.defaults.retry_advice) != json(&patched.defaults.retry_advice)
-    {
-        return Err(refused(
-            "trust_fields_changed",
-            "the decision opt-ins in `defaults` (`host_decisions`, `retry_advice`) changed",
-        ));
-    }
-    if base.worktree != patched.worktree {
-        return Err(refused("trust_fields_changed", "`worktree` changed"));
-    }
-    if json(&base.supervisor) != json(&patched.supervisor) {
-        return Err(refused(
-            "trust_fields_changed",
-            "the `supervisor` block (capabilities, promotion and trial policies) changed",
-        ));
-    }
+    Ok(())
+}
+
+/// Each node keeps its connector grants and the sub-playbook it runs.
+fn check_nodes(base: &Playbook, patched: &Playbook) -> Result<(), EngineError> {
     for node in &patched.nodes {
         let before = base.node(&node.id);
         let grants = |n: &apb_core::schema::Node| json(&n.kind.connector_bindings());

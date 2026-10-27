@@ -63,6 +63,8 @@ mod profile_resolve_test;
 mod promotion_test;
 #[path = "suite/provenance_test.rs"]
 mod provenance_test;
+#[path = "suite/quality_test.rs"]
+mod quality_test;
 #[path = "suite/registry_test.rs"]
 mod registry_test;
 #[path = "suite/run_memory_test.rs"]
@@ -101,6 +103,8 @@ mod validate_params_test;
 mod validate_profiles_test;
 #[path = "suite/validate_protect_test.rs"]
 mod validate_protect_test;
+#[path = "suite/validate_quality_test.rs"]
+mod validate_quality_test;
 #[path = "suite/validate_references_test.rs"]
 mod validate_references_test;
 #[path = "suite/validate_semantics_test.rs"]

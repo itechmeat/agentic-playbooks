@@ -16,6 +16,10 @@ use crate::versioning::{
     write_provenance,
 };
 
+pub mod policy;
+
+pub use policy::{PromotePolicy, TrialPolicy, promote_policy, trial_policy};
+
 use crate::candidate_pointer::CANDIDATE_LOCK_FILE as LOCK_FILE;
 pub use crate::candidate_pointer::{
     CANDIDATE_FILE, OUTCOME_SUPERSEDED, clear_candidate_if, read_candidate,
@@ -29,53 +33,6 @@ pub const SCOPE_CURRENT_RUN: &str = "current_run";
 /// Trial outcomes recorded in [`TrialRecord::outcome`].
 pub const OUTCOME_PROMOTED: &str = "promoted";
 pub const OUTCOME_REJECTED: &str = "rejected";
-
-/// `supervisor.policy.trial_candidates`: whether a run started without an
-/// explicit version runs the candidate.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TrialPolicy {
-    /// Never: the candidate runs only when asked for by version.
-    Off,
-    /// Every start without an explicit version runs it (the default).
-    NextRun,
-    /// That share of starts (0..=1) runs it, by a random draw per start.
-    Share(f64),
-}
-
-/// Reads `supervisor.policy.trial_candidates`: `off`, `next_run` (the
-/// default, also for anything unreadable) or `{ share: <0..1> }`.
-pub fn trial_policy(playbook: &Playbook) -> TrialPolicy {
-    let Some(value) = playbook
-        .supervisor
-        .as_ref()
-        .and_then(|s| s.policy.as_ref())
-        .and_then(|p| p.get("trial_candidates"))
-    else {
-        return TrialPolicy::NextRun;
-    };
-    if let Some(s) = value.as_str() {
-        return match s {
-            "off" => TrialPolicy::Off,
-            _ => TrialPolicy::NextRun,
-        };
-    }
-    match value.get("share").and_then(yaml_serde::Value::as_f64) {
-        Some(p) if p.is_finite() => TrialPolicy::Share(p.clamp(0.0, 1.0)),
-        _ => TrialPolicy::NextRun,
-    }
-}
-
-impl TrialPolicy {
-    /// Whether a start with the uniform draw `draw` (in `[0, 1)`) runs the
-    /// candidate.
-    pub fn admits(self, draw: f64) -> bool {
-        match self {
-            TrialPolicy::Off => false,
-            TrialPolicy::NextRun => true,
-            TrialPolicy::Share(p) => draw < p,
-        }
-    }
-}
 
 /// A uniform draw in `[0, 1)` for a [`TrialPolicy::Share`] start, from a
 /// random v4 UUID (no extra dependency, no shared state).
@@ -229,32 +186,8 @@ pub fn update_trial(
 mod tests {
     use super::*;
 
-    fn with_policy(policy: &str) -> Playbook {
-        Playbook::from_yaml(&format!(
-            "schema: 2\nid: p\nname: P\nversion: 1.0.0\nsupervisor:\n  policy:\n    trial_candidates: {policy}\nnodes: []\nedges: []\n"
-        ))
-        .unwrap()
-    }
-
     #[test]
-    fn the_policy_reads_off_next_run_and_a_share() {
-        assert_eq!(trial_policy(&with_policy("off")), TrialPolicy::Off);
-        assert_eq!(trial_policy(&with_policy("next_run")), TrialPolicy::NextRun);
-        assert_eq!(
-            trial_policy(&with_policy("{ share: 0.25 }")),
-            TrialPolicy::Share(0.25)
-        );
-        assert_eq!(
-            trial_policy(&with_policy("{ share: 7 }")),
-            TrialPolicy::Share(1.0)
-        );
-    }
-
-    #[test]
-    fn a_share_admits_draws_below_it() {
-        assert!(TrialPolicy::Share(0.3).admits(0.29));
-        assert!(!TrialPolicy::Share(0.3).admits(0.3));
-        assert!(!TrialPolicy::Off.admits(0.0));
+    fn a_draw_is_in_the_unit_interval() {
         let d = random_draw();
         assert!((0.0..1.0).contains(&d));
     }

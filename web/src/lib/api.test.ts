@@ -6,8 +6,14 @@ import {
   fetchDiff,
   fetchModelCatalog,
   clearMemory,
+  fetchCandidate,
   fetchFit,
   fetchMemory,
+  fetchRunGrades,
+  gradeRunByRules,
+  keepCurrentCandidate,
+  reopenRunGrading,
+  promoteCandidate,
   fetchPlaybook,
   postAnswer,
   postRunNotify,
@@ -215,6 +221,49 @@ describe('fetchFit', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', ready: true }))
     await expect(fetchFit('p', 'ws-abc')).resolves.toMatchObject({ ready: true })
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/fit?workspace=ws-abc', { headers: H })
+  })
+})
+
+describe('run quality', () => {
+  it('reads and grades a run through /api/runs/{id}/grades', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', grades: [] }))
+    await fetchRunGrades('r1', 'w1')
+    expect(fetchMock).toHaveBeenCalledWith('/api/runs/r1/grades?workspace=w1', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ grade: {} }))
+    await gradeRunByRules('r1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades', { method: 'POST', headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', reopened: true }))
+    await reopenRunGrading('r1', 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades/reopen?workspace=w1', {
+      method: 'POST',
+      headers: H,
+    })
+  })
+
+  it('reads and decides the candidate through /api/playbooks/{id}/candidate', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', candidate: null }))
+    await fetchCandidate('p')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/candidate', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'promote' }))
+    await promoteCandidate('p', 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/promote?workspace=w1', {
+      method: 'POST',
+      headers: H,
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'keep_current' }))
+    await keepCurrentCandidate('p', '  reads better ')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/keep-current', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ reason: 'reads better' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'keep_current' }))
+    await keepCurrentCandidate('p', ' ')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/keep-current', {
+      method: 'POST',
+      headers: JSON_H,
+      body: '{}',
+    })
   })
 })
 

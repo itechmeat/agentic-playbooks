@@ -213,6 +213,12 @@ pub struct RunExecutionManifest {
     /// [`crate::gate::RunPermit::candidate_skipped`]). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_skipped: Option<String>,
+    /// The kind of task the run does: the playbook's `quality.task_type`
+    /// rendered over the start's params (`default` without one), present
+    /// only for a playbook with a `quality:` block. Fixed at start, so a
+    /// later edit cannot change which runs a past run is compared with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<String>,
 }
 
 // --- host execution mode (0.23.0) ---
@@ -316,6 +322,7 @@ impl RunExecutionManifest {
             && self.consent.is_none()
             && !self.candidate_trial
             && self.candidate_skipped.is_none()
+            && self.task_type.is_none()
     }
 
     /// Each bound node's profile and bundle digests (the supervisor's

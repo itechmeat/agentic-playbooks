@@ -1,0 +1,11 @@
+{"seq":0,"ts":1000,"type":"run_started","playbook":"inbox-triage","version":"1.0.0"}
+{"seq":1,"ts":1001,"type":"node_started","node":"triage","attempt":1}
+{"seq":2,"ts":1002,"type":"node_finished","node":"triage","status":"succeeded","attempt":1,"output":"3 messages: 1 refund request, 1 address change, 1 spam","artifacts":[]}
+{"seq":3,"ts":1003,"type":"node_started","node":"act","attempt":1}
+{"seq":4,"ts":1004,"type":"connector_call","node_id":"act","connector":"crm","function":"find_contact","account":"main","url":"","outcome":"ok","http_status":200,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}
+{"seq":5,"ts":1005,"type":"connector_call","node_id":"act","connector":"crm","function":"update_contact","account":"main","url":"","outcome":"rate_limited","http_status":429,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}
+{"seq":6,"ts":1006,"type":"connector_call","node_id":"act","connector":"crm","function":"update_contact","account":"main","url":"","outcome":"rate_limited","http_status":429,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}
+{"seq":7,"ts":1007,"type":"connector_call","node_id":"act","connector":"crm","function":"update_contact","account":"main","url":"","outcome":"rate_limited","http_status":429,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}
+{"seq":8,"ts":1008,"type":"connector_call","node_id":"act","connector":"crm","function":"delete_contact","account":"main","url":"","outcome":"ok","http_status":200,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}
+{"seq":9,"ts":1009,"type":"node_finished","node":"act","status":"succeeded","attempt":1,"output":"spam contact deleted, address updated","artifacts":[]}
+{"seq":10,"ts":1010,"type":"run_finished","outcome":"succeeded"}

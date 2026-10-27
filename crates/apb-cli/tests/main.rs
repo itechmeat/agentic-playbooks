@@ -39,6 +39,8 @@ mod demo_playbooks_test;
 mod decisions_cli_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
+#[path = "suite/grade_cli_test.rs"]
+mod grade_cli_test;
 #[cfg(unix)]
 #[path = "suite/host_mode_cli_test.rs"]
 mod host_mode_cli_test;

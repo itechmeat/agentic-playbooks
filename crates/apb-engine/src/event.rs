@@ -444,6 +444,11 @@ pub enum EventPayload {
         run_id: String,
         #[serde(default)]
         successes: u32,
+        /// What promoted it: `successes` (the trial count of
+        /// `promote_supervisor_patches`) or `quality` (the comparison with
+        /// `current`). Absent in older journals, which read as `successes`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        basis: Option<String>,
     },
     /// This trial run of the candidate `version` failed (or a goal criterion
     /// did not hold): the candidate pointer was dropped, so the next runs use
@@ -457,7 +462,39 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+    /// The candidate trial `version` was compared with `current` by
+    /// quality and is still undecided: `verdict` is `wait` (more trials
+    /// needed) or `needs_person` (the trials are spent; a person decides).
+    /// Written right before `run_finished`, safe to skip up to that
+    /// checkpoint.
+    CandidateHeld {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        verdict: String,
+        #[serde(default)]
+        reason: String,
+    },
     // --- end candidate trials ---
+    // --- run quality ---
+    /// The rules grader graded the run as it ended: the stored grade
+    /// (`runs/<id>/grades/<grade_id>.json`) and each criterion's level.
+    /// Written after the last `node_finished` and right before
+    /// `run_finished`, so it is safe to skip up to that checkpoint. An end
+    /// replayed after a crash between this event and `run_finished` grades
+    /// nothing again (the inline grade looks for this event first). Grades
+    /// made after the run ended are not journaled.
+    RunGraded {
+        #[serde(default)]
+        grade_id: String,
+        #[serde(default)]
+        grader: String,
+        #[serde(default)]
+        levels: BTreeMap<String, String>,
+    },
+    // --- end run quality ---
     ReviewRequested {
         node: String,
         options: Vec<String>,

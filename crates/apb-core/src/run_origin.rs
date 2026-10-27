@@ -130,6 +130,12 @@ pub fn tag(domain: &str, bytes: &[u8]) -> std::io::Result<String> {
     keyed_tag(&key, domain, bytes).ok_or_else(|| std::io::Error::other("the key is unusable"))
 }
 
+/// [`tag`] without creating the key: `None` when the installation has no
+/// key yet (a library caller that never ran an `apb` entry point).
+pub fn tag_if_keyed(domain: &str, bytes: &[u8]) -> Option<String> {
+    keyed_tag(&load_key()?, domain, bytes)
+}
+
 /// Whether `stored` is [`tag`] of `bytes` for `domain` under this
 /// installation's key. False without a key.
 pub fn verify_tag(domain: &str, bytes: &[u8], stored: &str) -> bool {
