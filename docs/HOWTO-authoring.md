@@ -15,7 +15,7 @@ A playbook is a YAML document with these top-level fields:
 - `version` (string, `X.Y.Z`)
 - `params` (list): each `{ name, type, label?, options?, default? }`
 - `defaults` (profile, retries, timeout, on_failure)
-- `trigger`, `requires`, `effects`, `goal` (see below)
+- `trigger`, `requires`, `effects`, `budget`, `goal` (see below)
 - `nodes` (list) and `edges` (list)
 
 Every save through apb (`playbook_create` / `playbook_update`, the dashboard
@@ -2407,6 +2407,145 @@ A node's declaration widens the playbook's effective effects the same way
 name of the node: an automatic review
 decision (`auto_decide`) is refused on a gate followed by a node that
 declares `irreversible` or `secrets`, whatever the node is called.
+
+## budget (run spend limit)
+
+`budget` caps what a run spends, in tokens, in US dollars or in both. It is a
+predictive stop: before each agent node and each `playbook` node, the engine
+checks whether what is left still covers the node's median spend in
+comparable past runs, and pauses the run before the node when it does not.
+
+```yaml
+budget:
+  tokens: 400000          # input plus output tokens of the run's agent attempts (cache excluded)
+  usd: 4.00               # cost the agent CLIs reported, in US dollars
+  on_no_estimate: ask     # ask (default) | pause | continue
+```
+
+At least one of `tokens` and `usd` is required. `on_no_estimate` says what
+happens before a node that has no estimate (no comparable run reported its
+spend) or when what the run spent is unknown: `continue` runs it, `pause`
+pauses the run before it, and `ask` makes the person decide at start (see
+below); an `ask` nobody answered acts as `pause`. One exception: a run that
+already spent its limit (what its attempts reported alone reaches it)
+pauses before the next gated node under `continue` too.
+
+**Precedence.** A run argument overrides the block per field: MCP
+`playbook_run` and `playbook_execute_plan` take `budget: { tokens, usd,
+on_no_estimate }`, `apb run` takes `--budget-tokens 300k`, `--budget-usd 3.50`
+and `--on-no-estimate continue`, and the dashboard's Run dialog has a token
+and a dollar input. A run may set a higher or a lower limit than the block.
+With neither a block nor a run argument the run has no budget and no gate.
+An `on_no_estimate` without any limit (in the block or the run) is refused:
+`apb run` exits with an error, MCP and HTTP answer `invalid_budget`, and a
+block with only `on_no_estimate` is a V96 error. A token amount takes `_`
+separators (`300_000`), never a `,`: `1,5m` is refused, not read as `15m`.
+
+**The estimate.** A top-level run with a budget, or one a launch surface
+showed an estimate for, writes the estimate it started with
+(`runs/<id>/estimate.json`; best effort, a failed write never fails the
+start; with run overrides it is computed for the overridden bindings, not
+taken from the one shown), from the newest 50 runs of the same playbook
+version and execution mode (`cli` or `host`) among the project's newest 200
+run directories this apb created (a planted run directory takes no place
+among them). A node's spend comes
+only from runs where it ran with the same profile digest (its `profile.yaml`
+and SOUL, so its model too). `apb run --estimate`, MCP
+`playbook_get(estimate: true)` and the Run dialog show it before a start:
+time, tokens and cost with a range, how many comparable runs there are, how
+many attempts reported no usage, and the nodes with no estimate. Below 3
+comparable runs it is indicative only. See `docs/STATS.md` for the method.
+
+**The gate.** Before a gated node starts a visit, per limited dimension:
+
+- the node's need is the median spend of one visit of it;
+- what is left is the limit minus what the run spent, minus the medians of
+  the members of a parallel batch that were admitted and are still running
+  (so parallel branches do not all pass against the same amount);
+- an attempt that reported no usage (or no cost, for dollars) is never
+  counted as zero: it is estimated with its node's median per attempt, and
+  when no median exists what was spent is unknown. What the attempts did
+  report is still a lower bound: when it alone leaves nothing (basis
+  `exhausted`) or less than the need (basis `median`), the run pauses
+  whatever the policy; only while it still fits does `on_no_estimate`
+  decide;
+- a list node is gated before each batch, with the median per item times
+  the items of the batch; a node in a loop is gated at every traversal;
+- a node that fell back to another executor in this run (a profile fallback
+  in its latest visit, or a host fallback at any time) has no estimate,
+  because its history is another executor's.
+
+When less is left than the need, the run pauses before the node (the journal
+has `budget_gate` with `decision: paused` and `run_paused` with `by: engine`
+and a reason that starts with `budget (`). A plain admission journals nothing.
+
+**At start.** With `on_no_estimate: ask` and a gated node that has no
+estimate in a dimension the budget limits (a node with token history but no
+cost history counts under a dollar limit), the person decides before the run
+starts: MCP refuses the start
+with `budget_needs_decision` (the estimate and the nodes) until the call sets
+`budget.on_no_estimate`, the dashboard's Run dialog shows a pause or continue
+choice, and `apb run` asks at a terminal (without one, `ask` stays and the
+run pauses before such a node).
+
+**Resume.** A run its budget paused does not continue on a plain resume: the
+refusal (`budget_paused`, `apb resume` exit 2) names the node, what it needs
+and what is left. Resume it with a change:
+
+- a raise, added to the limit in force: `--raise-budget-tokens 100k`,
+  `--raise-budget-usd 2` (MCP `run_resume` `budget: { raise_tokens,
+  raise_usd }`, the dashboard's Resume form);
+- a new limit: `--budget-tokens`, `--budget-usd` (`tokens`, `usd`);
+- another policy: `--on-no-estimate continue` (`on_no_estimate`);
+- or `--over-budget-once` (`once`): the paused node (or the next batch of a
+  list node) runs once over the budget, then the gate applies again.
+
+A set and a raise of the same dimension in one resume are refused. A raise,
+a new limit or a policy is journaled as `budget_set` with `source: resume`,
+and `once` as `budget_gate` with `decision: waived`; what was spent is never
+reset. Both are journaled only when the resume is admitted, under the run's
+event lock right before its `run_resumed`: a refused resume (environment
+drift, a finished run, a busy workdir, another resume that won) journals
+none, and a change is applied once per pause, so a second submit of it for
+the same pause is refused. A waiver covers the pause it resolved: a later
+budget pause, or a resume from another node, drops it. A running run's
+budget does not change: pause it first. A budget may also be set at resume
+on a run that had none.
+
+**Who changes a budget.** The engine refuses a budget change, and a plain
+resume of a budget pause, from a supervisor or from its own waker. That a
+person stands behind an operator's change is each surface's rule: `apb
+resume` and the dashboard are a person at a terminal or a browser; MCP
+`run_resume` answers a `budget` first with
+`budget_change_requires_confirmation` and a `budget_nonce`, and applies it
+only when called again with `confirm_budget` set to that nonce, after the
+agent showed the person the change. Like the irreversible consent nonce it
+is not a secret: it makes the agent stop and ask, it cannot prove a person
+answered. A run a supervisor agent watches refuses budget changes over MCP
+outright (`budget_change_refused`).
+
+**Limits.**
+
+- It is not a ceiling: a node the gate admitted may spend past the limit,
+  and the estimate's range is wide on purpose (the medians of the nodes add
+  up as if they moved together).
+- A sub-playbook's spend counts toward its parent's budget and its
+  `playbook` node is gated as one node, but nothing inside the child is
+  gated, and the child's own `budget:` block is ignored under a parent.
+- What decision models spend is not counted; they keep their own budget
+  (`docs/DECISIONS.md`).
+- A subscription plan that reports no cost leaves the dollar dimension
+  without an estimate: with a dollar limit, `on_no_estimate` decides before
+  every gated node, and the start answer warns about it.
+- An older apb that reads a journal with `budget_set` or `budget_gate`
+  refuses to continue the run only until the next checkpoint, then continues
+  it without enforcing the budget.
+
+| Code | Level | What it covers |
+|---|---|---|
+| V96 | error | `budget` declares neither `tokens` nor `usd` |
+| V97 | error | `budget.tokens` is 0, or `budget.usd` is not a finite amount greater than 0 |
+| V98 | warning | a `budget` on a playbook with no agent node and no `playbook` node, so it never applies |
 
 ## goal (target and criteria)
 

@@ -1,6 +1,7 @@
 pub mod agent_catalog;
 pub mod agent_output;
 pub mod baseline;
+pub mod budget;
 pub mod bundle;
 pub mod cache;
 pub mod candidate;

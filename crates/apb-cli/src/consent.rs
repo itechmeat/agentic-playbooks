@@ -124,12 +124,12 @@ fn ask(need: &ConsentNeed) -> Option<bool> {
 }
 
 #[cfg(unix)]
-fn open_tty() -> Option<std::fs::File> {
+pub(crate) fn open_tty() -> Option<std::fs::File> {
     std::fs::File::open("/dev/tty").ok()
 }
 
 #[cfg(not(unix))]
-fn open_tty() -> Option<std::fs::File> {
+pub(crate) fn open_tty() -> Option<std::fs::File> {
     // No controlling-terminal device: the Windows console input handle.
     std::fs::File::open("CONIN$").ok()
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render } from 'svelte/server'
 import PlaybookStatsCard from './PlaybookStatsCard.svelte'
-import { costKnownText, modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
+import { costKnownText, digestText, executorGroups, modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
 import type { StatsReport, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
@@ -102,5 +102,51 @@ describe('costKnownText', () => {
     const spend = report.versions[1].spend
     expect(costKnownText({ spend: { ...spend, cost_known: { count: 3, of: 4, rate: 0.75 } } })).toBe('3/4 (75%) attempts')
     expect(costKnownText({ spend: { ...spend, cost_known: { count: 0, of: 0 } } })).toBeNull()
+  })
+})
+
+describe('executor digests', () => {
+  const group = (profile: string, runs: number, tokens?: number) => ({
+    profile,
+    bundle: `${profile}b`,
+    runs,
+    first_pass: { count: runs, of: runs, rate: 1 },
+    duration: { count: runs, median_ms: 60_000, max_ms: 60_000 },
+    tokens_per_visit: tokens,
+  })
+  const node = (name: string, digests: ReturnType<typeof group>[]) => ({
+    node: name,
+    runs: 2,
+    first_pass: { count: 2, of: 2, rate: 1 },
+    retries: 0,
+    fallbacks: 0,
+    reentries: 0,
+    duration: { count: 2, median_ms: 60_000, max_ms: 60_000 },
+    deliverable_missing: 0,
+    output_fields_missing: 0,
+    digests,
+    models: {},
+    model_mismatch: 0,
+  })
+
+  it('prints a group as apb stats does and lists only nodes with more than one executor', () => {
+    expect(digestText(group('1a2b3c4d5e6f', 2, 200))).toBe(
+      'profile 1a2b3c4d5e6f (bundle 1a2b3c4d5e6fb): 2 runs, first pass 2/2 (100%), median 1.0 min, 200 tokens per visit',
+    )
+    expect(digestText(group('aaa', 1))).toBe('profile aaa (bundle aaab): 1 run, first pass 1/1 (100%), median 1.0 min')
+    const v = { nodes: [node('a', [group('aaa', 1), group('bbb', 1)]), node('b', [group('ccc', 2)])] }
+    expect(executorGroups(v)).toEqual([
+      { node: 'a', groups: [digestText(group('aaa', 1)), digestText(group('bbb', 1))] },
+    ])
+    expect(executorGroups({ nodes: [] })).toEqual([])
+  })
+
+  it('shows the groups in the card', () => {
+    const v = version('1.0.0', { nodes: [node('a', [group('aaa', 1), group('bbb', 1)])] })
+    const body = render(PlaybookStatsCard, {
+      props: { report: { runs: 2, versions: [v] } as StatsReport },
+    }).body
+    expect(body).toContain('playbook-stats-executors')
+    expect(body).toContain('profile bbb (bundle bbbb)')
   })
 })

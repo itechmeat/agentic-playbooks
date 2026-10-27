@@ -2,6 +2,7 @@
 //! rmcp plumbing in [`crate::server`]. One module per domain; this file holds
 //! the shared error type and the two lookups every domain starts from.
 
+pub mod budget;
 pub mod capture;
 pub mod decision;
 pub mod intent;

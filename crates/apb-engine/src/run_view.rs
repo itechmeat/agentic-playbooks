@@ -91,7 +91,19 @@ pub struct RunUsage {
     pub finished_attempts: u32,
 }
 
+/// The tokens one attempt's usage counts toward a budget and the run
+/// statistics: input plus output, cache reads and writes left out.
+pub fn billable_tokens(u: &apb_core::agent_output::AgentUsage) -> u64 {
+    u.input_tokens.saturating_add(u.output_tokens)
+}
+
 impl RunUsage {
+    /// Input plus output tokens, cache reads and writes left out: what a
+    /// budget and the run statistics count (see [`billable_tokens`]).
+    pub fn billable_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
     /// The totals over `events`, `None` when no attempt reported usage.
     pub fn from_events(events: &[Event]) -> Option<Self> {
         let total = Self::totals(events);

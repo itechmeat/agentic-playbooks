@@ -1,3 +1,8 @@
+import type { BudgetLimit, OnNoEstimate } from './api.gen'
+
+// A run's budget argument: the generated limit plus the policy.
+export type RunBudget = BudgetLimit & { on_no_estimate?: OnNoEstimate }
+
 export interface Project {
   workspace_id: string
   name: string
@@ -56,6 +61,8 @@ export interface PlaybookDetail {
     // `route`, `stop`, or the id of the node it goes to. Absent (and on any
     // playbook written before the policy existed) means `route`.
     defaults?: { on_failure?: string } | null
+    // The playbook's run budget, the Run dialog's defaults.
+    budget?: RunBudget | null
   }
   layout: WfLayout | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
@@ -66,8 +73,11 @@ export interface PlaybookDetail {
 // from the Rust types the server serializes, so the two cannot drift. See
 // crates/apb-server/src/ts_contract.rs.
 export type {
+  BudgetStatus,
   ChildRun,
   NodeStatus,
+  OnNoEstimate,
+  RunEstimate,
   PauseBy,
   PauseInfo,
   PauseMode,

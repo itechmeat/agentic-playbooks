@@ -89,7 +89,9 @@ export async function errorMessage(
         body,
       }
     }
-    const meta = { code: body.error, detail: body.detail }
+    // The body rides along, so a caller reads a structured refusal's fields
+    // (the estimate of `budget_needs_decision`, the budget of `budget_paused`).
+    const meta = { code: body.error, detail: body.detail, body }
     if (body.error === 'validation' && body.codes?.length) {
       return { message: `${url}: validation: ${body.codes.join(', ')}`, ...meta }
     }

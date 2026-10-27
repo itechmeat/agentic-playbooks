@@ -180,7 +180,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get a playbook definition by id and optional version. detail selects the shape: \"summary\" (default) returns the compact interface (id/name/version/schema, params, nodes without prompt bodies, edges, supervisor interface) sized for MCP injection; \"full\" returns the complete authoring payload (yaml + full playbook + layout) for editing. An unknown detail value falls back to summary.",
+        description = "Get a playbook definition by id and optional version. detail selects the shape: \"summary\" (default) returns the compact interface (id/name/version/schema, params, nodes without prompt bodies, edges, supervisor interface) sized for MCP injection; \"full\" returns the complete authoring payload (yaml + full playbook + layout) for editing. An unknown detail value falls back to summary. estimate: true adds `estimate`, how long a run of this version takes and what it spends (time, tokens, cost, the nodes with no estimate) from comparable past runs in the workspace: the read-only way to show it before a start.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_get(
@@ -190,18 +190,28 @@ impl WfMcp {
             version,
             workspace,
             detail,
+            estimate,
         }): Parameters<PlaybookGetArgs>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::playbook_get(
+        let got = tools::playbook_get(
             &root,
             &id,
             version.as_deref(),
             tools::DetailMode::from_arg(detail.as_deref()),
-        ))
+        );
+        // The estimate is an optional extra: a failure to read it is
+        // reported inside it, the definition is returned all the same.
+        to_call_tool_result(got.map(|mut out| {
+            if estimate == Some(true) {
+                out["estimate"] = tools::budget::playbook_estimate(&root, &id, version.as_deref())
+                    .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            }
+            out
+        }))
     }
 
     #[tool(

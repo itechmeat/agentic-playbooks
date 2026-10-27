@@ -157,3 +157,58 @@ fn stats_counts_a_run_that_failed_at_start() {
         .stdout(predicate::str::contains("outcome: 0/1 (0%) succeeded"))
         .stdout(predicate::str::contains("skipped").not());
 }
+
+/// 8.4: after a node's profile changed (its SOUL), `apb stats` lists the
+/// node's figures per executor digest within the version, and `--compare`
+/// names the node whose executor differs between two versions. Real runs on
+/// a stub agent, so the manifests carry the digests.
+#[cfg(unix)]
+#[test]
+fn stats_shows_digest_groups_after_a_profile_change() {
+    use crate::budget_cli_test::{history_run, seed};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let stub = seed(root, "1.0.0", "first");
+    history_run(root, &stub);
+    seed(root, "1.1.0", "first");
+    history_run(root, &stub);
+    seed(root, "1.1.0", "second");
+    history_run(root, &stub);
+    apb()
+        .args(["stats", "--playbook", "bud"])
+        .current_dir(root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("    profile "))
+        .stdout(predicate::str::contains(": 1 runs, first pass 1/1 (100%)"))
+        .stdout(predicate::str::contains("200 tokens per visit"));
+    let out = apb()
+        .args(["stats", "--playbook", "bud", "--compare", "1.0.0", "--json"])
+        .current_dir(root)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let newer = v["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["version"] == "1.1.0")
+        .expect("1.1.0 in the report");
+    let node_a = newer["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["node"] == "a")
+        .expect("node a");
+    assert_eq!(node_a["digests"].as_array().unwrap().len(), 2);
+    let changes = v["compare"]["executor_changes"].as_array().unwrap();
+    let nodes: Vec<&str> = changes
+        .iter()
+        .map(|c| c["node"].as_str().unwrap())
+        .collect();
+    assert_eq!(nodes, ["a", "b"]);
+    assert_ne!(changes[0]["base_profile"], changes[0]["against_profile"]);
+}

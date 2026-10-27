@@ -104,6 +104,16 @@ pub struct RunOptions {
     /// (issue #192, [`crate::gate::RunPermit::candidate_skipped`]); the
     /// manifest records it so `run_status` reports it.
     pub candidate_skipped: Option<String>,
+    /// The run's budget argument; each field it sets overrides the
+    /// playbook's `budget:` block (see `apb_core::budget`). Ignored for a
+    /// sub-playbook child.
+    pub budget: Option<apb_core::budget::BudgetRequest>,
+    /// The estimate a launch surface showed the person before the start
+    /// (its pre-start check), kept as the run's snapshot instead of
+    /// computing it again. Without it, only a run with a budget computes
+    /// one; a run with neither has no snapshot. Ignored for a sub-playbook
+    /// child.
+    pub estimate: Option<crate::run_estimate::RunEstimate>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -565,18 +575,17 @@ pub(crate) fn hand_to_detached_driver(
     prepared: PreparedRun,
 ) -> Result<String, EngineError> {
     let run_id = prepared.run_id().to_string();
-    let pid =
-        match crate::driver::spawn_detached_driver(root, &run_id, None, false, false, None, None) {
-            Ok(pid) => pid,
-            Err(e) => {
-                // No driver was started, so nothing will ever move this run. Close
-                // it out rather than leaving it stuck in `running`.
-                prepared.abandon();
-                return Err(EngineError::Invalid(format!(
-                    "cannot start the detached run driver: {e}"
-                )));
-            }
-        };
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, &Default::default()) {
+        Ok(pid) => pid,
+        Err(e) => {
+            // No driver was started, so nothing will ever move this run. Close
+            // it out rather than leaving it stuck in `running`.
+            prepared.abandon();
+            return Err(EngineError::Invalid(format!(
+                "cannot start the detached run driver: {e}"
+            )));
+        }
+    };
     // Publish the driver BEFORE returning, for the same reason the lock is
     // handed over by pid here: until `driver.pid` names the child, this run
     // reads as having no driver at all, and a stop landing in that window

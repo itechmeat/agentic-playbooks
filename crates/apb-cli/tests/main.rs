@@ -21,6 +21,9 @@ mod advisory_cli_test;
 mod answer_cli_test;
 #[path = "suite/ask_server_cli_test.rs"]
 mod ask_server_cli_test;
+#[cfg(unix)]
+#[path = "suite/budget_cli_test.rs"]
+mod budget_cli_test;
 #[path = "suite/cache_cli.rs"]
 mod cache_cli;
 #[path = "suite/cli_test.rs"]

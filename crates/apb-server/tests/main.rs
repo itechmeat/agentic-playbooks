@@ -7,6 +7,8 @@
 
 #[path = "suite/common.rs"]
 mod common;
+#[path = "../../apb-engine/tests/support/driver_reaper.rs"]
+mod driver_reaper;
 
 #[path = "suite/answer_api_test.rs"]
 mod answer_api_test;
@@ -18,6 +20,9 @@ mod auth_endpoints_test;
 mod auth_test;
 #[path = "suite/bind_interlock_test.rs"]
 mod bind_interlock_test;
+#[cfg(unix)]
+#[path = "suite/budget_api_test.rs"]
+mod budget_api_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
 #[path = "suite/inbox_api_test.rs"]

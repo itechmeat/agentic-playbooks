@@ -221,6 +221,12 @@ pub(crate) struct RunBody {
     /// holder of the dashboard token can send the field.
     #[serde(default)]
     confirm_irreversible: Option<apb_engine::consent::Confirmation>,
+    /// The run's budget (`tokens`, `usd`, `on_no_estimate`), over the
+    /// playbook's `budget:` block. With `on_no_estimate` ask and nodes that
+    /// have no estimate, the start is refused (409 `budget_needs_decision`,
+    /// with the estimate) until the person picks pause or continue.
+    #[serde(default)]
+    budget: Option<super::estimate::BudgetBody>,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -254,7 +260,9 @@ pub(crate) struct RunBody {
 /// permit is applied to the run verbatim (anti-TOCTOU), and its consent-time
 /// warnings ride the 200 answer. Irreversible effects are the exception to
 /// "clicking Run is the confirmation": they need `confirm_irreversible`, which
-/// the dashboard sends only after its dialog (0.24.0).
+/// the dashboard sends only after its dialog (0.24.0). The run's `budget`
+/// is checked next (see `routes::estimate`), and the answer carries the
+/// run's `estimate` and `budget`.
 pub(crate) async fn run_playbook_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -306,9 +314,27 @@ pub(crate) async fn run_playbook_handler(
     if permit.needs_consent() {
         opts.consent = Some(apb_engine::consent::RunConsent::irreversible("dashboard"));
     }
-    let warnings = permit.warnings.clone();
+    let mut warnings = permit.warnings.clone();
     // Issue #192: the candidate the gate chose (and pinned) is what runs.
     let version = permit.run_version(None);
+    // The run's budget and the pre-start decision it may need; the check
+    // reads the run history, off the async runtime.
+    let checked = {
+        let (root, id, version, budget) = (root.clone(), id.clone(), version.clone(), body.budget);
+        tokio::task::spawn_blocking(move || {
+            super::estimate::start_budget(&root, &id, version.as_deref(), budget.as_ref())
+        })
+        .await
+    };
+    match checked {
+        Ok(Ok(c)) => {
+            opts.budget = c.budget;
+            opts.estimate = c.estimate;
+            warnings.extend(c.warnings);
+        }
+        Ok(Err(refusal)) => return refusal.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
     let candidate_trial = permit.candidate.clone();
     let candidate_skipped = permit.candidate_skipped.clone();
     permit.apply(&mut opts);
@@ -327,7 +353,8 @@ pub(crate) async fn run_playbook_handler(
             if let Some(note) = deprecation {
                 answer["deprecation"] = serde_json::json!(note);
             }
-            Json(answer).into_response()
+            // The estimate the run started with and its budget.
+            Json(apb_mcp::tools::budget::with_start_blocks(&root, answer)).into_response()
         }
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()

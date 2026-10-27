@@ -75,6 +75,8 @@ mod send_policy_validate_test;
 mod server_auth_test;
 #[path = "suite/validate_baseline_test.rs"]
 mod validate_baseline_test;
+#[path = "suite/validate_budget_test.rs"]
+mod validate_budget_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
 #[path = "suite/validate_fork_test.rs"]

@@ -30,6 +30,7 @@ use crate::exec_key::ExecKey;
 use crate::list::ledger::{ListFold, RECONCILE, progress_label, settled};
 use crate::list::prompt::item_section;
 use crate::pause::PauseRequest;
+use crate::scheduler::budget_gate::Admission;
 use crate::scheduler::outcome::{AttemptOutcome, ExecOptions, NodeCtx};
 use crate::state::NodeStatus;
 
@@ -39,8 +40,9 @@ pub(super) enum End {
     Done,
     /// A pause stopped admission; the visit stays open.
     Halted,
-    /// An item hit a provider quota; the run pauses until then.
-    Quota(PauseRequest),
+    /// The engine pauses the run: an item hit a provider quota, or the
+    /// budget gate refused the next batch.
+    Pause(PauseRequest),
     /// The run was stopped.
     Cancelled,
 }
@@ -53,7 +55,7 @@ enum Ran {
         events: Vec<EventPayload>,
         checked: Option<Checked>,
     },
-    Quota {
+    Paused {
         pause: PauseRequest,
         events: Vec<EventPayload>,
     },
@@ -74,6 +76,18 @@ pub(super) fn run_batches(run: &ListRun<'_, '_, '_>) -> Result<End, EngineError>
             return Ok(end);
         }
         let take = queue.len().min(size);
+        // A batch the budget refuses never starts: its items stay pending.
+        if let Some(gate) = run.budget
+            && let Admission::Pause(p) = gate.admit_batch(
+                run.ctx.run_dir,
+                run.ctx.journal,
+                run.node,
+                batch_no + 1,
+                take,
+            )?
+        {
+            return Ok(End::Pause(p));
+        }
         let ids: Vec<String> = queue.drain(..take).collect();
         batch_no += 1;
         run.ctx.journal.append(EventPayload::ListBatchStarted {
@@ -160,7 +174,7 @@ fn run_batch(
         drop(tx);
         for (id, ran) in rx {
             let res = match ran {
-                Ok(Ran::Quota { pause, events }) => {
+                Ok(Ran::Paused { pause, events }) => {
                     local_halt.store(true, Ordering::SeqCst);
                     quota.get_or_insert(pause);
                     append_all(run, &id, events).and_then(|()| interrupted(run, &fold, &id, None))
@@ -200,7 +214,7 @@ fn run_batch(
     Ok(if aborted {
         Some(End::Cancelled)
     } else if let Some(pause) = quota {
-        Some(End::Quota(pause))
+        Some(End::Pause(pause))
     } else if !left.is_empty() || stopped(run).is_some() {
         // A drain pause (no item admitted after it) or a `--now` pause.
         Some(End::Halted)
@@ -273,7 +287,7 @@ fn run_item(run: &ListRun<'_, '_, '_>, fold: &ListFold, id: &str) -> Result<Ran,
                 checked,
             }
         }
-        AttemptOutcome::QuotaPaused { pause, events } => Ran::Quota { pause, events },
+        AttemptOutcome::EnginePaused { pause, events } => Ran::Paused { pause, events },
         AttemptOutcome::Suspended { .. } | AttemptOutcome::Halted { .. } => {
             return Err(EngineError::Invalid(format!(
                 "list item `{id}` of node `{}` cannot suspend",

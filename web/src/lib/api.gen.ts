@@ -619,6 +619,31 @@ export type BaselineStats = { check: string, observation: string,
  */
 compared: number, met: Rate, regressed: number, unknown: number, };
 
+export type DigestStats = { 
+/**
+ * The profile digest, shortened.
+ */
+profile: string, 
+/**
+ * The bundle digest (profile plus skills), shortened.
+ */
+bundle: string, 
+/**
+ * Runs the node ran in under this executor.
+ */
+runs: number, 
+/**
+ * Runs where the node passed on its one visit and first attempt,
+ * without a fallback.
+ */
+first_pass: Rate, duration: Waits, 
+/**
+ * The median tokens of a visit that reported usage on every attempt.
+ */
+tokens_per_visit?: number, };
+
+export type ExecutorChange = { node: string, base_profile: string, against_profile: string, base_bundle: string, against_bundle: string, };
+
 export type NodeStats = { node: string, 
 /**
  * Runs the node started in.
@@ -641,6 +666,11 @@ expected_s?: number,
  * Finished executions that took longer than `expected_s`.
  */
 over_expected?: Rate, deliverable_missing: number, output_fields_missing: number, 
+/**
+ * Its figures per executor digest, when the runs of the version bound
+ * it to more than one ([`digests`]).
+ */
+digests?: Array<DigestStats>, 
 /**
  * Attempts per model actually used ([`UNREPORTED`] when a host said
  * nothing).
@@ -697,7 +727,12 @@ export type Comparison = { playbook: string, base: string,
 /**
  * `None` when no other version of the playbook has runs.
  */
-against?: string, success_delta?: number, first_pass_delta?: number, retries_per_run_delta?: number, loops_per_run_delta?: number, median_duration_delta_ms?: number, cost_per_run_delta_usd?: number, };
+against?: string, success_delta?: number, first_pass_delta?: number, retries_per_run_delta?: number, loops_per_run_delta?: number, median_duration_delta_ms?: number, cost_per_run_delta_usd?: number, 
+/**
+ * Nodes whose latest executor (profile or bundle digest) differs
+ * between the two versions.
+ */
+executor_changes?: Array<ExecutorChange>, };
 
 export type StatsReport = { runs: number, 
 /**
@@ -743,6 +778,8 @@ export type PauseBy = "operator" | "supervisor" | "engine";
 
 export type PauseMode = "drain" | "now";
 
+export type PauseCause = "quota" | "budget";
+
 export type PauseInfo = { reason: string, by: PauseBy, mode: PauseMode, 
 /**
  * When the run went paused (the `run_paused` that opened the current
@@ -757,7 +794,170 @@ until?: number, keep_lock?: boolean,
  * The run still reads `running`: a pause is queued and a live driver is
  * draining toward it. A view overlay, never a journal status.
  */
-pausing?: boolean, };
+pausing?: boolean, 
+/**
+ * Why the engine paused the run (a quota, the budget), derived from
+ * the reason; absent for every other pause.
+ */
+cause?: PauseCause, };
+
+export type OnNoEstimate = "ask" | "pause" | "continue";
+
+export type BudgetLimit = { tokens?: number, usd?: number, };
+
+export type BudgetSource = "playbook" | "run" | "resume";
+
+export type BudgetAmount = { tokens?: number, usd?: number, };
+
+export type SpentDim = { 
+/**
+ * The sum the attempts (and the sub-playbook runs) reported.
+ */
+known: number, 
+/**
+ * Attempts that reported nothing in this dimension: unknown, never
+ * zero.
+ */
+unknown_attempts: number, 
+/**
+ * The estimate for the unknown attempts (their node's median per
+ * attempt), `None` when any of them has no estimate: the spent amount
+ * is then unknown.
+ */
+imputed?: number, };
+
+export type BudgetSpent = { tokens?: SpentDim, usd?: SpentDim, };
+
+export type GateDecision = "paused" | "continued" | "waived" | "admitted_waived" | "unknown";
+
+export type GateBasis = "median" | "exhausted" | "no_estimate" | "unknown_spend" | "operator" | "unknown";
+
+export type DimStatus = { 
+/**
+ * What the attempts reported.
+ */
+spent: number, 
+/**
+ * Attempts that reported nothing in this dimension.
+ */
+unknown_attempts: number, 
+/**
+ * The estimate for those attempts; absent when one has none.
+ */
+imputed?: number, 
+/**
+ * The limit minus the spent and imputed amounts; absent when unknown.
+ */
+remaining?: number, };
+
+export type PausedAt = { node: string, 
+/**
+ * The list batch, for a list node.
+ */
+batch?: number, basis: GateBasis, need?: BudgetAmount, remaining?: BudgetAmount, };
+
+export type BudgetStatus = { limit: BudgetLimit, on_no_estimate: OnNoEstimate, source?: BudgetSource, tokens?: DimStatus, usd?: DimStatus, 
+/**
+ * How often the budget was set (at start and at resumes).
+ */
+sets: number, 
+/**
+ * The gate pause holding the run, while it does.
+ */
+paused?: PausedAt, 
+/**
+ * A node a person let run once over the budget, until it does.
+ */
+waiver?: string, };
+
+export type Spread<T> = { 
+/**
+ * How many samples; 0 for a declared figure.
+ */
+n: number, p50: T, low: T, high: T, kind: SpreadKind, };
+
+export type SpreadKind = "iqr" | "min_max" | "single";
+
+export type EstimateBasis = "history" | "declared" | "none";
+
+export type Comparable = { 
+/**
+ * Runs of the same version and execution mode within the window.
+ */
+runs: number, succeeded: number, window: number, 
+/**
+ * Runs whose attempts reported no usage at all.
+ */
+runs_without_usage: number, attempts_without_usage: number, attempts_without_cost: number, 
+/**
+ * Per node, the comparable runs that bound it to another profile.
+ */
+profile_mismatch?: { [key in string]: number }, };
+
+export type TimeEstimate = { basis: EstimateBasis, spread?: Spread<number>, 
+/**
+ * The median time succeeded runs waited for people (gates and
+ * questions), included in the spread.
+ */
+human_wait_p50_ms?: number, };
+
+export type SpendEstimate<T> = { basis: EstimateBasis, spread: Spread<T>, };
+
+export type NodeSpread = { tokens?: Spread<number>, cost_usd?: Spread<number>, ms?: Spread<number>, };
+
+export type AttemptMedian = { tokens?: number, cost_usd?: number, };
+
+export type ItemsBasis = "inline" | "history" | "unknown";
+
+export type ListEstimate = { 
+/**
+ * One item's spend over all its attempts (rounds and checks).
+ */
+per_item: NodeSpread, items?: number, items_basis: ItemsBasis, batch_ms_p50?: number, batch_size: number, };
+
+export type NodeEstimate = { node: string, 
+/**
+ * The median number of visits per run.
+ */
+visits_p50: number, 
+/**
+ * One visit: what the budget gate weighs before the node.
+ */
+per_visit: NodeSpread, 
+/**
+ * All visits of a run: loops and retries as they happened.
+ */
+per_run: NodeSpread, per_attempt_p50: AttemptMedian, list?: ListEstimate, };
+
+export type RunEstimate = { playbook: string, version: string, 
+/**
+ * `cli` or `host`.
+ */
+execution: string, comparable: Comparable, time: TimeEstimate, 
+/**
+ * Tokens over the estimated nodes; `None` when no node is estimated.
+ */
+tokens: SpendEstimate<number> | null, 
+/**
+ * Reported cost over the estimated nodes; `None` when no comparable
+ * attempt reported a cost.
+ */
+cost_usd: SpendEstimate<number> | null, nodes: Array<NodeEstimate>, 
+/**
+ * Gated nodes with no spend sample: the run figures leave them out.
+ */
+unestimated: Array<string>, 
+/**
+ * Gated nodes the gate has no token figure for (those of
+ * `unestimated` and those with cost samples only): a token limit
+ * cannot weigh them, and the run's tokens leave them out.
+ */
+unestimated_tokens: Array<string>, 
+/**
+ * Gated nodes the gate has no cost figure for: a dollar limit cannot
+ * weigh them, and the run's cost leaves them out.
+ */
+unestimated_cost: Array<string>, note?: string, };
 
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
@@ -899,6 +1099,16 @@ candidate_trial?: CandidateTrial,
  * pause. Absent for a run that is neither paused nor pausing.
  */
 pause?: PauseInfo, 
+/**
+ * The run's budget: limits, spent and left per dimension, and the node
+ * a budget pause holds it before. Absent for a run without a budget.
+ */
+budget?: BudgetStatus, 
+/**
+ * The estimate the run started with (time, tokens, cost from comparable
+ * runs). Absent for a run started before estimates, or a sub-run.
+ */
+estimate?: RunEstimate, 
 /**
  * The model each attempt actually ran on, against the profile's primary
  * model (issue #193); empty before the first attempt.

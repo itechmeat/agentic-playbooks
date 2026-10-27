@@ -15,59 +15,71 @@ use apb_engine::{
 };
 use serde_json::{Value, json};
 
-#[allow(clippy::too_many_arguments)]
+/// What every MCP start hands the engine besides the playbook and its
+/// version: the run's inputs and the permit the run gate returned.
+#[derive(Debug, Default)]
+pub struct StartArgs {
+    pub params: BTreeMap<String, String>,
+    pub instruction: Option<String>,
+    pub expected_digest: Option<String>,
+    pub expected_profile_bundles: Option<BTreeMap<String, String>>,
+    pub expected_children: Option<BTreeMap<String, ChildExpectation>>,
+    pub expected_connectors: BTreeMap<String, String>,
+    pub expected_connector_accounts: BTreeMap<String, String>,
+    pub continued_from: Option<String>,
+    pub worktree: Option<String>,
+    /// host execution mode (0.23.0).
+    pub execution: apb_core::execution::ExecutionRequest,
+    /// 0.24.0: the irreversible consent the caller obtained from the person.
+    pub consent: Option<apb_engine::consent::RunConsent>,
+    /// Issue #192: why the gate left a waiting candidate out (the permit's
+    /// `candidate_skipped`), recorded in the manifest for `run_status`.
+    pub candidate_skipped: Option<String>,
+    /// The run's budget argument, over the playbook's `budget:` block.
+    pub budget: Option<apb_core::budget::BudgetRequest>,
+    /// The estimate the pre-start check showed, kept as the run's snapshot.
+    pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
+}
+
+/// The engine options of an MCP start in `mode`. Fail-fast on a busy
+/// workdir: this caller is a person waiting on the answer, who can retry,
+/// not an event source whose event dies with the refusal (see
+/// `RunOptions::workdir_queue_wait`).
+pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
+    RunOptions {
+        instruction: a.instruction,
+        params: a.params,
+        mode,
+        expected_digest: a.expected_digest,
+        expected_profile_bundles: a.expected_profile_bundles,
+        continued_from: a.continued_from,
+        expected_children: a.expected_children,
+        expected_connectors: a.expected_connectors,
+        expected_connector_accounts: a.expected_connector_accounts,
+        workdir_queue_wait: None,
+        worktree: a.worktree,
+        execution: a.execution,
+        consent: a.consent,
+        candidate_skipped: a.candidate_skipped,
+        budget: a.budget,
+        estimate: a.estimate,
+        ..RunOptions::default()
+    }
+}
+
+/// Runs a playbook of the project at `root` to its end (autonomous); the
+/// answer carries the run's estimate and budget.
 pub fn playbook_run(
     root: &Path,
     id: &str,
     version: Option<&str>,
-    params: BTreeMap<String, String>,
-    instruction: Option<String>,
-    expected_digest: Option<String>,
-    expected_profile_bundles: Option<BTreeMap<String, String>>,
-    expected_children: Option<BTreeMap<String, ChildExpectation>>,
-    expected_connectors: BTreeMap<String, String>,
-    expected_connector_accounts: BTreeMap<String, String>,
-    continued_from: Option<String>,
-    worktree: Option<String>,
-    // host execution mode (0.23.0)
-    execution: apb_core::execution::ExecutionRequest,
-    // 0.24.0: the irreversible consent the caller obtained from the person.
-    consent: Option<apb_engine::consent::RunConsent>,
-    // Issue #192: why the gate left a waiting candidate out (the permit's
-    // `candidate_skipped`), recorded in the manifest for `run_status`.
-    candidate_skipped: Option<String>,
+    args: StartArgs,
 ) -> Result<Value, ToolError> {
-    let opts = RunOptions {
-        instruction,
-        params,
-        allow_shared_workdir: false,
-        mode: RunMode::Autonomous,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        expected_digest,
-        expected_profile_bundles,
-        parent_run: None,
-        continued_from,
-        depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
-        worktree,
-        execution,
-        consent,
-        eval: None,
-        candidate_skipped,
-    };
-    let res = run(root, id, version, opts)?;
-    Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
+    let res = run(root, id, version, start_options(args, RunMode::Autonomous))?;
+    Ok(super::budget::with_start_blocks(
+        root,
+        json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }),
+    ))
 }
 
 /// A non-blocking run start for a regular (non-supervised) MCP client:
@@ -80,59 +92,18 @@ pub fn playbook_run(
 /// policy gate, permit verification and manifest snapshot all complete here,
 /// in-process, and only the drive loop is handed across - so an `apb mcp`
 /// bound to a chat session that dies no longer takes the run with it.
-#[allow(clippy::too_many_arguments)]
 pub fn playbook_run_background(
     root: &Path,
     id: &str,
     version: Option<&str>,
-    params: BTreeMap<String, String>,
-    instruction: Option<String>,
-    expected_digest: Option<String>,
-    expected_profile_bundles: Option<BTreeMap<String, String>>,
-    expected_children: Option<BTreeMap<String, ChildExpectation>>,
-    expected_connectors: BTreeMap<String, String>,
-    expected_connector_accounts: BTreeMap<String, String>,
-    continued_from: Option<String>,
-    worktree: Option<String>,
-    // host execution mode (0.23.0)
-    execution: apb_core::execution::ExecutionRequest,
-    // 0.24.0: the irreversible consent the caller obtained from the person.
-    consent: Option<apb_engine::consent::RunConsent>,
-    // Issue #192: why the gate left a waiting candidate out (the permit's
-    // `candidate_skipped`), recorded in the manifest for `run_status`.
-    candidate_skipped: Option<String>,
+    args: StartArgs,
 ) -> Result<Value, ToolError> {
-    let opts = RunOptions {
-        instruction,
-        params,
-        allow_shared_workdir: false,
-        mode: RunMode::Autonomous,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        expected_digest,
-        expected_profile_bundles,
-        parent_run: None,
-        continued_from,
-        depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
-        worktree,
-        execution,
-        consent,
-        eval: None,
-        candidate_skipped,
-    };
+    let opts = start_options(args, RunMode::Autonomous);
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
-    Ok(json!({ "run_id": run_id }))
+    Ok(super::budget::with_start_blocks(
+        root,
+        json!({ "run_id": run_id }),
+    ))
 }
 
 pub fn runs_list(root: &Path) -> Result<Value, ToolError> {
@@ -221,6 +192,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         ListItems::NeedingALook,
     );
     add_candidate_trial(&mut out, &view, &dir);
+    super::budget::add_run_blocks(&mut out, &dir, &view);
     // Issue #195: what a fork's branch-failure policy cancelled and which
     // joins refused; absent when nothing did.
     let branch_failures = apb_engine::fork_view::entries(&view.events);
@@ -503,6 +475,9 @@ pub fn run_wait_result(
         WaitReason::Stopped if res.driver_alive == Some(false) => {
             "the run's driver is dead, so the run is interrupted; run_resume continues it"
         }
+        WaitReason::Stopped if super::budget::budget_paused(view) => {
+            super::budget::BUDGET_PAUSE_NEXT
+        }
         WaitReason::Stopped if res.pause().is_some() => {
             "the run is paused (see pause); run_resume continues it, also before pause.until. Gates stay open and are listed in pending_*"
         }
@@ -565,6 +540,7 @@ pub fn run_wait_result(
             out[key] = value;
         }
     }
+    super::budget::add_run_blocks(&mut out, &dir, view);
     Ok(out)
 }
 
@@ -660,6 +636,7 @@ pub fn run_resume(
     run_id: &str,
     from_node: Option<&str>,
     allow_environment_drift: bool,
+    budget: Option<&apb_engine::budget::BudgetResume>,
 ) -> Result<Value, ToolError> {
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
@@ -682,7 +659,24 @@ pub fn run_resume(
     // did not allow is returned as an Err HERE (issue #45 finding 3), instead
     // of the old detached spawn whose child failed its own check on null stdio
     // and left this ack reporting `detached: true` for a run that never moved.
-    apb_engine::resume_detached_with(root, run_id, from_node, allow_environment_drift)?;
+    // A budget pause resumes only with a budget change (see
+    // `apb_engine::budget::admit_resume`); its refusal is an answer the
+    // caller acts on, with the budget it is about.
+    let req = apb_engine::ResumeRequest {
+        from_node,
+        allow_environment_drift,
+        budget,
+        ..apb_engine::ResumeRequest::operator()
+    };
+    match apb_engine::resume_detached_req(root, run_id, &req) {
+        Ok(_) => {}
+        Err(apb_engine::EngineError::Conflict(detail)) => {
+            let dir = root.join(".apb/runs").join(run_id);
+            return super::budget::resume_refusal(&dir, run_id, &detail)
+                .ok_or(ToolError::Conflict(detail));
+        }
+        Err(e) => return Err(e.into()),
+    }
     let mut ack = json!({
         "run_id": run_id,
         "resumed_from": decision.start_node,
@@ -728,62 +722,21 @@ fn early_resume_until(root: &Path, run_id: &str) -> Option<u64> {
 /// detached driver process (see `playbook_run_background`). The supervisor
 /// access token is minted by the server layer (Phase 4b, Task 3), not this
 /// function.
-#[allow(clippy::too_many_arguments)]
 pub fn playbook_run_supervised(
     root: &Path,
     id: &str,
     version: Option<&str>,
-    params: BTreeMap<String, String>,
-    instruction: Option<String>,
-    expected_digest: Option<String>,
-    expected_profile_bundles: Option<BTreeMap<String, String>>,
-    expected_children: Option<BTreeMap<String, ChildExpectation>>,
-    expected_connectors: BTreeMap<String, String>,
-    expected_connector_accounts: BTreeMap<String, String>,
-    continued_from: Option<String>,
-    worktree: Option<String>,
-    // host execution mode (0.23.0)
-    execution: apb_core::execution::ExecutionRequest,
-    // 0.24.0: the irreversible consent the caller obtained from the person.
-    consent: Option<apb_engine::consent::RunConsent>,
-    // Issue #192: why the gate left a waiting candidate out (the permit's
-    // `candidate_skipped`), recorded in the manifest for `run_status`.
-    candidate_skipped: Option<String>,
+    args: StartArgs,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
     // (heartbeat oversight in drive does not touch this path).
-    let opts = RunOptions {
-        instruction,
-        params,
-        allow_shared_workdir: false,
-        mode: RunMode::Supervised,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        expected_digest,
-        expected_profile_bundles,
-        parent_run: None,
-        continued_from,
-        depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
-        worktree,
-        execution,
-        consent,
-        eval: None,
-        candidate_skipped,
-    };
+    let opts = start_options(args, RunMode::Supervised);
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
-    Ok(json!({ "run_id": run_id }))
+    Ok(super::budget::with_start_blocks(
+        root,
+        json!({ "run_id": run_id }),
+    ))
 }
 
 /// Stops a run and reports what that took: signaling a live driver (whose

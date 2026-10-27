@@ -643,7 +643,7 @@ pub(crate) fn execute_node(
         (
             Some(t),
             AttemptOutcome::Suspended { .. }
-            | AttemptOutcome::QuotaPaused { .. }
+            | AttemptOutcome::EnginePaused { .. }
             | AttemptOutcome::Halted { .. },
         ) => t.park(run_dir),
         (None, _) => {}
@@ -2659,7 +2659,7 @@ fn execute_node_kind(
                                 lost_session_retried = true;
                                 infra_retry = true;
                             } else if let Some(QuotaDecision::Pause { until }) = quota {
-                                return Ok(AttemptOutcome::QuotaPaused {
+                                return Ok(AttemptOutcome::EnginePaused {
                                     pause: crate::pause::quota::quota_pause(
                                         &step.agent,
                                         &step.model,
@@ -3456,7 +3456,7 @@ pub(crate) fn run_playbook_node(
             None,
             false,
             true,
-            Some(crate::pause::PauseBy::Engine),
+            crate::pause::PauseBy::Engine,
         )?;
         // Nested resume can also mirror wakes onto the parent log.
         log.resync_seq()?;

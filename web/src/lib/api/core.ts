@@ -2,14 +2,17 @@
 // skills, projects): one function per endpoint, no UI state.
 
 import type {
+  OnNoEstimate,
   Project,
   RunDetail,
+  RunEstimate,
   RunSummary,
   VersionDiff,
   VersionInfo,
   PlaybookDetail,
   PlaybookSummary,
   RestoredPlaybook,
+  RunBudget,
   TrashListEntry,
   TrustEntry,
   TrustKind,
@@ -188,7 +191,23 @@ export const pauseRun = (id: string, body: PauseRequestBody = {}, workspace = ''
 // POST /api/runs/{id}/resume: the Resume button. An irreversible run with no
 // consent recorded is refused with `irreversible_requires_confirmation`; the
 // run page answers with its consent dialog and sends the refusal's nonce.
-export const resumeRun = (id: string, workspace = '', consentNonce?: string) =>
+// The budget change of a resume: a raise, a new limit, another policy, or
+// letting the node a budget pause holds the run before run once. A plain
+// resume of a budget pause is refused (409 `budget_paused`).
+export interface ResumeBudget {
+  raise_tokens?: number
+  raise_usd?: number
+  tokens?: number
+  usd?: number
+  on_no_estimate?: OnNoEstimate
+  once?: boolean
+}
+
+export const resumeRun = (
+  id: string,
+  workspace = '',
+  opts: { consentNonce?: string; budget?: ResumeBudget } = {},
+) =>
   requestJson<{
     run_id: string
     resumed_from: string
@@ -198,7 +217,10 @@ export const resumeRun = (id: string, workspace = '', consentNonce?: string) =>
   }>(`${run(id)}/resume${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify(consentNonce ? { confirm_irreversible: consentNonce } : {}),
+    body: JSON.stringify({
+      ...(opts.consentNonce ? { confirm_irreversible: opts.consentNonce } : {}),
+      ...(opts.budget ? { budget: opts.budget } : {}),
+    }),
   })
 
 // POST /api/runs/{id}/answer: the web facade for answering an interactive
@@ -284,12 +306,30 @@ export const fetchVersions = (id: string, workspace = '') =>
 // refusal the dialog showed, so a playbook that changed in between is refused
 // again. Without it such a run is refused with
 // `irreversible_requires_confirmation` (0.24.0).
-export const runPlaybook = (id: string, workspace = '', consentNonce?: string) =>
-  requestJson<{ run_id: string }>(`${pb(id)}/run${qs({ workspace })}`, {
+// The budget of a run start, over the playbook's `budget:` block. With
+// `on_no_estimate` ask and nodes without an estimate the start is refused
+// (409 `budget_needs_decision`).
+export type { RunBudget } from '../types'
+
+export const runPlaybook = (
+  id: string,
+  workspace = '',
+  opts: { consentNonce?: string; budget?: RunBudget } = {},
+) =>
+  requestJson<{ run_id: string; warnings?: string[] }>(`${pb(id)}/run${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify(consentNonce ? { confirm_irreversible: consentNonce } : {}),
+    body: JSON.stringify({
+      ...(opts.consentNonce ? { confirm_irreversible: opts.consentNonce } : {}),
+      ...(opts.budget ? { budget: opts.budget } : {}),
+    }),
   })
+
+// GET /api/playbooks/{id}/estimate: what a run of the version takes and
+// spends, from the comparable past runs of its project (`summary` is the
+// text `apb run --estimate` prints).
+export const fetchEstimate = (id: string, workspace = '', version?: string) =>
+  getJson<RunEstimate & { summary: string }>(`${pb(id)}/estimate${qs({ workspace, version })}`)
 
 export const promoteVersion = (id: string, version: string, workspace = '') =>
   requestJson<{ promoted: string }>(

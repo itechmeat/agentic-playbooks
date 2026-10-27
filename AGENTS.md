@@ -26,7 +26,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V68, `list` for the list
-  rules V85-V89 and V93-V95), list mode (`list/`: the `list:` block, item
+  rules V85-V89 and V93-V95, `budget` for V96-V98), the run budget's schema,
+  the precedence of a run argument over the playbook's block and the amount
+  parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
   loading with ids and the `where` filter in `items`, the per-item state
   machine in `verdict`), the baseline check
   (`baseline/`: the `baseline_check` block, the observation path reader and
@@ -111,7 +113,18 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb resume --all`, `operator` the request built from surface arguments,
   `display` the one text line of a pause, `quota` the quota pause policy and
   schedule, `probe` the wake-up probe of a quota pause, run by
-  `scheduler/quota_probe`),
+  `scheduler/quota_probe`; `budget` the budget pause's reason and request,
+  `cause` the cause a quota or budget pause's reason names),
+  the run budget (`budget.rs`; `budget/`: `kind` the journal-facing types,
+  `fold` the limit in force and the gate's pauses and waivers, `spent` what
+  the run spent per dimension with unknown attempts imputed, `gate` the pure
+  admission decision, `resume` what a resume may change, `start` the check
+  every launch surface makes before a start, `view` the status every surface
+  reports; the drive side is `scheduler/budget_gate`), the run estimate
+  (`run_estimate.rs`; `run_estimate/`: `history` the comparable runs,
+  `sample` the per-run and per-node samples `apb stats` shares, `compose` the
+  figures, `snapshot` the `estimate.json` a run starts with), the run lookups
+  by id (`scheduler/run_ref`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
@@ -137,7 +150,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   and replay behind `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
-  `meta`, `intent` for `run_intent_resolve` and `apb intent`); `catalog_rank` is the opt-in decision-model ranking behind
+  `meta`, `intent` for `run_intent_resolve` and `apb intent`, `budget` for the
+  budget arguments, the pre-start decision and the estimate and budget blocks
+  the HTTP API reuses); `catalog_rank` is the opt-in decision-model ranking behind
   `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
@@ -145,9 +160,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
   subscriptions survey); non-TTY runs skip it. `apb self-update` updates
   installer-based installs in place. `apb intent list|resolve` shows a run's
-  send intents and records a person's decision on an unknown one.
+  send intents and records a person's decision on an unknown one. `budget.rs`
+  holds the budget flags of `apb run` and `apb resume`, the estimate printing
+  and the terminal question of `on_no_estimate: ask`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
-  resource in `routes/`, shared request state in `state.rs`, and the svelte
+  resource in `routes/` (`estimate` for the estimate route and the run and
+  resume budgets), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
@@ -197,13 +215,26 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
 - A **quota pause** is the engine's own pause on `FailureKind::Quota`
   (`failure_class.rs`, design section 6): the node attempt loop (`node.rs`)
   tries a profile fallback first, then infrastructure retries unless
-  `Retry-After` outlasts them, then returns `AttemptOutcome::QuotaPaused`
+  `Retry-After` outlasts them, then returns `AttemptOutcome::EnginePaused`
   (the attempt journaled `interrupted`, no `node_finished`); the drive posts
   it as an engine `Control::Pause` with `until`, so the drain path applies
   it. At `until` the waker (and `apb resume --all`) runs
   `pause::probe_before_wake` before resuming; a probe that hits the quota
   re-pauses. Probe outcomes are `supervisor_action quota_probe` markers.
   Six quota pauses of a node without a success fail it.
+- A **run budget** (`budget:` block, or a run argument over it per field)
+  is a predictive stop, not a ceiling: `scheduler/budget_gate` weighs what is
+  left (spent from the journal, unknown attempts imputed, parallel members'
+  medians reserved) against a gated node's median per visit (per batch for a
+  list node) from the run's `estimate.json`, journals any decision other
+  than a plain admission as `budget_gate`, and pauses through the same
+  engine pause as a quota (`pause::budget`, reason `budget (...)`, no
+  `until`). The limit in force is the latest `budget_set` (at start, and at a
+  resume that raises or sets it). A plain resume of a budget pause is
+  refused (`budget_paused`) until a person changes the budget or lets the
+  node run once; a supervisor or the engine never resumes one. Children are
+  not gated and never get a `budget_set`; their spend counts toward the
+  parent's.
 - A **baseline check** (`baseline_check`) reads its sources once before the
   first node that can act (`apb_core::effects::node_acts`) and once at the
   finish, journaled as `baseline_observed` and `baseline_compared`; the

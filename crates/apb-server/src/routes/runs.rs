@@ -104,6 +104,16 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub pause: Option<apb_engine::pause::PauseInfo>,
+    /// The run's budget: limits, spent and left per dimension, and the node
+    /// a budget pause holds it before. Absent for a run without a budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub budget: Option<apb_engine::budget::BudgetStatus>,
+    /// The estimate the run started with (time, tokens, cost from comparable
+    /// runs). Absent for a run started before estimates, or a sub-run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
     /// The model each attempt actually ran on, against the profile's primary
     /// model (issue #193); empty before the first attempt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -256,6 +266,8 @@ pub(crate) async fn get_run_handler(
         .as_str()
         .to_string();
     let execution_fallback = manifest.as_ref().is_some_and(|m| m.falls_back_to_host());
+    let budget = view.budget(&run_dir);
+    let estimate = apb_engine::run_estimate::snapshot::read(&run_dir);
     Json(RunDetail {
         run_id: id,
         playbook: playbook_id,
@@ -282,6 +294,8 @@ pub(crate) async fn get_run_handler(
         goal,
         candidate_trial,
         pause,
+        budget,
+        estimate,
         usage,
         decisions,
         unknown_events: view.unknown.len(),
@@ -469,6 +483,11 @@ pub(crate) struct ResumeBody {
     /// an older apb started): the same confirmation MCP `run_resume` takes.
     #[serde(default)]
     confirm_irreversible: Option<apb_engine::consent::Confirmation>,
+    /// The budget change a run its budget paused needs (raise or set a
+    /// limit, another `on_no_estimate`, or `once`); a plain resume of such a
+    /// run is refused (409 `budget_paused`, with the run's budget).
+    #[serde(default)]
+    budget: Option<super::estimate::ResumeBudgetBody>,
 }
 
 /// POST /api/runs/{id}/resume: the dashboard's Resume button, for a paused,
@@ -511,6 +530,10 @@ pub(crate) async fn post_resume_handler(
         Ok(note) => note,
         Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
     };
+    let budget = match super::estimate::resume_budget(body.budget.as_ref()) {
+        Ok(b) => b,
+        Err(refusal) => return refusal.into_response(),
+    };
     let from_node = body.from_node.as_deref();
     // Computed before the drive so the answer says where the run resumes, and
     // so a finished run is refused here (the argument-free plan would).
@@ -523,13 +546,13 @@ pub(crate) async fn post_resume_handler(
         .ok()
         .and_then(|v| v.pause().filter(|p| !p.pausing).and_then(|p| p.until))
         .filter(|u| *u > apb_core::clock::now_ms_u64());
-    match apb_engine::resume_detached_by(
-        &root,
-        &id,
+    let req = apb_engine::ResumeRequest {
         from_node,
-        body.allow_environment_drift,
-        apb_engine::pause::PauseBy::Operator,
-    ) {
+        allow_environment_drift: body.allow_environment_drift,
+        budget: budget.as_ref(),
+        ..apb_engine::ResumeRequest::operator()
+    };
+    match apb_engine::resume_detached_req(&root, &id, &req) {
         Ok(_) => {
             let mut answer = serde_json::json!({
                 "run_id": id,
@@ -545,6 +568,11 @@ pub(crate) async fn post_resume_handler(
                 answer["deprecation"] = serde_json::json!(note);
             }
             Json(answer).into_response()
+        }
+        Err(apb_engine::EngineError::Conflict(detail))
+            if let Some(refusal) = super::estimate::resume_refusal(&root, &id, &detail) =>
+        {
+            refusal
         }
         Err(e) => resume_error(e),
     }

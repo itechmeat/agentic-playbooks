@@ -8,7 +8,7 @@
 //! operator's `run_pause` (any run, by: operator) and `run_resume` pause and
 //! continue a run without ending it.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -487,49 +487,19 @@ impl WfMcp {
     /// The `playbook_run` branch for `supervise: "self"`: starts the
     /// playbook in the background, computes capabilities from the
     /// supervisor policy, and mints a token for the calling session.
-    #[allow(clippy::too_many_arguments)]
     fn run_supervised_self(
         &self,
         id: String,
         version: Option<String>,
-        params: BTreeMap<String, String>,
-        instruction: Option<String>,
-        expected_digest: String,
-        expected_bundles: BTreeMap<String, String>,
-        expected_children: BTreeMap<String, apb_engine::run_config::ChildExpectation>,
-        expected_connectors: BTreeMap<String, String>,
-        expected_connector_accounts: BTreeMap<String, String>,
-        continued_from: Option<String>,
-        worktree: Option<String>,
+        start: tools::StartArgs,
         warnings: Vec<String>,
-        execution: apb_core::execution::ExecutionRequest,
-        // 0.24.0: the irreversible consent.
-        consent: Option<apb_engine::consent::RunConsent>,
-        // Issue #192: the permit's `candidate_skipped`.
-        candidate_skipped: Option<String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
             Ok(caps) => caps,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        let started = tools::playbook_run_supervised(
-            &self.root,
-            &id,
-            version.as_deref(),
-            params,
-            instruction,
-            Some(expected_digest),
-            Some(expected_bundles),
-            Some(expected_children),
-            expected_connectors,
-            expected_connector_accounts,
-            continued_from,
-            worktree,
-            execution,
-            consent,
-            candidate_skipped,
-        );
+        let started = tools::playbook_run_supervised(&self.root, &id, version.as_deref(), start);
         let value = match started {
             Ok(v) => v,
             Err(e) => return to_call_tool_result(Err(e)),
@@ -546,14 +516,13 @@ impl WfMcp {
             Ok(t) => t,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        to_call_tool_result(with_warnings(
-            Ok(json!({
-                "run_id": run_id,
-                "supervisor_token": token.expose_secret(),
-                "capabilities": capabilities,
-            })),
-            &warnings,
-        ))
+        let mut out = json!({
+            "run_id": run_id,
+            "supervisor_token": token.expose_secret(),
+            "capabilities": capabilities,
+        });
+        tools::budget::carry_blocks(&value, &mut out);
+        to_call_tool_result(with_warnings(Ok(out), &warnings))
     }
 
     /// Combined tool router: the per-domain routers (defined in the

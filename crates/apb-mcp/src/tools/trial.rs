@@ -263,6 +263,9 @@ pub fn playbook_prepare_run(
     let mut children: Vec<Value> = Vec::new();
     list_children(&pf.children, "", &store, &mut children);
     let token = crate::plan::encode(&payload);
+    // What a run of the plan's version takes and spends in the target
+    // workspace; the budget is execute_plan's argument, not the plan's.
+    let estimate = super::budget::playbook_estimate(&root_b, id, Some(&pf.version)).ok();
     Ok(json!({
         "plan": {
             "workspace": workspace,
@@ -274,6 +277,7 @@ pub fn playbook_prepare_run(
             "profiles": profiles,
             "children": children,
             "params": params,
+            "estimate": estimate,
         },
         "plan_token": token,
     }))

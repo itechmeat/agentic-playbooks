@@ -22,6 +22,20 @@ export function when(ms: number | undefined): string | null {
   return date.toISOString().replace('.000Z', 'Z')
 }
 
+// Why the engine paused the run, as a label next to the pause word: its
+// budget or a provider quota; null for any other pause.
+export function pauseCauseLabel(pause: PauseInfo | null | undefined): string | null {
+  if (pause?.cause === 'budget') return 'by its budget'
+  if (pause?.cause === 'quota') return 'by a provider quota'
+  return null
+}
+
+// A budget pause resumes only with a budget change (a plain resume is
+// refused), so its Resume button opens the budget form.
+export function isBudgetPause(pause: PauseInfo | null | undefined): boolean {
+  return pause?.cause === 'budget'
+}
+
 // "by operator, since 2026-10-15T20:00:00Z, until ...": the parts after the
 // reason, in the order `apb runs` prints them.
 export function pauseDetails(pause: PauseInfo): string[] {
