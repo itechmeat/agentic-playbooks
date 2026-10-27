@@ -518,6 +518,90 @@ pub(crate) struct RunArgs {
         conflicts_with_all = ["overrides", "detach", "supervise", "continued_from", "worktree", "confirm_irreversible"]
     )]
     pub estimate: bool,
+    /// Remember the given --param values and --instruction for this
+    /// playbook in this project, for the next start that passes none.
+    /// Secret params and credential-shaped values are never stored
+    #[arg(long, conflicts_with = "estimate")]
+    pub remember: bool,
+}
+
+/// `--remember`: stores what the start was given once the run gate and the
+/// budget check passed, checked against the playbook's current version,
+/// and prints what was kept and refused (names and reasons, never values).
+fn remember_input(
+    root: &Path,
+    name: &str,
+    params: &BTreeMap<String, String>,
+    instruction: Option<&str>,
+) {
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: name.to_string(),
+        version: None,
+    };
+    let result = apb_mcp::tools::memory::remember_for_ref(root, &wref, params, instruction);
+    match result {
+        Ok(v) => {
+            let names = |key: &str| -> Vec<String> {
+                v[key]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let stored = names("remembered");
+            let refused: Vec<String> = v["not_remembered"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|r| {
+                            format!(
+                                "{} ({})",
+                                sanitize_for_terminal(r["name"].as_str().unwrap_or(""), 64),
+                                r["reason"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let stored: Vec<String> = stored
+                .iter()
+                .map(|n| sanitize_for_terminal(n, 64))
+                .collect();
+            eprintln!(
+                "remembered for this project: {}",
+                if stored.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    stored.join(", ")
+                }
+            );
+            if !refused.is_empty() {
+                eprintln!("not remembered: {}", refused.join(", "));
+            }
+            for note in names("memory_diagnostics") {
+                eprintln!("note: {note}");
+            }
+        }
+        Err(e) => eprintln!("warning: the run input was not remembered: {e}"),
+    }
+}
+
+/// Says which params (and whether the instruction) the start of `run_id`
+/// took from the project's remembered input, so input nobody typed is
+/// never silent.
+fn print_recalled(root: &Path, run_id: &str) {
+    let recalled = apb_engine::run_view::recalled_input(&root.join(".apb/runs").join(run_id));
+    if !recalled.is_empty() {
+        let names: Vec<String> = recalled
+            .iter()
+            .map(|n| sanitize_for_terminal(n, 64))
+            .collect();
+        eprintln!("used remembered input: {}", names.join(", "));
+    }
 }
 
 /// What every CLI start sets on the engine options: the run's inputs and
@@ -585,6 +669,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         eval_settings,
         budget,
         estimate,
+        remember,
     } = args;
     let (name, version) = (name.as_str(), version.as_deref());
     let execution = execution.as_deref();
@@ -709,6 +794,9 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
+        if remember {
+            remember_input(root, name, &parsed, instruction.as_deref());
+        }
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
         // itself cannot stay in the current process - std::thread does not
@@ -776,10 +864,14 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    if remember {
+        remember_input(root, name, &opts.params, opts.instruction.as_deref());
+    }
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
             Ok(run_id) => {
                 println!("run started: {run_id}");
+                print_recalled(root, &run_id);
                 if host {
                     println!(
                         "host execution mode: its agent steps wait as host tasks; `apb tasks {run_id}` lists them"
@@ -799,6 +891,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     match run(root, name, version, opts) {
         Ok(res) => {
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
+            print_recalled(root, &res.run_id);
             match res.outcome {
                 RunStatus::Succeeded => ExitCode::SUCCESS,
                 _ => ExitCode::from(1),
@@ -828,6 +921,7 @@ fn run_host_foreground(
         }
     };
     println!("run started: {run_id} (host execution mode)");
+    print_recalled(root, &run_id);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let announcer = {
         let (root, run_id, stop) = (root.to_path_buf(), run_id.clone(), stop.clone());

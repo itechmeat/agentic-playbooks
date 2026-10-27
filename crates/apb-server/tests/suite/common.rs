@@ -80,6 +80,13 @@ pub async fn config_sandbox() -> ConfigSandbox {
     }
 }
 
+impl ConfigSandbox {
+    /// The private global config dir.
+    pub fn path(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+}
+
 impl Drop for ConfigSandbox {
     fn drop(&mut self) {
         // SAFETY: still under ENV_LOCK (the guard drops after this body).

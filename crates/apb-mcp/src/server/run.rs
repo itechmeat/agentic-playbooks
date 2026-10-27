@@ -310,6 +310,7 @@ impl WfMcp {
             worktree,
             execution,
             budget,
+            remember,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -394,7 +395,7 @@ impl WfMcp {
         // Issue #192: the candidate version the gate chose (and pinned) for
         // a start without an explicit version is the one that runs.
         let version = permit.run_version(version.as_deref());
-        let candidate = super::StartCandidate::of(&permit);
+        let mut candidate = super::StartNotes::of(&permit, &self.root);
         // --- 0.24.0 irreversible consent ---
         // `confirm_irreversible` is the consent, checked against the nonce of
         // the refusal the person saw; `acknowledge_untrusted` answers trust
@@ -449,6 +450,15 @@ impl WfMcp {
             Err(refusal) => return to_call_tool_result(Ok(refusal)),
         };
         warnings.extend(checked.warnings);
+        // What the person chose to keep is remembered once the start
+        // succeeded (`StartNotes::annotate`).
+        if remember == Some(true) {
+            candidate.remember = Some(super::RememberAtStart {
+                resolved: resolved_def.clone(),
+                params: params.clone(),
+                instruction: instruction.clone(),
+            });
+        }
         let start = tools::StartArgs {
             params,
             instruction,

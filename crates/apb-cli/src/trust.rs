@@ -1,7 +1,10 @@
 //! `apb trust` subcommands: the approvals in the global trust store. A thin
 //! dispatch over `apb_core::trust::TrustStore::{entries, revoke}`, the same
-//! path the dashboard's Trust view and the MCP trust tools use.
+//! path the dashboard's Trust view and the MCP trust tools use, and over
+//! `apb_core::versioning::approval::approve_version` for an approval by
+//! digest.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use apb_core::trust::{Kind, TrustEntry, TrustSelector, TrustStore};
@@ -35,10 +38,43 @@ pub(crate) enum TrustAction {
         #[arg(long)]
         json: bool,
     },
+    /// Approve a playbook version and make it active. A version an import
+    /// wrote with scripts needs --digest, its exact trust digest: without it
+    /// the command prints the digest and the scripts to review and exits 2.
+    /// Exit codes: 0 approved, 2 refused or error
+    Approve {
+        id: String,
+        /// The version (default: the current one)
+        #[arg(long)]
+        version: Option<String>,
+        /// Definition scope: project (default) or global
+        #[arg(long, default_value = "project")]
+        scope: String,
+        /// The exact trust digest being approved (`sha256:...`)
+        #[arg(long)]
+        digest: Option<String>,
+        /// Machine-readable output for scripts
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-pub(crate) fn trust_cmd(action: TrustAction) -> ExitCode {
+pub(crate) fn trust_cmd(root: &Path, action: TrustAction) -> ExitCode {
     match action {
+        TrustAction::Approve {
+            id,
+            version,
+            scope,
+            digest,
+            json,
+        } => approve_cmd(
+            root,
+            &id,
+            version.as_deref(),
+            &scope,
+            digest.as_deref(),
+            json,
+        ),
         TrustAction::List { kind, json } => match parse_kind(kind.as_deref()) {
             Ok(kind) => list_cmd(kind, json),
             Err(code) => code,
@@ -100,6 +136,80 @@ fn revoke_cmd(target: &str, kind: Option<Kind>, as_json: bool) -> ExitCode {
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+fn approve_cmd(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    scope: &str,
+    digest: Option<&str>,
+    as_json: bool,
+) -> ExitCode {
+    let out = match apb_mcp::tools::approve_playbook(
+        root,
+        id,
+        version,
+        scope,
+        digest,
+        apb_core::trust::OriginKind::LocallyApproved,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("trust approve failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if as_json {
+        print_json(&out);
+    } else {
+        print_approval(&out);
+    }
+    if out.get("error").is_some() {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The text form of an approval answer: the approved version, or why not
+/// (with the scripts to review when the digest is required).
+fn print_approval(out: &serde_json::Value) {
+    let text = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    match out["error"].as_str() {
+        None => println!(
+            "approved {} @ {} ({}); it is active",
+            text(&out["id"]),
+            text(&out["version"]),
+            text(&out["digest"])
+        ),
+        Some("digest_required") => {
+            // On stdout with the table it introduces, so a pipe keeps both.
+            println!(
+                "this version was imported with scripts: review them, then approve it with --digest {}",
+                text(&out["digest"])
+            );
+            let mut rows = vec![vec![
+                "SCRIPT".to_string(),
+                "SHA256".to_string(),
+                "BYTES".to_string(),
+            ]];
+            for s in out["scripts"].as_array().into_iter().flatten() {
+                rows.push(vec![
+                    crate::util::sanitize_for_terminal(s["path"].as_str().unwrap_or_default(), 200),
+                    text(&s["sha256"]),
+                    s["bytes"].to_string(),
+                ]);
+            }
+            print_table(&rows);
+        }
+        Some("digest_mismatch") => eprintln!(
+            "trust approve refused: the version digests to {}, not {}; review it again before approving",
+            text(&out["actual"]),
+            text(&out["expected"])
+        ),
+        Some(_) => eprintln!("trust approve refused: {}", text(&out["detail"])),
+    }
 }
 
 fn print_entries(entries: &[TrustEntry]) {

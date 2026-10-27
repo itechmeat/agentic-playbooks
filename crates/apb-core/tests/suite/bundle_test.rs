@@ -64,7 +64,7 @@ fn export_import_round_trip_preserves_playbook_and_layout() {
     // Import into a clean project B: new project -> version 1.0.0.
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
-    let assigned = import_bundle(b.path(), &back, true).unwrap().version;
+    let assigned = import_bundle(b.path(), &back, true, None).unwrap().version;
     assert_eq!(assigned, "1.0.0");
 
     // The playbook and layout are in place in B.
@@ -84,7 +84,7 @@ fn an_unchanged_import_keeps_the_current_layout() {
     bundle.version = String::new();
     bundle.layout = Some(yaml_serde::from_str("nodes:\n  start: { x: 999, y: 999 }\n").unwrap());
 
-    let saved = import_bundle(b.path(), &bundle, true).unwrap();
+    let saved = import_bundle(b.path(), &bundle, true, None).unwrap();
     assert!(saved.unchanged);
     assert_eq!(saved.version, "1.0.0");
     assert_eq!(
@@ -100,6 +100,7 @@ fn import_invalid_playbook_surfaces_formatted_validation_lines_through_bundle_er
     init_project(b.path()).unwrap();
     let invalid = PLAYBOOK.replace(r#"prompt: "do""#, r#"prompt: "{{outputs.x}}""#);
     let bundle = PlaybookBundle {
+        origin: None,
         apb_bundle: 1,
         id: "va".to_string(),
         version: "1.0.0".to_string(),
@@ -108,7 +109,7 @@ fn import_invalid_playbook_surfaces_formatted_validation_lines_through_bundle_er
         scripts: Vec::new(),
     };
 
-    let err = import_bundle(b.path(), &bundle, true).unwrap_err();
+    let err = import_bundle(b.path(), &bundle, true, None).unwrap_err();
     assert!(matches!(
         err,
         BundleError::Versioning(VersioningError::Validation(_))
@@ -131,6 +132,7 @@ fn import_rejects_unknown_schema() {
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bad = PlaybookBundle {
+        origin: None,
         apb_bundle: 99,
         id: "va".to_string(),
         version: "1.0.0".to_string(),
@@ -138,7 +140,7 @@ fn import_rejects_unknown_schema() {
         layout: None,
         scripts: Vec::new(),
     };
-    let err = import_bundle(b.path(), &bad, true).unwrap_err();
+    let err = import_bundle(b.path(), &bad, true, None).unwrap_err();
     assert!(
         format!("{err}").contains("unsupported bundle schema"),
         "got: {err}"
@@ -151,6 +153,7 @@ fn import_honors_bundle_version_1_0_0_on_a_fresh_id() {
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bundle = PlaybookBundle {
+        origin: None,
         apb_bundle: 1,
         id: "va".to_string(),
         version: "1.0.0".to_string(),
@@ -159,7 +162,9 @@ fn import_honors_bundle_version_1_0_0_on_a_fresh_id() {
         scripts: Vec::new(),
     };
 
-    let assigned = import_bundle(b.path(), &bundle, true).unwrap().version;
+    let assigned = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
     assert_eq!(assigned, "1.0.0");
 }
 
@@ -172,6 +177,7 @@ fn import_honors_a_free_non_default_bundle_version() {
     let b = tempfile::tempdir().unwrap();
     seed(b.path());
     let bundle = PlaybookBundle {
+        origin: None,
         apb_bundle: 1,
         id: "va".to_string(),
         version: "9.9.9".to_string(),
@@ -180,7 +186,9 @@ fn import_honors_a_free_non_default_bundle_version() {
         scripts: Vec::new(),
     };
 
-    let assigned = import_bundle(b.path(), &bundle, true).unwrap().version;
+    let assigned = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
     assert_eq!(assigned, "9.9.9");
 }
 
@@ -190,6 +198,7 @@ fn second_import_of_the_same_version_errors_naming_the_conflict() {
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bundle = PlaybookBundle {
+        origin: None,
         apb_bundle: 1,
         id: "va".to_string(),
         version: "1.0.0".to_string(),
@@ -198,10 +207,22 @@ fn second_import_of_the_same_version_errors_naming_the_conflict() {
         scripts: Vec::new(),
     };
 
-    let first = import_bundle(b.path(), &bundle, true).unwrap().version;
+    let first = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
     assert_eq!(first, "1.0.0");
+    assert!(
+        import_bundle(b.path(), &bundle, true, None)
+            .unwrap()
+            .unchanged,
+        "the same bundle again writes nothing"
+    );
 
-    let err = import_bundle(b.path(), &bundle, true).unwrap_err();
+    let other = PlaybookBundle {
+        playbook: PLAYBOOK.replace("prompt: \"do\"", "prompt: \"do more\""),
+        ..bundle
+    };
+    let err = import_bundle(b.path(), &other, true, None).unwrap_err();
     assert!(
         matches!(err, BundleError::Versioning(VersioningError::Conflict(_))),
         "got {err:?}"
@@ -220,6 +241,7 @@ fn version_less_bundle_auto_assigns_exactly_as_today() {
     let b = tempfile::tempdir().unwrap();
     seed(b.path());
     let bundle = PlaybookBundle {
+        origin: None,
         apb_bundle: 1,
         id: "va".to_string(),
         version: String::new(),
@@ -230,12 +252,16 @@ fn version_less_bundle_auto_assigns_exactly_as_today() {
 
     // Seeded project already has `va` @ 1.0.0 current; a version-less bundle
     // falls back to the ordinary next-minor auto-assign.
-    let assigned = import_bundle(b.path(), &bundle, true).unwrap().version;
+    let assigned = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
     assert_eq!(assigned, "1.1.0");
 
     // The same definition again is no change (issue #67 item 9): nothing is
     // written and the import lands on the current version.
-    let again = import_bundle(b.path(), &bundle, true).unwrap().version;
+    let again = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
     assert_eq!(again, "1.1.0");
     let versions = apb_core::registry::list_versions(&b.path().join(".apb/playbooks/va")).unwrap();
     assert_eq!(versions, vec!["1.0.0".to_string(), "1.1.0".to_string()]);
@@ -247,6 +273,7 @@ fn import_rejects_a_non_semver_bundle_version_cleanly() {
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bundle = PlaybookBundle {
+        origin: None,
         apb_bundle: 1,
         id: "va".to_string(),
         version: "not-semver".to_string(),
@@ -255,7 +282,7 @@ fn import_rejects_a_non_semver_bundle_version_cleanly() {
         scripts: Vec::new(),
     };
 
-    let err = import_bundle(b.path(), &bundle, true).unwrap_err();
+    let err = import_bundle(b.path(), &bundle, true, None).unwrap_err();
     assert!(
         matches!(err, BundleError::Versioning(VersioningError::Conflict(_))),
         "got {err:?}"
@@ -314,6 +341,7 @@ fn script(path: &str, content: &[u8]) -> apb_core::bundle::BundleScript {
 
 fn bundle_with(scripts: Vec<apb_core::bundle::BundleScript>) -> PlaybookBundle {
     PlaybookBundle {
+        origin: None,
         apb_bundle: 2,
         id: "va".to_string(),
         version: "1.0.0".to_string(),
@@ -341,7 +369,7 @@ fn scripts_round_trip_with_content_mode_and_digest() {
     let back = PlaybookBundle::from_json(&bundle.to_json().unwrap()).unwrap();
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
-    let assigned = import_bundle(b.path(), &back, true).unwrap().version;
+    let assigned = import_bundle(b.path(), &back, true, None).unwrap().version;
     assert_eq!(assigned, version);
 
     let scripts = b
@@ -382,6 +410,7 @@ fn an_imported_version_is_never_trusted_with_or_without_scripts() {
         b.path(),
         &bundle_with(vec![script("x.sh", b"echo\n")]),
         true,
+        None,
     )
     .unwrap()
     .version;
@@ -393,7 +422,9 @@ fn an_imported_version_is_never_trusted_with_or_without_scripts() {
     let mut yaml_only = bundle_with(Vec::new());
     yaml_only.id = "vb".into();
     yaml_only.playbook = PLAYBOOK.replace("id: va", "id: vb");
-    let plain = import_bundle(b.path(), &yaml_only, true).unwrap().version;
+    let plain = import_bundle(b.path(), &yaml_only, true, None)
+        .unwrap()
+        .version;
     assert!(
         !store().is_approved(&trust_digest(b.path(), "vb", &plain)),
         "a bundle from elsewhere is not vouched for by importing it"
@@ -403,7 +434,9 @@ fn an_imported_version_is_never_trusted_with_or_without_scripts() {
     format_1.apb_bundle = 1;
     format_1.id = "vc".into();
     format_1.playbook = PLAYBOOK.replace("id: va", "id: vc");
-    let old = import_bundle(b.path(), &format_1, true).unwrap().version;
+    let old = import_bundle(b.path(), &format_1, true, None)
+        .unwrap()
+        .version;
     assert!(!store().is_approved(&trust_digest(b.path(), "vc", &old)));
 }
 
@@ -429,7 +462,7 @@ fn a_format_2_bundle_without_scripts_gives_a_version_without_scripts() {
     bundle.version = String::new();
     bundle.playbook = PLAYBOOK.replace("name: Valid Agent", "name: Imported");
 
-    let saved = import_bundle(b.path(), &bundle, true).unwrap();
+    let saved = import_bundle(b.path(), &bundle, true, None).unwrap();
     assert!(!saved.unchanged);
     assert_eq!(
         script_names(b.path(), &saved.version),
@@ -444,7 +477,7 @@ fn a_format_2_bundle_without_scripts_gives_a_version_without_scripts() {
     seed_with_scripts(c.path(), &[("local.sh", "echo local\n", true)]);
     let mut same_yaml = bundle_with(Vec::new());
     same_yaml.version = String::new();
-    let again = import_bundle(c.path(), &same_yaml, true).unwrap();
+    let again = import_bundle(c.path(), &same_yaml, true, None).unwrap();
     assert!(
         !again.unchanged,
         "differing scripts are not the same version"
@@ -462,14 +495,14 @@ fn a_format_1_bundle_keeps_the_current_scripts_and_may_not_carry_any() {
     bundle.version = String::new();
     bundle.playbook = PLAYBOOK.replace("name: Valid Agent", "name: Imported");
 
-    let saved = import_bundle(b.path(), &bundle, true).unwrap();
+    let saved = import_bundle(b.path(), &bundle, true, None).unwrap();
     assert!(!saved.unchanged);
     assert_eq!(script_names(b.path(), &saved.version), ["local.sh"]);
 
     let mut smuggled = bundle_with(vec![script("x.sh", b"echo\n")]);
     smuggled.apb_bundle = 1;
     smuggled.version = String::new();
-    let err = import_bundle(b.path(), &smuggled, true).unwrap_err();
+    let err = import_bundle(b.path(), &smuggled, true, None).unwrap_err();
     assert!(matches!(err, BundleError::Format(_)), "got {err}");
 }
 
@@ -488,7 +521,9 @@ fn a_format_1_bundle_still_imports() {
     .to_string();
     let bundle = PlaybookBundle::from_json(&json).unwrap();
     assert_eq!(
-        import_bundle(b.path(), &bundle, true).unwrap().version,
+        import_bundle(b.path(), &bundle, true, None)
+            .unwrap()
+            .version,
         "1.0.0"
     );
     assert!(Registry::open(b.path()).unwrap().load("va", None).is_ok());
@@ -521,7 +556,7 @@ fn import_rejects_every_unsafe_script_path_and_writes_nothing() {
     ];
     for scripts in cases {
         let label = format!("{:?}", scripts.iter().map(|s| &s.path).collect::<Vec<_>>());
-        let err = import_bundle(b.path(), &bundle_with(scripts), true).unwrap_err();
+        let err = import_bundle(b.path(), &bundle_with(scripts), true, None).unwrap_err();
         assert!(
             matches!(err, BundleError::Scripts(_)),
             "{label}: expected a scripts error, got {err}"
@@ -562,7 +597,7 @@ fn import_rejects_scripts_over_the_tree_limits() {
         (big, "per-file limit"),
         (over_total, "total limit"),
     ] {
-        let err = import_bundle(b.path(), &bundle_with(scripts), true).unwrap_err();
+        let err = import_bundle(b.path(), &bundle_with(scripts), true, None).unwrap_err();
         assert!(
             matches!(err, BundleError::Scripts(_)) && err.to_string().contains(expected),
             "expected `{expected}`, got {err}"
@@ -607,4 +642,293 @@ fn export_refuses_what_a_file_list_cannot_carry() {
         let err = export_bundle(root.path(), "va", None).unwrap_err();
         assert!(matches!(err, BundleError::Scripts(_)), "got {err}");
     }
+}
+
+#[test]
+fn an_export_carries_the_exporters_origin() {
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    seed(a.path());
+    let bundle = export_bundle(a.path(), "va", None).unwrap();
+    let origin = bundle.clone().origin.expect("an export records its origin");
+    assert_eq!(origin.scope, "project");
+    // The recorded digest is the one the importer computes for the version
+    // it writes, even when the source YAML was written by hand.
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let version = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
+    assert_eq!(origin.digest, trust_digest(b.path(), "va", &version));
+    let back = PlaybookBundle::from_json(
+        &export_bundle(a.path(), "va", None)
+            .unwrap()
+            .to_json()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(back.origin.is_some(), "the origin survives the file");
+}
+
+#[test]
+fn an_import_records_where_it_came_from() {
+    let _cfg = crate::common::config_sandbox();
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let bundle = bundle_with(vec![script("x.sh", b"echo hi\n")]);
+    let raw = bundle.to_json().unwrap();
+    let source = apb_core::bundle::ImportSource {
+        raw: raw.as_bytes(),
+        file_name: Some("/home/someone/Downloads/va.apb.json"),
+    };
+    let version = import_bundle(b.path(), &bundle, true, Some(source))
+        .unwrap()
+        .version;
+
+    let provenance =
+        apb_core::versioning::read_provenance_in(&b.path().join(".apb/playbooks/va"), &version)
+            .unwrap();
+    assert_eq!(provenance.created_by, "import");
+    let imported = provenance.imported.expect("import provenance");
+    assert_eq!(imported.file_name.as_deref(), Some("va.apb.json"));
+    assert_eq!(
+        imported.bundle_digest,
+        apb_core::content::sha256_hex(raw.as_bytes())
+    );
+    assert_eq!(
+        (
+            imported.source_id.as_str(),
+            imported.source_version.as_str()
+        ),
+        ("va", "1.0.0")
+    );
+    assert_eq!(imported.scripts.len(), 1);
+    assert_eq!(imported.scripts[0].path, "x.sh");
+    assert_eq!(
+        imported.scripts[0].sha256,
+        apb_core::content::sha256_hex(b"echo hi\n")
+    );
+    assert_eq!(imported.digest, trust_digest(b.path(), "va", &version));
+}
+
+#[test]
+fn a_preview_reports_the_definition_and_script_changes_without_writing() {
+    let _cfg = crate::common::config_sandbox();
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let first = bundle_with(vec![script("a.sh", b"one\n"), script("b.sh", b"two\n")]);
+    let raw = first.to_json().unwrap();
+
+    let fresh = apb_core::bundle::preview(b.path(), &first, raw.as_bytes()).unwrap();
+    assert!(fresh.new_playbook && !fresh.unchanged && fresh.needs_script_approval);
+    assert!(fresh.definition.is_none());
+    assert_eq!(fresh.scripts.added, vec!["a.sh", "b.sh"]);
+    assert_eq!(
+        fresh.bundle_digest,
+        apb_core::content::sha256_hex(raw.as_bytes())
+    );
+    assert!(
+        !b.path().join(".apb/playbooks/va").exists(),
+        "a preview writes nothing"
+    );
+
+    import_bundle(b.path(), &first, true, None).unwrap();
+    let same = apb_core::bundle::preview(b.path(), &first, raw.as_bytes()).unwrap();
+    assert!(same.unchanged && !same.needs_script_approval);
+
+    let mut next = bundle_with(vec![script("a.sh", b"changed\n"), script("c.sh", b"new\n")]);
+    next.version = "1.1.0".to_string();
+    next.playbook = PLAYBOOK.replace("prompt: \"do\"", "prompt: \"do more\"");
+    let changed = apb_core::bundle::preview(b.path(), &next, b"raw").unwrap();
+    assert!(!changed.new_playbook && !changed.unchanged && !changed.version_taken);
+    assert_eq!(changed.definition.unwrap().nodes_changed, vec!["w"]);
+    assert_eq!(changed.scripts.added, vec!["c.sh"]);
+    assert_eq!(changed.scripts.changed, vec!["a.sh"]);
+    assert_eq!(changed.scripts.removed, vec!["b.sh"]);
+    assert!(changed.errors.is_empty());
+
+    next.version = "1.0.0".to_string();
+    assert!(
+        apb_core::bundle::preview(b.path(), &next, b"raw")
+            .unwrap()
+            .version_taken
+    );
+
+    // The same content under a new version is a new version, as the import
+    // writes it.
+    let mut renumbered = first.clone();
+    renumbered.version = "2.0.0".to_string();
+    let preview = apb_core::bundle::preview(b.path(), &renumbered, b"raw").unwrap();
+    assert!(!preview.unchanged && !preview.version_taken);
+    assert!(
+        !import_bundle(b.path(), &renumbered, false, None)
+            .unwrap()
+            .unchanged
+    );
+
+    // A bundle whose YAML does not parse is listed, not refused.
+    let mut broken = first.clone();
+    broken.version = "3.0.0".to_string();
+    broken.playbook = "nodes: [".to_string();
+    let preview = apb_core::bundle::preview(b.path(), &broken, b"raw").unwrap();
+    assert!(preview.definition.is_none());
+    assert_eq!(preview.errors[0].code, "schema");
+}
+
+#[test]
+fn a_save_on_top_of_an_unapproved_import_still_needs_the_approval() {
+    use apb_core::versioning::approval::{ApproveError, approve_version, import_pending};
+    let _cfg = crate::common::config_sandbox();
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    import_bundle(
+        b.path(),
+        &bundle_with(vec![script("x.sh", b"echo\n")]),
+        true,
+        None,
+    )
+    .unwrap();
+    let edited = PLAYBOOK.replace("prompt: \"do\"", "prompt: \"do more\"");
+    let saved = apb_core::versioning::save_definition(b.path(), "va", &edited, None, true).unwrap();
+    assert!(!saved.unchanged);
+
+    let def_parent = b.path().join(".apb");
+    let dir = def_parent.join("playbooks/va");
+    let digest = trust_digest(b.path(), "va", &saved.version);
+    let trust = apb_core::trust::TrustStore::load();
+    assert!(
+        !trust.is_approved(&digest),
+        "the save does not vouch for the scripts"
+    );
+    assert!(import_pending(&dir, &saved.version, &digest, &trust));
+    let kind = apb_core::trust::OriginKind::LocallyApproved;
+    assert!(matches!(
+        approve_version(&def_parent, "va", None, None, kind),
+        Err(ApproveError::DigestRequired { .. })
+    ));
+
+    // Once approved by digest, a further save carries the approval along.
+    approve_version(&def_parent, "va", None, Some(&digest), kind).unwrap();
+    let again = PLAYBOOK.replace("prompt: \"do\"", "prompt: \"do it all\"");
+    let next = apb_core::versioning::save_definition(b.path(), "va", &again, None, true).unwrap();
+    let next_digest = trust_digest(b.path(), "va", &next.version);
+    let trust = apb_core::trust::TrustStore::load();
+    assert!(trust.is_approved(&next_digest));
+    assert!(!import_pending(&dir, &next.version, &next_digest, &trust));
+}
+
+#[test]
+fn an_approval_lists_the_scripts_as_they_are_now() {
+    use apb_core::versioning::approval::{ApproveError, approve_version};
+    let _cfg = crate::common::config_sandbox();
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let version = import_bundle(
+        b.path(),
+        &bundle_with(vec![script("x.sh", b"echo\n")]),
+        true,
+        None,
+    )
+    .unwrap()
+    .version;
+    let scripts_dir = b
+        .path()
+        .join(".apb/playbooks/va")
+        .join(&version)
+        .join("scripts");
+    fs::write(scripts_dir.join("x.sh"), "echo changed\n").unwrap();
+    fs::write(scripts_dir.join("y.sh"), "echo added\n").unwrap();
+
+    let kind = apb_core::trust::OriginKind::LocallyApproved;
+    match approve_version(&b.path().join(".apb"), "va", None, None, kind).unwrap_err() {
+        ApproveError::DigestRequired { scripts, .. } => {
+            let paths: Vec<&str> = scripts.iter().map(|s| s.path.as_str()).collect();
+            assert_eq!(paths, vec!["x.sh", "y.sh"]);
+            assert_eq!(
+                scripts[0].sha256,
+                apb_core::content::sha256_hex(b"echo changed\n")
+            );
+        }
+        other => panic!("expected DigestRequired, got {other}"),
+    }
+}
+
+#[test]
+fn an_imported_version_with_scripts_is_approved_only_by_its_exact_digest() {
+    use apb_core::versioning::approval::{ApproveError, approve_version, import_pending};
+    let _cfg = crate::common::config_sandbox();
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let version = import_bundle(
+        b.path(),
+        &bundle_with(vec![script("x.sh", b"echo\n")]),
+        true,
+        None,
+    )
+    .unwrap()
+    .version;
+    let def_parent = b.path().join(".apb");
+    let dir = def_parent.join("playbooks/va");
+    let digest = trust_digest(b.path(), "va", &version);
+    let pending = || {
+        import_pending(
+            &dir,
+            &version,
+            &trust_digest(b.path(), "va", &version),
+            &apb_core::trust::TrustStore::load(),
+        )
+    };
+    assert!(pending());
+
+    let kind = apb_core::trust::OriginKind::LocallyApproved;
+    match approve_version(&def_parent, "va", None, None, kind).unwrap_err() {
+        ApproveError::DigestRequired {
+            digest: named,
+            scripts,
+        } => {
+            assert_eq!(named, digest);
+            assert_eq!(scripts.len(), 1);
+        }
+        other => panic!("expected DigestRequired, got {other}"),
+    }
+    assert!(matches!(
+        approve_version(&def_parent, "va", None, Some("sha256:00"), kind),
+        Err(ApproveError::DigestMismatch { .. })
+    ));
+    assert!(pending(), "a refused approval records nothing");
+
+    let approved = approve_version(&def_parent, "va", None, Some(&digest), kind).unwrap();
+    assert_eq!(approved.digest, digest);
+    assert!(!pending());
+
+    fs::write(dir.join(&version).join("scripts/x.sh"), "echo changed\n").unwrap();
+    assert!(
+        pending(),
+        "a script changed after the approval needs a new one"
+    );
+}
+
+/// A format-1 bundle keeps the current scripts: over an imported version
+/// nobody approved, the preview says the new version needs the approval
+/// by digest too.
+#[test]
+fn a_format_1_preview_over_an_unapproved_import_needs_the_approval() {
+    let _cfg = crate::common::config_sandbox();
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    import_bundle(
+        b.path(),
+        &bundle_with(vec![script("x.sh", b"echo\n")]),
+        true,
+        None,
+    )
+    .unwrap();
+    let old_format = PlaybookBundle {
+        apb_bundle: 1,
+        version: String::new(),
+        playbook: PLAYBOOK.replace("prompt: \"do\"", "prompt: \"do more\""),
+        ..bundle_with(Vec::new())
+    };
+    let preview = apb_core::bundle::preview(b.path(), &old_format, b"raw").unwrap();
+    assert!(preview.needs_script_approval);
 }

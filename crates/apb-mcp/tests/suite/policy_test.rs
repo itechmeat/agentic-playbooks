@@ -192,7 +192,7 @@ fn approval_does_not_cover_other_or_changed_scripts() {
     let b = tempfile::tempdir().unwrap();
     seed_scripted(a.path(), "echo reviewed\n");
     seed_scripted(b.path(), "echo never-reviewed\n");
-    apb_mcp::tools::playbook_approve(a.path(), "s", None, "project").unwrap();
+    apb_mcp::tools::playbook_approve(a.path(), "s", None, "project", None).unwrap();
     assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
 
     let refusal = check_run(b.path(), &wref("s"), false, false).unwrap_err();
@@ -226,4 +226,82 @@ fn undigestable_scripts_still_load_but_never_run() {
     assert!(loaded.trust_digest().is_err());
     let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
     assert_eq!(refusal["policy"], "definition_unreadable", "{refusal}");
+}
+
+/// Exports a scripted playbook from a scratch project and imports it into
+/// `root`; returns the imported version.
+fn import_scripted(root: &Path, script: &str) -> String {
+    let source = tempfile::tempdir().unwrap();
+    seed_scripted(source.path(), script);
+    let bundle = apb_core::bundle::export_bundle(source.path(), "s", None).unwrap();
+    init_project(root).unwrap();
+    apb_core::bundle::import_bundle(root, &bundle, true, None)
+        .unwrap()
+        .version
+}
+
+/// A version imported with scripts runs only after an approval naming its
+/// exact digest: an acknowledge does not stand in for it, and a script
+/// changed after the approval brings the refusal back.
+#[test]
+fn imported_scripts_need_an_approval_by_digest_even_with_acknowledge() {
+    use apb_core::versioning::approval::{ApproveError, approve_version};
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    let version = import_scripted(a.path(), "echo imported\n");
+
+    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    assert_eq!(refusal["policy"], "imported_scripts_require_approval");
+    assert_eq!(refusal["version"], version.as_str());
+    assert_eq!(refusal["scripts"][0]["path"], "lint.sh");
+    let digest = refusal["digest"].as_str().unwrap().to_string();
+
+    let def_parent = a.path().join(".apb");
+    let kind = OriginKind::LocallyApproved;
+    assert!(matches!(
+        approve_version(&def_parent, "s", None, Some("sha256:0"), kind),
+        Err(ApproveError::DigestMismatch { .. })
+    ));
+    approve_version(&def_parent, "s", None, Some(&digest), kind).unwrap();
+    assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
+
+    std::fs::write(
+        a.path()
+            .join(".apb/playbooks/s")
+            .join(&version)
+            .join("scripts/lint.sh"),
+        "echo changed\n",
+    )
+    .unwrap();
+    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    assert_eq!(refusal["policy"], "imported_scripts_require_approval");
+}
+
+/// `playbook_approve` on a version imported with scripts: without a digest
+/// it answers `digest_required` with the digest and the scripts and changes
+/// nothing; a wrong digest is `digest_mismatch`; the right one approves it.
+#[test]
+fn playbook_approve_needs_the_digest_of_imported_scripts() {
+    use apb_mcp::tools::playbook_approve;
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    import_scripted(a.path(), "echo imported\n");
+
+    let asked = playbook_approve(a.path(), "s", None, "project", None).unwrap();
+    assert_eq!(asked["error"], "digest_required", "{asked}");
+    assert_eq!(asked["scripts"][0]["path"], "lint.sh");
+    let digest = asked["digest"].as_str().unwrap().to_string();
+    assert_eq!(
+        check_run(a.path(), &wref("s"), true, false).unwrap_err()["policy"],
+        "imported_scripts_require_approval"
+    );
+
+    let wrong = playbook_approve(a.path(), "s", None, "project", Some("sha256:0")).unwrap();
+    assert_eq!(wrong["error"], "digest_mismatch", "{wrong}");
+    assert_eq!(wrong["actual"], digest.as_str());
+
+    let ok = playbook_approve(a.path(), "s", None, "project", Some(&digest)).unwrap();
+    assert_eq!(ok["trusted"], true, "{ok}");
+    assert_eq!(ok["digest"], digest.as_str());
+    assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
 }

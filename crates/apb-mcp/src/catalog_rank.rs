@@ -38,6 +38,7 @@ use apb_decide::{Answer, ChoiceCriteria, Question, UseSite};
 use apb_engine::decision::standalone::{StandaloneDecider, StandaloneOutcome};
 use serde_json::{Value, json};
 
+use crate::catalog::CatalogRequest;
 use crate::tools::ToolError;
 
 /// Most options a `choice` may carry, `none_of_these` included.
@@ -85,13 +86,11 @@ impl RankCache {
 pub fn playbook_catalog_ranked(
     caller: &Path,
     root: &Path,
-    workspace_id: Option<&str>,
-    revision: Option<&str>,
-    limit: Option<usize>,
+    req: &CatalogRequest<'_>,
     query: &str,
     cache: &RankCache,
 ) -> Result<Value, ToolError> {
-    let plain = || crate::tools::playbook_catalog(root, workspace_id, revision, limit);
+    let plain = || crate::tools::playbook_catalog(root, req);
     let query = query.trim();
     if query.is_empty() {
         return plain();
@@ -104,7 +103,13 @@ pub fn playbook_catalog_ranked(
         return plain();
     }
     // The whole catalog, revision bypassed: the ranking depends on the query.
-    let mut full = crate::tools::playbook_catalog(root, workspace_id, None, None)?;
+    let whole = CatalogRequest {
+        revision: None,
+        limit: None,
+        fit: false,
+        ..*req
+    };
+    let mut full = crate::tools::playbook_catalog(root, &whole)?;
     let key = (
         root.to_string_lossy().into_owned(),
         full["catalog_revision"].as_str().unwrap_or("").to_string(),
@@ -124,8 +129,11 @@ pub fn playbook_catalog_ranked(
     if mode == DecisionMode::Shadow {
         return plain();
     }
-    if let (Some(n), Some(entries)) = (limit, full["entries"].as_array_mut()) {
+    if let (Some(n), Some(entries)) = (req.limit, full["entries"].as_array_mut()) {
         entries.truncate(n);
+    }
+    if req.fit {
+        crate::catalog::add_fit(root, &mut full["entries"]);
     }
     if let (Value::Object(out), Value::Object(add)) = (&mut full, fields) {
         out.extend(add);

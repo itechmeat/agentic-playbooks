@@ -3,6 +3,7 @@ use std::path::Path;
 use apb_core::registry::init_project;
 use apb_core::scope::digest_str;
 use apb_core::trust::{Lifecycle, OriginKind, TrustStore, write_lifecycle};
+use apb_mcp::catalog::CatalogRequest;
 use apb_mcp::tools::playbook_catalog;
 
 // Tests in this file touch the process-global APB_CONFIG_DIR - serialize them
@@ -66,7 +67,7 @@ fn catalog_lists_both_scopes_with_trust_aware_shadowing() {
     seed(&proj.path().join(".apb"), "review");
     write_lifecycle(&proj.path().join(".apb/playbooks/review"), Lifecycle::Draft).unwrap();
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let entries = cat["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2, "both scopes present");
 
@@ -105,9 +106,16 @@ fn catalog_revision_unchanged_roundtrip() {
     init_project(proj.path()).unwrap();
     seed(&proj.path().join(".apb"), "alpha");
 
-    let first = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let first = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let rev = first["catalog_revision"].as_str().unwrap().to_string();
-    let second = playbook_catalog(proj.path(), None, Some(&rev), None).unwrap();
+    let second = playbook_catalog(
+        proj.path(),
+        &CatalogRequest {
+            revision: Some(&rev),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(second["unchanged"], true);
     assert_eq!(second["catalog_revision"], rev);
 }
@@ -130,7 +138,7 @@ fn broken_playbook_lands_in_diagnostics_not_error() {
     std::fs::write(bad.join("playbook.yaml"), "this: is: not: valid: playbook").unwrap();
     std::fs::write(proj.path().join(".apb/playbooks/bad/current"), "1.0.0").unwrap();
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let entries = cat["entries"].as_array().unwrap();
     let diags = cat["diagnostics"].as_array().unwrap();
     assert!(
@@ -165,7 +173,7 @@ fn both_approved_is_ambiguous_not_silently_shadowed() {
         .approve(&digest_str(&py), "review", OriginKind::LocallyApproved)
         .unwrap();
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let entries = cat["entries"].as_array().unwrap();
     let proj_entry = entries
         .iter()
@@ -190,7 +198,7 @@ fn catalog_returns_suppressed_suggestions_and_moves_its_revision() {
     let _g = EnvGuard;
     init_project(proj.path()).unwrap();
 
-    let before = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let before = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let rev0 = before["catalog_revision"].as_str().unwrap().to_string();
     assert_eq!(
         before["suppressed_suggestions"].as_array().unwrap().len(),
@@ -206,7 +214,7 @@ fn catalog_returns_suppressed_suggestions_and_moves_its_revision() {
     };
     apb_mcp::tools::suggestion_dismiss(proj.path(), req()).unwrap();
 
-    let after = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let after = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let rev1 = after["catalog_revision"].as_str().unwrap().to_string();
     assert_ne!(rev0, rev1, "a dismiss write must move the revision");
     let suppressed = after["suppressed_suggestions"].as_array().unwrap();
@@ -232,7 +240,14 @@ fn catalog_returns_suppressed_suggestions_and_moves_its_revision() {
     // still move: otherwise a client holding rev1 would get unchanged: true
     // and never see the longer silence.
     apb_mcp::tools::suggestion_dismiss(proj.path(), req()).unwrap();
-    let third = playbook_catalog(proj.path(), None, Some(&rev1), None).unwrap();
+    let third = playbook_catalog(
+        proj.path(),
+        &CatalogRequest {
+            revision: Some(&rev1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(
         third["unchanged"].is_null(),
         "the revision must not match after a second decline: {third}"
@@ -240,7 +255,14 @@ fn catalog_returns_suppressed_suggestions_and_moves_its_revision() {
 
     // A matching revision still short-circuits.
     let rev2 = third["catalog_revision"].as_str().unwrap().to_string();
-    let same = playbook_catalog(proj.path(), None, Some(&rev2), None).unwrap();
+    let same = playbook_catalog(
+        proj.path(),
+        &CatalogRequest {
+            revision: Some(&rev2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(same["unchanged"], true, "{same}");
 }
 
@@ -259,7 +281,7 @@ fn catalog_entry_carries_goal_statement_when_present() {
     std::fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
     std::fs::write(proj.path().join(".apb/playbooks/withgoal/current"), "1.0.0").unwrap();
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let entries = cat["entries"].as_array().unwrap();
     let entry = entries
         .iter()
@@ -281,7 +303,7 @@ fn catalog_entry_omits_goal_statement_when_absent() {
     init_project(proj.path()).unwrap();
     seed(&proj.path().join(".apb"), "nogoal");
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let entries = cat["entries"].as_array().unwrap();
     let entry = entries.iter().find(|e| e["ref"]["id"] == "nogoal").unwrap();
     assert!(
@@ -309,7 +331,7 @@ fn corrupt_suggestion_store_surfaces_in_catalog_diagnostics_not_dropped() {
     )
     .unwrap();
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     assert_eq!(
         cat["suppressed_suggestions"].as_array().unwrap().len(),
         0,
@@ -326,4 +348,60 @@ fn corrupt_suggestion_store_surfaces_in_catalog_diagnostics_not_dropped() {
             .is_some_and(|e| e.contains("malformed suggestion store"))),
         "diagnostics: {diags:?}"
     );
+}
+
+/// `fit: true` adds a fit summary to every entry that is not shadowed, and
+/// the revision does not move: the fit depends on the project, the
+/// revision only on the definitions.
+#[test]
+fn catalog_fit_adds_a_summary_without_moving_the_revision() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+    seed(&proj.path().join(".apb"), "alpha");
+    seed(cfg.path(), "alpha");
+    seed(cfg.path(), "beta");
+
+    let plain = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
+    let with_fit = playbook_catalog(
+        proj.path(),
+        &CatalogRequest {
+            fit: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(with_fit["catalog_revision"], plain["catalog_revision"]);
+    for entry in with_fit["entries"].as_array().unwrap() {
+        let shadowed = entry["shadowed"].as_bool().unwrap();
+        assert_eq!(entry.get("fit").is_some(), !shadowed, "{entry}");
+        if let Some(fit) = entry.get("fit") {
+            assert_eq!(fit["ready"], true, "{entry}");
+            assert_eq!(fit["trusted"], false, "{entry}");
+        }
+    }
+    assert!(
+        plain["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e.get("fit").is_none())
+    );
+
+    // The fit can change while the revision stays: a request for it is
+    // always answered in full, never `unchanged`.
+    let again = playbook_catalog(
+        proj.path(),
+        &CatalogRequest {
+            fit: true,
+            revision: plain["catalog_revision"].as_str(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(again.get("unchanged").is_none(), "{again}");
+    assert!(again["entries"].as_array().is_some_and(|e| !e.is_empty()));
 }

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use apb_core::registry::init_project;
 use apb_core::scope::{Origin, PlaybookRef};
+use apb_mcp::catalog::CatalogRequest;
 use apb_mcp::policy::check_run;
 use apb_mcp::tools::{DismissRequest, playbook_capture, playbook_catalog, suggestion_dismiss};
 use serde_json::json;
@@ -122,7 +123,7 @@ fn old_style_dismiss_call_is_a_hard_project_dismissal() {
         "the response reports the computed snooze: {res}"
     );
 
-    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
     let dismissed = cat["dismissed_patterns"].as_array().unwrap();
     assert!(dismissed.iter().any(|p| p == "save-cleanup-playbook"));
 }

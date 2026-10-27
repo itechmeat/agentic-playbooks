@@ -144,26 +144,44 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
 /// What a started host-mode run tells its caller to do next.
 pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI, and neither do you (each task's execution_note is the contract). Call run_wait: it returns pending_tasks; for each one use your own subagent tool, telling it to read role_path as its system context and prompt_path as its task (or pass role_prompt and prompt inline), load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
 
-/// Adds the resolved execution of a run start to a successful response: the
-/// mode, whether the host fallback is on, and in host mode what to do next.
-/// What a run start reports about the playbook's candidate (issue #192):
-/// the candidate version the start runs as a trial, or why it was left out.
+/// What a run start reports beside the run: the playbook's candidate
+/// (issue #192), the candidate version the start runs as a trial or why it
+/// was left out, the input it took from memory, and what it remembered for
+/// the project.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct StartCandidate {
+pub(crate) struct StartNotes {
     pub(crate) trial: Option<String>,
     pub(crate) skipped: Option<String>,
+    /// The execution root the run directory lives under (the project).
+    pub(crate) runs_root: std::path::PathBuf,
+    /// The input to remember once the start succeeded (`remember: true`).
+    pub(crate) remember: Option<RememberAtStart>,
 }
 
-impl StartCandidate {
-    pub(crate) fn of(permit: &apb_engine::gate::RunPermit) -> Self {
-        StartCandidate {
+/// What a start with `remember: true` keeps for the project: the resolved
+/// playbook, and the params and instruction the caller passed.
+#[derive(Debug, Clone)]
+pub(crate) struct RememberAtStart {
+    pub(crate) resolved: apb_core::store::ResolvedPlaybook,
+    pub(crate) params: std::collections::BTreeMap<String, String>,
+    pub(crate) instruction: Option<String>,
+}
+
+impl StartNotes {
+    pub(crate) fn of(permit: &apb_engine::gate::RunPermit, runs_root: &std::path::Path) -> Self {
+        StartNotes {
             trial: permit.candidate.clone(),
             skipped: permit.candidate_skipped.clone(),
+            runs_root: runs_root.to_path_buf(),
+            remember: None,
         }
     }
 
     /// Adds `candidate_trial` (the version) or `candidate_skipped` (the
-    /// reason) to a start response.
+    /// reason) to a start response, and for a start that produced a run:
+    /// `recalled` (the params and instruction taken from memory) and what
+    /// was remembered. Memory is written only here, after the start
+    /// succeeded, so a refused or failed start never changes it.
     fn annotate(&self, obj: &mut serde_json::Map<String, Value>) {
         if let Some(v) = &self.trial {
             obj.insert("candidate_trial".into(), json!(v));
@@ -171,14 +189,41 @@ impl StartCandidate {
         if let Some(why) = &self.skipped {
             obj.insert("candidate_skipped".into(), json!(why));
         }
+        let Some(run_id) = obj.get("run_id").and_then(Value::as_str) else {
+            return;
+        };
+        let run_dir = self.runs_root.join(".apb/runs").join(run_id);
+        let recalled = apb_engine::run_view::recalled_input(&run_dir);
+        if !recalled.is_empty() {
+            obj.insert("recalled".into(), json!(recalled));
+        }
+        let Some(r) = &self.remember else {
+            return;
+        };
+        match tools::memory::remember_at_start(&r.resolved, &r.params, r.instruction.as_deref()) {
+            Ok(Value::Object(memory)) => obj.extend(memory),
+            Ok(_) => {}
+            Err(e) => {
+                let warning = json!(format!("the run input was not remembered: {e}"));
+                match obj.get_mut("warnings").and_then(Value::as_array_mut) {
+                    Some(list) => list.push(warning),
+                    None => {
+                        obj.insert("warnings".into(), json!([warning]));
+                    }
+                }
+            }
+        }
     }
 }
 
+/// Adds the resolved execution of a run start to a successful response:
+/// the mode, whether the host fallback is on, and in host mode what to do
+/// next; then the [`StartNotes`].
 fn with_execution(
     result: CallToolResult,
     resolved: &apb_core::execution::ResolvedExecution,
     deprecation: Option<&str>,
-    candidate: &StartCandidate,
+    notes: &StartNotes,
 ) -> CallToolResult {
     let result = with_deprecation(result, deprecation);
     if result.is_error == Some(true) {
@@ -187,7 +232,7 @@ fn with_execution(
     let mut result = result;
     if let Some(Value::Object(obj)) = result.structured_content.as_mut() {
         annotate_execution(obj, resolved);
-        candidate.annotate(obj);
+        notes.annotate(obj);
         return result;
     }
     if let Some(block) = result.content.first_mut()
@@ -196,7 +241,7 @@ fn with_execution(
         && obj.contains_key("run_id")
     {
         annotate_execution(&mut obj, resolved);
-        candidate.annotate(&mut obj);
+        notes.annotate(&mut obj);
         if let Ok(new) = ContentBlock::json(Value::Object(obj)) {
             *block = new;
         }

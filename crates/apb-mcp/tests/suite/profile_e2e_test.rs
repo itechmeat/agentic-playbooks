@@ -91,7 +91,7 @@ fn write_profile_then_run_then_skill_edit_untrusts() {
 
     // Activate the playbook (lifecycle active + digest trusted), otherwise the gate
     // would refuse at the playbook level before checking the profile.
-    apb_mcp::tools::playbook_approve(root, "p", None, "project").expect("approve ok");
+    apb_mcp::tools::playbook_approve(root, "p", None, "project", None).expect("approve ok");
 
     let wref = PlaybookRef {
         origin: Origin::Project { workspace_id: None },
@@ -165,7 +165,7 @@ fn permit_bundle_map_is_enforced_against_skill_drift() {
         },
     )
     .expect("write");
-    apb_mcp::tools::playbook_approve(root, "p", None, "project").expect("approve");
+    apb_mcp::tools::playbook_approve(root, "p", None, "project", None).expect("approve");
 
     let wref = PlaybookRef {
         origin: Origin::Project { workspace_id: None },

@@ -17,6 +17,7 @@ mod judge;
 mod list;
 mod node_io;
 mod nodes;
+mod params;
 mod templates;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -49,13 +50,14 @@ use nodes::{
 };
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
     Warning,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Issue {
     pub code: &'static str,
     pub severity: Severity,
@@ -175,6 +177,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
     list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
     budget::check_budget(playbook, &mut r); // V96-V98
+    params::check_params(playbook, &mut r); // V99, V100
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

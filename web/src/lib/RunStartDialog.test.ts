@@ -2,19 +2,38 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { flushSync, mount, unmount } from 'svelte'
 
-const { fetchEstimate } = vi.hoisted(() => ({ fetchEstimate: vi.fn() }))
-vi.mock('./api', () => ({ fetchEstimate }))
+const { fetchEstimate, fetchMemory } = vi.hoisted(() => ({
+  fetchEstimate: vi.fn(),
+  fetchMemory: vi.fn(),
+}))
+vi.mock('./api', () => ({ fetchEstimate, fetchMemory }))
 
 import RunStartDialog from './RunStartDialog.svelte'
 import type { RunEstimate } from './api.gen'
 
 let app: ReturnType<typeof mount> | null = null
-beforeEach(() => fetchEstimate.mockReset())
+beforeEach(() => {
+  fetchEstimate.mockReset()
+  fetchMemory.mockReset()
+  fetchMemory.mockResolvedValue(emptyRecall)
+})
 afterEach(() => {
   if (app) unmount(app)
   app = null
   document.body.innerHTML = ''
 })
+
+const emptyRecall = {
+  id: 'p',
+  scope: 'project',
+  version: '1.0.0',
+  instruction: null,
+  instruction_source: 'none',
+  values: [],
+  missing: [],
+  schema_changed: false,
+  diagnostics: [],
+}
 
 const byTestId = (id: string) => document.querySelector<HTMLElement>(`[data-testid="${id}"]`)
 const tick = () => new Promise((r) => setTimeout(r, 0))
@@ -89,7 +108,7 @@ describe('RunStartDialog', () => {
     pause!.click()
     flushSync()
     submit()
-    expect(onrun).toHaveBeenCalledWith({ on_no_estimate: 'pause' })
+    expect(onrun).toHaveBeenCalledWith({ on_no_estimate: 'pause' }, { params: {} })
   })
 
   it('sends the typed budget, and no policy choice when every node is estimated', async () => {
@@ -98,7 +117,7 @@ describe('RunStartDialog', () => {
     type('run-start-tokens', '300k')
     type('run-start-usd', '$2')
     submit()
-    expect(onrun).toHaveBeenCalledWith({ tokens: 300_000, usd: 2 })
+    expect(onrun).toHaveBeenCalledWith({ tokens: 300_000, usd: 2 }, { params: {} })
   })
 
   it('asks for a dollar limit when the nodes have token history only', async () => {
@@ -110,7 +129,7 @@ describe('RunStartDialog', () => {
     document.querySelector<HTMLInputElement>('input[value="continue"]')!.click()
     flushSync()
     submit()
-    expect(onrun).toHaveBeenCalledWith({ usd: 2, on_no_estimate: 'continue' })
+    expect(onrun).toHaveBeenCalledWith({ usd: 2, on_no_estimate: 'continue' }, { params: {} })
   })
 
   it("keeps asking with the block's limit when the inputs are emptied", async () => {
@@ -121,7 +140,7 @@ describe('RunStartDialog', () => {
     document.querySelector<HTMLInputElement>('input[value="pause"]')!.click()
     flushSync()
     submit()
-    expect(onrun).toHaveBeenCalledWith({ on_no_estimate: 'pause' })
+    expect(onrun).toHaveBeenCalledWith({ on_no_estimate: 'pause' }, { params: {} })
   })
 
   it('asks when the estimate cannot be read', async () => {
@@ -139,6 +158,114 @@ describe('RunStartDialog', () => {
     const onrun = await open(null, ['a'])
     expect(byTestId('run-start-policy')).toBeNull()
     submit()
-    expect(onrun).toHaveBeenCalledWith(undefined)
+    expect(onrun).toHaveBeenCalledWith(undefined, { params: {} })
+  })
+
+  it('prefills the remembered input and sends it with the remember choice', async () => {
+    fetchMemory.mockResolvedValue({
+      ...emptyRecall,
+      instruction: 'since the last tag',
+      instruction_source: 'memory',
+      values: [
+        { name: 'channel', value: 'beta', status: { status: 'compatible' } },
+        { name: 'count', value: 'many', status: { status: 'incompatible', reason: 'type_changed' } },
+      ],
+    })
+    const onrun = await open(null, [], {
+      params: [
+        { name: 'channel', type: 'text' },
+        { name: 'count', type: 'int', default: 2 },
+        { name: 'token', type: 'text', secret: true, default: undefined },
+      ],
+    })
+    expect(fetchMemory).toHaveBeenCalledWith('p', 'w')
+    expect((byTestId('run-start-param-channel') as HTMLInputElement).value).toBe('beta')
+    // The value that no longer fits is not used: the field shows the default.
+    expect((byTestId('run-start-param-count') as HTMLInputElement).value).toBe('2')
+    expect(byTestId('run-start-param-note-count')?.textContent).toContain('right type')
+    expect((byTestId('run-start-param-token') as HTMLInputElement).type).toBe('password')
+    expect((byTestId('run-start-instruction') as HTMLTextAreaElement).value).toBe('since the last tag')
+    // The secret has no value yet: the start is held until it is entered.
+    submit()
+    expect(onrun).not.toHaveBeenCalled()
+    expect(byTestId('run-start-error')?.textContent).toContain('token')
+    type('run-start-param-token', 's3cret')
+    ;(byTestId('run-start-remember') as HTMLInputElement).click()
+    flushSync()
+    submit()
+    expect(onrun).toHaveBeenCalledWith(undefined, {
+      params: { channel: 'beta', token: 's3cret' },
+      instruction: 'since the last tag',
+      remember: true,
+    })
+  })
+
+  it('keeps what the person typed before the memory answer and waits for it to start', async () => {
+    let answer: (r: unknown) => void = () => {}
+    fetchMemory.mockReturnValue(new Promise((r) => (answer = r)))
+    const onrun = await open(null, [], {
+      params: [
+        { name: 'channel', type: 'text' },
+        { name: 'mode', type: 'text' },
+      ],
+    })
+    type('run-start-param-channel', 'typed')
+    type('run-start-instruction', 'my own words')
+    expect((byTestId('run-start-submit') as HTMLButtonElement).disabled).toBe(true)
+    submit()
+    expect(onrun).not.toHaveBeenCalled()
+
+    answer({
+      ...emptyRecall,
+      instruction: 'remembered words',
+      instruction_source: 'memory',
+      values: [
+        { name: 'channel', value: 'beta', status: { status: 'compatible' } },
+        { name: 'mode', value: 'fast', status: { status: 'compatible' } },
+      ],
+      diagnostics: ['the remembered input could not be read; it is ignored'],
+    })
+    await tick()
+    flushSync()
+    expect((byTestId('run-start-param-channel') as HTMLInputElement).value).toBe('typed')
+    expect((byTestId('run-start-param-mode') as HTMLInputElement).value).toBe('fast')
+    expect((byTestId('run-start-instruction') as HTMLTextAreaElement).value).toBe('my own words')
+    expect(byTestId('run-start-memory-note')?.textContent).toContain('could not be read')
+    submit()
+    expect(onrun).toHaveBeenCalledWith(undefined, {
+      params: { channel: 'typed', mode: 'fast' },
+      instruction: 'my own words',
+    })
+  })
+
+  it('a cleared remembered value starts with the default, not the remembered one', async () => {
+    fetchMemory.mockResolvedValue({
+      ...emptyRecall,
+      values: [{ name: 'mode', value: 'fast', status: { status: 'compatible' } }],
+    })
+    const onrun = await open(null, [], {
+      params: [{ name: 'mode', type: 'text', default: 'slow' }],
+    })
+    expect((byTestId('run-start-param-mode') as HTMLInputElement).value).toBe('fast')
+    type('run-start-param-mode', '')
+    submit()
+    expect(onrun).toHaveBeenCalledWith(undefined, { params: { mode: 'slow' } })
+  })
+
+  it('sends the shown defaults when the remembered input cannot be read', async () => {
+    fetchMemory.mockRejectedValue(new Error('gone'))
+    const onrun = await open(null, [], {
+      params: [{ name: 'mode', type: 'text', default: 'slow' }],
+    })
+    submit()
+    expect(onrun).toHaveBeenCalledWith(undefined, { params: { mode: 'slow' } })
+  })
+
+  it('still starts when the remembered input cannot be read', async () => {
+    fetchMemory.mockRejectedValue(new Error('gone'))
+    const onrun = await open(null, [])
+    expect(byTestId('run-start-memory-note')?.textContent).toContain('could not be read')
+    submit()
+    expect(onrun).toHaveBeenCalledWith(undefined, { params: {} })
   })
 })

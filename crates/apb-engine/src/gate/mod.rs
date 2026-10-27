@@ -13,18 +13,17 @@
 //! confirmation, so those surfaces pass `true`. Connector and account trust
 //! ignore the knob on every surface (secret egress).
 
+pub(crate) mod trust_scan;
+
 use std::path::Path;
 
 use crate::run_config::ChildExpectation;
-use apb_core::connector::config::account_digest;
-use apb_core::connector::resolve::resolve_playbook;
-use apb_core::connector::secrets::missing_vars;
 use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
 use apb_core::scope::{Origin, PlaybookRef};
-use apb_core::trust::{Lifecycle, TrustStore, account_trust_id, read_lifecycle};
+use apb_core::trust::{Lifecycle, TrustStore, read_lifecycle};
 use serde_json::{Value, json};
 
 /// String name of an effect, for plans/catalog.
@@ -343,13 +342,13 @@ pub fn check_resume_consent(
 /// run gate (`check_run`) and the cross-workspace consent surface (`preflight`)
 /// so both derive the SAME children pins and recursive effects union from a
 /// single resolution instead of duplicating it.
-struct TreeResolution {
+pub(crate) struct TreeResolution {
     /// Node-id -> verified child pin for THIS playbook (recursive).
-    children: std::collections::BTreeMap<String, ChildExpectation>,
+    pub(crate) children: std::collections::BTreeMap<String, ChildExpectation>,
     /// Union of the parent's effective effects and every pinned child's
     /// effective effects (recursively). Rendered with `effect_str`, matching
     /// `Preflight::effects`.
-    effects: std::collections::BTreeSet<Effect>,
+    pub(crate) effects: std::collections::BTreeSet<Effect>,
     /// `<scope>/<name>` keys of child profile bundles that are not approved
     /// (empty when `acknowledge_untrusted` is set).
     untrusted: Vec<String>,
@@ -555,7 +554,7 @@ pub fn consent_sources(
 /// Seeds the effects union and cycle path with the parent itself, then walks and
 /// verifies its sub-playbook tree once. `parent_id`/`origin` identify the parent
 /// for cycle detection and `auto` scope resolution of its children.
-fn resolve_tree(
+pub(crate) fn resolve_tree(
     root: &Path,
     playbook: &Playbook,
     origin: &Origin,
@@ -723,6 +722,9 @@ pub fn check_run(
     // Lifecycle: draft/retired does not run through the normal path - only via trial.
     let playbook_dir = definition_parent.join("playbooks").join(&wref.id);
     check_lifecycle(&playbook_dir, &wref.id)?;
+    if let Ok(digest) = loaded.trust_digest() {
+        check_import_approval(&playbook_dir, &wref.id, &loaded.version, &digest)?;
+    }
 
     // Candidate trials (issue #192): a start without an explicit version may
     // run the candidate instead of `current`. Chosen here, before the permit
@@ -1006,145 +1008,31 @@ fn check_connectors(
     // Deliberately ignored - see the doc comment above (secret egress).
     let _ = acknowledge_untrusted;
 
-    if !playbook.binds_connectors() {
-        return Ok((
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            Vec::new(),
-        ));
+    // Resolution, then env presence over the union of every used
+    // connector's required env, then trust: the connector tree digest first
+    // (a changed folder is a bigger deal than an account), then every merged
+    // account digest.
+    let scan = trust_scan::scan_connectors(root, playbook)
+        .map_err(|errors| json!({ "policy": "connector_unresolved", "errors": errors }))?;
+    if !scan.missing_env.is_empty() {
+        return Err(json!({ "policy": "connector_env_missing", "missing": scan.missing_env }));
     }
-
-    // 1. Resolve every bound connector against the live files.
-    let resolution = match resolve_playbook(root, playbook) {
-        Ok(r) => r,
-        Err(errors) => {
-            return Err(json!({ "policy": "connector_unresolved", "errors": errors }));
-        }
-    };
-
-    // 2. Env presence over the union of every used connector's required env.
-    let mut required: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for resolved in resolution.connectors.values() {
-        for var in &resolved.required_env {
-            required.insert(var.clone());
-        }
-    }
-    let required: Vec<String> = required.into_iter().collect();
-    let missing = missing_vars(root, &required);
-    if !missing.is_empty() {
-        return Err(json!({ "policy": "connector_env_missing", "missing": missing }));
-    }
-
-    // 3. + 4. Trust: connector tree digest first (a changed folder is a bigger
-    // deal than an account), then every merged account digest.
-    let store = TrustStore::load();
-    let mut connectors: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    let mut accounts: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    let mut untrusted_connectors: Vec<String> = Vec::new();
-    let mut unapproved_accounts: Vec<String> = Vec::new();
-    let mut account_fields = serde_json::Map::new();
-    let mut warnings: Vec<String> = Vec::new();
-
-    for (name, resolved) in &resolution.connectors {
-        let digest = resolved.loaded.digest.clone();
-        if !store.is_approved(&digest) {
-            untrusted_connectors.push(name.clone());
-        }
-        connectors.insert(name.clone(), digest);
-
-        // Zero-account connector (finding 11 of issue #42; enriched by finding 1
-        // of issue #56): an empty `expected_connector_accounts` for a bound
-        // connector passes the gate silently today and every node bound to it
-        // then fails at call time (nothing to call). Surface it as a
-        // consent-time warning rather than a hard refusal - a missing account
-        // is a configuration gap, not the secret-egress problem the
-        // connector/account trust gate guards. Name the binding node ids and
-        // the specific functions those nodes call so a supervisor can see
-        // exactly what would fail.
-        if resolved.accounts.is_empty() {
-            let mut node_ids: std::collections::BTreeSet<String> =
-                std::collections::BTreeSet::new();
-            let mut functions: std::collections::BTreeSet<String> =
-                std::collections::BTreeSet::new();
-            for (node_id, grants) in &resolution.grants {
-                for grant in grants {
-                    if grant.connector == *name {
-                        node_ids.insert(node_id.clone());
-                        for f in &grant.functions {
-                            functions.insert(f.clone());
-                        }
-                    }
-                }
-            }
-            if node_ids.is_empty() {
-                // Defensive fallback: a bound connector should always have at
-                // least one grant, but prefer the connector-only wording over
-                // empty brackets if resolution and grants somehow diverge.
-                warnings.push(format!(
-                    "connector `{name}` is bound but has no configured accounts; nodes that call it will fail until an account is added"
-                ));
-            } else {
-                let nodes = node_ids.into_iter().collect::<Vec<_>>().join(", ");
-                let funcs = functions.into_iter().collect::<Vec<_>>().join(", ");
-                warnings.push(format!(
-                    "connector `{name}` is bound but has no configured accounts; nodes [{nodes}] call functions [{funcs}] and will fail until an account is added"
-                ));
-            }
-        }
-
-        for account in &resolved.accounts {
-            let id = account_trust_id(name, &account.name);
-            let adigest = account_digest(account);
-            if !store.is_approved(&adigest) && !unapproved_accounts.contains(&id) {
-                unapproved_accounts.push(id.clone());
-                account_fields.insert(id.clone(), account_display(&resolved.loaded.doc, account));
-            }
-            accounts.insert(id, adigest);
-        }
-    }
-
-    if !untrusted_connectors.is_empty() {
+    if !scan.untrusted_connectors.is_empty() {
         return Err(json!({
             "policy": "untrusted_connector_requires_approve",
-            "connectors": untrusted_connectors,
+            "connectors": scan.untrusted_connectors,
             "detail": "approve the connector digest via the approve surface; acknowledge_untrusted does not bypass connector trust",
         }));
     }
-    if !unapproved_accounts.is_empty() {
+    if !scan.unapproved_accounts.is_empty() {
         return Err(json!({
             "policy": "unapproved_connector_account",
-            "accounts": unapproved_accounts,
-            "fields": Value::Object(account_fields),
+            "accounts": scan.unapproved_accounts,
+            "fields": Value::Object(scan.account_fields),
             "detail": "approve the account digest via the approve surface; acknowledge_untrusted does not bypass account trust",
         }));
     }
-
-    Ok((connectors, accounts, warnings))
-}
-
-/// Non-secret display of an account for an approval prompt (spec 7: the user
-/// sees the concrete fields they approve). Every value is safe: a secret-marked
-/// field holds only its raw `{{env.VAR}}` or `{{cmd:...}}` reference in the
-/// config, never the resolved secret, so the whole `fields` map plus the
-/// `default` flag can be shown. This mirrors exactly what the account digest
-/// pins. `cmd` names each secret read from a command, with the command line:
-/// approving the account authorizes apb to run it.
-fn account_display(
-    doc: &apb_core::connector::def::ConnectorDoc,
-    account: &apb_core::connector::config::Account,
-) -> Value {
-    let fields: serde_json::Map<String, Value> = account
-        .fields
-        .iter()
-        .map(|(k, v)| (k.clone(), json!(v)))
-        .collect();
-    json!({
-        "default": account.default,
-        "fields": Value::Object(fields),
-        "cmd": apb_core::connector::config::cmd_refs(doc, account),
-    })
+    Ok((scan.connectors, scan.accounts, scan.warnings))
 }
 
 /// Recursively collects and verifies the sub-playbook pins of `playbook`.
@@ -1223,6 +1111,12 @@ fn collect_children(
             .join("playbooks")
             .join(&resolved.id);
         check_lifecycle(&child_playbook_dir, &resolved.id)?;
+        check_import_approval(
+            &child_playbook_dir,
+            &resolved.id,
+            &resolved.version,
+            &resolved.digest,
+        )?;
         check_digest_trust(&resolved.id, &resolved.digest, acknowledge_untrusted)?;
         if let Some(req) = &loaded.playbook.requires {
             check_requires(root, req, &resolved.id)?;
@@ -1253,25 +1147,16 @@ fn collect_children(
             PlaybookOrigin::Project
         };
         // Child profile bundles (nodes + finish-with-prompt), trust-checked.
-        let mut bundles = std::collections::BTreeMap::new();
-        let store = TrustStore::load();
-        for r in collect_profile_refs(&loaded.playbook, false) {
-            match profile_store::compute_bundle(root, worigin, &r) {
-                Ok((lp, _pairs, bundle)) => {
-                    let key = format!("{}/{}", profile_store::scope_str(lp.scope), lp.name);
-                    if !acknowledge_untrusted
-                        && !store.is_approved(&bundle)
-                        && !untrusted.contains(&key)
-                    {
-                        untrusted.push(key.clone());
-                    }
-                    bundles.insert(key, bundle);
-                }
-                Err(e) => {
-                    return Err(json!({ "policy": "profile_unresolved", "detail": e.to_string() }));
+        let refs = collect_profile_refs(&loaded.playbook, false);
+        let bundles = trust_scan::scan_profile_bundles(root, &refs, worigin)?;
+        if !acknowledge_untrusted {
+            for key in bundles.untrusted {
+                if !untrusted.contains(&key) {
+                    untrusted.push(key);
                 }
             }
         }
+        let bundles = bundles.verified;
         // Recurse into the child's own sub-playbook nodes on the current branch.
         path.push(pair);
         let grand = collect_children(
@@ -1447,40 +1332,17 @@ fn check_profile_bundles(
         _ => PlaybookOrigin::Project,
     };
     let refs = collect_profile_refs(playbook, supervised);
-    let mut verified: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    if refs.is_empty() {
-        return Ok(verified);
-    }
-    let store = TrustStore::load();
-    let mut untrusted: Vec<String> = Vec::new();
-    for r in refs {
-        match profile_store::compute_bundle(root, worigin, &r) {
-            Ok((loaded, _pairs, bundle)) => {
-                let key = format!("{}/{}", profile_store::scope_str(loaded.scope), loaded.name);
-                if !acknowledge_untrusted
-                    && !store.is_approved(&bundle)
-                    && !untrusted.contains(&key)
-                {
-                    untrusted.push(key.clone());
-                }
-                // The map VERIFIED by this same pass - the engine will receive it as
-                // expected (permit), not a freshly recomputed one (closes TOCTOU).
-                verified.insert(key, bundle);
-            }
-            Err(e) => {
-                return Err(json!({ "policy": "profile_unresolved", "detail": e.to_string() }));
-            }
-        }
-    }
-    if !untrusted.is_empty() {
+    // The map VERIFIED by this same pass - the engine will receive it as
+    // expected (permit), not a freshly recomputed one (closes TOCTOU).
+    let scan = trust_scan::scan_profile_bundles(root, &refs, worigin)?;
+    if !acknowledge_untrusted && !scan.untrusted.is_empty() {
         return Err(json!({
             "policy": "untrusted_profile_requires_acknowledge",
-            "profiles": untrusted,
+            "profiles": scan.untrusted,
             "detail": "run again with acknowledge_untrusted: true after user confirmation",
         }));
     }
-    Ok(verified)
+    Ok(scan.verified)
 }
 
 /// Lifecycle gate shared by the parent (`check_run` / `preflight`) and every
@@ -1511,6 +1373,35 @@ fn check_digest_trust(id: &str, digest: &str, acknowledge_untrusted: bool) -> Re
         }));
     }
     Ok(())
+}
+
+/// The import approval gate shared by the parent and every child: a version
+/// an import wrote with scripts runs only once its exact content (`digest`,
+/// its trust digest now) was approved by digest. Like connector trust,
+/// `acknowledge_untrusted` does not bypass it: an acknowledge is consent to
+/// run unapproved content in general, while these scripts are code from a
+/// file someone else wrote, which the approver must name. The rule hardens
+/// the import path; content written into the repository by other means is
+/// covered by the ordinary digest trust. Public for the starts no gate
+/// checks (a trial), which refuse the same way before anything runs.
+pub fn check_import_approval(
+    playbook_dir: &Path,
+    id: &str,
+    version: &str,
+    digest: &str,
+) -> Result<(), Value> {
+    let trust = TrustStore::load();
+    match apb_core::versioning::approval::pending_import(playbook_dir, version, digest, &trust) {
+        None => Ok(()),
+        Some(scripts) => Err(json!({
+            "policy": "imported_scripts_require_approval",
+            "id": id,
+            "version": version,
+            "digest": digest,
+            "scripts": scripts,
+            "detail": "this version was imported with scripts; review them and approve the version by naming this digest; acknowledge_untrusted does not bypass this",
+        })),
+    }
 }
 
 /// Checks `requires` applicability: files - only safe relative

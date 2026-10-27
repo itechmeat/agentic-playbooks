@@ -489,3 +489,86 @@ fn trust_list_and_revoke_by_id() {
 
     apb(&["trust", "revoke", "demo"]).assert().code(2);
 }
+
+/// `apb memory`: show prints what a playbook remembers in this project
+/// (value, instruction, missing params), and clear forgets it.
+#[test]
+fn memory_show_and_clear_round_trip() {
+    use apb_core::run_memory::{MemoryKey, RememberInput, remember};
+    use apb_core::scope::Scope;
+    let dir = seeded_dir();
+    let params = apb_core::schema::Playbook::from_yaml(VALID).unwrap().params;
+    let key = MemoryKey::new(Scope::Project, "implement-task").unwrap();
+    let input = RememberInput {
+        params: Some([("task".to_string(), "fix the login form".to_string())].into()),
+        instruction: Some("keep it small".to_string()),
+    };
+    let stored = remember(dir.path(), &key, &params, "1.0.0", input).unwrap();
+    assert!(stored.refused.is_empty(), "{stored:?}");
+
+    playbook()
+        .args(["memory", "show", "implement-task"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fix the login form"))
+        .stdout(predicate::str::contains("compatible"))
+        .stdout(predicate::str::contains(
+            "instruction (remembered): keep it small",
+        ));
+
+    playbook()
+        .args(["memory", "clear", "implement-task", "--what", "params"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let out = playbook()
+        .args(["memory", "show", "implement-task", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(shown["values"], serde_json::json!([]), "{shown}");
+    assert_eq!(shown["missing"], serde_json::json!(["task"]), "{shown}");
+    assert_eq!(shown["instruction"], "keep it small", "{shown}");
+}
+
+/// `apb make-global --dry-run` prints the plan and changes nothing; a
+/// playbook bound to a project-only profile is blocked (exit 2) until
+/// --move-profiles copies the profile.
+#[test]
+fn make_global_dry_run_reports_the_plan_without_changes() {
+    let dir = seeded_dir();
+    let cfg = tempfile::tempdir().unwrap();
+    let apb = |args: &[&str]| {
+        let mut cmd = playbook();
+        cmd.args(args)
+            .env("APB_CONFIG_DIR", cfg.path())
+            .current_dir(dir.path());
+        cmd
+    };
+    apb(&["make-global", "implement-task", "--dry-run"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("profile_project_only [architect]"))
+        .stdout(predicate::str::contains("dry run: nothing changed"));
+    apb(&[
+        "make-global",
+        "implement-task",
+        "--dry-run",
+        "--move-profiles",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("copy_profile [architect]"))
+    .stdout(predicate::str::contains("copy_playbook"));
+    assert!(!cfg.path().join("playbooks/implement-task").exists());
+    // A real attempt stops at the plan's blocker, not at argument parsing.
+    apb(&["make-global", "implement-task", "--variant", "keep"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("profile_project_only [architect]"))
+        .stdout(predicate::str::contains("nothing changed"));
+    assert!(!cfg.path().join("playbooks/implement-task").exists());
+}

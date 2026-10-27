@@ -25,12 +25,14 @@ mod bind_interlock_test;
 mod budget_api_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
+#[path = "suite/fit_api_test.rs"]
+mod fit_api_test;
 #[path = "suite/inbox_api_test.rs"]
 mod inbox_api_test;
 #[path = "suite/ingest_test.rs"]
 mod ingest_test;
-#[path = "suite/input_draft_api_test.rs"]
-mod input_draft_api_test;
+#[path = "suite/memory_api_test.rs"]
+mod memory_api_test;
 #[path = "suite/meta_api_test.rs"]
 mod meta_api_test;
 #[path = "suite/profiles_api_test.rs"]

@@ -5,11 +5,13 @@ import {
   deletePlaybook,
   fetchDiff,
   fetchModelCatalog,
-  fetchInputDraft,
+  clearMemory,
+  fetchFit,
+  fetchMemory,
   fetchPlaybook,
   postAnswer,
   runPlaybook,
-  saveInputDraft,
+  saveMemory,
   saveLayout,
   updatePlaybook,
 } from './api'
@@ -172,35 +174,45 @@ describe('saveLayout', () => {
   })
 })
 
-describe('input draft', () => {
-  it('GETs and PUTs /api/playbooks/{id}/input-draft', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'x' }))
-    const got = await fetchInputDraft('p')
-    expect(got).toEqual({ instruction: 'x' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', { headers: H })
+describe('remembered input', () => {
+  it('reads, remembers and forgets through /api/playbooks/{id}/memory', async () => {
+    const recall = { id: 'p', scope: 'project', version: '1.0.0', instruction: 'x', values: [] }
+    fetchMock.mockResolvedValueOnce(jsonResponse(recall))
+    await expect(fetchMemory('p')).resolves.toEqual(recall)
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/memory', { headers: H })
 
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'hi' }))
-    const saved = await saveInputDraft('p', 'hi')
-    expect(saved).toEqual({ instruction: 'hi' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', scope: 'project', stored: ['instruction'], refused: [] }))
+    const saved = await saveMemory('p', { instruction: 'hi', params: { channel: 'beta' } })
+    expect(saved.stored).toEqual(['instruction'])
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/memory', {
       method: 'PUT',
       headers: JSON_H,
-      body: JSON.stringify({ instruction: 'hi' }),
+      body: JSON.stringify({ instruction: 'hi', params: { channel: 'beta' } }),
+    })
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', scope: 'project', cleared: 'params' }))
+    await clearMemory('p', 'params')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/memory?what=params', {
+      method: 'DELETE',
+      headers: H,
     })
   })
 
-  it('adds ?workspace= to select a project on the global dashboard', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
-    await fetchInputDraft('p', 'ws-abc')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', { headers: H })
+  it('selects the project and the definition scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}))
+    await fetchMemory('p', 'ws-abc', { scope: 'global', version: '2.0.0' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/playbooks/p/memory?workspace=ws-abc&scope=global&version=2.0.0',
+      { headers: H },
+    )
+  })
+})
 
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
-    await saveInputDraft('p', 'hi', 'ws-abc')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', {
-      method: 'PUT',
-      headers: JSON_H,
-      body: JSON.stringify({ instruction: 'hi' }),
-    })
+describe('fetchFit', () => {
+  it('GETs the fit report of a run in the selected project', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', ready: true }))
+    await expect(fetchFit('p', 'ws-abc')).resolves.toMatchObject({ ready: true })
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/fit?workspace=ws-abc', { headers: H })
   })
 })
 
@@ -348,5 +360,20 @@ describe('runPlaybook', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
       budget: { tokens: 300000 },
     })
+  })
+
+  it('sends the run input and remember only when given', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-1', remembered: ['channel'], not_remembered: [] }))
+    await runPlaybook('p', '', {
+      input: { params: { channel: 'beta' }, instruction: 'go', remember: true },
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      params: { channel: 'beta' },
+      instruction: 'go',
+      remember: true,
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-2' }))
+    await runPlaybook('p', '', { input: { params: {} } })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({})
   })
 })

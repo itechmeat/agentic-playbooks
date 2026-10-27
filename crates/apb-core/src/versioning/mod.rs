@@ -8,7 +8,7 @@
 //! the editor this is expected (source of truth - model), but hand edits with
 //! comments will lose formatting.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,15 @@ use crate::fsutil::atomic_write;
 use crate::registry::{Registry, is_frozen_dir, is_safe_segment, list_versions, parse_version};
 use crate::schema::{Playbook, SchemaError};
 use crate::validate::{Issue, Severity, ValidationContext, validate};
+
+pub mod approval;
+mod diff;
+mod imported;
+
+pub use diff::{VersionDiff, diff_definitions, line_diff};
+pub use imported::{
+    BundleOrigin, ImportProvenance, MAX_FILE_NAME, ScriptEntry, sanitize_file_name,
+};
 
 const MAX_RENAME_ATTEMPTS: u32 = 100;
 
@@ -45,6 +54,7 @@ pub enum VersioningError {
 /// older builds carry a `promoted` flag that drifted from `current` (a
 /// rollback or a save that did not move `current` left it set); it is
 /// ignored on read.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct VersionProvenance {
     pub created_by: String,
@@ -54,26 +64,36 @@ pub struct VersionProvenance {
     /// `next_runs` for a forward patch (a candidate for the next runs);
     /// absent for a patch the run migrated onto (`current_run`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub scope: Option<String>,
     /// The version the patch was made from: the lineage of a candidate that
     /// replaced an earlier one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub base_version: Option<String>,
     /// Why the supervisor made the forward patch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub rationale: Option<String>,
     /// What the rationale rests on: journal seqs, node ids, durations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
     pub evidence: Vec<String>,
     /// How the candidate fared in its trials; absent until a trial run ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub trial: Option<TrialRecord>,
     // --- end forward patches ---
+    /// Where an imported version came from (`created_by: import`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub imported: Option<ImportProvenance>,
 }
 
 /// The trial record of a candidate version (issue #192): how many trial runs
 /// it passed, and its fate once decided. A historical fact like the rest of
 /// the sidecar: whether the version is in use is still `current` alone.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct TrialRecord {
     /// Trial runs that succeeded with every goal criterion holding.
@@ -82,13 +102,16 @@ pub struct TrialRecord {
     /// `promoted`, `rejected` or `superseded`; absent while it is still on
     /// trial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub outcome: Option<String>,
     /// The trial run that decided the outcome (for `superseded`: the run
     /// whose forward patch replaced it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub run_id: Option<String>,
     /// Why it was rejected, or the version that superseded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub reason: Option<String>,
 }
 
@@ -194,6 +217,7 @@ pub fn create_version_with_override(
             version_override,
             make_current,
             imported_scripts: None,
+            imported: None,
         },
     )
 }
@@ -202,13 +226,16 @@ pub fn create_version_with_override(
 /// an import of a format-2 bundle (see [`crate::bundle`]): those files (maybe
 /// none) become the new version's `scripts/` and the base version's scripts
 /// are not carried. `None` carries the base's scripts along, as every
-/// ordinary save does.
+/// ordinary save does. `imported` is `Some` for every import: the version
+/// is then recorded as `created_by: import` with that provenance, its
+/// `digest` set to the trust digest of the version written.
 struct NewVersion<'a> {
     yaml: &'a str,
     base_version: Option<&'a str>,
     version_override: Option<&'a str>,
     make_current: bool,
     imported_scripts: Option<&'a [TreeFile]>,
+    imported: Option<&'a ImportProvenance>,
 }
 
 fn create_version_impl(
@@ -282,6 +309,21 @@ fn create_version_impl(
         Some(files) => VersionScripts::Imported(files),
         None => VersionScripts::CarryFrom(base.as_deref()),
     };
+    // Scripts carried from a base an import wrote, and nobody approved yet,
+    // are still that import's code: the new version keeps its record, so
+    // the approval by digest stays required (a save is no way around it).
+    let inherited = match req.imported_scripts {
+        None => inherited_import(&playbook_dir, base.as_deref()),
+        Some(_) => None,
+    };
+    let imported = match req.imported {
+        Some(own) if own.scripts.is_empty() => Some(ImportProvenance {
+            scripts: inherited.map(|i| i.scripts).unwrap_or_default(),
+            ..own.clone()
+        }),
+        Some(own) => Some(own.clone()),
+        None => inherited,
+    };
     let version_path = match commit_version_dir(&playbook_dir, &version, &playbook, scripts, bump) {
         Ok(path) => path,
         Err(e) => {
@@ -299,19 +341,22 @@ fn create_version_impl(
         .to_string_lossy()
         .to_string();
 
-    if let Some(base_ver) = base.as_deref() {
-        copy_parent_layout(&playbook_dir, base_ver, &version)?;
+    let provenance = VersionProvenance {
+        created_by: if req.imported.is_some() {
+            "import"
+        } else {
+            "user"
+        }
+        .to_string(),
+        ..Default::default()
+    };
+    if let Err(e) = finish_version(root, id, &version, base.as_deref(), provenance, imported) {
+        let _ = remove_dir_all(&version_path);
+        if is_new {
+            discard_new_playbook_dir(&playbook_dir);
+        }
+        return Err(e);
     }
-
-    write_provenance(
-        root,
-        id,
-        &version,
-        &VersionProvenance {
-            created_by: "user".to_string(),
-            ..Default::default()
-        },
-    )?;
 
     if is_new || req.make_current {
         atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
@@ -323,6 +368,62 @@ fn create_version_impl(
     }
 
     Ok(version)
+}
+
+/// The trust digest of the committed version directory `version_dir`.
+fn written_digest(version_dir: &Path) -> io::Result<String> {
+    let yaml = fs::read_to_string(version_dir.join("playbook.yaml"))?;
+    crate::scope::definition_digest(&yaml, version_dir).map_err(io::Error::other)
+}
+
+/// The import record of `base` (a version of the playbook in
+/// `playbook_dir`) that a version carrying its scripts keeps: the base was
+/// imported with scripts (or kept such a record itself) and its content is
+/// not approved. A base whose digest cannot be read counts as not approved.
+pub(crate) fn inherited_import(
+    playbook_dir: &Path,
+    base: Option<&str>,
+) -> Option<ImportProvenance> {
+    let base = base?;
+    let imported = read_provenance_in(playbook_dir, base)?.imported?;
+    let approved = written_digest(&playbook_dir.join(base))
+        .is_ok_and(|d| crate::trust::TrustStore::load().is_approved(&d));
+    (!imported.scripts.is_empty() && !approved).then_some(imported)
+}
+
+/// Everything a committed `version` gets after its directory: the layout
+/// of `base`, and its provenance with `imported` (see [`write_with_import`]).
+/// On a failure the caller removes the version: one whose import record
+/// did not land would run without the approval it needs.
+fn finish_version(
+    root: &Path,
+    id: &str,
+    version: &str,
+    base: Option<&str>,
+    provenance: VersionProvenance,
+    imported: Option<ImportProvenance>,
+) -> Result<(), VersioningError> {
+    if let Some(base) = base {
+        copy_parent_layout(&playbooks_dir(root).join(id), base, version)?;
+    }
+    write_with_import(root, id, version, provenance, imported)
+}
+
+/// Writes `provenance` for the committed `version`, with `imported` (when
+/// there is one) stamped with the trust digest of the version written: what
+/// an approval of it must name.
+fn write_with_import(
+    root: &Path,
+    id: &str,
+    version: &str,
+    mut provenance: VersionProvenance,
+    imported: Option<ImportProvenance>,
+) -> Result<(), VersioningError> {
+    if let Some(imported) = imported {
+        let digest = written_digest(&playbooks_dir(root).join(id).join(version))?;
+        provenance.imported = Some(ImportProvenance { digest, ..imported });
+    }
+    write_provenance(root, id, version, &provenance)
 }
 
 /// The one save path for a playbook definition written through apb: MCP
@@ -434,8 +535,9 @@ pub enum ImportedScripts<'a> {
 /// An import equal to the current version (the same definition, compared as
 /// [`save_definition`] does, and for a format-2 bundle the same scripts)
 /// writes nothing and returns the current version with [`Saved::unchanged`]
-/// set; its trust is untouched. An explicit `version_override` always
-/// creates that version.
+/// set; its trust is untouched. That holds when the bundle names no version
+/// or names the current one (the same bundle imported again); any other
+/// `version_override` creates that version.
 ///
 /// The `scripts` paths must already be validated by the caller (the bundle's
 /// shared script path check and its size limits); this function writes what
@@ -447,23 +549,11 @@ pub fn save_imported(
     version_override: Option<&str>,
     make_current: bool,
     scripts: ImportedScripts<'_>,
+    provenance: &ImportProvenance,
 ) -> Result<Saved, VersioningError> {
-    let playbook_dir = playbooks_dir(root).join(id);
-    let current = if is_safe_segment(id) {
-        read_current_pointer(&playbook_dir)
-    } else {
-        None
-    };
-    if version_override.is_none()
-        && let Some(current) = current.as_deref()
-        && same_definition(&playbook_dir, current, id, yaml)
-        && match scripts {
-            ImportedScripts::CarryCurrent => true,
-            ImportedScripts::Bundle(files) => same_scripts(&playbook_dir.join(current), files),
-        }
-    {
+    if let Some(current) = unchanged_import(root, id, yaml, version_override, scripts) {
         return Ok(Saved {
-            version: current.to_string(),
+            version: current,
             unchanged: true,
         });
     }
@@ -479,6 +569,7 @@ pub fn save_imported(
                 ImportedScripts::Bundle(files) => Some(files),
                 ImportedScripts::CarryCurrent => None,
             },
+            imported: Some(provenance),
         },
     )?;
     // No approve_written here, by design: an import cannot vouch for a
@@ -487,6 +578,34 @@ pub fn save_imported(
         version,
         unchanged: false,
     })
+}
+
+/// The current version of playbook `id` when importing `yaml` with
+/// `scripts` as `version_override` would write nothing: no other version is
+/// named, the same definition (compared as [`save_definition`] does) and,
+/// for a format-2 bundle, the same scripts. Shared by the import and its
+/// preview, so both say the same.
+pub(crate) fn unchanged_import(
+    root: &Path,
+    id: &str,
+    yaml: &str,
+    version_override: Option<&str>,
+    scripts: ImportedScripts<'_>,
+) -> Option<String> {
+    if !is_safe_segment(id) {
+        return None;
+    }
+    let playbook_dir = playbooks_dir(root).join(id);
+    let current = read_current_pointer(&playbook_dir)?;
+    if version_override.is_some_and(|v| v != current) {
+        return None;
+    }
+    let same = same_definition(&playbook_dir, &current, id, yaml)
+        && match scripts {
+            ImportedScripts::CarryCurrent => true,
+            ImportedScripts::Bundle(files) => same_scripts(&playbook_dir.join(&current), files),
+        };
+    same.then_some(current)
 }
 
 /// Whether the `scripts/` of `version_dir` holds exactly `files` (paths,
@@ -515,11 +634,7 @@ fn same_scripts(version_dir: &Path, files: &[TreeFile]) -> bool {
 /// comments and the version number do not count as a change. Anything that
 /// does not parse is a change (the save then reports its own error).
 fn same_definition(playbook_dir: &Path, version: &str, id: &str, yaml: &str) -> bool {
-    let normalized = |text: &str| -> Option<String> {
-        let mut playbook = Playbook::from_yaml(text).ok()?;
-        playbook.id = id.to_string();
-        playbook_yaml_for_version(&playbook, version).ok()
-    };
+    let normalized = |text: &str| canonical_definition(text, id, version).ok();
     let Ok(stored) = fs::read_to_string(playbook_dir.join(version).join("playbook.yaml")) else {
         return false;
     };
@@ -527,6 +642,19 @@ fn same_definition(playbook_dir: &Path, version: &str, id: &str, yaml: &str) -> 
         (Some(a), Some(b)) => a == b,
         _ => false,
     }
+}
+
+/// `yaml` as a save writes it for playbook `id` at `version`: parsed and
+/// serialized again with the id and the version pinned. What an export
+/// carries, so the digest it records is the one the import computes.
+pub(crate) fn canonical_definition(
+    yaml: &str,
+    id: &str,
+    version: &str,
+) -> Result<String, VersioningError> {
+    let mut playbook = Playbook::from_yaml(yaml).map_err(schema_err)?;
+    playbook.id = id.to_string();
+    playbook_yaml_for_version(&playbook, version)
 }
 
 /// The trust half of a write through apb: approves the digest of
@@ -659,8 +787,14 @@ pub(crate) fn create_patch_version_with(
         .to_string_lossy()
         .to_string();
 
-    copy_parent_layout(&playbook_dir, base_version, &version)?;
-    write_provenance(root, id, &version, &provenance)?;
+    let imported = provenance
+        .imported
+        .clone()
+        .or_else(|| inherited_import(&playbook_dir, Some(base_version)));
+    if let Err(e) = finish_version(root, id, &version, Some(base_version), provenance, imported) {
+        let _ = remove_dir_all(&version_path);
+        return Err(e);
+    }
 
     Ok(version)
 }
@@ -769,6 +903,7 @@ pub fn read_provenance(
     Ok(Some(provenance))
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionInfo {
     pub version: String,
@@ -778,7 +913,14 @@ pub struct VersionInfo {
     /// Whether the `candidate` pointer names this version: a forward patch
     /// on trial in the next runs (issue #192, see `crate::candidate`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub is_candidate: bool,
+    /// An import wrote this version with scripts and its content is not
+    /// approved: it runs only after an approval naming its digest
+    /// ([`approval`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub awaiting_approval: bool,
     pub provenance: Option<VersionProvenance>,
 }
 
@@ -792,7 +934,7 @@ pub fn list_versions_with_provenance(
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
-    let playbook_dir = root.join(".apb/playbooks").join(id);
+    let playbook_dir = playbooks_dir(root).join(id);
     if !playbook_dir.is_dir() {
         return Err(VersioningError::NotFound(id.to_string()));
     }
@@ -800,19 +942,38 @@ pub fn list_versions_with_provenance(
         .ok()
         .map(|s| s.trim().to_string());
     let candidate = crate::candidate_pointer::read_candidate(&playbook_dir);
+    let trust = crate::trust::TrustStore::load();
     let mut out = Vec::new();
     for version in list_versions(&playbook_dir)? {
         let is_current = current.as_deref() == Some(version.as_str());
         let is_candidate = candidate.as_deref() == Some(version.as_str());
         let provenance = read_provenance(root, id, &version)?;
+        let awaiting_approval = imported_with_scripts(provenance.as_ref())
+            && awaits_approval(root, id, &version, &trust);
         out.push(VersionInfo {
             version,
             is_current,
             is_candidate,
+            awaiting_approval,
             provenance,
         });
     }
     Ok(out)
+}
+
+fn imported_with_scripts(p: Option<&VersionProvenance>) -> bool {
+    p.and_then(|p| p.imported.as_ref())
+        .is_some_and(|i| !i.scripts.is_empty())
+}
+
+/// Whether a version imported with scripts waits for an approval of its
+/// content now (the rule of [`approval::import_pending`]); a version whose
+/// digest cannot be read waits too.
+fn awaits_approval(root: &Path, id: &str, version: &str, trust: &crate::trust::TrustStore) -> bool {
+    !crate::registry::Registry::open(root)
+        .and_then(|reg| reg.load(id, Some(version)))
+        .and_then(|loaded| loaded.trust_digest())
+        .is_ok_and(|digest| trust.is_approved(&digest))
 }
 
 /// Makes `version` the current one: a promotion (a supervisor patch that
@@ -991,11 +1152,13 @@ pub fn list_trash(root: &Path) -> Result<Vec<TrashEntry>, VersioningError> {
     Ok(out)
 }
 
-fn read_current_pointer(playbook_dir: &Path) -> Option<String> {
+/// The version `current` names in `playbook_dir`, when it names one that
+/// is a safe path segment (a tampered pointer such as `../x` reads as none).
+pub(crate) fn read_current_pointer(playbook_dir: &Path) -> Option<String> {
     fs::read_to_string(playbook_dir.join("current"))
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && is_safe_segment(s))
 }
 
 /// Saves canvas layout for version. Layout is mutable: overwriting
@@ -1026,17 +1189,6 @@ pub fn save_layout(
     Ok(())
 }
 
-/// Structural and textual diff of two versions of the same playbook.
-#[derive(Debug, Serialize)]
-pub struct VersionDiff {
-    pub nodes_added: Vec<String>,
-    pub nodes_removed: Vec<String>,
-    pub nodes_changed: Vec<String>,
-    pub edges_added: Vec<String>,
-    pub edges_removed: Vec<String>,
-    pub yaml_diff: String,
-}
-
 /// Compares two versions: structurally (nodes/edges) and line by line (YAML).
 pub fn version_diff(
     root: &Path,
@@ -1062,75 +1214,7 @@ pub fn version_diff(
     let from_yaml = read_version_yaml(&base, id, from)?;
     let to_yaml = read_version_yaml(&base, id, to)?;
 
-    let from_playbook = Playbook::from_yaml(&from_yaml).map_err(schema_err)?;
-    let to_playbook = Playbook::from_yaml(&to_yaml).map_err(schema_err)?;
-
-    let from_nodes: HashMap<&str, &crate::schema::Node> = from_playbook
-        .nodes
-        .iter()
-        .map(|n| (n.id.as_str(), n))
-        .collect();
-    let to_nodes: HashMap<&str, &crate::schema::Node> = to_playbook
-        .nodes
-        .iter()
-        .map(|n| (n.id.as_str(), n))
-        .collect();
-
-    let mut nodes_added = Vec::new();
-    let mut nodes_removed = Vec::new();
-    let mut nodes_changed = Vec::new();
-
-    for node_id in to_nodes.keys() {
-        if !from_nodes.contains_key(node_id) {
-            nodes_added.push((*node_id).to_string());
-        }
-    }
-    for node_id in from_nodes.keys() {
-        if !to_nodes.contains_key(node_id) {
-            nodes_removed.push((*node_id).to_string());
-        }
-    }
-    for (node_id, from_node) in &from_nodes {
-        if let Some(to_node) = to_nodes.get(node_id) {
-            let from_ser = serde_json::to_value(from_node)
-                .map_err(|e| VersioningError::Schema(e.to_string()))?;
-            let to_ser = serde_json::to_value(to_node)
-                .map_err(|e| VersioningError::Schema(e.to_string()))?;
-            if from_ser != to_ser {
-                nodes_changed.push((*node_id).to_string());
-            }
-        }
-    }
-    nodes_added.sort();
-    nodes_removed.sort();
-    nodes_changed.sort();
-
-    let from_edges: HashSet<String> = from_playbook
-        .edges
-        .iter()
-        .map(|e| format!("{}->{}", e.from, e.to))
-        .collect();
-    let to_edges: HashSet<String> = to_playbook
-        .edges
-        .iter()
-        .map(|e| format!("{}->{}", e.from, e.to))
-        .collect();
-
-    let mut edges_added: Vec<String> = to_edges.difference(&from_edges).cloned().collect();
-    let mut edges_removed: Vec<String> = from_edges.difference(&to_edges).cloned().collect();
-    edges_added.sort();
-    edges_removed.sort();
-
-    let yaml_diff = line_diff(&from_yaml, &to_yaml);
-
-    Ok(VersionDiff {
-        nodes_added,
-        nodes_removed,
-        nodes_changed,
-        edges_added,
-        edges_removed,
-        yaml_diff,
-    })
+    diff_definitions(&from_yaml, &to_yaml)
 }
 
 fn read_version_yaml(base: &Path, id: &str, version: &str) -> Result<String, VersioningError> {
@@ -1139,51 +1223,6 @@ fn read_version_yaml(base: &Path, id: &str, version: &str) -> Result<String, Ver
         return Err(VersioningError::NotFound(format!("{id}@{version}")));
     }
     Ok(fs::read_to_string(path)?)
-}
-
-/// Line-by-line unified-like diff via LCS (without external crates).
-fn line_diff(from: &str, to: &str) -> String {
-    let a: Vec<&str> = from.lines().collect();
-    let b: Vec<&str> = to.lines().collect();
-    let n = a.len();
-    let m = b.len();
-
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            if a[i] == b[j] {
-                dp[i][j] = dp[i + 1][j + 1] + 1;
-            } else {
-                dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut j = 0;
-    while i < n && j < m {
-        if a[i] == b[j] {
-            out.push(format!(" {}", a[i]));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            out.push(format!("-{}", a[i]));
-            i += 1;
-        } else {
-            out.push(format!("+{}", b[j]));
-            j += 1;
-        }
-    }
-    while i < n {
-        out.push(format!("-{}", a[i]));
-        i += 1;
-    }
-    while j < m {
-        out.push(format!("+{}", b[j]));
-        j += 1;
-    }
-    out.join("\n")
 }
 
 /// Restores a deleted playbook: the one path behind the dashboard's Restore,
@@ -1251,9 +1290,9 @@ pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, V
     })
 }
 
-/// The playbook store of a project root. Crate-visible so the bundle export
-/// resolves the version directory through the same helper the save paths use.
-pub(crate) fn playbooks_dir(root: &Path) -> PathBuf {
+/// The playbook store of a project root: every surface resolves a version
+/// directory through the same helper the save paths use.
+pub fn playbooks_dir(root: &Path) -> PathBuf {
     root.join(".apb/playbooks")
 }
 
@@ -1353,18 +1392,27 @@ fn schema_err(e: SchemaError) -> VersioningError {
 }
 
 fn validate_playbook(root: &Path, playbook: &Playbook) -> Result<(), VersioningError> {
+    let issues = validation_errors(root, playbook)?;
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(VersioningError::Validation(issues))
+    }
+}
+
+/// The errors (not warnings) that keep `playbook` from being saved in the
+/// project at `root`.
+pub(crate) fn validation_errors(
+    root: &Path,
+    playbook: &Playbook,
+) -> Result<Vec<Issue>, VersioningError> {
     let reg = Registry::open(root).map_err(|e| VersioningError::NotFound(e.to_string()))?;
     let ctx = ValidationContext::for_registry(&reg, crate::profile_store::PlaybookOrigin::Project);
-    let report = validate(playbook, &ctx);
-    if report.is_valid() {
-        return Ok(());
-    }
-    let issues: Vec<Issue> = report
+    Ok(validate(playbook, &ctx)
         .issues
         .into_iter()
         .filter(|issue| issue.severity == Severity::Error)
-        .collect();
-    Err(VersioningError::Validation(issues))
+        .collect())
 }
 
 fn bump_minor(version: &str) -> Result<String, VersioningError> {
@@ -1606,7 +1654,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    const VALID: &str = include_str!("../tests/fixtures/valid.yaml");
+    const VALID: &str = include_str!("../../tests/fixtures/valid.yaml");
 
     #[test]
     fn commit_version_dir_rewrites_yaml_on_collision_bump() {

@@ -63,12 +63,16 @@ mod promotion_test;
 mod provenance_test;
 #[path = "suite/registry_test.rs"]
 mod registry_test;
+#[path = "suite/run_memory_test.rs"]
+mod run_memory_test;
 #[path = "suite/schema_migrate_config_test.rs"]
 mod schema_migrate_config_test;
 #[path = "suite/schema_migrate_test.rs"]
 mod schema_migrate_test;
 #[path = "suite/schema_test.rs"]
 mod schema_test;
+#[path = "suite/scope_move_test.rs"]
+mod scope_move_test;
 #[path = "suite/send_policy_validate_test.rs"]
 mod send_policy_validate_test;
 #[path = "suite/server_auth_test.rs"]
@@ -87,6 +91,8 @@ mod validate_goal_test;
 mod validate_inbox_test;
 #[path = "suite/validate_node_io_test.rs"]
 mod validate_node_io_test;
+#[path = "suite/validate_params_test.rs"]
+mod validate_params_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_protect_test.rs"]

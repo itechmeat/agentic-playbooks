@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { candidateTrialLabel, provenanceLabel, trialBadge } from './versioninfo'
+import { approvalBadge, approvalHint, candidateTrialLabel, provenanceLabel, trialBadge } from './versioninfo'
 import type { VersionInfo } from './types'
 
 describe('provenanceLabel', () => {
@@ -54,5 +54,45 @@ describe('forward patches and candidate trials', () => {
       'candidate 1.0.1: rejected',
     )
     expect(candidateTrialLabel(undefined)).toBeNull()
+  })
+})
+
+describe('imported versions', () => {
+  const imported = (file_name?: string): VersionInfo => ({
+    version: '2.0.0',
+    is_current: true,
+    provenance: {
+      created_by: 'import',
+      run_id: null,
+      classification: null,
+      imported: {
+        bundle_digest: 'sha256:b',
+        file_name,
+        source_id: 'p',
+        source_version: '2.0.0',
+        imported_at_ms: 1,
+        digest: 'sha256:d',
+      },
+    },
+  })
+  it('names the bundle file it came from', () => {
+    expect(provenanceLabel(imported('release.apb.json'))).toBe('imported from release.apb.json')
+  })
+  it('says imported when the bundle had no file name', () => {
+    expect(provenanceLabel(imported())).toBe('imported')
+  })
+  it('badges a version that waits for an approval by digest, and no other', () => {
+    expect(approvalBadge({ ...imported(), awaiting_approval: true })).toBe('awaiting approval')
+    expect(approvalBadge(imported())).toBeNull()
+  })
+  it('labels a save that kept the scripts of an unapproved import', () => {
+    const saved = imported('release.apb.json')
+    saved.provenance!.created_by = 'user'
+    expect(provenanceLabel(saved)).toBe('minor, with imported scripts')
+  })
+  it('hints the approval without a digest that may be stale', () => {
+    const hint = approvalHint('p', '2.0.0')
+    expect(hint).toContain('apb trust approve p --version 2.0.0')
+    expect(hint).not.toContain('sha256:')
   })
 })
