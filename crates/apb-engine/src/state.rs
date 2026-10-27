@@ -644,6 +644,9 @@ impl RunState {
                 // The budget and its gate; `crate::budget::BudgetFold` folds
                 // them.
                 EventPayload::BudgetSet { .. } | EventPayload::BudgetGate { .. } => {}
+                // The notification subscription; `crate::notify::NotifyState`
+                // folds it.
+                EventPayload::NotifySet { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a

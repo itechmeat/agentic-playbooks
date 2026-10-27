@@ -25,9 +25,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
-  `worktree` and `cache.key`, `baseline` for V62-V68, `list` for the list
+  `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
   rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
-  param rules V99 and V100), the run budget's schema,
+  param rules V99 and V100; `nodes` also holds V68, ids that start with `@`
+  are the engine's, and V101, `audience` on a finish without a prompt), the
+  "Notify me" settings (`notify/`: the machine target, the project's
+  narrowing, a run's request, and `precedence` combining them), the run
+  budget's schema,
   the precedence of a run argument over the playbook's block and the amount
   parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
   loading with ids and the `where` filter in `items`, the per-item state
@@ -36,8 +40,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the rule comparison), the project's own test and lint commands
   (`project_checks.rs`), the findings and warnings an attempt reports and
   their sanitizer (`run_notes.rs`), one walk over every connector binding
-  site, nodes, a list node's item check `<node>#check` and the reserved
-  `@baseline` (`connector/sites.rs`), a
+  site, nodes, a list node's item check `<node>#check` and the engine sites
+  `@baseline` and `@notify` (`connector/sites.rs`, `is_engine_site`), a
+  function's `people:` block, the args people read and whether it can carry
+  a notification (`connector/people.rs`), a
   function's send-once declaration and the connector's `identity`
   (`connector/idempotency.rs`) and the hidden send marker
   (`connector/marker.rs`), profiles
@@ -132,7 +138,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`run_estimate.rs`; `run_estimate/`: `history` the comparable runs,
   `sample` the per-run and per-node samples `apb stats` shares, `compose` the
   figures, `snapshot` the `estimate.json` a run starts with), the run lookups
-  by id (`scheduler/run_ref`),
+  by id (`scheduler/run_ref`), "Notify me" (`notify/`: `start` the check
+  every launch surface makes and a person's change on a live run,
+  `transitions` the pure list of transitions due, `notice` the message,
+  `send` the drive's sweep through the send ledger under `@notify`, `view`
+  the block every surface reports, `trial` the test message of `apb notify
+  test`), the text apb writes for people (`people/`: `brief` the writing
+  brief and where it applies, `instruction` the review and supervisor
+  instructions, `link` a run's dashboard link), the run report as one
+  self-contained HTML page (`report_html/`), the redactor every text that
+  leaves the machine goes through (`redact.rs`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
@@ -144,7 +159,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`run_doctor.rs`, `run_doctor/env` the process env rows), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping, `attempt` the
-  call's attempt binding and `send_once` the send-once flow; `intent/` the
+  call's attempt binding, `target` the snapshot grant or the live
+  trust-gated target a call resolves first, and `send_once` the send-once
+  flow; `intent/` the
   send ledger: `identity` what makes two sends the same, `ledger` the fold
   and the admission table, `stamp` the key and the marker, `reconcile` the
   lookup of a marker send; `effect` what a call says about its effect), background
@@ -164,7 +181,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `meta`, `intent` for `run_intent_resolve` and `apb intent`, `budget` for the
   budget arguments, the pre-start decision and the estimate and budget blocks
   the HTTP API reuses, `memory` for `playbook_memory` and the `remember` of a
-  start, shared with the HTTP API); `promote/` is `playbook_make_global` (the
+  start, shared with the HTTP API, `notify` for the notify argument, the
+  `notify_unavailable` start check, a live change and the run's `notify`
+  block, shared with the HTTP API and the CLI); `promote/` is `playbook_make_global` (the
   plan and its blockers in `plan`, the apply in `mod`); `catalog_rank` is the
   opt-in decision-model ranking behind `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
@@ -177,11 +196,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   holds the budget flags of `apb run` and `apb resume`, the estimate printing
   and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb
   memory`, `make_global.rs` is `apb make-global`, `import_preview.rs` prints
-  the preview `apb import` shows before it asks for acceptance.
+  the preview `apb import` shows before it asks for acceptance. `notify.rs`
+  is `apb notify` and the notify flags of `apb run` (forwarded to the
+  supervised drive like the budget flags), `report.rs` is `apb runs <id>
+  --html`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `memory` for remembered run
-  input), shared request state in `state.rs`, and the svelte
+  input, `notify` for the machine's notify target and a live run's change;
+  `runs` also serves the report page), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
@@ -262,6 +285,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   node run once; a supervisor or the engine never resumes one. Children are
   not gated and never get a `budget_set`; their spend counts toward the
   parent's.
+- **Notifications** ("Notify me") sit outside the run permit: the target
+  is the person's subscription, checked when it is set
+  (`notify::start::check`, every launch surface calls it first and refuses
+  `notify_unavailable`) and pinned in `notify_set` with the connector and
+  account digests; every send checks the live target against those pins.
+  A send is apb's own call under `@notify` through the send ledger,
+  labelled `notify:<kind>.<seq>`, so a restart never sends twice; the run
+  outcome leaves those sends out. A failed notification never fails the run.
+  Only a person sets a target: `apb notify` refuses a change or a test
+  inside a run step (`APB_RUN_ID`, `APB_HOST_TASK`, read through
+  `apb_core::step_env`), a start from a step may not name its own target,
+  and MCP `run_notify` only turns notifications on or off and narrows them
+  (`notify::set` with `ChangedBy::Host`).
 - A **baseline check** (`baseline_check`) reads its sources once before the
   first node that can act (`apb_core::effects::node_acts`) and once at the
   finish, journaled as `baseline_observed` and `baseline_compared`; the

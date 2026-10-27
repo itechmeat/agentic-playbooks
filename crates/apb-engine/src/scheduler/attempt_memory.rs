@@ -277,7 +277,8 @@ fn intent_effect(rec: &IntentRecord, state: &IntentState) -> Effect {
         IntentState::NotSent { source } => {
             let why = match source.as_str() {
                 "person" => "a person confirmed it did not go out",
-                "gate" => "apb recorded it but never sent it",
+                "unsent" | "journal" | "refused" => "apb recorded it but never sent it",
+                "gate" => "the trust check refused it before it was sent",
                 _ => "it did not go out (refused or failed before it could act)",
             };
             (
@@ -436,6 +437,36 @@ impl AttemptMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_send_apb_never_made_reads_apart_from_a_trust_refusal() {
+        let what = |source: &str| {
+            let events = vec![
+                intent(1, "si-1", "once", "none", 0),
+                ev(
+                    2,
+                    EventPayload::SendIntentSettled {
+                        intent: "si-1".into(),
+                        outcome: "not_sent".into(),
+                        source: source.into(),
+                        detail: None,
+                        effect_ref: None,
+                        by: None,
+                    },
+                ),
+            ];
+            let ledger = Ledger::fold(&events);
+            let rec = &ledger.records()[0];
+            intent_effect(rec, &rec.state).what
+        };
+        for source in ["unsent", "journal", "refused"] {
+            assert!(
+                what(source).starts_with("apb recorded it but never sent it"),
+                "{source}"
+            );
+        }
+        assert!(what("gate").starts_with("the trust check refused it"));
+    }
 
     fn ev(seq: u64, payload: EventPayload) -> Event {
         Event {

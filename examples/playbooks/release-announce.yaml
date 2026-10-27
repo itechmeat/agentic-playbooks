@@ -37,6 +37,7 @@ nodes:
       - { name: github, accounts: [default], functions: [create_release], max_calls: 3 }
   - id: announce_email
     type: agent_task
+    audience: people
     prompt: >-
       Send an email to {{params.announce_email}} announcing release
       {{params.release_tag}}, using the smtp connector's send_email
@@ -47,13 +48,21 @@ nodes:
       - { name: smtp, accounts: [default], functions: [send_email], max_calls: 3 }
   - id: announce_telegram
     type: agent_task
+    audience: people
     prompt: >-
       Post a short announcement of release {{params.release_tag}} to
       Telegram chat {{params.telegram_chat_id}}, using the telegram
       connector's send_message function with `--intent announce-telegram`.
     connectors:
       - { name: telegram, accounts: [default], functions: [send_message], max_calls: 3 }
-  - { id: finish, type: finish, outcome: success }
+  - id: finish
+    type: finish
+    outcome: success
+    audience: people
+    prompt: >-
+      Tell the release manager in three lines: the release link, whether
+      the email and the Telegram post went out, and anything they still
+      have to do by hand.
 edges:
   - { from: start, to: create_release }
   - { from: create_release, to: announce_email }

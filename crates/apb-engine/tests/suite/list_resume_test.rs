@@ -219,6 +219,7 @@ impl Drop for Supervised {
                 &self.run_dir,
                 Control::Abort {
                     reason: "the test ended early".into(),
+                    by: None,
                 },
             );
             let _ = d.join();

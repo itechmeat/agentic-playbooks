@@ -109,6 +109,12 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub budget: Option<apb_engine::budget::BudgetStatus>,
+    /// The run's notifications: whether they are on, where they go, about
+    /// what, what was sent, and why a subscription could not be used.
+    /// Absent for a run that never had a subscription.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub notify: Option<apb_engine::notify::RunNotify>,
     /// The estimate the run started with (time, tokens, cost from comparable
     /// runs). Absent for a run started before estimates, or a sub-run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +274,7 @@ pub(crate) async fn get_run_handler(
     let execution_fallback = manifest.as_ref().is_some_and(|m| m.falls_back_to_host());
     let budget = view.budget(&run_dir);
     let estimate = apb_engine::run_estimate::snapshot::read(&run_dir);
+    let notify = apb_mcp::tools::notify::run_block(&run_dir, &view.events);
     Json(RunDetail {
         run_id: id,
         playbook: playbook_id,
@@ -295,6 +302,7 @@ pub(crate) async fn get_run_handler(
         candidate_trial,
         pause,
         budget,
+        notify,
         estimate,
         usage,
         decisions,
@@ -649,6 +657,54 @@ pub(crate) async fn get_run_report_handler(
         Err(apb_engine::EngineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/runs/{id}/report.html: the run report as one self-contained
+/// page to save (the dashboard's "Save report"), the same page `apb runs
+/// <id> --html` writes. Served as a download with its own Content Security
+/// Policy (nothing loads, nothing runs, only its pinned stylesheet applies)
+/// and `nosniff`, so it is never rendered as part of the dashboard.
+pub(crate) async fn get_run_report_html_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WorkspaceQuery>,
+) -> impl IntoResponse {
+    use axum::http::header;
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let run_dir = root.join(".apb/runs").join(&id);
+    if !run_dir.is_dir() {
+        return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
+    }
+    let page =
+        tokio::task::spawn_blocking(move || apb_engine::report_html::render(&root, &run_dir)).await;
+    match page {
+        Ok(Ok(html)) => {
+            let csp = apb_engine::report_html::markup::csp(apb_engine::report_html::STYLESHEET);
+            let disposition = format!("attachment; filename=\"apb-run-{id}.html\"");
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+                    (header::CONTENT_SECURITY_POLICY, csp),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                    (header::CONTENT_DISPOSITION, disposition),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                ],
+                html,
+            )
+                .into_response()
+        }
+        Ok(Err(apb_engine::EngineError::NotFound(what))) => {
+            (StatusCode::NOT_FOUND, what).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

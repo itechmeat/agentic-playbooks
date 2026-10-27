@@ -25,6 +25,7 @@ mod http;
 mod request;
 mod response;
 mod send_once;
+mod target;
 
 pub use account::select_live_account;
 use account::{account_selection_error, select_account};
@@ -32,10 +33,11 @@ pub use attempt::AttemptClaim;
 use auth::{non_secret_fields, resolve_secrets};
 use encode::{assemble_url, encode_args_for_url, encode_component};
 use http::HttpCall;
-pub(crate) use request::CallOrigin;
 use request::validate_args;
 pub use request::{CallContext, CallRequest};
+pub(crate) use request::{CallOrigin, TargetPins};
 use response::map_status;
+pub(crate) use target::LiveTarget;
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -369,81 +371,30 @@ impl PreparedCall {
 /// `PreparedCall` with its journal scope, or an answer that needs no call;
 /// or a gate error for any pre-execution failure.
 fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
-    // 1. Manifest.
-    let manifest = manifest::read(req.run_dir)
-        .map_err(|e| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("run manifest unreadable: {e}"),
-            )
-        })?
-        .ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Config,
-                "this run has no manifest; connectors are unavailable",
-            )
-        })?;
-
-    // 2. Grant lookup + account selection.
-    let grants = manifest.grants_for(req.node_id);
-    let grant = grants
-        .iter()
-        .find(|g| g.connector == req.connector)
-        .ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Permission,
-                format!(
-                    "node `{}` has no grant for connector `{}`",
-                    req.node_id, req.connector
-                ),
-            )
-        })?;
-    // apb's own lookup of an earlier send reads functions the node may not
-    // call itself; it is held to read-only functions below instead.
-    if ctx.origin != CallOrigin::Reconcile && !grant.functions.iter().any(|f| f == req.function) {
-        return Err(CallError::new(
-            CallErrorCode::Permission,
-            format!(
-                "node `{}` may not call function `{}` on connector `{}`",
-                req.node_id, req.function, req.connector
-            ),
-        ));
-    }
-
-    let mconn = manifest.connector(req.connector).ok_or_else(|| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{}` is not in the run manifest", req.connector),
-        )
-    })?;
-    let account_name = select_account(req, grant, mconn)?;
-    let maccount = mconn
-        .accounts
-        .iter()
-        .find(|a| a.name == account_name)
-        .ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("granted account `{account_name}` is not in the connector snapshot"),
-            )
-        })?;
+    // 1, 2 and 4: where the call goes (the run's grant and snapshot, or a
+    // live trust-checked target).
+    let target = target::resolve(req, ctx)?;
 
     // 3. The attempt the call belongs to. A node's call from an attempt
     // that has ended, or that claims another attempt, is refused whatever
     // it calls: it would act, and be charged, in the current attempt's name.
     let events = attempt::journal(req.run_dir);
     let binding = attempt::bind(&events, req.node_id, &ctx.claim);
-    if ctx.origin == CallOrigin::Node && !binding.open {
+    if ctx.origin.charges_budget() && !binding.open {
         return Err(send_once::attempt_closed(req));
     }
     // Its max_calls budget: prior ConnectorCall events for this (node,
     // connector) grant, from the current attempt only. The budget is per
     // grant, so a second connector granted to the same node must not
-    // consume this connector's budget. apb's own reads are never charged.
+    // consume this connector's budget. apb's own calls are never charged.
     let budget = |events: &[crate::event::Event]| -> Result<(), CallError> {
-        if ctx.origin != CallOrigin::Node {
+        let Some(grant) = target
+            .grant
+            .as_ref()
+            .filter(|_| ctx.origin.charges_budget())
+        else {
             return Ok(());
-        }
+        };
         let binding = attempt::bind(events, req.node_id, &ctx.claim);
         check_budget(
             req,
@@ -456,23 +407,7 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
             ),
         )
     };
-
-    // 4. Load the snapshotted connector definition. The write-once run dir is
-    // the integrity boundary: the manifest tree digest covers the whole live
-    // connector folder and cannot be recomputed from this one copied file, so
-    // drift protection is the snapshot itself. A missing or unparsable
-    // snapshot, or a name that no longer matches, is Config drift.
-    let doc = load_snapshot(req.run_dir, req.connector)?;
-    let function = doc.function(req.function).cloned().ok_or_else(|| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!(
-                "function `{}` is missing from the `{}` snapshot (drift)",
-                req.function, req.connector
-            ),
-        )
-    })?;
-    if ctx.origin != CallOrigin::Node && !function.read_only {
+    if ctx.origin.read_only_only() && !target.function.read_only {
         return Err(CallError::new(
             CallErrorCode::Permission,
             format!(
@@ -496,10 +431,14 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
     let gate_input = send_once::GateInput {
         req,
         ctx,
-        on_unknown: grant.on_unknown.unwrap_or_default(),
-        doc: &doc,
-        function: &function,
-        account: &account_name,
+        on_unknown: target
+            .grant
+            .as_ref()
+            .and_then(|g| g.on_unknown)
+            .unwrap_or_default(),
+        doc: &target.doc,
+        function: &target.function,
+        account: &target.account,
         read: &execute_with,
         budget: &budget,
     };
@@ -515,10 +454,10 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
 
     let stamp = scope.send.as_ref().map(send_once::Tracked::stamp);
     let built = build_prepared(
-        &function,
-        &doc,
-        account_name,
-        maccount,
+        &target.function,
+        &target.doc,
+        target.account.clone(),
+        &target.maccount,
         &req.args,
         req.root,
         CallMode {
@@ -997,10 +936,9 @@ pub fn play_call(
 
 /// Shared live-call preparation for both `healthcheck` (fixed function, no
 /// args, always live) and `play_call` (dashboard playground, spec section
-/// 7: arbitrary function, args, optional dry-run). Loads the LIVE
-/// connector definition and LIVE merged account config - no run context,
-/// no manifest, no event log, no grant/budget checks (those are run-scoped
-/// concepts a standalone live call does not have).
+/// 7: arbitrary function, args, optional dry-run): the [`LiveTarget`], with
+/// no run context, no manifest, no event log and no grant or budget checks
+/// (those are run-scoped concepts a standalone live call does not have).
 ///
 /// Trust gating applies ONLY when `dry_run` is false: a dry-run never
 /// resolves secrets (`build_prepared` skips secret resolution entirely for
@@ -1022,98 +960,18 @@ fn prepare_play_call(
     dry_run: bool,
     full: bool,
 ) -> Result<Prepared, CallError> {
-    let loaded = store::load(name)
-        .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
-    let function = loaded.doc.function(function_name).cloned().ok_or_else(|| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{name}` declares no function `{function_name}`"),
-        )
-    })?;
-
-    let accounts = config::load_merged(root, name).map_err(|e| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{name}` account config: {e}"),
-        )
-    })?;
-    let acct = select_live_account(&accounts, account)
-        .ok_or_else(|| account_selection_error(name, account, &accounts))?
-        .clone();
-
+    let live = LiveTarget::load(root, name, account, function_name)?;
     if !dry_run {
-        // Trust gate (spec 2026-07-18-connectors-design section 9): a live
-        // call resolves LIVE secrets and sends them to the LIVE config's
-        // base_url, so an unapproved or changed connector/account must
-        // never be callable - the same guard `crate::gate::check_connectors`
-        // applies before a real run, checked here before anything below
-        // touches a secret. Connector digest first (a changed folder is a
-        // bigger deal than one account), then the target account's own
-        // digest.
-        let trust = TrustStore::load();
-        if !trust.is_approved(&loaded.digest) {
-            return Err(CallError::new(
-                CallErrorCode::Permission,
-                format!(
-                    "connector `{name}` is not approved; approve it before calling (see the connector approve flow)"
-                ),
-            ));
-        }
-        let account_digest = config::account_digest(&acct);
-        if !trust.is_approved(&account_digest) {
-            return Err(CallError::new(
-                CallErrorCode::Permission,
-                format!(
-                    "account `{}` is not approved; approve it before calling (see the connector approve flow)",
-                    account_trust_id(name, &acct.name)
-                ),
-            ));
-        }
+        live.require_trust()?;
     }
-
-    let errors = config::validate_accounts(&loaded.doc, std::slice::from_ref(&acct));
-    if !errors.is_empty() {
-        return Err(CallError::new(
-            CallErrorCode::Config,
-            format!(
-                "connector `{name}` account `{}` is invalid: {}",
-                acct.name,
-                errors.join("; ")
-            ),
-        ));
-    }
-
-    let env = config::env_refs(&loaded.doc, &acct);
-    let cmd = config::cmd_refs(&loaded.doc, &acct);
-    let secret_keys: std::collections::HashSet<&str> =
-        env.keys().chain(cmd.keys()).map(String::as_str).collect();
-    let fields: BTreeMap<String, String> = acct
-        .fields
-        .iter()
-        .filter(|(k, _)| !secret_keys.contains(k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let digest = config::account_digest(&acct);
-    let maccount = ManifestAccount {
-        name: acct.name.clone(),
-        default: acct.default,
-        fields,
-        env,
-        cmd,
-        digest,
-    };
-
+    let target = live.into_target()?;
     build_prepared(
-        &function,
-        &loaded.doc,
-        acct.name.clone(),
-        &maccount,
+        &target.function,
+        &target.doc,
+        target.account,
+        &target.maccount,
         args,
         root,
-        // `full` is the caller's real flag, not hardcoded: `prepare_healthcheck`
-        // passes `true` (a reachability probe shows the raw body), the
-        // playground's `play_call` passes whatever the caller asked for
-        // (default `false`, applying `response_pick` like a normal call).
         CallMode {
             dry_run,
             full,

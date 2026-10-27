@@ -731,8 +731,8 @@ fn a_journal_that_cannot_record_the_intent_refuses_the_send() {
 }
 
 /// A send whose secret is missing fails after its intent is recorded and
-/// before anything leaves: the intent is settled as not sent by the gate,
-/// so a repeat is not blocked as unknown.
+/// before anything leaves: the intent is settled as not sent (`unsent`, not
+/// a trust refusal), so a repeat is not blocked as unknown.
 #[test]
 fn a_send_that_fails_before_it_leaves_is_settled_as_not_sent() {
     let _lock = common::env_lock();
@@ -744,7 +744,7 @@ fn a_send_that_fails_before_it_leaves_is_settled_as_not_sent() {
     assert!(stub.requests().is_empty());
     assert!(matches!(
         &run.ledger().records()[0].state,
-        IntentState::NotSent { source } if source == "gate"
+        IntentState::NotSent { source } if source == "unsent"
     ));
 }
 

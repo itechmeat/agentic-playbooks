@@ -659,7 +659,7 @@ fn follow(tree: &Path, run_id: &str, limits: &core_eval::Limits) -> Option<StopR
         }
     };
     if reason.is_some() {
-        let _ = apb_engine::stop_run(tree, run_id);
+        let _ = apb_engine::stop_run_by(tree, run_id, apb_engine::pause::kind::PauseBy::Engine);
     }
     reason
 }
@@ -1114,7 +1114,11 @@ impl Drop for ScratchGuard {
     fn drop(&mut self) {
         let live = LIVE.lock().ok().and_then(|mut l| l.take());
         if let Some(run) = live {
-            let _ = apb_engine::stop_run(&run.tree, &run.run_id);
+            let _ = apb_engine::stop_run_by(
+                &run.tree,
+                &run.run_id,
+                apb_engine::pause::kind::PauseBy::Engine,
+            );
             let run_dir = run.tree.join(".apb/runs").join(&run.run_id);
             let gone = driver_gone(&run_dir, &run.run_id);
             if gone && let Some(rep) = run.tree.parent() {

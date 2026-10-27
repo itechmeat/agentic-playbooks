@@ -308,10 +308,20 @@ fn drive(
     lock: &mut Option<crate::workdir::WorkdirGuard>,
 ) -> Result<RunResult, EngineError> {
     let run_id_for_failure = run_id.clone();
-    match drive_inner(
+    let result = drive_inner(
         playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode, lock,
-    ) {
+    );
+    // The drive's last word on the run: a pause, its end or its failure is
+    // news to a person who subscribed (see `crate::notify`).
+    let notify_after = || {
+        crate::notify::send::Notifier::new(root, run_dir, &run_id_for_failure).sweep_now();
+    };
+    match result {
         Ok(r) => {
+            // The last sweep runs while this is still the run's one driver:
+            // once the lock is released and the waker armed, a resume may
+            // start another that reads the same journal.
+            notify_after();
             // A paused run holds no driver (issue #200): keep its lock when
             // the pause asked for it, and leave a waker behind for `until`.
             if r.outcome == RunStatus::Paused {
@@ -336,6 +346,7 @@ fn drive(
             let _ = log.append(EventPayload::RunFinished {
                 outcome: "failed".into(),
             });
+            notify_after();
             Ok(RunResult {
                 run_id: run_id_for_failure,
                 outcome: RunStatus::Failed,
@@ -609,6 +620,7 @@ fn drive_inner(
     // patch cannot change `baseline_check` once an acting node started.
     let mut baseline_before_done = false;
     let gate = budget_gate::DriveGate::load(run_dir)?;
+    let notifier = crate::notify::send::Notifier::new(root, run_dir, &run_id);
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
@@ -646,7 +658,11 @@ fn drive_inner(
             )?;
         }
 
-        let mut state = RunState::fold(&read_all(run_dir)?);
+        let events = read_all(run_dir)?;
+        // A transition journaled since the last turn (a review that opened,
+        // a question asked) is news to a person who subscribed.
+        notifier.sweep(&events);
+        let mut state = RunState::fold(&events);
         // A `worktree` template over a node's output resolves as soon as that
         // node has succeeded: the busy lock moves onto the tree first, then
         // the tree is journaled, and every node from here on runs in it.
@@ -708,9 +724,7 @@ fn drive_inner(
         }
 
         if let NodeKind::Finish {
-            outcome: o,
-            prompt,
-            profile: _,
+            outcome: o, prompt, ..
         } = &node_kind
         {
             // A finish-with-prompt composes the run answer via an agent (spec
@@ -1674,7 +1688,7 @@ fn drive_inner(
                 // options are, and how to answer.
                 if review_open_count(&events, &current) == 0 {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let mut instruction = crate::progress::review_instruction(
+                    let mut instruction = crate::people::instruction::review_instruction(
                         &current,
                         title.as_deref(),
                         options,

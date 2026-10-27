@@ -497,3 +497,53 @@ fn a_settlement_after_a_pause_is_past_the_last_checkpoint() {
         "a reading surface skips it"
     );
 }
+
+/// `notify_set` round trips, changes no run state, and an older binary that
+/// does not know it skips it while a checkpoint follows: such a binary then
+/// simply sends no notifications.
+#[test]
+fn notify_set_round_trips_and_is_skippable_before_a_checkpoint() {
+    let line = r#"{"seq":1,"ts":2,"type":"notify_set","target":{"connector":"telegram","account":"me","function":"send_message","to":"42","connector_digest":"sha256:c","account_digest":"sha256:a"},"on":["review","finished"],"source":"run"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+    // A shape a newer apb wrote reads leniently instead of failing.
+    let newer = r#"{"seq":1,"ts":2,"type":"notify_set","target":"elsewhere","on":["review","stalled"],"source":"run","by":"robot"}"#;
+    assert!(matches!(
+        serde_json::from_str::<Event>(newer).unwrap().payload,
+        EventPayload::NotifySet {
+            target: None,
+            by: None,
+            ..
+        }
+    ));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        line.replace("notify_set", "notify_set_from_the_future"),
+        r#"{"seq":2,"ts":3,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 2, 3]);
+}
+
+/// Who stopped a run reads as absent from an old `run_aborted` line and
+/// stays off the wire when unset.
+#[test]
+fn run_aborted_carries_who_stopped_it_only_when_known() {
+    let old = r#"{"seq":4,"ts":5,"type":"run_aborted","reason":"stop requested"}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::RunAborted { by: None, .. }
+    ));
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+    let new = r#"{"seq":4,"ts":5,"type":"run_aborted","reason":"stop requested","by":"operator"}"#;
+    let e: Event = serde_json::from_str(new).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), new);
+}

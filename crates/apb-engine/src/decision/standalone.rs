@@ -20,7 +20,8 @@ use apb_core::decisions::{
 use apb_decide::{Answer, DecisionRequest, ProviderChain, Question, UseSite};
 use serde_json::{Value, json};
 
-use super::{compact_answer, list_price_per_million, providers, redact, redact_value};
+use super::{compact_answer, list_price_per_million, providers};
+use crate::redact;
 
 /// The log file under `<root>/.apb/`.
 pub const DECISIONS_LOG: &str = "decisions.jsonl";
@@ -144,11 +145,8 @@ impl StandaloneDecider {
     /// The same secrets a run of this project redacts: the provider keys
     /// and every variable an installed connector references.
     fn redactor(&self) -> &redact::Redactor {
-        self.redactor.get_or_init(|| {
-            let mut secrets = apb_core::connector::resolve::resolve_referenced(&self.root);
-            secrets.extend(self.chain().1.iter().cloned());
-            redact::Redactor::new(secrets, &self.root)
-        })
+        self.redactor
+            .get_or_init(|| redact::Redactor::for_workspace(&self.root, self.chain().1.clone()))
     }
 
     /// `text` as a request would carry it: redacted when `privacy.redact` is
@@ -290,10 +288,10 @@ impl StandaloneDecider {
             // The questions carry text too (a suggestion's synopsis).
             let questions = serde_json::to_value(&questions)
                 .ok()
-                .map(|v| redact_value(self.redactor(), v))
+                .map(|v| self.redactor().redact_value(v))
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or(questions);
-            (redact_value(self.redactor(), state), questions)
+            (self.redactor().redact_value(state), questions)
         } else {
             (state, questions)
         };

@@ -233,6 +233,48 @@ pub(crate) fn check_finish(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V101 (warning): `audience` on a finish node without a `prompt`. Such a
+/// finish composes no answer, so there is no text the setting could shape.
+pub(crate) fn check_audience(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        if let NodeKind::Finish {
+            prompt: None,
+            audience: Some(_),
+            ..
+        } = &n.kind
+        {
+            r.warn(
+                "V101",
+                Some(&n.id),
+                format!(
+                    "finish node `{}` sets `audience` but has no prompt; it composes no answer, so the setting has no effect",
+                    n.id
+                ),
+            );
+        }
+    }
+}
+
+/// V68 (error): a node id that starts with `@`. Those ids name the sites the
+/// engine calls connectors from itself (`@baseline`, `@notify`), so a node
+/// taking one would borrow the engine's grants.
+pub(crate) fn check_engine_ids(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in playbook
+        .nodes
+        .iter()
+        .filter(|n| crate::connector::sites::is_engine_site(&n.id))
+    {
+        r.error(
+            "V68",
+            Some(&n.id),
+            format!(
+                "node id `{}` is not allowed: ids that start with `@` are reserved for the engine",
+                n.id
+            ),
+        );
+    }
+}
+
 /// V22 (error): a playbook node whose reference id is empty or not a safe path
 /// segment. Resolvability of the reference is a gate/adopt concern (the offline
 /// validator cannot see other playbooks).

@@ -174,6 +174,15 @@ pub(crate) struct RunBody {
     /// never stored).
     #[serde(default)]
     remember: bool,
+    /// The run's notifications (the Run dialog's "Notify me"): `true`
+    /// through the machine's target, `false` off whatever the machine
+    /// default, or `{ on, target }`. A request that cannot be honoured
+    /// refuses the start (409 `notify_unavailable`; 400 `invalid_notify`)
+    /// before anything is written.
+    /// Taken as JSON and parsed here, so a malformed value answers 400
+    /// `invalid_notify` like MCP rather than the extractor's plain error.
+    #[serde(default)]
+    notify: Option<serde_json::Value>,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -208,8 +217,9 @@ pub(crate) struct RunBody {
 /// warnings ride the 200 answer. Irreversible effects are the exception to
 /// "clicking Run is the confirmation": they need `confirm_irreversible`, which
 /// the dashboard sends only after its dialog (0.24.0). The run's `budget`
-/// is checked next (see `routes::estimate`), and the answer carries the
-/// run's `estimate` and `budget`.
+/// is checked next (see `routes::estimate`), then its `notify` request
+/// (see `routes::notify`), and the answer carries the run's `estimate` and
+/// `budget`.
 pub(crate) async fn run_playbook_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -282,6 +292,30 @@ pub(crate) async fn run_playbook_handler(
         Ok(Err(refusal)) => return refusal.into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+    // The notification request, checked like MCP checks it: the engine
+    // checks it again at start and pins the target.
+    let notify = match body
+        .notify
+        .as_ref()
+        .map(super::notify::parse_request)
+        .transpose()
+    {
+        Ok(req) => req,
+        Err(e) => return super::notify::refusal(e),
+    };
+    let checked = {
+        let (root, notify) = (root.clone(), notify.clone());
+        tokio::task::spawn_blocking(move || {
+            apb_mcp::tools::notify::start_check(&root, notify.as_ref())
+        })
+        .await
+    };
+    match checked {
+        Ok(Ok(notes)) => warnings.extend(notes),
+        Ok(Err(e)) => return super::notify::refusal(e),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+    opts.notify = notify;
     // What the person chose to keep is remembered once the start succeeded.
     let keep = body
         .remember
@@ -326,6 +360,18 @@ pub(crate) async fn run_playbook_handler(
         }
         Err(apb_engine::EngineError::Conflict(what)) => {
             (StatusCode::CONFLICT, what).into_response()
+        }
+        // The engine's own notify check, should the settings have changed
+        // since the one above: the same answer, and still nothing written.
+        Err(apb_engine::EngineError::Invalid(what))
+            if what.starts_with(apb_engine::notify::REFUSED_START) =>
+        {
+            let why = what[apb_engine::notify::REFUSED_START.len()..]
+                .trim_start_matches(':')
+                .trim();
+            super::notify::refusal(apb_mcp::tools::notify::NotifyError::Unavailable(
+                why.to_string(),
+            ))
         }
         // Client precondition failures (e.g. cross-playbook continued_from)
         // must not look like server faults.

@@ -1,6 +1,8 @@
-//! Redaction and clipping of what a decision request sends.
+//! Redaction and clipping of text apb hands to someone outside the run: a
+//! decision request, a notification, the HTML run report, a journaled probe
+//! failure.
 //!
-//! Applied to every text field before it leaves the machine, in this order:
+//! Applied to every text field before it leaves, in this order:
 //! known secret values (the variables every installed connector references,
 //! and the provider keys themselves) become `[redacted]`; absolute paths
 //! under the project become repo-relative and other home paths `~/...`;
@@ -53,6 +55,14 @@ impl std::fmt::Debug for Redactor {
 }
 
 impl Redactor {
+    /// The redactor of the workspace at `root`: the secret values every
+    /// installed connector references, plus `extra` (a provider's keys).
+    pub(crate) fn for_workspace(root: &std::path::Path, extra: Vec<Secret>) -> Self {
+        let mut secrets = apb_core::connector::resolve::resolve_referenced(root);
+        secrets.extend(extra);
+        Self::new(secrets, root)
+    }
+
     pub(crate) fn new(mut secrets: Vec<Secret>, root: &std::path::Path) -> Self {
         secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
@@ -89,6 +99,27 @@ impl Redactor {
         out = HOME_PATH.replace_all(&out, "~").into_owned();
         out = apb_core::token_shape::redact_tokens(&out);
         EMAIL.replace_all(&out, "[email]").into_owned()
+    }
+
+    /// [`Redactor::redact`] over every string of a JSON value, object keys
+    /// included (a map keyed by a path, an address or a token). Redact a
+    /// value before serialising it: serialising escapes quotes, backslashes
+    /// and newlines, and a secret written that way no longer matches. Two
+    /// keys that redact alike keep the later entry.
+    pub(crate) fn redact_value(&self, v: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match v {
+            Value::String(s) => Value::String(self.redact(&s)),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|i| self.redact_value(i)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(k, v)| (self.redact(&k), self.redact_value(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 }
 
@@ -133,6 +164,22 @@ pub(crate) fn clip(text: &str, head: usize, tail: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_json_value_is_redacted_in_its_keys_as_well_as_its_values() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Redactor::new(vec![Secret::new("hunter2-secret-value")], root.path());
+        let v = serde_json::json!({
+            "outputs": { "hunter2-secret-value": "dev.person@example.org", "plain": ["hunter2-secret-value"] }
+        });
+        let out = r.redact_value(v).to_string();
+        assert!(
+            !out.contains("hunter2"),
+            "a secret key or value reached the output"
+        );
+        assert!(!out.contains("example.org"));
+        assert!(out.contains("plain"));
+    }
 
     #[test]
     fn secrets_tokens_paths_and_emails_are_redacted() {

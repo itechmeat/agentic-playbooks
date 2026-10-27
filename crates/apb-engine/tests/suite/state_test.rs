@@ -688,6 +688,7 @@ fn a_terminal_finish_ends_owed_revivals() {
         },
         EventPayload::RunAborted {
             reason: "stop".into(),
+            by: None,
         },
     ] {
         let mut all = revival_journal();

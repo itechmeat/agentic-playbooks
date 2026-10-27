@@ -72,10 +72,9 @@ const MESSAGE_TAIL: usize = 200;
 /// personal paths redacted the way a decision request is (the connector
 /// secrets of the workspace at `root`), on one line, and clipped.
 fn journal_message(root: &Path, msg: &str) -> String {
-    let secrets = apb_core::connector::resolve::resolve_referenced(root);
-    let redacted = crate::decision::redact::Redactor::new(secrets, root).redact(msg);
+    let redacted = crate::redact::Redactor::for_workspace(root, Vec::new()).redact(msg);
     let one_line = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::decision::redact::clip(&one_line, MESSAGE_HEAD, MESSAGE_TAIL).replace('\n', " ")
+    crate::redact::clip(&one_line, MESSAGE_HEAD, MESSAGE_TAIL).replace('\n', " ")
 }
 
 /// Probes the executor of the quota pause at journal sequence `seq` of run

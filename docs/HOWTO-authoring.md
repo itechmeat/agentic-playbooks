@@ -2294,6 +2294,48 @@ run_report. A finish without a prompt stays instant and free with no answer.
 Do not set a profile without a prompt (validator V21). Estimate
 expected_duration on a finish-with-prompt like any agent step.
 
+The answer is written for a person by default: the composer's prompt carries
+apb's writing brief (see "Writing for people" below). When the answer is
+read by another agent instead (a sub-playbook whose parent parses it, a run
+whose caller is a script), set `audience: agents` on the finish node and the
+brief is left out. `audience` on a finish without a prompt has no effect
+(validator V101, a warning).
+
+## Writing for people
+
+Some of what a run writes is read by a person, not by the next step: the
+finish answer, a pull request description, a reminder mail, a chat post, a
+note in a CRM. For that text apb adds one fixed brief to the agent's prompt:
+lead with the conclusion, say who acts next and what they do, state facts
+(numbers, names, links) and mark what was not checked as not verified, use
+the reader's words instead of apb's internal terms, keep it short.
+
+The brief goes only where a person reads the output:
+
+- the finish composer, unless the finish node says `audience: agents`;
+- an `agent_task` marked `audience: people`;
+- a node granted a connector function that declares a `people:` block (the
+  official `telegram`, `slack`, `smtp` and `zulip` send functions and
+  `github.create_pull`; see "Text people read" in `docs/CONNECTORS.md`).
+  Its connector block also names the arguments people read.
+
+```yaml
+  - id: draft_reminder
+    type: agent_task
+    audience: people        # the mail draft is read by the customer
+    prompt: >-
+      Draft the payment reminder for {{item.name}} ...
+```
+
+`audience` is allowed on `agent_task` and `finish` (`people` or `agents`).
+Every other prompt stays byte for byte as it was, so cache keys do not
+change. The brief shapes how an agent writes; it is not a check. The run's
+own report says what was verified and what was not, whatever the answer
+claims (see "Run outcome" in `docs/MCP.md`).
+
+To hear about a run while it waits for you (a review, a question, a pause, the
+end) through a chat or mail you already use, see `docs/NOTIFY.md`.
+
 ## Host execution mode (running without agent CLIs)
 
 A playbook needs nothing special to run in host execution mode (informally
@@ -2887,7 +2929,8 @@ list or a count, `count` on a non-number), **V65** (connector args or
 `complete_when` templating anything but a declared `params.<name>`), **V66** (warning: a baseline without a goal, or with only
 manual criteria), **V67** (warning: a script or `project_checks` source while
 `worktree` reads a node output, so the two snapshots would run in different
-trees), **V68** (a node id equal to the reserved `@baseline`).
+trees), **V68** (a node id that starts with `@`: those ids, `@baseline` and
+`@notify`, are reserved for the engine).
 
 `run_status`, `run_report`, `apb runs <id>` and the dashboard run page show
 each check and observation with both values and the verdict; `apb stats`

@@ -357,6 +357,7 @@ fn a_mid_attempt_control_message_is_journaled_received_before_the_attempt_ends()
         &run_dir,
         Control::Abort {
             reason: "test done".into(),
+            by: None,
         },
     )
     .unwrap();

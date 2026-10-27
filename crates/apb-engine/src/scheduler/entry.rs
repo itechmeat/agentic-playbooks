@@ -114,6 +114,13 @@ pub struct RunOptions {
     /// one; a run with neither has no snapshot. Ignored for a sub-playbook
     /// child.
     pub estimate: Option<crate::run_estimate::RunEstimate>,
+    /// The run's notification request (see [`crate::notify`]); `None` asks
+    /// for nothing, so the machine default and the project apply. A
+    /// launch surface runs [`crate::notify::check`] first and refuses a
+    /// request it cannot honour; the start checks it again and pins the
+    /// target. Ignored for a sub-playbook child, which inherits its
+    /// parent's reviews and questions.
+    pub notify: Option<apb_core::notify::NotifyRequest>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -195,9 +202,10 @@ impl Prepared {
         if already_decided {
             return;
         }
-        if matches!(crate::control::pending_stop_seq(run_dir), Ok(Some(_))) {
+        if let Ok(Some((_, by))) = crate::control::pending_stop(run_dir) {
             let _ = self.log.append(EventPayload::RunAborted {
                 reason: e.to_string(),
+                by,
             });
             return;
         }
@@ -664,9 +672,10 @@ pub(super) fn reap_dead_attempts(
 }
 
 /// Posts a cancel command to control.jsonl of an already-running (or already
-/// finished) run. Does not wait for an actual stop - `drive` will see the Abort at
-/// the nearest iteration boundary. Idempotent: a repeated call just appends
-/// another Abort, which is harmless.
+/// finished) run: the supervisor's abort, journaled as `by: supervisor`. Does
+/// not wait for an actual stop - `drive` will see the Abort at the nearest
+/// iteration boundary. Idempotent: a repeated call just appends another Abort,
+/// which is harmless.
 pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -679,12 +688,13 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
         &run_dir,
         Control::Abort {
             reason: "run_cancel".into(),
+            by: Some(crate::pause::kind::PauseBy::Supervisor),
         },
     )?;
     // Propagate the abort into any non-terminal sub-playbook children (spec C):
-    // an operator abort of the parent must reach a child that is blocking the
-    // parent (e.g. a child paused on human_review).
-    crate::stop::abort_children(root, run_id)?;
+    // an abort of the parent must reach a child that is blocking the parent
+    // (e.g. a child paused on human_review).
+    crate::stop::abort_children(root, run_id, crate::pause::kind::PauseBy::Supervisor)?;
     Ok(())
 }
 

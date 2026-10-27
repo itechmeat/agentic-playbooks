@@ -2,6 +2,7 @@ import { decisionNote } from './rundecisions'
 import { outcomeEventNote } from './runoutcome'
 import { attemptOutputNote } from './outputloss'
 import { attemptUsageNote } from './runusage'
+import { notifyEventNote, notifySetNote } from './notify'
 import type { WfEvent } from './types'
 
 // An intervention journal entry: a supervisor wake-up or its action.
@@ -86,9 +87,14 @@ function listOf(v: unknown): string {
 // (issue #195), or which inputs a join wrote off and a re-run revived
 // (issue #203), and what a re-run revives, the baseline check's snapshots
 // and comparisons, the notes an attempt reported, and what a process_env
-// allowlist withheld from an attempt. Every other kind has none.
+// allowlist withheld from an attempt, and the run's notifications (who
+// changed them, and each notification sent). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
+  // A notification's send rides the send ledger and the connector call
+  // events under the engine site `@notify`.
+  const notification = notifyEventNote(e.type, r)
+  if (notification) return notification
   switch (e.type) {
     case 'session_handoff':
       return r.warm
@@ -159,6 +165,8 @@ function eventNote(e: WfEvent): string | undefined {
       if (!list) return undefined
       return r.from_node ? `re-run of ${String(r.from_node)} revives ${list}` : `a re-run revives ${list}`
     }
+    case 'notify_set':
+      return notifySetNote(r)
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

@@ -611,6 +611,22 @@ impl NodeKind {
         }
     }
 
+    /// Whether a person reads what this node writes: an `agent_task` marked
+    /// `audience: people`, or a `finish` that composes an answer and is not
+    /// marked `audience: agents`. Connector functions with a `people:`
+    /// block are weighed by the engine, which knows the grants.
+    pub fn writes_for_people(&self) -> bool {
+        match self {
+            NodeKind::AgentTask { audience, .. } => *audience == Some(Audience::People),
+            NodeKind::Finish {
+                prompt: Some(_),
+                audience,
+                ..
+            } => *audience != Some(Audience::Agents),
+            _ => false,
+        }
+    }
+
     /// This node's connector bindings (spec 2026-07-18-connectors-design
     /// section 5). An empty slice for every kind except `agent_task`.
     pub fn connector_bindings(&self) -> &[ConnectorBinding] {
@@ -1375,6 +1391,9 @@ pub enum NodeKind {
         /// covered. Empty (the default) checks nothing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         protect: Vec<String>,
+        /// Who reads this node's output (see [`Audience`]). Absent: agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audience: Option<Audience>,
     },
     Script {
         script: String,
@@ -1424,6 +1443,10 @@ pub enum NodeKind {
         /// profile without a prompt (a binding that can never execute).
         #[serde(default)]
         profile: Option<QualifiedProfileRef>,
+        /// Who reads the composed answer (see [`Audience`]). Absent: people.
+        /// Meaningful only with `prompt` (V101).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audience: Option<Audience>,
     },
     Playbook {
         /// The child playbook to run (spec C). `scope: auto` resolves the
@@ -1477,6 +1500,18 @@ pub enum WaitFor {
 pub enum Outcome {
     Success,
     Failure,
+}
+
+/// Who reads what a node writes. `people`: the output (a message, a PR
+/// description, a closing answer) is for a person, so the prompt carries
+/// apb's writing brief. `agents`: it is read by the next step only. An
+/// `agent_task` is `agents` unless it says otherwise; a `finish` with a
+/// `prompt` is `people` unless it says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Audience {
+    People,
+    Agents,
 }
 
 /// Required isolation level for node execution (spec 7.3/8.3): `full` -

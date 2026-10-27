@@ -4,12 +4,29 @@
 //! resolution, effects, the run gate, preflight and the validator all walk
 //! this one list, so a binding site cannot be resolved by one of them and
 //! missed by another.
+//!
+//! Sites whose id starts with [`ENGINE_SITE_PREFIX`] belong to the engine:
+//! [`BASELINE_SITE`] and [`NOTIFY_SITE`]. No node may take such an id
+//! (V68), and no caller outside the engine may call under one.
 
 use std::borrow::Cow;
 
 use crate::baseline::{BASELINE_SITE, BaselineConnector};
 use crate::list::{ConnectorCheck, check_site, check_site_node};
 use crate::schema::{ConnectorBinding, FunctionsAllow, Playbook};
+
+/// What the id of every site the engine owns starts with.
+pub const ENGINE_SITE_PREFIX: char = '@';
+
+/// The site run notifications are sent and journaled under. It binds no
+/// connector in the playbook: a notification's target is the person's own
+/// subscription, trust-checked against the digests pinned when it was set.
+pub const NOTIFY_SITE: &str = "@notify";
+
+/// Whether `site` belongs to the engine rather than to a node.
+pub fn is_engine_site(site: &str) -> bool {
+    site.starts_with(ENGINE_SITE_PREFIX)
+}
 
 /// One binding site: its id and the connectors it binds.
 pub type Site<'a> = (Cow<'a, str>, Cow<'a, [ConnectorBinding]>);
@@ -86,11 +103,14 @@ impl Playbook {
 }
 
 /// A binding site as people read it: `node `<id>``, `the item check of
-/// node `<id>`` for a list node's check, or `the baseline check` for the
-/// reserved [`BASELINE_SITE`], which is not a node.
+/// node `<id>`` for a list node's check, `the baseline check` for the
+/// reserved [`BASELINE_SITE`] and `notifications` for [`NOTIFY_SITE`],
+/// which are not nodes.
 pub fn site_label(site: &str) -> String {
     if site == BASELINE_SITE {
         "the baseline check".to_string()
+    } else if site == NOTIFY_SITE {
+        "notifications".to_string()
     } else if let Some(node) = check_site_node(site) {
         format!("the item check of node `{node}`")
     } else {
@@ -168,6 +188,9 @@ edges:
     #[test]
     fn the_baseline_site_is_named_as_the_baseline_check() {
         assert_eq!(site_label(BASELINE_SITE), "the baseline check");
+        assert_eq!(site_label(NOTIFY_SITE), "notifications");
+        assert!(is_engine_site(NOTIFY_SITE) && is_engine_site(BASELINE_SITE));
+        assert!(!is_engine_site("build"));
         assert_eq!(site_label("fix"), "node `fix`");
         assert_eq!(site_label("fix#check"), "the item check of node `fix`");
     }

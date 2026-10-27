@@ -8,6 +8,7 @@ pub mod estimate;
 pub mod fit;
 pub mod memory;
 pub mod meta;
+pub mod notify;
 pub mod playbooks;
 pub mod profiles;
 pub mod runs;

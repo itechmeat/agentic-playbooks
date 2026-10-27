@@ -15,9 +15,11 @@ mod intent;
 mod make_global;
 mod manage;
 mod memory;
+mod notify;
 mod onboarding;
 mod pause;
 mod profile;
+mod report;
 mod run;
 mod run_items;
 // --- 0.24.0 run execution mode lines ---
@@ -248,6 +250,33 @@ enum Command {
         /// passed, needs_look)
         #[arg(long, requires = "items")]
         state: Option<String>,
+        /// With a run id: write the run report as one self-contained HTML
+        /// page (no script, no network) to this file, or `-` for standard
+        /// output
+        #[arg(long, value_name = "PATH", requires = "run_id", conflicts_with_all = ["json", "items"])]
+        html: Option<PathBuf>,
+    },
+    /// Notifications about runs ("Notify me"): without arguments, the
+    /// machine's notify target and whether runs here notify by default;
+    /// with a run id, that run's notifications, or a change of them with
+    /// --on, --off, --via or --to; `apb notify test` sends one test message
+    /// through the target
+    Notify {
+        /// A run id, or `test`
+        run: Option<String>,
+        /// Turn notifications on; with a comma-separated list joined by `=`
+        /// (--on=review,finished) only those transitions
+        #[arg(long, value_name = "LIST", num_args = 0..=1, require_equals = true, default_missing_value = "", conflicts_with = "off")]
+        on: Option<String>,
+        /// Turn notifications off for the run
+        #[arg(long, conflicts_with_all = ["via", "to"])]
+        off: bool,
+        /// Send through this connector account: <connector>/<account>[:function]
+        #[arg(long, value_name = "CONNECTOR/ACCOUNT[:FUNCTION]")]
+        via: Option<String>,
+        /// The recipient (a chat id, an address)
+        #[arg(long, value_name = "TO", allow_hyphen_values = true)]
+        to: Option<String>,
     },
     /// Pause a run so it can continue later (issue #200). Default `--drain`:
     /// no new node starts, running nodes finish, then the run is paused and
@@ -523,6 +552,9 @@ enum Command {
         /// The run's budget argument, forwarded from `apb run --supervise`.
         #[command(flatten)]
         budget: budget::BudgetFlags,
+        /// The run's notify flags, forwarded from `apb run --supervise`.
+        #[command(flatten)]
+        notify: notify::NotifyFlags,
     },
     /// Drives an already-prepared run at `<root>/.apb/runs/<run-id>` to
     /// completion in THIS process. Spawned detached by
@@ -675,7 +707,28 @@ fn main() -> ExitCode {
                 state: state.as_deref(),
             },
         ),
+        Some(Command::Runs {
+            run_id: Some(run_id),
+            html: Some(out),
+            ..
+        }) => report::html_cmd(&root, &run_id, &out),
         Some(Command::Runs { run_id, json, .. }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Notify {
+            run,
+            on,
+            off,
+            via,
+            to,
+        }) => notify::notify_cmd(
+            &root,
+            run.as_deref(),
+            &notify::NotifyChange {
+                on: on.as_deref(),
+                off,
+                via: via.as_deref(),
+                to: to.as_deref(),
+            },
+        ),
         Some(Command::Pause {
             run_id,
             now,
@@ -830,6 +883,7 @@ fn main() -> ExitCode {
             consent_nonce,
             handshake,
             budget,
+            notify,
         }) => drive_supervised_child(
             &root,
             &name,
@@ -842,6 +896,7 @@ fn main() -> ExitCode {
             consent.zip(consent_nonce),
             &handshake,
             &budget,
+            &notify,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:
         // the spawning parent knows which project the run belongs to.

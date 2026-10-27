@@ -70,6 +70,10 @@ pub struct GlobalConfig {
     /// (`crate::output_limits`). Absent keys keep the defaults; a project
     /// `.apb/config.yaml` may only lower them.
     pub output_limits: crate::output_limits::OutputLimitSettings,
+    /// "Notify me" (`crate::notify`): the target notifications go to and
+    /// whether every run notifies by default. Absent: no run notifies
+    /// unless it names a target itself.
+    pub notify: crate::notify::NotifySettings,
 }
 
 // --- host execution mode (0.23.0) ---
@@ -378,6 +382,7 @@ impl GlobalConfig {
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         cfg.output_limits
             .validate()
+            .and_then(|()| cfg.notify.validate())
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         // A policy glob that does not compile would match nothing and refuse
         // every model its rule covers: report it where it is written instead.
@@ -528,6 +533,19 @@ pub fn project_output_limits(
     project_section(root, "output_limits")
 }
 
+/// The project-level `notify:` section (see `crate::notify`): it may only
+/// turn the machine default off or narrow the transitions.
+pub fn project_notify(root: &Path) -> Result<crate::notify::ProjectNotify, String> {
+    let section: crate::notify::ProjectNotify = project_section(root, "notify")?;
+    section.validate().map_err(|e| {
+        format!(
+            "invalid project config `{}`: {e}",
+            root.join(".apb/config.yaml").display()
+        )
+    })?;
+    Ok(section)
+}
+
 /// The address the dashboard binds when no flag is given. Loopback, because a
 /// server that anyone on the network can reach must be an explicit decision.
 pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -639,6 +657,23 @@ impl ServerConfig {
             out.insert(addr);
         }
         Ok(out)
+    }
+
+    /// The dashboard page of run `run` of workspace `workspace`: under
+    /// `public_base_url` when one is set, else on the loopback dashboard at
+    /// `port`. Both ids are percent-encoded as path segments.
+    pub fn run_url(&self, port: u16, workspace: &str, run: &str) -> String {
+        let base = self
+            .public_base_url
+            .as_deref()
+            .map(|u| u.trim().trim_end_matches('/'))
+            .filter(|u| !u.is_empty())
+            .map_or_else(|| format!("http://127.0.0.1:{port}"), str::to_string);
+        format!(
+            "{base}/#/run/{}/{}",
+            crate::url_component::encode(workspace),
+            crate::url_component::encode(run)
+        )
     }
 
     /// Whether the configured public origin is https, which is one of the two

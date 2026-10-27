@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use super::standalone::{StandaloneDecider, StandaloneOutcome};
 use super::{
     DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, FieldClass, Judgement,
-    StateField, StateParts, redact_value,
+    StateField, StateParts,
 };
 use crate::error::EngineError;
 use crate::event::{DecisionAnswer, EventLog, EventPayload};
@@ -705,7 +705,7 @@ fn ask_in_run(root: &Path, run_id: &str, req: &AskRequest) -> Result<AskOutcome,
     if runner.settings().privacy.redact {
         qs = serde_json::to_value(&qs)
             .ok()
-            .map(|v| redact_value(runner.redactor(), v))
+            .map(|v| runner.redactor().redact_value(v))
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or(qs);
     }

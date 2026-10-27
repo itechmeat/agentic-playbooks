@@ -19,7 +19,7 @@ import type {
   TrustRevoked,
   WriteResult,
 } from '../types'
-import type { FitReport, Recall, Refused, Remembered } from '../api.gen'
+import type { FitReport, MachineNotify, Recall, Refused, Remembered, RunNotify } from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
 
@@ -197,6 +197,26 @@ export const fetchRun = (id: string, workspace = '') =>
 export const fetchRunReport = (id: string, workspace = '') =>
   getJson<{ report: string }>(`${run(id)}/report${qs({ workspace })}`)
 
+// GET /api/runs/{id}/report.html: the run report as one self-contained page,
+// served as a download (the run page's "Save report" link).
+export const runReportHtmlUrl = (id: string, workspace = '') =>
+  `${run(id)}/report.html${qs({ workspace })}`
+
+// GET /api/notify: the machine's notify target (no secret in it) and
+// whether runs of the workspace notify without being asked.
+export const fetchNotify = (workspace = '') =>
+  getJson<MachineNotify>(`/api/notify${qs({ workspace })}`)
+
+// POST /api/runs/{id}/notify: a person turns a live run's notifications on
+// (`true`, through the machine's target or the run's current one) or off.
+// Refused with 409 `notify_unavailable` when the target cannot be used, and
+// `run_ended` for a run that ended.
+export const postRunNotify = (id: string, notify: boolean, workspace = '') =>
+  requestJson<{ run_id: string; notify?: RunNotify; warnings?: string[] }>(
+    `${run(id)}/notify${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ notify }) },
+  )
+
 export const postReview = (
   id: string,
   node: string,
@@ -348,11 +368,13 @@ export const fetchVersions = (id: string, workspace = '') =>
 export type { RunBudget } from '../types'
 
 // What a start passes besides its budget: the param values, the
-// instruction and whether to remember both for this project.
+// instruction, whether to remember both for this project, and the "Notify
+// me" choice when it differs from what the workspace does anyway.
 export interface RunInput {
   params?: Record<string, string>
   instruction?: string
   remember?: boolean
+  notify?: boolean
 }
 
 export interface RunStarted {
@@ -380,6 +402,7 @@ export const runPlaybook = (
       // An empty instruction is sent on purpose: the person cleared it.
       ...(opts.input?.instruction !== undefined ? { instruction: opts.input.instruction } : {}),
       ...(opts.input?.remember ? { remember: true } : {}),
+      ...(opts.input?.notify !== undefined ? { notify: opts.input.notify } : {}),
     }),
   })
 

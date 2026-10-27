@@ -1,7 +1,7 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchRun, fetchRunReport, postAnswer, postReview } from '../lib/api'
+  import { fetchRun, fetchRunReport, postAnswer, postReview, runReportHtmlUrl } from '../lib/api'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal, runEventJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
@@ -17,6 +17,7 @@
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
   import RunVerdictPanel from '../lib/RunVerdictPanel.svelte'
   import RunPauseControls from '../lib/RunPauseControls.svelte'
+  import RunNotifyControl from '../lib/RunNotifyControl.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import RunBudgetPanel from '../lib/RunBudgetPanel.svelte'
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
@@ -157,6 +158,24 @@
     playbookId={detail.playbook}
     onchange={load}
   />
+  <!-- Who hears about the run, and the report as one page to keep. -->
+  <RunNotifyControl
+    {id}
+    {workspace}
+    status={detail.run_status}
+    notify={detail.notify ?? null}
+    onchange={load}
+  >
+    {#snippet actions()}
+      <a
+        class="save-report"
+        href={runReportHtmlUrl(id, workspace)}
+        download
+        data-testid="run-save-report"
+        title="The run report as one self-contained HTML page: no script, no network">Save report</a
+      >
+    {/snippet}
+  </RunNotifyControl>
   <div class="border-b border-border px-4 py-2">
     <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />
   </div>
@@ -429,3 +448,28 @@
     </Tabs.Root>
   </aside>
 </div>
+
+<style>
+  /* Plain CSS over the app's variables. */
+  .save-report {
+    display: inline-flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md, 6px);
+    color: var(--foreground);
+    font-size: 12px;
+    font-weight: 500;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .save-report:hover {
+    background: var(--accent);
+    color: var(--accent-foreground);
+  }
+  .save-report:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+</style>

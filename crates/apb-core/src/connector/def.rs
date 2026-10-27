@@ -345,6 +345,9 @@ pub struct FunctionSpec {
     /// `super::idempotency`). Only on functions that change something.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<Idempotency>,
+    /// The args people read and the recipient (see `super::people`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub people: Option<super::people::PeopleArgs>,
 }
 
 impl FunctionSpec {
@@ -371,6 +374,16 @@ impl FunctionSpec {
     /// returning a mock, sending mail, or opening a mailbox.
     pub fn is_inbox(&self) -> bool {
         self.inbox.is_some()
+    }
+
+    /// Whether the function can carry a run notification (see
+    /// `super::people::notice_capable`).
+    pub fn carries_notices(&self) -> bool {
+        super::people::notice_capable(
+            self.people.as_ref(),
+            self.idempotency.is_some(),
+            self.args_schema.as_ref(),
+        )
     }
 
     /// The parts of this function the send-once rules read.
@@ -470,6 +483,8 @@ impl ConnectorDoc {
     ///    properties of `args_schema`; an unknown mode fails the parse.
     /// 9. `idempotency` and `identity` follow the send-once rules
     ///    (`super::idempotency::validate`).
+    /// 10. `people` sits only on a function that sends, and names string
+    ///     properties of `args_schema` (`super::people::validate`).
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -559,6 +574,14 @@ impl ConnectorDoc {
                 is_http,
                 outside,
             )?;
+            if let Some(people) = &f.people {
+                super::people::validate(
+                    &f.name,
+                    people,
+                    !(f.read_only || is_inbox || is_imap),
+                    f.args_schema.as_ref(),
+                )?;
+            }
 
             // response_pick projects a JSON document (spec 4.5). An HTTP
             // function projects the response body and an inbox function

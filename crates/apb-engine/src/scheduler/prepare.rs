@@ -632,6 +632,24 @@ pub(crate) fn prepare_run_target(
     )?;
     // --- end 0.24.0 irreversible consent ---
 
+    // The notification subscription: a child inherits its parent's, a
+    // top-level run checks its own request against the configs and pins the
+    // target. A person's request that cannot be honoured refuses the start
+    // before anything is written; the run journals the subscription below.
+    let notify_set = match &opts.parent_run {
+        Some(parent) => crate::notify::start::inherited(&root.join(".apb/runs").join(parent)),
+        None => {
+            let check = crate::notify::check(root, opts.notify.as_ref());
+            if let Some(why) = check.refusal {
+                return Err(EngineError::Invalid(format!(
+                    "{}: {why}",
+                    crate::notify::REFUSED_START
+                )));
+            }
+            check.event()
+        }
+    };
+
     let start_node = playbook
         .nodes
         .iter()
@@ -943,6 +961,9 @@ pub(crate) fn prepare_run_target(
             },
         );
         prep_try(&mut log, recorded)?;
+    }
+    if let Some(set) = notify_set {
+        log.append(set)?;
     }
     // Right after provenance, so a reader of the journal alone can tell an
     // admitted-but-waiting run from one whose first node is simply slow.

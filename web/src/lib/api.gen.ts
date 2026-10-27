@@ -959,6 +959,53 @@ unestimated_tokens: Array<string>,
  */
 unestimated_cost: Array<string>, note?: string, };
 
+export type Transition = "review" | "question" | "paused" | "finished";
+
+export type NotifyTarget = { connector: string, account: string, function: string, to: string, };
+
+export type NotifySent = { 
+/**
+ * `<kind>.<seq>`, e.g. `review.12`.
+ */
+transition: string, 
+/**
+ * `pending`, `confirmed`, `not_sent` or `unknown`.
+ */
+state: string, 
+/**
+ * When its latest try was recorded, epoch milliseconds.
+ */
+at: number, };
+
+export type RunNotify = { active: boolean, target?: NotifyTarget, on: Array<Transition>, 
+/**
+ * Where the subscription in force came from.
+ */
+source?: string, 
+/**
+ * Each transition notified, with what became of its latest try.
+ */
+sent: Array<NotifySent>, problems: Array<string>, };
+
+export type MachineNotify = { 
+/**
+ * The machine's target; absent when none is configured.
+ */
+target?: NotifyTarget, 
+/**
+ * The transitions a run notifies about by default.
+ */
+on: Array<Transition>, 
+/**
+ * Whether a run of this workspace notifies without being asked (the
+ * machine default, unless the project turned it off).
+ */
+default_on: boolean, 
+/**
+ * Why the machine or the project notify settings do not read.
+ */
+problem?: string, };
+
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
@@ -1104,6 +1151,12 @@ pause?: PauseInfo,
  * a budget pause holds it before. Absent for a run without a budget.
  */
 budget?: BudgetStatus, 
+/**
+ * The run's notifications: whether they are on, where they go, about
+ * what, what was sent, and why a subscription could not be used.
+ * Absent for a run that never had a subscription.
+ */
+notify?: RunNotify, 
 /**
  * The estimate the run started with (time, tokens, cost from comparable
  * runs). Absent for a run started before estimates, or a sub-run.

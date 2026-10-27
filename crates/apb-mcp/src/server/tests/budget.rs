@@ -40,6 +40,7 @@ fn start_args(budget: Option<BudgetArg>) -> PlaybookRunArgs {
         execution: None,
         budget,
         remember: None,
+        notify: None,
     }
 }
 

@@ -25,6 +25,7 @@ fn wake_and_abort_round_trip_and_fold() {
     .unwrap();
     log.append(EventPayload::RunAborted {
         reason: "user cancel".into(),
+        by: None,
     })
     .unwrap();
 

@@ -10,7 +10,9 @@ import {
   fetchMemory,
   fetchPlaybook,
   postAnswer,
+  postRunNotify,
   runPlaybook,
+  runReportHtmlUrl,
   saveMemory,
   saveLayout,
   updatePlaybook,
@@ -375,5 +377,29 @@ describe('runPlaybook', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-2' }))
     await runPlaybook('p', '', { input: { params: {} } })
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({})
+  })
+})
+
+describe('notify', () => {
+  it('sends the start choice only when the dialog made one', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ run_id: 'p-1' }))
+    await runPlaybook('p', '', { input: { notify: false } })
+    await runPlaybook('p', '', { input: {} })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ notify: false })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({})
+  })
+
+  it('posts a live change and surfaces notify_unavailable', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: 'notify_unavailable', detail: 'connector `telegram` is not approved' }, 409),
+    )
+    const err = postRunNotify('r 1', true, 'ws').catch((e: unknown) => e)
+    await expect(err).resolves.toMatchObject({ status: 409, code: 'notify_unavailable' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/runs/r%201/notify?workspace=ws')
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ notify: true })
+  })
+
+  it('links the report page of a run', () => {
+    expect(runReportHtmlUrl('r 1', 'ws')).toBe('/api/runs/r%201/report.html?workspace=ws')
   })
 })

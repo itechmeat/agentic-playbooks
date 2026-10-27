@@ -83,7 +83,7 @@ pub(crate) fn obtain(need: &ConsentNeed, how: &CliConsent) -> Result<Granted, St
 /// The run this process was started from (`APB_RUN_ID`, which the engine
 /// sets for every agent and script step), if any.
 fn parent_run() -> Option<String> {
-    std::env::var("APB_RUN_ID").ok().filter(|v| !v.is_empty())
+    crate::util::StepCaller::from_env().run_id
 }
 
 /// The refusal of a start from inside the run `parent`: an agent or script

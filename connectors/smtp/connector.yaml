@@ -1,5 +1,5 @@
 name: smtp
-version: 0.1.0
+version: 0.2.0
 healthcheck: verify
 account_fields:
   - name: host
@@ -59,6 +59,7 @@ functions:
         body_text: { type: string }
         body_html: { type: string, description: "optional; combines with body_text into a multipart message when both are present" }
       required: [to, subject, body_text]
+    people: { to: to, subject: subject, text: body_text }
     idempotency: { mode: none }
     examples:
       - args: { to: ops@example.com, subject: "Release 1.4.0 is live", body_text: "Release 1.4.0 shipped. See the changelog for details.", cc: team@example.com }

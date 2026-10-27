@@ -218,7 +218,7 @@ baseline_check:
 ```
 
 Each such check becomes a grant for the reserved site `@baseline` (a node
-may not use that id, V68): exactly that function, on that account, frozen in
+may not use an id that starts with `@`, V68): exactly that function, on that account, frozen in
 the run manifest like a node's grant and covered by the playbook digest.
 The function must be `read_only` and must not be an inbox function: the
 validator refuses anything else when it can see the installed connector
@@ -231,6 +231,19 @@ as an empty or zero result. The call is bounded by the smaller of the
 check's `timeout_seconds` and the function's `timeout_sec`. Only the engine
 calls under `@baseline`: `apb connector call` refuses an `APB_NODE_ID` that
 starts with `@`.
+
+### Notifications (the `@notify` site)
+
+A run that notifies a person about its transitions (see `docs/NOTIFY.md`)
+sends through the person's own target, not through a node's grant: one
+function of one approved account, checked when the subscription is set and
+again at every send against the connector and account digests pinned then.
+Each notification is journaled as an ordinary `connector_call` with
+`node_id: "@notify"` and `origin: "notify"`, and goes through the send ledger
+under the site `@notify` with the label `notify:<transition>.<seq>`. The run
+outcome leaves those sends out of the run's own sends; `apb intent list`
+shows them. Like `@baseline`, the site is reserved for the engine: a node may
+not use an id that starts with `@` (V68).
 
 ## Receiving events (webhooks and the inbox)
 
@@ -658,6 +671,42 @@ shows with its backslashes, needs no mode: an escape there would only show up
 as a stray backslash, and a value read back and sent again would gain one more
 each time.
 
+## Text people read (`people:`)
+
+A function that sends something a person reads (a message, a mail, a pull
+request description) declares which of its string arguments those are:
+
+```yaml
+  - name: send_message
+    people: { to: chat_id, text: text }
+    idempotency: { mode: none, result_ref: result.message_id }
+```
+
+`text` is required and names the body; `subject` (a mail subject, a chat
+topic, a pull request title) and `to` (the recipient) are optional. Each must
+name a string property of `args_schema`, no argument may fill two roles,
+and the block is refused on a function that sends nothing (`read_only`, an
+inbox or an imap read).
+
+The block does two things:
+
+- A node granted such a function gets apb's writing brief for people in its
+  prompt (lead with the conclusion, say who acts next, state facts and mark
+  what is not verified, no internal terms), and its connector block names
+  the arguments people read, one line per function. See "Writing for people"
+  in `docs/HOWTO-authoring.md`.
+- A function whose block names `to`, that declares `idempotency`, and whose
+  `args_schema` requires no argument the block does not name can carry run
+  notifications (`docs/NOTIFY.md`): apb fills `to` with the person's
+  recipient, `text` with the notice and `subject` with its subject line, and
+  nothing else. A `text` argument with the `literal` text mode gets the
+  notice as one line.
+
+The official connectors declare it on `telegram.send_message`,
+`slack.send_message` (`reply_in_thread` has `text` only), `smtp.send_email`,
+`zulip.send_stream_message`, `zulip.send_direct_message` and
+`github.create_pull` (`subject` and `text` only).
+
 ## Official connectors
 
 Fifteen official connectors ship inside the `apb` binary and install with
@@ -833,7 +882,10 @@ no separate reply function. `get_messages` takes optional `anchor`
 (a numeric message id to page around; omit for newest), `num_before`,
 and `narrow` (Zulip's filter, passed verbatim as a string whose
 content is a JSON array of operator/operand objects). Healthcheck:
-`get_me`.
+`get_me`. `send_stream_message` and `send_direct_message` declare
+`idempotency: none`: Zulip takes no idempotency key, so a send whose outcome
+is not known is refused on a repeat until a person decides, or resent under
+`on_unknown: resend`. Before, such a send was simply sent again.
 
 ### discord
 
@@ -882,6 +934,10 @@ list and history functions page with a body-carried cursor (pass
 `reply_in_thread` are separate functions so a grant can allow thread
 replies without allowing new top-level posts. Healthcheck:
 `auth_test` (a POST by Slack API convention, mutates nothing).
+`send_message` declares `idempotency: none`: Slack takes no idempotency key,
+so a send whose outcome is not known is refused on a repeat until a person
+decides, or resent under `on_unknown: resend`. Before, such a send was simply
+sent again.
 
 ### atrip
 

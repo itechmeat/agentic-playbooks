@@ -8,6 +8,7 @@ pub mod decision;
 pub mod intent;
 pub mod memory;
 pub mod meta;
+pub mod notify;
 pub mod playbook;
 pub mod retro;
 pub mod run;

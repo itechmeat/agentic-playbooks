@@ -48,6 +48,17 @@ pub fn validate_snake_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `name` is a string property of a function's `args_schema`: the
+/// args a text mode prepares and the args people read must be text.
+pub fn is_string_arg(args_schema: Option<&serde_json::Value>, name: &str) -> bool {
+    args_schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|properties| properties.get(name))
+        .and_then(|property| property.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("string")
+}
+
 /// Resolves a dot path over objects and numeric array indices (`entry.0.id`).
 /// The empty path is the value itself. `None` when a segment is missing, an
 /// index does not parse or is out of range, or a scalar sits midway.

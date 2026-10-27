@@ -472,10 +472,10 @@ fn call_cmd(
         }
     };
 
-    // A site id starting with `@` is reserved for the engine's own calls
-    // (the baseline check reads under `@baseline`); no node can carry one
-    // (validator V68), so a caller naming one is borrowing its grant.
-    if node_id.starts_with('@') {
+    // An engine site (`@baseline`, `@notify`) is reserved for the engine's
+    // own calls; no node can carry one (validator V68), so a caller naming
+    // one is borrowing its grant.
+    if apb_core::connector::sites::is_engine_site(&node_id) {
         print_call_result(&call_error_json(
             "config",
             &format!(

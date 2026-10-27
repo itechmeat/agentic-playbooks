@@ -333,10 +333,15 @@ fn abort_propagates_to_a_running_child() {
 
     let child_dir = dir.path().join(".apb/runs").join("child-1");
     let entries = read_control_after(&child_dir, None).unwrap();
+    // The child's abort carries who stopped the parent: the supervisor.
     assert!(
-        entries
-            .iter()
-            .any(|e| matches!(&e.cmd, Control::Abort { .. })),
+        entries.iter().any(|e| matches!(
+            &e.cmd,
+            Control::Abort {
+                by: Some(apb_engine::pause::kind::PauseBy::Supervisor),
+                ..
+            }
+        )),
         "the running child received an Abort control entry"
     );
 
@@ -349,4 +354,52 @@ fn abort_propagates_to_a_running_child() {
             .any(|e| matches!(&e.cmd, Control::Abort { .. })),
         "the parent received an Abort control entry"
     );
+}
+
+#[test]
+fn a_person_stopping_the_parent_stops_the_child_in_their_name() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let parent_events = concat!(
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"parent\",\"version\":\"1.0.0\"}\n",
+        "{\"seq\":1,\"ts\":0,\"type\":\"child_run_started\",\"node_id\":\"c\",\"run_id\":\"child-1\"}\n",
+    );
+    seed_run_dir(dir.path(), "parent-1", None, parent_events);
+    let child_events = "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"child\",\"version\":\"1.0.0\"}\n";
+    seed_run_dir(dir.path(), "child-1", None, child_events);
+
+    apb_engine::stop_run(dir.path(), "parent-1").unwrap();
+    let child_dir = dir.path().join(".apb/runs").join("child-1");
+    let entries = read_control_after(&child_dir, None).unwrap();
+    assert!(entries.iter().any(|e| matches!(
+        &e.cmd,
+        Control::Abort {
+            by: Some(apb_engine::pause::kind::PauseBy::Operator),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn an_engine_stop_is_journaled_as_the_engines() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let events =
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n";
+    seed_run_dir(dir.path(), "run-1", None, events);
+    // Nothing drives it, so the stop finalizes it on the spot.
+    apb_engine::stop_run_by(
+        dir.path(),
+        "run-1",
+        apb_engine::pause::kind::PauseBy::Engine,
+    )
+    .unwrap();
+    let journal = apb_engine::event::read_all(&dir.path().join(".apb/runs/run-1")).unwrap();
+    assert!(journal.iter().any(|e| matches!(
+        &e.payload,
+        apb_engine::event::EventPayload::RunAborted {
+            by: Some(apb_engine::pause::kind::PauseBy::Engine),
+            ..
+        }
+    )));
 }

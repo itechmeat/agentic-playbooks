@@ -9,7 +9,7 @@
 //! 1. The use's mode (the snapshot, capped by the ceiling; the kill switch
 //!    re-checked now). Off: nothing happens, nothing is journaled.
 //! 2. Fields of a material class `privacy.send` does not allow are emptied.
-//! 3. Redaction ([`redact`]), then each field's own clip, then the share of
+//! 3. Redaction ([`crate::redact`]), then each field's own clip, then the share of
 //!    `privacy.max_state_bytes` it may take, head and tail kept.
 //! 4. sha256 of the state and of the questions.
 //! 5. A decision journaled before this drive started for the same use,
@@ -28,7 +28,6 @@ pub(crate) mod completion;
 pub mod host_task;
 pub(crate) mod judge;
 mod providers;
-pub(crate) mod redact;
 pub mod report;
 pub mod standalone;
 // Engine uses (issue #165 Parts 9-12 and 14), one module each.
@@ -47,6 +46,7 @@ use serde_json::{Value, json};
 
 use crate::error::EngineError;
 use crate::event::{DecisionAnswer, DecisionBaseline, Event, EventPayload};
+use crate::redact;
 use providers::Chains;
 
 /// The settings a new run snapshots into its manifest, or `None` when the
@@ -426,7 +426,7 @@ impl DecisionRunner {
         let privacy = &self.settings.privacy;
         let meta = Value::Object(parts.meta.clone());
         let meta = if privacy.redact {
-            redact_value(self.redactor(), meta)
+            self.redactor().redact_value(meta)
         } else {
             meta
         };
@@ -1059,7 +1059,7 @@ impl DecisionRunner {
     ) -> Result<apb_decide::DecisionResponse, apb_decide::DecideError> {
         let mut request = request.clone();
         if self.settings.privacy.redact {
-            request.state = redact_value(self.redactor(), request.state);
+            request.state = self.redactor().redact_value(request.state);
         }
         self.chains().all.decide(&request, None)
     }
@@ -1167,21 +1167,6 @@ pub(crate) fn intern(name: &str) -> &'static str {
 }
 
 // --- end judge routes ---------------------------------------------------------
-
-fn redact_value(r: &redact::Redactor, v: Value) -> Value {
-    match v {
-        Value::String(s) => Value::String(r.redact(&s)),
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(|i| redact_value(r, i)).collect())
-        }
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, redact_value(r, v)))
-                .collect(),
-        ),
-        other => other,
-    }
-}
 
 fn compact_answer(a: &Answer) -> DecisionAnswer {
     let round = |x: f64| (x * 1e6).round() / 1e6;

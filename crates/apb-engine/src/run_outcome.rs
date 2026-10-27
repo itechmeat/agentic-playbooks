@@ -26,10 +26,10 @@ pub mod summary;
 
 pub use baseline::{RunBaseline, baseline_from};
 pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
-pub use intents::{RunIntent, intents_from};
+pub use intents::{RunIntent, intents_from, outcome_intents};
 pub use lists::ListOutcome;
 pub use notes::RunNotes;
-pub use summary::{NeedsLook, OutcomeSummary};
+pub use summary::{AGENT_SUMMARY_TITLE, NeedsLook, OutcomeSummary};
 
 use serde::Serialize;
 

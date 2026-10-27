@@ -66,14 +66,35 @@ pub(crate) fn observe_live_channels(
 /// Returns `Ok(None)` when nothing was enforced (no open question, not yet
 /// expired, or a default was posted). Engine-owned: the injected sidecar
 /// timeout is only a larger backstop, never the enforcement mechanism.
+///
+/// A question journaled here is news to a person who subscribed, and the
+/// drive loop's own sweep does not run while the attempt blocks on the
+/// answer: `notifier` sweeps from here, throttled and briefly, once the
+/// timeout is enforced (an attempt the timeout ends sweeps nothing more).
 pub(crate) fn tick_live_observation(
     run_dir: &Path,
     node: &str,
     journal: &Journal,
     timeout_secs: Option<u64>,
     default_answer: Option<&str>,
+    notifier: Option<&crate::notify::send::Notifier>,
 ) -> Result<Option<String>, EngineError> {
     observe_live_channels(run_dir, node, journal)?;
+    let enforced = enforce_question_timeout(run_dir, node, timeout_secs, default_answer)?;
+    if let (None, Some(n)) = (&enforced, notifier) {
+        n.sweep_throttled();
+    }
+    Ok(enforced)
+}
+
+/// The node's `question_timeout_seconds` for its open question (see
+/// [`tick_live_observation`]).
+fn enforce_question_timeout(
+    run_dir: &Path,
+    node: &str,
+    timeout_secs: Option<u64>,
+    default_answer: Option<&str>,
+) -> Result<Option<String>, EngineError> {
     let Some(secs) = timeout_secs else {
         return Ok(None);
     };
