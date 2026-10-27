@@ -64,20 +64,9 @@ fn check_name(c: &GoalCheck) -> &'static str {
 /// A `list` criterion: the list node's latest visit processed every item
 /// and none needs a look.
 fn list_status(events: &[crate::event::Event], node: &str) -> (&'static str, Option<String>) {
-    let Some(fold) = crate::list::ListFold::of(events, node) else {
-        return (status::FAILED, Some(format!("list `{node}` never ran")));
-    };
-    let c = fold.counts();
-    if c.processed == c.total && c.needs_look == 0 {
-        (status::PASSED, None)
-    } else {
-        (
-            status::FAILED,
-            Some(format!(
-                "list `{node}`: {}",
-                crate::list::progress_label(&c)
-            )),
-        )
+    match crate::list::list_criterion(events, node) {
+        (true, _) => (status::PASSED, None),
+        (false, line) => (status::FAILED, Some(line)),
     }
 }
 

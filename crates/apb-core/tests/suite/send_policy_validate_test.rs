@@ -307,3 +307,35 @@ fn v84_fires_on_a_resend_over_an_irreversible_function() {
         .is_empty()
     );
 }
+
+/// A native imap write declares `none` like smtp, and nothing else.
+#[test]
+fn an_imap_write_may_declare_only_none() {
+    let doc = |idem: &str| {
+        format!(
+            r#"
+name: x
+version: 0.1.0
+functions:
+  - name: mark
+    description: d
+    imap:
+      connection: {{ host: h, port: "993", use_tls: "true", auth_method: password, username: u, password: p }}
+      op: set_flags
+      params: {{ folder: "{{{{args.folder}}}}", uids: "{{{{args.uids}}}}", seen: "true" }}
+    args_schema: {{ type: object, properties: {{ folder: {{ type: string }}, uids: {{ type: string }} }} }}
+    idempotency: {idem}
+"#
+        )
+    };
+    let ok = parse(&doc("{ mode: none }")).unwrap();
+    assert_eq!(
+        ok.functions[0].idempotency.as_ref().map(|i| i.mode()),
+        Some(IdempotencyMode::None)
+    );
+    let err = parse(&doc("{ mode: key, header: K, window_sec: 1 }")).unwrap_err();
+    assert!(
+        err.contains("imap function `mark` may only declare"),
+        "{err}"
+    );
+}

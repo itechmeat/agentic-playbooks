@@ -376,16 +376,13 @@ fn seed_loop_fork(root: &Path) {
     common::seed_main(root);
 }
 
-/// (d) End-to-end pin for the monotone-liveness residual documented on
-/// `parallel::routed_targets`: `gate` forks into `a` on the first pass (the
+/// (d) A loop fork that changes branches: `gate` forks into `a` on the first pass (the
 /// flaky stub fails first) and into `b` on the second (it succeeds after),
 /// both feeding the same `join: all` merge `m`, with a bounded back edge
-/// `m -> gate` and a fallback exit to `done` once the cap is spent. Widened
-/// journaling keeps both `a` and `b` live for the rest of the run once either
-/// has delivered, rather than writing off whichever branch a later pass did
-/// not select - the direction of error this task accepts is a run that can
-/// wait longer than strictly necessary, never one that fires a join short a
-/// branch. This run must still reach `done` rather than dead-ending with "no
+/// `m -> gate` and a fallback exit to `done` once the cap is spent. Routing
+/// reads each node's latest execution (`parallel::routed_targets`), so the
+/// branch a later pass did not select is written off for that pass. This run
+/// must still reach `done` rather than dead-ending with "no
 /// outgoing edge and is not finish" or "parallel batch produced no runnable
 /// successor and no finish".
 #[test]
@@ -412,7 +409,7 @@ fn a_loop_fork_that_changes_branches_still_reaches_finish() {
 
     let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
     // Both branches actually ran, on different passes, and both delivered into
-    // the merge: this is the shape the residual is about, not a fixture that
+    // the merge: this is the shape the test is about, not a fixture that
     // happens to take only one branch.
     assert_eq!(count_starts(&events, "a"), 1, "the first pass took `a`");
     assert_eq!(count_starts(&events, "b"), 1, "the second pass took `b`");

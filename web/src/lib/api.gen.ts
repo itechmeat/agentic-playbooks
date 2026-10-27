@@ -46,7 +46,7 @@ through: number, };
 
 export type GoalCriterionResult = { index: number, description: string, 
 /**
- * `script`, `marker` or `manual`.
+ * `script`, `marker`, `list` or `manual`.
  */
 check: string, 
 /**
@@ -137,7 +137,7 @@ export type RunNotes = { findings: Array<RunFinding>, warnings: Array<RunWarning
  */
 dropped: number, };
 
-export type EvidenceSource = "goal" | "success_check" | "baseline";
+export type EvidenceSource = "goal" | "success_check" | "baseline" | "item_check";
 
 export type Evidence = { source: EvidenceSource, subject: string, 
 /**
@@ -145,7 +145,7 @@ export type Evidence = { source: EvidenceSource, subject: string,
  */
 result: string, detail?: string, };
 
-export type GapKind = "manual_criterion" | "self_reported_node" | "goal_not_checked" | "unknown_call" | "incomplete_response" | "inbox_gap" | "output_truncated" | "baseline_unknown";
+export type GapKind = "manual_criterion" | "self_reported_node" | "goal_not_checked" | "unknown_call" | "incomplete_response" | "inbox_gap" | "output_truncated" | "baseline_unknown" | "item_needs_look" | "self_reported_items";
 
 export type Gap = { kind: GapKind, subject: string, detail?: string, };
 
@@ -156,13 +156,24 @@ export type BaselineOutcome = { problem: Array<string>, change: Array<string>,
  */
 goal_reached?: boolean, };
 
-export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends";
+export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends" | "list_items";
 
 export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, 
 /**
  * Sends whose outcome is not known and that no replay settled.
  */
-unknown_sends?: number, };
+unknown_sends?: number, 
+/**
+ * List items that need a look.
+ */
+list_items?: number, };
+
+export type ListOutcome = { node: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, 
+/**
+ * How each item was checked (`connector asana.get_task`); absent when
+ * the items passed on the agent's own report.
+ */
+check?: string, };
 
 export type OutcomeSummary = { headline: string, needs_look?: NeedsLook, 
 /**
@@ -178,6 +189,10 @@ verified: Array<Evidence>,
  * What nobody checked.
  */
 unverified: Array<Gap>, findings: Array<RunFinding>, warnings: Array<RunWarning>, baseline?: BaselineOutcome, 
+/**
+ * Each list node's counts; empty for a run without a list.
+ */
+lists?: Array<ListOutcome>, 
 /**
  * The finish node's answer: the agent's own account, not checked.
  */
@@ -868,6 +883,11 @@ baseline?: RunBaseline,
  * The findings and warnings the attempts reported; absent when none.
  */
 notes?: RunNotes, 
+/**
+ * Each list node's visit with its items; empty for a run without a
+ * list.
+ */
+lists?: Array<RunList>, 
 /**
  * The candidate trial this run was (issue #192), with its verdict;
  * absent for every other run.

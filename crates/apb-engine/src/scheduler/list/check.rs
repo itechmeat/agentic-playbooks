@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use apb_core::list::verdict::ItemVerdict;
 use apb_core::list::{
-    CheckSource, ConnectorCheck, JudgeCheck, OnUnavailable, VERDICT_QUESTION, check_site,
-    items::Item,
+    CheckSource, ConnectorCheck, JudgeCheck, OnUnavailable, OutputCheck, VERDICT_QUESTION,
+    check_site, items::Item,
 };
 use serde_json::{Map, Value};
 
@@ -78,27 +78,33 @@ pub(super) fn run(
     };
     let kind = source.kind();
     match source {
-        CheckSource::Output(o) => {
-            let got = apb_core::schema::output_field_value(output, &o.field);
-            if got.as_deref() == Some(o.equals.as_str()) {
-                Checked {
-                    verdict: Some(ItemVerdict::Accept),
-                    note: None,
-                    kind: Some(kind),
-                }
-            } else {
-                let got = got.unwrap_or_else(|| "absent".to_string());
-                Checked::of(
-                    kind,
-                    Some(ItemVerdict::Reject),
-                    format!("`{}` is {got}, not {}", o.field, o.equals),
-                )
-            }
-        }
+        CheckSource::Output(o) => match output_mismatch(o, output) {
+            None => Checked {
+                verdict: Some(ItemVerdict::Accept),
+                note: None,
+                kind: Some(kind),
+            },
+            Some(note) => Checked::of(kind, Some(ItemVerdict::Reject), note),
+        },
         CheckSource::Script(path) => script(run, item, output, path),
         CheckSource::Connector(c) => connector(run, item, &outputs, c),
         CheckSource::Judge(j) => judge(run, item, &outputs, j, journal),
     }
+}
+
+/// Why the step's output fails an output check, clipped as a script's
+/// note is (the field's value is the step's own text, of any length);
+/// `None` when it passes.
+fn output_mismatch(check: &OutputCheck, output: &str) -> Option<String> {
+    let got = apb_core::schema::output_field_value(output, &check.field);
+    if got.as_deref() == Some(check.equals.as_str()) {
+        return None;
+    }
+    let got = got.unwrap_or_else(|| "absent".to_string());
+    Some(clip_note(&format!(
+        "`{}` is {got}, not {}",
+        check.field, check.equals
+    )))
 }
 
 /// Everything a check's process or call needs from the run.
@@ -422,5 +428,21 @@ mod tests {
             ),
             "{{params.secret}} {{item_output.x}}|s3"
         );
+    }
+
+    /// The output check's note quotes the field's value, which can be the
+    /// step's whole text: it is clipped like a script's note.
+    #[test]
+    fn an_output_mismatch_note_is_clipped() {
+        let check = OutputCheck {
+            field: "verdict".into(),
+            equals: "ok".into(),
+        };
+        let long = "x".repeat(NOTE_MAX_BYTES * 4);
+        let output = serde_json::json!({ "verdict": long }).to_string();
+        let note = output_mismatch(&check, &output).unwrap();
+        assert_eq!(note.len(), NOTE_MAX_BYTES);
+        assert!(note.starts_with("`verdict` is x"));
+        assert_eq!(output_mismatch(&check, r#"{"verdict":"ok"}"#), None);
     }
 }

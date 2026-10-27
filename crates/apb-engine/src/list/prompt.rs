@@ -12,7 +12,7 @@ pub const ITEM_HEADING: &str = "## item";
 
 /// The section for `item`, the `ordinal`-th (from 1) of `total`: one
 /// fenced data block holding its id, its JSON and, on a re-run
-/// ([`rerun_of`]), its previous outputs and the check's note. Everything
+/// ([`ran_before`]), its previous outputs and the check's note. Everything
 /// that comes from the item, the step or the check sits inside the block,
 /// JSON-escaped, behind a fence longer than any backtick run in it. The id
 /// and the item are always whole (an item larger than `ITEM_MAX_BYTES`
@@ -28,7 +28,7 @@ pub fn item_section(
     let mut data = serde_json::Map::new();
     data.insert("id".into(), Value::String(item.id.clone()));
     data.insert("item".into(), item.value.clone());
-    let rerun = rerun_of(previous);
+    let rerun = previous.filter(|p| ran_before(p));
     if let Some(prev) = rerun {
         data.insert("previous_round".into(), Value::from(prev.round));
         if let Some(o) = &prev.output {
@@ -60,10 +60,10 @@ pub fn item_section(
     )
 }
 
-/// The previous record an item's section reports, when the item ran before:
-/// a round above 0 or a check's note.
-fn rerun_of(previous: Option<&ItemRecord>) -> Option<&ItemRecord> {
-    previous.filter(|p| p.round > 0 || p.note.is_some())
+/// Whether `record` tells of an earlier run of its item: a round above 0,
+/// a check's note, or outputs it settled with.
+pub fn ran_before(record: &ItemRecord) -> bool {
+    record.round > 0 || record.note.is_some() || record.output.is_some()
 }
 
 /// `text` cut to [`PREVIOUS_FIELD_MAX_BYTES`], with a marker saying so.

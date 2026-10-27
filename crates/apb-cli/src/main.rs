@@ -15,6 +15,7 @@ mod onboarding;
 mod pause;
 mod profile;
 mod run;
+mod run_items;
 // --- 0.24.0 run execution mode lines ---
 mod run_mode;
 // --- end 0.24.0 run execution mode lines ---
@@ -248,8 +249,18 @@ enum Command {
         /// Show only this run
         run_id: Option<String>,
         /// With a run id: the run as JSON, the same object as MCP run_status
-        #[arg(long, requires = "run_id")]
+        #[arg(long, requires = "run_id", conflicts_with = "items")]
         json: bool,
+        /// With a run id: one line per item of the run's list nodes
+        #[arg(long, requires = "run_id")]
+        items: bool,
+        /// With --items: only this list node
+        #[arg(long, requires = "items")]
+        node: Option<String>,
+        /// With --items: only items in this state (pending, running,
+        /// passed, needs_look)
+        #[arg(long, requires = "items")]
+        state: Option<String>,
     },
     /// Pause a run so it can continue later (issue #200). Default `--drain`:
     /// no new node starts, running nodes finish, then the run is paused and
@@ -674,7 +685,21 @@ fn main() -> ExitCode {
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
-        Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Runs {
+            run_id: Some(run_id),
+            items: true,
+            node,
+            state,
+            ..
+        }) => run_items::items_cmd(
+            &root,
+            &run_id,
+            &run_items::ItemFilter {
+                node: node.as_deref(),
+                state: state.as_deref(),
+            },
+        ),
+        Some(Command::Runs { run_id, json, .. }) => runs_cmd(&root, run_id.as_deref(), json),
         Some(Command::Pause {
             run_id,
             now,

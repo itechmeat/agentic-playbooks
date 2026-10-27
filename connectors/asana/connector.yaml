@@ -124,6 +124,7 @@ functions:
         assignee: { type: string, description: "user gid or email" }
         due_on: { type: string, description: "YYYY-MM-DD" }
       required: [project, name]
+    idempotency: { mode: none, result_ref: data.gid }
     examples:
       - args: { project: "1200", name: "Ship the release" }
         note: "notes, assignee, and due_on are optional; an omitted optional field is dropped from the request body rather than sent as null."

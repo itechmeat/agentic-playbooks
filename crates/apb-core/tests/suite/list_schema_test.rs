@@ -219,6 +219,35 @@ fn v86_a_where_filter_is_whole() {
     assert_eq!(filter.unwrap().equals, Some(serde_json::Value::Null));
 }
 
+/// From a list node `where` may set a state and a field together (both
+/// must hold); the field still needs its `equals`, and a state still needs
+/// a list source.
+#[test]
+fn v86_a_where_filter_may_join_a_state_and_a_field_from_a_list_node() {
+    let downstream = |filter: &str| {
+        GOOD.replace(
+            "  - { id: done, type: finish, outcome: success }\n",
+            &format!(
+                "  - id: file\n    type: agent_task\n    prompt: File the item.\n    profile: x\n    list:\n      items:\n        from: {{ node: triage, field: items }}\n        where: {filter}\n      item_outputs: [gid]\n  - {{ id: done, type: finish, outcome: success }}\n"
+            ),
+        )
+        .replace("  - { from: triage, to: done }", "  - { from: triage, to: file }\n  - { from: file, to: done }")
+    };
+    let both = downstream(r#"{ state: passed, field: actionable, equals: "true" }"#);
+    assert!(Playbook::from_yaml(&both).unwrap().node("file").is_some());
+    assert!(!has(&both, "V86", Severity::Error));
+    assert!(has(
+        &downstream("{ state: passed, field: actionable }"),
+        "V86",
+        Severity::Error
+    ));
+    assert!(has(
+        &with_where(r#"{ state: passed, field: kind, equals: "a" }"#),
+        "V86",
+        Severity::Error
+    ));
+}
+
 /// A node id ending in the item-check suffix would share that site.
 #[test]
 fn v85_a_node_id_may_not_take_the_item_check_site() {

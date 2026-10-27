@@ -147,11 +147,15 @@ impl Run {
         seq
     }
 
-    /// Journals the end of the attempt [`Run::start_attempt`] made current.
+    /// Journals the end of the attempt made current (a node's or an
+    /// item's).
     fn finish_attempt(&self, status: &str) {
-        let attempt = self.current.lock().unwrap().attempt.unwrap_or(1);
+        let (attempt, item) = {
+            let current = self.current.lock().unwrap();
+            (current.attempt.unwrap_or(1), current.item.clone())
+        };
         self.journal(EventPayload::AttemptFinished {
-            item: None,
+            item,
             node: NODE.into(),
             attempt,
             status: status.into(),
@@ -1187,4 +1191,73 @@ fn a_made_up_item_id_may_neither_send_nor_reset_the_budget() {
         assert_eq!(stub.requests().len(), 1, "list node: {list}");
         assert_eq!(run.ledger().records().len(), 1, "list node: {list}");
     }
+}
+
+// -- List mode: an item's own retry ----------------------------------------
+
+impl Run {
+    /// Journals attempt `attempt` of list item `item` with a fresh token and
+    /// makes it the one [`Run::call`] claims.
+    fn start_item_attempt(&self, attempt: u32, item: &str) {
+        let token = apb_core::connector::marker::new_nonce();
+        self.journal(EventPayload::AttemptStarted {
+            item: Some(item.into()),
+            node: NODE.into(),
+            attempt,
+            agent: "claude".into(),
+            soul_delivery: None,
+            skills_mode: None,
+            pid: Some(std::process::id()),
+            spawn_ms: None,
+            model: None,
+            workdir: None,
+            transcript: None,
+            token: Some(token.clone()),
+        });
+        *self.current.lock().unwrap() = AttemptClaim {
+            item: Some(item.into()),
+            attempt: Some(attempt),
+            token: Some(token),
+            host_task: None,
+        };
+    }
+}
+
+fn asana_task() -> Value {
+    json!({ "project": "1200", "name": "Reply to the invoice question" })
+}
+
+/// An item's attempt files its task and then fails on the infrastructure;
+/// the retry of the same item repeats the send and the ledger answers
+/// `already_sent` with the task's gid, without a request. Another item with
+/// the same arguments is its own send.
+#[test]
+fn an_items_retry_after_a_send_is_answered_already_sent_by_the_ledger() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![
+        Reply::Respond(201, r#"{"data":{"gid":"77","name":"n"}}"#.into()),
+        Reply::Respond(201, r#"{"data":{"gid":"78","name":"n"}}"#.into()),
+    ]);
+    let run = run_with("asana", &stub.base_url, Grant::of(&["create_task"]));
+    run.start_item_attempt(1, "m-1");
+    let (first, ok) = run.call("create_task", asana_task(), None);
+    assert!(ok, "the first send goes out");
+    assert!(first.get("already_sent").is_none());
+    run.finish_attempt("failed");
+
+    run.start_item_attempt(2, "m-1");
+    let (repeat, ok) = run.call("create_task", asana_task(), None);
+    assert!(ok);
+    assert_eq!(repeat["already_sent"], json!(true));
+    assert_eq!(repeat["ref"], "77", "the task the first send filed");
+    assert_eq!(stub.requests().len(), 1, "the repeat made no request");
+
+    run.start_item_attempt(1, "m-2");
+    let (other, ok) = run.call("create_task", asana_task(), None);
+    assert!(ok);
+    assert!(
+        other.get("already_sent").is_none(),
+        "another item sends its own"
+    );
+    assert_eq!(stub.requests().len(), 2);
 }

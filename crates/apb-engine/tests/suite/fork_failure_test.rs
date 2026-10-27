@@ -1152,3 +1152,69 @@ fn a_fan_in_inside_a_cycle_runs_once_per_pass_in_either_order() {
         assert!(first_ends.iter().all(|e| *e < second_f), "{a}/{b}");
     }
 }
+
+/// The driver died while the `require: all_succeeded` join ran (a crash,
+/// or a `--now` pause): the resume runs the join on the deliveries it
+/// already had.
+#[test]
+fn a_resume_inside_a_require_join_runs_it_on_the_deliveries_it_had() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(
+        root,
+        &require_playbook("ok.sh", "  - { from: j, to: done }\n"),
+        0,
+    );
+    let (outcome, run_id, _) = run_events(root);
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    cut_journal(
+        &run_dir,
+        |l| l.contains(r#""type":"node_started""#) && l.contains(r#""node":"j""#),
+        &[],
+    );
+
+    let res = resume(root, &run_id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::JoinRefused { .. }))
+    );
+    assert_eq!(finished(&events, "j"), ["succeeded"]);
+}
+
+/// The branch that failed into a `require: all_succeeded` join is re-run
+/// (`--from-node`) and succeeds: the join runs on it and on the sibling
+/// that succeeded the first time.
+#[test]
+fn a_re_run_of_the_failed_branch_runs_the_require_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(
+        root,
+        &require_playbook("flaky.sh", "  - { from: j, to: done }\n"),
+        0,
+    );
+    let flag = root.join("failed-once");
+    fs::write(
+        root.join(".apb/playbooks/fk/1.0.0/scripts/flaky.sh"),
+        format!(
+            "f='{}'\nif [ -e \"$f\" ]; then echo ok; else : > \"$f\"; exit 1; fi\n",
+            flag.display()
+        ),
+    )
+    .unwrap();
+    let (outcome, run_id, _) = run_events(root);
+    assert_eq!(outcome, RunStatus::Failed);
+
+    let res = resume(root, &run_id, Some("a")).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&root.join(".apb/runs").join(&run_id)).unwrap();
+    assert_eq!(finished(&events, "a"), ["failed", "succeeded"]);
+    assert_eq!(
+        finished(&events, "j").last().map(String::as_str),
+        Some("succeeded")
+    );
+}

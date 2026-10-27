@@ -64,6 +64,13 @@ gaps:
    review cannot see its own round-one findings without plumbing the history
    back in manually.
 
+For several reviewers, each reviewing again only while its own findings
+are open, see [document-review-panel](document-review-panel.md) and its two
+examples, examples/playbooks/review-panel-list.yaml (one list node with
+`rerun: not_passed`) and examples/playbooks/review-panel.yaml (the same
+plan from plain nodes); both bound the rounds and hand what is left to a
+person.
+
 ## 7. Target
 
 The fix loops back through the same review, bounded (at most N rounds), each

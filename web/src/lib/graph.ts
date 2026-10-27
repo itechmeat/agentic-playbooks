@@ -1,5 +1,6 @@
 import dagre from '@dagrejs/dagre'
 import type { PlaybookDetail, WfLayout } from './types'
+import { listBadge } from './listprogress'
 
 export interface FlowNode {
   id: string
@@ -11,6 +12,8 @@ export interface FlowNode {
     cached?: boolean
     failure?: FailureEffect | null
     exits?: NodeExits | null
+    // `12/43` on a list node of a run, `list` in the editor (`listBadge`).
+    list?: string | null
   }
   type: 'playbookNode'
 }
@@ -289,6 +292,7 @@ export function toFlow(
   statuses?: Record<string, string>,
   cachedIds?: Set<string>,
   forceAuto?: boolean,
+  listProgress?: Record<string, { processed: number; total: number }>,
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   // `forceAuto` is the topbar "Re-layout" button: it ignores any stored
   // arrangement (manual or otherwise) and recomputes from scratch, so the
@@ -335,6 +339,7 @@ export function toFlow(
       cached: cachedIds?.has(n.id),
       failure: failureEffect(playbook, n.id),
       exits: exits.get(n.id) ?? null,
+      list: listBadge(n, listProgress?.[n.id]),
     },
   }))
 

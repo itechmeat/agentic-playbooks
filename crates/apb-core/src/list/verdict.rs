@@ -46,6 +46,14 @@ pub enum ItemState {
 }
 
 impl ItemState {
+    /// Every state, in the order an item moves through them.
+    pub const ALL: [ItemState; 4] = [
+        ItemState::Pending,
+        ItemState::Running,
+        ItemState::Passed,
+        ItemState::NeedsLook,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             ItemState::Pending => "pending",
@@ -57,14 +65,7 @@ impl ItemState {
 
     /// The state `word` names (as [`ItemState::as_str`] writes it).
     pub fn parse(word: &str) -> Option<Self> {
-        [
-            ItemState::Pending,
-            ItemState::Running,
-            ItemState::Passed,
-            ItemState::NeedsLook,
-        ]
-        .into_iter()
-        .find(|s| s.as_str() == word)
+        ItemState::ALL.into_iter().find(|s| s.as_str() == word)
     }
 
     pub fn is_terminal(self) -> bool {
@@ -89,6 +90,30 @@ pub enum NeedsLookReason {
 }
 
 impl NeedsLookReason {
+    pub const ALL: [NeedsLookReason; 5] = [
+        NeedsLookReason::Rejected,
+        NeedsLookReason::CheckUnknown,
+        NeedsLookReason::UnknownSend,
+        NeedsLookReason::Failed,
+        NeedsLookReason::ItemTooLarge,
+    ];
+
+    /// The reason `word` names (as [`NeedsLookReason::as_str`] writes it).
+    pub fn parse(word: &str) -> Option<Self> {
+        NeedsLookReason::ALL
+            .into_iter()
+            .find(|r| r.as_str() == word)
+    }
+
+    /// Whether the item's check put it here, rather than its step, a send
+    /// or its size.
+    pub fn from_check(self) -> bool {
+        matches!(
+            self,
+            NeedsLookReason::Rejected | NeedsLookReason::CheckUnknown
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             NeedsLookReason::Rejected => "rejected",

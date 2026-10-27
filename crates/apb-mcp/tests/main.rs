@@ -48,6 +48,8 @@ mod retro_tool_test;
 mod review_tool_test;
 #[path = "suite/run_answer_test.rs"]
 mod run_answer_test;
+#[path = "suite/run_lists_test.rs"]
+mod run_lists_test;
 #[path = "suite/run_tools_test.rs"]
 mod run_tools_test;
 #[path = "suite/subplaybook_policy_test.rs"]

@@ -3,6 +3,8 @@
 
 use serde::Serialize;
 
+use apb_core::list::verdict::ItemState;
+
 use super::ledger::{ItemRecord, ListFold};
 
 /// One list node's visit with its items.
@@ -46,6 +48,10 @@ pub struct RunListItem {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub reason: Option<String>,
     pub attempts: u32,
+    /// Its check rejected it in some round of the visit, whatever came after.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub check_rejected: bool,
 }
 
 /// A list node's counts, for the progress summary.
@@ -90,19 +96,43 @@ impl RunList {
     }
 }
 
+impl RunList {
+    /// The list with its counts whole but only its first `cap` items that
+    /// need a look, for a status read that stays small on a long list.
+    /// This list with its first `cap` items, and how many it left out.
+    pub fn first_items(&self, cap: usize) -> (RunList, usize) {
+        let list = RunList {
+            items: self.items.iter().take(cap).cloned().collect(),
+            ..self.clone()
+        };
+        (list, self.items.len().saturating_sub(cap))
+    }
+
+    pub fn needing_a_look(&self, cap: usize) -> RunList {
+        RunList {
+            items: self
+                .items
+                .iter()
+                .filter(|i| i.state == ItemState::NeedsLook.as_str())
+                .take(cap)
+                .cloned()
+                .collect(),
+            ..self.clone()
+        }
+    }
+}
+
 impl RunListItem {
     fn of(id: &str, r: &ItemRecord) -> RunListItem {
         RunListItem {
             id: id.to_string(),
-            state: r
-                .state
-                .map_or("pending", apb_core::list::verdict::ItemState::as_str)
-                .to_string(),
+            state: r.state.map_or("pending", ItemState::as_str).to_string(),
             round: r.round,
             verdict: r.verdict.clone(),
             note: r.note.clone(),
             reason: r.reason.clone(),
             attempts: r.attempts,
+            check_rejected: r.check_rejected,
         }
     }
 }
@@ -122,16 +152,36 @@ impl ListProgress {
     }
 }
 
-/// Every list node of `playbook` that started a visit, as [`RunList`]s in
-/// playbook order.
+/// Every list node that started a visit, as [`RunList`]s: in playbook
+/// order with their titles, or, without a readable playbook snapshot, in
+/// the order the journal started them and without titles. Every surface
+/// that counts a run's list items reads them here, so a listing and a run's
+/// detail never disagree.
 pub fn run_lists(
-    playbook: &apb_core::schema::Playbook,
+    playbook: Option<&apb_core::schema::Playbook>,
     events: &[crate::event::Event],
 ) -> Vec<RunList> {
-    playbook
-        .nodes
-        .iter()
-        .filter(|n| n.list().is_some())
-        .filter_map(|n| ListFold::of(events, &n.id).map(|f| RunList::of(&f, n.title.as_deref())))
+    let nodes: Vec<(&str, Option<&str>)> = match playbook {
+        Some(p) => p
+            .nodes
+            .iter()
+            .filter(|n| n.list().is_some())
+            .map(|n| (n.id.as_str(), n.title.as_deref()))
+            .collect(),
+        None => {
+            let mut started: Vec<(&str, Option<&str>)> = Vec::new();
+            for e in events {
+                if let crate::event::EventPayload::ListStarted { node, .. } = &e.payload
+                    && !started.iter().any(|(n, _)| n == node)
+                {
+                    started.push((node.as_str(), None));
+                }
+            }
+            started
+        }
+    };
+    nodes
+        .into_iter()
+        .filter_map(|(id, title)| ListFold::of(events, id).map(|f| RunList::of(&f, title)))
         .collect()
 }

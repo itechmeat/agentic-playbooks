@@ -862,7 +862,8 @@ pub(crate) fn looped(list: &str) -> String {
 }
 
 /// `rerun: not_passed` on a real loop: the second visit carries the item
-/// that passed in the first (`carried`) and runs only the one that did not.
+/// that passed in the first (`carried`) and runs only the one that did not,
+/// telling it what it reported in the first visit.
 #[test]
 fn a_loop_visit_under_rerun_not_passed_carries_the_passed_items() {
     let dir = tempfile::tempdir().unwrap();
@@ -882,4 +883,52 @@ fn a_loop_visit_under_rerun_not_passed_carries_the_passed_items() {
     assert_eq!((a.state.as_str(), a.carried), ("passed", true));
     let b = last_state(&ev, "b");
     assert_eq!((b.state.as_str(), b.carried), ("passed", false));
+    let b_prompts: Vec<String> = invocations(root)
+        .into_iter()
+        .filter(|i| i.item == "b")
+        .map(|i| i.prompt)
+        .collect();
+    assert_eq!(
+        b_prompts
+            .iter()
+            .filter(|p| p.contains("\"previous_outputs\":{\"blocking\":\"1\"}"))
+            .count(),
+        1,
+        "only the second visit's run of b carries what the first reported"
+    );
+}
+
+/// The same id with changed content in a later visit is another item to
+/// its step: it is not told what the earlier content's run reported.
+#[test]
+fn a_changed_item_in_a_later_visit_is_not_told_the_earlier_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let extra = "  - id: emit\n    type: script\n    script: scripts/emit.sh\n    runner: sh\n    outputs: { fields: [messages] }\n";
+    let list = format!(
+        "items: {{ from: {{ node: emit, field: messages }} }}\nbatch: {{ size: 1, parallel: 1, retries: 0 }}\nrerun: not_passed\n{OUTPUT_CHECK}"
+    );
+    let yaml = playbook(&list, extra, "emit").replace(
+        "  - { from: work, to: done }\n",
+        "  - { from: work, to: emit, max_traversals: 1 }\n  - { from: work, to: done, fallback: true }\n",
+    );
+    let emit = format!(
+        "f='{}'\nn=$(cat \"$f\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$f\"\necho \"{{\\\"messages\\\":[{{\\\"id\\\":\\\"b\\\",\\\"v\\\":$n}}]}}\"\n",
+        root.join("emit-runs").display()
+    );
+    seed(root, &yaml, &[("emit.sh", &emit)]);
+    let _env = Env::set(&stub(root, ""), &[]);
+    plan(root, "b", Some(1), "1");
+    let res = run_list(root);
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let ev = events(root, &res.run_id);
+    assert_eq!(work_finishes(&ev).len(), 2, "two visits");
+    assert_eq!(runs_of(root, "b"), 2, "the changed item runs again");
+    assert!(
+        invocations(root)
+            .iter()
+            .filter(|i| i.item == "b")
+            .all(|i| !i.prompt.contains("previous_outputs")),
+        "no run of b is told the earlier content's report"
+    );
 }

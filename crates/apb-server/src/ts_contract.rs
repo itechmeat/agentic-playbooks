@@ -65,6 +65,7 @@ fn render_types() -> String {
         apb_engine::run_outcome::summary::BaselineOutcome::decl(&cfg),
         apb_engine::run_outcome::summary::NeedsLookReason::decl(&cfg),
         apb_engine::run_outcome::NeedsLook::decl(&cfg),
+        apb_engine::run_outcome::ListOutcome::decl(&cfg),
         apb_engine::run_outcome::OutcomeSummary::decl(&cfg),
         apb_engine::state::RunStatus::decl(&cfg),
         apb_engine::state::NodeStatus::decl(&cfg),

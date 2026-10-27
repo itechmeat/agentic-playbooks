@@ -698,3 +698,93 @@ fn a_terminal_finish_ends_owed_revivals() {
         assert_eq!(s.current_status("c"), NodeStatus::Succeeded);
     }
 }
+
+/// A loop round in the journal: the hop `gate -> a` of round 1 is history
+/// once `gate` started again, and `m`, which finished after `a`'s finish of
+/// round 1, consumed that delivery.
+#[test]
+fn a_loop_round_reads_only_the_latest_execution() {
+    let started = |node: &str| EventPayload::NodeStarted {
+        node: node.into(),
+        attempt: 1,
+    };
+    let finished = |node: &str| EventPayload::NodeFinished {
+        node: node.into(),
+        status: "succeeded".into(),
+        attempt: 1,
+        output: String::new(),
+        artifacts: Vec::new(),
+    };
+    let hop = |from: &str, to: &str| EventPayload::EdgeTraversed {
+        from: from.into(),
+        to: to.into(),
+        via_policy: false,
+        uncounted: true,
+    };
+    let round_one = [
+        started("gate"),
+        finished("gate"),
+        hop("gate", "a"),
+        started("a"),
+        finished("a"),
+        hop("a", "m"),
+        started("m"),
+        finished("m"),
+    ];
+    let mut payloads: Vec<EventPayload> = round_one.to_vec();
+    let s = RunState::fold(&numbered(&payloads));
+    assert!(s.hop_of_latest_run("gate", "a"));
+    assert!(!s.join_consumed("a", "gate"), "gate never ran after a");
+    assert!(s.join_consumed("a", "m"), "m ran on a's delivery");
+
+    payloads.extend([started("gate"), finished("gate"), hop("gate", "b")]);
+    let s = RunState::fold(&numbered(&payloads));
+    assert!(!s.hop_of_latest_run("gate", "a"), "a hop of round 1");
+    assert!(s.hop_of_latest_run("gate", "b"));
+    assert!(s.join_consumed("a", "m"), "a delivered into round 1 of m");
+    assert!(
+        s.journaled_hops
+            .contains(&("gate".to_string(), "a".to_string())),
+        "the history stays"
+    );
+}
+
+/// A join that started again after its finish (a crash or a pause while it
+/// ran, then a resume) or that a re-run revived has consumed nothing: its
+/// inputs' finishes count for the execution to come.
+#[test]
+fn a_join_running_again_or_revived_consumed_nothing() {
+    let started = |node: &str| EventPayload::NodeStarted {
+        node: node.into(),
+        attempt: 1,
+    };
+    let finished = |node: &str| EventPayload::NodeFinished {
+        node: node.into(),
+        status: "succeeded".into(),
+        attempt: 1,
+        output: String::new(),
+        artifacts: Vec::new(),
+    };
+    let base = vec![started("a"), finished("a"), started("j"), finished("j")];
+    assert!(RunState::fold(&numbered(&base)).join_consumed("a", "j"));
+
+    let mut again = base.clone();
+    again.push(started("j"));
+    assert!(!RunState::fold(&numbered(&again)).join_consumed("a", "j"));
+
+    let mut revived = base;
+    revived.push(EventPayload::NodesRevived {
+        from_node: "j".into(),
+        nodes: vec!["j".into()],
+        superseded: Vec::new(),
+    });
+    assert!(!RunState::fold(&numbered(&revived)).join_consumed("a", "j"));
+}
+
+fn numbered(payloads: &[EventPayload]) -> Vec<Event> {
+    payloads
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ev(i as u64, p.clone()))
+        .collect()
+}

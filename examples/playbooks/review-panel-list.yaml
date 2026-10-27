@@ -1,0 +1,95 @@
+schema: 2
+id: review-panel-list
+name: Review panel (list node)
+description: >-
+  The review panel as one list node: each reviewer is an item, the engine
+  checks every reviewer's verdict, keeps the reviewers that passed and runs
+  only the open ones again after a fix, at most three rounds in all. The
+  same plan as review-panel without the per-reviewer nodes and edges. See
+  docs/scenarios/document-review-panel.md.
+version: 1.0.0
+defaults:
+  profile: main
+effects: [fs_read, fs_write]
+goal:
+  statement: >-
+    Every reviewer ends with no blocking finding open, or a person decides
+    what is left; no reviewer is dropped between rounds and no test is
+    removed to make a finding go away.
+  criteria:
+    - description: Every reviewer of the panel passed its check
+      check: { type: list, node: panel }
+    - description: Every remark a reviewer left was fixed or answered
+      check: { type: manual }
+# The project's own test command runs before the first step that can change
+# anything and again at the finish, so a fix that breaks a test that passed
+# before shows in the outcome.
+baseline_check:
+  checks:
+    - id: tests
+      description: The project's test suite
+      timeout_seconds: 1800
+      project_checks: { only: [test] }
+nodes:
+  - { id: start, type: start }
+  - id: panel
+    type: agent_task
+    title: Review the change, one reviewer per item
+    expected_duration: 10m
+    prompt: >-
+      Review the change described in {{run.instruction}} with the focus
+      the item section names. On a second round the item section also
+      holds your previous findings and the check's note: review only those
+      findings and anything the fix broke. Write the outputs blocking (the
+      number of blocking findings, 0 when none) and findings (one line per
+      finding with file and line).
+    list:
+      items:
+        inline:
+          - { id: correctness, focus: "wrong results, missed cases, broken error handling" }
+          - { id: security, focus: "injection, secrets, unsafe input handling, missing permission checks" }
+          - { id: style, focus: "readability and the project's conventions" }
+      batch: { size: 3, parallel: 3, retries: 0 }
+      item_outputs: [blocking, findings]
+      # A reviewer passes when it reports no blocking finding; the engine
+      # reads the number, nobody's summary of it.
+      check: { output: { field: blocking, equals: "0" } }
+      # A later round keeps the reviewers that passed and runs the rest.
+      rerun: not_passed
+      # Any open reviewer fails the node, which routes to the fix.
+      on_needs_look: fail
+  - id: fix
+    type: agent_task
+    title: Fix the open findings
+    expected_duration: 20m
+    max_retries: 1
+    # A fix that deletes or edits a test fails its attempt and is undone.
+    protect: ["tests/**", "**/*_test.*"]
+    prompt: >-
+      Fix the findings of the reviewers that did not pass. The panel's
+      items with their findings: {{nodes.panel.output.items}}. Do not
+      change or remove tests to make a finding go away.
+  - id: human_review
+    type: human_review
+    title: Decide what is left
+    prompt: >-
+      Three rounds did not close every finding. The run's list names the
+      reviewers still open and their findings; accept the change as it is
+      or stop.
+    options: [accept, stop]
+  - { id: done, type: finish, outcome: success }
+  # A person's acceptance ends apart from a clean panel, so the outcome says
+  # which of the two it was.
+  - { id: accepted, type: finish, outcome: success }
+  - { id: stopped, type: finish, outcome: failure }
+edges:
+  - { from: start, to: panel }
+  - { from: panel, to: done, condition: { type: node_status, node: panel, equals: success } }
+  # Two more rounds at most; once the bound is spent the fallback hands
+  # what is left to a person.
+  - { from: panel, to: fix, condition: { type: node_status, node: panel, equals: failure }, max_traversals: 2 }
+  - { from: panel, to: human_review, fallback: true }
+  - { from: fix, to: panel, condition: { type: node_status, node: fix, equals: success } }
+  - { from: fix, to: human_review, fallback: true }
+  - { from: human_review, to: accepted, condition: { type: review_status, equals: accept } }
+  - { from: human_review, to: stopped, condition: { type: review_status, equals: stop } }

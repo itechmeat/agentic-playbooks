@@ -30,12 +30,22 @@ in an eval that could ship something:
 - a node that declares `irreversible` or `secrets` effects or looks like a
   merge, push, deploy or publish step (the V73 evidence chain),
 - a node that binds a connector (real connectors are never called from an
-  eval, and mocks come later),
+  eval, and mocks come later), including a list node whose item check reads
+  a connector (`check.connector`, the `<node>#check` binding site),
 - a `playbook` node (the child's effects are not visible to the case).
 
 Such a playbook is refused before anything is created
 (`eval_refused_effects`, exit 2), and `apb validate` reports it as V81.
 There is no case-level switch that lifts the refusal.
+
+List nodes (`list:`) are allowed otherwise: an eval runs their items and
+their `output`, `script` and `judge` item checks as a real run does. To
+assert how many items a
+case handled, give the playbook a goal criterion `{ type: list, node: <id> }`
+(HOWTO-authoring, "goal"): with `checks.goal: required` the case then
+passes only when that list processed every item and none needs a look. An
+`events` check may also count `list_started`, `list_batch_started` and
+`list_item_settled`.
 
 What the agent still has:
 
@@ -191,7 +201,7 @@ the run journal and the tree; none asks a model.
 | Check | Reads |
 |---|---|
 | `run.outcome` | the terminal event, or `stopped` when the runner stopped the run |
-| `goal` | the playbook's own `goal.criteria`, from their `goal_checked` events (never re-run). `required`: every script and marker criterion passed; a run stopped before its finish node counts as `not_reached` when the case accepts `stopped`. Skipped when the playbook has no such criteria; a case that says `goal: required` explicitly for such a version is a V80 |
+| `goal` | the playbook's own `goal.criteria`, from their `goal_checked` events (never re-run). `required`: every script, marker and list criterion passed; a run stopped before its finish node counts as `not_reached` when the case accepts `stopped`. Skipped when the playbook has no such criteria; a case that says `goal: required` explicitly for such a version is a V80 |
 | `route` | the visited nodes in order: `node_started`, a gate's `review_requested`, and start and finish nodes |
 | `outputs` | the node's latest output; `field` reads a key of it parsed as JSON |
 | `files` | the tree after the run; `unchanged_from_fixture` compares with the fixture commit. A symlink at the path or on a directory below the tree is never followed (the check fails), and `matches` on a missing file fails |
@@ -354,7 +364,7 @@ does); `result` has `eval_id`, `playbook`, `version`, `started_at_ms`,
   not have, a path leaves `evals/scripts/` or `evals/fixtures/`, a regex
   does not compile, a param is not declared, a duration or range does not
   parse, an `events` check names a type the journal cannot hold, an
-  explicit `goal: required` meets a version without script or marker
+  explicit `goal: required` meets a version without script, marker or list
   criteria, an env key reconfigures apb, the shell, the loader or git, the
   suite holds a symlink or cannot be digested. The node, param and goal
   checks skip a case whose `versions` range excludes the version.

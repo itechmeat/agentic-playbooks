@@ -42,8 +42,10 @@ pub struct ItemRecord {
     pub reconciled: bool,
     /// The batch it was last admitted in.
     pub batch: u32,
-    /// Its content digest when it passed.
+    /// The digest of the content it was settled on.
     pub digest: Option<String>,
+    /// Its check rejected it in some round of this visit.
+    pub check_rejected: bool,
 }
 
 impl ItemRecord {
@@ -190,6 +192,7 @@ impl ListFold {
                         r.note = note.clone();
                     }
                     r.reason = reason.clone();
+                    r.check_rejected |= state == settled::REJECTED;
                     if output.is_some() {
                         r.output = output.clone();
                     }
@@ -283,6 +286,21 @@ pub fn progress_label(c: &ListCounts) -> String {
     format!(
         "{} of {} processed, {} passed, {look}",
         c.processed, c.total, c.passed
+    )
+}
+
+/// A `list` goal criterion read from the journal: whether `node`'s latest
+/// visit processed every item with none needing a look, and the line that
+/// says where it stands ("list `x`: 12 of 43 processed, ..."). The goal
+/// check at the finish node and the run surfaces before it share it.
+pub fn list_criterion(events: &[Event], node: &str) -> (bool, String) {
+    let Some(fold) = ListFold::of(events, node) else {
+        return (false, format!("list `{node}` never ran"));
+    };
+    let c = fold.counts();
+    (
+        c.processed == c.total && c.needs_look == 0,
+        format!("list `{node}`: {}", progress_label(&c)),
     )
 }
 
@@ -393,6 +411,29 @@ mod tests {
         ];
         let f = ListFold::of(&events, "l").unwrap();
         assert_eq!(f.item("a").unwrap().note, None);
+    }
+
+    /// A check rejection followed by a failed retry keeps the rejection.
+    #[test]
+    fn a_rejection_survives_a_failed_retry() {
+        let mut failed = settled(5, "a", settled::NEEDS_LOOK, None, 1);
+        if let EventPayload::ListItemSettled { reason, .. } = &mut failed.payload {
+            *reason = Some("failed".into());
+        }
+        let events = vec![
+            started(1, 1, false),
+            batch(2, 1, &["a"]),
+            settled(3, "a", settled::REJECTED, Some("reject"), 1),
+            batch(4, 2, &["a"]),
+            failed,
+        ];
+        let f = ListFold::of(&events, "l").unwrap();
+        let a = f.item("a").unwrap();
+        assert_eq!(a.reason.as_deref(), Some("failed"));
+        assert!(a.check_rejected);
+        let list = crate::list::RunList::of(&f, None);
+        let outcomes = crate::run_outcome::lists::list_outcomes(None, &[list]);
+        assert_eq!(outcomes[0].check_failed, 1);
     }
 
     #[test]

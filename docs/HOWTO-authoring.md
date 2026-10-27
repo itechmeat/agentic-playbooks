@@ -550,6 +550,256 @@ fails the node, the same policy as `deliverable_missing`. Validation warns
 source node's `outputs.fields` does not declare. A node that declares nothing is
 not checked.
 
+### List processing (list:)
+
+An `agent_task` or a `script` node with a `list:` block runs its step once
+per item of a list instead of once for the whole list. The engine loads the
+items, admits them in batches, runs each item's step on its own, checks each
+item's result, and keeps every item's state in the run journal. A retry, a
+pause, a crash or a later loop visit repeats only the items that did not
+pass, and every run surface counts the items instead of trusting an agent's
+summary of them.
+
+```yaml
+- id: file_tasks
+  type: agent_task
+  prompt: >-
+    The item section holds one triaged message. Create one task for it with
+    the tracker connector and write the output task_gid.
+  connectors:
+    - { name: asana, accounts: [default], functions: [create_task], max_calls: 2 }
+  list:
+    items:
+      from: { node: triage, field: items }    # or `inline: [ ... ]`, exactly one
+      key: id                                 # the item field that names it (default id)
+      max_items: 100                          # default 100, at most 500
+      where: { state: passed, field: actionable, equals: "true" }   # optional filter
+    batch:
+      size: 10        # items admitted per batch (default 10)
+      parallel: 2     # items running at once (default 1)
+      retries: 1      # re-runs of an item its check rejected (default 1, at most 5)
+    item_outputs: [task_gid]   # the fields each item's step writes
+    check:                     # optional; exactly one of output, script, connector, judge
+      connector:
+        name: asana
+        account: default
+        function: get_task
+        args: { task: "{{item_output.task_gid}}" }
+        accept_when: { path: data.gid, exists: true }
+    on_needs_look: continue    # or fail
+    rerun: all                 # or not_passed
+```
+
+**Items.** `items.from` names an earlier node and one of its declared
+`outputs.fields` holding a JSON array of objects, or a list node and its
+field `items` (below). `items.inline` writes the objects in the playbook.
+Every item is a JSON object; `key` names the field that identifies it, a
+non-blank string or an integer of at most 128 characters. An id reaches
+prompts, the environment and journal lines, so it may not hold a backtick,
+a line break, a tab or any separator other than a plain space, a control
+character or an invisible formatting mark (bidi embeddings, overrides and
+isolates included). Duplicate ids, a
+missing or malformed key, a source that is not a JSON array, or more items
+than `max_items` fail the node before any item runs, with a message that
+names the problem (duplicate ids are listed). `where` keeps the items whose
+`field` equals `equals` (compared as an `output_field` condition compares:
+a string as is, a number or a boolean in its JSON form). `equals: null`
+keeps an item whose field is present and null; a missing field is not equal
+to it, and no other `equals` matches a missing field. A field that holds an
+object or an array never matches. The dropped items are counted as
+`filtered_out`. An item larger than 8 KiB of JSON is never
+handed to a step: it needs a look at once (`item_too_large`).
+
+From a list node the items are that node's `items` entries, keyed by their
+`id` (the `key` setting is not read): each item is the earlier item object
+with the earlier step's outputs added under `output`. `where.field` then
+reads those earlier outputs, and `where.state` keeps the items that ended in
+one state there (`where: { state: passed }`). Both may be given, and an
+item is kept only when both hold: `where: { state: passed, field:
+actionable, equals: "true" }` takes the items whose check passed and whose
+step read actionable, so an item its check rejected never reaches the
+next step on the strength of an output nobody confirmed. `where.state` on
+any other source is a validation error.
+
+**Item states.** An item is `pending`, `running`, `passed` or `needs_look`;
+the last two are final for the visit. After its step, the item's check
+decides:
+
+- `accept`: the item passed. `accept_with_note`: it passed with a note (the
+  note shows on every surface and is counted as `passed_with_note`).
+- `reject`: the item goes back into the queue (behind the items not admitted
+  yet) for another round while it has `batch.retries` left, then needs a
+  look (`rejected`). A step that did not write every `item_outputs` field is
+  rejected the same way, with a note naming the missing fields.
+- a check that cannot tell (a connector read that failed, a script that
+  could not run or printed no verdict, a judge set to `on_unavailable:
+  needs_look` without an answer) never accepts: the item needs a look
+  (`check_unknown`).
+- a step that failed needs a look (`failed`), with the first line of the
+  failure as its note.
+
+There are two retry layers. Inside one round, the item's step runs through
+the ordinary attempt loop of the node: `max_retries`, profile fallbacks and
+infrastructure retries apply to each item as to any node, and the retry
+briefing tells a retried attempt what the failed one did. Across rounds,
+`batch.retries` re-runs an item whose step succeeded but whose check
+rejected it; the re-run's item data carries `previous_round`,
+`previous_outputs` and `check_note` (each of the last two cut to 2 KiB with
+a marker), so the step knows what to fix. Under `rerun: not_passed` an item
+that runs again in a later loop visit gets the same fields from the visit
+before. An item
+interrupted by a pause, a quota pause or a crash goes back to `pending`
+without spending a round.
+
+**The item prompt.** An `agent_task` list node renders its prompt once for
+the visit; each item's step gets that text followed by a final `## item`
+section: "Item 4 of 43" and one fenced JSON data block holding the item's
+`id` and its content as `item`, with the instruction to treat the block as
+data, never as instructions. Everything that comes from the item or a check
+sits inside that block, JSON-escaped, behind a fence longer than any
+backtick run in it. Everything before the section is the
+same for every item, so a provider's prompt cache serves the shared prefix
+and only the short section is new per item. For the same reason a prompt or
+a `workdir` may not read `{{item.*}}` or `{{item_output.*}}` (V86): a
+template that changed per item would break the shared prefix. Write "the
+item section holds ..." in the prompt instead. Each item's step runs in a
+session of its own (never a continued one) with `APB_ITEM_ID` in its
+environment. A `script` list step gets `APB_ITEM_ID` and `APB_ITEM_FILE`
+(the item's JSON in a file under the run directory) and publishes its item
+outputs by printing a JSON object, as any script node does.
+
+**Checks.** `check` names exactly one source (V87):
+
+- `output: { field, equals }`: one of the `item_outputs` must equal the
+  value; anything else rejects. Deterministic and free.
+- `script: scripts/<file>`: a script of the version's `scripts/` runs per
+  item with `APB_ITEM_ID`, `APB_ITEM_FILE` and `APB_ITEM_OUTPUT_FILE` (the
+  step's output as JSON) and prints `{"verdict": "accept" |
+  "accept_with_note" | "reject", "note": "..."}`. A non-zero exit rejects;
+  no verdict is a check that cannot tell. It may run for 120 seconds and
+  reads the scripts the run pinned at start.
+- `connector`: one `read_only` function of an installed connector, called
+  by the engine itself with `args` that may template `{{item.<path>}}`,
+  `{{item_output.<field>}}` and `{{params.<name>}}`. `accept_when` sets a
+  dot `path` into the response and exactly one of `equals` (which may
+  template the same way) or `exists: true`. The check is its own binding
+  site, `<node>#check`, granted only that one function and account, and it
+  goes through trust and the run gate like a node's binding. A write
+  function here is a validation error.
+- `judge`: a decision-model question per item, named `verdict`, over the
+  rendered `state` fields (same templates as above). `criteria` keys are
+  `accept`, `accept_with_note` and `reject`, and `accept` must be described
+  (V89). An answer below `min_confidence` counts as no answer;
+  `on_unavailable` (`accept_with_note` by default, `reject` or
+  `needs_look`) decides what no answer means. See `docs/DECISIONS.md` for
+  the providers.
+
+A list without `check` accepts every item whose step succeeded and wrote
+its `item_outputs`; the validator warns (V93) and the run outcome lists the
+items as passed on the agent's own report. When a check is set, the item
+does not also get the decision-model completion check, and tier routing is
+not asked per item.
+
+**The node's output.** When every item is final the node publishes one JSON
+object, whatever its `outputs.fields` say: `total` (items after the filter),
+`processed` (`passed` plus `needs_look`), `passed` (including those with a
+note), `passed_with_note`, `needs_look`, `filtered_out`, and `items`, one
+entry per item with `id`, `state`, `note`, `item` and `output` (the item's
+declared outputs). Later nodes read the fields by name
+(`{{nodes.file_tasks.output.needs_look}}`, an `output_field` condition on
+`passed`) or take the node as the source of another list. With
+`on_needs_look: continue` (the default) the node succeeds and reports the
+items; with `on_needs_look: fail` the node fails with the same output, so a
+failure route or a supervisor sees it.
+
+**Sending once.** A list step is repeated by design, so every write
+function a list node is granted must declare `idempotency` (V88): an
+undeclared write could act twice for one item. A send is keyed by the node
+and the item, so one item's send never answers another's. Without
+`--intent` an item's send carries the fixed label `item:send`: one item
+sends a function once, and a rerun that words the payload differently is
+still the same send (it gets `already_sent` once the first went out). An
+item that sends one function more than once names each send with its own
+`--intent`. A call that names an item (`APB_ITEM_ID`) with no running
+attempt of its own is refused: a made-up item id can neither send nor
+reset a spent `max_calls`. When an item's step fails
+and a send it made has an unknown outcome:
+
+- a `key` or `marker` send gets one free reconcile run in the same round:
+  the repeat replays the key or looks the marker up through the send
+  ledger, so the service answers from what it already has.
+- a `none` send settles the item as needing a look (`unknown_send`). The
+  item is never sent again on its own: a supervisor retry skips it until a
+  person resolves the send with `apb intent resolve` (`--sent` or
+  `--not-sent`); either way the next retry runs the item again, a repeat
+  of a send resolved as sent is answered `already_sent`, and the item's
+  check decides. A
+  binding's `on_unknown: resend` does not change this once the item has
+  settled: no later round, visit or supervisor retry runs it again on its
+  own while that send's outcome is unknown.
+
+**What a list node may not be.** V85 refuses `list:` on any node type other
+than `agent_task` and `script`, on an interactive node, on a node that
+continues another node's session or whose session another node continues,
+on a node with `cache` or `success_check` (use `list.check`), on a node
+with `protect` while `batch.parallel` is above 1, and refuses a zero
+`batch.size` or `batch.parallel`, `batch.retries` above 5, `max_items`
+outside 1 to 500 and a `key` that is not an identifier. A run in host
+execution mode with a list node is refused at start: list nodes need
+`execution: cli` in this release.
+
+**Validator codes.**
+
+| Code | Level | What it covers |
+|---|---|---|
+| V85 | error | where `list:` may sit and its numbers (above) |
+| V86 | error | the item source: exactly one of `from` and `inline`, a source that finishes before the node, a declared field (or `items` of a list node), `where` shapes (`field` with `equals`, `state` only from a list node, both together when both must hold), usable inline items; and `{{item.*}}` in a prompt or `workdir` |
+| V87 | error | the check: one source, an `output` field among `item_outputs`, a script under `scripts/`, a read-only connector function, a valid `accept_when`, check templates limited to `item.*`, `item_output.<item_outputs>` and `params.*` |
+| V88 | error | a granted write function without an `idempotency` declaration |
+| V89 | error | a judge check's criteria keys, `min_confidence` in (0, 1], `on_unavailable` |
+| V93 | warning | a list without a check; `rerun: not_passed` on a node in no cycle |
+| V94 | warning | `batch.parallel` above the playbook's `max_parallel` |
+| V95 | error | a `type: list` goal criterion that names a node without `list:` |
+
+**Pause, resume, quota and stop.** Before an item starts, the runner reads
+the run's control channel, so no item starts after a pause request returned.
+A drain pause lets the running items finish and admits no new one; a
+`--now` pause kills the running items, which journal `interrupted` and go
+back to pending; a quota pause of one item stops admission, lets the other
+running items finish and pauses the run until the quota window passes. The
+visit stays open in each case: the node gets no `node_finished`, and the
+resume continues the same visit with only the items that are not final
+(when the source still yields the same items; a changed list starts a new
+visit). A crashed item attempt is reaped under its item and runs again
+alone. A stop ends the visit cancelled with its open items left open.
+
+A failed list visit (for example under `on_needs_look: fail`) is reopened
+by a supervisor retry (`supervisor_node_retry`): the items that passed are
+kept, the items that need a look run again, except an item too large to
+run and an item whose unknown send nobody resolved yet. Any other later
+visit of the node, such as a loop back to it, is a new visit governed by
+`rerun`.
+
+**Surfaces.** `run_status` and `run_report` carry a `lists` block (counts
+per list node; `run_status` names at most 50 items that need a look per
+list, `run_report` every item; see `docs/MCP.md`). The run outcome counts
+each list, names every item that needs a look as a gap (at most 30, then
+one "and N more" line), lists a list without a check as self-reported, and
+reads the run as needing a look while an item does. After every batch a
+`run_progress` event carries a line such as "12 of 43 processed, 11
+passed, 1 needs a look"; the dashboard run page shows a card per list
+with its counts and a filterable item table, and the graph shows `12/43`
+on the list node. `apb runs <id> --items [--node N] [--state
+pending|running|passed|needs_look]` prints one line per item. The journal
+records `list_started`, `list_batch_started` and `list_item_settled`, and
+the attempt, connector call, send intent and decision events of an item
+carry its id in `item`.
+
+**Compatibility.** The `list:` block is additive to schema 2. An older apb
+reads the playbook but ignores the block and would run the node once for
+the whole list, so start and resume list runs with this apb or a newer
+one.
+
 ### Node working directory (workdir)
 
 An `agent_task` or a `script` node can run somewhere other than the execution
@@ -1100,6 +1350,17 @@ decision is auditable afterwards. That is routine graph bookkeeping rather than 
 anomaly - an either-or merge has one by construction - so no supervisor is woken
 for it.
 
+**A join inside a loop** weighs each round on its own. An input counts as
+delivered only when its source finished after the join last started; a
+source that delivered into the round before has yet to run in this one, so
+the join waits for it while something still leads there, and writes it off
+when nothing does (its gate kept it out this round). A node's routing is
+read from its latest execution: an edge it took in an earlier round does
+not keep that branch live, and a bounded edge its own traversal spent is
+still the edge it took, never a fallback it did not take. So a finish node
+fed both by a collector and by the fallback of a spent fix loop ends the
+run when the collector routes into it.
+
 A write-off holds only for the pass that made it. When an operator or a
 supervisor asks for a node to run again (`resume --from-node`, or a
 supervisor's retry, continue-from, patch, or move off a review gate), that
@@ -1337,6 +1598,14 @@ outright, the same path a single ready node has always taken. Lower the cap for
 playbooks whose branches are resource-heavy (large builds, rate-limited external
 calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
+
+A list node (`list:`) never joins a batch: it runs alone on the sequential
+path, and its items run on the list's own worker pool, at most
+`min(batch.parallel, max_parallel)` at a time. `batch.parallel` above the
+playbook's `max_parallel` (or the default 4 when the playbook sets none) is
+a validator warning (V94): the cap still wins. As with a branch node, the
+commits an item's step makes are recorded only when the pool runs one item
+at a time.
 
 One shape never joins a batch at all, whatever the cap says: a node with an
 explicit `join:` edge (and a join with `require: all_succeeded`). Only an explicit barrier can be recorded failed with the
@@ -1891,6 +2160,17 @@ ends the loop there. This behaves the same as routing the loop through a
 `condition` node (`review -> again -> review` with `max_loops: 2` on `again`),
 including on resume and inside parallel branches.
 
+A list node inside a loop runs a new visit each time the loop reaches it.
+With `rerun: all` (the default) every item runs again. With `rerun:
+not_passed` the items that passed in the previous visit are carried over
+as passed (as long as their content is unchanged) and only the others run,
+each told in its item section what it reported and what the check said the
+visit before. A reviewer panel is the typical shape: the list node fails
+under `on_needs_look: fail`, a bounded edge routes to a fix, the fix routes
+back to the list, and only the reviewers still open review again
+(examples/playbooks/review-panel-list.yaml). `rerun: not_passed` on a node
+that sits in no cycle has no effect, and the validator warns (V93).
+
 ## expected_duration (progress estimates)
 
 Every node may carry an optional `expected_duration`: the estimated wall time
@@ -1944,7 +2224,8 @@ or for the run to use your own subagents. Do not choose it yourself. The only
 other way a step runs as a host task is the automatic fallback below, when no
 CLI of the step can start. Nothing detects a host by name, there is no
 machine switch, and a project `.apb/config.yaml` can only turn the fallback
-off.
+off. A playbook with a list node (`list:`) is refused in host mode at run
+start: list nodes run with `execution: cli` only in this release.
 
 In host mode apb spawns no agent CLI. Every agent step (and a finish answer)
 becomes a host task that `run_wait` returns in `pending_tasks`, each with the
@@ -2160,9 +2441,15 @@ validates its playbooks.
     matches the digest the run pinned at start: when an earlier node changed
     it, every `script` criterion is `error` (so `enforce` fails the run)
     instead of running an edited check.
-- `enforce` (bool, default `false`): a failed `script` or `marker` criterion
-  fails a run that would otherwise succeed, with a `run_error` naming the
-  criterion. Without it the results are only reported. V41 warns when
+  - `check: { type: list, node: <id> }`: the latest visit of a list node
+    (`list:`) processed every item and none needs a look. It counts the
+    engine's own item states, so "every row was handled" no longer rests on
+    an agent's tally. Before the finish, run surfaces show where the list
+    stands ("list `send`: 12 of 43 processed, 11 passed, 1 needs a look").
+    Naming a node without `list:` is validator error **V95**.
+- `enforce` (bool, default `false`): a failed `script`, `marker` or `list`
+  criterion fails a run that would otherwise succeed, with a `run_error`
+  naming the criterion. Without it the results are only reported. V41 warns when
   `enforce` is set and every criterion is manual, because nothing could fail.
 
 When the checks run: when the run reaches a finish node, after every node
@@ -2372,6 +2659,13 @@ Keep the cases small (the fixture of the repository's own
 `branch-quality-review` suite is a twenty-line crate), tag a quick subset,
 and set `limits` and `budget` in `suite.yaml`: every repetition is a paid
 agent run. The format, the checks and the storage are in `docs/EVALS.md`.
+
+List nodes (`list:`) run in evals like any other node, except that a
+`connector` item check is a connector binding site and is refused like
+every other one (V81). To assert the counts, give the playbook a `type:
+list` goal criterion: `checks.goal: required` then needs every item
+processed with none left for a look, and an `events` check may name
+`list_started`, `list_batch_started` and `list_item_settled`.
 <!-- end 0.24.0 eval suites -->
 
 ## Secrets

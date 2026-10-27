@@ -19,6 +19,8 @@
       failure?: FailureEffect | null
       // The node's named ways out, when it has more than one (see `nodeExits`).
       exits?: NodeExits | null
+      // `12/43` on a list node of a run, `list` in the editor.
+      list?: string | null
     }
   } = $props()
 
@@ -76,6 +78,11 @@
   {#if hasTarget}<Handle type="target" position={Position.Top} />{/if}
   <div class="flex items-center gap-1">
     <span class="text-[11px] text-muted-foreground">{data.kind}</span>
+    {#if data.list}
+      <span class="list-badge" title="Runs once per item: items processed of the list" data-testid="node-list-badge">
+        {data.list}
+      </span>
+    {/if}
     {#if modeBadge}
       <!-- Several lines leaving one node mean two opposite things - all of them
            run, or exactly one does - and the graph alone cannot say which. -->
@@ -140,3 +147,15 @@
   {/if}
   {#if hasSource}<Handle type="source" position={Position.Bottom} />{/if}
 </div>
+
+<style>
+  .list-badge {
+    padding: 0 0.25rem;
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius, 0.5rem) / 2);
+    color: var(--muted-foreground);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 10px;
+    line-height: 1rem;
+  }
+</style>

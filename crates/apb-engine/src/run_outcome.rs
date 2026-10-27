@@ -6,24 +6,28 @@
 //! absent when the run journaled nothing for it, so a run without them reads
 //! exactly as before.
 //!
-//! Submodules: `baseline` (the baseline check's view), `notes` (findings and
+//! Submodules: `claims` (evidence and gaps), `baseline` (the baseline check's view), `notes` (findings and
 //! warnings), `calls` (connector calls by what they say about the outcome),
 //! `commits` (the commits and their `Apb-Run` trailers), `intents` (the send
-//! intents of the send ledger) and `summary` (the human outcome every
+//! intents of the send ledger), `lists` (the list nodes' counts, item checks
+//! and items that need a look) and `summary` (the human outcome every
 //! surface shows, and the cheap "needs a look" marker of a run listing).
 
 use std::path::Path;
 
 pub mod baseline;
 pub mod calls;
+pub mod claims;
 pub mod commits;
 pub mod intents;
+pub mod lists;
 pub mod notes;
 pub mod summary;
 
 pub use baseline::{RunBaseline, baseline_from};
 pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
 pub use intents::{RunIntent, intents_from};
+pub use lists::ListOutcome;
 pub use notes::RunNotes;
 pub use summary::{NeedsLook, OutcomeSummary};
 
@@ -116,6 +120,7 @@ impl RunView {
     pub fn readout_of(&self, playbook: Option<apb_core::schema::Playbook>) -> RunReadout {
         RunReadout {
             goal: goal_from(playbook.as_ref(), &self.events),
+            lists: crate::list::run_lists(playbook.as_ref(), &self.events),
             baseline: baseline_from(playbook.as_ref(), &self.events),
             notes: self.notes(),
             playbook,
@@ -132,6 +137,8 @@ pub struct RunReadout {
     pub goal: Option<RunGoal>,
     pub baseline: Option<RunBaseline>,
     pub notes: RunNotes,
+    /// Every list node that started a visit, with its items.
+    pub lists: Vec<crate::list::RunList>,
 }
 
 // --- goal criteria (C1) -------------------------------------------------------
@@ -142,7 +149,7 @@ pub struct RunReadout {
 pub struct GoalCriterionResult {
     pub index: usize,
     pub description: String,
-    /// `script`, `marker` or `manual`.
+    /// `script`, `marker`, `list` or `manual`.
     pub check: String,
     /// `passed`, `failed`, `error`, `manual` (a person confirms it), or
     /// `pending` while the run has not reached a finish node.
@@ -204,12 +211,20 @@ pub fn goal_from(
             // The last result for this criterion (a resumed run may check
             // twice).
             let found = checked.iter().rev().find(|(idx, _, _)| *idx == i);
+            // A list criterion not checked yet says where its list stands.
+            let live = || match &c.check {
+                GoalCheck::List { node } => Some(crate::list::list_criterion(events, node).1),
+                _ => None,
+            };
             GoalCriterionResult {
                 index: i,
                 description: c.description.clone(),
                 check: check.to_string(),
                 status: found.map_or(fallback, |(_, s, _)| s).to_string(),
-                detail: found.and_then(|(_, _, d)| (*d).clone()),
+                detail: match found {
+                    Some((_, _, d)) => (*d).clone(),
+                    None => live(),
+                },
             }
         })
         .collect();

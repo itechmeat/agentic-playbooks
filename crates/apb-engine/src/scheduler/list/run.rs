@@ -13,6 +13,8 @@ use super::super::outcome::NodeCtx;
 use crate::error::EngineError;
 use crate::event::EventPayload;
 use crate::exec_key::{ExecKey, item_hash};
+use crate::list::ledger::{ItemRecord, ListFold};
+use crate::list::prompt::ran_before;
 
 /// The item's declared outputs as a JSON object, `None` when the output is
 /// not one.
@@ -48,11 +50,26 @@ pub(super) struct ListRun<'r, 'a, 'j> {
     /// The execution root (connector secrets resolve against it).
     pub root: PathBuf,
     pub spawn_env: Vec<(String, String)>,
+    /// The node's visit before this one, read under `rerun: not_passed`.
+    pub earlier: Option<ListFold>,
 }
 
 impl ListRun<'_, '_, '_> {
     pub(super) fn item(&self, id: &str) -> Option<&Item> {
         self.items.iter().find(|i| i.id == id)
+    }
+
+    /// What `id` did before this run of it: its record in this visit once
+    /// it ran, else its record of the visit before when that settled the
+    /// same content (an item that changed is another item to its step).
+    pub(super) fn previous<'f>(&'f self, fold: &'f ListFold, id: &str) -> Option<&'f ItemRecord> {
+        let digest = self.item(id).map(|i| i.digest.as_str());
+        fold.item(id).filter(|r| ran_before(r)).or_else(|| {
+            self.earlier
+                .as_ref()
+                .and_then(|f| f.item(id))
+                .filter(|r| r.digest.is_some() && r.digest.as_deref() == digest)
+        })
     }
 
     pub(super) fn key<'k>(&'k self, id: &'k str) -> ExecKey<'k> {
@@ -103,7 +120,12 @@ impl ListRun<'_, '_, '_> {
             round: s.round,
             carried: s.carried,
             check: s.check.map(str::to_string),
-            digest: s.digest.map(str::to_string),
+            // Every settlement names the content it settled, so a later
+            // visit tells the same item from a changed one.
+            digest: s
+                .digest
+                .or_else(|| self.item(s.id).map(|i| i.digest.as_str()))
+                .map(str::to_string),
         })
     }
 }

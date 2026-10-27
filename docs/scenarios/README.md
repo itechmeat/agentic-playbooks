@@ -42,15 +42,15 @@ Each scenario file has the same seven numbered sections:
 | Scenario | Kind | Runnable example | Main gaps |
 |---|---|---|---|
 | [ci-failure-triage](ci-failure-triage.md) | code | examples/playbooks/ci-failure-triage.yaml | the root-cause criterion stays manual; a wrong diagnosis still reports success |
-| [review-triage](review-triage.md) | code | examples/playbooks/review-triage.yaml | one review and one fix, no second review round |
+| [review-triage](review-triage.md) | code | examples/playbooks/review-triage.yaml | one review and one fix, no second review round (several reviewers with rounds: document-review-panel) |
 | [sentry-triage](sentry-triage.md) | code | examples/playbooks/sentry-triage.yaml | the whole list goes to one agent call; a re-run may file an issue twice |
 | [dependency-security-fix](dependency-security-fix.md) | code | examples/playbooks/dependency-security-fix.yaml | the audit findings are not engine-held (the tests are); no per-finding loop |
-| [document-review-panel](document-review-panel.md) | code | docs only | no per-item state across loop rounds; a bounded loop re-runs the whole body |
-| [inbox-triage](inbox-triage.md) | routine | examples/playbooks/inbox-triage.yaml | first candidate for list processing; the search limit clips silently; an inbox gap is invisible |
+| [document-review-panel](document-review-panel.md) | code | examples/playbooks/review-panel-list.yaml (recommended), examples/playbooks/review-panel.yaml | only each reviewer's latest round is reported; a conflict between reviewers reaches a person only through the bound |
+| [inbox-triage](inbox-triage.md) | routine | examples/playbooks/inbox-triage.yaml | per-message list steps with engine checks; a clipped search is visible but not prevented; arrivals during the run are invisible |
 | [whatsapp-inbox](whatsapp-inbox.md) | routine | examples/playbooks/whatsapp-inbox.yaml | a re-run after a crash may reply twice; the batch ack is all-or-nothing |
 | [release-announce](release-announce.md) | routine | examples/playbooks/release-announce.yaml | no idempotency across runs: a re-run may create the release and re-send the email again |
 | [release-heartbeat](release-heartbeat.md) | routine | examples/playbooks/release-heartbeat.yaml | "exactly one issue" is prompt discipline; overlapping runs cannot see each other |
-| [bulk-reminders](bulk-reminders.md) | routine | examples/playbooks/bulk-reminders.yaml | no per-item node; a lost answer stays unknown for a person; a re-run does not see the sends |
+| [bulk-reminders](bulk-reminders.md) | routine | examples/playbooks/bulk-reminders.yaml | per-row list steps with counts a goal checks; a lost answer stays unknown for a person; a re-run does not see the sends |
 | [crm-cleanup](crm-cleanup.md) | routine | examples/playbooks/crm-cleanup.yaml | no per-deal ledger: the engine-held count shows how many are left, not which |
 
 Every runnable example lives in examples/playbooks/ and is validated on the
@@ -64,5 +64,5 @@ A feature that closes a gap adds an engine test for its scenario in that
 feature's PR. The scenario document names the gap; the test pins the behaviour
 that closes it, on the initial state the document describes. A PR that claims
 a gap is closed without the scenario's test is not done. A docs-only scenario
-(document-review-panel today) gets its test in the PR that first makes it
-expressible.
+gets its test in the PR that first makes it expressible
+(document-review-panel got `review_panel_test` that way).

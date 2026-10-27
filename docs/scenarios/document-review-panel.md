@@ -1,7 +1,8 @@
 # Document review panel
 
-Kind: code work. Runnable example: docs only in this PR, because the schema
-cannot express the panel loop yet (see section 6).
+Kind: code work. Runnable examples: examples/playbooks/review-panel-list.yaml
+(one list node, the recommended form) and examples/playbooks/review-panel.yaml
+(the same plan from plain nodes and edges). Section 6 compares them.
 
 ## 1. Purpose
 
@@ -23,18 +24,20 @@ different round.
 
 ## 3. Steps
 
-1. Fan out: one reviewer node per scope, in parallel, each reading the
-   document and returning its findings with severity. (agent nodes, fork,
-   max_parallel)
-2. Collect: merge the findings into one list. (join: all, collector agent
-   node)
-3. Author: fix the findings, or answer them with a reason. (agent node)
-4. Re-review: only reviewers whose findings were non-empty look again, at
-   their own findings as fixed by the author. (conditional re-entry per
-   reviewer)
-5. Bound: at most 3 rounds. (loop edge with a traversal cap)
-6. Escalate: findings still open after the bound, or a reviewer conflict,
-   go to a person. (human_review gate)
+1. Review: one reviewer per scope reads the change and returns its blocking
+   findings. (a list node with one inline item per reviewer, or one review
+   node per reviewer behind a gate)
+2. Keep each reviewer's state: open or clean, with its remarks. (the list
+   node's item states, or a collector agent node)
+3. Author: fix the findings, or answer them with a reason. (agent node with
+   `protect` on the tests)
+4. Re-review: only reviewers whose findings were open look again, at their
+   own findings as fixed by the author. (`rerun: not_passed`, or a gate per
+   reviewer routing to a re-review node)
+5. Bound: at most 3 rounds. (an edge with `max_traversals: 2`)
+6. Escalate: findings still open after the bound go to a person; a
+   person's acceptance ends at its own finish node, apart from a clean
+   panel. (human_review gate)
 
 ## 4. Expected outcome
 
@@ -59,20 +62,76 @@ silently picks one side and both reviewers' next round passes.
 
 ## 6. Today
 
-Cannot be expressed today. The parallel first round is a plain fork and is
-fine; the panel loop is not, for these reasons:
+Two examples ship, each driven end to end against the shape above by its
+own engine tests (crates/apb-engine/tests/suite/review_panel_test.rs): at
+most three review rounds and two fixes, each fix reviewed in the round
+after it.
 
-1. No per-item state across loop rounds: which reviewer still owes a look,
-   and what each said last round, has nowhere to live that the loop can read.
-2. A bounded loop re-runs the whole body; there is no "skip the nodes whose
-   item is done" per reviewer.
-3. The run context keeps only the latest run of each node, so a round-2
-   reviewer cannot see its own round-1 findings without hand-rolled plumbing.
-4. There is no condition form for "this node runs only when its own item is
-   still open".
+**The list form** (examples/playbooks/review-panel-list.yaml) is one list
+node, `panel`, whose items are the reviewers:
 
-The example for this scenario is therefore docs only. Its closest expressible
-cousin is examples/playbooks/review-triage.yaml, one reviewer, one round.
+```yaml
+list:
+  items:
+    inline:
+      - { id: correctness, focus: "wrong results, missed cases, broken error handling" }
+      - { id: security, focus: "injection, secrets, unsafe input handling, missing permission checks" }
+      - { id: style, focus: "readability and the project's conventions" }
+  batch: { size: 3, parallel: 3, retries: 0 }
+  item_outputs: [blocking, findings]
+  check: { output: { field: blocking, equals: "0" } }
+  rerun: not_passed
+  on_needs_look: fail
+```
+
+A reviewer passes when its own `blocking` output is the text `0`; the
+engine compares the field, so a reviewer must write exactly `0`. Any open reviewer fails the node, a bounded edge
+(`max_traversals: 2`) routes to the fix, and the fix routes back to the
+panel. On the next visit `rerun: not_passed` carries the reviewers that
+passed and runs only the open ones, each told in its item section what it
+reported last round and what the check said. Once the bound is spent the
+fallback edge hands the rest to a person. The goal's `type: list`
+criterion counts the reviewers.
+
+**The graph template** (examples/playbooks/review-panel.yaml) builds the
+same rounds from plain nodes. Each reviewer has a `condition` gate, a review
+node and a re-review node that continues the reviewer's session. The gate
+reads the collector's last state: clean goes straight to the collector,
+open goes to the re-review, and no state yet (the first round) goes to the
+first review. Every round forks into the three gates, so the reviewers run
+side by side, and the collector is a `join: all` on every edge into it: it
+waits for each reviewer that runs again this round, and a reviewer its gate
+kept out counts as arrived. A collector agent keeps every reviewer's state
+and remarks; the edge into the fix carries `max_traversals: 2` with a
+fallback to `human_review`, so the third round's open findings go to a
+person instead of a fix nobody reviews.
+
+Why the list form is the recommended one:
+
+1. The engine keeps each reviewer's state. In the template the state is a
+   collector agent's output, and a collector that forgets a reviewer
+   silently drops it; in the list form every reviewer is an item whose
+   state the journal holds, so none can be dropped between rounds.
+2. Adding a reviewer is one more inline item. In the template it is a gate,
+   a review node, a re-review node, seven edges and a change to the
+   collector's prompt and outputs.
+3. The outcome names the open reviewer (`panel/security`, with the check's
+   note) as an item that needs a look, and the run surfaces count the
+   panel; the template's outcome has only the collector's own report and
+   its `OPEN REVIEWERS:` marker.
+4. The list's pool caps how many reviewers run at once (`batch.parallel`);
+   the template's fork runs every reviewer of a round at once, up to
+   `max_parallel`.
+
+The template still shows how far plain nodes and edges go, and keeps a
+reviewer's own session across rounds where the engine can continue it,
+which the list form does not (a later round of a reviewer gets its earlier
+outputs and the check's note in its item section instead).
+
+Still open in both: the panel report keeps each reviewer's latest round,
+not every round's findings and dispositions; and a conflict between two
+reviewers is not detected as such, it reaches a person only through the
+bound.
 
 ## 7. Target
 

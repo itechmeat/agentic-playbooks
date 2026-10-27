@@ -38,10 +38,15 @@ export function gapLabel(g: Gap): string {
 // The gaps that mean the run saw or did less than it reports: shown as a
 // warning rather than a plain note.
 export function gapIsWarning(g: Gap): boolean {
-  return g.kind === 'inbox_gap' || g.kind === 'unknown_call' || g.kind === 'incomplete_response'
+  return (
+    g.kind === 'inbox_gap' ||
+    g.kind === 'unknown_call' ||
+    g.kind === 'incomplete_response' ||
+    g.kind === 'item_needs_look'
+  )
 }
 
-// `1 regression, 2 findings, 1 warning, 1 unknown send`, the same text as
+// `1 regression, 2 findings, 1 warning, 1 unknown send, 2 list items`, the same text as
 // `apb runs`, or null when nothing calls for a look.
 export function needsLookCounts(n: NeedsLook | null | undefined): string | null {
   if (!n) return null
@@ -53,6 +58,7 @@ export function needsLookCounts(n: NeedsLook | null | undefined): string | null 
   add(n.findings, 'finding', 'findings')
   add(n.warnings, 'warning', 'warnings')
   add(n.unknown_sends ?? 0, 'unknown send', 'unknown sends')
+  add(n.list_items ?? 0, 'list item', 'list items')
   return parts.length ? parts.join(', ') : null
 }
 
