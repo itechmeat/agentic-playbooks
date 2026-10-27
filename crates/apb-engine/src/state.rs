@@ -530,7 +530,9 @@ impl RunState {
                 | EventPayload::RunMigrated { .. }
                 | EventPayload::VersionPromoted { .. }
                 | EventPayload::CandidatePromoted { .. }
-                | EventPayload::CandidateRejected { .. } => {}
+                | EventPayload::CandidateRejected { .. }
+                | EventPayload::CandidateHeld { .. }
+                | EventPayload::RunGraded { .. } => {}
                 EventPayload::WaitStarted { .. }
                 | EventPayload::WaitSignalled { .. }
                 | EventPayload::WaitTimeout { .. } => {}

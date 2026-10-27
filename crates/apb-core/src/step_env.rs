@@ -30,4 +30,32 @@ impl StepCaller {
             (None, None) => None,
         }
     }
+
+    /// The refusal of `what` when this process is a run step: a step does
+    /// not judge or decide a playbook's runs (grading, promoting); `None`
+    /// outside a run.
+    pub fn refusal(&self, what: &str) -> Option<String> {
+        self.describe().map(|from| {
+            format!(
+                "{what} is refused {from}: a run step does not grade runs or decide a playbook's candidate; do it outside a run (the CLI, the dashboard, or an agent session that is not a run step)"
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_step_is_refused_and_a_person_is_not() {
+        assert_eq!(StepCaller::default().refusal("grading"), None);
+        let step = StepCaller {
+            run_id: Some("r1".into()),
+            host_task: None,
+        };
+        let why = step.refusal("grading").unwrap();
+        assert!(why.starts_with("grading is refused inside run"), "{why}");
+        assert!(why.contains("run `r1`"), "{why}");
+    }
 }

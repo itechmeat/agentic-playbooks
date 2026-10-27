@@ -767,7 +767,10 @@ export type CandidateTrial = {
  */
 version: string, 
 /**
- * `running`; `promoted` or `rejected` once the run decided it; `passed`
+ * `running`; `promoted` or `rejected` once the run decided it; `wait`
+ * or `needs_person` for a quality comparison it left open (or, once
+ * that comparison was decided after the run, what the candidate's
+ * trial record says now); `passed`
  * for a success that did not promote yet (`after_n_successes`,
  * `manual`); `undecided` for an end that judges nothing (a stop, a
  * replaced candidate).
@@ -1429,6 +1432,150 @@ scripts?: Array<ScriptEntry>,
  */
 digest: string, };
 
+export type ComparableKey = { criterion: string, digest: string, 
+/**
+ * `<kind>/<version>`.
+ */
+grader: string, task_type: string, };
+
+export type Tally = { good: number, partial: number, poor: number, not_applicable: number, not_enough_data: number, };
+
+export type CriterionResult = "worse" | "better" | "same" | "inconclusive" | "insufficient" | "not_applicable";
+
+export type CriterionComparison = { key: ComparableKey, candidate: Tally, current: Tally, result: CriterionResult, };
+
+export type Verdict = "promote" | "keep_current" | "wait" | "needs_person";
+
+export type QualityRecord = { verdict: Verdict, reason: string, compared?: Array<CriterionComparison>, 
+/**
+ * Unix milliseconds.
+ */
+decided_at: number, 
+/**
+ * `apb` for a decision the rule made, else the surface a person used.
+ */
+decided_by: string, };
+
+export type CriterionSource = "builtin" | "playbook";
+
+export type Level = "good" | "partial" | "poor" | "not_applicable" | "not_enough_data";
+
+export type Cite = { ref: string, span?: [number, number], };
+
+export type ViewEnd = { view: string, complete: boolean, ended: boolean, };
+
+export type CriterionGrade = { id: string, source: CriterionSource, 
+/**
+ * The criterion definition's digest at grading time.
+ */
+digest: string, 
+/**
+ * `run` or `node:<id>`.
+ */
+subject: string, level: Level, 
+/**
+ * A short machine slug for why (`run_failed`, `no_signal`, ...).
+ */
+reason_code: string, 
+/**
+ * One sentence for a person; never source text.
+ */
+why: string, cites?: Array<Cite>, absence_basis?: Array<ViewEnd>, 
+/**
+ * Whether the level counts in a promotion decision.
+ */
+counts_for_promotion: boolean, };
+
+export type ReadOp = { op: string, ref: string, chars: number, };
+
+export type ViewRead = { view: string, 
+/**
+ * The view holds everything the run produced (nothing was cut).
+ */
+complete: boolean, 
+/**
+ * Every record of the view was read in full.
+ */
+ended: boolean, 
+/**
+ * The share of its records read in full, 0 to 1.
+ */
+read_share: number, };
+
+export type ReadTrace = { budget_chars: number, read_chars: number, ops?: Array<ReadOp>, views?: Array<ViewRead>, };
+
+export type GraderKind = "rules" | "host";
+
+export type GraderId = { kind: GraderKind, version: number, };
+
+export type SkillReadState = "yes" | "no" | "unknown";
+
+export type SkillRead = { node: string, profile: string, skill: string, bundle_digest: string, read: SkillReadState, 
+/**
+ * The record that shows the read.
+ */
+at?: string, };
+
+export type Grade = { schema: number, grade_id: string, run_id: string, playbook: string, version: string, task_type: string, grader: GraderId, 
+/**
+ * Unix milliseconds.
+ */
+created_at: number, criteria: Array<CriterionGrade>, reading: ReadTrace, skills?: Array<SkillRead>, 
+/**
+ * The installation's MAC over the rest of the grade: only a grade apb
+ * stored on this machine counts in a promotion. Absent when the
+ * installation has no key.
+ */
+mac?: string, };
+
+export type CompareMode = "not_worse" | "better";
+
+export type QualityGate = { compare: CompareMode, 
+/**
+ * Determinate grades needed per side and per criterion.
+ */
+min_runs: number, 
+/**
+ * Trials after which an undecided comparison goes to a person.
+ */
+max_trials: number, 
+/**
+ * How many of current's latest graded runs are compared with.
+ */
+window: number, 
+/**
+ * The non-inferiority margin, 0 to 1: a criterion is not worse only
+ * when the candidate's upper bound for poor is at most current's poor
+ * rate plus this.
+ */
+margin: number, };
+
+export type QualityDecision = { verdict: Verdict, per_criterion: Array<CriterionComparison>, reason: string, };
+
+export type CandidateQualityView = { version: string, current: string, 
+/**
+ * The candidate's ended trial runs.
+ */
+trials: number, 
+/**
+ * The gate under a quality policy; absent under the others.
+ */
+gate?: QualityGate, 
+/**
+ * The comparison as it stands now (quality policy only).
+ */
+decision?: QualityDecision, 
+/**
+ * The latest decision recorded on the candidate's trial record.
+ */
+recorded?: QualityRecord, };
+
+export type Graded = { grade: Grade, candidate?: QualityRecord, candidate_error?: string, };
+
+export type RunGrades = { run_id: string, grades: Array<Grade>, };
+
+export type PlaybookCandidate = { id: string, candidate: CandidateQualityView | null, };
+
 export type TrialRecord = { 
 /**
  * Trial runs that succeeded with every goal criterion holding.
@@ -1447,7 +1594,12 @@ run_id?: string,
 /**
  * Why it was rejected, or the version that superseded it.
  */
-reason?: string, };
+reason?: string, 
+/**
+ * The latest quality decision under `promote_supervisor_patches:
+ * { when: quality }`; absent under every other policy.
+ */
+quality?: QualityRecord, };
 
 export type VersionProvenance = { created_by: string, run_id: string | null, classification: string | null, 
 /**

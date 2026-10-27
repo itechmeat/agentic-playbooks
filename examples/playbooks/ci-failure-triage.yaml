@@ -32,6 +32,20 @@ goal:
       check: { type: marker, marker: '"next_action"' }
     - description: The cause is the first real error in the log, not a later symptom
       check: { type: manual }
+# Run quality (docs/QUALITY.md): the rules grade the built-in criteria
+# (outcome, loops, scope, consent, skill use) as every run ends, for free;
+# a host grades the criterion below when a person asks (apb grade, MCP
+# run_grade_start), citing the records it read.
+quality:
+  criteria:
+    - id: first-error
+      subject: { node: triage }
+      evidence: presence
+      reads: [outputs, transcripts]
+      levels:
+        good: "likely_cause cites the first error in the log, before any follow-up errors"
+        partial: "likely_cause names the failing step but cites a later follow-up error"
+        poor: "likely_cause names an error or a step the log does not show"
 nodes:
   - { id: start, type: start }
   - id: triage

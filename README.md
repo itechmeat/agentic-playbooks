@@ -33,7 +33,11 @@ log behind.
   as MCP tools, so an agent can create, run, and supervise playbooks itself.
 - **Self-improving playbooks.** A supervisor agent can watch a run, retry or
   reroute nodes, patch the playbook mid-run; successful patches are promoted
-  into a new version.
+  into a new version. Runs are graded on quality criteria (built-in ones by
+  rules, the playbook's own by your agent, every level citing what it read),
+  and with `promote_supervisor_patches: { when: quality }` apb promotes a
+  candidate version on its own only when it is shown not worse (a person
+  can still promote it or keep the current one).
 - **Local-first.** No cloud, no accounts. State lives in `.apb/` next to your
   code; versions are immutable and diffable.
 
@@ -187,6 +191,8 @@ apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> fo
 apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
 apb suggestions     list / allow / reset save-as-playbook suggestion declines
 apb stats           cross-run metrics per playbook version and node (read-only)
+apb grade <run>     grade an ended run by rules; --backfill <id> grades earlier runs
+apb candidate <id>  a candidate version compared with current by quality; --promote, --keep-current
 apb eval <id>       run a playbook's eval cases in scratch repositories (opt-in, paid)
 apb cache           status / inspect / prune / clear the node result cache
 apb decide          ask the configured decision models a bounded question
@@ -256,6 +262,7 @@ still change between minor releases. Design specs live in
 - [Decision models](docs/DECISIONS.md): optional small models for checks, judges and ranking
 - [Reference scenarios](docs/scenarios/README.md): realistic code and routine situations features are checked against, with the gaps they name
 - [Run stats](docs/STATS.md) and [evals](docs/EVALS.md): measuring playbooks across runs
+- [Run quality](docs/QUALITY.md): grading runs on quality criteria and promoting a candidate by quality
 - [CI](docs/CI.md) and [deployment](docs/DEPLOYMENT.md): running apb in pipelines and on a server
 
 ## Development

@@ -19,7 +19,18 @@ import type {
   TrustRevoked,
   WriteResult,
 } from '../types'
-import type { FitReport, MachineNotify, Recall, Refused, Remembered, RunNotify } from '../api.gen'
+import type {
+  FitReport,
+  Graded,
+  MachineNotify,
+  PlaybookCandidate,
+  QualityRecord,
+  Recall,
+  Refused,
+  Remembered,
+  RunGrades,
+  RunNotify,
+} from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
 
@@ -196,6 +207,30 @@ export const fetchRun = (id: string, workspace = '') =>
   getJson<RunDetail>(`${run(id)}${qs({ workspace })}`)
 export const fetchRunReport = (id: string, workspace = '') =>
   getJson<{ report: string }>(`${run(id)}/report${qs({ workspace })}`)
+
+// Run quality: a run's stored grades, a rules grade of an ended run (a
+// stored grade re-decides the playbook's candidate), a playbook's candidate
+// compared with current, and a person's decision on it.
+export const fetchRunGrades = (id: string, workspace = '') =>
+  getJson<RunGrades>(`${run(id)}/grades${qs({ workspace })}`)
+export const gradeRunByRules = (id: string, workspace = '') =>
+  requestJson<Graded>(`${run(id)}/grades${qs({ workspace })}`, { method: 'POST' })
+// POST /api/runs/{id}/grades/reopen: a person lets a host grade the run
+// once more (a run takes one host grade until then).
+export const reopenRunGrading = (id: string, workspace = '') =>
+  requestJson<{ run_id: string; reopened: boolean }>(`${run(id)}/grades/reopen${qs({ workspace })}`, {
+    method: 'POST',
+  })
+export const fetchCandidate = (id: string, workspace = '') =>
+  getJson<PlaybookCandidate>(`${pb(id)}/candidate${qs({ workspace })}`)
+export const promoteCandidate = (id: string, workspace = '') =>
+  requestJson<QualityRecord>(`${pb(id)}/candidate/promote${qs({ workspace })}`, { method: 'POST' })
+export const keepCurrentCandidate = (id: string, reason: string, workspace = '') =>
+  requestJson<QualityRecord>(`${pb(id)}/candidate/keep-current${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(reason.trim() ? { reason: reason.trim() } : {}),
+  })
 
 // GET /api/runs/{id}/report.html: the run report as one self-contained page,
 // served as a download (the run page's "Save report" link).

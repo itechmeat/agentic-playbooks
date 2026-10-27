@@ -76,6 +76,18 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/playbooks/{id}/fit", get(routes::fit::get_fit_handler))
         .route(
+            "/api/playbooks/{id}/candidate",
+            get(routes::quality::get_candidate_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/candidate/promote",
+            post(routes::quality::post_promote_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/candidate/keep-current",
+            post(routes::quality::post_keep_current_handler),
+        )
+        .route(
             "/api/playbooks/{id}/run",
             post(routes::playbooks::run_playbook_handler),
         )
@@ -161,6 +173,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/runs/{id}/report.html",
             get(routes::runs::get_run_report_html_handler),
+        )
+        .route(
+            "/api/runs/{id}/grades",
+            get(routes::quality::get_grades_handler).post(routes::quality::post_grades_handler),
+        )
+        .route(
+            "/api/runs/{id}/grades/reopen",
+            post(routes::quality::post_reopen_handler),
         )
         .route(
             "/api/runs/{id}/notify",

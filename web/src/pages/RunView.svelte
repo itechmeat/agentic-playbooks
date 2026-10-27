@@ -1,7 +1,18 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchRun, fetchRunReport, postAnswer, postReview, runReportHtmlUrl } from '../lib/api'
+  import { tick } from 'svelte'
+  import {
+    fetchRun,
+    fetchRunGrades,
+    fetchRunReport,
+    gradeRunByRules,
+    postAnswer,
+    postReview,
+    reopenRunGrading,
+    runReportHtmlUrl,
+  } from '../lib/api'
+  import type { Grade } from '../lib/api.gen'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal, runEventJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
@@ -20,6 +31,8 @@
   import RunNotifyControl from '../lib/RunNotifyControl.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
   import RunBudgetPanel from '../lib/RunBudgetPanel.svelte'
+  import QualityPanel from '../lib/QualityPanel.svelte'
+  import { verdictText } from '../lib/quality'
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
@@ -28,7 +41,7 @@
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
   import * as Tabs from '$lib/components/ui/tabs'
-  import { runStatusClass, showsDriverDead } from '../lib/status'
+  import { isTerminalRunStatus, runStatusClass, showsDriverDead } from '../lib/status'
   import { pauseLine } from '../lib/pause'
   import { toast } from 'svelte-sonner'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
@@ -42,6 +55,11 @@
   let tab = $state<'events' | 'journal' | 'report'>('events')
   let deciding = $state<string | null>(null)
   let answering = $state(false)
+  // Run quality: the stored grades, a rules grade in flight, and the journal
+  // event a grade's citation opened in the events list.
+  let grades = $state<Grade[]>([])
+  let grading = $state(false)
+  let citedSeq = $state<number | null>(null)
 
   const nodeTypes = { playbookNode: PlaybookNode }
   const journal = $derived(detail ? interventionJournal(detail.events) : [])
@@ -83,9 +101,60 @@
     }
   }
 
+  // A grading request answers for the run it was made on: once the page
+  // moved to another run it neither reports nor unlocks that run's buttons
+  // (the route effect resets `grading`).
+  async function gradeRequest(work: () => Promise<{ done: string; warning?: string }>, failed: string) {
+    const target = loadTarget()
+    const stillHere = () => target === loadTarget()
+    grading = true
+    try {
+      const { done, warning } = await work()
+      if (!stillHere()) return
+      toast.success(done)
+      if (warning) toast.warning('The candidate was not re-decided', { description: warning })
+      await load()
+    } catch (e) {
+      if (stillHere()) toast.error(failed, { description: String(e) })
+    } finally {
+      if (stillHere()) grading = false
+    }
+  }
+
+  function gradeByRules() {
+    return gradeRequest(async () => {
+      const graded = await gradeRunByRules(id, workspace)
+      const after = graded.candidate ? `; candidate: ${verdictText(graded.candidate.verdict)}` : ''
+      return { done: `Graded by rules${after}`, warning: graded.candidate_error }
+    }, 'Grading failed')
+  }
+
+  // A run takes one host grade: a person lets a host grade it once more.
+  function reopenGrading() {
+    return gradeRequest(async () => {
+      await reopenRunGrading(id, workspace)
+      return { done: 'A host may grade this run once more' }
+    }, 'Could not reopen the grading')
+  }
+
+  // A citation opens its journal event in the events list.
+  async function showCite(seq: number) {
+    tab = 'events'
+    citedSeq = seq
+    await tick()
+    document.querySelector(`[data-event-seq="${seq}"]`)?.scrollIntoView({ block: 'center' })
+  }
+
+  // The run a load was started for: an answer that comes back after the
+  // page moved to another run (back/forward, a change notice) is dropped.
+  const loadTarget = () => `${workspace}\u0000${id}`
+
   async function load() {
+    const target = loadTarget()
+    const current = () => target === loadTarget()
     try {
       const d = await fetchRun(id, workspace)
+      if (!current()) return
       detail = d
       if (d.model) {
         const flow = toFlow(
@@ -100,13 +169,20 @@
         edges = flow.edges
       }
     } catch (e) {
+      if (!current()) return
       toast.error('Failed to load run', { description: String(e) })
     }
     try {
       const r = await fetchRunReport(id, workspace)
-      report = r.report
+      if (current()) report = r.report
     } catch {
-      report = null
+      if (current()) report = null
+    }
+    try {
+      const g = (await fetchRunGrades(id, workspace)).grades
+      if (current()) grades = g
+    } catch {
+      if (current()) grades = []
     }
   }
 
@@ -114,6 +190,9 @@
     // Track the route target so browser back/forward between two runs reloads.
     void id
     void workspace
+    grades = []
+    grading = false
+    citedSeq = null
     load()
     return subscribeChanges(load)
   })
@@ -371,6 +450,15 @@
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
       <AttemptModelsPanel models={detail.attempt_models} />
       <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
+      <QualityPanel
+        {grades}
+        events={detail.events}
+        ended={isTerminalRunStatus(detail.run_status)}
+        {grading}
+        onGrade={gradeByRules}
+        onReopen={reopenGrading}
+        onCite={showCite}
+      />
     {/if}
 
     {#if detail?.candidate_trial}
@@ -411,7 +499,7 @@
         {#if detail}
           <ol class="flex flex-col gap-1 text-xs">
             {#each eventJournal as e (e.seq)}
-              <li class="flex items-center gap-1.5">
+              <li class="event-row" class:cited={citedSeq === e.seq} data-event-seq={e.seq}>
                 <code class="rounded bg-muted px-1 py-0.5">{e.type}</code>
                 {#if e.node}<span class="text-muted-foreground">{e.node}</span>{/if}
                 {#if e.note}<span class="min-w-0 truncate text-muted-foreground" title={e.note}>{e.note}</span>{/if}
@@ -467,6 +555,18 @@
   .save-report:hover {
     background: var(--accent);
     color: var(--accent-foreground);
+  }
+  /* One event of the events list; `cited` marks the one a grade's
+     citation opened. */
+  .event-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: var(--radius-sm, 4px);
+  }
+  .event-row.cited {
+    outline: 1px solid var(--primary);
+    background: color-mix(in oklab, var(--primary) 12%, transparent);
   }
   .save-report:focus-visible {
     outline: 2px solid var(--ring);

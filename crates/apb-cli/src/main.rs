@@ -1,5 +1,6 @@
 mod budget;
 mod cache;
+mod candidate;
 mod connector;
 mod consent;
 mod dashboard_check;
@@ -10,6 +11,7 @@ mod decisions;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
+mod grade;
 mod import_preview;
 mod intent;
 mod make_global;
@@ -383,6 +385,16 @@ enum Command {
         #[command(subcommand)]
         action: DecisionsAction,
     },
+    /// Grade an ended run by rules (the built-in quality criteria: outcome,
+    /// loops, scope, consent, skill use), show its stored grades, or grade
+    /// a playbook's earlier runs so a candidate comparison has a history.
+    /// A stored grade re-decides the playbook's candidate under a quality
+    /// policy. Free: no model is called
+    Grade(crate::grade::GradeArgs),
+    /// Show a playbook's candidate version and how it compares with
+    /// current by quality, or decide it: --promote makes it current,
+    /// --keep-current drops it and changes nothing
+    Candidate(crate::candidate::CandidateArgs),
     // --- 0.23.0 stats (C3) ---
     /// Cross-run metrics per playbook version and node, from the run
     /// journals only: outcome rate, first-pass success, retries, fallbacks
@@ -797,6 +809,8 @@ fn main() -> ExitCode {
         Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
         Some(Command::Decide(args)) => crate::decide::decide_cmd(&root, args),
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
+        Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
+        Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Stats {
             playbook,

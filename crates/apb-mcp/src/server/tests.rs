@@ -145,6 +145,11 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_report",
         "run_report_html",
         "run_retro_context",
+        "run_grade_start",
+        "run_grade_read",
+        "run_grade_submit",
+        "run_grades",
+        "playbook_candidate",
         "run_resume",
         "run_stop",
         "run_pause",
@@ -321,6 +326,8 @@ fn tools_carry_safety_annotations() {
         "run_events",
         "run_report",
         "run_retro_context",
+        "run_grades",
+        "playbook_candidate",
         "supervisor_wait_event",
         "supervisor_run_inspect",
     ] {
@@ -368,6 +375,12 @@ fn tools_carry_safety_annotations() {
     // unasked must ask first; it replaces only its own derived page.
     assert_eq!(read_only("run_report_html"), Some(false));
     assert_eq!(destructive("run_report_html"), Some(false));
+    // A grading session writes its reading state and the grade into the
+    // run, never anything the run made: not read-only, not destructive.
+    for n in ["run_grade_start", "run_grade_read", "run_grade_submit"] {
+        assert_eq!(read_only(n), None, "tool `{n}`");
+        assert_eq!(destructive(n), Some(false), "tool `{n}`");
+    }
     // The supervisor's server offers read-only tools only.
     let supervisor = WfMcp::for_supervisor(PathBuf::from("."));
     let offered: Vec<String> = supervisor
@@ -378,6 +391,9 @@ fn tools_carry_safety_annotations() {
         .collect();
     assert!(offered.contains(&"run_report".to_string()));
     assert!(!offered.contains(&"run_report_html".to_string()));
+    // A supervisor reads grades but never grades.
+    assert!(offered.contains(&"run_grades".to_string()));
+    assert!(!offered.contains(&"run_grade_submit".to_string()));
 }
 
 #[tokio::test]
@@ -2528,3 +2544,5 @@ mod budget;
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
 mod notify;
+// Run quality: grading sessions, grades and the candidate.
+mod quality;

@@ -3,8 +3,10 @@
 //! the shared error type and the two lookups every domain starts from.
 
 pub mod budget;
+pub mod candidate;
 pub mod capture;
 pub mod decision;
+pub mod grade;
 pub mod intent;
 pub mod memory;
 pub mod meta;
@@ -43,6 +45,19 @@ pub enum ToolError {
     /// surfaces can map it to 409 without a fragile substring search in the text.
     #[error("conflict: {0}")]
     Conflict(String),
+}
+
+/// Refuses `what` when `step` is a run step (see
+/// [`apb_core::step_env::StepCaller::refusal`]): grading a run and deciding
+/// a candidate are never done by a step of a run.
+pub(crate) fn outside_run(
+    step: &apb_core::step_env::StepCaller,
+    what: &str,
+) -> Result<(), ToolError> {
+    match step.refusal(what) {
+        Some(why) => Err(ToolError::Conflict(why)),
+        None => Ok(()),
+    }
 }
 
 impl From<RegistryError> for ToolError {

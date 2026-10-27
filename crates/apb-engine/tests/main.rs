@@ -100,6 +100,9 @@ mod budget_gate_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
 #[cfg(unix)]
+#[path = "suite/candidate_quality_test.rs"]
+mod candidate_quality_test;
+#[cfg(unix)]
 #[path = "suite/candidate_trial_test.rs"]
 mod candidate_trial_test;
 #[path = "suite/child_connector_prepare.rs"]
@@ -184,6 +187,10 @@ mod global_config_test;
 mod global_scope_run_test;
 #[path = "suite/goal_criteria_test.rs"]
 mod goal_criteria_test;
+#[path = "suite/grade_rules_test.rs"]
+mod grade_rules_test;
+#[path = "suite/grade_session_test.rs"]
+mod grade_session_test;
 #[path = "suite/heartbeat_lost_test.rs"]
 mod heartbeat_lost_test;
 #[cfg(unix)]
@@ -265,6 +272,8 @@ mod prompt_cache_test;
 #[cfg(unix)]
 #[path = "suite/protect_test.rs"]
 mod protect_test;
+#[path = "suite/quality_common.rs"]
+mod quality_common;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
 #[path = "suite/quota_pause_test.rs"]
@@ -340,6 +349,8 @@ mod supervisor_commands_test;
 #[cfg(unix)]
 #[path = "suite/token_economy_test.rs"]
 mod token_economy_test;
+#[path = "suite/transcript_read_test.rs"]
+mod transcript_read_test;
 #[cfg(unix)]
 #[path = "suite/transcript_test.rs"]
 mod transcript_test;

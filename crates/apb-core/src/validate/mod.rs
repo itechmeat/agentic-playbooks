@@ -18,6 +18,7 @@ mod list;
 mod node_io;
 mod nodes;
 mod params;
+mod quality;
 mod templates;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -181,6 +182,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
     budget::check_budget(playbook, &mut r); // V96-V98
     params::check_params(playbook, &mut r); // V99, V100
+    quality::check_quality(playbook, &mut r); // V102-V107
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

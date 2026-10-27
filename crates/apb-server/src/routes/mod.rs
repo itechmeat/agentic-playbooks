@@ -11,6 +11,7 @@ pub mod meta;
 pub mod notify;
 pub mod playbooks;
 pub mod profiles;
+pub mod quality;
 pub mod runs;
 // --- 0.23.0 stats (C3) ---
 pub mod stats;

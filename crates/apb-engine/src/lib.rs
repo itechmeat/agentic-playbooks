@@ -28,6 +28,7 @@ pub mod fork_view;
 // forward patches (issue #192)
 pub mod forward_patch;
 pub mod gate;
+pub mod grade;
 pub mod hooks;
 pub mod inspect;
 pub mod invocation;
@@ -51,6 +52,7 @@ pub mod review;
 pub mod run_config;
 pub mod run_doctor;
 pub mod run_estimate;
+pub mod run_history;
 mod run_lineage;
 pub mod run_outcome;
 // --- run retrospective (#192 part 3) ---
@@ -68,6 +70,7 @@ pub mod signals;
 mod stall;
 pub mod state;
 pub mod stop;
+pub mod transcript;
 pub mod workdir;
 pub mod zcode_ui_sync;
 

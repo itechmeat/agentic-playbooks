@@ -245,7 +245,7 @@ pub fn unverified_run_dirs(roots: &[PathBuf]) -> usize {
         .count()
 }
 
-fn created_here(run_dir: &Path) -> bool {
+pub(crate) fn created_here(run_dir: &Path) -> bool {
     run_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -253,7 +253,7 @@ fn created_here(run_dir: &Path) -> bool {
 }
 
 /// Every directory under the given project roots' `.apb/runs`.
-fn candidate_run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn candidate_run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
         // `.apb` and `.apb/runs` must be real directories: a link would
