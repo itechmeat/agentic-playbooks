@@ -5,6 +5,7 @@
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal, runEventJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
+  import { listProgressByNode } from '../lib/listprogress'
   import { runGates } from '../lib/rungates'
   import { runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import { candidateTrialLabel } from '../lib/versioninfo'
@@ -17,6 +18,7 @@
   import RunVerdictPanel from '../lib/RunVerdictPanel.svelte'
   import RunPauseControls from '../lib/RunPauseControls.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
+  import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -84,7 +86,14 @@
       const d = await fetchRun(id, workspace)
       detail = d
       if (d.model) {
-        const flow = toFlow(d.model, d.layout, d.nodes, cachedNodeIds(d.events))
+        const flow = toFlow(
+          d.model,
+          d.layout,
+          d.nodes,
+          cachedNodeIds(d.events),
+          false,
+          listProgressByNode(d.lists),
+        )
         nodes = flow.nodes
         edges = flow.edges
       }
@@ -335,6 +344,9 @@
 
     {#if detail}
       <RunVerdictPanel outcome={detail.outcome} />
+      {#key `${workspace}/${id}`}
+        <ListProgressPanel lists={detail.lists} />
+      {/key}
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
       <AttemptModelsPanel models={detail.attempt_models} />
     {/if}

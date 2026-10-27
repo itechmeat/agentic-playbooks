@@ -17,122 +17,15 @@ use serde::Serialize;
 
 use super::baseline::{RunBaseline, observation_line};
 use super::calls::{CallClass, ClassifiedCall, classified_calls};
+pub use super::claims::{Evidence, EvidenceSource, Gap, GapKind};
 use super::intents::{RunIntent, intents_from};
+use super::lists::{ListOutcome, list_evidence, list_gaps, list_outcomes};
 use super::notes::{RunFinding, RunNotes, RunWarning, finding_line, warning_line};
 use super::{RunGoal, inbox_gap_lines, inbox_gaps_from};
 use crate::event::{Event, EventPayload};
+use crate::list::RunList;
 use crate::run_view::RunView;
 use crate::state::{NodeStatus, RunStatus};
-
-/// What checked a piece of evidence.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceSource {
-    Goal,
-    SuccessCheck,
-    Baseline,
-}
-
-impl EvidenceSource {
-    /// Every source, for the dashboard's label table (`consts.gen.ts`).
-    pub const ALL: [EvidenceSource; 3] = [
-        EvidenceSource::Goal,
-        EvidenceSource::SuccessCheck,
-        EvidenceSource::Baseline,
-    ];
-
-    /// The source in words.
-    pub fn label(self) -> &'static str {
-        match self {
-            EvidenceSource::Goal => "goal",
-            EvidenceSource::SuccessCheck => "success check",
-            EvidenceSource::Baseline => "baseline",
-        }
-    }
-}
-
-/// One thing the engine checked, and what it found.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Evidence {
-    pub source: EvidenceSource,
-    pub subject: String,
-    /// `passed`, `failed`, `error`, `met` or `not_met`.
-    pub result: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub detail: Option<String>,
-}
-
-impl Evidence {
-    /// Whether the check came out in the run's favour.
-    pub fn passed(&self) -> bool {
-        self.result == "passed" || self.result == Verdict::Met.as_str()
-    }
-}
-
-/// Why something is not verified.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GapKind {
-    /// A goal criterion a person confirms.
-    ManualCriterion,
-    /// An agent step that succeeded on its own report only.
-    SelfReportedNode,
-    /// The run ended before its goal criteria were checked.
-    GoalNotChecked,
-    /// A connector write whose effect is not known.
-    UnknownCall,
-    /// A connector response that was cut short.
-    IncompleteResponse,
-    /// Unread inbox events lost to retention.
-    InboxGap,
-    /// An attempt's output was cut.
-    OutputTruncated,
-    /// A baseline observation that could not be compared.
-    BaselineUnknown,
-}
-
-impl GapKind {
-    /// Every kind, for the dashboard's label table (`consts.gen.ts`).
-    pub const ALL: [GapKind; 8] = [
-        GapKind::ManualCriterion,
-        GapKind::SelfReportedNode,
-        GapKind::GoalNotChecked,
-        GapKind::UnknownCall,
-        GapKind::IncompleteResponse,
-        GapKind::InboxGap,
-        GapKind::OutputTruncated,
-        GapKind::BaselineUnknown,
-    ];
-
-    /// Why something is not verified, in words.
-    pub fn label(self) -> &'static str {
-        match self {
-            GapKind::ManualCriterion => "to confirm by hand",
-            GapKind::SelfReportedNode => "self-reported",
-            GapKind::GoalNotChecked => "goal not checked",
-            GapKind::UnknownCall => "call outcome unknown",
-            GapKind::IncompleteResponse => "response cut short",
-            GapKind::InboxGap => "inbox gap",
-            GapKind::OutputTruncated => "output cut",
-            GapKind::BaselineUnknown => "baseline unknown",
-        }
-    }
-}
-
-/// One thing nobody checked.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Gap {
-    pub kind: GapKind,
-    pub subject: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub detail: Option<String>,
-}
 
 /// The baseline told as a story: the problem the before snapshot found,
 /// the change the after snapshot shows, and whether the goal (never the
@@ -159,10 +52,13 @@ pub enum NeedsLookReason {
     Warnings,
     /// Sends nobody can tell went out: a person resolves each.
     UnknownSends,
+    /// List items that need a look.
+    ListItems,
 }
 
 /// A run with a baseline regression, findings or warnings its attempts
-/// reported, or sends whose outcome is not known. Nothing else sets it: a
+/// reported, sends whose outcome is not known, or list items that need a
+/// look. Nothing else sets it: a
 /// failed run says so in its status.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -175,6 +71,10 @@ pub struct NeedsLook {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
     pub unknown_sends: u32,
+    /// List items that need a look.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub list_items: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -201,10 +101,23 @@ impl NeedsLook {
     pub fn from_events(playbook: Option<&Playbook>, events: &[Event]) -> Option<Self> {
         let notes = RunNotes::from_events(events);
         let intents = intents_from(events, apb_core::clock::now_ms_u64());
-        Self::of(current_regressions(playbook, events), &notes, &intents)
+        Self::of(
+            current_regressions(playbook, events),
+            &notes,
+            &intents,
+            crate::list::run_lists(playbook, events)
+                .iter()
+                .map(|l| l.needs_look)
+                .sum(),
+        )
     }
 
-    fn of(regressions: u32, notes: &RunNotes, intents: &[RunIntent]) -> Option<Self> {
+    fn of(
+        regressions: u32,
+        notes: &RunNotes,
+        intents: &[RunIntent],
+        list_items: u32,
+    ) -> Option<Self> {
         let findings = notes.findings.len() as u32;
         let warnings = notes.warnings.len() as u32;
         let unknown_sends = intents.iter().filter(|i| i.is_open_unknown()).count() as u32;
@@ -213,6 +126,7 @@ impl NeedsLook {
             (findings, NeedsLookReason::Findings),
             (warnings, NeedsLookReason::Warnings),
             (unknown_sends, NeedsLookReason::UnknownSends),
+            (list_items, NeedsLookReason::ListItems),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
@@ -224,16 +138,18 @@ impl NeedsLook {
             findings,
             warnings,
             unknown_sends,
+            list_items,
         })
     }
 
-    /// `1 regression, 2 findings, 1 warning, 1 unknown send`.
+    /// `1 regression, 2 findings, 1 warning, 1 unknown send, 2 list items`.
     pub fn line(&self) -> String {
         [
             (self.regressions, "regression", "regressions"),
             (self.findings, "finding", "findings"),
             (self.warnings, "warning", "warnings"),
             (self.unknown_sends, "unknown send", "unknown sends"),
+            (self.list_items, "list item", "list items"),
         ]
         .into_iter()
         .filter(|(n, ..)| *n > 0)
@@ -270,6 +186,10 @@ pub struct OutcomeSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub baseline: Option<BaselineOutcome>,
+    /// Each list node's counts; empty for a run without a list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<ListOutcome>>", optional))]
+    pub lists: Vec<ListOutcome>,
     /// The finish node's answer: the agent's own account, not checked.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -285,6 +205,8 @@ struct Inputs<'a> {
     notes: &'a RunNotes,
     calls: Vec<ClassifiedCall>,
     intents: Vec<RunIntent>,
+    lists: &'a [RunList],
+    list_outcomes: Vec<ListOutcome>,
     /// The run's id: the run directory's name.
     run_id: String,
 }
@@ -314,6 +236,8 @@ impl OutcomeSummary {
             notes: &readout.notes,
             calls: classified_calls(run_dir, &view.events),
             intents: intents_from(&view.events, apb_core::clock::now_ms_u64()),
+            lists: &readout.lists,
+            list_outcomes: list_outcomes(readout.playbook.as_ref(), &readout.lists),
             run_id: run_dir
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -328,6 +252,7 @@ impl OutcomeSummary {
     /// section, items indented by two spaces.
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![self.headline.clone()];
+        out.extend(self.lists.iter().map(ListOutcome::line));
         let mut section = |title: &str, items: Vec<String>| {
             if !items.is_empty() {
                 out.push(format!("{title}:"));
@@ -392,6 +317,7 @@ impl Inputs<'_> {
             current_regressions(self.playbook, &self.view.events),
             notes,
             &self.intents,
+            self.list_outcomes.iter().map(|l| l.needs_look).sum(),
         );
         let verified = self.verified();
         let unverified = self.unverified();
@@ -410,6 +336,7 @@ impl Inputs<'_> {
             findings: notes.findings.clone(),
             warnings: notes.warnings.clone(),
             baseline: self.baseline.map(|b| baseline_story(b, self.goal)),
+            lists: self.list_outcomes,
             agent_summary: None,
         }
     }
@@ -487,6 +414,7 @@ impl Inputs<'_> {
                 });
             }
         }
+        out.extend(list_evidence(&self.list_outcomes));
         if let Some(b) = self.baseline {
             out.extend(
                 b.observations()
@@ -532,8 +460,10 @@ impl Inputs<'_> {
         }
         for id in self.succeeded_nodes() {
             let node = self.playbook.and_then(|p| p.node(id));
+            // A list node's items are told one by one below.
             if let Some(n) = node.filter(|n| matches!(n.kind, NodeKind::AgentTask { .. }))
                 && n.success_check.is_none()
+                && n.list().is_none()
             {
                 out.push(Gap {
                     kind: GapKind::SelfReportedNode,
@@ -542,6 +472,7 @@ impl Inputs<'_> {
                 });
             }
         }
+        out.extend(list_gaps(&self.list_outcomes, self.lists));
         out.extend(self.call_gaps());
         out.extend(self.intent_gaps());
         // The line names the inbox, the lost events and the node that found

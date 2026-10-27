@@ -8,5 +8,5 @@ pub mod prompt;
 mod stamp;
 pub mod view;
 
-pub use ledger::{ItemRecord, ListCounts, ListFold, progress_label};
+pub use ledger::{ItemRecord, ListCounts, ListFold, list_criterion, progress_label};
 pub use view::{ListProgress, RunList, RunListItem, run_lists};

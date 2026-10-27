@@ -1,0 +1,195 @@
+schema: 2
+id: review-panel
+name: Review panel (graph template)
+description: >-
+  Three reviewers read one change side by side, a collector keeps
+  each reviewer's verdict, a fix step addresses the open findings, and only the
+  reviewers whose findings are still open review again, at most three
+  rounds in all. Built from plain nodes and edges; review-panel-list does
+  the same with one list node. See docs/scenarios/document-review-panel.md.
+version: 1.0.0
+defaults:
+  profile: main
+effects: [fs_read, fs_write]
+goal:
+  statement: >-
+    Every reviewer ends with no blocking finding open, or a person decides
+    what is left; no reviewer is dropped between rounds and no test is
+    removed to make a finding go away.
+  criteria:
+    - description: The collector reports the open reviewers of the last round
+      check: { type: marker, marker: "OPEN REVIEWERS:" }
+    - description: Every remark a reviewer left was fixed or answered
+      check: { type: manual }
+# The project's own test command runs before the first step that can change
+# anything and again at the finish, so a fix that breaks a test that passed
+# before shows in the outcome.
+baseline_check:
+  checks:
+    - id: tests
+      description: The project's test suite
+      timeout_seconds: 1800
+      project_checks: { only: [test] }
+nodes:
+  - { id: start, type: start }
+  # One gate per reviewer decides, every round, whether that reviewer runs:
+  # clean in the collector's last state goes straight to the collector, open
+  # reviews again, and with no state yet (the first round) reviews fresh.
+  # The three gates, and so the three reviewers, run side by side.
+  - { id: gate_correctness, type: condition, title: Correctness reviewer needed }
+  - { id: gate_security, type: condition, title: Security reviewer needed }
+  - { id: gate_style, type: condition, title: Style reviewer needed }
+  - id: review_correctness
+    type: agent_task
+    title: Review correctness
+    expected_duration: 10m
+    prompt: >-
+      Review the change described in {{run.instruction}} for correctness:
+      wrong results, missed cases, broken error handling. Write the outputs
+      blocking (the number of blocking findings, 0 when none) and findings
+      (one line per finding with file and line).
+    outputs: { fields: [blocking, findings] }
+  - id: review_security
+    type: agent_task
+    title: Review security
+    expected_duration: 10m
+    prompt: >-
+      Review the change described in {{run.instruction}} for security:
+      injection, secrets, unsafe input handling, missing permission checks.
+      Write the outputs blocking (the number of blocking findings, 0 when
+      none) and findings (one line per finding with file and line).
+    outputs: { fields: [blocking, findings] }
+  - id: review_style
+    type: agent_task
+    title: Review style
+    expected_duration: 10m
+    prompt: >-
+      Review the change described in {{run.instruction}} for readability
+      and the project's conventions. Write the outputs blocking (the number
+      of blocking findings, 0 when none) and findings (one line per finding
+      with file and line).
+    outputs: { fields: [blocking, findings] }
+  # A re-review continues the reviewer's own session when the engine can
+  # (the validator warns that it may start fresh, since the gate picks the
+  # review or the re-review); the remarks are in the prompt either way, so
+  # a fresh session still knows what it asked for.
+  - id: rereview_correctness
+    type: agent_task
+    title: Review correctness again
+    expected_duration: 5m
+    continue_session: review_correctness
+    prompt: >-
+      Check again whether your correctness remarks are resolved after the
+      fix: {{nodes.collect.output.remarks_correctness}}. Review only those
+      remarks and anything the fix broke. Write the outputs blocking and
+      findings as before.
+    outputs: { fields: [blocking, findings] }
+  - id: rereview_security
+    type: agent_task
+    title: Review security again
+    expected_duration: 5m
+    continue_session: review_security
+    prompt: >-
+      Check again whether your security remarks are resolved after the fix:
+      {{nodes.collect.output.remarks_security}}. Review only those remarks
+      and anything the fix broke. Write the outputs blocking and findings
+      as before.
+    outputs: { fields: [blocking, findings] }
+  - id: rereview_style
+    type: agent_task
+    title: Review style again
+    expected_duration: 5m
+    continue_session: review_style
+    prompt: >-
+      Check again whether your style remarks are resolved after the fix:
+      {{nodes.collect.output.remarks_style}}. Review only those remarks and
+      anything the fix broke. Write the outputs blocking and findings as
+      before.
+    outputs: { fields: [blocking, findings] }
+  # The collector waits for every reviewer of the round (`join: all` on each
+  # edge into it): a reviewer that runs again this round is waited for, one
+  # its gate kept out counts as arrived.
+  - id: collect
+    type: agent_task
+    title: Collect the reviewers' verdicts
+    expected_duration: 2m
+    require_verdict: true
+    prompt: >-
+      Keep the panel's state. Your previous state, empty in the first
+      round: {{nodes.collect.output}}. The reviewers' latest outputs:
+      correctness {{nodes.review_correctness.output}} then
+      {{nodes.rereview_correctness.output}}; security
+      {{nodes.review_security.output}} then {{nodes.rereview_security.output}};
+      style {{nodes.review_style.output}} then {{nodes.rereview_style.output}}
+      (the later one is the newer when both are set). A reviewer clean in
+      your previous state stays clean. Never drop a reviewer: every one of
+      the three keeps a state. Write the outputs correctness, security and
+      style (each `open` or `clean`), open_count (how many are open), and
+      remarks_correctness, remarks_security, remarks_style (the open
+      findings of each, empty when clean). End your reply with a line `OPEN
+      REVIEWERS: <names, or none>`.
+    outputs:
+      fields: [correctness, security, style, open_count, remarks_correctness, remarks_security, remarks_style]
+  - id: fix
+    type: agent_task
+    title: Fix the open findings
+    expected_duration: 20m
+    max_retries: 1
+    # A fix that deletes or edits a test fails its attempt and is undone.
+    protect: ["tests/**", "**/*_test.*"]
+    prompt: >-
+      Fix the open review findings: correctness
+      {{nodes.collect.output.remarks_correctness}}; security
+      {{nodes.collect.output.remarks_security}}; style
+      {{nodes.collect.output.remarks_style}}. Do not change or remove
+      tests to make a finding go away.
+  - { id: fix_round, type: condition, title: Another fix round }
+  - { id: next_round, type: condition, title: Start the next round }
+  - id: human_review
+    type: human_review
+    title: Decide what is left
+    prompt: >-
+      Three rounds did not close every finding. The open reviewers and
+      their remarks are in the collector's output; accept the change as it
+      is or stop.
+    options: [accept, stop]
+  - { id: done, type: finish, outcome: success }
+  # A person's acceptance ends apart from a clean panel, so the outcome says
+  # which of the two it was.
+  - { id: accepted, type: finish, outcome: success }
+  - { id: stopped, type: finish, outcome: failure }
+edges:
+  # Every round forks into the three gates; each gate leads to its reviewer
+  # or straight to the collector, and every reviewer leads to the collector.
+  - { from: start, to: gate_correctness }
+  - { from: start, to: gate_security }
+  - { from: start, to: gate_style }
+  - { from: gate_correctness, to: collect, join: all, condition: { type: output_field, node: collect, field: correctness, equals: clean } }
+  - { from: gate_correctness, to: rereview_correctness, condition: { type: output_field, node: collect, field: correctness, equals: open } }
+  - { from: gate_correctness, to: review_correctness, fallback: true }
+  - { from: review_correctness, to: collect, join: all }
+  - { from: rereview_correctness, to: collect, join: all }
+  - { from: gate_security, to: collect, join: all, condition: { type: output_field, node: collect, field: security, equals: clean } }
+  - { from: gate_security, to: rereview_security, condition: { type: output_field, node: collect, field: security, equals: open } }
+  - { from: gate_security, to: review_security, fallback: true }
+  - { from: review_security, to: collect, join: all }
+  - { from: rereview_security, to: collect, join: all }
+  - { from: gate_style, to: collect, join: all, condition: { type: output_field, node: collect, field: style, equals: clean } }
+  - { from: gate_style, to: rereview_style, condition: { type: output_field, node: collect, field: style, equals: open } }
+  - { from: gate_style, to: review_style, fallback: true }
+  - { from: review_style, to: collect, join: all }
+  - { from: rereview_style, to: collect, join: all }
+  - { from: collect, to: done, condition: { type: output_field, node: collect, field: open_count, equals: "0" } }
+  - { from: collect, to: fix_round, fallback: true }
+  # Two fixes at most, each reviewed in the next round: the edge into the
+  # fix is bounded, and once it is spent (or a fix fails) the fallback hands
+  # what is left to a person, so no fix goes unreviewed.
+  - { from: fix_round, to: fix, max_traversals: 2 }
+  - { from: fix_round, to: human_review, fallback: true }
+  - { from: fix, to: next_round, condition: { type: node_status, node: fix, equals: success } }
+  - { from: fix, to: human_review, fallback: true }
+  - { from: next_round, to: gate_correctness }
+  - { from: next_round, to: gate_security }
+  - { from: next_round, to: gate_style }
+  - { from: human_review, to: accepted, condition: { type: review_status, equals: accept } }
+  - { from: human_review, to: stopped, condition: { type: review_status, equals: stop } }

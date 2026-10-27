@@ -240,6 +240,22 @@ pub struct RunState {
     /// revival of the delivering node makes it stale. A pair leaves the set
     /// when its target runs again or its revival ends.
     pub delivered_since_revival: BTreeSet<(String, String)>,
+    /// Where each node's latest execution sits in the journal: the seq of
+    /// its latest `node_started` and `node_finished`, and of the latest
+    /// `edge_traversed` of each hop. Routing reads a node's latest
+    /// execution only ([`RunState::hop_of_latest_run`]), and a join inside a
+    /// loop does not count a delivery it already consumed
+    /// ([`RunState::join_consumed`]): the earlier rounds' results stay in
+    /// `nodes` and `journaled_hops`.
+    pub seqs: NodeSeqs,
+}
+
+/// The journal positions behind [`RunState::seqs`].
+#[derive(Debug, Default, Clone)]
+pub struct NodeSeqs {
+    pub started: BTreeMap<String, u64>,
+    pub finished: BTreeMap<String, u64>,
+    pub hops: BTreeMap<(String, String), u64>,
 }
 
 /// One revival in force (see [`RunState::revivals`]).
@@ -299,6 +315,36 @@ impl RunState {
             && self
                 .journaled_hops
                 .contains(&(from.to_string(), to.to_string()))
+    }
+
+    /// Whether the journaled hop `from -> to` was taken by `from`'s latest
+    /// execution: recorded after `from` last started. A hop of an earlier
+    /// loop round is history, not where the node goes now. With no position
+    /// on record (a state built by hand) the hop counts.
+    pub fn hop_of_latest_run(&self, from: &str, to: &str) -> bool {
+        let hop = self.seqs.hops.get(&(from.to_string(), to.to_string()));
+        match (hop, self.seqs.started.get(from)) {
+            (Some(hop), Some(start)) => hop > start,
+            _ => true,
+        }
+    }
+
+    /// Whether `join` already consumed `source`'s latest finish: the join's
+    /// latest execution finished after it, and the join has neither started
+    /// again nor been revived since. Inside a loop such a finish belongs to
+    /// the round before (`parallel::arrival` asks only for a source in the
+    /// join's own cycle). A join still running (a crash or a pause while it
+    /// ran, then a resume) or one a re-run revived has consumed nothing.
+    pub fn join_consumed(&self, source: &str, join: &str) -> bool {
+        let Some(done) = self.seqs.finished.get(source) else {
+            return false;
+        };
+        let Some(join_done) = self.seqs.finished.get(join) else {
+            return false;
+        };
+        join_done > done
+            && self.seqs.started.get(join).is_none_or(|s| s < join_done)
+            && !self.revived.contains(join)
     }
 
     /// Applies a revival without a start of its own (tests, mostly): see
@@ -391,6 +437,7 @@ impl RunState {
                 EventPayload::RunStarted { .. } => s.run_status = RunStatus::Running,
                 EventPayload::RunProvenance { .. } => {}
                 EventPayload::NodeStarted { node, .. } => {
+                    s.seqs.started.insert(node.clone(), e.seq);
                     s.nodes.insert(node.clone(), NodeStatus::Running);
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
@@ -434,6 +481,7 @@ impl RunState {
                     ..
                 } => {
                     open.retain(|(n, _)| n != node);
+                    s.seqs.finished.insert(node.clone(), e.seq);
                     s.ran_again(node);
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
@@ -606,6 +654,7 @@ impl RunState {
                     uncounted,
                 } => {
                     s.journaled_hops.insert((from.clone(), to.clone()));
+                    s.seqs.hops.insert((from.clone(), to.clone()), e.seq);
                     if s.revived.contains(to) && !s.revived.contains(from) {
                         s.delivered_since_revival
                             .insert((from.clone(), to.clone()));

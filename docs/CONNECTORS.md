@@ -395,7 +395,9 @@ An intent name is 1 to 64 characters of `a-z`, `0-9`, `.`, `_` and `-`,
 starting with a letter or a digit. Without `--intent` the label is a hash of
 the arguments, so a repeat that is word for word the same is still
 recognised, but a reworded one is not: tell agents to pass a stable name and
-the same name on every attempt. The connector block of the agent's prompt
+the same name on every attempt. A list item's send without `--intent` is
+the exception: its label is the fixed `item:send`, so one item sends a
+function once (see "Sending once in list mode" below). The connector block of the agent's prompt
 marks such functions `send-once` and says so.
 
 What counts is the node's effect scope: everything since the node last
@@ -451,8 +453,10 @@ offers, declared per function:
   refused with `unknown_effect` until a person decides, unless the binding
   says `on_unknown: resend`.
 
-`idempotency` is allowed only on HTTP, mock and smtp functions that are not
-`read_only` (an smtp function may declare only `mode: none`), and the
+`idempotency` is allowed only on HTTP, mock, smtp and imap functions that
+are not `read_only` (an smtp or imap function may declare only `mode:
+none`, since neither protocol has a key or a marker to reconcile with), and
+the
 manifest is refused at load time when a `key` field is empty, is also an
 argument, or sits in a body that does not always render as a JSON object
 (an object, or `{{args}}` with an object `args_schema`), a header collides, a
@@ -488,6 +492,29 @@ applies to `none` sends and to `key` sends after their window, never to
 `marker` sends. The validator refuses `on_unknown` on a binding none of whose
 functions declares `none` or `key` (V69), and `resend` on a binding that
 grants an `irreversible` function (V84).
+
+### Sending once in list mode
+
+A list node (`list:`, HOWTO-authoring "List processing") runs its step once
+per item and repeats items by design, so every write function it is granted
+must declare `idempotency` (V88). The send ledger keys each item's sends by
+the node and the item, so one item's send never answers another's. Without
+`--intent` an item's send carries the fixed label `item:send`: one send per
+function per item, also when a rerun words the payload differently. An item
+that sends one function more than once names each send with its own
+`--intent`. A call that names an item with no running attempt of its own
+is refused, so a made-up `APB_ITEM_ID` can neither send nor reset a spent
+`max_calls`. When an
+item's step fails with a send of unknown outcome, a `key` or `marker` send
+gets one free reconcile run of that item; a `none` send leaves the item
+needing a look (`unknown_send`), and no retry runs it again until a person
+resolves the send, also under `on_unknown: resend` (once the item has
+settled, no later round, visit or retry runs it again on its own while that
+send's outcome is unknown).
+The declarations on `asana.create_task` and
+`imap.mark_read` exist so those functions can be used in list steps, but
+they apply to every binding: outside a list too, a repeat of a send whose
+outcome is unknown is refused unless the binding says `on_unknown: resend`.
 
 ### A person's decision
 
@@ -682,7 +709,11 @@ result's `next_page.offset` field and pass it back on the following
 call, omitting it on the first call. `search_tasks` is a fuzzy typeahead
 match against task names, not a full-text search; use `list_tasks` with
 a project filter when a complete, predictable result set matters more.
-Healthcheck: `get_me`.
+`create_task` declares `idempotency: { mode: none, result_ref: data.gid }`:
+Asana takes no idempotency key, so a task whose answer was lost is refused
+on a repeat until a person decides (the task may exist), or created again
+under `on_unknown: resend`; a confirmed send keeps the created task's gid
+as its reference. Healthcheck: `get_me`.
 
 ### imap
 
@@ -694,7 +725,11 @@ differ. `search_messages` and `get_message` open the folder read-only
 with `EXAMINE` and fetch content with `BODY.PEEK[]`, so reading a
 message never marks it seen; only `mark_read` and `mark_unread` change
 anything on the server, and each is a separate, independently grantable
-function. `use_tls` defaults to `true` when omitted; only set it to
+function. `mark_read` declares `idempotency: { mode: none }` (`mark_unread`
+declares no `idempotency`), so a list step may be granted it (V88); a `mark_read`
+whose answer was lost is refused on a repeat until a person decides, or
+sent again under `on_unknown: resend`, which suits it since marking a
+message read twice does no harm. `use_tls` defaults to `true` when omitted; only set it to
 `false` for a local plaintext test fixture, never for a real provider.
 Gmail (`imap.gmail.com`, port `993`) needs 2-Step Verification enabled
 before an app password can be generated; a Google Workspace account

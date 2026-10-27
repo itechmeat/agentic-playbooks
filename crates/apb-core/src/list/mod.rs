@@ -113,9 +113,9 @@ pub struct ItemsFrom {
 }
 
 /// Which items of the source are kept: those whose `field` equals `equals`,
-/// or, from a list node, those in `state`. `field` and `equals` go together
-/// (V86); `equals: null` keeps items whose field is present and null (see
-/// [`items::apply_filter`]).
+/// and, from a list node, those in `state`; with both set, an item must
+/// pass both. `field` and `equals` go together (V86); `equals: null` keeps
+/// items whose field is present and null (see [`items::apply_filter`]).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemFilter {

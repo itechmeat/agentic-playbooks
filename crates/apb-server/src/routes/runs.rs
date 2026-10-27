@@ -88,6 +88,11 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub notes: Option<apb_engine::run_outcome::RunNotes>,
+    /// Each list node's visit with its items; empty for a run without a
+    /// list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(test, ts(as = "Option<Vec<apb_engine::list::RunList>>", optional))]
+    pub lists: Vec<apb_engine::list::RunList>,
     /// The candidate trial this run was (issue #192), with its verdict;
     /// absent for every other run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +246,7 @@ pub(crate) async fn get_run_handler(
     let goal = readout.goal;
     let baseline = readout.baseline;
     let notes = Some(readout.notes).filter(|n| !n.is_empty());
+    let lists = readout.lists;
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
     let pause = view.pause().cloned();
     let nodes = view.nodes();
@@ -273,6 +279,7 @@ pub(crate) async fn get_run_handler(
         outcome,
         baseline,
         notes,
+        lists,
         attempt_models,
         goal,
         candidate_trial,

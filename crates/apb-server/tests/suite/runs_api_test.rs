@@ -1564,3 +1564,81 @@ async fn resume_refuses_a_busy_workdir_and_leaves_the_run_paused() {
         apb_engine::state::RunStatus::Paused
     );
 }
+
+const LISTED: &str = r#"
+schema: 2
+id: listed
+name: listed
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: start, type: start }
+  - id: rows
+    type: agent_task
+    prompt: Check the row in the item section.
+    list:
+      items: { inline: [ { id: a }, { id: b } ] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: rows }
+  - { from: rows, to: done }
+"#;
+
+fn item_settled(item: &str, state: &str) -> apb_engine::event::EventPayload {
+    apb_engine::event::EventPayload::ListItemSettled {
+        node: "rows".into(),
+        item: item.into(),
+        state: state.into(),
+        verdict: None,
+        note: None,
+        reason: (state == "needs_look").then(|| "failed".into()),
+        output: None,
+        round: 0,
+        carried: false,
+        check: None,
+        digest: None,
+    }
+}
+
+#[tokio::test]
+async fn run_detail_carries_the_lists_and_the_listing_marks_items_that_need_a_look() {
+    let dir = seed_with_run();
+    let started = apb_engine::event::EventPayload::ListStarted {
+        node: "rows".into(),
+        total: 2,
+        filtered_out: 0,
+        items_digest: "d".into(),
+        batch_size: 2,
+        parallel: 1,
+        reopened: false,
+    };
+    seed_gate_run_yaml(
+        dir.path(),
+        "listed-1",
+        LISTED,
+        &[
+            started,
+            item_settled("a", "passed"),
+            item_settled("b", "needs_look"),
+        ],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/listed-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let list = &json["lists"][0];
+    assert_eq!(list["node"], "rows");
+    assert_eq!(
+        (list["passed"].as_u64(), list["needs_look"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["items"][1]["reason"], "failed");
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, runs) = get_json(app, "/api/runs").await;
+    let entry = runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "listed-1")
+        .expect("the run is listed");
+    assert_eq!(entry["needs_look"]["list_items"], 1);
+}

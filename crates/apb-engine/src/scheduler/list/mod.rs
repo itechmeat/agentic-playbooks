@@ -71,7 +71,7 @@ pub(crate) fn execute(
         }
         _ => String::new(),
     };
-    let run = ListRun {
+    let mut run = ListRun {
         ctx,
         node,
         spec,
@@ -82,8 +82,14 @@ pub(crate) fn execute(
         workers: spec.workers(opts.max_parallel),
         root: super::judge::cfg_root(ctx.run_dir),
         spawn_env: ctx.cfg.spawn_env(),
+        earlier: None,
     };
-    open_visit(&run, loaded.filtered_out)?;
+    let events = open_visit(&run, loaded.filtered_out)?;
+    // Under `rerun: not_passed` an item run again in a later visit is told
+    // what it reported and what its check said the visit before.
+    if spec.rerun == RerunPolicy::NotPassed {
+        run.earlier = ListFold::previous(&events, node_id);
+    }
     let outcome = batch::run_batches(&run)?;
     match outcome {
         batch::End::Done => compose(&run),
@@ -104,15 +110,17 @@ pub(crate) fn execute(
 /// same items, reopen a failed one a supervisor retried, or start a new one
 /// (carrying items that passed last time under `rerun: not_passed`). An
 /// item whose earlier send's outcome is still unknown never runs again
-/// until a person settles that send.
-fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<(), EngineError> {
+/// until a person settles that send. Returns the journal as it read it once
+/// the visit's start is in it (the visits before it are as they stand).
+fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<Vec<Event>, EngineError> {
     let node = &run.node.id;
     let events = read_all(run.ctx.run_dir)?;
     let digest = items_digest(&run.items);
     let fold = ListFold::of(&events, node);
     let same = fold.as_ref().filter(|f| f.items_digest == digest);
     if same.is_some_and(ListFold::is_open) {
-        return settle_too_large(run, same);
+        settle_too_large(run, same)?;
+        return Ok(events);
     }
     let reopen = same.is_some_and(|f| retried_after_failure(&events, node, f.started_seq));
     let sends = batch::ItemSends::of(&events, node);
@@ -136,8 +144,9 @@ fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<(), Engine
         }
         park_unknown_sends(run, &sends)?;
     }
-    let now = ListFold::of(&read_all(run.ctx.run_dir)?, node);
-    settle_too_large(run, now.as_ref())
+    let events = read_all(run.ctx.run_dir)?;
+    settle_too_large(run, ListFold::of(&events, node).as_ref())?;
+    Ok(events)
 }
 
 /// Whether a supervisor retried `node` after the visit starting at `seq`

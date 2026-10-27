@@ -213,7 +213,13 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         out["pause"] = json!(p);
     }
     add_journal_extras(&mut out, &view);
-    add_outcome_blocks(&mut out, &view, &dir, &view.readout(&dir));
+    add_outcome_blocks(
+        &mut out,
+        &view,
+        &dir,
+        &view.readout(&dir),
+        ListItems::NeedingALook,
+    );
     add_candidate_trial(&mut out, &view, &dir);
     // Issue #195: what a fork's branch-failure policy cancelled and which
     // joins refused; absent when nothing did.
@@ -237,9 +243,28 @@ fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, di
 
 // --- 0.23.0: run outcome blocks (C1, C7) ---
 
+/// Which items of each list a run surface carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListItems {
+    /// `run_status`: the counts and at most [`STATUS_LOOK_ITEMS`] items
+    /// that need a look.
+    NeedingALook,
+    /// `run_report`: every item up to [`REPORT_LIST_ITEMS`], and how many
+    /// it left out.
+    All,
+}
+
+/// The most items that need a look `run_status` names per list.
+const STATUS_LOOK_ITEMS: usize = 50;
+
+/// The most items `run_report` names per list; `items_truncated` counts
+/// the rest, which `apb runs <id> --items` prints.
+const REPORT_LIST_ITEMS: usize = 500;
+
 /// The run's goal with the criteria results (C1), the commits its nodes made
-/// (C7), the inbox gaps its connector reads found, its baseline check and the
-/// findings and warnings its attempts reported, each only when there is one:
+/// (C7), the inbox gaps its connector reads found, its baseline check, the
+/// findings and warnings its attempts reported and its lists, each only when
+/// there is one:
 /// a run of a playbook without a goal on a tree without commits reads as
 /// before. Shared by `run_status` and `run_report`.
 fn add_outcome_blocks(
@@ -247,6 +272,7 @@ fn add_outcome_blocks(
     view: &apb_engine::run_view::RunView,
     dir: &Path,
     readout: &apb_engine::run_outcome::RunReadout,
+    list_items: ListItems,
 ) {
     if let Some(goal) = &readout.goal {
         out["goal"] = json!(goal);
@@ -280,6 +306,41 @@ fn add_outcome_blocks(
     if !readout.notes.is_empty() {
         out["notes"] = json!(readout.notes);
     }
+    // Each list node's counts and items; absent for a run without a list.
+    if !readout.lists.is_empty() {
+        out["lists"] = match list_items {
+            ListItems::All => json!(
+                readout
+                    .lists
+                    .iter()
+                    .map(|l| {
+                        let (first, left_out) = l.first_items(REPORT_LIST_ITEMS);
+                        with_truncated(json!(first), left_out)
+                    })
+                    .collect::<Vec<_>>()
+            ),
+            ListItems::NeedingALook => json!(
+                readout
+                    .lists
+                    .iter()
+                    .map(|l| {
+                        let named = l.needing_a_look(STATUS_LOOK_ITEMS);
+                        let left_out = (l.needs_look as usize).saturating_sub(named.items.len());
+                        with_truncated(json!(named), left_out)
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        };
+    }
+}
+
+/// A list as a surface carries it, with `items_truncated` counting the
+/// items its `items` leaves out (absent when none).
+fn with_truncated(mut list: Value, left_out: usize) -> Value {
+    if left_out > 0 {
+        list["items_truncated"] = json!(left_out);
+    }
+    list
 }
 
 // --- end of the 0.23.0 blocks ---
@@ -564,7 +625,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "answer": answer,
     });
     add_journal_extras(&mut base, &view);
-    add_outcome_blocks(&mut base, &view, &dir, &readout);
+    add_outcome_blocks(&mut base, &view, &dir, &readout, ListItems::All);
 
     // duration_table is always present (empty when there is no snapshot), as
     // before; it is now built from the single events read above.

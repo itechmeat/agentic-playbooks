@@ -4092,9 +4092,12 @@ pub(crate) fn advance_frontier(
     // taken hop, so it is filtered out: `journaled_hops` is what
     // `routed_targets`/`pending_heads` trust as "every hop the drive loop
     // actually took", and the record outlives even a patch that removes the
-    // edge. Deduplicated against the folded hop set (which includes prior
-    // drives), so a loop cannot grow the journal without bound; the counted
-    // record below is deliberately NOT deduped.
+    // edge. Deduplicated per execution of `node`: a hop already journaled
+    // after `node` last started (a resume advancing past it again) is not
+    // written twice, while every loop round writes its own, because routing
+    // reads only the hops of a node's latest execution
+    // (`RunState::hop_of_latest_run`). The counted record below is
+    // deliberately NOT deduped.
     for e in &selected {
         if raced_out.contains(&e.to) {
             continue;
@@ -4102,6 +4105,7 @@ pub(crate) fn advance_frontier(
         if state
             .journaled_hops
             .contains(&(node.to_string(), e.to.clone()))
+            && state.hop_of_latest_run(node, &e.to)
         {
             continue;
         }

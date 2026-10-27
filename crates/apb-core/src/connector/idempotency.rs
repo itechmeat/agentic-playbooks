@@ -160,7 +160,21 @@ pub enum FunctionKind {
     Http,
     Mock,
     Smtp,
+    /// A native imap function: like smtp, it has no key or marker to
+    /// reconcile with, so it may declare only `none`.
+    Imap,
     Other,
+}
+
+impl FunctionKind {
+    /// The native mail transport this kind is, by name.
+    pub fn native_transport(self) -> Option<&'static str> {
+        match self {
+            FunctionKind::Smtp => Some("smtp"),
+            FunctionKind::Imap => Some("imap"),
+            FunctionKind::Http | FunctionKind::Mock | FunctionKind::Other => None,
+        }
+    }
 }
 
 /// The parts of one manifest function the rules read.
@@ -289,15 +303,16 @@ fn check_function(
     }
     match (f.kind, idem) {
         (FunctionKind::Http | FunctionKind::Mock, _) => {}
-        (FunctionKind::Smtp, Idempotency::None { .. }) => {}
-        (FunctionKind::Smtp, _) => {
+        (FunctionKind::Smtp | FunctionKind::Imap, Idempotency::None { .. }) => {}
+        (FunctionKind::Smtp | FunctionKind::Imap, _) => {
+            let transport = f.kind.native_transport().unwrap_or("native");
             return Err(invalid(format!(
-                "smtp function `{name}` may only declare idempotency mode `none`"
+                "{transport} function `{name}` may only declare idempotency mode `none`"
             )));
         }
         (FunctionKind::Other, _) => {
             return Err(invalid(format!(
-                "function `{name}` declares idempotency, which only HTTP, mock and smtp functions support"
+                "function `{name}` declares idempotency, which only HTTP, mock, smtp and imap functions support"
             )));
         }
     }

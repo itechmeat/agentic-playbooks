@@ -239,7 +239,7 @@ fn run_item(run: &ListRun<'_, '_, '_>, fold: &ListFold, id: &str) -> Result<Ran,
     let exec = ItemExec {
         id: id.to_string(),
         template: run.template.clone(),
-        section: item_section(item, ordinal, run.items.len(), fold.item(id)),
+        section: item_section(item, ordinal, run.items.len(), run.previous(fold, id)),
         outputs: run.spec.item_outputs.clone(),
         checked: run.spec.check.is_some(),
         file: files.item,

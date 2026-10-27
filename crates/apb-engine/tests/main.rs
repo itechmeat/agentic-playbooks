@@ -188,6 +188,9 @@ mod interactive_reprompt_test;
 #[path = "suite/interactive_timeout_test.rs"]
 mod interactive_timeout_test;
 #[cfg(unix)]
+#[path = "suite/join_loop_test.rs"]
+mod join_loop_test;
+#[cfg(unix)]
 #[path = "suite/join_revive_test.rs"]
 mod join_revive_test;
 #[path = "suite/journal_compat_test.rs"]
@@ -262,10 +265,15 @@ mod resume_capture_test;
 mod resume_test;
 #[path = "suite/retry_test.rs"]
 mod retry_test;
+#[cfg(unix)]
+#[path = "suite/review_panel_test.rs"]
+mod review_panel_test;
 #[path = "suite/review_state_test.rs"]
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[path = "suite/run_outcome_list_test.rs"]
+mod run_outcome_list_test;
 #[path = "suite/run_outcome_test.rs"]
 mod run_outcome_test;
 #[path = "suite/run_provenance_test.rs"]

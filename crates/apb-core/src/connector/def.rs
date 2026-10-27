@@ -381,6 +381,8 @@ impl FunctionSpec {
             FunctionKind::Mock
         } else if self.is_smtp() {
             FunctionKind::Smtp
+        } else if self.is_imap() {
+            FunctionKind::Imap
         } else {
             FunctionKind::Other
         };

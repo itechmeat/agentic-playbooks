@@ -94,7 +94,7 @@ apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
 apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal)
-apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome)
+apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item)
 apb wait <run>      block until a run finishes, needs input or stops
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
 apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
@@ -149,7 +149,7 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 - [Eval suites](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
 - [Host integration](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
 - [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
-- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings, the retry briefing, `Apb-Run` trailer reporting
+- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, list processing (`list:` runs a step once per item, in batches, with an engine check per item and per-item state kept across retries, pauses and loops), goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings, the retry briefing, `Apb-Run` trailer reporting
 - [Guardrails](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
 - [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
 - [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust, sending once (the send ledger, `--intent`, `on_unknown`)
@@ -164,3 +164,4 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 
 - [Design spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-07-08-workflows-cli-design.md): full system design and rationale
 - [Agent profiles spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-07-12-agent-profiles-design.md): profiles, trust, skills, scope resolution
+- [List processing spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-10-27-list-processing-design.md): list nodes, the item state machine, item checks, send-once per item, the review panel examples

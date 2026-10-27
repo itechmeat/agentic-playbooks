@@ -1438,8 +1438,9 @@ pub enum EventPayload {
         /// Which check decided (`output`, `script`, `connector`, `judge`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         check: Option<String>,
-        /// The digest of the item's content, on a pass: `rerun: not_passed`
-        /// carries a passed item only while its content is the same.
+        /// The digest of the item's content: `rerun: not_passed` carries a
+        /// passed item only while its content is the same, and a later
+        /// visit shows an item what it reported before only then.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<String>,
     },
@@ -2312,20 +2313,51 @@ pub fn read_journal(run_dir: &Path) -> Result<JournalRead, EngineError> {
 
 fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<JournalRead, EngineError> {
     let path = run_dir.join("events.jsonl");
-    let mut out = JournalRead::default();
     if !path.is_file() {
-        return Ok(out);
+        return Ok(JournalRead::default());
     }
-    // An unparsable line is only forgiven once nothing follows it, so the
-    // verdict is deferred: the next line proves it was not the tail.
-    let mut torn: Option<EngineError> = None;
     let bytes = std::fs::read(&path)?;
-    for line in journal_lines(&bytes) {
+    match parse_journal(&bytes, tolerate_torn_tail) {
+        // A strict reader outside the append lock can catch another writer
+        // mid-line (a batch member's attempt journaling while the drive
+        // routes a sibling). Read again once that write is done: under the
+        // lock no line is half written, so a tail still torn then is a
+        // writer that died mid-line, and stays an error.
+        Err(Unreadable::Tail(_)) => {
+            let bytes = with_journal_lock(run_dir, || std::fs::read(&path))??;
+            parse_journal(&bytes, false).map_err(Unreadable::into_error)
+        }
+        other => other.map_err(Unreadable::into_error),
+    }
+}
+
+/// Why a journal's bytes did not parse: a bad final line (possibly a write
+/// still in progress) or a bad line with more after it.
+enum Unreadable {
+    Tail(EngineError),
+    Middle(EngineError),
+}
+
+impl Unreadable {
+    fn into_error(self) -> EngineError {
+        match self {
+            Unreadable::Tail(e) | Unreadable::Middle(e) => e,
+        }
+    }
+}
+
+/// Parses a journal snapshot. An unparsable line is only forgiven once
+/// nothing follows it, so the verdict is deferred: the next line proves it
+/// was not the tail. Strict, a bad tail is [`Unreadable::Tail`].
+fn parse_journal(bytes: &[u8], tolerate_torn_tail: bool) -> Result<JournalRead, Unreadable> {
+    let mut out = JournalRead::default();
+    let mut torn: Option<EngineError> = None;
+    for line in journal_lines(bytes) {
         // Any further line at all proves the stored candidate was not the
         // tail, a blank one included: only end-of-file makes a torn line
         // forgivable, so this must run before the blank-line skip.
         if let Some(e) = torn.take() {
-            return Err(e);
+            return Err(Unreadable::Middle(e));
         }
         let parsed = line.and_then(|line| {
             if line.trim().is_empty() {
@@ -2335,13 +2367,13 @@ fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Journal
             }
         });
         if let Err(err) = parsed {
-            if !tolerate_torn_tail {
-                return Err(err);
-            }
             torn = Some(err);
         }
     }
-    Ok(out)
+    match torn {
+        Some(e) if !tolerate_torn_tail => Err(Unreadable::Tail(e)),
+        _ => Ok(out),
+    }
 }
 
 #[cfg(test)]
@@ -2824,6 +2856,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         torn_log(dir.path());
         assert!(read_all(dir.path()).is_err());
+    }
+
+    /// A strict reader that catches a line another writer is still writing
+    /// waits for that write under the append lock and reads it whole.
+    #[test]
+    fn read_all_reads_a_line_a_live_writer_is_finishing() {
+        let dir = tempfile::tempdir().unwrap();
+        torn_log(dir.path());
+        let path = dir.path().join("events.jsonl");
+        let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+        let held = writer.try_clone().unwrap();
+        let lock = JournalLock::required(&held).unwrap();
+        let reader = {
+            let dir = dir.path().to_path_buf();
+            std::thread::spawn(move || read_all(&dir))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        writer
+            .write_all(b"ted\",\"node\":\"a\",\"attempt\":1}\n")
+            .unwrap();
+        drop(lock);
+        let events = reader.join().unwrap().unwrap();
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

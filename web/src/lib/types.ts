@@ -21,6 +21,9 @@ export interface PlaybookNode {
   id: string
   type: string
   title?: string | null
+  // A `list:` block: the node runs its step once per item. Only its
+  // presence matters to the graph.
+  list?: Record<string, unknown> | null
   [key: string]: unknown
 }
 

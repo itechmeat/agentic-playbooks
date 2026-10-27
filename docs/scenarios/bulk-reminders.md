@@ -21,16 +21,21 @@ must not send anything twice.
 
 ## 3. Steps
 
-1. Load the list from the CSV, row by row, unchanged. (agent node, read-only)
+1. Load the list from the CSV, row by row, unchanged, keyed by invoice
+   number. (agent node, read-only, declared output `rows`)
 2. Check every row against the mailbox for a payment confirmation naming its
-   invoice; verdict paid or unpaid per row, with evidence. (agent node, a
-   check per item: imap search_messages)
+   invoice; verdict paid or unpaid per row, with evidence. (list node over
+   `rows`, connector read: imap search_messages, an `output` item check
+   that a row whose search did not run needs a look instead of reading as
+   unpaid)
 3. Send one personal reminder per unpaid row; address the debtor by name,
    name the invoice, the amount and the due date; nothing to paid rows.
-   (agent node, connector write: smtp send_email, one message per item)
-4. The goal criteria check the three count markers (loaded, checked, sent);
-   no-double-send and nothing-to-paid are a reader's criteria. (goal
-   criteria)
+   (list node over the checked rows filtered by `paid`, connector write:
+   smtp send_email, one message per item, a judge item check on each
+   message)
+4. The goal criteria count both lists through the engine's item states;
+   that the load step read every row of the file stays a reader's
+   criterion. (goal criteria `type: list` and `type: manual`)
 
 ## 4. Expected outcome
 
@@ -56,29 +61,54 @@ second reminder.
 
 ## 6. Today
 
-examples/playbooks/bulk-reminders.yaml expresses the three steps and the
-markers. The gaps:
+examples/playbooks/bulk-reminders.yaml loads the file once and checks and
+sends once per row, as list nodes:
 
-1. The whole list goes to one agent call per step; there is no per-item node
-   and no per-item verdict the engine holds.
-2. max_calls budgets are hand-tuned to the expected list length; a longer
-   list clips silently mid-run.
-3. A reminder whose answer was lost stays unknown: SMTP offers no way to
-   look a sent email up, so that one row waits for a person's decision.
-4. The counts (loaded, checked, sent) are agent-written text; the engine
-   cannot assert sent equals unpaid minus failed, so an arithmetic lie in
-   the report would pass the markers.
+```yaml
+- id: send_reminders
+  type: agent_task
+  connectors:
+    - { name: smtp, accounts: [default], functions: [send_email], max_calls: 2 }
+  list:
+    items:
+      from: { node: check_payments, field: items }
+      where: { state: passed, field: paid, equals: "false" }
+      max_items: 500
+    batch: { size: 10, parallel: 2, retries: 0 }
+    item_outputs: [subject, body_excerpt]
+```
 
-Closed within a run: each reminder is sent with `--intent` named after its
-invoice and recorded in the run's send ledger, so the infrastructure retry
-and a resume after a pause are answered `already_sent` for the 9 rows that
-went out and send only the rest; the one send whose answer was lost is
-refused instead of repeated. The retry's prompt lists what the earlier
-attempts sent (engine tests
+Where that leaves the gaps the first version had:
+
+1. Closed: each row is one item with its own verdict the engine holds. The
+   payment check and the reminder run per row; the send step reads the
+   check step's own items, filtered to the rows whose check passed and
+   that read unpaid, so a paid row, or one whose search could not run,
+   never reaches it.
+2. Closed: each row's step has its own small `max_calls`, so no budget is
+   tuned to the list length. The list's size is bounded by `max_items`, and
+   a file with more rows fails the step before anything is sent instead of
+   clipping mid-run.
+3. Still a person's call, now per row: a reminder whose answer was lost is
+   recorded as an unknown send of that row. The row needs a look
+   (`unknown_send`) and is never sent again on its own, by a retry, a
+   resume or a supervisor retry, until a person resolves the send with
+   `apb intent resolve`; the other rows carry on.
+4. Closed: the counts are the engine's. The run report, `run_status` and
+   `apb runs <id> --items` show checked, passed and needing-a-look rows per
+   step, and the goal's `type: list` criteria fail while a row is
+   unprocessed or needs a look, so a report cannot claim more than was
+   checked.
+
+Within a run, each row's sends are keyed by the node and the invoice, so an
+infrastructure retry, a resume after a pause and a supervisor retry repeat
+only the rows that did not pass, and a row that passed is never sent again
+(engine tests
+`a_drain_pause_finishes_the_running_item_and_the_resume_runs_the_rest` and
+`an_unknown_none_send_is_never_resent_until_a_person_resolves_it` in
+crates/apb-engine/tests/suite/list_resume_test.rs, and
 `a_retry_after_a_failed_visit_is_answered_and_a_loop_after_success_sends_again`
-in crates/apb-engine/tests/suite/send_intent_test.rs and
-`a_retry_is_briefed_on_what_the_failed_attempt_sent` in
-crates/apb-engine/tests/suite/attempt_briefing_test.rs). A fresh run of the
+in crates/apb-engine/tests/suite/send_intent_test.rs). A fresh run of the
 same list does not see the earlier run's sends.
 
 ## 7. Target

@@ -160,7 +160,8 @@ pub fn items_from_list_output(output: &str, max: u32) -> Result<Vec<SourcedItem>
 
 /// Applies `filter`: returns the kept items and how many were filtered out.
 /// From a list source (`state` known), `field` reads the earlier list's
-/// output, and `state` the state the item ended in there. `equals: null`
+/// output, and `state` the state the item ended in there; an item is kept
+/// only when every condition set holds. `equals: null`
 /// keeps an item whose field is present and null (a missing field is not
 /// equal to it); any other `equals` keeps an item whose field is the same
 /// string, number or bool. An object or array never matches.
@@ -517,5 +518,26 @@ mod tests {
         assert_eq!(dropped, 1);
         assert_eq!(kept[0].value["output"]["actionable"], "true");
         assert_eq!(kept[0].value["s"], 1);
+    }
+
+    /// A state and a field together: an item is kept only when both hold,
+    /// so an item whose check did not pass is dropped although its output
+    /// reads actionable.
+    #[test]
+    fn a_state_and_a_field_together_keep_only_items_that_pass_both() {
+        let out = json!({"items": [
+            {"id": "a", "state": "passed", "item": {}, "output": {"actionable": "true"}},
+            {"id": "b", "state": "needs_look", "item": {}, "output": {"actionable": "true"}},
+            {"id": "c", "state": "passed", "item": {}, "output": {"actionable": "false"}},
+        ]})
+        .to_string();
+        let both = ItemFilter {
+            field: Some("actionable".into()),
+            equals: Some(json!("true")),
+            state: Some("passed".into()),
+        };
+        let (kept, dropped) = apply_filter(items_from_list_output(&out, 10).unwrap(), Some(&both));
+        assert_eq!(ids(&kept), ["a"]);
+        assert_eq!(dropped, 2);
     }
 }

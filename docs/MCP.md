@@ -38,11 +38,11 @@ Reads (read-only):
 | `playbook_validate` | Validate a playbook, list of issues, including a profile or a script a run would not find (V91, V92); `valid` is false only on an error, and V91 is a warning when only the global store could provide the profile |
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
-| `runs_list` | List of runs; `needs_look` (`reasons`: `regression`, `findings`, `warnings`, `unknown_sends`, with the `regressions`, `findings` and `warnings` counts, plus `unknown_sends` when not zero) marks a run with a baseline regression, notes its attempts reported or sends whose outcome is not known, absent when none (see Run outcome below) |
-| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `output_truncated`: per attempt that lost part of its output (`node`, `attempt`, `truncated` with `stream`, `kept_bytes`, `dropped_bytes_at_least` per cut stream, `transcript_incomplete`), absent when none did (see "Bounded agent output" in `docs/HOWTO-authoring.md`). `inbox_gaps`: per connector inbox read that found unread events retention had already dropped (`node`, `connector`, `account`, `from`, `through`, the inclusive range lost), absent when the run journaled no gap. `baseline`: the playbook's baseline check (`enforce`, per check `id`, `description`, `source`, `before_status`, `before_reason`, `inherited_from`, `after_status` and `observations` with `id`, `rule`, `before`, `after`, `change`, `verdict` `met`, `not_met`, `unknown` or `pending`, `regressed`, `detail`; the `met`, `not_met`, `unknown` and `regressions` counts), absent when the playbook declares none. `notes`: the findings and warnings the attempts reported (`findings` with `node`, `attempt`, `kind`, `location`, `evidence`, `why_not_fixed`; `warnings` with `node`, `attempt`, `subject`, `reason`; `dropped`: malformed entries left out), each kept once per node with its latest attempt, absent when none. `branch_failures`: what a fork's `on_branch_failure` policy did and which `require: all_succeeded` joins refused (`seq`, `kind` `branch_failed`, `branch_cancelled` or `join_refused`, `node`, `detail`), absent when nothing did. `pending_tasks` and `execution`: see Host execution mode below |
+| `runs_list` | List of runs; `needs_look` (`reasons`: `regression`, `findings`, `warnings`, `unknown_sends`, `list_items`, with the `regressions`, `findings` and `warnings` counts, plus `unknown_sends` and `list_items` when not zero) marks a run with a baseline regression, notes its attempts reported, sends whose outcome is not known or list items that need a look, absent when none (see Run outcome below) |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `output_truncated`: per attempt that lost part of its output (`node`, `attempt`, `truncated` with `stream`, `kept_bytes`, `dropped_bytes_at_least` per cut stream, `transcript_incomplete`), absent when none did (see "Bounded agent output" in `docs/HOWTO-authoring.md`). `inbox_gaps`: per connector inbox read that found unread events retention had already dropped (`node`, `connector`, `account`, `from`, `through`, the inclusive range lost), absent when the run journaled no gap. `baseline`: the playbook's baseline check (`enforce`, per check `id`, `description`, `source`, `before_status`, `before_reason`, `inherited_from`, `after_status` and `observations` with `id`, `rule`, `before`, `after`, `change`, `verdict` `met`, `not_met`, `unknown` or `pending`, `regressed`, `detail`; the `met`, `not_met`, `unknown` and `regressions` counts), absent when the playbook declares none. `notes`: the findings and warnings the attempts reported (`findings` with `node`, `attempt`, `kind`, `location`, `evidence`, `why_not_fixed`; `warnings` with `node`, `attempt`, `subject`, `reason`; `dropped`: malformed entries left out), each kept once per node with its latest attempt, absent when none. `branch_failures`: what a fork's `on_branch_failure` policy did and which `require: all_succeeded` joins refused (`seq`, `kind` `branch_failed`, `branch_cancelled` or `join_refused`, `node`, `detail`), absent when nothing did. `lists`: per list node (`list:`) that started a visit, its counts and at most 50 of its items that need a look, with `items_truncated` when more do (see List nodes below), absent for a run without a list. `pending_tasks` and `execution`: see Host execution mode below |
 | `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below); `inline_prompt: false` drops each task's inline `prompt` and `role_prompt` (default `true`) for a host whose subagents read `prompt_path` and `role_path` |
 | `run_events` | Run events, optionally from a given seq |
-| `run_report` | Short run summary; carries `usage`, `output_truncated`, `decisions`, `goal`, `commits`, `inbox_gaps`, `baseline`, `notes` and `unknown_events` like `run_status`, and `outcome`: the human outcome of the run (see Run outcome below) |
+| `run_report` | Short run summary; carries `usage`, `output_truncated`, `decisions`, `goal`, `commits`, `inbox_gaps`, `baseline`, `notes` and `unknown_events` like `run_status`, `lists` with the items of every list node, at most 500 per list (see List nodes below), and `outcome`: the human outcome of the run (see Run outcome below) |
 | `run_retro_context` | The retrospective numbers of a run for whoever improves its playbook: `{ run_id, compare_last? }`. Per node (in the order the nodes first started): `duration_ms` (finished executions summed), `expected_s` and `over_expected` (the declared `expected_duration`), `executions`, `reentries`, `retries`, `fallbacks`, `tokens` and `cost_usd` (as the agents or the host reported them), `models` (the models the attempts actually ran on), `host_wait_ms`, `profile` (the manifest binding), `baseline_median_ms`, and `attempts`: per attempt `model` with `model_source` (`cli`: the binding the CLI started with; `host`: the model the host reported in its submission; `unreported`: a host task whose host named none, never inferred), `declared_model` (the profile's model or fallback hint a host may ignore), `status`, `duration_ms`, `failure_kind`, `verdict` (the status file: `success`, `failure` or `invalid`), `tokens`, `cost_usd`, `host_tasks` and `host_wait_ms` (from `host_task_requested` to the host's `host_task_submitted`). Per run: `outcome` (absent while live; the report is as of the last journal line), `execution`, `duration_ms`, `tokens`, `cost_usd`, `goal` (as in `run_status`) and `baseline`: the last `compare_last` (default 10, at most 100, 0 for none) finished runs of the same playbook version that apb created on this machine (`run_ids` newest first, `success`, `median_duration_ms`, `duration_delta_ms`, `median_tokens`, `median_cost_usd`), absent when there is none. A prompt gets the same report as text through `{{run.retro}}` (HOWTO-authoring, "Retrospective node") |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
@@ -443,10 +443,13 @@ switches.
   run), the connector writes that went through, per function, and the sends
   apb's lookup found or a person confirmed went out.
 - `verified`: what the engine itself checked, each `{ source, subject,
-  result, detail? }`. `source` is `goal` (a script or marker criterion,
+  result, detail? }`. `source` is `goal` (a script, marker or list criterion,
   `result` `passed`, `failed` or `error`), `success_check` (a node whose
-  `success_check` passed) or `baseline` (a compared observation, `result`
-  `met` or `not_met`).
+  `success_check` passed), `baseline` (a compared observation, `result`
+  `met` or `not_met`) or `item_check` (a list node's item check once an
+  item was processed: `result` `passed` when no item needs a look, else
+  `failed`, and a detail such as `41 of 43 items passed, connector
+  asana.get_task`).
 - `unverified`: what nobody checked, each `{ kind, subject, detail? }`.
   `kind` is `manual_criterion` (a person confirms it), `self_reported_node`
   (an `agent_task` that succeeded with no `success_check`: its own report is
@@ -460,8 +463,18 @@ switches.
   the send it repeated open),
   `incomplete_response` (a connector response cut short), `inbox_gap`
   (unread inbox events lost to retention), `output_truncated` (an attempt's
-  output was cut) or `baseline_unknown` (an observation that could not be
-  compared, or a check with no after snapshot in a run that ended).
+  output was cut), `baseline_unknown` (an observation that could not be
+  compared, or a check with no after snapshot in a run that ended),
+  `item_needs_look` (a list item its check, its step or its send left for a
+  person; `subject` is `<node>/<item id>`, the detail says why; at most 30,
+  then one `and N more` entry) or `self_reported_items` (a list node with
+  no item check whose items passed on the agent's own report).
+- `lists`: per list node `{ node, total, processed, passed,
+  passed_with_note, needs_look, check? }`, where `check` says how each item
+  was checked (`connector asana.get_task`, `script scripts/x.sh`, `output
+  blocking equals 0`, `judge`) and is absent for a list without a check;
+  absent for a run without a list. The text rendering prints one line per
+  list right under the headline.
 - `findings` and `warnings`: as in `notes` above.
 - `baseline`: the baseline check told as `problem` (what the before snapshot
   found), `change` (each observation before and after, its rule and verdict)
@@ -471,12 +484,45 @@ switches.
 - `agent_summary`: the finish node's answer, the agent's own account,
   labelled as not checked.
 - `needs_look`: as in `runs_list`. Only a baseline regression, findings,
-  warnings or unknown sends (`unknown_sends`) set it, read from the journal
-  alone; a failed run says so in its status instead. Resolve an unknown send
+  warnings, unknown sends (`unknown_sends`) or list items that need a look
+  (`list_items`) set it, read from the journal alone; a failed run says so
+  in its status instead. Resolve an unknown send
   with `run_intent_resolve` after asking the user.
 
 `apb runs <id>` prints the same outcome as text, and `apb runs` marks a run
 that needs a look.
+
+## List nodes
+
+A node with `list:` runs its step once per item and keeps every item's
+state in the journal (HOWTO-authoring, "List processing"). `run_status` and
+`run_report` carry those states as `lists`, one entry per list node that
+started a visit (its latest visit), absent for a run without a list:
+
+- `node`, `title` (when the node has one);
+- the counts `total` (items after the filter), `processed` (`passed` plus
+  `needs_look`), `passed` (with a note included), `passed_with_note`,
+  `needs_look`, `pending` and `running`;
+- `batch` (the batch running or last run, from 1) and `batches` (how many
+  the visit needs at its batch size);
+- `items`, each `{ id, state, round, verdict?, note?, reason?, attempts }`:
+  `state` is `pending`, `running`, `passed` or `needs_look`; `round` counts
+  the re-runs after a rejection (0 for the first run); `verdict` is the
+  check's last word (`accept`, `accept_with_note`, `reject`); `reason` says
+  why an item needs a look (`rejected`, `check_unknown`, `unknown_send`,
+  `failed`, `item_too_large`); `attempts` counts the item's attempts in the
+  visit.
+
+`run_status` keeps the counts whole but lists only the items that need a
+look, at most 50 per list, so a status read on a 500-item list stays small;
+a list with more carries `items_truncated`, the needs-look items left out.
+`run_report` lists the items in list order, at most 500 per list; a list
+with more carries `items_truncated`, the count left out, and `apb runs
+<id> --items` prints them all. The dashboard run detail carries the same
+`lists`, the progress report carries the counts per list, and `apb runs
+<id> --items [--node N] [--state pending|running|passed|needs_look]`
+prints one line per item. An item whose unknown send blocks it is resolved
+like any other send, with `run_intent_resolve` after asking the user.
 
 ## Detached runs, resume, and stop
 

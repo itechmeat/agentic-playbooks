@@ -181,6 +181,8 @@ fn the_demo_playbooks_validate() {
         "bulk-reminders",
         "crm-cleanup",
         "review-triage",
+        "review-panel",
+        "review-panel-list",
     ];
     for id in ids {
         register_playbook(

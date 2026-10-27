@@ -24,12 +24,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
-  `worktree` and `cache.key`, `baseline` for V62-V68), the baseline check
+  `worktree` and `cache.key`, `baseline` for V62-V68, `list` for the list
+  rules V85-V89 and V93-V95), list mode (`list/`: the `list:` block, item
+  loading with ids and the `where` filter in `items`, the per-item state
+  machine in `verdict`), the baseline check
   (`baseline/`: the `baseline_check` block, the observation path reader and
   the rule comparison), the project's own test and lint commands
   (`project_checks.rs`), the findings and warnings an attempt reports and
   their sanitizer (`run_notes.rs`), one walk over every connector binding
-  site, nodes plus the reserved `@baseline` (`connector/sites.rs`), a
+  site, nodes, a list node's item check `<node>#check` and the reserved
+  `@baseline` (`connector/sites.rs`), a
   function's send-once declaration and the connector's `identity`
   (`connector/idempotency.rs`) and the hidden send marker
   (`connector/marker.rs`), profiles
@@ -69,14 +73,22 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `protect` the protected-path snapshot and restore, `goal` the goal criteria
   checked at run end, `provenance` the run id in the agent env and the
   commits a node made, `host` the host-mode adapter that turns an agent step
-  into a host task), the host task store behind `run_task_submit` and
+  into a host task, `dispatch` the one entry that sends a list node to its
+  runner, `list/` the list runner: `source` the item load, `batch` the
+  batches on the list's worker pool and each item's settlement, `check` the
+  item checks, `run` one visit's shared state), list mode's pure half
+  (`list/`: `ledger` the journal fold of a visit, `prompt` the `## item`
+  prompt section, `stamp` the item stamp on item-scoped events, `view` the
+  surface view), the execution key that pairs attempts, files and sends by
+  node and list item (`exec_key.rs`), the host task store behind `run_task_submit` and
   `apb tasks` (`host_task.rs`), the baseline check's journal fold and its
   source reads (`baseline.rs`, `baseline/`: `read` a connector or script,
   `project` the project's commands), the read-only goal and commits blocks of the
   run surfaces (`run_outcome.rs`; `run_outcome/`: `baseline` and `notes` the
   baseline and findings views, `calls` connector calls by what they say about
-  the outcome, `commits` the commits and their `Apb-Run` trailers, `intents`
-  the send intents and the unknown ones a person resolves, `summary` the
+  the outcome, `claims` the evidence and gap types, `commits` the commits and their `Apb-Run` trailers, `intents`
+  the send intents and the unknown ones a person resolves, `lists` the list
+  nodes' counts, item-check evidence and items that need a look, `summary` the
   human outcome every surface shows and the "needs a look" marker), the
   cross-run metrics behind `apb stats`
   (`run_stats.rs`, `run_stats/`, `findings` for findings and baseline
@@ -203,10 +215,29 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `review_decide`). The retry briefing
   (`scheduler/attempt_memory`) tells the next attempt what the ledger holds,
   outside the node cache key.
+- **List mode**: `list:` on an `agent_task` or `script` node runs its step
+  once per item (from an earlier node's declared field, a list node's
+  `items`, or inline), in batches on the list's own pool capped by
+  `min(batch.parallel, max_parallel)`, while the node itself runs alone on
+  the sequential arm. Each item ends `passed` or `needs_look` through the
+  pure transition in `apb_core::list::verdict` (a rejection re-runs it while
+  `batch.retries` lasts; a pause, quota pause or crash returns it to
+  pending without spending a round; an unknown `key`/`marker` send gets one
+  free reconcile run, a `none` one needs a look). The journal holds the
+  visit (`list_started`, `list_batch_started`, `list_item_settled`, and
+  `item` on attempt, connector call, send intent and decision events);
+  `ListFold` is the one reader for resume, supervisor retry, `rerun:
+  not_passed`, progress and every surface. Everything keyed by node is
+  keyed by `ExecKey` (node + item) so items of one node can run at once.
+  The prompt is rendered once per visit; the item goes in a trailing
+  `## item` section, so templates may not read `item.*` (V86). Host
+  execution mode refuses list nodes at run start.
 - Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
   implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in
   inside its own cycle stays first-arrival, else loops deadlock). An unreachable
-  source counts as satisfied. Concurrency is capped by `max_parallel`
+  source counts as satisfied. Inside a loop a join counts only deliveries since
+  it last started, and routing reads each node's latest execution
+  (`RunState::seqs`; liveness in `parallel/liveness.rs`). Concurrency is capped by `max_parallel`
   (`defaults.max_parallel`, then the run config, then the engine default 4).
 
 ## Commands
