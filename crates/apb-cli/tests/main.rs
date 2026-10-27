@@ -43,6 +43,9 @@ mod host_mode_cli_test;
 mod ingest_cli_test;
 #[path = "suite/intent_cli_test.rs"]
 mod intent_cli_test;
+#[cfg(unix)]
+#[path = "suite/list_send_cli_test.rs"]
+mod list_send_cli_test;
 #[path = "suite/live_smoke_test.rs"]
 mod live_smoke_test;
 #[path = "suite/mcp_cli_test.rs"]

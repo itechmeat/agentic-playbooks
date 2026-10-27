@@ -722,6 +722,7 @@ impl DecisionRunner {
             );
         }
         let base = EventPayload::DecisionMade {
+            item: None,
             use_site: call.site.as_str().to_string(),
             node: call.node.map(str::to_string),
             attempt: call.attempt,
@@ -967,6 +968,7 @@ impl DecisionRunner {
             return;
         }
         let _ = journal.append_decision(EventPayload::DecisionMade {
+            item: None,
             output_chars: None,
             use_site: site.as_str().to_string(),
             node: node.map(str::to_string),

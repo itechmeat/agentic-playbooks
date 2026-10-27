@@ -16,6 +16,8 @@ pub struct ClassifiedCall {
     /// The seq of its `connector_call`.
     pub seq: u64,
     pub node: String,
+    /// The list item the call belongs to, for an item of a list node.
+    pub item: Option<String>,
     pub connector: String,
     pub function: String,
     pub outcome: String,
@@ -54,6 +56,7 @@ pub fn classified_calls(run_dir: &Path, events: &[Event]) -> Vec<ClassifiedCall>
                 attempt_seq,
                 intent,
                 origin: None,
+                item,
                 ..
             } => {
                 let ro = *read_only
@@ -67,6 +70,7 @@ pub fn classified_calls(run_dir: &Path, events: &[Event]) -> Vec<ClassifiedCall>
                 Some(ClassifiedCall {
                     seq: e.seq,
                     node: node_id.clone(),
+                    item: item.clone(),
                     connector: connector.clone(),
                     function: function.clone(),
                     outcome: outcome.clone(),

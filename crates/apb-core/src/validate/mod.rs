@@ -13,6 +13,7 @@ mod decisions;
 mod forks;
 mod graph;
 mod judge;
+mod list;
 mod node_io;
 mod nodes;
 mod templates;
@@ -171,6 +172,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_judge_edges(playbook, &mut r); // V59, V60 (issue #165 Part 7)
     check_decision_opt_ins(playbook, ctx, &mut r); // V70, V71, V72, V73, V74
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
+    list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

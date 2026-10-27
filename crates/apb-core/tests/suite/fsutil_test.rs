@@ -81,3 +81,21 @@ fn a_spawn_waits_out_an_executable_that_is_still_open_for_writing() {
     };
     assert!(status.success());
 }
+
+#[test]
+fn a_private_write_is_not_blocked_by_temps_a_killed_process_left_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    // Temps a killed earlier process with this same pid could have left,
+    // in every name the pid and a per-process counter alone would give.
+    let pid = std::process::id();
+    for n in 0..64 {
+        fs::write(
+            dir.path().join(format!(".tmp-{pid}-{n}-state.json")),
+            b"stale",
+        )
+        .unwrap();
+    }
+    apb_core::fsutil::atomic_write_private(&path, b"fresh").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"fresh");
+}

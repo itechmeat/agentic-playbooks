@@ -208,6 +208,7 @@ mod tests {
 
     fn finished(node: &str, status: &str, kind: Option<&str>) -> EventPayload {
         EventPayload::AttemptFinished {
+            item: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: node.into(),

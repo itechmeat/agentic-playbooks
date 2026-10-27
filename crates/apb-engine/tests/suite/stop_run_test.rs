@@ -318,6 +318,7 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
     })
     .unwrap();
     log.append(EventPayload::AttemptStarted {
+        item: None,
         node: "work".into(),
         attempt: 1,
         agent: "claude".into(),
@@ -1074,6 +1075,7 @@ fn a_note_the_crashed_driver_never_applied_survives_a_stop() {
         })
         .unwrap();
         log.append(EventPayload::AttemptStarted {
+            item: None,
             node: "work".into(),
             attempt: 1,
             agent: "claude".into(),
@@ -1485,6 +1487,7 @@ fn a_note_posted_after_a_stop_survives_the_resume_that_applies_the_stop() {
         })
         .unwrap();
         log.append(EventPayload::AttemptStarted {
+            item: None,
             node: "work".into(),
             attempt: 1,
             agent: "claude".into(),

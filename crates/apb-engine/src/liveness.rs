@@ -410,6 +410,8 @@ fn argv_program_is_apb(argv: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct OpenAttempt {
     pub node: String,
+    /// The list item the attempt runs, for an item of a list node.
+    pub item: Option<String>,
     pub attempt: u32,
     /// The agent pid captured at spawn. `None` for old journals and for paths
     /// that do not journal the spawn, in which case liveness is unknowable.
@@ -425,21 +427,25 @@ pub struct OpenAttempt {
     pub exited: bool,
 }
 
-/// Every attempt still open at the end of the journal, ordered by node then
-/// attempt number. Mirrors the `open` set inside `RunState::fold`; kept
+/// Every attempt still open at the end of the journal, ordered by node,
+/// item, then attempt number. Mirrors the `open` set inside `RunState::fold`; kept
 /// separate because the fold deliberately throws away the pid and the
 /// timestamp, which are exactly what liveness needs.
 pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
-    let mut open: BTreeMap<(String, u32), OpenAttempt> = BTreeMap::new();
+    type Key = (String, Option<String>, u32);
+    let key = |k: crate::exec_key::ExecKey<'_>, attempt: u32| -> Key {
+        (k.node.to_string(), k.item_owned(), attempt)
+    };
+    let mut open: BTreeMap<Key, OpenAttempt> = BTreeMap::new();
     for e in events {
         match &e.payload {
-            EventPayload::AttemptStarted {
-                node, attempt, pid, ..
-            } => {
+            p @ EventPayload::AttemptStarted { attempt, pid, .. } => {
+                let k = crate::exec_key::ExecKey::of_started(p).expect("an attempt_started");
                 open.insert(
-                    (node.clone(), *attempt),
+                    key(k, *attempt),
                     OpenAttempt {
-                        node: node.clone(),
+                        node: k.node.to_string(),
+                        item: k.item_owned(),
                         attempt: *attempt,
                         pid: *pid,
                         started_ms: e.ts,
@@ -448,19 +454,21 @@ pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
                     },
                 );
             }
-            EventPayload::AttemptExited { node, attempt } => {
-                if let Some(a) = open.get_mut(&(node.clone(), *attempt)) {
+            p @ EventPayload::AttemptExited { attempt, .. } => {
+                let k = crate::exec_key::ExecKey::of_exited(p).expect("an attempt_exited");
+                if let Some(a) = open.get_mut(&key(k, *attempt)) {
                     a.exited = true;
                 }
             }
-            EventPayload::AttemptFinished { node, attempt, .. } => {
-                open.remove(&(node.clone(), *attempt));
+            p @ EventPayload::AttemptFinished { attempt, .. } => {
+                let k = crate::exec_key::ExecKey::of_finished(p).expect("an attempt_finished");
+                open.remove(&key(k, *attempt));
             }
             // A node that reported a verdict closes every attempt it had: the
             // fold does the same, and an `attempt_finished` can be missing on
             // paths that only journal the node-level outcome.
             EventPayload::NodeFinished { node, .. } => {
-                open.retain(|(n, _), _| n != node);
+                open.retain(|(n, _, _), _| n != node);
             }
             _ => {}
         }
@@ -800,6 +808,7 @@ mod tests {
 
     fn attempt_started(node: &str, attempt: u32, pid: Option<u32>) -> EventPayload {
         EventPayload::AttemptStarted {
+            item: None,
             node: node.into(),
             attempt,
             agent: "stub".into(),
@@ -1063,6 +1072,7 @@ mod tests {
                 2,
                 300,
                 EventPayload::AttemptFinished {
+                    item: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "a".into(),
@@ -1314,6 +1324,7 @@ mod tests {
                 3,
                 3_000,
                 EventPayload::AttemptFinished {
+                    item: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "a".into(),
@@ -1679,6 +1690,7 @@ edges:
             2,
             3_000,
             EventPayload::AttemptExited {
+                item: None,
                 node: "a".into(),
                 attempt: 1,
             },

@@ -525,6 +525,7 @@ pub fn consent_sources(
 ) -> Vec<String> {
     let mut out = crate::consent::own_sources(playbook);
     for (site, bindings) in playbook.connector_sites() {
+        let site: &str = &site;
         out.extend(connector_sources(site, &bindings));
     }
     for n in &playbook.nodes {

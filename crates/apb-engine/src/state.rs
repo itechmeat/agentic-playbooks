@@ -380,8 +380,9 @@ impl RunState {
 
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
-        // Open attempts: node -> attempt. Closed by attempt_finished/node_finished.
-        let mut open: BTreeSet<String> = BTreeSet::new();
+        // Open attempts by (node, item). Closed by attempt_finished, and every
+        // attempt of a node by its node_finished.
+        let mut open: BTreeSet<(String, Option<String>)> = BTreeSet::new();
         // The run status came from the old resume's `run_paused { reason:
         // "resume from X" }` marker, which never meant a pause.
         let mut legacy_marker = false;
@@ -395,10 +396,18 @@ impl RunState {
                     s.refused_joins.remove(node);
                     s.ran_again(node);
                 }
-                EventPayload::AttemptStarted { node, attempt, .. } => {
+                EventPayload::AttemptStarted {
+                    node,
+                    attempt,
+                    item,
+                    ..
+                } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
-                    s.attempts.insert(node.clone(), *attempt);
-                    open.insert(node.clone());
+                    // A list item's attempt numbers are its own.
+                    if item.is_none() {
+                        s.attempts.insert(node.clone(), *attempt);
+                    }
+                    open.insert((node.clone(), item.clone()));
                 }
                 // The attempt stays open until its `attempt_finished`: an exit
                 // the drive never finished is a crash to an offline reader.
@@ -407,10 +416,14 @@ impl RunState {
                 EventPayload::AttemptFinished {
                     node,
                     rejected_output,
+                    item,
                     ..
                 } => {
-                    open.remove(node);
-                    if let Some(text) = rejected_output {
+                    open.remove(&(node.clone(), item.clone()));
+                    // A list item's rejection is its own, not the node's.
+                    if item.is_none()
+                        && let Some(text) = rejected_output
+                    {
                         s.rejected_outputs.insert(node.clone(), text.clone());
                     }
                 }
@@ -420,7 +433,7 @@ impl RunState {
                     output,
                     ..
                 } => {
-                    open.remove(node);
+                    open.retain(|(n, _)| n != node);
                     s.ran_again(node);
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
@@ -575,6 +588,10 @@ impl RunState {
                 EventPayload::BaselineObserved { .. }
                 | EventPayload::BaselineCompared { .. }
                 | EventPayload::AttemptNotes { .. } => {}
+                // A list visit's records; `crate::list::ListFold` folds them.
+                EventPayload::ListStarted { .. }
+                | EventPayload::ListBatchStarted { .. }
+                | EventPayload::ListItemSettled { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a
@@ -625,7 +642,7 @@ impl RunState {
         }
         // Attempts still open after the last event: interrupted.
         if !open.is_empty() {
-            for node in &open {
+            for (node, _) in &open {
                 s.nodes.insert(node.clone(), NodeStatus::Interrupted);
             }
             // `Aborted` belongs in this exempt list next to the other explicit

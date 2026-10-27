@@ -199,6 +199,7 @@ pub fn goal_from(
                 GoalCheck::Manual => ("manual", "manual"),
                 GoalCheck::Marker { .. } => ("marker", "pending"),
                 GoalCheck::Script { .. } => ("script", "pending"),
+                GoalCheck::List { .. } => ("list", "pending"),
             };
             // The last result for this criterion (a resumed run may check
             // twice).

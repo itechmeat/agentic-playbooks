@@ -20,10 +20,13 @@ use std::path::Path;
 use apb_core::connector::idempotency::IdempotencyMode;
 use apb_core::connector::marker;
 
-pub use identity::{ARGS_LABEL_PREFIX, IntentKey, args_label, validate_label};
+pub use identity::{
+    ARGS_LABEL_PREFIX, ITEM_LABEL, IntentKey, args_label, default_label, validate_label,
+};
 pub use ledger::{
     Admission, AdmitQuery, ChainVerdict, IntentRecord, IntentState, Ledger, admit, chain_verdict,
-    effect_scope_floor, effective_state, send_verdict,
+    effect_scope_floor, effect_scope_floor_with, effective_state, item_scope_floor, passed_floors,
+    send_verdict,
 };
 
 use crate::error::EngineError;
@@ -68,6 +71,7 @@ pub fn admitted(draft: &IntentDraft<'_>, admission: &Admission) -> Option<NewInt
     let id = format!("si-{}", &marker::new_nonce()[..12]);
     let replay = replay_of.is_some();
     let payload = EventPayload::SendIntentRecorded {
+        item: draft.key.item.clone(),
         intent: id.clone(),
         nonce: nonce.clone(),
         node: draft.key.node.clone(),

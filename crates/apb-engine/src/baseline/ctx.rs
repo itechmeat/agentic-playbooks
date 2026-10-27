@@ -27,6 +27,12 @@ pub(crate) struct ReadCtx<'a> {
     pub phase: &'a str,
     /// The journal so far (the scripts digest pin is in it).
     pub events: &'a [Event],
+    /// Whether a spawned process must leave the working tree as it found
+    /// it. False only for a list item check while sibling items run, which
+    /// legitimately change the tree.
+    pub guard_tree: bool,
+    /// What a tampered `scripts/` copy is named as in the reason.
+    pub scripts_label: &'a str,
 }
 
 impl ReadCtx<'_> {
@@ -45,6 +51,9 @@ impl ReadCtx<'_> {
     /// (not a git work tree, no commit yet, git failed).
     pub(crate) fn tree_guarded<T>(&self, f: impl FnOnce() -> T) -> Result<T, &'static str> {
         const UNCHECKED: &str = "the working tree could not be checked";
+        if !self.guard_tree {
+            return Ok(f());
+        }
         let before = apb_core::fingerprint::git_fingerprint(self.workdir, &[]).ok_or(UNCHECKED)?;
         let out = f();
         match apb_core::fingerprint::git_fingerprint(self.workdir, &[]) {

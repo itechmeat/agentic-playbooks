@@ -11,6 +11,7 @@ use crate::state::NodeStatus;
 pub struct ScriptResult {
     pub status: NodeStatus,
     pub stdout: String,
+    pub stderr: String,
 }
 
 /// List of candidate runtimes for a runner key. First the global config
@@ -156,5 +157,6 @@ pub fn run_script_with_env_removed(
     Ok(ScriptResult {
         status,
         stdout: captured.stdout,
+        stderr: captured.stderr,
     })
 }

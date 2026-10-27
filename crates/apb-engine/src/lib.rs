@@ -15,6 +15,7 @@ pub mod driver;
 mod env_duration;
 pub mod error;
 pub mod event;
+pub mod exec_key;
 // --- 0.24.0 eval suites ---
 pub mod eval;
 // --- end 0.24.0 eval suites ---
@@ -28,6 +29,7 @@ pub mod hooks;
 pub mod inspect;
 pub mod invocation;
 pub mod legacy_snapshot;
+pub mod list;
 pub mod liveness;
 // host execution mode (0.23.0)
 pub mod host_task;

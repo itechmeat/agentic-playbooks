@@ -76,6 +76,8 @@ struct CallScope {
     attempt_seq: Option<u64>,
     origin: CallOrigin,
     send: Option<send_once::Tracked>,
+    /// The list item the call belongs to (the caller's claim).
+    item: Option<String>,
 }
 
 // The result taxonomy (`CallError`, `CallErrorCode`, `CallOk`) and the interim
@@ -126,6 +128,11 @@ pub fn execute_with(req: CallRequest, ctx: CallContext) -> (Value, bool) {
 /// check's `timeout_seconds`).
 pub fn execute_within(req: CallRequest, max_secs: u64) -> (Value, bool) {
     execute_bounded(req, &CallContext::default(), Some(max_secs))
+}
+
+/// [`execute_with`] bounded like [`execute_within`].
+pub fn execute_with_within(req: CallRequest, ctx: CallContext, max_secs: u64) -> (Value, bool) {
+    execute_bounded(req, &ctx, Some(max_secs))
 }
 
 fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> (Value, bool) {
@@ -392,7 +399,7 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
         })?;
     // apb's own lookup of an earlier send reads functions the node may not
     // call itself; it is held to read-only functions below instead.
-    if ctx.origin == CallOrigin::Node && !grant.functions.iter().any(|f| f == req.function) {
+    if ctx.origin != CallOrigin::Reconcile && !grant.functions.iter().any(|f| f == req.function) {
         return Err(CallError::new(
             CallErrorCode::Permission,
             format!(
@@ -440,7 +447,12 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
         check_budget(
             req,
             grant,
-            &attempt::prior_calls(events, req.node_id, req.connector, &binding),
+            &attempt::prior_calls(
+                events,
+                crate::exec_key::ExecKey::new(req.node_id, ctx.claim.item.as_deref()),
+                req.connector,
+                &binding,
+            ),
         )
     };
 
@@ -459,11 +471,11 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
             ),
         )
     })?;
-    if ctx.origin == CallOrigin::Reconcile && !function.read_only {
+    if ctx.origin != CallOrigin::Node && !function.read_only {
         return Err(CallError::new(
             CallErrorCode::Permission,
             format!(
-                "apb reads back an earlier send only through read-only functions; `{}` is not one",
+                "apb reads back an earlier send, and checks an item, only through read-only functions; `{}` is not one",
                 req.function
             ),
         ));
@@ -478,6 +490,7 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
         attempt_seq: binding.attempt_seq,
         origin: ctx.origin,
         send: None,
+        item: ctx.claim.item.clone(),
     };
     let gate_input = send_once::GateInput {
         req,
@@ -1180,6 +1193,7 @@ fn validate_url(url: &str) -> Result<(), CallError> {
 fn append_event(req: &CallRequest, meta: &EventMeta) {
     if let Ok(mut log) = EventLog::open_foreign(req.run_dir) {
         let _ = log.append(EventPayload::ConnectorCall {
+            item: meta.scope.item.clone(),
             node_id: req.node_id.to_string(),
             connector: req.connector.to_string(),
             function: req.function.to_string(),

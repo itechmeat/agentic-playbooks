@@ -196,6 +196,12 @@ mod journal_compat_test;
 mod judge_test;
 #[path = "suite/lineage_test.rs"]
 mod lineage_test;
+#[cfg(unix)]
+#[path = "suite/list_resume_test.rs"]
+mod list_resume_test;
+#[cfg(unix)]
+#[path = "suite/list_run_test.rs"]
+mod list_run_test;
 #[path = "suite/list_runs_resilient_test.rs"]
 mod list_runs_resilient_test;
 #[path = "suite/loop_edges_test.rs"]

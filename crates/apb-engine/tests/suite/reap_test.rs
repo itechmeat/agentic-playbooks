@@ -223,6 +223,7 @@ fn node_started(node: &str) -> EventPayload {
 
 fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
     EventPayload::AttemptStarted {
+        item: None,
         node: node.into(),
         attempt: 1,
         agent: "claude-code".into(),

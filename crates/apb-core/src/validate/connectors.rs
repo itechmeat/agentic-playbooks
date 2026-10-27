@@ -44,6 +44,7 @@ pub(crate) fn check_connectors(
     r: &mut ValidationReport,
 ) {
     for (site, bindings) in playbook.connector_sites() {
+        let site: &str = &site;
         let label = crate::connector::sites::site_label(site);
         let mut seen_connectors = HashSet::new();
         for b in bindings.iter() {

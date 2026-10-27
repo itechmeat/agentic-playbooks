@@ -199,6 +199,7 @@ mod tests {
             seq,
             ts: 1_000,
             payload: EventPayload::SendIntentRecorded {
+                item: None,
                 intent: id.into(),
                 nonce: "n".into(),
                 node: "announce".into(),

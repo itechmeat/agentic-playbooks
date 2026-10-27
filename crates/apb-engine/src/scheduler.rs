@@ -44,7 +44,10 @@ mod attempt_memory;
 mod attempt_notes;
 mod baseline;
 mod cache;
+mod continuation;
 mod control_apply;
+mod deadline;
+mod dispatch;
 mod entry;
 mod finish_answer;
 mod fork;
@@ -54,10 +57,12 @@ mod handoff;
 mod host;
 mod journal;
 mod judge;
+mod list;
 mod listing;
 mod live;
 mod node;
 mod node_workdir;
+mod outcome;
 mod patch;
 mod pipeline;
 mod prepare;
@@ -75,6 +80,8 @@ mod transcript;
 mod worktree;
 
 pub(crate) use control_apply::{ControlScan, scan_control};
+pub use deadline::DEADLINE_REASON;
+use deadline::DeadlineWatch;
 pub(crate) use entry::Prepared;
 use entry::reap_dead_attempts;
 pub use entry::{
@@ -93,6 +100,8 @@ pub use listing::{RunSummary, list_runs};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
 pub(crate) use node::parent_run_origin;
 use node::*;
+pub use outcome::RunResult;
+pub(crate) use outcome::{AttemptOutcome, ExecOptions, LiveContext, NodeCtx, ResumeContext};
 use patch::*;
 use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
 use prepare::*;
@@ -241,11 +250,8 @@ fn fallback_finish_answer(node: &str) -> String {
 /// would exceed this depth fails its parent node.
 pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
 
-/// How many batch members the drive loop runs at once when neither the playbook
-/// nor the run declares a cap (spec 2026-08-05 section 1.3). Wide enough that a
-/// fan-out is worth batching, small enough that a fan-out of twenty nodes cannot
-/// spawn twenty agent processes at once.
-pub const DEFAULT_MAX_PARALLEL: usize = 4;
+/// See [`apb_core::schema::DEFAULT_MAX_PARALLEL`].
+pub const DEFAULT_MAX_PARALLEL: usize = apb_core::schema::DEFAULT_MAX_PARALLEL;
 
 /// The concurrency cap in force for this run.
 ///
@@ -318,39 +324,6 @@ pub fn run_profile_origin(root: &Path, run_id: &str) -> Result<PlaybookOrigin, E
     rebind::run_origin(&run_dir)
 }
 
-#[derive(Debug)]
-pub struct RunResult {
-    pub run_id: String,
-    pub outcome: RunStatus,
-}
-
-/// The outcome of one node execution (`execute_node`). A normal execution
-/// `Finished` with a status, output, and the events drive must write in its
-/// return batch. An interactive `agent_task` that asked a question via the
-/// stdout marker instead of finishing returns `Suspended` (spec 2026-07-20):
-/// the drive loop parks it on the question and re-invokes once an answer
-/// arrives. Consumed by Task 5 (timeout expiry in the park loop), Task 6 (the
-/// marker scan that feeds it), and Task 7 (resume-vs-reprompt re-invocation).
-pub(crate) enum AttemptOutcome {
-    Finished {
-        status: NodeStatus,
-        output: String,
-        events: Vec<EventPayload>,
-    },
-    Suspended {
-        question: String,
-        options: Vec<String>,
-    },
-    /// The node hit a provider quota it cannot wait out (issue #200, design
-    /// 6): the attempt is journaled `interrupted` already, the node gets no
-    /// `node_finished`, and the drive pauses the run with `pause`, so the
-    /// resume runs the node again.
-    QuotaPaused {
-        pause: crate::pause::PauseRequest,
-        events: Vec<EventPayload>,
-    },
-}
-
 /// The shared execution loop: advances the run from `start_node` to a finish node,
 /// a pause, or exhausting the step limit. Used by both `run` and `resume`.
 ///
@@ -415,54 +388,6 @@ fn drive(
                 run_id: run_id_for_failure,
                 outcome: RunStatus::Failed,
             })
-        }
-    }
-}
-
-/// Posts an abort to the run it watches once the wall clock passes
-/// `deadline_ms`; dropping it (the drive ended) ends the watch.
-struct DeadlineWatch {
-    done: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-/// The abort reason a run past its eval deadline is stopped with.
-pub const DEADLINE_REASON: &str = "deadline: the run passed its wall-clock limit";
-
-impl DeadlineWatch {
-    fn start(run_dir: &Path, deadline_ms: u64) -> Self {
-        let done = Arc::new(AtomicBool::new(false));
-        let (flag, dir) = (done.clone(), run_dir.to_path_buf());
-        let thread = std::thread::spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
-                let now = apb_core::clock::now_ms();
-                let at = u128::from(deadline_ms);
-                if now >= at {
-                    let _ = crate::control::post_control(
-                        &dir,
-                        Control::Abort {
-                            reason: DEADLINE_REASON.into(),
-                        },
-                    );
-                    return;
-                }
-                let left = (at - now).min(500) as u64;
-                std::thread::park_timeout(Duration::from_millis(left));
-            }
-        });
-        DeadlineWatch {
-            done,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for DeadlineWatch {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            t.thread().unpark();
-            let _ = t.join();
         }
     }
 }
@@ -681,6 +606,12 @@ fn drive_inner(
     // `cancelled` was interrupted by the pause, journals an `interrupted`
     // attempt and no `node_finished`, and runs again on resume.
     let pause_now = Arc::new(AtomicBool::new(false));
+    // The same flags, read by a list node between its items.
+    let exec_stop = crate::stop::StopFlags {
+        cancel: Arc::clone(&run_cancel),
+        halt: Arc::clone(&halt),
+        pause_now: Arc::clone(&pause_now),
+    };
     let watcher = crate::stop::StopWatcher::spawn(
         run_dir,
         control_cursor,
@@ -1259,28 +1190,31 @@ fn drive_inner(
                                             // never answers and a hung drive.
                                             let res = std::panic::catch_unwind(
                                                 std::panic::AssertUnwindSafe(|| {
-                                                    execute_node(
-                                                        &playbook_c,
-                                                        &rd,
-                                                        &wd,
+                                                    dispatch::execute(
+                                                        &NodeCtx {
+                                                            playbook: &playbook_c,
+                                                            run_dir: &rd,
+                                                            workdir: &wd,
+                                                            run_id: &rid,
+                                                            state: &state_now,
+                                                            cfg: &cfg_c,
+                                                            cancel: &cancel_c,
+                                                            env_scrub: &scrub_c,
+                                                            journal: journal_ref,
+                                                            decisions: decisions_ref,
+                                                        },
                                                         &node,
-                                                        &rid,
-                                                        &state_now,
-                                                        &cfg_c,
-                                                        op,
-                                                        &cancel_c,
-                                                        &scrub_c,
-                                                        journal_ref,
-                                                        decisions_ref,
                                                         // Interactive nodes are
                                                         // excluded from the
                                                         // batch, so neither a
                                                         // resume nor the live
                                                         // sidecar originates
                                                         // here.
-                                                        None,
-                                                        None,
-                                                        alone,
+                                                        ExecOptions {
+                                                            override_prompt: op,
+                                                            track_provenance: alone,
+                                                            ..ExecOptions::default()
+                                                        },
                                                     )
                                                 }),
                                             )
@@ -1316,13 +1250,15 @@ fn drive_inner(
                                         output,
                                         events,
                                     } => (status, output, events),
-                                    // Interactive nodes are excluded from the
-                                    // batch above, so a suspension here is
+                                    // Interactive nodes and list nodes are
+                                    // excluded from the batch above, so a
+                                    // suspension or a list halt here is
                                     // impossible; be explicit rather than
                                     // silently mishandle it.
-                                    AttemptOutcome::Suspended { .. } => {
+                                    AttemptOutcome::Suspended { .. }
+                                    | AttemptOutcome::Halted { .. } => {
                                         return Err(EngineError::Invalid(format!(
-                                            "interactive node `{node}` must not run in a concurrent batch"
+                                            "node `{node}` (interactive or list) must not run in a concurrent batch"
                                         )));
                                     }
                                     // A quota pause (issue #200): no
@@ -1351,7 +1287,11 @@ fn drive_inner(
                                     && !fork_killed.contains(&node)
                                     && !cancel.load(Ordering::Relaxed)
                                 {
-                                    journal::journal_interrupted(&journal, run_dir, &node)?;
+                                    journal::journal_interrupted(
+                                        &journal,
+                                        run_dir,
+                                        crate::exec_key::ExecKey::node(&node),
+                                    )?;
                                     continue;
                                 }
                                 // Declared-artifact capture and cache admission,
@@ -2258,39 +2198,41 @@ fn drive_inner(
                 let resume_attempt = resume_ctx.is_some();
                 let outcome = {
                     let journal = Journal::new(&mut *log);
-                    execute_node(
-                        &playbook,
-                        run_dir,
-                        &workdir,
+                    dispatch::execute(
+                        &NodeCtx {
+                            playbook: &playbook,
+                            run_dir,
+                            workdir: &workdir,
+                            run_id: &run_id,
+                            state: &state,
+                            cfg,
+                            cancel: &run_cancel,
+                            env_scrub: &env_scrub,
+                            journal: &journal,
+                            decisions: decisions.as_ref(),
+                        },
                         &current,
-                        &run_id,
-                        &state,
-                        cfg,
-                        override_prompt,
-                        &run_cancel,
-                        &env_scrub,
-                        &journal,
-                        decisions.as_ref(),
-                        // Resume context set by the answer-consumed arm above;
-                        // `None` on the first attempt of a visit and on the
-                        // reprompt path.
-                        resume_ctx.take(),
-                        // Live sidecar (spec 2026-07-20, Task 11): injected only
-                        // when the ceiling is `Live` on claude and the exe
-                        // resolved; a downgrade hands `None` and the marker path
-                        // runs. Rebuilt per attempt so each re-invocation of an
-                        // injectable node points the sidecar at the right exe.
-                        if live_injectable {
-                            Some(crate::scheduler::node::LiveContext {
+                        ExecOptions {
+                            override_prompt,
+                            // Resume context set by the answer-consumed arm
+                            // above; `None` on the first attempt of a visit
+                            // and on the reprompt path.
+                            resume: resume_ctx.take(),
+                            // Live sidecar (spec 2026-07-20, Task 11):
+                            // injected only when the ceiling is `Live` on
+                            // claude and the exe resolved; a downgrade hands
+                            // `None` and the marker path runs. Rebuilt per
+                            // attempt so each re-invocation of an injectable
+                            // node points the sidecar at the right exe.
+                            live: live_injectable.then(|| LiveContext {
                                 exe: live_exe
                                     .clone()
                                     .expect("live_injectable implies a resolved exe"),
                                 timeout_ms: live_timeout_ms,
-                            })
-                        } else {
-                            None
+                            }),
+                            track_provenance: true,
+                            ..ExecOptions::default()
                         },
-                        true,
                     )?
                 };
                 match outcome {
@@ -2377,7 +2319,10 @@ fn drive_inner(
                         if question_asked_count(&events, &current)
                             <= question_answered_count(&events, &current)
                         {
-                            let attempt = attempt_started_count(&events, &current) as u32;
+                            let attempt = attempt_started_count(
+                                &events,
+                                crate::exec_key::ExecKey::node(&current),
+                            ) as u32;
                             // Idempotent channel post: skip if a crash between
                             // a prior post_question and its QuestionAsked
                             // already left an unanswered question for this
@@ -2413,6 +2358,12 @@ fn drive_inner(
                         }
                         journal::post_quota_pause(run_dir, pause)?;
                         continue;
+                    }
+                    // An interactive node is never a list node (V85).
+                    AttemptOutcome::Halted { .. } => {
+                        return Err(EngineError::Invalid(format!(
+                            "interactive node `{current}` cannot run as a list"
+                        )));
                     }
                 }
             }
@@ -2472,24 +2423,31 @@ fn drive_inner(
                 // that borrow so `log` is free again for the return-batch writes.
                 let outcome = {
                     let journal = Journal::new(&mut *log);
-                    execute_node(
-                        &playbook,
-                        run_dir,
-                        &workdir,
+                    dispatch::execute(
+                        &NodeCtx {
+                            playbook: &playbook,
+                            run_dir,
+                            workdir: &workdir,
+                            run_id: &run_id,
+                            state: &state,
+                            cfg,
+                            cancel: &node_kill,
+                            env_scrub: &env_scrub,
+                            journal: &journal,
+                            decisions: decisions.as_ref(),
+                        },
                         &current,
-                        &run_id,
-                        &state,
-                        cfg,
-                        override_prompt,
-                        &node_kill,
-                        &env_scrub,
-                        &journal,
-                        decisions.as_ref(),
-                        // Non-interactive nodes never resume.
-                        None,
-                        // ...and never run the live sidecar.
-                        None,
-                        true,
+                        // Non-interactive nodes never resume and never run
+                        // the live sidecar; a list node reads the stop flags
+                        // between its items.
+                        ExecOptions {
+                            override_prompt,
+                            track_provenance: true,
+                            stop: Some(&exec_stop),
+                            max_parallel: resolved_max_parallel(&playbook, cfg),
+                            control_after: control_cursor,
+                            ..ExecOptions::default()
+                        },
                     )?
                 };
                 let (st, out, evs) = match outcome {
@@ -2514,6 +2472,14 @@ fn drive_inner(
                         journal::post_quota_pause(run_dir, pause)?;
                         continue;
                     }
+                    // A list node stopped between items for a pause: no
+                    // `node_finished`; the control scan applies the pause.
+                    AttemptOutcome::Halted { events } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        continue;
+                    }
                 };
                 for ev in evs {
                     log.append(ev)?;
@@ -2526,7 +2492,11 @@ fn drive_inner(
                     && journal::interrupted_by_pause(&pause_now, &run_cancel)
                 {
                     pause_short_circuited = true;
-                    journal::journal_interrupted(&Journal::new(&mut *log), run_dir, &current)?;
+                    journal::journal_interrupted(
+                        &Journal::new(&mut *log),
+                        run_dir,
+                        crate::exec_key::ExecKey::node(&current),
+                    )?;
                     continue;
                 }
                 // Declared-artifact capture and cache admission, the same unit

@@ -1,14 +1,16 @@
 //! Per-attempt transcripts (issue #67 item 10): every agent attempt keeps
 //! what it printed, and for claude the CLI's own session transcript, in
-//! `<run>/attempts/<node>-<attempt>/`, referenced from `attempt_started`.
+//! `<run>/attempts/<node>-<attempt>/` (`<node>.i-<item digest>-<attempt>/` for a
+//! list item), referenced from `attempt_started`.
 //! Diagnosing an attempt that died then is a file read instead of a
 //! reconstruction from the working tree.
 
 use super::*;
 
-/// The run-relative transcript directory of one attempt.
-pub(crate) fn relative(node_id: &str, attempt: u32) -> String {
-    format!("attempts/{node_id}-{attempt}")
+/// The run-relative transcript directory of one attempt, named by its
+/// [`crate::exec_key::ExecKey::stem`].
+pub(crate) fn relative(stem: &str) -> String {
+    format!("attempts/{stem}")
 }
 
 /// The file in an attempt's transcript directory holding the agent session
@@ -30,12 +32,8 @@ pub(crate) fn record_session(run_dir: &Path, dir: &Path, session: &str) {
 /// directory left by an earlier execution whose attempt counter restarted
 /// (a resume, a continue_from) is cleared first, so it only ever holds what
 /// this attempt wrote.
-pub(crate) fn attempt_dir(
-    run_dir: &Path,
-    node_id: &str,
-    attempt: u32,
-) -> Result<PathBuf, EngineError> {
-    let dir = run_dir.join(relative(node_id, attempt));
+pub(crate) fn attempt_dir(run_dir: &Path, stem: &str) -> Result<PathBuf, EngineError> {
+    let dir = run_dir.join(relative(stem));
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -720,8 +720,15 @@ mod tests {
     /// K2: an event type this apb never writes is a V80, a real one is not.
     #[test]
     fn v80_names_an_event_type_the_journal_does_not_have() {
-        assert!(is_event_type("run_error"));
-        assert!(is_event_type("run_finished"));
+        for t in [
+            "run_error",
+            "run_finished",
+            "list_started",
+            "list_batch_started",
+            "list_item_settled",
+        ] {
+            assert!(is_event_type(t), "{t}");
+        }
         assert!(!is_event_type("run_eror"));
         let dir = tempfile::tempdir().unwrap();
         let evals = dir.path().join("evals");

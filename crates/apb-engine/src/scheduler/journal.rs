@@ -8,6 +8,7 @@
 //! Shares the parent module's imports via `use super::*`.
 
 use super::*;
+use crate::exec_key::ExecKey;
 
 /// A shared append handle over the run's single event log, used only for the
 /// two attempt-lifecycle events that are journaled off the return batch:
@@ -19,15 +20,36 @@ use super::*;
 /// the sequential path holds the sole reference, while the parallel batch path
 /// shares `&Journal` across scoped worker threads. Each append is a single
 /// atomic line write, so lock contention is irrelevant.
+///
+/// A list item's journal ([`Journal::for_item`]) shares the same log and
+/// stamps every item-scoped event it appends with its item, so the code that
+/// builds those events never names the item itself.
 pub(crate) struct Journal<'a> {
-    log: std::sync::Mutex<&'a mut EventLog>,
+    log: std::sync::Arc<std::sync::Mutex<&'a mut EventLog>>,
+    item: Option<String>,
 }
 
 impl<'a> Journal<'a> {
     pub(crate) fn new(log: &'a mut EventLog) -> Self {
         Self {
-            log: std::sync::Mutex::new(log),
+            log: std::sync::Arc::new(std::sync::Mutex::new(log)),
+            item: None,
         }
+    }
+
+    /// A journal over the same log that stamps `item` (none: a plain one).
+    pub(crate) fn for_item(&self, item: Option<&str>) -> Journal<'a> {
+        Journal {
+            log: std::sync::Arc::clone(&self.log),
+            item: item.map(str::to_string),
+        }
+    }
+
+    fn stamped(&self, mut payload: EventPayload) -> EventPayload {
+        if let Some(item) = &self.item {
+            payload.stamp_item(item);
+        }
+        payload
     }
 
     /// Appends one event under the lock. Poison-tolerant: a worker thread that
@@ -35,6 +57,7 @@ impl<'a> Journal<'a> {
     /// append-only and a partial line is impossible (a single `writeln!`), so
     /// recovering the inner guard and continuing is safe.
     pub(crate) fn append(&self, payload: EventPayload) -> Result<(), EngineError> {
+        let payload = self.stamped(payload);
         self.log
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -53,6 +76,7 @@ impl<'a> Journal<'a> {
     /// Appends one event and returns its seq (the decision runner names its
     /// debug-state file after it).
     pub(crate) fn append_seq(&self, payload: EventPayload) -> Result<u64, EngineError> {
+        let payload = self.stamped(payload);
         Ok(self
             .log
             .lock()
@@ -118,13 +142,11 @@ pub(crate) fn question_answered_count(events: &[Event], node: &str) -> usize {
         .count()
 }
 
-/// How many `AttemptStarted` events a node already carries - the number of the
-/// current attempt while one is open, used to tag a posted question.
-pub(crate) fn attempt_started_count(events: &[Event], node: &str) -> usize {
-    events
-        .iter()
-        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node: n, .. } if n == node))
-        .count()
+/// How many `AttemptStarted` events an execution key already carries - the
+/// number of the current attempt while one is open, used to tag a posted
+/// question.
+pub(crate) fn attempt_started_count(events: &[Event], key: ExecKey<'_>) -> usize {
+    events.iter().filter(|e| key.started(e)).count()
 }
 
 /// How many `NodeStarted` / `NodeFinished` events a node already carries. A
@@ -282,18 +304,17 @@ pub(crate) struct PausedSession {
 pub(crate) fn paused_attempt_session(
     run_dir: &Path,
     events: &[Event],
-    node: &str,
+    key: ExecKey<'_>,
 ) -> Option<PausedSession> {
     let (at, attempt, session) = events.iter().enumerate().rev().find_map(|(i, e)| {
         match &e.payload {
             EventPayload::AttemptFinished {
-                node: n,
                 attempt,
                 status,
                 session,
                 partial_output,
                 ..
-            } if n == node => Some((i, *attempt, status, session, partial_output)),
+            } if key.finished(e) => Some((i, *attempt, status, session, partial_output)),
             _ => None,
         }
         .map(|(i, attempt, status, session, partial)| {
@@ -308,13 +329,12 @@ pub(crate) fn paused_attempt_session(
     }
     events[..at].iter().rev().find_map(|e| match &e.payload {
         EventPayload::AttemptStarted {
-            node: n,
             attempt: a,
             agent,
             model: Some(model),
             workdir,
             ..
-        } if n == node && *a == attempt => Some(PausedSession {
+        } if key.started(e) && *a == attempt => Some(PausedSession {
             agent: agent.clone(),
             model: model.clone(),
             session: id.clone(),
@@ -370,14 +390,14 @@ fn first_resume_after_pause(after: &[Event]) -> bool {
 /// paths share, so the note is seeded from this fold instead. Keyed on the LATEST
 /// attempt, exactly like [`last_attempt_session`]: a later attempt that finished
 /// some other way has already recovered, and a note about it would be stale.
-pub(crate) fn last_attempt_interrupted(events: &[Event], node: &str) -> bool {
+pub(crate) fn last_attempt_interrupted(events: &[Event], key: ExecKey<'_>) -> bool {
     events
         .iter()
         .rev()
         .find_map(|e| match &e.payload {
-            EventPayload::AttemptFinished {
-                node: n, status, ..
-            } if n == node => Some(status.as_str() == NodeStatus::Interrupted.as_str()),
+            EventPayload::AttemptFinished { status, .. } if key.finished(e) => {
+                Some(status.as_str() == NodeStatus::Interrupted.as_str())
+            }
             _ => None,
         })
         .unwrap_or(false)
@@ -472,23 +492,22 @@ pub(crate) const PAUSE_INTERRUPT_NOTE: &str = "interrupted by a pause (--now)";
 fn interrupted_attempt_session(
     run_dir: &std::path::Path,
     events: &[Event],
-    node: &str,
+    key: ExecKey<'_>,
     attempt: u32,
 ) -> Option<String> {
     // Attempt numbers restart with every execution of the node, so only the
     // latest start of this attempt (and a finish after it) is its own.
     let start = events.iter().rposition(|e| {
-        matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt: a, .. }
-            if n == node && *a == attempt)
+        key.started(e)
+            && matches!(&e.payload, EventPayload::AttemptStarted { attempt: a, .. } if *a == attempt)
     })?;
     transcript_session(run_dir, &events[start]).or_else(|| {
         events[start..].iter().find_map(|e| match &e.payload {
             EventPayload::AttemptFinished {
-                node: n,
                 attempt: a,
                 session,
                 ..
-            } if n == node && *a == attempt => session.clone(),
+            } if key.finished(e) && *a == attempt => session.clone(),
             _ => None,
         })
     })
@@ -530,19 +549,25 @@ fn transcript_session(run_dir: &std::path::Path, start: &Event) -> Option<String
 pub(crate) fn journal_interrupted(
     journal: &Journal,
     run_dir: &std::path::Path,
-    node: &str,
+    key: ExecKey<'_>,
 ) -> Result<(), crate::error::EngineError> {
     let events = crate::event::read_all(run_dir)?;
-    let attempt = crate::state::RunState::fold(&events)
-        .attempts
-        .get(node)
-        .copied()
+    // The number of the key's latest attempt (an item's numbers are its own).
+    let attempt = events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptStarted { attempt, .. } if key.started(e) => Some(*attempt),
+            _ => None,
+        })
         .unwrap_or(1);
-    let session = interrupted_attempt_session(run_dir, &events, node, attempt);
+    let session = interrupted_attempt_session(run_dir, &events, key, attempt);
+    let journal = journal.for_item(key.item);
     journal.append(EventPayload::AttemptFinished {
+        item: None,
         output_truncated: Vec::new(),
         transcript_incomplete: false,
-        node: node.to_string(),
+        node: key.node.to_string(),
         attempt,
         status: "interrupted".into(),
         duration_ms: None,
@@ -642,6 +667,7 @@ mod tests {
             seq,
             ts: 1_000 + seq as u128,
             payload: EventPayload::AttemptFinished {
+                item: None,
                 output_truncated: Vec::new(),
                 transcript_incomplete: false,
                 node: node.into(),
@@ -660,10 +686,10 @@ mod tests {
 
     #[test]
     fn a_node_with_no_finished_attempt_is_not_interrupted() {
-        assert!(!last_attempt_interrupted(&[], "work"));
+        assert!(!last_attempt_interrupted(&[], ExecKey::node("work")));
         assert!(!last_attempt_interrupted(
             &[finished(0, "other", "interrupted")],
-            "work"
+            ExecKey::node("work")
         ));
     }
 
@@ -673,7 +699,7 @@ mod tests {
             finished(0, "work", "failed"),
             finished(1, "work", "interrupted"),
         ];
-        assert!(last_attempt_interrupted(&events, "work"));
+        assert!(last_attempt_interrupted(&events, ExecKey::node("work")));
     }
 
     /// Keyed on the LATEST attempt, not on any interrupted one in history: a node
@@ -685,7 +711,7 @@ mod tests {
             finished(0, "work", "interrupted"),
             finished(1, "work", "succeeded"),
         ];
-        assert!(!last_attempt_interrupted(&events, "work"));
+        assert!(!last_attempt_interrupted(&events, ExecKey::node("work")));
     }
 
     /// Only the attempt a `--now` pause cut short, followed by that pause,
@@ -698,6 +724,7 @@ mod tests {
             at(
                 ts,
                 EventPayload::AttemptStarted {
+                    item: None,
                     node: "work".into(),
                     attempt: 1,
                     agent: "claude".into(),
@@ -716,6 +743,7 @@ mod tests {
             at(
                 ts,
                 EventPayload::AttemptFinished {
+                    item: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "work".into(),
@@ -738,8 +766,9 @@ mod tests {
             finished(2, Some(PAUSE_INTERRUPT_NOTE)),
             paused(3),
         ];
-        let got = paused_attempt_session(Path::new("/nonexistent"), &by_pause, "work")
-            .expect("a paused session");
+        let got =
+            paused_attempt_session(Path::new("/nonexistent"), &by_pause, ExecKey::node("work"))
+                .expect("a paused session");
         assert_eq!(
             (got.agent.as_str(), got.model.as_str(), got.session.as_str()),
             ("claude", "haiku", "sid")
@@ -747,13 +776,17 @@ mod tests {
         // A missing verdict, then a pause: the attempt was not cut short.
         let no_verdict = vec![started(1), finished(2, Some("partial work")), paused(3)];
         assert_eq!(
-            paused_attempt_session(Path::new("/nonexistent"), &no_verdict, "work"),
+            paused_attempt_session(
+                Path::new("/nonexistent"),
+                &no_verdict,
+                ExecKey::node("work")
+            ),
             None
         );
         // The pause interrupt without its pause (a driver that died).
         let no_pause = vec![started(1), finished(2, Some(PAUSE_INTERRUPT_NOTE))];
         assert_eq!(
-            paused_attempt_session(Path::new("/nonexistent"), &no_pause, "work"),
+            paused_attempt_session(Path::new("/nonexistent"), &no_pause, ExecKey::node("work")),
             None
         );
     }
@@ -775,6 +808,7 @@ mod tests {
                 at(
                     1,
                     EventPayload::AttemptStarted {
+                        item: None,
                         node: "work".into(),
                         attempt: 1,
                         agent: "claude".into(),
@@ -791,6 +825,7 @@ mod tests {
                 at(
                     2,
                     EventPayload::AttemptFinished {
+                        item: None,
                         output_truncated: Vec::new(),
                         transcript_incomplete: false,
                         node: "work".into(),
@@ -807,7 +842,7 @@ mod tests {
                 ),
                 at(3, crate::pause::engine_paused("x")),
             ];
-            paused_attempt_session(run.path(), &events, "work")
+            paused_attempt_session(run.path(), &events, ExecKey::node("work"))
                 .expect("a paused session")
                 .workdir
         };
@@ -833,6 +868,7 @@ mod tests {
             at(
                 1,
                 EventPayload::AttemptStarted {
+                    item: None,
                     node: "work".into(),
                     attempt: 1,
                     agent: "claude".into(),
@@ -849,6 +885,7 @@ mod tests {
             at(
                 2,
                 EventPayload::AttemptFinished {
+                    item: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "work".into(),
@@ -865,11 +902,11 @@ mod tests {
             ),
         ];
         assert_eq!(
-            interrupted_attempt_session(dir.path(), &events, "work", 1).as_deref(),
+            interrupted_attempt_session(dir.path(), &events, ExecKey::node("work"), 1).as_deref(),
             Some("sid")
         );
         assert_eq!(
-            interrupted_attempt_session(dir.path(), &events, "work", 2),
+            interrupted_attempt_session(dir.path(), &events, ExecKey::node("work"), 2),
             None
         );
         // A later execution of the node restarts at attempt 1: the older
@@ -877,7 +914,7 @@ mod tests {
         let mut rerun = events.clone();
         rerun.push(at(3, events[0].payload.clone()));
         assert_eq!(
-            interrupted_attempt_session(dir.path(), &rerun, "work", 1),
+            interrupted_attempt_session(dir.path(), &rerun, ExecKey::node("work"), 1),
             None
         );
     }
@@ -886,6 +923,7 @@ mod tests {
         at(
             seq,
             EventPayload::AttemptStarted {
+                item: None,
                 node: "work".into(),
                 attempt: 1,
                 agent: "claude".into(),
@@ -911,7 +949,7 @@ mod tests {
         std::fs::write(old.join(super::super::transcript::SESSION_ID_FILE), "old").unwrap();
         let events = vec![started(1, Some("t-old")), started(2, None)];
         assert_eq!(
-            interrupted_attempt_session(dir.path(), &events, "work", 1),
+            interrupted_attempt_session(dir.path(), &events, ExecKey::node("work"), 1),
             None
         );
     }
@@ -926,10 +964,16 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join(super::super::transcript::SESSION_ID_FILE), "x").unwrap();
         let events = vec![started(1, Some("../elsewhere"))];
-        assert_eq!(interrupted_attempt_session(&run, &events, "work", 1), None);
+        assert_eq!(
+            interrupted_attempt_session(&run, &events, ExecKey::node("work"), 1),
+            None
+        );
         let abs = outside.to_str().unwrap();
         let events = vec![started(1, Some(abs))];
-        assert_eq!(interrupted_attempt_session(&run, &events, "work", 1), None);
+        assert_eq!(
+            interrupted_attempt_session(&run, &events, ExecKey::node("work"), 1),
+            None
+        );
         std::fs::create_dir_all(run.join("t")).unwrap();
         std::fs::write(
             run.join("t")
@@ -939,7 +983,7 @@ mod tests {
         .unwrap();
         let events = vec![started(1, Some("t"))];
         assert_eq!(
-            interrupted_attempt_session(&run, &events, "work", 1).as_deref(),
+            interrupted_attempt_session(&run, &events, ExecKey::node("work"), 1).as_deref(),
             Some("ok")
         );
     }
@@ -953,6 +997,7 @@ mod tests {
                 at(
                     1,
                     EventPayload::AttemptStarted {
+                        item: None,
                         node: "work".into(),
                         attempt: 1,
                         agent: "claude".into(),
@@ -969,6 +1014,7 @@ mod tests {
                 at(
                     2,
                     EventPayload::AttemptFinished {
+                        item: None,
                         output_truncated: Vec::new(),
                         transcript_incomplete: false,
                         node: "work".into(),
@@ -999,10 +1045,13 @@ mod tests {
             explicit,
         };
         let first = events(&[paused.clone(), resumed(false)]);
-        assert!(paused_attempt_session(Path::new("/nonexistent"), &first, "work").is_some());
+        assert!(
+            paused_attempt_session(Path::new("/nonexistent"), &first, ExecKey::node("work"))
+                .is_some()
+        );
         let from_node = events(&[paused.clone(), resumed(true)]);
         assert_eq!(
-            paused_attempt_session(Path::new("/nonexistent"), &from_node, "work"),
+            paused_attempt_session(Path::new("/nonexistent"), &from_node, ExecKey::node("work")),
             None
         );
         let second_cycle = events(&[
@@ -1012,7 +1061,11 @@ mod tests {
             resumed(false),
         ]);
         assert_eq!(
-            paused_attempt_session(Path::new("/nonexistent"), &second_cycle, "work"),
+            paused_attempt_session(
+                Path::new("/nonexistent"),
+                &second_cycle,
+                ExecKey::node("work")
+            ),
             None
         );
     }

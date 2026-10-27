@@ -466,6 +466,7 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
         why.push("the playbook's effects contain `irreversible`".to_string());
     }
     for (site, bindings) in playbook.connector_sites() {
+        let site: &str = &site;
         if !bindings.is_empty() {
             why.push(format!(
                 "{} binds a connector; eval runs never call real connectors and mocks are not supported yet",
@@ -673,7 +674,7 @@ fn case_problems(
         });
         if criteria == 0 {
             p.push(format!(
-                "checks.goal is `required` but version {} has no script or marker goal criterion",
+                "checks.goal is `required` but version {} has no script, marker or list goal criterion",
                 playbook.version
             ));
         }
@@ -1221,7 +1222,7 @@ mod tests {
             .collect();
         assert_eq!(
             v80,
-            [&"eval case `explicit`: checks.goal is `required` but version 1.2.0 has no script or marker goal criterion".to_string()]
+            [&"eval case `explicit`: checks.goal is `required` but version 1.2.0 has no script, marker or list goal criterion".to_string()]
         );
         let with_goal = PB.replace(
             "nodes:",

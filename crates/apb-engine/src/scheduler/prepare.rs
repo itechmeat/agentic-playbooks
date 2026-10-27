@@ -513,6 +513,16 @@ pub(crate) fn prepare_run_target(
         ));
     }
 
+    // List nodes run on the CLI only in this release (their items are
+    // agent attempts the engine spawns itself).
+    if execution.mode == apb_core::execution::ExecutionMode::Host
+        && playbook.nodes.iter().any(|n| n.list().is_some())
+    {
+        return Err(EngineError::Invalid(
+            "list nodes need execution: cli in this release".into(),
+        ));
+    }
+
     // Run-level overrides (spec 11): produce an "effective playbook" = version +
     // overrides. All the code afterward works only with it. Empty overrides
     // change nothing.
@@ -679,8 +689,8 @@ pub(crate) fn prepare_run_target(
     let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
         .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
     let copied = prep_try_unstarted(&mut log, &unstarted, copied)?;
-    // Pinned only for a playbook with goal `script` criteria or baseline
-    // `script` checks, the two readers of the pin, so every other run's
+    // Pinned only for a playbook with goal `script` criteria, baseline
+    // `script` checks or list item `script` checks, the readers of the pin, so every other run's
     // `run_provenance` stays as it was in 0.22.
     let has_goal_scripts = playbook.goal.as_ref().is_some_and(|g| {
         g.criteria
@@ -693,7 +703,13 @@ pub(crate) fn prepare_run_target(
             Some(apb_core::baseline::BaselineSource::Script(_))
         )
     });
-    let scripts_digest = if has_goal_scripts || has_baseline_scripts {
+    // A list item check script reads the pin the same way.
+    let has_item_check_scripts = playbook.nodes.iter().any(|n| {
+        n.list()
+            .and_then(|l| l.check.as_ref())
+            .is_some_and(|c| c.script.is_some())
+    });
+    let scripts_digest = if has_goal_scripts || has_baseline_scripts || has_item_check_scripts {
         Some(prep_try_unstarted(
             &mut log,
             &unstarted,

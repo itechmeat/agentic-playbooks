@@ -359,6 +359,14 @@ pub struct ProgressSummary {
         ts(as = "Option<Vec<crate::host_task::PendingHostTask>>", optional)
     )]
     pub pending_tasks: Vec<crate::host_task::PendingHostTask>,
+    /// The counts of every list node that started a visit, in playbook
+    /// order. Absent when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::list::ListProgress>>", optional)
+    )]
+    pub lists: Vec<crate::list::ListProgress>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -732,7 +740,10 @@ impl GroupContext {
                 label: lbl,
             } = &e.payload
             {
-                if let Some(&gi) = group_of.get(node_id.as_str()) {
+                // A list node's report counts its items, not a cycle's
+                // iterations.
+                let is_list = playbook.node(node_id).is_some_and(|n| n.list().is_some());
+                if !is_list && let Some(&gi) = group_of.get(node_id.as_str()) {
                     let total_c = if *total == 0 { 1 } else { *total };
                     let done_c = (*done).min(total_c);
                     report_of.insert(gi, (done_c, total_c));
@@ -817,12 +828,27 @@ fn weighted_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> (u
                 total += w;
                 if status(id) == NodeStatus::Succeeded {
                     done += w;
+                } else if n.list().is_some() {
+                    done += list_credit(events, id, w);
                 }
             }
         }
     }
 
     (done, total)
+}
+
+/// The credit a running list node earns: its weight times the share of its
+/// items processed so far.
+fn list_credit(events: &[Event], node: &str, weight: u128) -> u128 {
+    let Some(fold) = crate::list::ListFold::of(events, node).filter(|f| f.is_open()) else {
+        return 0;
+    };
+    let c = fold.counts();
+    match c.total {
+        0 => 0,
+        total => weight * u128::from(c.processed.min(total)) / u128::from(total),
+    }
 }
 
 /// Computes the progress summary from events + the run's playbook version.
@@ -953,6 +979,13 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         pending_tasks: Vec::new(),
         pending_waits,
         plan_key,
+        lists: playbook
+            .nodes
+            .iter()
+            .filter(|n| n.list().is_some())
+            .filter_map(|n| crate::list::ListFold::of(events, &n.id))
+            .map(|f| crate::list::ListProgress::of(&f))
+            .collect(),
     }
 }
 

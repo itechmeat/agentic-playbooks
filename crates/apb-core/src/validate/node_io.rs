@@ -104,13 +104,25 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
         .iter()
         .filter_map(|n| super::judge::judge_output_fields(n).map(|f| (n.id.as_str(), f)))
         .collect();
+    // A list node publishes its counts and items whatever it declares.
+    let list_fields: HashMap<&str, Vec<String>> = playbook
+        .nodes
+        .iter()
+        .filter(|n| n.list().is_some())
+        .map(|n| {
+            let fields = crate::list::LIST_OUTPUT_FIELDS.map(String::from).to_vec();
+            (n.id.as_str(), fields)
+        })
+        .collect();
     let declared = |id: &str| -> Option<&Vec<String>> {
-        playbook
-            .node(id)
-            .and_then(|n| n.outputs.as_ref())
-            .map(|o| &o.fields)
-            .filter(|f| !f.is_empty())
-            .or_else(|| judge_fields.get(id))
+        list_fields.get(id).or_else(|| {
+            playbook
+                .node(id)
+                .and_then(|n| n.outputs.as_ref())
+                .map(|o| &o.fields)
+                .filter(|f| !f.is_empty())
+                .or_else(|| judge_fields.get(id))
+        })
     };
     let report = |owner: Option<&str>, source: &str, field: &str, r: &mut ValidationReport| {
         if let Some(fields) = declared(source)

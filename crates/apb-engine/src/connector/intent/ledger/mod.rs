@@ -14,6 +14,7 @@ use apb_core::schema::OnUnknown;
 
 use super::identity::IntentKey;
 use crate::event::{Event, EventPayload};
+use crate::exec_key::ExecKey;
 
 /// What became of one intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +117,7 @@ impl Ledger {
 
     fn record(&mut self, event: &Event) {
         let EventPayload::SendIntentRecorded {
+            item,
             intent,
             nonce,
             node,
@@ -172,6 +174,7 @@ impl Ledger {
                 function: function.clone(),
                 account: account.clone(),
                 label: label.clone(),
+                item: item.clone(),
             },
             nonce: nonce.clone(),
             mode: IdempotencyMode::parse(mode),
@@ -277,22 +280,107 @@ fn settle(
     rec.settled_by = by.clone();
 }
 
-/// Where the effect scope of `node` starts: the first seq after its last
-/// `node_finished` with status `succeeded`, or 0 when it never succeeded.
-/// Intents recorded from there on count; a loop visit after a success starts
-/// afresh, so a send that belongs to each iteration is allowed again.
-pub fn effect_scope_floor(events: &[Event], node: &str) -> u64 {
-    events
+/// Where the effect scope of `key` starts: the first seq after its node's
+/// last `node_finished` with status `succeeded`, or 0 when it never
+/// succeeded. Intents recorded from there on count; a loop visit after a
+/// success starts afresh, so a send that belongs to each iteration is
+/// allowed again.
+///
+/// A list item's scope starts only after the item's own last
+/// `list_item_settled { passed }`: a node that succeeded with items that
+/// did not pass moves nothing for those items, so a loop visit never resends
+/// what an earlier visit may have sent. Nor does it ever start past a send
+/// of the item whose outcome is still unknown or pending: that send stays
+/// in scope until it is found or a person settles it.
+pub fn effect_scope_floor(events: &[Event], key: ExecKey<'_>) -> u64 {
+    effect_scope_floor_with(
+        events,
+        &Ledger::fold(events),
+        key,
+        apb_core::clock::now_ms_u64(),
+        &crate::liveness::pid_alive,
+    )
+}
+
+/// [`effect_scope_floor`] over a ledger already folded from `events`, as of
+/// `now_ms`, with the process check given.
+pub fn effect_scope_floor_with(
+    events: &[Event],
+    ledger: &Ledger,
+    key: ExecKey<'_>,
+    now_ms: u64,
+    alive: &dyn Fn(u32) -> bool,
+) -> u64 {
+    let Some(item) = key.item else {
+        return events
+            .iter()
+            .rev()
+            .find(|e| {
+                matches!(&e.payload, EventPayload::NodeFinished { node: n, status, .. }
+                    if n == key.node && status == "succeeded")
+            })
+            .map_or(0, |e| e.seq + 1);
+    };
+    let passed = events
         .iter()
         .rev()
-        .find(|e| {
+        .find(|e| passed_item(e, key.node).is_some_and(|i| i == item))
+        .map_or(0, |e| e.seq + 1);
+    item_scope_floor(ledger, key, passed, now_ms, alive)
+}
+
+/// The item a `list_item_settled { passed }` of `node` names.
+fn passed_item<'a>(e: &'a Event, node: &str) -> Option<&'a str> {
+    match &e.payload {
+        EventPayload::ListItemSettled {
+            node: n,
+            item,
+            state,
+            ..
+        } if n == node && state == crate::list::ledger::settled::PASSED => Some(item),
+        _ => None,
+    }
+}
+
+/// For every item of `node`: the first seq after its last
+/// `list_item_settled { passed }`, in one pass over `events`. An item that
+/// never passed is absent (its floor is 0).
+pub fn passed_floors(events: &[Event], node: &str) -> HashMap<String, u64> {
+    let mut floors = HashMap::new();
+    for e in events {
+        if let Some(item) = passed_item(e, node) {
+            floors.insert(item.to_string(), e.seq + 1);
+        }
+    }
+    floors
+}
+
+/// A list item's effect scope floor given `passed`, the first seq after its
+/// last passed settlement (0 when it never passed): see
+/// [`effect_scope_floor`].
+pub fn item_scope_floor(
+    ledger: &Ledger,
+    key: ExecKey<'_>,
+    passed: u64,
+    now_ms: u64,
+    alive: &dyn Fn(u32) -> bool,
+) -> u64 {
+    if passed == 0 {
+        return 0;
+    }
+    ledger
+        .records()
+        .iter()
+        .filter(|r| r.seq < passed && r.key.exec_key() == key)
+        .filter(|r| {
             matches!(
-                &e.payload,
-                EventPayload::NodeFinished { node: n, status, .. }
-                    if n == node && status == "succeeded"
+                members_verdict(ledger.send_of(r), r, now_ms, alive).state,
+                IntentState::Unknown { .. } | IntentState::Pending { .. }
             )
         })
-        .map_or(0, |e| e.seq + 1)
+        .map(|r| r.seq)
+        .min()
+        .map_or(passed, |open| open.min(passed))
 }
 
 /// The state a record reads as now: a pending intent whose deadline passed
@@ -461,7 +549,7 @@ fn admit_with(events: &[Event], q: &AdmitQuery<'_>, alive: &dyn Fn(u32) -> bool)
         return Admission::AttemptClosed;
     }
     let ledger = Ledger::fold(events);
-    let floor = effect_scope_floor(events, &q.key.node);
+    let floor = effect_scope_floor_with(events, &ledger, q.key.exec_key(), q.now_ms, alive);
     let Some(tip) = ledger.latest(q.key, floor) else {
         return Admission::New { resend_of: None };
     };

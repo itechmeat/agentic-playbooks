@@ -997,6 +997,7 @@ fn seed_open_attempt_run(root: &std::path::Path, run_id: &str, pid: u32) {
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::AttemptStarted {
+        item: None,
         node: "note".into(),
         attempt: 1,
         agent: "claude".into(),

@@ -3,6 +3,7 @@
 
 use super::*;
 
+use super::continuation::{Continuation, continuation_prompt};
 use crate::adapter::AgentFailure;
 use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
 
@@ -121,79 +122,6 @@ fn resolve_session(
     }
 }
 
-/// How much of the last failure a continuation prompt quotes.
-const CONTINUATION_REASON_MAX_BYTES: usize = 2048;
-
-/// Why a session is being continued (issue #136 items 2 and 3).
-enum Continuation<'a> {
-    /// The last attempt was stopped at its deadline.
-    Deadline,
-    /// The last attempt was cut short by a `--now` pause (issue #200).
-    Paused,
-    /// An attempt ended without recording a required verdict.
-    Interrupted,
-    /// The last attempt failed with this text (clipped when quoted).
-    Failed(&'a str),
-}
-
-/// The retry briefing of `node` (see [`super::attempt_memory`]) as a
-/// paragraph to append to an attempt's prompt, empty when no earlier attempt
-/// is in scope. Appended outside `render_node_prompt`, so the node's cache
-/// key does not move.
-fn retry_briefing(run_dir: &Path, events: &[Event], node: &str) -> String {
-    super::attempt_memory::recall(run_dir, events, node)
-        .map(|m| format!("\n\n{}", m.briefing()))
-        .unwrap_or_default()
-}
-
-/// [`retry_briefing`] over the journal as it stands. Processes outside the
-/// drive (`apb connector call`) append to it while it is read, so a torn
-/// last line is forgiven; a journal that cannot be read leaves the advisory
-/// briefing out rather than failing the attempt.
-fn retry_briefing_now(run_dir: &Path, node: &str) -> String {
-    crate::event::read_all_lossy_tail(run_dir)
-        .map(|events| retry_briefing(run_dir, &events, node))
-        .unwrap_or_default()
-}
-
-/// The prompt that continues a session after its attempt did not finish: the
-/// session already holds the node prompt, so only what happened is said.
-/// `verdict_file` adds the reminder to record the verdict in the new
-/// attempt's status file (the interruption note already carries it).
-fn continuation_prompt(why: Continuation<'_>, verdict_file: bool) -> String {
-    let mut out = match why {
-        Continuation::Deadline => {
-            "Your previous turn was stopped at its time limit before it finished. \
-             Continue where you stopped; do not redo work that is already done."
-                .to_string()
-        }
-        Continuation::Paused => "Your previous turn was stopped by a pause before it finished. \
-             Continue where you stopped; do not redo work that is already done."
-            .to_string(),
-        Continuation::Interrupted => return super::status_file::INTERRUPTION_NOTE.to_string(),
-        Continuation::Failed(reason) => {
-            let reason = reason.trim();
-            let mut cut = reason.len().min(CONTINUATION_REASON_MAX_BYTES);
-            while !reason.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            format!(
-                "Your previous attempt at this task did not succeed:\n\n{}\n\n\
-                 Continue in this session: fix what is wrong and finish the task. \
-                 Do not redo work that is already done.",
-                &reason[..cut]
-            )
-        }
-    };
-    if verdict_file {
-        out.push_str(
-            " Record your final verdict in the status file named by APB_STATUS_FILE \
-             (a new file for this attempt) before your turn ends.",
-        );
-    }
-    out
-}
-
 /// The prompt of an answer round that resumes the asking session: the user's
 /// answer and one line pointing back at the contracts the session already
 /// holds. Everything else the first turn carried (skills, connector grants,
@@ -206,33 +134,6 @@ pub(crate) fn answer_followup(answer: &str) -> String {
 /// See [`answer_followup`].
 const ANSWER_FOLLOWUP_NOTE: &str = "(The user's answer to your question. Continue the task; the \
      instructions from the start of this session still apply, including how to finish your reply.)";
-
-/// A `resume`-transport re-invocation of an interactive node (spec 2026-07-20,
-/// Task 7). Carries the session id captured from the attempt that asked, plus
-/// the user's answer to hand the agent as the follow-up prompt. When present,
-/// `execute_node` re-enters the primary executor's own session via its resume
-/// form instead of re-invoking from scratch with a transcript. Chosen by the
-/// drive loop, which downgrades to a plain (`resume: None`) re-invocation when
-/// no session was captured or the agent has no resume form.
-pub(crate) struct ResumeContext {
-    pub session: String,
-    pub answer: String,
-}
-
-/// A `live`-transport execution of an interactive node (spec 2026-07-20, Task
-/// 11). Present only when the drive loop resolved the node's `interaction` to
-/// `Live` on claude/claude-code AND could resolve the current exe; a downgrade
-/// hands `None`. When present, `execute_node` injects the `apb __ask-server`
-/// sidecar into the claude argv, appends the live prompt paragraph instead of
-/// the marker contract, and drives the channel observation on this (the drive)
-/// thread via the adapter's per-poll `on_tick`.
-pub(crate) struct LiveContext {
-    /// Current apb executable, resolved by the drive layer (a resolution
-    /// failure downgrades before we get here, so this is always present).
-    pub exe: std::path::PathBuf,
-    /// Per-server tool timeout in ms handed to the sidecar injection.
-    pub timeout_ms: u64,
-}
 
 /// The seq of the last control entry currently posted, or `None` when the
 /// channel is empty. Used as the mid-attempt observation baseline
@@ -524,6 +425,7 @@ pub(super) fn journal_interrupted_attempt(
     attempt: InterruptedAttempt<'_>,
 ) -> Result<(), EngineError> {
     journal.append(EventPayload::AttemptFinished {
+        item: None,
         output_truncated: attempt.capture.truncated,
         transcript_incomplete: attempt.capture.transcript_incomplete,
         node: attempt.node_id.into(),
@@ -625,7 +527,7 @@ fn effective_failure_kind(detail: &str, class: ErrorClass, require_verdict: bool
 /// a finish-with-prompt composes through `execute_finish_answer` and a
 /// sub-playbook instruction through `run_playbook_node`, neither of which passes
 /// through [`execute_node`].
-fn prompt_template(kind: &NodeKind) -> Option<&str> {
+pub(super) fn prompt_template(kind: &NodeKind) -> Option<&str> {
     match kind {
         NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => Some(prompt.as_str()),
         _ => None,
@@ -661,7 +563,7 @@ fn prompt_template(kind: &NodeKind) -> Option<&str> {
 /// One anomaly per node execution (not per attempt), listing every hole with the
 /// reason it is one, journaled through the same `WakeRaised { Anomaly }`
 /// mechanism as the empty-output anomaly.
-fn journal_missing_inputs(
+pub(super) fn journal_missing_inputs(
     journal: &Journal,
     run_dir: &Path,
     node_id: &str,
@@ -706,25 +608,23 @@ fn journal_missing_inputs(
 /// `track_provenance` is false for a member of a concurrent batch that
 /// shares the tree with a sibling: `HEAD` moves by both, so no commit could
 /// be attributed to one node.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
-    playbook: &Playbook,
-    run_dir: &Path,
-    workdir: &Path,
+    ctx: &NodeCtx<'_, '_>,
     node_id: &str,
-    run_id: &str,
-    state: &RunState,
-    cfg: &RunConfig,
-    override_prompt: Option<String>,
-    cancel: &AtomicBool,
-    env_scrub: &[String],
-    journal: &Journal,
-    decisions: Option<&crate::decision::DecisionRunner>,
-    resume: Option<ResumeContext>,
-    live: Option<LiveContext>,
-    track_provenance: bool,
+    opts: ExecOptions<'_>,
 ) -> Result<AttemptOutcome, EngineError> {
-    let tracker = track_provenance
+    let NodeCtx {
+        playbook,
+        run_dir,
+        workdir,
+        run_id,
+        state,
+        cfg,
+        journal,
+        ..
+    } = *ctx;
+    let tracker = opts
+        .track_provenance
         .then(|| {
             super::provenance::Tracker::start(playbook, run_dir, node_id, workdir, |t| {
                 render_node_prompt(
@@ -738,27 +638,15 @@ pub(crate) fn execute_node(
             })
         })
         .flatten();
-    let outcome = execute_node_kind(
-        playbook,
-        run_dir,
-        workdir,
-        node_id,
-        run_id,
-        state,
-        cfg,
-        override_prompt,
-        cancel,
-        env_scrub,
-        journal,
-        decisions,
-        resume,
-        live,
-    )?;
+    let outcome = execute_node_kind(ctx, node_id, opts)?;
     match (tracker, &outcome) {
         (Some(t), AttemptOutcome::Finished { .. }) => t.finish(run_dir, journal)?,
-        (Some(t), AttemptOutcome::Suspended { .. } | AttemptOutcome::QuotaPaused { .. }) => {
-            t.park(run_dir)
-        }
+        (
+            Some(t),
+            AttemptOutcome::Suspended { .. }
+            | AttemptOutcome::QuotaPaused { .. }
+            | AttemptOutcome::Halted { .. },
+        ) => t.park(run_dir),
         (None, _) => {}
     }
     Ok(outcome)
@@ -766,23 +654,32 @@ pub(crate) fn execute_node(
 
 // --- end of run provenance ----------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn execute_node_kind(
-    playbook: &Playbook,
-    run_dir: &Path,
-    workdir: &Path,
+    ctx: &NodeCtx<'_, '_>,
     node_id: &str,
-    run_id: &str,
-    state: &RunState,
-    cfg: &RunConfig,
-    override_prompt: Option<String>,
-    cancel: &AtomicBool,
-    env_scrub: &[String],
-    journal: &Journal,
-    decisions: Option<&crate::decision::DecisionRunner>,
-    resume: Option<ResumeContext>,
-    live: Option<LiveContext>,
+    opts: ExecOptions<'_>,
 ) -> Result<AttemptOutcome, EngineError> {
+    let NodeCtx {
+        playbook,
+        run_dir,
+        workdir,
+        run_id,
+        state,
+        cfg,
+        cancel,
+        env_scrub,
+        journal,
+        decisions,
+    } = *ctx;
+    let ExecOptions {
+        override_prompt,
+        resume,
+        live,
+        item,
+        ..
+    } = opts;
+    // The execution's key: the node, and for a list item the item.
+    let key = crate::exec_key::ExecKey::new(node_id, item.map(|i| i.id.as_str()));
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
@@ -791,8 +688,10 @@ fn execute_node_kind(
     // interactive path share, and it fires once per execution. Skipped when the
     // node's own template is not what runs: a prompt override replaces it
     // wholesale, and a resume re-invocation carries only the user's answer.
+    // A list item's shared template was checked once for the whole list.
     if override_prompt.is_none()
         && resume.is_none()
+        && item.is_none()
         && let Some(template) = prompt_template(&node.kind)
     {
         journal_missing_inputs(journal, run_dir, node_id, template, state)?;
@@ -852,6 +751,10 @@ fn execute_node_kind(
             // per-attempt `on_tick` closure can capture them freely; only ever
             // consulted on the live path.
             let live_q_timeout: Option<u64> = *question_timeout_seconds;
+            // A list item's own section, after everything its items share.
+            let item_section = item
+                .map(|i| format!("\n\n{}", i.section))
+                .unwrap_or_default();
             let live_default: Option<String> = default_answer.clone();
             // The node's own directory (issue #67 item 4). An unresolvable
             // `workdir` fails the node before anything is spawned.
@@ -878,10 +781,12 @@ fn execute_node_kind(
             // answer (the prior context lives in the agent's own session); an
             // ordinary attempt renders the node prompt (or takes the reprompt
             // override the drive loop supplied).
-            let mut text = match (&resume, &override_prompt) {
-                (Some(rc), _) => answer_followup(&rc.answer),
-                (None, Some(p)) => p.clone(),
-                (None, None) => render_node_prompt(
+            let mut text = match (&resume, &override_prompt, item) {
+                (Some(rc), _, _) => answer_followup(&rc.answer),
+                (None, Some(p), _) => p.clone(),
+                // A list item: the template its list rendered once.
+                (None, None, Some(i)) => i.template.clone(),
+                (None, None, None) => render_node_prompt(
                     run_dir,
                     run_id,
                     state,
@@ -914,8 +819,12 @@ fn execute_node_kind(
                 );
             }
             // The completion check's `task`: the prompt as rendered for this
-            // execution, before any retry continuation replaces it.
-            let task_prompt = text.clone();
+            // execution (with a list item's own section), before any retry
+            // continuation replaces it.
+            let task_prompt = match item {
+                Some(i) if resume.is_none() => format!("{text}\n\n{}", i.section),
+                _ => text.clone(),
+            };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             // Required verdict (spec 2026-08-05 section 2.2). The node field is a
             // plain bool, so it can only turn the requirement ON; a playbook-wide
@@ -982,6 +891,7 @@ fn execute_node_kind(
             // an execution, possibly through the rebind overlay read below.
             if let Some(runner) = decisions
                 && resume.is_none()
+                && item.is_none()
                 && node.route == Some(apb_core::schema::RouteSetting::Auto)
             {
                 route_execution(
@@ -1154,9 +1064,13 @@ fn execute_node_kind(
             let status_note = super::status_file::status_file_note(
                 node.success_check.is_some(),
                 require_verdict,
-                node.outputs
-                    .as_ref()
-                    .map_or(&[][..], |o| o.fields.as_slice()),
+                match item {
+                    Some(i) => i.outputs.as_slice(),
+                    None => node
+                        .outputs
+                        .as_ref()
+                        .map_or(&[][..], |o| o.fields.as_slice()),
+                },
             );
             if first_turn && !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
@@ -1170,7 +1084,8 @@ fn execute_node_kind(
                 run_dir,
                 node_id,
                 cfg.spawn_env(),
-            );
+            )
+            .with_item(key.item);
 
             // Agent sessions this execution's attempts left behind, by binding
             // (issue #136 item 2). A later attempt on the same (agent, model) -
@@ -1240,9 +1155,9 @@ fn execute_node_kind(
             let mut pause_session = false;
             if resume.is_none()
                 && !host_mode
-                && let Some(paused) = journaled.as_deref().and_then(|events| {
-                    super::journal::paused_attempt_session(run_dir, events, node_id)
-                })
+                && let Some(paused) = journaled
+                    .as_deref()
+                    .and_then(|events| super::journal::paused_attempt_session(run_dir, events, key))
             {
                 // The session is bound to the directory it ran in: an
                 // isolated node resumes in the interrupted attempt's own
@@ -1286,10 +1201,10 @@ fn execute_node_kind(
             // split, not this flag.
             let mut was_interrupted = require_verdict
                 && match &journaled {
-                    Some(events) => super::journal::last_attempt_interrupted(events, node_id),
+                    Some(events) => super::journal::last_attempt_interrupted(events, key),
                     // A resume re-invocation skipped the read above; pay for one
                     // rather than silently drop the note.
-                    None => super::journal::last_attempt_interrupted(&read_all(run_dir)?, node_id),
+                    None => super::journal::last_attempt_interrupted(&read_all(run_dir)?, key),
                 };
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
@@ -1506,7 +1421,10 @@ fn execute_node_kind(
                         }
                         wd.clone()
                     } else if isolated {
-                        let wd = run_dir.join("work").join(node_id).join(attempt.to_string());
+                        let wd = run_dir
+                            .join("work")
+                            .join(node_id)
+                            .join(key.work_segment(attempt));
                         // Fail-closed: a missing directory is normal, but any other
                         // cleanup error is NOT swallowed - otherwise we would materialize
                         // skills on top of leftovers from the previous (possibly hostile) attempt.
@@ -1581,7 +1499,7 @@ fn execute_node_kind(
                                     None => {
                                         let f = crate::invocation::fresh_session(
                                             &step.agent,
-                                            &format!("apb {run_id} {node_id} {attempt}"),
+                                            &key.session_title(run_id, attempt),
                                         );
                                         let mut spec = base.clone();
                                         match &f {
@@ -1617,7 +1535,7 @@ fn execute_node_kind(
                     // file per attempt. The headless field ignores it.
                     let stream_log = run_dir
                         .join("agent-stream")
-                        .join(format!("{node_id}-{attempt}.jsonl"));
+                        .join(format!("{}.jsonl", key.stem(attempt)));
                     // Per-attempt status file (subtask S2): the agent MAY write
                     // its final verdict here as JSON; the engine reads it before
                     // parsing the textual report. Mirrors the agent-stream
@@ -1626,7 +1544,7 @@ fn execute_node_kind(
                     // any success_check.
                     let status_dir = run_dir.join("agent-status");
                     apb_core::fsutil::create_dir_under(run_dir, &status_dir)?;
-                    let status_file = status_dir.join(format!("{node_id}-{attempt}.json"));
+                    let status_file = status_dir.join(format!("{}.json", key.stem(attempt)));
                     // Stale status-file removal (issue #70 item 3): a resume or
                     // continue_from re-run can restart the attempt counter, so a
                     // status file from a PRIOR execution may still sit at this
@@ -1636,7 +1554,8 @@ fn execute_node_kind(
                     let _ = std::fs::remove_file(&status_file);
                     // This attempt's raw output (issue #67 item 10), cleared
                     // the same way when a re-run restarts the counter.
-                    let transcript_dir = super::transcript::attempt_dir(run_dir, node_id, attempt)?;
+                    let transcript_dir =
+                        super::transcript::attempt_dir(run_dir, &key.stem(attempt))?;
                     // This attempt's prompt. A continued session already holds the
                     // node prompt, so it gets only what happened since: the answer
                     // (answer round), the deadline note, or why the last attempt
@@ -1683,19 +1602,19 @@ fn execute_node_kind(
                             std::borrow::Cow::Owned(format!(
                                 "{}{}{notes}",
                                 continuation_prompt(why, !status_note.is_empty()),
-                                retry_briefing(run_dir, &journal_now, node_id)
+                                super::attempt_memory::retry_briefing(run_dir, &journal_now, key)
                             ))
                         }
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
-                            "{step_text}\n\n{}\n\n{}{}",
+                            "{step_text}\n\n{}\n\n{}{item_section}{}",
                             super::status_file::INTERRUPTION_NOTE,
                             super::status_file::NOTES_NOTE,
-                            retry_briefing_now(run_dir, node_id)
+                            super::attempt_memory::retry_briefing_now(run_dir, key)
                         )),
                         None => std::borrow::Cow::Owned(format!(
-                            "{step_text}\n\n{}{}",
+                            "{step_text}\n\n{}{item_section}{}",
                             super::status_file::NOTES_NOTE,
-                            retry_briefing_now(run_dir, node_id)
+                            super::attempt_memory::retry_briefing_now(run_dir, key)
                         )),
                     };
                     timeout_continuation = false;
@@ -1753,11 +1672,12 @@ fn execute_node_kind(
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
                     let attempt_model = Some(step.model.clone());
-                    let attempt_transcript = Some(super::transcript::relative(node_id, attempt));
+                    let attempt_transcript = Some(super::transcript::relative(&key.stem(attempt)));
                     let attempt_dir = Some(attempt_workdir.display().to_string());
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
                         if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                            item: None,
                             node: node_id.to_string(),
                             attempt: cur_attempt,
                             agent: agent_name.clone(),
@@ -1974,6 +1894,7 @@ fn execute_node_kind(
                     // attempt meanwhile (issue #107).
                     if spawn_at.get().is_some() {
                         journal.append(EventPayload::AttemptExited {
+                            item: None,
                             node: node_id.into(),
                             attempt,
                         })?;
@@ -1995,6 +1916,7 @@ fn execute_node_kind(
                     if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
+                            item: None,
                             output_truncated: capture.truncated.clone(),
                             transcript_incomplete: capture.transcript_incomplete,
                             node: node_id.into(),
@@ -2023,6 +1945,7 @@ fn execute_node_kind(
                     if let Some(msg) = timeout_msg.borrow_mut().take() {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
+                            item: None,
                             output_truncated: capture.truncated.clone(),
                             transcript_incomplete: capture.transcript_incomplete,
                             node: node_id.into(),
@@ -2141,6 +2064,7 @@ fn execute_node_kind(
                     // by an attempt_started.
                     if spawn_instant.is_none() {
                         journal.append(EventPayload::AttemptStarted {
+                            item: None,
                             node: node_id.into(),
                             attempt,
                             agent: step.agent.clone(),
@@ -2183,6 +2107,7 @@ fn execute_node_kind(
                             // interactive nodes.
                             if *interactive && let Some(q) = report.question {
                                 journal.append(EventPayload::AttemptFinished {
+                                    item: None,
                                     output_truncated: capture.truncated.clone(),
                                     transcript_incomplete: capture.transcript_incomplete,
                                     node: node_id.into(),
@@ -2288,6 +2213,7 @@ fn execute_node_kind(
                                     // downstream `nodes.<id>.rejected_output`.
                                     Some(reason) => {
                                         journal.append(EventPayload::AttemptFinished {
+                                            item: None,
                                             output_truncated: capture.truncated.clone(),
                                             transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
@@ -2308,16 +2234,21 @@ fn execute_node_kind(
                                         last_timed_out = false;
                                     }
                                     None => {
-                                        let check = completion_check(
-                                            decisions,
-                                            journal,
-                                            run_dir,
-                                            node,
-                                            attempt,
-                                            &task_prompt,
-                                            &report.output,
-                                            try_i < retries,
-                                        )?;
+                                        // A list item's own check decides it.
+                                        let check = if item.is_some_and(|i| i.checked) {
+                                            Default::default()
+                                        } else {
+                                            completion_check(
+                                                decisions,
+                                                journal,
+                                                run_dir,
+                                                node,
+                                                attempt,
+                                                &task_prompt,
+                                                &report.output,
+                                                try_i < retries,
+                                            )?
+                                        };
                                         let duration_ms = duration_ms
                                             .map(|d| d + check.elapsed.as_millis() as u64);
                                         // Completion enforce (issue #165 Part
@@ -2325,6 +2256,7 @@ fn execute_node_kind(
                                         // failure, like a success_check one.
                                         if let Some(reason) = check.reject {
                                             journal.append(EventPayload::AttemptFinished {
+                                                item: None,
                                                 output_truncated: capture.truncated.clone(),
                                                 transcript_incomplete: capture
                                                     .transcript_incomplete,
@@ -2347,6 +2279,7 @@ fn execute_node_kind(
                                             continue;
                                         }
                                         journal.append(EventPayload::AttemptFinished {
+                                            item: None,
                                             output_truncated: capture.truncated.clone(),
                                             transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
@@ -2380,6 +2313,7 @@ fn execute_node_kind(
                                 }
                             } else {
                                 journal.append(EventPayload::AttemptFinished {
+                                    item: None,
                                     output_truncated: capture.truncated.clone(),
                                     transcript_incomplete: capture.transcript_incomplete,
                                     node: node_id.into(),
@@ -2465,6 +2399,7 @@ fn execute_node_kind(
                                         ),
                                     )?;
                                     journal.append(EventPayload::AttemptFinished {
+                                        item: None,
                                         output_truncated: capture.truncated.clone(),
                                         transcript_incomplete: capture.transcript_incomplete,
                                         node: node_id.into(),
@@ -2515,22 +2450,27 @@ fn execute_node_kind(
                                         &output,
                                     )? {
                                         None => {
-                                            let check = completion_check(
-                                                decisions,
-                                                journal,
-                                                run_dir,
-                                                node,
-                                                attempt,
-                                                &task_prompt,
-                                                &output,
-                                                try_i < retries,
-                                            )?;
+                                            let check = if item.is_some_and(|i| i.checked) {
+                                                Default::default()
+                                            } else {
+                                                completion_check(
+                                                    decisions,
+                                                    journal,
+                                                    run_dir,
+                                                    node,
+                                                    attempt,
+                                                    &task_prompt,
+                                                    &output,
+                                                    try_i < retries,
+                                                )?
+                                            };
                                             let duration_ms = duration_ms
                                                 .map(|d| d + check.elapsed.as_millis() as u64);
                                             if let Some(reason) = check.reject {
                                                 // Completion enforce (issue #165
                                                 // Part 14.1), as on the Ok branch.
                                                 journal.append(EventPayload::AttemptFinished {
+                                                    item: None,
                                                     output_truncated: capture.truncated.clone(),
                                                     transcript_incomplete: capture
                                                         .transcript_incomplete,
@@ -2549,6 +2489,7 @@ fn execute_node_kind(
                                                 last_timed_out = false;
                                             } else {
                                                 journal.append(EventPayload::AttemptFinished {
+                                                    item: None,
                                                     output_truncated: capture.truncated.clone(),
                                                     transcript_incomplete: capture
                                                         .transcript_incomplete,
@@ -2572,6 +2513,7 @@ fn execute_node_kind(
                                         }
                                         Some(reason) => {
                                             journal.append(EventPayload::AttemptFinished {
+                                                item: None,
                                                 output_truncated: capture.truncated.clone(),
                                                 transcript_incomplete: capture
                                                     .transcript_incomplete,
@@ -2597,6 +2539,7 @@ fn execute_node_kind(
                                 // raw CLI error text.
                                 Some(sfr) => {
                                     journal.append(EventPayload::AttemptFinished {
+                                        item: None,
                                         output_truncated: capture.truncated.clone(),
                                         transcript_incomplete: capture.transcript_incomplete,
                                         node: node_id.into(),
@@ -2688,6 +2631,7 @@ fn execute_node_kind(
                                         was_interrupted = true;
                                     } else {
                                         journal.append(EventPayload::AttemptFinished {
+                                            item: None,
                                             output_truncated: capture.truncated.clone(),
                                             transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
@@ -2941,6 +2885,18 @@ fn execute_node_kind(
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
             let mut env = crate::script::run_env(run_dir, Some(node_id));
+            if let Some(i) = item {
+                match i.script_env() {
+                    Ok(item_env) => env.extend(item_env),
+                    Err(msg) => {
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: msg,
+                            events,
+                        });
+                    }
+                }
+            }
             let overlay = cfg.spawn_env();
             env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
             let r = crate::script::run_script_with_env(
@@ -3232,6 +3188,7 @@ pub(crate) fn execute_finish_answer(
             let on_spawn = |pid: u32, spawn_ms: u64| {
                 spawn_at.set(Some(std::time::Instant::now()));
                 if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                    item: None,
                     node: node_id.to_string(),
                     attempt: cur_attempt,
                     agent: agent_name.clone(),
@@ -3270,6 +3227,7 @@ pub(crate) fn execute_finish_answer(
             // (pid unknown) so every attempt_finished is preceded by a started.
             if spawn_instant.is_none() {
                 journal.append(EventPayload::AttemptStarted {
+                    item: None,
                     node: node_id.into(),
                     attempt,
                     agent: agent_label.clone(),
@@ -3287,6 +3245,7 @@ pub(crate) fn execute_finish_answer(
             match outcome {
                 Ok(report) => {
                     journal.append(EventPayload::AttemptFinished {
+                        item: None,
                         output_truncated: report.capture.truncated.clone(),
                         transcript_incomplete: report.capture.transcript_incomplete,
                         node: node_id.into(),
@@ -3317,6 +3276,7 @@ pub(crate) fn execute_finish_answer(
                 }) => {
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {
+                        item: None,
                         output_truncated: capture.truncated,
                         transcript_incomplete: capture.transcript_incomplete,
                         node: node_id.into(),
@@ -3777,7 +3737,8 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
         && !is_interactive(playbook, node)
         && playbook
             .node(node)
-            .is_none_or(|n| n.kind.protect_globs().is_empty())
+            // A list node runs its items on its own pool, on the sequential arm.
+            .is_none_or(|n| n.kind.protect_globs().is_empty() && n.list().is_none())
         && !matches!(
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))
