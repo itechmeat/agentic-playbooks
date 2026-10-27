@@ -161,6 +161,7 @@ fn seed_run_yaml(
             accounts: granted_accounts.iter().map(|s| s.to_string()).collect(),
             functions: functions.iter().map(|s| s.to_string()).collect(),
             max_calls,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();
@@ -251,6 +252,7 @@ fn seed_cmd_run(run_dir: &Path, account: ManifestAccount) {
             accounts: vec!["acct1".to_string()],
             functions: vec!["echo".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();
@@ -1139,6 +1141,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: vec!["list_items".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run.path(), &m).unwrap();
@@ -1213,12 +1216,14 @@ functions:
                 accounts: vec!["acct1".to_string()],
                 functions: vec!["ping".to_string()],
                 max_calls: Some(1),
+                on_unknown: None,
             },
             ManifestConnectorGrant {
                 connector: "other".to_string(),
                 accounts: vec!["a".to_string()],
                 functions: vec!["ping".to_string()],
                 max_calls: Some(1),
+                on_unknown: None,
             },
         ],
     );
@@ -1287,6 +1292,7 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
         model: None,
         workdir: None,
         transcript: None,
+        token: None,
     })
     .unwrap();
 }
@@ -1501,6 +1507,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: vec!["get_me".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run.path(), &m).unwrap();
@@ -1597,6 +1604,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: vec!["get_me".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run.path(), &m).unwrap();
@@ -2047,6 +2055,7 @@ fn seed_smtp_run(run_dir: &Path) {
             accounts: vec!["acct1".to_string()],
             functions: vec!["send_email".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();

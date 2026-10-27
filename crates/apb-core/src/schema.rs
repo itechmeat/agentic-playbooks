@@ -927,18 +927,47 @@ impl<'de> Deserialize<'de> for FunctionsAllow {
 /// A node's binding of one connector (spec 2026-07-18-connectors-design
 /// section 5): the connector folder name, an optional restriction to a
 /// subset of configured accounts (`None` - all accounts), the functions grant
-/// (`FunctionsAllow`), and an optional call budget counted per executor
-/// attempt (`apb-engine`'s `connector::call::attempt_floor`). Accepted in YAML
-/// as a bare string (shorthand, everything else default) or as an object.
-/// Structural checks (name format, duplicates, empty/duplicate list entries,
-/// `max_calls == 0`) are validator V23-V26; FS-dependent checks (connector
-/// installed, account/function exists) are a later task.
+/// (`FunctionsAllow`), an optional call budget counted per executor attempt
+/// (`apb-engine`'s `connector::call::attempt`), and what a repeat of a send
+/// with an unknown outcome does (`on_unknown`). Accepted in YAML as a bare
+/// string (shorthand, everything else default) or as an object. Structural
+/// checks (name format, duplicates, empty/duplicate list entries,
+/// `max_calls == 0`) are validator V23-V26, the send policy V69 and V84;
+/// FS-dependent checks (connector installed, account/function exists) are a
+/// later task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorBinding {
     pub name: String,
     pub accounts: Option<Vec<String>>,
     pub functions: FunctionsAllow,
     pub max_calls: Option<u32>,
+    /// What a repeat of a send whose outcome is unknown does (`None` reads
+    /// as [`OnUnknown::Refuse`]).
+    pub on_unknown: Option<OnUnknown>,
+}
+
+/// What a repeat of a send does when an earlier attempt's outcome is not
+/// known (the request timed out, the connection broke, the process died).
+/// It applies to functions that declare `idempotency: none` and to a `key`
+/// send whose key window has passed; a `marker` send with no match found is
+/// never resent automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnUnknown {
+    /// Refuse the repeat until a person decides whether it was sent.
+    #[default]
+    Refuse,
+    /// Send again: a duplicate is acceptable for this binding.
+    Resend,
+}
+
+impl OnUnknown {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnUnknown::Refuse => "refuse",
+            OnUnknown::Resend => "resend",
+        }
+    }
 }
 
 /// The object form of a connector binding. A separate struct with
@@ -954,6 +983,8 @@ struct ConnectorBindingFull {
     functions: FunctionsAllow,
     #[serde(default)]
     max_calls: Option<u32>,
+    #[serde(default)]
+    on_unknown: Option<OnUnknown>,
 }
 
 /// An intermediate form for deserializing "string or object", mirroring
@@ -973,24 +1004,27 @@ impl<'de> Deserialize<'de> for ConnectorBinding {
                 accounts: None,
                 functions: FunctionsAllow::All,
                 max_calls: None,
+                on_unknown: None,
             },
             ConnectorBindingForm::Full(ConnectorBindingFull {
                 name,
                 accounts,
                 functions,
                 max_calls,
+                on_unknown,
             }) => Self {
                 name,
                 accounts,
                 functions,
                 max_calls,
+                on_unknown,
             },
         })
     }
 }
 
 /// Serializes back to the bare-string shorthand when `accounts`, `functions`,
-/// and `max_calls` are all default (round-trips the web form cleanly);
+/// `max_calls` and `on_unknown` are all default (round-trips the web form cleanly);
 /// otherwise as an object, omitting `functions` entirely when it is `All`
 /// (mirrors the YAML shorthand: an absent field means "every function").
 impl Serialize for ConnectorBinding {
@@ -998,6 +1032,7 @@ impl Serialize for ConnectorBinding {
         if self.accounts.is_none()
             && self.functions == FunctionsAllow::All
             && self.max_calls.is_none()
+            && self.on_unknown.is_none()
         {
             return s.serialize_str(&self.name);
         }
@@ -1009,6 +1044,9 @@ impl Serialize for ConnectorBinding {
             len += 1;
         }
         if self.max_calls.is_some() {
+            len += 1;
+        }
+        if self.on_unknown.is_some() {
             len += 1;
         }
         let mut state = s.serialize_struct("ConnectorBinding", len)?;
@@ -1023,6 +1061,9 @@ impl Serialize for ConnectorBinding {
         }
         if let Some(max_calls) = self.max_calls {
             state.serialize_field("max_calls", &max_calls)?;
+        }
+        if let Some(on_unknown) = self.on_unknown {
+            state.serialize_field("on_unknown", &on_unknown)?;
         }
         state.end()
     }
@@ -1822,6 +1863,7 @@ edges: []
             accounts: None,
             functions: FunctionsAllow::All,
             max_calls: None,
+            on_unknown: None,
         };
         let yaml = yaml_serde::to_string(&bare).unwrap();
         assert_eq!(yaml.trim(), "jira");
@@ -1834,6 +1876,7 @@ edges: []
             accounts: Some(vec!["team-bot".into()]),
             functions: FunctionsAllow::List(vec!["send_message".into()]),
             max_calls: Some(50),
+            on_unknown: None,
         };
         let yaml = yaml_serde::to_string(&full).unwrap();
         assert!(yaml.contains("name: telegram"));
@@ -1849,6 +1892,7 @@ edges: []
             accounts: None,
             functions: FunctionsAllow::ReadOnly,
             max_calls: None,
+            on_unknown: None,
         };
         let yaml = yaml_serde::to_string(&read_only).unwrap();
         assert!(yaml.contains("functions: read_only"));

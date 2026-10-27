@@ -1,4 +1,4 @@
-import type { NodeCommits, RunGoal, RunInboxGap } from './api.gen'
+import type { CommittedArtifact, NodeCommits, RunGoal, RunInboxGap } from './api.gen'
 import type { WfEvent } from './types'
 import type { Tone } from './runverdict'
 
@@ -20,14 +20,32 @@ export interface CommitLine {
   sha: string
   short: string
   subject: string
+  // Set when the commit's `Apb-Run` trailer does not name this run.
+  trailer?: string
 }
 
-// One line per commit, in journal order (newest first within a node).
-export function commitLines(commits: NodeCommits[] | undefined): CommitLine[] {
+// What a commit's `Apb-Run` trailer says against the run `runId`, in the
+// words of `apb runs`: `no Apb-Run trailer`, `Apb-Run names <id>`, or
+// nothing when it names this run or the trailers were not read (an older
+// apb, an old git).
+export function trailerNote(a: CommittedArtifact, runId: string | undefined): string | undefined {
+  const ids = a.apb_run
+  if (!Array.isArray(ids) || runId === undefined) return undefined
+  if (ids.length === 0) return 'no Apb-Run trailer'
+  if (ids.includes(runId)) return undefined
+  return `Apb-Run names ${ids.join(', ')}`
+}
+
+// One line per commit, in journal order (newest first within a node),
+// flagged when its trailer does not name `runId`.
+export function commitLines(commits: NodeCommits[] | undefined, runId?: string): CommitLine[] {
   const out: CommitLine[] = []
   for (const c of commits ?? []) {
     for (const a of c.commits) {
-      out.push({ node: c.node, sha: a.sha, short: a.sha.slice(0, 12), subject: a.subject })
+      const line: CommitLine = { node: c.node, sha: a.sha, short: a.sha.slice(0, 12), subject: a.subject }
+      const trailer = trailerNote(a, runId)
+      if (trailer) line.trailer = trailer
+      out.push(line)
     }
   }
   return out

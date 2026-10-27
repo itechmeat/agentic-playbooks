@@ -13,6 +13,9 @@ use super::args::*;
 use super::{WfMcp, sliced_wait, to_call_tool_result, with_execution, with_warnings};
 use crate::tools::{self, ToolError};
 
+/// Who a send intent settled through `run_intent_resolve` names.
+const INTENT_RESOLVED_BY: &str = "a person, through MCP run_intent_resolve";
+
 #[tool_router(router = run_router, vis = "pub(crate)")]
 impl WfMcp {
     #[tool(
@@ -692,6 +695,34 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::run_stop(&root, &run_id))
+    }
+
+    #[tool(
+        description = "Record a person's decision on a send whose outcome is not known (a run outcome gap `call outcome unknown` that names `apb intent resolve`): sent true when the person confirmed it went out, false when it did not. This records a person's decision: ask the user first and pass on only their answer, never decide it yourself. A subagent (a host task's or an agent step's) must never call it; it reports the send as a finding instead. After sent true a repeat of the send answers already_sent without sending; after sent false a repeat sends it again. Refused for an intent whose outcome is already known or that is still in flight.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_intent_resolve(
+        &self,
+        Parameters(RunIntentResolveArgs {
+            run_id,
+            intent,
+            sent,
+            note,
+            workspace,
+        }): Parameters<RunIntentResolveArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_intent_resolve(
+            &root,
+            &run_id,
+            &intent,
+            sent,
+            note,
+            tools::IntentCaller::person(INTENT_RESOLVED_BY),
+        ))
     }
 
     #[tool(

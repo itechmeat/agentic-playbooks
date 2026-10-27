@@ -261,6 +261,14 @@ pub fn resolve_optional_arg<'a>(ctx: &'a RenderCtx, field: &str) -> Option<&'a s
     }
 }
 
+/// Whether a top-level body string is the whole-args form `"{{args}}"`,
+/// which renders as the arguments object itself. Exact match: any other
+/// text around it makes an ordinary interpolated string. The one rule
+/// `render_body` and the idempotency validator share.
+pub fn is_whole_args_body(s: &str) -> bool {
+    s == "{{args}}"
+}
+
 /// Renders a body value: a top-level `"{{args}}"` string renders as a clone
 /// of `ctx.args` (the wave 1 whole-forward form); a top-level single
 /// placeholder (`"{{args.field}}"`) renders as the typed value of that arg,
@@ -276,7 +284,7 @@ pub fn render_body(
     ctx: &RenderCtx,
 ) -> Result<serde_json::Value, ConnectorError> {
     if let serde_json::Value::String(s) = body {
-        if s == "{{args}}" {
+        if is_whole_args_body(s) {
             return Ok(ctx.args.clone());
         }
         if let Some(field) = single_args_placeholder(s) {

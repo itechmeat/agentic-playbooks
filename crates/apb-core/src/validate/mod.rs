@@ -157,7 +157,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_expected_duration(playbook, &mut r); // V19, V20
     check_finish(playbook, &mut r); // V21
     check_playbook_ref(playbook, &mut r); // V22
-    check_connectors(playbook, ctx, &mut r); // V23, V24, V25, V26, V42, V43
+    check_connectors(playbook, ctx, &mut r); // V23-V26, V42, V43, V69, V84
     baseline::check_baseline(playbook, ctx, &mut r); // V62-V68
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30, V34

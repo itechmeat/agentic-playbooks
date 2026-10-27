@@ -708,6 +708,7 @@ mod tests {
                     model: Some("haiku".into()),
                     workdir: None,
                     transcript: None,
+                    token: None,
                 },
             )
         };
@@ -784,6 +785,7 @@ mod tests {
                         model: Some("haiku".into()),
                         workdir: Some(dir.to_string_lossy().into_owned()),
                         transcript: None,
+                        token: None,
                     },
                 ),
                 at(
@@ -841,6 +843,7 @@ mod tests {
                     model: Some("haiku".into()),
                     workdir: None,
                     transcript: None,
+                    token: None,
                 },
             ),
             at(
@@ -893,6 +896,7 @@ mod tests {
                 model: None,
                 workdir: None,
                 transcript: transcript.map(Into::into),
+                token: None,
             },
         )
     }
@@ -959,6 +963,7 @@ mod tests {
                         model: Some("haiku".into()),
                         workdir: None,
                         transcript: None,
+                        token: None,
                     },
                 ),
                 at(

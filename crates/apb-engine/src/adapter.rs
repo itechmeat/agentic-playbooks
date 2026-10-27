@@ -143,26 +143,63 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
     }
 }
 
+/// The variable that carries an attempt's token to its processes.
+pub const ATTEMPT_TOKEN_ENV: &str = "APB_ATTEMPT_TOKEN";
+
 /// Connector isolation applied to every spawned agent process (spec 4.3).
 /// `scrub` is the union of env var names referenced by ANY installed connector
 /// config (both scopes), removed from the child so a connector token can never
 /// be inherited by an agent. `run_dir`/`node_id`, when set, become the
 /// `APB_RUN_DIR`/`APB_NODE_ID` context env that `apb connector call` (a child
 /// of the agent) reads to locate the run manifest and check its grants, plus
-/// `APB_RUN_ID` (the run directory's name) for provenance. The
-/// default is empty: no scrub and no context env, so non-connector spawn paths
-/// are untouched.
+/// `APB_RUN_ID` (the run directory's name) for provenance, and `APB_ATTEMPT`
+/// (the attempt number) with `APB_ATTEMPT_TOKEN` (the attempt's token) so a
+/// connector call binds to the attempt that made it. The default is empty: no scrub and no context env, so non-connector
+/// spawn paths are untouched.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectorEnvPolicy {
     pub scrub: Vec<String>,
     pub run_dir: Option<PathBuf>,
     pub node_id: Option<String>,
+    /// The attempt number the spawned agent runs as.
+    pub attempt: Option<u32>,
+    /// The attempt's random token (`APB_ATTEMPT_TOKEN`), journaled on its
+    /// `attempt_started`: what binds a connector call to this very attempt.
+    pub attempt_token: Option<String>,
     /// An eval run's env overlay (`RunConfig::spawn_env`), set after the
     /// scrub and the run-context env. Empty for every other run.
     pub overlay: Vec<(String, String)>,
 }
 
 impl ConnectorEnvPolicy {
+    /// The policy of an agent a run spawns for `node`: inherited connector
+    /// tokens scrubbed, the run context set, the run's env overlay applied.
+    /// The attempt is set per attempt with [`Self::with_attempt`].
+    pub fn for_node(
+        scrub: Vec<String>,
+        run_dir: &std::path::Path,
+        node: &str,
+        overlay: Vec<(String, String)>,
+    ) -> Self {
+        ConnectorEnvPolicy {
+            scrub,
+            run_dir: Some(run_dir.to_path_buf()),
+            node_id: Some(node.to_string()),
+            attempt: None,
+            attempt_token: None,
+            overlay,
+        }
+    }
+
+    /// This policy for attempt `attempt`, with a fresh attempt token.
+    pub fn with_attempt(&self, attempt: u32) -> Self {
+        ConnectorEnvPolicy {
+            attempt: Some(attempt),
+            attempt_token: Some(apb_core::connector::marker::new_nonce()),
+            ..self.clone()
+        }
+    }
+
     /// Removes every scrubbed var from `cmd`'s environment and, when set,
     /// injects the run-context env. Called at every agent spawn site.
     fn apply(&self, cmd: &mut Command) {
@@ -180,6 +217,18 @@ impl ConnectorEnvPolicy {
         if let Some(node) = &self.node_id {
             cmd.env("APB_NODE_ID", node);
         }
+        match self.attempt {
+            Some(n) => cmd.env("APB_ATTEMPT", n.to_string()),
+            // Never inherit another attempt's number from the parent.
+            None => cmd.env_remove("APB_ATTEMPT"),
+        };
+        match &self.attempt_token {
+            Some(token) => cmd.env(ATTEMPT_TOKEN_ENV, token),
+            None => cmd.env_remove(ATTEMPT_TOKEN_ENV),
+        };
+        // A host task id belongs to the host's subagent, never to an agent
+        // apb spawns itself.
+        cmd.env_remove("APB_HOST_TASK");
         // Spawned agents are headless; force a pass-through pager so CLI
         // porcelain (notably `gh issue view`) cannot exit 0 with empty stdout
         // when a TTY-like pager path is engaged (see issue #42 finding 12).

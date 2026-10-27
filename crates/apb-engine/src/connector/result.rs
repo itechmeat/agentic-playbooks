@@ -27,6 +27,14 @@ pub enum CallErrorCode {
     /// whole (cut at the read cap, or the read failed partway): the honest
     /// answer is an error, never a partial body passed as complete data.
     IncompleteResponse,
+    /// A send of this intent may already have gone out, and apb cannot tell:
+    /// a repeat is refused until a person decides (send-once gate).
+    UnknownEffect,
+    /// The same intent is being sent right now by another call.
+    InFlight,
+    /// The attempt this call claims to belong to has ended, so it may not
+    /// send anything.
+    AttemptClosed,
 }
 
 impl CallErrorCode {
@@ -43,6 +51,9 @@ impl CallErrorCode {
             CallErrorCode::Network => "network",
             CallErrorCode::Timeout => "timeout",
             CallErrorCode::IncompleteResponse => "incomplete_response",
+            CallErrorCode::UnknownEffect => "unknown_effect",
+            CallErrorCode::InFlight => "in_flight",
+            CallErrorCode::AttemptClosed => "attempt_closed",
         }
     }
 }
@@ -149,6 +160,15 @@ pub enum CallOk {
         /// shape (no `gap` key).
         gap: Option<InboxGap>,
     },
+    /// The intent was already sent and confirmed: nothing went out again.
+    AlreadySent {
+        intent: String,
+        label: String,
+        /// The attempt that sent it.
+        sent_in_attempt: Option<u32>,
+        /// The created item's id or link, when known.
+        effect_ref: Option<String>,
+    },
 }
 
 impl CallOk {
@@ -194,6 +214,18 @@ impl CallOk {
                 }
                 value
             }
+            CallOk::AlreadySent {
+                intent,
+                label,
+                sent_in_attempt,
+                effect_ref,
+            } => json!({
+                "ok": true,
+                "already_sent": true,
+                "intent": { "id": intent, "label": label },
+                "sent_in_attempt": sent_in_attempt,
+                "ref": effect_ref,
+            }),
         };
         if let Some(loss) = self.incompleteness() {
             loss.annotate(&mut value);
@@ -206,14 +238,17 @@ impl CallOk {
         match self {
             CallOk::Http { incomplete, .. } => incomplete.as_ref().map(Incompleteness::Body),
             CallOk::Inbox { gap, .. } => gap.as_ref().map(Incompleteness::InboxGap),
-            CallOk::Smtp { .. } => None,
+            CallOk::Smtp { .. } | CallOk::AlreadySent { .. } => None,
         }
     }
 
-    /// The response body regardless of shape (test/inspection accessor).
+    /// The response body regardless of shape (test/inspection accessor);
+    /// `null` for an already-sent answer, which carries no response.
     pub fn body(&self) -> &Value {
+        static NONE: Value = Value::Null;
         match self {
             CallOk::Http { body, .. } | CallOk::Smtp { body } | CallOk::Inbox { body, .. } => body,
+            CallOk::AlreadySent { .. } => &NONE,
         }
     }
 
@@ -224,7 +259,7 @@ impl CallOk {
     pub(crate) fn response_complete(&self) -> Option<bool> {
         match self {
             CallOk::Http { incomplete, .. } => Some(incomplete.is_none()),
-            CallOk::Smtp { .. } | CallOk::Inbox { .. } => None,
+            CallOk::Smtp { .. } | CallOk::Inbox { .. } | CallOk::AlreadySent { .. } => None,
         }
     }
 }

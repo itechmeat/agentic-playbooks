@@ -136,6 +136,26 @@ enum Continuation<'a> {
     Failed(&'a str),
 }
 
+/// The retry briefing of `node` (see [`super::attempt_memory`]) as a
+/// paragraph to append to an attempt's prompt, empty when no earlier attempt
+/// is in scope. Appended outside `render_node_prompt`, so the node's cache
+/// key does not move.
+fn retry_briefing(run_dir: &Path, events: &[Event], node: &str) -> String {
+    super::attempt_memory::recall(run_dir, events, node)
+        .map(|m| format!("\n\n{}", m.briefing()))
+        .unwrap_or_default()
+}
+
+/// [`retry_briefing`] over the journal as it stands. Processes outside the
+/// drive (`apb connector call`) append to it while it is read, so a torn
+/// last line is forgiven; a journal that cannot be read leaves the advisory
+/// briefing out rather than failing the attempt.
+fn retry_briefing_now(run_dir: &Path, node: &str) -> String {
+    crate::event::read_all_lossy_tail(run_dir)
+        .map(|events| retry_briefing(run_dir, &events, node))
+        .unwrap_or_default()
+}
+
 /// The prompt that continues a session after its attempt did not finish: the
 /// session already holds the node prompt, so only what happened is said.
 /// `verdict_file` adds the reminder to record the verdict in the new
@@ -1145,12 +1165,12 @@ fn execute_node_kind(
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
-            let connector_policy = crate::adapter::ConnectorEnvPolicy {
-                scrub: env_scrub.to_vec(),
-                run_dir: Some(run_dir.to_path_buf()),
-                node_id: Some(node_id.to_string()),
-                overlay: cfg.spawn_env(),
-            };
+            let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
+                env_scrub.to_vec(),
+                run_dir,
+                node_id,
+                cfg.spawn_env(),
+            );
 
             // Agent sessions this execution's attempts left behind, by binding
             // (issue #136 item 2). A later attempt on the same (agent, model) -
@@ -1658,24 +1678,28 @@ fn execute_node_kind(
                             // Supervisor notes applied since reach the continued
                             // session too: it never saw the assembled prompt that
                             // would carry them.
-                            let notes =
-                                crate::context::supervisor_notes_section(&read_all(run_dir)?);
+                            let journal_now = read_all(run_dir)?;
+                            let notes = crate::context::supervisor_notes_section(&journal_now);
                             std::borrow::Cow::Owned(format!(
-                                "{}{notes}",
-                                continuation_prompt(why, !status_note.is_empty())
+                                "{}{}{notes}",
+                                continuation_prompt(why, !status_note.is_empty()),
+                                retry_briefing(run_dir, &journal_now, node_id)
                             ))
                         }
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
-                            "{step_text}\n\n{}\n\n{}",
+                            "{step_text}\n\n{}\n\n{}{}",
                             super::status_file::INTERRUPTION_NOTE,
-                            super::status_file::NOTES_NOTE
+                            super::status_file::NOTES_NOTE,
+                            retry_briefing_now(run_dir, node_id)
                         )),
                         None => std::borrow::Cow::Owned(format!(
-                            "{step_text}\n\n{}",
-                            super::status_file::NOTES_NOTE
+                            "{step_text}\n\n{}{}",
+                            super::status_file::NOTES_NOTE,
+                            retry_briefing_now(run_dir, node_id)
                         )),
                     };
                     timeout_continuation = false;
+                    let attempt_policy = connector_policy.with_attempt(attempt);
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
@@ -1690,7 +1714,7 @@ fn execute_node_kind(
                             soul_text.as_deref()
                         },
                         grant_autonomy,
-                        connector_policy: &connector_policy,
+                        connector_policy: &attempt_policy,
                         interactive: *interactive,
                         // Ordinary agent_task attempts carry the spec 6.2 report
                         // contract so the agent's self-assessed status routes the node.
@@ -1744,6 +1768,7 @@ fn execute_node_kind(
                             model: attempt_model.clone(),
                             workdir: attempt_dir.clone(),
                             transcript: attempt_transcript.clone(),
+                            token: attempt_policy.attempt_token.clone(),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -2126,6 +2151,7 @@ fn execute_node_kind(
                             model: attempt_model.clone(),
                             workdir: attempt_dir.clone(),
                             transcript: attempt_transcript.clone(),
+                            token: attempt_policy.attempt_token.clone(),
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -3070,12 +3096,12 @@ pub(crate) fn execute_finish_answer(
     // Connector env isolation (spec 4.3): the finish-answer agent is a spawned
     // agent too, so its inherited connector tokens are scrubbed and it gets the
     // run-context env.
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
-        scrub: env_scrub.to_vec(),
-        run_dir: Some(run_dir.to_path_buf()),
-        node_id: Some(node_id.to_string()),
-        overlay: cfg.spawn_env(),
-    };
+    let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
+        env_scrub.to_vec(),
+        run_dir,
+        node_id,
+        cfg.spawn_env(),
+    );
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
     let mut last_msg = String::new();
@@ -3165,6 +3191,7 @@ pub(crate) fn execute_finish_answer(
             let stream_log = run_dir
                 .join("agent-stream")
                 .join(format!("{node_id}-{attempt}.jsonl"));
+            let attempt_policy = connector_policy.with_attempt(attempt);
             let task = AgentTask {
                 prompt: &text,
                 model: &ri.model,
@@ -3173,7 +3200,7 @@ pub(crate) fn execute_finish_answer(
                 stream_log: Some(&stream_log),
                 soul: Some(entry.soul.as_str()),
                 grant_autonomy,
-                connector_policy: &connector_policy,
+                connector_policy: &attempt_policy,
                 // A finish-answer node is never interactive: it composes the
                 // run's terminal answer, it does not ask the user questions.
                 interactive: false,
@@ -3215,6 +3242,7 @@ pub(crate) fn execute_finish_answer(
                     model: None,
                     workdir: None,
                     transcript: None,
+                    token: attempt_policy.attempt_token.clone(),
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -3252,6 +3280,7 @@ pub(crate) fn execute_finish_answer(
                     model: None,
                     workdir: None,
                     transcript: None,
+                    token: attempt_policy.attempt_token.clone(),
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -3821,9 +3850,8 @@ pub(crate) fn maybe_compact_context(
     // no run-context env.
     let connector_policy = crate::adapter::ConnectorEnvPolicy {
         scrub: env_scrub.to_vec(),
-        run_dir: None,
-        node_id: None,
         overlay: cfg.spawn_env(),
+        ..Default::default()
     };
     let task = AgentTask {
         prompt: &prompt,

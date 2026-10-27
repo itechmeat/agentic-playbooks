@@ -85,6 +85,7 @@ pub fn baseline_binding(c: &BaselineConnector) -> ConnectorBinding {
         accounts: c.account.clone().map(|a| vec![a]),
         functions: FunctionsAllow::List(vec![c.function.clone()]),
         max_calls: None,
+        on_unknown: None,
     }
 }
 

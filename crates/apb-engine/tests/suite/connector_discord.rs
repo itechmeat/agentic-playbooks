@@ -63,6 +63,7 @@ fn seed_run(run_dir: &Path, base_url: &str, function: &str) {
             accounts: vec!["acct1".to_string()],
             functions: vec![function.to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();
@@ -128,8 +129,8 @@ fn auth_header_is_bot_prefixed_secret() {
     );
     seed_run(run.path(), &server.base_url, "get_me");
 
-    let (value, ok) = call(run.path(), root.path(), "get_me", serde_json::json!({}));
-    assert!(ok, "expected ok: {value}");
+    let (_, ok) = call(run.path(), root.path(), "get_me", serde_json::json!({}));
+    assert!(ok, "the call must succeed");
 
     let req = server.captured_request().expect("server saw a request");
     assert!(
@@ -156,13 +157,13 @@ fn get_messages_drops_absent_before_and_limit() {
     let server = common::spawn_http(200, "OK", &[], r#"[]"#.to_string());
     seed_run(run.path(), &server.base_url, "get_messages");
 
-    let (value, ok) = call(
+    let (_, ok) = call(
         run.path(),
         root.path(),
         "get_messages",
         serde_json::json!({"channel_id": "111"}),
     );
-    assert!(ok, "expected ok: {value}");
+    assert!(ok, "the call must succeed");
 
     let req = server.captured_request().expect("server saw a request");
     let request_line = req.lines().next().unwrap_or("");
@@ -191,7 +192,7 @@ fn get_messages_propagates_before_and_limit() {
     let server = common::spawn_http(200, "OK", &[], r#"[]"#.to_string());
     seed_run(run.path(), &server.base_url, "get_messages");
 
-    let (value, ok) = call(
+    let (_, ok) = call(
         run.path(),
         root.path(),
         "get_messages",
@@ -201,7 +202,7 @@ fn get_messages_propagates_before_and_limit() {
             "before": "999888777"
         }),
     );
-    assert!(ok, "expected ok: {value}");
+    assert!(ok, "the call must succeed");
 
     let req = server.captured_request().expect("server saw a request");
     let request_line = req.lines().next().unwrap_or("");
@@ -236,7 +237,7 @@ fn reply_to_message_renders_nested_message_reference() {
     );
     seed_run(run.path(), &server.base_url, "reply_to_message");
 
-    let (value, ok) = call(
+    let (_, ok) = call(
         run.path(),
         root.path(),
         "reply_to_message",
@@ -246,7 +247,7 @@ fn reply_to_message_renders_nested_message_reference() {
             "content": "ack"
         }),
     );
-    assert!(ok, "expected ok: {value}");
+    assert!(ok, "the call must succeed");
 
     let req = server.captured_request().expect("server saw a request");
     let request_line = req.lines().next().unwrap_or("");
@@ -255,21 +256,33 @@ fn reply_to_message_renders_nested_message_reference() {
         "request line: {request_line}"
     );
     let body = captured_body_json(&req);
+    assert_eq!(body["content"], "ack");
     assert_eq!(
-        body,
-        serde_json::json!({
-            "content": "ack",
-            "message_reference": {
-                "message_id": "222333"
-            }
-        }),
-        "nested message_reference must render literally: {body}"
+        body["message_reference"],
+        serde_json::json!({ "message_id": "222333" }),
+        "nested message_reference must render literally"
+    );
+    assert_send_once_and_silent(&body);
+}
+
+/// Every Discord send carries a 24-character nonce Discord must honour,
+/// and pings nobody whatever the text says. That each send draws a new
+/// nonce is the send ledger's to show (`send_intent_test`).
+fn assert_send_once_and_silent(body: &serde_json::Value) {
+    assert_eq!(body["enforce_nonce"], true);
+    assert_eq!(body["allowed_mentions"], serde_json::json!({ "parse": [] }));
+    let nonce = body["nonce"].as_str().unwrap_or_default();
+    assert_eq!(
+        nonce.len(),
+        24,
+        "the nonce must fit Discord's 25-character limit"
     );
 }
 
-/// `send_message` posts `{content}` only (no message_reference).
+/// `send_message` posts the content, the nonce and the mention guard, and
+/// no message_reference.
 #[test]
-fn send_message_body_is_content_only() {
+fn send_message_body_is_content_nonce_and_no_mentions() {
     let _lock = common::env_lock();
     let run = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -283,7 +296,7 @@ fn send_message_body_is_content_only() {
     );
     seed_run(run.path(), &server.base_url, "send_message");
 
-    let (value, ok) = call(
+    let (_, ok) = call(
         run.path(),
         root.path(),
         "send_message",
@@ -292,14 +305,20 @@ fn send_message_body_is_content_only() {
             "content": "hi"
         }),
     );
-    assert!(ok, "expected ok: {value}");
+    assert!(ok, "the call must succeed");
 
     let req = server.captured_request().expect("server saw a request");
     let body = captured_body_json(&req);
+    assert_eq!(body["content"], "hi");
+    assert!(
+        body.get("message_reference").is_none(),
+        "send_message carries no message_reference"
+    );
+    assert_send_once_and_silent(&body);
     assert_eq!(
-        body,
-        serde_json::json!({ "content": "hi" }),
-        "send_message body should be content only: {body}"
+        body.as_object().map(|m| m.len()),
+        Some(4),
+        "send_message body is content, nonce, enforce_nonce and allowed_mentions only"
     );
 }
 
@@ -316,7 +335,7 @@ fn get_me_response_pick_projects_identity() {
     seed_run(run.path(), &server.base_url, "get_me");
 
     let (value, ok) = call(run.path(), root.path(), "get_me", serde_json::json!({}));
-    assert!(ok, "expected ok: {value}");
+    assert!(ok, "the call must succeed");
     assert_eq!(value["picked"], serde_json::json!(true));
     assert_eq!(
         value["body"],
@@ -347,7 +366,7 @@ fn list_channels_path_and_response_pick() {
         "list_channels",
         serde_json::json!({"guild_id": "g1"}),
     );
-    assert!(ok, "expected ok: {value}");
+    assert!(ok, "the call must succeed");
 
     let req = server.captured_request().expect("server saw a request");
     let request_line = req.lines().next().unwrap_or("");

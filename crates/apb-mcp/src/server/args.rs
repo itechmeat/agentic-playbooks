@@ -165,6 +165,22 @@ pub struct RunPauseArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunIntentResolveArgs {
+    pub run_id: String,
+    /// The send intent id (`si-...`), as the run outcome's gap names it.
+    pub intent: String,
+    /// The person's answer: true when the send did go out, false when it
+    /// did not.
+    pub sent: bool,
+    /// What the person checked, kept with the decision.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunWaitArgs {
     pub run_id: String,
     /// workspace_id of another workspace (spec 7). None - the current one.

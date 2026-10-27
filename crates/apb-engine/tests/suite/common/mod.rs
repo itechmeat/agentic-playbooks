@@ -148,6 +148,7 @@ pub struct TestHttpServer {
     pub base_url: String,
     addr: std::net::SocketAddr,
     request: Arc<Mutex<Option<String>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -161,13 +162,10 @@ impl TestHttpServer {
 
 impl Drop for TestHttpServer {
     fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
-            // If the test under test errored out before ever connecting, the
-            // one-shot `accept()` would block forever and this join would
-            // deadlock. Make a throwaway connection to unblock it (best-effort:
-            // if the thread already served and exited, the listener is gone and
-            // this simply fails).
-            let _ = std::net::TcpStream::connect(self.addr);
+            // A test that errored out before ever connecting leaves the
+            // thread waiting; it polls `stop` and leaves on its own.
             let _ = h.join();
         }
     }
@@ -186,6 +184,9 @@ pub fn spawn_http(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
 
     let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n",
@@ -208,7 +209,7 @@ pub fn spawn_http(
     let request = Arc::new(Mutex::new(None));
     let req_slot = request.clone();
     let handle = std::thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
+        if let Some(mut stream) = accept_until_stopped(&listener, &stopped) {
             let captured = read_http_request(&mut stream);
             *req_slot.lock().unwrap() = Some(captured);
             let _ = stream.write_all(&response);
@@ -220,6 +221,7 @@ pub fn spawn_http(
         base_url,
         addr,
         request,
+        stop,
         handle: Some(handle),
     }
 }
@@ -320,4 +322,137 @@ fn http_stub_consumes_chunked_request_body() {
         captured.ends_with("Transfer-Encoding: Chunked\r\n\r\nhello world"),
         "{captured:?}"
     );
+}
+
+/// Makes an answer's status and body from the requests served so far.
+pub type ReplyFn = Box<dyn FnOnce(&[String]) -> (u16, String) + Send>;
+
+/// One answer of a [`ScriptedHttpServer`].
+pub enum Reply {
+    /// Answer with this status and JSON body.
+    Respond(u16, String),
+    /// Answer with a status and a body computed from every request served
+    /// so far, this one last (to echo what an earlier request sent).
+    From(ReplyFn),
+    /// Read the request, then close the connection without an answer: the
+    /// client sees a network failure, so it cannot know what happened.
+    Cut,
+    /// Signal `arrived` once the request is read, then wait for `release`
+    /// before answering with status 200 and this body.
+    Held {
+        body: String,
+        arrived: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
+}
+
+/// A stub HTTP server on `127.0.0.1:0` that serves one connection per
+/// scripted [`Reply`], in order, and records every request (head + body).
+/// After the script it accepts nothing more, so an unexpected extra request
+/// fails to connect. The serving thread joins on drop.
+pub struct ScriptedHttpServer {
+    pub base_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl ScriptedHttpServer {
+    /// Every request served so far, in order.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for ScriptedHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            // The serving thread polls `stop` while it waits for a
+            // connection, so it leaves on its own: no wake-up connection
+            // that could reach a port another test holds by now.
+            let _ = h.join();
+        }
+    }
+}
+
+/// The next connection of `listener` (non-blocking), as a blocking stream,
+/// or `None` once `stop` is set or the listener fails.
+fn accept_until_stopped(
+    listener: &TcpListener,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Option<TcpStream> {
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // An accepted socket may inherit the listener's mode.
+                stream.set_nonblocking(false).ok()?;
+                return Some(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Spawns a [`ScriptedHttpServer`] for `script`.
+pub fn spawn_script(script: Vec<Reply>) -> ScriptedHttpServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (seen, stopped) = (requests.clone(), stop.clone());
+    // Non-blocking, so the thread can watch `stop` while it waits.
+    listener.set_nonblocking(true).unwrap();
+    let handle = std::thread::spawn(move || {
+        for reply in script {
+            let Some(mut stream) = accept_until_stopped(&listener, &stopped) else {
+                return;
+            };
+            let captured = read_http_request(&mut stream);
+            seen.lock().unwrap().push(captured);
+            let (status, body) = match reply {
+                Reply::Respond(status, body) => (status, body),
+                Reply::From(make) => make(&seen.lock().unwrap()),
+                Reply::Cut => continue,
+                Reply::Held {
+                    body,
+                    arrived,
+                    release,
+                } => {
+                    let _ = arrived.send(());
+                    // Bounded, so a test that fails before it releases the
+                    // request fails instead of hanging its client and this
+                    // server's join.
+                    let _ = release.recv_timeout(std::time::Duration::from_secs(60));
+                    (200, body)
+                }
+            };
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    ScriptedHttpServer {
+        base_url: format!("http://{addr}"),
+        requests,
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// The JSON body of a captured request (head + body as the stubs record it).
+pub fn request_json(raw: &str) -> serde_json::Value {
+    raw.split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str(body).ok())
+        .unwrap_or(serde_json::Value::Null)
 }

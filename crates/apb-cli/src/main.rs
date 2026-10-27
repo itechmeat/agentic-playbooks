@@ -9,6 +9,7 @@ mod decisions;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
+mod intent;
 mod manage;
 mod onboarding;
 mod pause;
@@ -38,6 +39,7 @@ use clap::{Parser, Subcommand};
 use crate::cache::{CacheCmd, cache_cmd};
 use crate::connector::{ConnectorAction, connector_cmd};
 use crate::decisions::{DecisionsAction, decisions_cmd};
+use crate::intent::{IntentAction, intent_cmd};
 use crate::manage::{
     ProjectsAction, adopt_cmd, detect_cmd, export_cmd, import_cmd, migrate_cmd, projects_cmd,
     run_init, subscriptions_cmd,
@@ -145,6 +147,12 @@ enum Command {
     Trash {
         #[command(subcommand)]
         action: TrashAction,
+    },
+    /// The send intents of a run: list what became of each send, or record
+    /// a person's decision on one whose outcome is not known
+    Intent {
+        #[command(subcommand)]
+        action: IntentAction,
     },
     /// List the approvals in the trust store, or revoke them
     Trust {
@@ -625,6 +633,7 @@ fn main() -> ExitCode {
         Some(Command::Import { file, no_current }) => import_cmd(&root, &file, !no_current),
         Some(Command::Trash { action }) => trash_cmd(&root, action),
         Some(Command::Trust { action }) => trust_cmd(action),
+        Some(Command::Intent { action }) => intent_cmd(&root, action),
         Some(Command::Run {
             name,
             version,

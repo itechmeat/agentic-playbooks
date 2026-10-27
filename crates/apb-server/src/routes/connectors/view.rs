@@ -94,6 +94,7 @@ pub(crate) fn connector_public(name: &str) -> Option<(ConnectorPublic, InstallSt
                     webhook: None,
                     account_fields: Vec::new(),
                     functions: Vec::new(),
+                    identity: None,
                 },
                 meta: store::public_meta_from_str("", name),
                 body_md: String::new(),

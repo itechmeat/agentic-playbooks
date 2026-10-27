@@ -43,14 +43,14 @@ Each scenario file has the same seven numbered sections:
 |---|---|---|---|
 | [ci-failure-triage](ci-failure-triage.md) | code | examples/playbooks/ci-failure-triage.yaml | the root-cause criterion stays manual; a wrong diagnosis still reports success |
 | [review-triage](review-triage.md) | code | examples/playbooks/review-triage.yaml | one review and one fix, no second review round |
-| [sentry-triage](sentry-triage.md) | code | examples/playbooks/sentry-triage.yaml | the whole list goes to one agent call; a retry may file an issue twice |
+| [sentry-triage](sentry-triage.md) | code | examples/playbooks/sentry-triage.yaml | the whole list goes to one agent call; a re-run may file an issue twice |
 | [dependency-security-fix](dependency-security-fix.md) | code | examples/playbooks/dependency-security-fix.yaml | the audit findings are not engine-held (the tests are); no per-finding loop |
 | [document-review-panel](document-review-panel.md) | code | docs only | no per-item state across loop rounds; a bounded loop re-runs the whole body |
 | [inbox-triage](inbox-triage.md) | routine | examples/playbooks/inbox-triage.yaml | first candidate for list processing; the search limit clips silently; an inbox gap is invisible |
-| [whatsapp-inbox](whatsapp-inbox.md) | routine | examples/playbooks/whatsapp-inbox.yaml | a retry may reply twice; the batch ack is all-or-nothing |
-| [release-announce](release-announce.md) | routine | examples/playbooks/release-announce.yaml | no idempotency: a re-run may create the release and re-send the email again |
+| [whatsapp-inbox](whatsapp-inbox.md) | routine | examples/playbooks/whatsapp-inbox.yaml | a re-run after a crash may reply twice; the batch ack is all-or-nothing |
+| [release-announce](release-announce.md) | routine | examples/playbooks/release-announce.yaml | no idempotency across runs: a re-run may create the release and re-send the email again |
 | [release-heartbeat](release-heartbeat.md) | routine | examples/playbooks/release-heartbeat.yaml | "exactly one issue" is prompt discipline; overlapping runs cannot see each other |
-| [bulk-reminders](bulk-reminders.md) | routine | examples/playbooks/bulk-reminders.yaml | a retry after a timeout may send twice; no per-item sent ledger |
+| [bulk-reminders](bulk-reminders.md) | routine | examples/playbooks/bulk-reminders.yaml | no per-item node; a lost answer stays unknown for a person; a re-run does not see the sends |
 | [crm-cleanup](crm-cleanup.md) | routine | examples/playbooks/crm-cleanup.yaml | no per-deal ledger: the engine-held count shows how many are left, not which |
 
 Every runnable example lives in examples/playbooks/ and is validated on the

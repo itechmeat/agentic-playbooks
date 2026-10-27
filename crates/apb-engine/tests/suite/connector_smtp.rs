@@ -58,13 +58,31 @@ impl Drop for SmtpTestServer {
 /// Spawns a one-connection SMTP listener. `advertise_starttls` controls whether
 /// EHLO advertises STARTTLS; `advertise_auth` whether it advertises AUTH.
 fn spawn_smtp(advertise_starttls: bool, advertise_auth: bool) -> SmtpTestServer {
+    spawn_smtp_ending(advertise_starttls, advertise_auth, Some(QUEUED))
+}
+
+/// The server's reply to a message: queued.
+const QUEUED: &[u8] = b"250 2.0.0 Ok: queued\r\n";
+
+/// [`spawn_smtp`] answering the end of a message with `data_reply`, or, with
+/// `None`, closing the connection without a reply.
+fn spawn_smtp_ending(
+    advertise_starttls: bool,
+    advertise_auth: bool,
+    data_reply: Option<&'static [u8]>,
+) -> SmtpTestServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let rec = Arc::new(Mutex::new(Recorded::default()));
     let slot = rec.clone();
     let handle = std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            serve(&mut stream, &slot, advertise_starttls, advertise_auth);
+            serve(
+                &mut stream,
+                &slot,
+                (advertise_starttls, advertise_auth),
+                data_reply,
+            );
         }
     });
     SmtpTestServer {
@@ -81,7 +99,12 @@ fn line(reader: &mut BufReader<&TcpStream>) -> String {
     s.trim_end().to_string()
 }
 
-fn serve(stream: &mut TcpStream, rec: &Arc<Mutex<Recorded>>, starttls: bool, auth: bool) {
+fn serve(
+    stream: &mut TcpStream,
+    rec: &Arc<Mutex<Recorded>>,
+    (starttls, auth): (bool, bool),
+    data_reply: Option<&[u8]>,
+) {
     let mut w = stream.try_clone().unwrap();
     let mut reader = BufReader::new(&*stream);
     let _ = w.write_all(b"220 test ESMTP\r\n");
@@ -120,7 +143,12 @@ fn serve(stream: &mut TcpStream, rec: &Arc<Mutex<Recorded>>, starttls: bool, aut
                 body.push('\n');
             }
             rec.lock().unwrap().data = body;
-            let _ = w.write_all(b"250 2.0.0 Ok: queued\r\n");
+            match data_reply {
+                Some(reply) => {
+                    let _ = w.write_all(reply);
+                }
+                None => break,
+            }
         } else if upper.starts_with("QUIT") {
             rec.lock().unwrap().quit = true;
             let _ = w.write_all(b"221 Bye\r\n");
@@ -319,4 +347,39 @@ fn use_tls_refuses_plaintext_when_starttls_absent() {
         r.mail_from.is_none() && r.auth_plain.is_none(),
         "must not proceed in plaintext"
     );
+}
+
+/// Only the server's reply refuses a message: a connection cut after the
+/// message went over leaves it unknown whether it was taken (`network`, so a
+/// send-once intent settles unknown), while a 5xx reply is a refusal
+/// (`service`, settled not sent).
+#[test]
+fn a_send_cut_off_after_the_message_is_undetermined_and_a_reply_refuses() {
+    for (reply, expected) in [
+        (None, CallErrorCode::Network),
+        (Some(&b"554 5.7.1 rejected\r\n"[..]), CallErrorCode::Service),
+    ] {
+        let srv = spawn_smtp_ending(false, false, reply);
+        let args = json!({"to": "x@y.z", "subject": "Hi", "body_text": "cut-off-body-marker"});
+        let call = match build(
+            &send_spec(),
+            &account_no_creds(&srv.host, srv.port, false),
+            &args,
+            &BTreeMap::new(),
+            Vec::new(),
+            false,
+            15,
+        )
+        .unwrap()
+        {
+            SmtpBuild::Call(c) => c,
+            _ => panic!("expected a call"),
+        };
+        let err = call.send().expect_err("the send must not succeed");
+        assert_eq!(err.code, expected);
+        assert!(
+            srv.recorded().data.contains("cut-off-body-marker"),
+            "the message body went over"
+        );
+    }
 }

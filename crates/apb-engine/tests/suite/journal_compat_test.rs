@@ -409,3 +409,91 @@ fn inbox_gap_round_trips_and_is_skippable_before_a_checkpoint() {
     let events = read_all(&dir).unwrap();
     assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
 }
+
+/// The send ledger's two records round trip, change no run state, and an
+/// older binary that does not know them skips them while a checkpoint
+/// follows, and refuses to drive on when none does (the general rule).
+#[test]
+fn send_intent_records_round_trip_and_are_skippable_before_a_checkpoint() {
+    let recorded = r#"{"seq":2,"ts":3,"type":"send_intent_recorded","intent":"si-1","nonce":"n","node":"a","attempt":1,"attempt_seq":1,"connector":"c","function":"f","account":"main","mode":"key","label":"x","pid":7,"deadline_ms":9,"replay_of":"si-0"}"#;
+    let settled = r#"{"seq":3,"ts":4,"type":"send_intent_settled","intent":"si-1","outcome":"confirmed","source":"key_replay","effect_ref":"m-1"}"#;
+    for line in [recorded, settled] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    let head = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        recorded.replace("send_intent_recorded", "send_intent_from_the_future"),
+    ];
+    let finished = r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let settled_run = [&head[..], &[finished.to_string(), String::new()]].concat();
+    let dir = write_run(tmp.path(), "r1", &settled_run.join("\n"));
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
+
+    let open_run = [&head[..], &[String::new()]].concat();
+    let dir = write_run(tmp.path(), "r2", &open_run.join("\n"));
+    assert!(
+        read_all(&dir).is_err(),
+        "an unsettled unknown event refuses"
+    );
+}
+
+/// The attempt and intent fields of a connector call read as absent from an
+/// old line and stay off the wire when unset.
+#[test]
+fn a_connector_call_carries_its_attempt_and_intent_only_when_set() {
+    let old = r#"{"seq":5,"ts":9,"type":"connector_call","node_id":"n","connector":"c","function":"f","account":"a","url":"u","outcome":"ok","http_status":200,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ConnectorCall {
+            attempt: None,
+            attempt_seq: None,
+            intent: None,
+            origin: None,
+            ..
+        }
+    ));
+    let new = old.replace(
+        "}",
+        r#","attempt":2,"attempt_seq":11,"intent":"si-1","origin":"reconcile"}"#,
+    );
+    let e: Event = serde_json::from_str(&new).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), new);
+}
+
+/// A person's decision lands after the run paused: past the last
+/// checkpoint. An older binary that does not know the event refuses to
+/// drive the run on, while a reading surface still shows every event.
+#[test]
+fn a_settlement_after_a_pause_is_past_the_last_checkpoint() {
+    let lines = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":2,"type":"run_paused","reason":"lunch","by":"operator","mode":"drain"}"#,
+        r#"{"seq":2,"ts":3,"type":"send_intent_settled","intent":"si-1","outcome":"not_sent","source":"person","by":"ana"}"#,
+    ];
+    let tmp = tempfile::tempdir().unwrap();
+    let paused = write_run(tmp.path(), "r1", &(lines.join("\n") + "\n"));
+    let events = read_all(&paused).unwrap();
+    assert!(
+        events[1].payload.is_checkpoint(),
+        "the pause is the checkpoint"
+    );
+    assert!(matches!(
+        events[2].payload,
+        EventPayload::SendIntentSettled { .. }
+    ));
+
+    let older = lines.map(|l| l.replace("send_intent_settled", "send_intent_from_the_future"));
+    let dir = write_run(tmp.path(), "r2", &(older.join("\n") + "\n"));
+    assert!(read_all(&dir).is_err(), "an older apb does not drive on");
+    assert_eq!(
+        apb_engine::event::read_all_lossy_tail(&dir).unwrap().len(),
+        2,
+        "a reading surface skips it"
+    );
+}

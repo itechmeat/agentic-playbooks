@@ -114,6 +114,9 @@ fn failure(e: EngineError) -> AgentFailure {
     AgentFailure::new(ErrorClass::Transport, format!("host task: {e}"))
 }
 
+/// The variable that names the host task a subagent works on.
+const HOST_TASK_ENV: &str = "APB_HOST_TASK";
+
 /// The environment a CLI attempt of this task would have had, which the host
 /// sets for its subagent.
 fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
@@ -131,6 +134,14 @@ fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
     }
     if let Some(node) = &task.connector_policy.node_id {
         env.insert("APB_NODE_ID".to_string(), node.clone());
+    }
+    // The attempt a connector call binds to; the task id joins it once the
+    // task is opened (`HostAdapter::request`).
+    if let Some(attempt) = task.connector_policy.attempt {
+        env.insert("APB_ATTEMPT".to_string(), attempt.to_string());
+    }
+    if let Some(token) = &task.connector_policy.attempt_token {
+        env.insert(crate::adapter::ATTEMPT_TOKEN_ENV.to_string(), token.clone());
     }
     if let Some(sf) = &task.status_file {
         env.insert(
@@ -246,6 +257,10 @@ impl HostAdapter<'_, '_> {
                     .map(|t| now_ms.saturating_add(t.as_millis() as u64)),
             ),
         };
+        // The task id binds the subagent's connector calls to this attempt
+        // even when a later drive adopts the task under another number.
+        let mut env = env.clone();
+        env.insert(HOST_TASK_ENV.to_string(), task_id.clone());
         let record = TaskRecord {
             task_id: task_id.clone(),
             node: task.node.to_string(),
@@ -257,7 +272,7 @@ impl HostAdapter<'_, '_> {
             model_hint: self.model_hint.clone(),
             hint_source: self.hint_source.clone(),
             fallback_of: self.fallback_of.clone(),
-            env: env.clone(),
+            env,
             requested_ts,
         };
         host_task::write_task(self.run_dir, &record, prompt, task.soul)?;

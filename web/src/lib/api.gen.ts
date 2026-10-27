@@ -4,7 +4,13 @@
 
 import type { PlaybookEdge, PlaybookNode, WfEvent, WfLayout } from './types'
 
-export type CommittedArtifact = { sha: string, subject: string, };
+export type CommittedArtifact = { sha: string, subject: string, 
+/**
+ * The values of the commit's `Apb-Run` trailers: `None` when they were
+ * not read (an old event, or a git too old to read trailers),
+ * `Some([])` for a commit without one. Additive.
+ */
+apb_run?: Array<string>, };
 
 export type NodeCommits = { node: string, 
 /**
@@ -150,9 +156,13 @@ export type BaselineOutcome = { problem: Array<string>, change: Array<string>,
  */
 goal_reached?: boolean, };
 
-export type NeedsLookReason = "regression" | "findings" | "warnings";
+export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends";
 
-export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, };
+export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, 
+/**
+ * Sends whose outcome is not known and that no replay settled.
+ */
+unknown_sends?: number, };
 
 export type OutcomeSummary = { headline: string, needs_look?: NeedsLook, 
 /**

@@ -176,6 +176,38 @@ fn call_refuses_a_node_id_reserved_for_the_engine() {
     );
 }
 
+/// A send's `--intent` label is checked before anything else, so a bad name
+/// never reaches the ledger; a good one passes on to the call.
+#[test]
+fn call_refuses_an_intent_label_outside_the_slug_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_INTENT_TOKEN_UNSET");
+    let call = |label: &str| {
+        playbook(
+            dir.path(),
+            &[
+                "connector",
+                "call",
+                "widget",
+                "get_item",
+                "--args",
+                r#"{"id":"42"}"#,
+                "--dry-run",
+                "--intent",
+                label,
+            ],
+        )
+    };
+    let bad = call("Weekly Report");
+    assert!(!bad.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&bad.stdout).trim()).unwrap();
+    assert_eq!(v["error"]["code"], serde_json::json!("invalid_args"));
+    assert!(call("weekly-report.2026-10").status.success());
+}
+
 // --- env ------------------------------------------------------------------
 
 /// `--dry-run` renders a call without executing it or resolving secrets, so

@@ -1216,8 +1216,10 @@ fn routing_shadow_journals_the_tier_and_keeps_the_executor() {
 fn routing_enforce_runs_the_tier_and_cascades_up_on_an_agent_failure() {
     let p = Project::new(&one_node(", route: auto, max_retries: 2"), "");
     seed_tiers(p.root.path());
-    // Fails on the light tier (haiku), succeeds above it.
-    p.agent_body("case \"$*\" in *haiku*) echo 'error: cannot parse the grammar' 1>&2; exit 1;; *) echo 'Done and verified.';; esac");
+    // Fails on the light tier (haiku), succeeds above it. Matched on the
+    // model flag: the retry briefing names the earlier attempt's model in
+    // the prompt.
+    p.agent_body("case \"$*\" in *\"--model haiku\"*) echo 'error: cannot parse the grammar' 1>&2; exit 1;; *) echo 'Done and verified.';; esac");
     let server = StubServer::start_with_fallback(vec![], tier_reply("light", 0.9));
     p.decisions(&config(
         &server.base_url,

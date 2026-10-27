@@ -38,7 +38,7 @@ Reads (read-only):
 | `playbook_validate` | Validate a playbook, list of issues, including a profile or a script a run would not find (V91, V92); `valid` is false only on an error, and V91 is a warning when only the global store could provide the profile |
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
-| `runs_list` | List of runs; `needs_look` (`reasons`: `regression`, `findings`, `warnings`, with the `regressions`, `findings` and `warnings` counts) marks a run with a baseline regression or notes its attempts reported, absent when none (see Run outcome below) |
+| `runs_list` | List of runs; `needs_look` (`reasons`: `regression`, `findings`, `warnings`, `unknown_sends`, with the `regressions`, `findings` and `warnings` counts, plus `unknown_sends` when not zero) marks a run with a baseline regression, notes its attempts reported or sends whose outcome is not known, absent when none (see Run outcome below) |
 | `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `output_truncated`: per attempt that lost part of its output (`node`, `attempt`, `truncated` with `stream`, `kept_bytes`, `dropped_bytes_at_least` per cut stream, `transcript_incomplete`), absent when none did (see "Bounded agent output" in `docs/HOWTO-authoring.md`). `inbox_gaps`: per connector inbox read that found unread events retention had already dropped (`node`, `connector`, `account`, `from`, `through`, the inclusive range lost), absent when the run journaled no gap. `baseline`: the playbook's baseline check (`enforce`, per check `id`, `description`, `source`, `before_status`, `before_reason`, `inherited_from`, `after_status` and `observations` with `id`, `rule`, `before`, `after`, `change`, `verdict` `met`, `not_met`, `unknown` or `pending`, `regressed`, `detail`; the `met`, `not_met`, `unknown` and `regressions` counts), absent when the playbook declares none. `notes`: the findings and warnings the attempts reported (`findings` with `node`, `attempt`, `kind`, `location`, `evidence`, `why_not_fixed`; `warnings` with `node`, `attempt`, `subject`, `reason`; `dropped`: malformed entries left out), each kept once per node with its latest attempt, absent when none. `branch_failures`: what a fork's `on_branch_failure` policy did and which `require: all_succeeded` joins refused (`seq`, `kind` `branch_failed`, `branch_cancelled` or `join_refused`, `node`, `detail`), absent when nothing did. `pending_tasks` and `execution`: see Host execution mode below |
 | `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below); `inline_prompt: false` drops each task's inline `prompt` and `role_prompt` (default `true`) for a host whose subagents read `prompt_path` and `role_path` |
 | `run_events` | Run events, optionally from a given seq |
@@ -88,6 +88,7 @@ Mutations (destructive):
 | `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true` |
 | `run_pause` | Pause a run so it can continue later (operator tool: any live or paused run, `by: operator`, no supervisor token). `mode` `drain` (default: running nodes finish) or `now` (running nodes are interrupted and run again on resume); optional `reason`, `until` (RFC 3339 or a duration such as `90m`; the run resumes by itself then) and `keep_lock`. See Pause and resume below |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
+| `run_intent_resolve` | Records a person's decision on a send whose outcome is not known (`run_id`, `intent`: the `si-...` id the outcome's `call outcome unknown` gap and `apb intent list` name, not the `--intent` label; `sent`, optional `note`): `sent: true` makes a repeat of the send answer `already_sent`, `false` lets it go out again. Ask the user first and pass on only their answer, never decide it alone. Refused for a send whose outcome is known or that is still in flight. A subagent (a host task's or an agent step's) must never call it and reports the send as a finding instead; like `review_decide` this is an instruction, since the server cannot tell a person's session from a subagent sharing it (the CLI `apb intent resolve` refuses inside a run). See Run outcome below and "Sending once" in CONNECTORS.md |
 | `review_decide` | Decide a run's human_review node |
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
 | `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`, or a host task submitted as `blocked`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
@@ -217,7 +218,7 @@ supervisor agent that `apb run --supervise` spawns gets
 (agents pass their environment to their MCP servers) serves only the
 `supervisor_*` tools, the read-only tools and `run_answer`, whose `run_id`
 path (answering as the human) it refuses. The operator's run control
-(`run_stop`, `run_pause`, `run_resume`, `review_decide`), authoring and run starts take no
+(`run_stop`, `run_pause`, `run_resume`, `review_decide`, `run_intent_resolve`), authoring and run starts take no
 token, so they are not offered to a supervisor. One is worth naming regardless, because its polling contract is easy
 to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
 until the run's next wake, a new human_review gate, the end of the run, or a
@@ -438,7 +439,9 @@ switches.
 - `headline`: one line, such as `Run succeeded; 2 of 3 checks passed; 5 not
   verified; needs a look (1 finding, 1 warning)`.
 - `done`: the steps that succeeded (start and finish aside), the commits per
-  node, and the connector writes that went through, per function.
+  node (with how many lack an `Apb-Run` trailer for this run or name another
+  run), the connector writes that went through, per function, and the sends
+  apb's lookup found or a person confirmed went out.
 - `verified`: what the engine itself checked, each `{ source, subject,
   result, detail? }`. `source` is `goal` (a script or marker criterion,
   `result` `passed`, `failed` or `error`), `success_check` (a node whose
@@ -449,7 +452,12 @@ switches.
   (an `agent_task` that succeeded with no `success_check`: its own report is
   the only evidence), `goal_not_checked` (the run ended before a finish
   node), `unknown_call` (a connector write that timed out, hit a network
-  error or a server error: whether it changed anything is not known),
+  error or a server error: whether it changed anything is not known; for a
+  send-once function one gap per send intent, whose detail names the intent
+  and `apb intent resolve <run> <si-id> --sent|--not-sent`, also for a send
+  whose process died before its call was recorded, and none once a replay,
+  apb's lookup or a person settled it; a replay that did not go out leaves
+  the send it repeated open),
   `incomplete_response` (a connector response cut short), `inbox_gap`
   (unread inbox events lost to retention), `output_truncated` (an attempt's
   output was cut) or `baseline_unknown` (an observation that could not be
@@ -462,9 +470,10 @@ switches.
   tell. A baseline shows the change; it never decides the goal.
 - `agent_summary`: the finish node's answer, the agent's own account,
   labelled as not checked.
-- `needs_look`: as in `runs_list`. Only a baseline regression, findings or
-  warnings set it, read from the journal alone; a failed run says so in its
-  status instead.
+- `needs_look`: as in `runs_list`. Only a baseline regression, findings,
+  warnings or unknown sends (`unknown_sends`) set it, read from the journal
+  alone; a failed run says so in its status instead. Resolve an unknown send
+  with `run_intent_resolve` after asking the user.
 
 `apb runs <id>` prints the same outcome as text, and `apb runs` marks a run
 that needs a look.

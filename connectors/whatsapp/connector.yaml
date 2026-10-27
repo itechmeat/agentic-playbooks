@@ -96,6 +96,7 @@ functions:
             preview_url: { type: boolean, description: "render a link preview for the first URL found in body" }
           required: [body]
       required: [to, text]
+    idempotency: { mode: none, result_ref: messages.0.id }
     examples:
       - args: { to: "15551234567", text: { body: "Hello from apb" } }
         note: "preview_url is optional and off by default."
@@ -140,6 +141,7 @@ functions:
             components: { type: array, items: { type: object, additionalProperties: true }, description: "header/body/button parameter substitutions; omit entirely for a template with no variables" }
           required: [name, language]
       required: [to, template]
+    idempotency: { mode: none, result_ref: messages.0.id }
     examples:
       - args: { to: "15551234567", template: { name: "hello_world", language: { code: "en_US" } } }
         note: "components is optional and omitted here because hello_world takes no parameters."

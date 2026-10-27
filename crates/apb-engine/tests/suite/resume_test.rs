@@ -130,6 +130,7 @@ fn attempt_started(node: &str) -> EventPayload {
         model: None,
         workdir: None,
         transcript: None,
+        token: None,
     }
 }
 

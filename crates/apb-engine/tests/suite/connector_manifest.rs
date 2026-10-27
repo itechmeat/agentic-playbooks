@@ -39,6 +39,7 @@ fn sample_grant() -> ManifestConnectorGrant {
         accounts: vec!["acme".to_string()],
         functions: vec!["post_message".to_string()],
         max_calls: Some(5),
+        on_unknown: None,
     }
 }
 

@@ -364,3 +364,97 @@ fn a_finding_reported_again_reads_in_the_latest_attempts_words() {
     assert_eq!(o.findings[0].attempt, 2);
     assert_eq!(o.findings[0].finding.why_not_fixed, "still needs a person");
 }
+
+fn intent(id: &str, label: &str) -> Value {
+    json!({ "type": "send_intent_recorded", "intent": id, "nonce": "n", "node": "fix", "attempt": 1,
+            "connector": "twenty", "function": "update_opportunity", "account": "default",
+            "mode": "none", "label": label, "pid": 0, "deadline_ms": 0 })
+}
+
+fn settled(id: &str, outcome: &str, source: &str) -> Value {
+    json!({ "type": "send_intent_settled", "intent": id, "outcome": outcome, "source": source,
+            "detail": if outcome == "unknown" { json!("timeout") } else { Value::Null } })
+}
+
+fn intent_call(id: &str, outcome: &str) -> Value {
+    let mut c = call("update_opportunity", outcome, None, None);
+    c["intent"] = json!(id);
+    c
+}
+
+fn subjects(o: &OutcomeSummary, kind: GapKind) -> Vec<(String, String)> {
+    o.unverified
+        .iter()
+        .filter(|g| g.kind == kind)
+        .map(|g| (g.subject.clone(), g.detail.clone().unwrap_or_default()))
+        .collect()
+}
+
+/// The send ledger in the outcome: a send nobody can tell went out is a gap
+/// that names the command resolving it and calls for a look, also when its
+/// sender vanished before any call was journaled; a send a lookup later
+/// found is done, not a gap.
+#[test]
+fn an_unknown_send_is_a_gap_and_a_send_settled_later_is_not() {
+    let events = [
+        node("started", "fix"),
+        intent("si-a", "announce"),
+        intent_call("si-a", "timeout"),
+        settled("si-a", "unknown", "response"),
+        intent("si-b", "digest"),
+        intent_call("si-b", "timeout"),
+        settled("si-b", "unknown", "response"),
+        settled("si-b", "confirmed", "reconcile"),
+        // Recorded, then the sender died before its call was journaled.
+        intent("si-c", "summary"),
+        node("finished", "fix"),
+        json!({ "type": "run_finished", "outcome": "succeeded" }),
+    ];
+    let o = outcome_of(PLAYBOOK, &events);
+    let gaps = subjects(&o, GapKind::UnknownCall);
+    assert_eq!(
+        gaps.len(),
+        2,
+        "one gap per open intent, none per call: {gaps:?}"
+    );
+    // The wording of a gap and a done line is `run_outcome::intents`'s;
+    // here only which intent lands where.
+    assert_eq!(gaps[0].0, "twenty.update_opportunity");
+    assert!(gaps[0].1.contains("(si-a)"));
+    assert!(gaps[1].1.contains("(si-c)"));
+    assert!(o.done.iter().any(|d| d.contains("(si-b)")), "{:?}", o.done);
+    let look = o.needs_look.expect("unknown sends call for a look");
+    assert_eq!(look.unknown_sends, 2);
+    assert!(look.reasons.contains(&NeedsLookReason::UnknownSends));
+    assert!(look.line().ends_with("2 unknown sends"));
+    // The listing reads the same.
+    assert_eq!(needs_look(&events).map(|n| n.unknown_sends), Some(2));
+}
+
+/// The commits' `Apb-Run` trailers in the done line: one that names this
+/// run is fine, one without it or naming another run is counted.
+#[test]
+fn commits_without_this_runs_trailer_are_counted_in_the_done_line() {
+    let commit = |sha: &str, ids: Value| json!({ "sha": sha, "subject": "s", "apb_run": ids });
+    let events = [
+        node("started", "fix"),
+        json!({ "type": "artifacts_committed", "node": "fix", "before": "b", "after": "c1",
+                "commits": [commit("c1", json!(["r1"])), commit("c2", json!([])), commit("c3", json!(["r0"]))] }),
+        json!({ "type": "artifacts_committed", "node": "fix", "before": "c1", "after": "c4",
+                "commits": [{ "sha": "c4", "subject": "old event" }] }),
+        node("finished", "fix"),
+    ];
+    let o = outcome_of(PLAYBOOK, &events);
+    assert!(
+        o.done.contains(
+            &"fix: 3 commits (1 without an Apb-Run trailer, 1 naming another run)".to_string()
+        ),
+        "{:?}",
+        o.done
+    );
+    assert!(
+        o.done.contains(&"fix: 1 commit".to_string()),
+        "{:?}",
+        o.done
+    );
+}

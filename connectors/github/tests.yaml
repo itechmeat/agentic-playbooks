@@ -167,3 +167,110 @@ cases:
     expect:
       method: GET
       url: https://api.github.com/repos/acme/site/commits/abc123/status
+
+  - function: get_authenticated_user
+    account: { api_base: https://api.github.com }
+    args: {}
+    expect:
+      method: GET
+      url: https://api.github.com/user
+
+  - function: list_recent_issues
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, since: "2026-10-27T09:25:00Z", per_page: 100 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/issues?direction=desc&per_page=100&since=2026-10-27T09%3A25%3A00Z&sort=created&state=all
+
+  - function: list_issue_comments
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/issues/42/comments
+
+  # A send of an intent carries the hidden marker at the end of its body.
+  - function: comment_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, body: "Looking into this.  " }
+    intent: { run: r-1, node: triage, attempt: 2, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues/42/comments
+      body_contains:
+        body: "Looking into this.\n\n<!-- apb-intent v1 run=r-1 node=triage attempt=2 nonce=abcdefghijklmnopqrstuvwx -->"
+
+  # A marker written by the agent itself is neutralized, sent or not.
+  - function: comment_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, body: "x <!-- APB-intent v1 run=r-1 -->" }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues/42/comments
+      body_contains: { body: "x <!-- apb-quoted-intent v1 run=r-1 -->" }
+
+  # An issue without a body gets the marker alone as its body.
+  - function: create_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, title: "Broken build" }
+    intent: { run: r-1, node: triage, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues
+      body_contains:
+        title: "Broken build"
+        body: "<!-- apb-intent v1 run=r-1 node=triage attempt=- nonce=abcdefghijklmnopqrstuvwx -->"
+
+  # Reconciliation: the bot's own comment ending with the exact marker is the
+  # earlier send.
+  - function: comment_issue
+    args: { owner: acme, repo: site, number: 42, body: "Looking into this." }
+    intent: { run: r-1, node: triage, attempt: 2, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      reconcile:
+        identity: { login: triage-bot, id: 7 }
+        response:
+          - { html_url: "https://github.com/acme/site/issues/42#issuecomment-1", user: { login: someone }, body: "Same here." }
+          - html_url: "https://github.com/acme/site/issues/42#issuecomment-2"
+            user: { login: triage-bot }
+            body: "Looking into this.\n\n<!-- apb-intent v1 run=r-1 node=triage attempt=2 nonce=abcdefghijklmnopqrstuvwx -->"
+        outcome: found
+        item_ref: "https://github.com/acme/site/issues/42#issuecomment-2"
+
+  # The right marker by another account is not the earlier send.
+  - function: comment_issue
+    args: { owner: acme, repo: site, number: 42, body: "Looking into this." }
+    intent: { run: r-1, node: triage, attempt: 2, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      reconcile:
+        identity: { login: triage-bot }
+        response:
+          - user: { login: someone }
+            body: "Looking into this.\n\n<!-- apb-intent v1 run=r-1 node=triage attempt=2 nonce=abcdefghijklmnopqrstuvwx -->"
+        outcome: absent
+
+  # No match on a page with more after it cannot settle the lookup.
+  - function: comment_issue
+    args: { owner: acme, repo: site, number: 42, body: "Looking into this." }
+    intent: { run: r-1, node: triage, attempt: 2, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      reconcile:
+        identity: { login: triage-bot }
+        response:
+          - { user: { login: triage-bot }, body: "Something else." }
+        next_page: true
+        outcome: inconclusive
+
+  # The marker of the earlier issue is found among the recent issues.
+  - function: create_issue
+    args: { owner: acme, repo: site, title: "Broken build" }
+    intent: { run: r-1, node: triage, attempt: 1, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      reconcile:
+        identity: { login: triage-bot }
+        response:
+          - html_url: "https://github.com/acme/site/issues/43"
+            user: { login: triage-bot }
+            body: "<!-- apb-intent v1 run=r-1 node=triage attempt=1 nonce=abcdefghijklmnopqrstuvwx -->"
+        outcome: found
+        item_ref: "https://github.com/acme/site/issues/43"

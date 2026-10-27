@@ -335,7 +335,7 @@
 
     {#if detail}
       <RunVerdictPanel outcome={detail.outcome} />
-      <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
+      <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
       <AttemptModelsPanel models={detail.attempt_models} />
     {/if}
 

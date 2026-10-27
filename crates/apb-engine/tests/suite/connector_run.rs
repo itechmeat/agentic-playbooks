@@ -167,12 +167,13 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
         program: env_dump_agent(dir.path()),
         spec: builtin("claude").unwrap(),
     };
-    let policy = ConnectorEnvPolicy {
-        scrub: vec!["MOCK_SCRUB_TOKEN".to_string()],
-        run_dir: Some(dir.path().to_path_buf()),
-        node_id: Some("node-a".to_string()),
-        overlay: Vec::new(),
-    };
+    let policy = ConnectorEnvPolicy::for_node(
+        vec!["MOCK_SCRUB_TOKEN".to_string()],
+        dir.path(),
+        "node-a",
+        Vec::new(),
+    )
+    .with_attempt(3);
     let report = ad
         .run(&AgentTask {
             prompt: "hi",
@@ -210,6 +211,12 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
     assert!(
         report.raw.contains("APB_NODE_ID=node-a"),
         "APB_NODE_ID missing or wrong in the agent env: {}",
+        report.raw
+    );
+    // The attempt number a connector call binds to.
+    assert!(
+        report.raw.contains("APB_ATTEMPT=3"),
+        "APB_ATTEMPT missing or wrong in the agent env: {}",
         report.raw
     );
 }

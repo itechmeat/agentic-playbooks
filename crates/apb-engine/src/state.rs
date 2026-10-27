@@ -515,6 +515,9 @@ impl RunState {
                 // An inbox gap is a reporting record; the run surfaces read it straight
                 // from the journal, the state fold carries no inbox cursor.
                 EventPayload::InboxGap { .. } => {}
+                // The send ledger is folded by `connector::intent::ledger`;
+                // it carries no run-state effect.
+                EventPayload::SendIntentRecorded { .. } | EventPayload::SendIntentSettled { .. } => {}
                 // Node-cache events (spec 2026-07-19) are audit records: a hit
                 // is reported alongside the node's own NodeStarted/NodeFinished
                 // (which carry the run-state effect), and miss/stored/rejected

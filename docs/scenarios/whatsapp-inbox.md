@@ -61,8 +61,8 @@ or a max_traversals edge, or a schedule outside the playbook. The gaps:
 
 1. The whole batch goes to one agent call (read, reply, ack each handle all
    events in one attempt).
-2. A retry after a timeout may reply twice to the same sender; there is no
-   per-event sent ledger the retry can read.
+2. A reply whose answer was lost stays unknown: the Cloud API takes no
+   idempotency key, so the retry refuses it until a person decides.
 3. The ack is batch-wide (up to a sequence number), so a crash between reply
    and ack replays the whole batch on the next run; there is no per-event
    acknowledgement to resume from.
@@ -71,6 +71,16 @@ or a max_traversals edge, or a schedule outside the playbook. The gaps:
 5. A recurring poll needs machinery outside this playbook (a schedule or a
    hand-bounded loop); there is no simple "run this every N minutes and
    never overlap" shape.
+
+Closed within a run: each reply is sent with `--intent` named after its
+event and recorded in the run's send ledger, so a retry after the timeout is
+answered `already_sent` for the 4 replies that went out and sends only the
+remaining 3; the retry's prompt lists them (engine tests
+`a_retry_after_a_failed_visit_is_answered_and_a_loop_after_success_sends_again`
+in crates/apb-engine/tests/suite/send_intent_test.rs and
+`a_retry_is_briefed_on_what_the_failed_attempt_sent` in
+crates/apb-engine/tests/suite/attempt_briefing_test.rs). The next run, after
+a crash before the ack, does not see them.
 
 Closed: events the inbox retention dropped before this consumer read them
 used to vanish without a trace. The read now carries the lost range as
@@ -82,9 +92,9 @@ crates/apb-engine/tests/suite/connector_inbox.rs).
 ## 7. Target
 
 Each event is processed per item with an idempotency key (its sequence
-number); the sent ledger survives retries and interruptions; the cursor
+number); the sent ledger survives retries, interruptions and the next run; the cursor
 moves per item or the ledger substitutes for it; the injection rule is
 backed by a structural guarantee (reply content derived only from declared
 fields, for example). A feature closing these gaps carries an engine test
-that interrupts after 4 replies and asserts the retry sends only the
-remaining 3.
+that crashes the run before the ack and asserts the next run replies to
+nobody twice.

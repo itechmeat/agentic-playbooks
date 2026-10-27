@@ -34,6 +34,7 @@ pub struct ResolvedGrant {
     pub accounts: Vec<Account>,
     pub functions: Vec<String>,
     pub max_calls: Option<u32>,
+    pub on_unknown: Option<crate::schema::OnUnknown>,
 }
 
 /// Everything the policy gate and the engine need about one connector a
@@ -276,6 +277,7 @@ fn expand_grant(
         accounts,
         functions,
         max_calls: binding.max_calls,
+        on_unknown: binding.on_unknown,
     })
 }
 
@@ -363,6 +365,9 @@ pub struct ConnectorFacts {
     /// Names of its functions not marked `read_only` (V73 warns about a
     /// grant of one after an `auto_decide` gate).
     pub write_functions: Vec<String>,
+    /// Function name -> the send-once mode it declares; functions that
+    /// declare none are absent (V69).
+    pub idempotency: std::collections::BTreeMap<String, super::idempotency::IdempotencyMode>,
     /// Account field names the webhook block's `{{secret.*}}` placeholders
     /// reference, sorted and deduplicated. Empty when there is no block.
     pub webhook_secret_fields: Vec<String>,
@@ -465,6 +470,12 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
                     .iter()
                     .filter(|f| !f.read_only)
                     .map(|f| f.name.clone())
+                    .collect(),
+                idempotency: loaded
+                    .doc
+                    .functions
+                    .iter()
+                    .filter_map(|f| f.idempotency.as_ref().map(|i| (f.name.clone(), i.mode())))
                     .collect(),
                 webhook_secret_fields,
                 accounts,

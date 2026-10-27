@@ -99,6 +99,7 @@ apb wait <run>      block until a run finishes, needs input or stops
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
 apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
 apb stop <run>      stop a run
+apb intent          list a run's send intents, or resolve one whose outcome is not known (--sent | --not-sent)
 apb review          decide a pending human_review node
 apb answer          answer an interactive node's pending question
 apb tasks           list or submit host tasks (host execution mode; --notes: findings and warnings)
@@ -143,15 +144,15 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 ## Docs
 
 - [Install guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INSTALL.md): detailed installation methods and environment checks
-- [MCP tools reference](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/MCP.md): full tool surface, annotations, safety model, the run outcome (done, verified, not verified, findings, warnings, baseline)
+- [MCP tools reference](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/MCP.md): full tool surface, annotations, safety model, the run outcome (done, verified, not verified, findings, warnings, baseline, unknown sends)
 - [Run stats](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/STATS.md): `apb stats`, cross-run metrics from the run journals
 - [Eval suites](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
 - [Host integration](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
 - [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
-- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings
+- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings, the retry briefing, `Apb-Run` trailer reporting
 - [Guardrails](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
 - [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
-- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust
+- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust, sending once (the send ledger, `--intent`, `on_unknown`)
 - [Deployment](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DEPLOYMENT.md): running the dashboard on a server behind a TLS proxy with API keys
 - [Decision models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DECISIONS.md): optional small models for completion checks, judge nodes, retry advice and catalog ranking
 - [Reference scenarios](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/scenarios/README.md): realistic code and routine situations features are checked against, each naming today's gaps

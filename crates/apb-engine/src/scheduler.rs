@@ -40,6 +40,7 @@ use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree}
 /// every caller expects to find it.
 pub use crate::run_config::RunMode;
 
+mod attempt_memory;
 mod attempt_notes;
 mod baseline;
 mod cache;

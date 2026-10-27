@@ -3,6 +3,7 @@
 //! reclassification that catches envelope errors hidden inside a 2xx.
 
 use super::*;
+use apb_core::connector::def::ErrorWhen;
 
 /// Recursively redacts secret values in a JSON value's string leaves.
 pub(crate) fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {

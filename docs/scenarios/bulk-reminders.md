@@ -63,19 +63,29 @@ markers. The gaps:
    and no per-item verdict the engine holds.
 2. max_calls budgets are hand-tuned to the expected list length; a longer
    list clips silently mid-run.
-3. A retry after a timeout may send twice: whether a row was sent lives only
-   in the session memory of the attempt.
-4. A resume after a pause replays the send step from the start; there is no
-   per-item sent ledger to skip against.
-5. The counts (loaded, checked, sent) are agent-written text; the engine
+3. A reminder whose answer was lost stays unknown: SMTP offers no way to
+   look a sent email up, so that one row waits for a person's decision.
+4. The counts (loaded, checked, sent) are agent-written text; the engine
    cannot assert sent equals unpaid minus failed, so an arithmetic lie in
    the report would pass the markers.
+
+Closed within a run: each reminder is sent with `--intent` named after its
+invoice and recorded in the run's send ledger, so the infrastructure retry
+and a resume after a pause are answered `already_sent` for the 9 rows that
+went out and send only the rest; the one send whose answer was lost is
+refused instead of repeated. The retry's prompt lists what the earlier
+attempts sent (engine tests
+`a_retry_after_a_failed_visit_is_answered_and_a_loop_after_success_sends_again`
+in crates/apb-engine/tests/suite/send_intent_test.rs and
+`a_retry_is_briefed_on_what_the_failed_attempt_sent` in
+crates/apb-engine/tests/suite/attempt_briefing_test.rs). A fresh run of the
+same list does not see the earlier run's sends.
 
 ## 7. Target
 
 The list is a first-class value; each row flows through per-item steps with
 per-item verdicts (sent, skipped-paid, failed) recorded by the engine; every
-send is keyed by the invoice number as an idempotency key, and a retry or a
+send is keyed by the invoice number, and a re-run as well as a retry or a
 resume reads the ledger and sends only the remainder. The run report's
 counts are engine-checked (sent plus failed equals unpaid). A feature closing
 these gaps carries an engine test that interrupts after 9 sends and asserts
