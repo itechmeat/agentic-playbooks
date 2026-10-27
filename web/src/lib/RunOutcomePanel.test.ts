@@ -20,4 +20,20 @@ describe('RunOutcomePanel', () => {
     flushSync()
     expect(document.querySelectorAll('[data-testid="run-commit-row"]').length).toBe(2)
   })
+
+  // A run whose inbox reads lost unread events says so as a warning, one line
+  // per gap; a run without gaps shows no warning.
+  it('warns about each inbox gap and stays quiet without one', () => {
+    const gap = { node: 'watch', connector: 'echo-hooks', account: 'main', from: 3, through: 6 }
+    app = mount(RunOutcomePanel, { target: document.body, props: { goal: null, commits: [], inboxGaps: [gap] } })
+    flushSync()
+    const lines = document.querySelectorAll('[data-testid="run-inbox-gap"]')
+    expect(lines.length).toBe(1)
+    expect(lines[0].textContent).toContain('events 3-6')
+    expect(lines[0].textContent).toContain('echo-hooks/main')
+    unmount(app)
+    app = mount(RunOutcomePanel, { target: document.body, props: { goal: null, commits: [] } })
+    flushSync()
+    expect(document.querySelector('[data-testid="run-inbox-gaps"]')).toBeNull()
+  })
 })

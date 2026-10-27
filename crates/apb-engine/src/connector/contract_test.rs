@@ -904,6 +904,39 @@ functions:
         );
     }
 
+    /// `text_args` prepares the value placed into the form body.
+    #[test]
+    fn text_args_prepare_the_form_body() {
+        let doc = ConnectorDoc::from_yaml(
+            "name: chat\nversion: 0.1.0\nfunctions:\n  - name: send\n    description: d\n    method: POST\n    url: https://chat.example.com/messages\n    body_form: { content: \"{{args.content}}\" }\n    text_args: { content: markdown_no_commands }\n    args_schema: { type: object, properties: { content: { type: string } } }\n",
+            "chat",
+        )
+        .unwrap();
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send\n    args: { content: \"/close\" }\n    expect:\n      method: POST\n      url: https://chat.example.com/messages\n      body_form_contains: { content: \"\\\\/close\" }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc, &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
+    /// A body that is the whole args object (`body: "{{args}}"`) carries the
+    /// prepared value too, and the args without a mode as given.
+    #[test]
+    fn text_args_prepare_a_whole_args_body() {
+        let doc = ConnectorDoc::from_yaml(
+            "name: tracker\nversion: 0.1.0\nfunctions:\n  - name: create\n    description: d\n    method: POST\n    url: https://tracker.example.com/items\n    body: \"{{args}}\"\n    text_args: { text: markdown_no_commands }\n    args_schema: { type: object, properties: { text: { type: string }, note: { type: string } } }\n",
+            "tracker",
+        )
+        .unwrap();
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: create\n    args: { text: \"/close\", note: \"/close\" }\n    expect:\n      method: POST\n      url: https://tracker.example.com/items\n      body_contains: { text: \"\\\\/close\", note: \"/close\" }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc, &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
     #[test]
     fn body_form_contains_on_function_without_body_form_fails_clearly() {
         let tests = TestsDoc::from_yaml(

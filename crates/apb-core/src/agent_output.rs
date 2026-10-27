@@ -160,6 +160,32 @@ pub fn usage(agent: &str, stdout: &str) -> Option<AgentUsage> {
     }
 }
 
+/// Whether `stdout` ends with the closing record of `agent`'s machine output,
+/// the one carrying the verdict and the usage: claude's `result` object,
+/// codex's `turn.completed` (or, for a failed turn, `turn.failed` or
+/// `error`), an opencode `step_finish` part (its last line; earlier steps
+/// print one too) or the `error` that ends a failed run, zcode's response
+/// document. Every CLI prints it last, so a copy of the output that kept only
+/// the beginning and the end still has it unless it was cut. `None` for an
+/// agent without a machine format, where no record can be checked for.
+pub fn has_final_record(agent: &str, stdout: &str) -> Option<bool> {
+    let last_is = |kinds: &[&str]| {
+        stdout
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .and_then(|l| serde_json::from_str::<Value>(l).ok())
+            .is_some_and(|v| str_at(&v, "type").is_some_and(|t| kinds.contains(&t)))
+    };
+    match crate::detect::canonical_agent_id(agent) {
+        "claude" => Some(claude_result(stdout).is_some()),
+        "codex" => Some(last_is(&["turn.completed", "turn.failed", "error"])),
+        "opencode" => Some(last_is(&["step_finish", "error"])),
+        "zcode" => Some(crate::zcode::response_text(stdout).is_some()),
+        _ => None,
+    }
+}
+
 fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }

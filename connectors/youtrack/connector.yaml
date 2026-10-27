@@ -1,5 +1,5 @@
 name: youtrack
-version: 0.1.0
+version: 0.1.1
 healthcheck: get_me
 auth:
   kind: header
@@ -87,6 +87,8 @@ functions:
       description: "{{args.description}}"
     query:
       fields: "idReadable,summary,resolved,project(shortName),reporter(login)"
+    text_args:
+      description: markdown
     args_schema:
       type: object
       properties:
@@ -108,6 +110,8 @@ functions:
       description: "{{args.description}}"
     query:
       fields: "idReadable,summary,resolved,project(shortName),reporter(login)"
+    text_args:
+      description: markdown
     args_schema:
       type: object
       properties:
@@ -142,6 +146,8 @@ functions:
       text: "{{args.text}}"
     query:
       fields: "id,text,author(login),created"
+    text_args:
+      text: markdown
     args_schema:
       type: object
       properties:

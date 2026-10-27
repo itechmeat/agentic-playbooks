@@ -3,6 +3,7 @@ mod agent_home;
 // candidate trials (issue #192)
 pub mod attempt_models;
 pub mod candidate;
+pub mod capture;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;
@@ -10,6 +11,7 @@ pub mod context;
 pub mod control;
 pub mod decision;
 pub mod driver;
+mod env_duration;
 pub mod error;
 pub mod event;
 // --- 0.24.0 eval suites ---

@@ -206,6 +206,7 @@ pub(crate) fn execute(
         cancel,
         env_scrub,
         overlay: cfg.spawn_env(),
+        output_limits: cfg.output_limits(),
         journal,
         attempt: std::cell::Cell::new(attempt_started_count(&read_all(run_dir)?, node_id) as u32),
     };
@@ -333,6 +334,8 @@ struct ProfileEmulation<'a, 'j> {
     env_scrub: &'a [String],
     /// The eval env overlay (`RunConfig::spawn_env`).
     overlay: Vec<(String, String)>,
+    /// The run's output limits (`RunConfig::output_limits`).
+    output_limits: apb_core::output_limits::OutputLimits,
     journal: &'a Journal<'j>,
     attempt: std::cell::Cell<u32>,
 }
@@ -442,6 +445,7 @@ impl ProfileEmulation<'_, '_> {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: self.output_limits,
         };
         let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
@@ -472,14 +476,20 @@ impl ProfileEmulation<'_, '_> {
             self.journal.append(started(None, None))?;
         }
         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
-        let (status, output, session, usage) = match outcome {
+        let (status, output, session, usage, capture) = match outcome {
             Ok(report) => (
                 report.status,
                 Some(report.output),
                 report.session,
                 report.usage,
+                report.capture,
             ),
-            Err(crate::adapter::AgentFailure { class, usage, .. }) => (
+            Err(crate::adapter::AgentFailure {
+                class,
+                usage,
+                capture,
+                ..
+            }) => (
                 if class == ErrorClass::Timeout {
                     NodeStatus::TimedOut
                 } else {
@@ -488,9 +498,12 @@ impl ProfileEmulation<'_, '_> {
                 None,
                 None,
                 usage,
+                capture,
             ),
         };
         self.journal.append(EventPayload::AttemptFinished {
+            output_truncated: capture.truncated,
+            transcript_incomplete: capture.transcript_incomplete,
             node: self.node_id.into(),
             attempt,
             status: status.as_str().into(),

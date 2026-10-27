@@ -1062,6 +1062,8 @@ mod tests {
                 2,
                 300,
                 EventPayload::AttemptFinished {
+                    output_truncated: Vec::new(),
+                    transcript_incomplete: false,
                     node: "a".into(),
                     attempt: 1,
                     status: "succeeded".into(),
@@ -1311,6 +1313,8 @@ mod tests {
                 3,
                 3_000,
                 EventPayload::AttemptFinished {
+                    output_truncated: Vec::new(),
+                    transcript_incomplete: false,
                     node: "a".into(),
                     attempt: 1,
                     status: "failed".into(),

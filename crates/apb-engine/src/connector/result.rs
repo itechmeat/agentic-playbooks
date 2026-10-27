@@ -4,7 +4,11 @@
 //! redaction. It is the dependency sink both call kinds point at, so neither
 //! call module has to depend on the other (keeps the file graph acyclic).
 
+use apb_core::connector::inbox::InboxGap;
 use serde_json::{Value, json};
+
+use crate::connector::completeness::Incompleteness;
+pub use crate::connector::completeness::{BodyIncomplete, IncompleteReason};
 
 /// The structured error code taxonomy (spec section 8). The wire form is the
 /// snake_case string from [`CallErrorCode::as_str`].
@@ -19,6 +23,10 @@ pub enum CallErrorCode {
     Service,
     Network,
     Timeout,
+    /// A 2xx on a `read_only` function whose response body did not read
+    /// whole (cut at the read cap, or the read failed partway): the honest
+    /// answer is an error, never a partial body passed as complete data.
+    IncompleteResponse,
 }
 
 impl CallErrorCode {
@@ -34,6 +42,7 @@ impl CallErrorCode {
             CallErrorCode::Service => "service",
             CallErrorCode::Network => "network",
             CallErrorCode::Timeout => "timeout",
+            CallErrorCode::IncompleteResponse => "incomplete_response",
         }
     }
 }
@@ -45,6 +54,9 @@ pub struct CallError {
     pub message: String,
     pub http_status: Option<u16>,
     pub retry_after_sec: Option<u64>,
+    /// Set only on an `IncompleteResponse` error: why the body read did not
+    /// complete.
+    pub incomplete: Option<BodyIncomplete>,
 }
 
 impl CallError {
@@ -54,7 +66,32 @@ impl CallError {
             message: message.into(),
             http_status: None,
             retry_after_sec: None,
+            incomplete: None,
         }
+    }
+
+    /// Builds the `incomplete_response` error for a read-only call whose 2xx
+    /// body did not read whole: it carries the real status, the reason, and
+    /// the cap when relevant, and no partial body travels as data. The
+    /// message tells the caller to narrow the request; nothing in apb
+    /// retries such a call automatically.
+    pub(crate) fn incomplete_response(status: u16, incomplete: BodyIncomplete) -> Self {
+        let why = match incomplete.reason {
+            IncompleteReason::BodyCap => format!(
+                "the response body was cut at the {} byte read cap",
+                incomplete.cap_bytes.unwrap_or_default()
+            ),
+            IncompleteReason::ReadError => "the response body read failed partway".to_string(),
+        };
+        let mut err = CallError::new(
+            CallErrorCode::IncompleteResponse,
+            format!(
+                "{why}, so the result would be incomplete; narrow the request (page, filter, or use a smaller page size) and call again"
+            ),
+        );
+        err.http_status = Some(status);
+        err.incomplete = Some(incomplete);
+        err
     }
 
     /// The `{ "ok": false, "error": { ... } }` result JSON.
@@ -68,22 +105,30 @@ impl CallError {
         if let Some(r) = self.retry_after_sec {
             err.insert("retry_after_sec".into(), json!(r));
         }
+        if let Some(b) = &self.incomplete {
+            b.detail(&mut err);
+        }
         json!({ "ok": false, "error": Value::Object(err) })
     }
 }
 
 /// A successful call result (spec section 8). HTTP and mock carry
-/// `status`/`truncated` (plus the `link`/`picked` HTTP extras); smtp carries
-/// only a body (spec 4.2: `{ ok: true, body: { accepted, from, subject } }`
-/// for send, `{ verified: true }` for verify); inbox carries the fixed
-/// envelope of a local store read, with the same `picked` flag HTTP uses
-/// (spec 2026-08-16-webhook-ingest-design).
+/// `status` plus the body-read outcome (plus the `link`/`picked` HTTP
+/// extras); smtp carries only a body (spec 4.2: `{ ok: true, body: {
+/// accepted, from, subject } }` for send, `{ verified: true }` for verify);
+/// inbox carries the fixed envelope of a local store read, with the same
+/// `picked` flag HTTP uses (spec 2026-08-16-webhook-ingest-design).
 #[derive(Debug)]
 pub enum CallOk {
     Http {
         status: u16,
         body: Value,
-        truncated: bool,
+        /// Set when the body read did not complete (cut at the read cap, or
+        /// a read error after part of the body); `None` for a whole body.
+        /// The incompleteness lives here, OUTSIDE `body`, so the
+        /// `response_pick` projection cannot remove it, and surfaces at the
+        /// top level of the result JSON.
+        incomplete: Option<BodyIncomplete>,
         /// The raw `Link` response header, when the service sent one (spec 4.4).
         link: Option<String>,
         /// True when the function's `response_pick` projection was applied to
@@ -97,6 +142,12 @@ pub enum CallOk {
         body: Value,
         /// True when `response_pick` was applied to the envelope.
         picked: bool,
+        /// An unread-events gap the read detected (retention dropped events
+        /// the consumer never acknowledged): the inclusive lost seq range.
+        /// Emitted at the top level of the result JSON, outside `body`, so a
+        /// `response_pick` projection cannot hide it. `None` keeps today's
+        /// shape (no `gap` key).
+        gap: Option<InboxGap>,
     },
 }
 
@@ -106,16 +157,21 @@ impl CallOk {
     /// exactly as before (link only when present, picked only when true);
     /// smtp emits just `{ ok, body }`; inbox emits `{ ok, body }` plus the
     /// same `picked` marker HTTP uses, and never a status (no request left
-    /// the machine).
+    /// the machine). A complete result adds no keys beyond that shape; an
+    /// incomplete one is annotated by the shared completeness rule
+    /// ([`crate::connector::completeness`]).
     pub(crate) fn to_success_json(&self) -> Value {
-        match self {
+        let mut value = match self {
             CallOk::Http {
                 status,
                 body,
-                truncated,
+                incomplete,
                 link,
                 picked,
             } => {
+                let truncated = incomplete
+                    .as_ref()
+                    .is_some_and(|b| b.reason == IncompleteReason::BodyCap);
                 let mut value = json!({
                     "ok": true,
                     "status": status,
@@ -131,13 +187,26 @@ impl CallOk {
                 value
             }
             CallOk::Smtp { body } => json!({ "ok": true, "body": body }),
-            CallOk::Inbox { body, picked } => {
+            CallOk::Inbox { body, picked, .. } => {
                 let mut value = json!({ "ok": true, "body": body });
                 if *picked {
                     value["picked"] = json!(true);
                 }
                 value
             }
+        };
+        if let Some(loss) = self.incompleteness() {
+            loss.annotate(&mut value);
+        }
+        value
+    }
+
+    /// What this success did not deliver whole, if anything.
+    fn incompleteness(&self) -> Option<Incompleteness<'_>> {
+        match self {
+            CallOk::Http { incomplete, .. } => incomplete.as_ref().map(Incompleteness::Body),
+            CallOk::Inbox { gap, .. } => gap.as_ref().map(Incompleteness::InboxGap),
+            CallOk::Smtp { .. } => None,
         }
     }
 
@@ -145,6 +214,17 @@ impl CallOk {
     pub fn body(&self) -> &Value {
         match self {
             CallOk::Http { body, .. } | CallOk::Smtp { body } | CallOk::Inbox { body, .. } => body,
+        }
+    }
+
+    /// The journal's `response_complete` value for this result: `Some` for an
+    /// HTTP response (whole, or cut or failed partway), `None` where
+    /// completeness does not apply (smtp, imap, inbox; a mock is decided by
+    /// its call kind, not by the result).
+    pub(crate) fn response_complete(&self) -> Option<bool> {
+        match self {
+            CallOk::Http { incomplete, .. } => Some(incomplete.is_none()),
+            CallOk::Smtp { .. } | CallOk::Inbox { .. } => None,
         }
     }
 }

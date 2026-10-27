@@ -191,6 +191,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         })
         .unwrap();
 

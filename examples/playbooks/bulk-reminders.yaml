@@ -1,0 +1,76 @@
+schema: 2
+id: bulk-reminders
+name: Bulk payment reminders
+description: >-
+  Read a list of overdue invoices from a CSV file, check every row against
+  the mailbox for a payment that arrived after the export, and send one
+  personal reminder email per still-unpaid row. The whole list is handled
+  by single agent calls today; see docs/scenarios/bulk-reminders.md for
+  what that means for retries and resumes.
+version: 1.0.0
+params:
+  - { name: list_path, type: text, label: "CSV file with the overdue invoices, columns email,name,invoice,amount,due_date" }
+  - { name: mail_folder, type: text, label: "IMAP folder to search for payment confirmations" }
+defaults:
+  profile: main
+effects: [network, external, irreversible]
+goal:
+  statement: >-
+    Every still-unpaid invoice on the list has exactly one personal
+    reminder, every paid or credited one has none, and the counts in the
+    run report account for every row of the list.
+  criteria:
+    - description: The list step reports how many rows it read
+      check: { type: marker, marker: "LIST LOADED:" }
+    - description: The check step reports a paid or unpaid verdict for every row
+      check: { type: marker, marker: "CHECKED:" }
+    - description: The send step reports one sent reminder per still-unpaid row
+      check: { type: marker, marker: "REMINDERS SENT:" }
+    - description: No invoice got two reminders and no paid invoice got one
+      check: { type: manual }
+nodes:
+  - { id: start, type: start }
+  - id: load_list
+    type: agent_task
+    title: Load the overdue list
+    expected_duration: 2m
+    prompt: >-
+      Read the CSV file at {{params.list_path}}. It holds one overdue
+      invoice per row with the columns email, name, invoice, amount,
+      due_date. Do not modify the file. List every row as you read it, in
+      file order. End with a line `LIST LOADED: <n> rows`.
+  - id: check_payments
+    type: agent_task
+    title: Check every row against the mailbox
+    expected_duration: 10m
+    prompt: >-
+      For every row from {{nodes.load_list.output}}, search folder
+      {{params.mail_folder}} with the imap connector's search_messages
+      function (folder {{params.mail_folder}}, subject_contains set to the
+      row's invoice number) for a payment confirmation or credit note.
+      Give every row a verdict: `paid` with the message uid as evidence,
+      or `unpaid`. End with a line `CHECKED: <n> rows, <p> paid, <u>
+      unpaid`, followed by one verdict line per row.
+    connectors:
+      - { name: imap, accounts: [default], functions: [search_messages], max_calls: 25 }
+  - id: send_reminders
+    type: agent_task
+    title: Send one reminder per unpaid row
+    expected_duration: 15m
+    prompt: >-
+      For every row marked `unpaid` in {{nodes.check_payments.output}},
+      send one personal reminder email to the row's address with the smtp
+      connector's send_email function. Address the debtor by name and name
+      the invoice number, the amount and the due date. One message per
+      invoice, never one bulk mail to several recipients. Send nothing to
+      a row marked `paid`. End with a line `REMINDERS SENT: <k> of <u>
+      unpaid rows`, and name every unpaid row you could not send to with
+      the error you hit.
+    connectors:
+      - { name: smtp, accounts: [default], functions: [send_email], max_calls: 30 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: load_list }
+  - { from: load_list, to: check_payments }
+  - { from: check_payments, to: send_reminders }
+  - { from: send_reminders, to: finish }

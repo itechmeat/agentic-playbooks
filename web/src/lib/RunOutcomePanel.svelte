@@ -1,20 +1,34 @@
 <script lang="ts">
-  import type { NodeCommits, RunGoal } from './api.gen'
+  import type { NodeCommits, RunGoal, RunInboxGap } from './api.gen'
   import * as Card from '$lib/components/ui/card'
   import { Badge } from '$lib/components/ui/badge'
-  import { commitLines, goalBadge, goalSummary, omittedCommits } from './runoutcome'
+  import { commitLines, goalBadge, goalSummary, inboxGapLine, omittedCommits } from './runoutcome'
 
   // What the run produced beyond its outputs (0.23.0): the playbook's goal
   // with each criterion's result, manual ones as a checklist for a person,
-  // and the commits its nodes made on a git tree. Each block renders only
-  // when there is one, so the page of a run without them is unchanged.
-  let { goal, commits }: { goal?: RunGoal | null; commits?: NodeCommits[] | null } = $props()
+  // the commits its nodes made on a git tree, and a warning for each inbox
+  // gap its connector reads found. Each block renders only when there is one,
+  // so the page of a run without them is unchanged.
+  let {
+    goal,
+    commits,
+    inboxGaps,
+  }: { goal?: RunGoal | null; commits?: NodeCommits[] | null; inboxGaps?: RunInboxGap[] | null } = $props()
 
   const lines = $derived(commitLines(commits ?? undefined))
   const omitted = $derived(omittedCommits(commits ?? undefined))
   const checked = $derived(goal ? goal.criteria.filter((c) => c.check !== 'manual') : [])
   const manual = $derived(goal ? goal.criteria.filter((c) => c.check === 'manual') : [])
 </script>
+
+{#if inboxGaps?.length}
+  <div class="inbox-gaps" role="alert" data-testid="run-inbox-gaps">
+    <p class="inbox-gaps-title">The run did not see its inbox whole</p>
+    {#each inboxGaps as g, i (i)}
+      <p class="inbox-gap-line" data-testid="run-inbox-gap">{inboxGapLine(g)}</p>
+    {/each}
+  </div>
+{/if}
 
 {#if goal}
   <Card.Root data-testid="run-goal">
@@ -69,3 +83,22 @@
     </Card.Content>
   </Card.Root>
 {/if}
+
+<style>
+  .inbox-gaps {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--warning);
+    border-radius: var(--radius, 0.5rem);
+    background: color-mix(in oklch, var(--warning) 12%, transparent);
+    font-size: 0.75rem;
+  }
+  .inbox-gaps-title {
+    font-weight: 600;
+  }
+  .inbox-gap-line {
+    overflow-wrap: anywhere;
+  }
+</style>

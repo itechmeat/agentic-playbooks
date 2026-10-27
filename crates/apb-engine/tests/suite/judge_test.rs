@@ -354,6 +354,41 @@ fn emulate_asks_the_profile_once_and_journals_it_uncalibrated() {
     );
 }
 
+/// A judge node's emulation attempt runs under the run's output limits, and
+/// what it lost is journaled on its `attempt_finished` like any attempt's.
+#[test]
+fn an_emulation_attempt_that_lost_output_says_so() {
+    let p = Project::new(&small("    on_unavailable: emulate\n", ""));
+    fs::write(
+        p.cfg.path().join("config.yaml"),
+        "output_limits:\n  head_bytes: 1024\n  tail_bytes: 4096\n",
+    )
+    .unwrap();
+    let filler = format!("{}\n", "x".repeat(99)).repeat(100);
+    p.set_emulation(&format!(
+        "{filler}```json\n{{\"q1\": 0.9, \"q2\": {{\"clean\": 0.1, \"needs_fix\": 0.8, \"unclear\": 0.1}}}}\n```"
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    // Whether the cut reply still answers is not the point here.
+    let (_, _, events) = p.run("small");
+    let lost = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptFinished {
+                node,
+                output_truncated,
+                ..
+            } if node == "triage" => Some(output_truncated.clone()),
+            _ => None,
+        })
+        .expect("the emulation attempt");
+    assert!(
+        lost.iter().any(|l| l.stream == "stdout"),
+        "the cut stdout is journaled: {lost:?}"
+    );
+}
+
 #[test]
 fn emulate_goes_to_a_configured_endpoint_when_the_native_provider_is_down() {
     let native = StubServer::start(vec![]);

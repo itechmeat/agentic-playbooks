@@ -21,8 +21,44 @@ A playbook is a YAML document with these top-level fields:
 Every save through apb (`playbook_create` / `playbook_update`, the dashboard
 editor, `apb import`) creates a new immutable version, except when the
 definition equals the current version apart from its `version:` field and
-formatting: then nothing is written, the current version and its trust stay as
-they are, and the answer says `unchanged: true`.
+formatting (for an import of a format-2 bundle, the scripts must also match,
+none when the bundle lists none):
+then nothing is written, the current version and its trust stay as they are,
+and the answer says `unchanged: true`.
+
+`apb export` writes one version as a single bundle file: the YAML, the editor
+layout and every regular file under the version's `scripts/` (bundle format
+2; a version over the scripts limits, or one holding symlinks, refuses to
+export rather than lose files). `apb import` checks those files again and
+writes the YAML and the scripts as one new version, which holds exactly the
+bundle's scripts: none when the bundle lists none, never the scripts of the
+version that was current. An imported version is never approved by the
+import, with or without scripts: it stays untrusted until it is approved
+(`playbook_approve`, or a run confirmation). Older bundles (format 1) predate
+scripts: they still import, carry no scripts themselves, and their version
+keeps the current version's scripts as an ordinary save does.
+
+### One playbook with params, or several playbooks
+
+When two uses of a process differ only in data (which project, which channel,
+which threshold), write one playbook and make that data a `params` entry. When
+they differ in which steps run or in what order, write separate playbooks:
+a param that switches whole branches on and off hides two processes in one
+graph, and each of them gets harder to read, test and trust.
+
+- Code: "fix the failing tests in service A" and "the same in service B" are
+  one playbook with a `service` param. "Fix the failing tests" and "upgrade a
+  dependency, then fix what broke" are two playbooks, since the second has an
+  extra step before the fix.
+- Routine: "post the weekly report to #sales" and "to #support" are one
+  playbook with a `channel` param. "Post the weekly report" and "chase every
+  overdue invoice, then post a summary" are two playbooks, since the steps
+  differ.
+
+```yaml
+params:
+  - { name: channel, type: text, label: "Channel to post the report to", default: "#sales" }
+```
 
 ## Visual editor and graph check
 
@@ -1359,6 +1395,15 @@ any other timeout (next fallback step, or the node ends `timed_out`). A node
 without `require_verdict` keeps the plain rule: a deadline kill moves on to the
 fallback chain.
 
+A deadline kill is graceful: the agent's process group gets SIGTERM, then up
+to `APB_TIMEOUT_GRACE_MS` milliseconds (default 5000) to exit, then SIGKILL,
+the same stop path a `--now` pause uses. What the agent printed on its way
+out is drained within the usual drain budget, and when it holds a complete
+final record (claude prints one, with its usage, when it is stopped) the
+attempt keeps that token usage and cost. The attempt stays `timed_out`
+whatever the record says; a partial record is ignored, and an agent that
+prints nothing leaves its usage unknown, never zero.
+
 A `transient` failure is retried on the SAME executor out of a separate
 infrastructure budget that never touches `max_retries`: the node's own retry count
 does not move and no retry is journaled against it, while each infrastructure
@@ -1492,6 +1537,51 @@ still leaves what it said and ran. For `claude`, whose text output does not show
 its tool calls, the CLI's own session transcript (every tool call and result) is
 copied there as `session.jsonl`. Other agents keep their sessions in their own
 stores. `agent-stream/` still holds the streamed events of the `acp` transport.
+
+### Bounded agent output
+
+apb never keeps an unbounded amount of what an agent prints. In memory each
+stream keeps its beginning (the head, where session ids are) and its end (the
+tail, where every supported CLI prints its final record: claude's `result`,
+codex's `turn.completed`, opencode's last `step_finish`, or the error
+record that ends a failed codex or opencode run); the middle of a
+longer stream is dropped. On disk `stdout.log`, `stderr.log`, the `acp`
+transport's stream log and the `session.jsonl` copy each stop at a size cap:
+the file then ends with one line saying how many bytes were written and that
+the rest was not kept, while apb keeps reading the agent, so a cap never
+blocks or kills it. On the `acp` transport a single line as long as the tail
+or longer is never kept whole either.
+
+The limits are in the `output_limits` section of the global `config.yaml`:
+
+```yaml
+output_limits:
+  head_bytes: 2097152          # in memory, per stream (2 MiB)
+  tail_bytes: 6291456          # in memory, per stream (6 MiB); also bounds an acp line and the acp queue
+  log_file_bytes: 67108864     # stdout.log and stderr.log, each (64 MiB)
+  stream_log_bytes: 67108864   # the acp stream log (64 MiB)
+  session_copy_bytes: 67108864 # the session.jsonl copy (64 MiB)
+  stream_line_queue: 1024      # acp lines buffered between the reader and the engine (at most tail_bytes in all)
+```
+
+Every key is optional and must be positive. A project `.apb/config.yaml` may
+carry the same section to lower a limit for its own runs; a larger project
+value is ignored. A run resolves its limits once, when it starts.
+
+An attempt that lost part of its output says so on its `attempt_finished`:
+`output_truncated` lists each cut stream (`stdout`, `stderr`, `stream_log`,
+`session_copy`) with the bytes kept and the bytes dropped at least, and is
+absent when nothing was cut; a stream counts as cut only when neither the
+memory copy nor its file holds all of it. When the agent's final record
+itself was cut (it fell into the dropped middle, its line was longer than the
+tail, or the stream ended inside it) the attempt is never a success: it fails
+with "the agent's final result could not be read whole: output exceeded the
+limit", classified `agent` (not a quota or a transport failure), and
+`transcript_incomplete` is set. A status file verdict still decides the
+attempt, as it does for any other abnormal end, since the status file is not
+part of the cut output. Token usage then counts only the records that were
+kept. `run_status`, `run_report`, `apb runs <id>` and the dashboard journal
+show both fields.
 
 A transcript holds whatever the agent printed or read, secrets included, so it
 must never reach git. APB keeps `<project>/.apb/.gitignore` listing its

@@ -512,6 +512,9 @@ impl RunState {
                 // A connector call is an audit record (spec 6.2); it does not
                 // change run state.
                 EventPayload::ConnectorCall { .. } => {}
+                // An inbox gap is a reporting record; the run surfaces read it straight
+                // from the journal, the state fold carries no inbox cursor.
+                EventPayload::InboxGap { .. } => {}
                 // Node-cache events (spec 2026-07-19) are audit records: a hit
                 // is reported alongside the node's own NodeStarted/NodeFinished
                 // (which carry the run-state effect), and miss/stored/rejected

@@ -540,6 +540,8 @@ pub(crate) fn journal_interrupted(
         .unwrap_or(1);
     let session = interrupted_attempt_session(run_dir, &events, node, attempt);
     journal.append(EventPayload::AttemptFinished {
+        output_truncated: Vec::new(),
+        transcript_incomplete: false,
         node: node.to_string(),
         attempt,
         status: "interrupted".into(),
@@ -640,6 +642,8 @@ mod tests {
             seq,
             ts: 1_000 + seq as u128,
             payload: EventPayload::AttemptFinished {
+                output_truncated: Vec::new(),
+                transcript_incomplete: false,
                 node: node.into(),
                 attempt: 1,
                 status: status.into(),
@@ -711,6 +715,8 @@ mod tests {
             at(
                 ts,
                 EventPayload::AttemptFinished {
+                    output_truncated: Vec::new(),
+                    transcript_incomplete: false,
                     node: "work".into(),
                     attempt: 1,
                     status: "interrupted".into(),
@@ -783,6 +789,8 @@ mod tests {
                 at(
                     2,
                     EventPayload::AttemptFinished {
+                        output_truncated: Vec::new(),
+                        transcript_incomplete: false,
                         node: "work".into(),
                         attempt: 1,
                         status: "interrupted".into(),
@@ -838,6 +846,8 @@ mod tests {
             at(
                 2,
                 EventPayload::AttemptFinished {
+                    output_truncated: Vec::new(),
+                    transcript_incomplete: false,
                     node: "work".into(),
                     attempt: 1,
                     status: "failed".into(),
@@ -954,6 +964,8 @@ mod tests {
                 at(
                     2,
                     EventPayload::AttemptFinished {
+                        output_truncated: Vec::new(),
+                        transcript_incomplete: false,
                         node: "work".into(),
                         attempt: 1,
                         status: "interrupted".into(),

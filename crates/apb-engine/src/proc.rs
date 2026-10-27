@@ -84,6 +84,66 @@ fn signal_process_group(pid: u32, signal: libc::c_int) {
     });
 }
 
+/// Milliseconds a timed-out agent gets between SIGTERM and SIGKILL. Tests
+/// shorten it.
+pub const TIMEOUT_GRACE_ENV: &str = "APB_TIMEOUT_GRACE_MS";
+
+/// The default grace period of a node timeout.
+pub const DEFAULT_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
+
+/// How a process tree is stopped: at once, or SIGTERM first and SIGKILL
+/// after a grace period. The one stop path for a stop, a `--now` pause and a
+/// node timeout alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopMode {
+    Kill,
+    Graceful(Duration),
+}
+
+impl StopMode {
+    /// A cancellation: graceful when a `--now` pause latched `cancel`
+    /// (issue #200), at once for a stop.
+    pub(crate) fn on_cancel(cancel: &AtomicBool) -> Self {
+        if crate::pause::interrupt::is_graceful(cancel) {
+            StopMode::Graceful(crate::pause::interrupt::grace())
+        } else {
+            StopMode::Kill
+        }
+    }
+
+    /// A node timeout: the agent gets SIGTERM and [`TIMEOUT_GRACE_ENV`]
+    /// (default [`DEFAULT_TIMEOUT_GRACE`]) to stop and print its last
+    /// record before it is killed.
+    pub(crate) fn on_timeout() -> Self {
+        StopMode::Graceful(
+            crate::env_duration::millis(TIMEOUT_GRACE_ENV).unwrap_or(DEFAULT_TIMEOUT_GRACE),
+        )
+    }
+
+    pub(crate) fn is_graceful(self) -> bool {
+        matches!(self, StopMode::Graceful(_))
+    }
+}
+
+/// Stops the process tree led by `child` and reaps the leader. Both modes
+/// end with a SIGKILL to the whole GROUP, not only the direct child, so
+/// grandchildren (MCP servers, tool subprocesses, codex workers) cannot
+/// outlive the attempt, and then the leader through its handle (covers a
+/// spawn where `process_group(0)` did not take).
+pub(crate) fn stop_process_tree(child: &mut std::process::Child, mode: StopMode) {
+    match mode {
+        StopMode::Graceful(grace) => terminate_process_group(child, grace),
+        StopMode::Kill => {
+            kill_process_group(child.id());
+            // A second kill on an already-dead process is a harmless error.
+            let _ = child.kill();
+            // Bounded: the leader was just SIGKILLed, which no process can
+            // catch or ignore.
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Ends the process group led by `child` the way a `--now` pause does
 /// (issue #200): SIGTERM to the group, up to `grace` for the leader to exit,
 /// then SIGKILL to the group and the leader, and a reap. A script or agent
@@ -94,7 +154,7 @@ fn signal_process_group(pid: u32, signal: libc::c_int) {
 /// a zombie until then, which keeps its pid, and so the group id, from being
 /// reused by an unrelated process. The SIGKILL reaches the group's leftovers
 /// and nothing else.
-pub(crate) fn terminate_process_group(child: &mut std::process::Child, grace: Duration) {
+fn terminate_process_group(child: &mut std::process::Child, grace: Duration) {
     #[cfg(unix)]
     signal_process_group(child.id(), libc::SIGTERM);
     let deadline = Instant::now() + grace;
@@ -231,18 +291,12 @@ pub fn run_capture(
             // which on some Linux setups failed to reach the grandchild
             // and left the stdout pipe open until natural exit.
             // A `--now` pause (issue #200) ends the script gracefully:
-            // SIGTERM, a grace period, then the same SIGKILL as below.
-            if was_cancelled && cancel.is_some_and(crate::pause::interrupt::is_graceful) {
-                terminate_process_group(&mut child, crate::pause::interrupt::grace());
-                cancelled = true;
-                break None;
-            }
-            kill_process_group(child.id());
-            // Also the leader directly, through the handle rather than by pid:
-            // if `process_group(0)` did not take, the group kill above missed
-            // it, and the `wait` below would then block on a live child.
-            let _ = child.kill();
-            let _ = child.wait();
+            // SIGTERM, a grace period, then the same SIGKILL.
+            let mode = match cancel {
+                Some(c) if was_cancelled => StopMode::on_cancel(c),
+                _ => StopMode::Kill,
+            };
+            stop_process_tree(&mut child, mode);
             cancelled = was_cancelled;
             break None;
         }

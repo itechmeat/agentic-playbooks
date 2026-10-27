@@ -1325,7 +1325,8 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
 /// The goal criteria results (C1) and the commits (C7) a journal carries:
 /// `run_status` and `run_report` show both, read with the goal from the
 /// run's playbook snapshot; a run of a playbook without a goal and without
-/// commits carries neither key.
+/// commits carries neither key. The same for the inbox gaps the journal
+/// records.
 #[test]
 fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
     let dir = tempfile::tempdir().unwrap();
@@ -1349,7 +1350,8 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
             r#"{"seq":3,"ts":4,"type":"goal_checked","index":0,"description":"says hi","check":"marker","status":"passed"}"#,
             r#"{"seq":4,"ts":5,"type":"goal_checked","index":1,"description":"a person smiles","check":"manual","status":"manual"}"#,
             r#"{"seq":5,"ts":6,"type":"node_finished","node":"done","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#,
-            r#"{"seq":6,"ts":7,"type":"run_finished","outcome":"succeeded"}"#,
+            r#"{"seq":6,"ts":7,"type":"inbox_gap","node_id":"note","connector":"echo-hooks","account":"main","from":3,"through":6}"#,
+            r#"{"seq":7,"ts":8,"type":"run_finished","outcome":"succeeded"}"#,
             "",
         ]
         .join("\n"),
@@ -1359,6 +1361,11 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
         run_status(dir.path(), "r-goal").unwrap(),
         apb_mcp::tools::run_report(dir.path(), "r-goal").unwrap(),
     ] {
+        // The inbox was not seen whole: the report says which events were lost.
+        assert_eq!(
+            out["inbox_gaps"],
+            serde_json::json!([{"node": "note", "connector": "echo-hooks", "account": "main", "from": 3, "through": 6}])
+        );
         assert_eq!(out["goal"]["statement"], "greet");
         assert_eq!(out["goal"]["checked"], true);
         assert_eq!(out["goal"]["criteria"][0]["status"], "passed");
@@ -1388,6 +1395,53 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
     let plain = run_status(dir.path(), res["run_id"].as_str().unwrap()).unwrap();
     assert!(plain.get("goal").is_none());
     assert!(plain.get("commits").is_none());
+    assert!(plain.get("inbox_gaps").is_none());
+}
+
+/// `run_status` and `run_report` list each attempt that lost part of its
+/// output, and leave `output_truncated` out for a run where none did.
+#[test]
+fn run_views_list_output_losses_only_when_an_attempt_lost_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join(".apb/runs/r1");
+    fs::create_dir_all(&run_dir).unwrap();
+    let lines = [
+        r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":1,"type":"attempt_finished","node":"w","attempt":1,"status":"failed","output_truncated":[{"stream":"stdout","kept_bytes":5120,"dropped_bytes_at_least":14980}],"transcript_incomplete":true}"#,
+        r#"{"seq":2,"ts":2,"type":"attempt_finished","node":"w","attempt":2,"status":"succeeded"}"#,
+        r#"{"seq":3,"ts":3,"type":"run_finished","outcome":"succeeded"}"#,
+    ];
+    fs::write(run_dir.join("events.jsonl"), lines.join("\n") + "\n").unwrap();
+    let expected = serde_json::json!([{
+        "node": "w",
+        "attempt": 1,
+        "truncated": [{"stream": "stdout", "kept_bytes": 5120, "dropped_bytes_at_least": 14980}],
+        "transcript_incomplete": true
+    }]);
+    assert_eq!(
+        run_status(dir.path(), "r1").unwrap()["output_truncated"],
+        expected
+    );
+    assert_eq!(
+        apb_mcp::tools::run_report(dir.path(), "r1").unwrap()["output_truncated"],
+        expected
+    );
+
+    let plain = dir.path().join(".apb/runs/r2");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("events.jsonl"), format!("{}\n", lines[0])).unwrap();
+    assert!(
+        run_status(dir.path(), "r2")
+            .unwrap()
+            .get("output_truncated")
+            .is_none()
+    );
+    assert!(
+        apb_mcp::tools::run_report(dir.path(), "r2")
+            .unwrap()
+            .get("output_truncated")
+            .is_none()
+    );
 }
 
 /// Issue #195: `run_status` lists what a fork's branch-failure policy did and

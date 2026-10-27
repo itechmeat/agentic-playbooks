@@ -125,7 +125,7 @@ enum Command {
         #[arg(long, value_name = "ID")]
         run: Option<String>,
     },
-    /// Export a playbook (with layout) to a single bundle file
+    /// Export a playbook version (YAML, layout and scripts) to a single bundle file
     Export {
         name: String,
         #[arg(long)]

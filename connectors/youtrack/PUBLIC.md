@@ -63,6 +63,16 @@ Common forms:
 - `project: DEMO` finds issues in the DEMO project.
 - `for: me #Unresolved` finds unresolved issues assigned to the current user.
 
+## Comment and description text
+
+YouTrack runs commands only through `apply_command`, never from the text of a
+comment or a description, so `add_comment.text` and the `description` of
+`create_issue` and `update_issue` are declared `markdown` (`text_args`, see
+`docs/CONNECTORS.md` in the apb repository): the text is sent exactly as
+written, formatting and mentions included. `summary` has no text mode:
+YouTrack shows a summary as plain text, where an escape would only add a
+visible backslash, and a summary runs no command.
+
 ## Commands and the apply_command power warning
 
 `apply_command` applies a YouTrack command to one or more issues through the

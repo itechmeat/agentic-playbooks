@@ -29,6 +29,7 @@ pub mod judge;
 pub mod migration;
 pub mod model_check;
 pub mod models_table;
+pub mod output_limits;
 pub mod overrides;
 pub mod preflight;
 pub mod profile;

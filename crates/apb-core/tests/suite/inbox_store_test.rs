@@ -3,7 +3,7 @@
 //! tempdir, so none of them touches process env and none needs the shared
 //! env lock.
 
-use apb_core::connector::inbox::{Appended, Inbox, Retention};
+use apb_core::connector::inbox::{Appended, Inbox, InboxGap, Retention};
 use serde_json::json;
 
 fn inbox(dir: &tempfile::TempDir) -> Inbox {
@@ -29,7 +29,7 @@ fn append_read_ack_round_trip() {
     );
 
     // read does not move the cursor: two reads in a row see the same events.
-    let (events, cursor) = box_.read("worker", 10).unwrap();
+    let (events, cursor, _) = box_.read("worker", 10).unwrap();
     assert_eq!(
         cursor, 0,
         "an unknown consumer starts before the first event"
@@ -39,16 +39,16 @@ fn append_read_ack_round_trip() {
         vec![1, 2, 3]
     );
     assert_eq!(events[0].body["text"], "one");
-    let (again, _) = box_.read("worker", 10).unwrap();
+    let (again, _, _) = box_.read("worker", 10).unwrap();
     assert_eq!(again.len(), 3, "read must not consume");
 
     // limit pages from the cursor forward.
-    let (page, _) = box_.read("worker", 2).unwrap();
+    let (page, _, _) = box_.read("worker", 2).unwrap();
     assert_eq!(page.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
 
     // ack moves the cursor forward and only forward.
     assert_eq!(box_.ack("worker", 2).unwrap(), 2);
-    let (rest, cursor) = box_.read("worker", 10).unwrap();
+    let (rest, cursor, _) = box_.read("worker", 10).unwrap();
     assert_eq!(cursor, 2);
     assert_eq!(rest.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3]);
     assert_eq!(
@@ -58,7 +58,7 @@ fn append_read_ack_round_trip() {
     );
 
     // a second consumer has its own cursor.
-    let (other, cursor) = box_.read("auditor", 10).unwrap();
+    let (other, cursor, _) = box_.read("auditor", 10).unwrap();
     assert_eq!(cursor, 0);
     assert_eq!(other.len(), 3, "cursors are per consumer");
 
@@ -115,7 +115,7 @@ fn a_duplicate_provider_id_is_not_appended() {
         Appended::Duplicate,
         "a redelivery of the same provider id is dropped"
     );
-    let (events, _) = box_.read("w", 10).unwrap();
+    let (events, _, _) = box_.read("w", 10).unwrap();
     assert_eq!(events.len(), 1, "the duplicate left no second line");
     assert_eq!(events[0].body["n"], 1, "the first delivery is the one kept");
 }
@@ -359,7 +359,7 @@ fn ack_beyond_head_does_not_swallow_future_events() {
     );
     box_.append("m4", &json!({"i": 4})).unwrap();
     box_.append("m5", &json!({"i": 5})).unwrap();
-    let (pending, cursor) = box_.read("worker", 100).unwrap();
+    let (pending, cursor, _) = box_.read("worker", 100).unwrap();
     assert_eq!(cursor, 3);
     assert_eq!(
         pending.iter().map(|e| e.seq).collect::<Vec<_>>(),
@@ -403,7 +403,7 @@ fn two_concurrent_appenders_get_unique_sequence_numbers() {
     assert_eq!(all, (1..=50).collect::<Vec<u64>>(), "and gapless from 1");
 
     let box_ = Inbox::at(&base, "echo-hooks", "main").unwrap();
-    let (events, _) = box_.read("w", 1000).unwrap();
+    let (events, _, _) = box_.read("w", 1000).unwrap();
     assert_eq!(
         events.len(),
         50,
@@ -432,7 +432,7 @@ fn retention_drops_acked_entries_first_then_the_oldest_by_size() {
         max_age_ms: 0,
     };
     box_.append_with("m7", &json!({"i": 7}), &age_only).unwrap();
-    let (events, _) = box_.read("fresh", 100).unwrap();
+    let (events, _, _) = box_.read("fresh", 100).unwrap();
     assert_eq!(
         events.iter().map(|e| e.seq).collect::<Vec<_>>(),
         vec![4, 5, 6, 7],
@@ -445,7 +445,7 @@ fn retention_drops_acked_entries_first_then_the_oldest_by_size() {
         max_age_ms: u64::MAX,
     };
     box_.append_with("m8", &json!({"i": 8}), &tiny).unwrap();
-    let (events, _) = box_.read("fresh", 100).unwrap();
+    let (events, _, _) = box_.read("fresh", 100).unwrap();
     assert_eq!(
         events.iter().map(|e| e.seq).collect::<Vec<_>>(),
         vec![8],
@@ -494,7 +494,7 @@ fn retention_never_empties_the_log_even_when_every_event_is_acked_and_expired() 
         max_age_ms: 0,
     };
     box_.append_with("m4", &json!({"i": 4}), &age_only).unwrap();
-    let (events, _) = box_.read("someone_else", 100).unwrap();
+    let (events, _, _) = box_.read("someone_else", 100).unwrap();
     assert_eq!(
         events.iter().map(|e| e.seq).collect::<Vec<_>>(),
         vec![4],
@@ -517,6 +517,93 @@ fn retention_never_empties_the_log_even_when_every_event_is_acked_and_expired() 
     assert_eq!(
         depth.pending, 2,
         "the cursor sits below the surviving range, so both survivors are pending"
+    );
+}
+
+/// Retention that drops events a consumer never acknowledged must be visible
+/// to that consumer: the next read reports the exact lost range. The size cap
+/// is the path that drops unacked events (the age path only ever takes acked
+/// ones), so that is the one this drives.
+#[test]
+fn a_read_reports_the_range_retention_dropped_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    for i in 1..=6u32 {
+        box_.append(&format!("m{i}"), &json!({"i": i})).unwrap();
+    }
+    box_.ack("worker", 2).unwrap();
+
+    // The size cap drops oldest first regardless of ack state, keeping only
+    // the newest event: seqs 3..=6 were stored, never read by `worker`,
+    // never acked, and are gone.
+    let tiny = Retention {
+        max_bytes: 1,
+        max_age_ms: u64::MAX,
+    };
+    box_.append_with("m7", &json!({"i": 7}), &tiny).unwrap();
+
+    let (events, cursor, gap) = box_.read("worker", 100).unwrap();
+    assert_eq!(cursor, 2);
+    assert_eq!(
+        events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![7],
+        "only the retained event is delivered"
+    );
+    assert_eq!(
+        gap,
+        Some(InboxGap {
+            from: 3,
+            through: 6
+        })
+    );
+
+    // A consumer that never read at all lost everything up to the survivor:
+    // its gap starts at the log's first ever seq.
+    let (other, _, gap) = box_.read("late_reader", 100).unwrap();
+    assert_eq!(other.len(), 1);
+    assert_eq!(
+        gap,
+        Some(InboxGap {
+            from: 1,
+            through: 6
+        })
+    );
+}
+
+/// Events a consumer acknowledged before retention dropped them are gone
+/// legitimately: the next read reports no gap, whatever a consumer that
+/// never acked them would see.
+#[test]
+fn acked_then_dropped_events_produce_no_gap_for_the_acking_consumer() {
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    for i in 1..=3u32 {
+        box_.append(&format!("m{i}"), &json!({"i": i})).unwrap();
+    }
+    box_.ack("worker", 3).unwrap();
+
+    // A zero-length age window drops everything acked; the newest event
+    // stays as the retention floor.
+    let age_only = Retention {
+        max_bytes: 64 * 1024 * 1024,
+        max_age_ms: 0,
+    };
+    box_.append_with("m4", &json!({"i": 4}), &age_only).unwrap();
+
+    let (events, cursor, gap) = box_.read("worker", 100).unwrap();
+    assert_eq!(cursor, 3);
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4]);
+    assert_eq!(gap, None, "acked-then-dropped is not a loss for the acker");
+
+    // A second consumer that never saw those events did lose them, and its
+    // read says so: the gap is per consumer, derived from its own cursor.
+    let (_, _, late) = box_.read("late_reader", 100).unwrap();
+    assert_eq!(
+        late,
+        Some(InboxGap {
+            from: 1,
+            through: 3
+        })
     );
 }
 

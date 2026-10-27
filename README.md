@@ -184,7 +184,7 @@ apb connector       list / show / call / approve / doctor / env / init / install
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
 apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
-apb export/import   move a playbook as a single bundle file
+apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
 apb suggestions     list / allow / reset save-as-playbook suggestion declines
 apb stats           cross-run metrics per playbook version and node (read-only)
 apb eval <id>       run a playbook's eval cases in scratch repositories (opt-in, paid)
@@ -254,6 +254,7 @@ still change between minor releases. Design specs live in
 - [Connectors](docs/CONNECTORS.md): calling external services from playbooks
 - [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce
 - [Decision models](docs/DECISIONS.md): optional small models for checks, judges and ranking
+- [Reference scenarios](docs/scenarios/README.md): realistic code and routine situations features are checked against, with the gaps they name
 - [Run stats](docs/STATS.md) and [evals](docs/EVALS.md): measuring playbooks across runs
 - [CI](docs/CI.md) and [deployment](docs/DEPLOYMENT.md): running apb in pipelines and on a server
 

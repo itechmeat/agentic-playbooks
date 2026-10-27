@@ -1,5 +1,6 @@
 import { decisionNote } from './rundecisions'
 import { outcomeEventNote } from './runoutcome'
+import { attemptOutputNote } from './outputloss'
 import { attemptUsageNote } from './runusage'
 import type { WfEvent } from './types'
 
@@ -65,8 +66,8 @@ function listOf(v: unknown): string {
 
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
-// attempt's transcript is, the tokens an attempt reported (issue #167),
-// which working tree the run moved into, what a decision model answered
+// attempt's transcript is, the tokens an attempt reported (issue #167) and
+// what it lost of its output, which working tree the run moved into, what a decision model answered
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
 // (issue #195), or which inputs a join wrote off and a re-run revived
 // (issue #203), and what a re-run revives. Every other kind has none.
@@ -81,13 +82,17 @@ function eventNote(e: WfEvent): string | undefined {
     case 'artifacts_committed':
     case 'goal_checked':
     case 'protected_paths_modified':
+    case 'inbox_gap':
       return outcomeEventNote(e)
     case 'output_fields_missing':
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
     case 'attempt_started':
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
-    case 'attempt_finished':
-      return attemptUsageNote(r.usage)
+    case 'attempt_finished': {
+      const notes = [attemptUsageNote(r.usage), attemptOutputNote(r.output_truncated, r.transcript_incomplete)]
+      const line = notes.filter(Boolean).join(' · ')
+      return line || undefined
+    }
     case 'decision_made':
       return decisionNote(e)
     case 'wake_raised':

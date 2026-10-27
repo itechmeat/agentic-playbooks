@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { runEventJournal } from './journal'
-import { commitLines, goalBadge, goalSummary, omittedCommits } from './runoutcome'
+import { commitLines, goalBadge, goalSummary, inboxGapLine, omittedCommits } from './runoutcome'
 import type { NodeCommits, RunGoal } from './api.gen'
 import type { WfEvent } from './types'
 
@@ -136,6 +136,24 @@ describe('protected_paths_modified in the event journal', () => {
     expect(runEventJournal(events).map((e) => e.note)).toEqual([
       'protected: modified tests/a.rs, added tests/b.rs',
       'protected: deleted x; not restored: x (copies kept in /r/protect/fix/2)',
+    ])
+  })
+})
+
+describe('inboxGapLine', () => {
+  it('names one lost event or a range of them', () => {
+    const gap = { node: 'watch', connector: 'echo-hooks', account: 'main', from: 4, through: 4 }
+    expect(inboxGapLine(gap)).toBe(
+      'echo-hooks/main: unread event 4 was dropped by inbox retention before it was read (found by watch)',
+    )
+  })
+
+  it('notes inbox_gap in the event journal with the same words', () => {
+    const events: WfEvent[] = [
+      { seq: 1, ts: 1, type: 'inbox_gap', node_id: 'watch', connector: 'echo-hooks', account: 'main', from: 3, through: 6 },
+    ]
+    expect(runEventJournal(events).map((e) => e.note)).toEqual([
+      'echo-hooks/main: unread events 3-6 were dropped by inbox retention before they were read (found by watch)',
     ])
   })
 })

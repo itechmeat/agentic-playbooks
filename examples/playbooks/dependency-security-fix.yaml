@@ -1,0 +1,100 @@
+schema: 2
+id: dependency-security-fix
+name: Dependency security fix
+description: >-
+  Record the baseline before changing anything (what the dependency audit
+  reports, which tests already fail), fix the audit findings one by one on
+  a branch, prove the final state (findings gone, no new failing tests),
+  open exactly one change request, and record what was not fixed and why.
+version: 1.0.0
+params:
+  - { name: repo_owner, type: text, label: "GitHub repository owner" }
+  - { name: repo_name, type: text, label: "GitHub repository name" }
+  - { name: base_branch, type: text, label: "Branch the change request targets, e.g. main" }
+defaults:
+  profile: main
+effects: [fs_read, fs_write, network, external, irreversible]
+goal:
+  statement: >-
+    Every audit finding on the branch is either fixed or named with a
+    reason, the final audit and test runs prove no finding and no new
+    failure is left, and exactly one change request carries the change.
+  criteria:
+    - description: The baseline records the audit findings and the tests that already fail
+      check: { type: marker, marker: "BASELINE:" }
+    - description: The proof step reports the final audit result against the baseline
+      check: { type: marker, marker: "AUDIT RESULT:" }
+    - description: The proof step reports the final test result against the baseline
+      check: { type: marker, marker: "TEST RESULT:" }
+    - description: Exactly one change request was opened and its URL is reported
+      check: { type: marker, marker: "CHANGE REQUEST:" }
+    - description: Every unfixed finding carries a reason a reader can act on
+      check: { type: manual }
+nodes:
+  - { id: start, type: start }
+  - id: baseline
+    type: agent_task
+    title: Record the baseline
+    expected_duration: 10m
+    prompt: >-
+      Work in the current working tree and change nothing in this step. Run
+      the project's dependency audit (for a Rust project cargo audit, for a
+      JavaScript project the audit command of its package manager, otherwise
+      the project's documented one) and the test suite. Record exactly as
+      the tools report them: every open audit finding with its id, severity
+      and affected package, and every test that fails before any change,
+      with its test name, so the later steps can prove they added no new
+      failure. Then create a fix branch off the current commit for the work
+      that follows. End with a line `BASELINE: <n> audit findings, <m>
+      pre-existing failing tests, branch <branch name>`.
+  - id: fix_findings
+    type: agent_task
+    title: Fix the findings one by one
+    expected_duration: 45m
+    continue_session: baseline
+    prompt: >-
+      On the branch named in {{nodes.baseline.output}}, work through the
+      audit findings from {{nodes.baseline.output}} one at a time, highest
+      severity first: fix the finding, run the affected tests, and commit
+      before moving to the next one. Bump or replace the dependency, or
+      apply the advisory's suggested change; do not silence a warning
+      without a written reason. Keep two running lists in your reply:
+      `FIXED:` with one line per finding you fixed, and `NOT FIXED:` with
+      one line per finding you could not fix and the reason (no compatible
+      release, a breaking change that needs its own change request, a false
+      positive). Do not open a change request in this step.
+  - id: prove
+    type: agent_task
+    title: Prove the final state
+    expected_duration: 15m
+    continue_session: fix_findings
+    prompt: >-
+      On the branch named in {{nodes.baseline.output}}, run the dependency
+      audit and the full test suite again. Compare with the baseline in
+      {{nodes.baseline.output}}. Do not fix anything in this step; report
+      only. End with two lines: `AUDIT RESULT: <n> findings remain (<ids>,
+      or none)` and `TEST RESULT: <n> failures, of which <k> pre-existing
+      per the baseline (name every new one)`.
+  - id: change_request
+    type: agent_task
+    title: Open exactly one change request
+    expected_duration: 5m
+    prompt: >-
+      Push the branch named in {{nodes.baseline.output}} to the remote and
+      open exactly one pull request in {{params.repo_owner}}/{{params.repo_name}}
+      from that branch to {{params.base_branch}}, using the github
+      connector's create_pull function. The title names the dependency
+      security fixes; the body lists the fixed findings, the `AUDIT
+      RESULT:` and `TEST RESULT:` lines from {{nodes.prove.output}}, and
+      the NOT FIXED list with its reasons from {{nodes.fix_findings.output}}.
+      Open no second pull request for the unfixed findings; they belong in
+      this one's body. End with a line `CHANGE REQUEST: <html_url>`.
+    connectors:
+      - { name: github, accounts: [default], functions: [create_pull], max_calls: 3 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: baseline }
+  - { from: baseline, to: fix_findings }
+  - { from: fix_findings, to: prove }
+  - { from: prove, to: change_request }
+  - { from: change_request, to: finish }

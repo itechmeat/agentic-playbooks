@@ -251,9 +251,10 @@ pub(crate) fn export_cmd(
         Some(path) => match atomic_write(path, json.as_bytes()) {
             Ok(()) => {
                 println!(
-                    "exported {} @ {} -> {}",
+                    "exported {} @ {} ({} script file(s)) -> {}",
                     bundle.id,
                     bundle.version,
+                    bundle.scripts.len(),
                     path.display()
                 );
                 ExitCode::SUCCESS
@@ -286,8 +287,26 @@ pub(crate) fn import_cmd(root: &Path, file: &Path, make_current: bool) -> ExitCo
         }
     };
     match apb_core::bundle::import_bundle(root, &bundle, make_current) {
-        Ok(version) => {
-            println!("imported {} as version {version}", bundle.id);
+        Ok(saved) => {
+            // The id and version come from the bundle file: never print a
+            // control character from it raw.
+            let id = crate::util::sanitize_for_terminal(&bundle.id, 128);
+            let version = crate::util::sanitize_for_terminal(&saved.version, 64);
+            if saved.unchanged {
+                println!("{id} @ {version} already holds this bundle; nothing imported");
+                return ExitCode::SUCCESS;
+            }
+            println!(
+                "imported {id} as version {version} ({} script file(s))",
+                bundle.scripts.len()
+            );
+            // An imported version is never auto-approved: say so, and how it
+            // gets approved.
+            println!(
+                "{id} @ {version} is untrusted until approved: review it and its scripts, \
+                 then approve it with the MCP tool `playbook_approve`, \
+                 or confirm it for one run with `apb run {id} --version {version}`"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

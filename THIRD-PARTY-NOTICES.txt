@@ -1582,7 +1582,7 @@ For these and/or other purposes and motivations, and without any expectation of 
 Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 
 Used by:
-  webpki-roots 1.0.9 https://github.com/rustls/webpki-roots
+  webpki-roots 1.0.11 https://github.com/rustls/webpki-roots
 
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -1730,7 +1730,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ISC License (ISC)
 
 Used by:
-  rustls-webpki 0.103.15 https://github.com/rustls/webpki
+  rustls-webpki 0.103.16 https://github.com/rustls/webpki
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -4339,7 +4339,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  ctutils 0.4.2 https://github.com/RustCrypto/utils
+  ctutils 0.4.6 https://github.com/RustCrypto/utils
 
 Copyright (c) 2025-2026 The RustCrypto Project Developers
 
@@ -5324,7 +5324,7 @@ MIT License (MIT)
 
 Used by:
   tokio-util 0.7.18 https://github.com/tokio-rs/tokio
-  tokio 1.53.2 https://github.com/tokio-rs/tokio
+  tokio 1.54.1 https://github.com/tokio-rs/tokio
 
 MIT License
 

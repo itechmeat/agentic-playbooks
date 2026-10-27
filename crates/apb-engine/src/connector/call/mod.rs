@@ -38,6 +38,7 @@ use apb_core::connector::template::{
     RenderCtx, render_body, render_encoded, render_raw, resolve_optional_arg,
     single_args_placeholder,
 };
+use apb_core::connector::text_mode::apply_text_args;
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
@@ -45,7 +46,9 @@ use crate::event::{EventLog, EventPayload};
 use crate::manifest::{self, ManifestAccount, ManifestConnector, ManifestConnectorGrant};
 
 /// The maximum response body read into memory (spec 6.1). A longer body is
-/// truncated and the result marked `"truncated": true`.
+/// cut at the cap: a read-only call fails as `incomplete_response`, a call
+/// that may have changed the world stays a success but carries
+/// `response_complete: false` on its result.
 const BODY_CAP: usize = 1024 * 1024;
 
 /// The default User-Agent (spec 4.4): ureq sends its own, and GitHub rejects
@@ -79,7 +82,9 @@ pub struct CallRequest<'a> {
 // and SMTP call paths point at (keeps the file graph acyclic). Re-exported here
 // so the public path `apb_engine::connector::call::{CallError, ...}` is stable.
 use crate::connector::result::redact_message;
-pub use crate::connector::result::{CallError, CallErrorCode, CallOk};
+pub use crate::connector::result::{
+    BodyIncomplete, CallError, CallErrorCode, CallOk, IncompleteReason,
+};
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
 /// event log. A dry-run or a gate rejection records nothing, so those never
@@ -95,6 +100,9 @@ struct EventMeta {
     /// HTTP/mock and for smtp `verify`.
     smtp_subject: Option<String>,
     smtp_recipients: Option<u32>,
+    /// Whether the response body was read whole (`Some(true)`), cut or failed
+    /// partway (`Some(false)`), or completeness does not apply (`None`).
+    response_complete: Option<bool>,
 }
 
 /// Runs the whole call pipeline and returns the JSON document to print plus an
@@ -106,6 +114,15 @@ pub fn execute(req: CallRequest) -> (Value, bool) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Ok(ok, meta) => {
             append_event(&req, &meta);
+            if let CallOk::Inbox { gap: Some(gap), .. } = &ok {
+                crate::connector::inbox::journal_gap(
+                    req.run_dir,
+                    req.connector,
+                    &meta.account,
+                    req.node_id,
+                    gap,
+                );
+            }
             (ok.to_success_json(), true)
         }
         Outcome::Executed(err, meta) => {
@@ -140,9 +157,18 @@ fn run(req: &CallRequest) -> Outcome {
     let account = prepared.account().to_string();
     let url = prepared.pre_auth_url();
     let (smtp_subject, smtp_recipients) = prepared.event_extra();
+    // Whether the journal event can speak about response completeness is a
+    // property of the call kind (only a real HTTP response read a body), so
+    // it is read off the prepared call before dispatch consumes it.
+    let http_like = matches!(prepared, PreparedCall::Http(_));
     let started = Instant::now();
     let (result, http_status) = prepared.dispatch();
     let duration_ms = started.elapsed().as_millis() as u64;
+    let response_complete = match (&result, http_like) {
+        (Ok(ok), true) => ok.response_complete(),
+        (Err(err), true) if err.code == CallErrorCode::IncompleteResponse => Some(false),
+        _ => None,
+    };
 
     match result {
         Ok(ok) => Outcome::Ok(
@@ -155,6 +181,7 @@ fn run(req: &CallRequest) -> Outcome {
                 duration_ms,
                 smtp_subject,
                 smtp_recipients,
+                response_complete,
             },
         ),
         Err(err) => {
@@ -170,6 +197,7 @@ fn run(req: &CallRequest) -> Outcome {
                     duration_ms,
                     smtp_subject,
                     smtp_recipients,
+                    response_complete,
                 },
             )
         }
@@ -220,6 +248,10 @@ enum PreparedCall {
 struct HttpCall {
     account: String,
     method: String,
+    /// The function's `read_only` flag: a 2xx whose body did not read whole
+    /// fails as `incomplete_response` for a read-only function, and stays a
+    /// success carrying the incompleteness for any other function.
+    read_only: bool,
     /// URL rendered BEFORE auth injection (function query included, auth query
     /// NOT). This is the URL recorded in the event log.
     pre_auth_url: String,
@@ -288,7 +320,10 @@ impl PreparedCall {
     fn dispatch(self) -> (Result<CallOk, CallError>, Option<u16>) {
         match self {
             PreparedCall::Mock { status, body, .. } => {
-                (map_status(status, body, false, None), Some(status))
+                // A mock body is complete by construction: no read happened,
+                // so no incompleteness can be reported, whatever the
+                // function's read_only flag says.
+                (map_status(status, body, None, None, false), Some(status))
             }
             PreparedCall::Http(h) => h.send(),
             // An smtp call has no HTTP status; the event log records the
@@ -491,8 +526,15 @@ pub(crate) fn render_http(
     let query = render_query(function, &ctx)?;
     let pre_auth_url = assemble_url(&base, &query);
     validate_url(&pre_auth_url)?;
+    // Text modes prepare the named args before they reach the body, so no
+    // body template can place the raw value.
+    let body_args = apply_text_args(&function.text_args, args);
+    let body_ctx = RenderCtx {
+        args: &body_args,
+        ..ctx
+    };
     let rendered_body = match &function.body {
-        Some(b) => Some(render_body(b, &ctx).map_err(|e| {
+        Some(b) => Some(render_body(b, &body_ctx).map_err(|e| {
             CallError::new(CallErrorCode::Config, format!("body render failed: {e}"))
         })?),
         None => None,
@@ -500,7 +542,7 @@ pub(crate) fn render_http(
     let rendered_form = if function.body_form.is_empty() {
         None
     } else {
-        Some(render_form(function, &ctx)?)
+        Some(render_form(function, &body_ctx)?)
     };
     let mut headers = BTreeMap::new();
     for (name, template) in &function.headers {
@@ -710,6 +752,7 @@ fn build_prepared(
         HttpCall {
             account: account_name,
             method: rendered.method,
+            read_only: function.read_only,
             pre_auth_url: rendered.pre_auth_url,
             rendered_body: rendered.rendered_body,
             rendered_form: rendered.rendered_form,
@@ -743,15 +786,18 @@ fn build_prepared(
 /// the dashboard's probe button. Returns the same `{ "ok": bool, ... }` shape
 /// `execute` does; the bool mirrors `execute`'s ok hint.
 pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
-    match prepare_healthcheck(root, name, account) {
+    answer_live(prepare_healthcheck(root, name, account))
+}
+
+/// Dispatches a prepared live call outside a run (healthcheck, playground)
+/// and shapes its answer: no journal, the same result JSON `execute` gives.
+fn answer_live(prepared: Result<Prepared, CallError>) -> (Value, bool) {
+    match prepared {
         Ok(Prepared::DryRun(v)) => (v, true),
-        Ok(Prepared::Call(prepared)) => {
-            let (result, _status) = prepared.dispatch();
-            match result {
-                Ok(ok) => (ok.to_success_json(), true),
-                Err(err) => (err.to_json(), false),
-            }
-        }
+        Ok(Prepared::Call(prepared)) => match prepared.dispatch().0 {
+            Ok(ok) => (ok.to_success_json(), true),
+            Err(err) => (err.to_json(), false),
+        },
         Err(e) => (e.to_json(), false),
     }
 }
@@ -802,17 +848,15 @@ pub fn play_call(
     dry_run: bool,
     full: bool,
 ) -> (Value, bool) {
-    match prepare_play_call(root, name, account, function_name, args, dry_run, full) {
-        Ok(Prepared::DryRun(v)) => (v, true),
-        Ok(Prepared::Call(prepared)) => {
-            let (result, _status) = prepared.dispatch();
-            match result {
-                Ok(ok) => (ok.to_success_json(), true),
-                Err(err) => (err.to_json(), false),
-            }
-        }
-        Err(e) => (e.to_json(), false),
-    }
+    answer_live(prepare_play_call(
+        root,
+        name,
+        account,
+        function_name,
+        args,
+        dry_run,
+        full,
+    ))
 }
 
 /// Shared live-call preparation for both `healthcheck` (fixed function, no
@@ -1341,10 +1385,10 @@ impl HttpCall {
             .get("Link")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let (body, truncated) = read_body(response);
+        let (body, incomplete) = read_body(response);
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
-        let mut mapped = map_status(status, body, truncated, retry_after);
+        let mut mapped = map_status(status, body, incomplete, retry_after, self.read_only);
         // error_when reclassification (spec
         // 2026-07-22-official-connectors-wave-3, section 4.2): a 2xx body
         // matching the connector's predicate maps to a `service` error
@@ -1353,7 +1397,11 @@ impl HttpCall {
         // BEFORE the `response_pick` projection below (a reclassified
         // response is never projected; the error envelope carries the
         // extracted message instead). Non-2xx statuses arrive here as Err
-        // and keep the status-table mapping untouched.
+        // and keep the status-table mapping untouched. Ordering with the
+        // incompleteness rule: a read-only cut body already failed in
+        // `map_status`, so only a non-read-only call reaches this match; when
+        // it does, the reclassification wins and the error carries no
+        // completeness keys (a reclassified response is an error).
         if let Ok(CallOk::Http { body, .. }) = &mapped
             && let Some(rule) = &self.error_when
             && let Some(err) = reclassify_error_when(rule, body, status)
@@ -1461,6 +1509,7 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
             duration_ms: meta.duration_ms,
             smtp_subject: meta.smtp_subject.clone(),
             smtp_recipients: meta.smtp_recipients,
+            response_complete: meta.response_complete,
         });
     }
 }
@@ -1813,26 +1862,52 @@ mod tests {
 
     #[test]
     fn map_status_classifies_the_taxonomy() {
-        assert!(map_status(200, json!({}), false, None).is_ok());
+        assert!(map_status(200, json!({}), None, None, false).is_ok());
         assert_eq!(
-            map_status(302, json!({}), false, None).unwrap_err().code,
+            map_status(302, json!({}), None, None, false)
+                .unwrap_err()
+                .code,
             CallErrorCode::Service
         );
         assert_eq!(
-            map_status(401, json!({}), false, None).unwrap_err().code,
+            map_status(401, json!({}), None, None, false)
+                .unwrap_err()
+                .code,
             CallErrorCode::Auth
         );
         assert_eq!(
-            map_status(404, json!({}), false, None).unwrap_err().code,
+            map_status(404, json!({}), None, None, false)
+                .unwrap_err()
+                .code,
             CallErrorCode::NotFound
         );
-        let rl = map_status(429, json!({}), false, Some(30)).unwrap_err();
+        let rl = map_status(429, json!({}), None, Some(30), false).unwrap_err();
         assert_eq!(rl.code, CallErrorCode::RateLimited);
         assert_eq!(rl.retry_after_sec, Some(30));
         assert_eq!(
-            map_status(503, json!({}), false, None).unwrap_err().code,
+            map_status(503, json!({}), None, None, false)
+                .unwrap_err()
+                .code,
             CallErrorCode::Service
         );
+    }
+
+    #[test]
+    fn map_status_fails_a_read_only_incomplete_body_without_returning_it() {
+        let cut = BodyIncomplete::cut_at_cap(BODY_CAP);
+        let err = map_status(200, json!({"partial": true}), Some(cut), None, true).unwrap_err();
+        assert_eq!(err.code, CallErrorCode::IncompleteResponse);
+        assert_eq!(err.http_status, Some(200));
+        assert_eq!(err.incomplete.as_ref().unwrap().reason.as_str(), "body_cap");
+
+        // The same incompleteness on a function that may have changed the
+        // world stays a success and carries it on the result instead.
+        let cut = BodyIncomplete::cut_at_cap(BODY_CAP);
+        let ok = map_status(200, json!({"partial": true}), Some(cut), None, false).unwrap();
+        assert!(ok.response_complete() == Some(false));
+
+        // A whole body is a success either way.
+        assert!(map_status(200, json!({}), None, None, true).is_ok());
     }
 
     #[test]

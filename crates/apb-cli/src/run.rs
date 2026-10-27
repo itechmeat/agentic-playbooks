@@ -1138,6 +1138,12 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     if let Some(u) = view.usage() {
         println!("  usage: {}", usage_line(&u));
     }
+    for loss in view.output_losses() {
+        println!(
+            "  output cut: {}",
+            sanitize_for_terminal(&loss.line(), QUESTION_TEXT_MAX)
+        );
+    }
     if let Some(d) = view.decisions() {
         println!("  decisions: {}", d.line());
     }
@@ -1181,6 +1187,12 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     for line in apb_engine::run_outcome::commit_lines(&view.commits()) {
         println!(
             "  commit {}",
+            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+        );
+    }
+    for line in apb_engine::run_outcome::inbox_gap_lines(&view.inbox_gaps()) {
+        println!(
+            "  inbox gap {}",
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }

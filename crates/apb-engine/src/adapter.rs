@@ -1,9 +1,8 @@
 use apb_core::detect::canonical_agent_id;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -12,13 +11,22 @@ use std::os::unix::process::CommandExt as _;
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 use serde::Deserialize;
 
+mod failure;
+mod output;
+mod stop;
+
+pub use failure::{AgentFailure, ErrorClass};
+
+use output::{headless_capture, incomplete_failure, pipes_failure, stream_capture};
+
+use crate::capture::{CappedFile, LineCapture, OutputCapture, Pipes, STREAM_LOG, STREAM_STDOUT};
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
 // Shared with `run_capture` rather than duplicated: the signal-target
 // validation it performs is the difference between killing one process group
 // and killing every process the user owns, so it must live in exactly one
 // place.
-use crate::proc::kill_process_group;
+use crate::proc::{StopMode, kill_process_group, stop_process_tree};
 use crate::progress::pending_interval_ms;
 use crate::state::NodeStatus;
 
@@ -53,13 +61,13 @@ fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
 /// that worked for hours - cannot reach it, because by then it is gone and its
 /// fds are closed. Tests override it via `APB_AGENT_DRAIN_BUDGET_MS`.
 fn drain_budget() -> Duration {
-    env_duration_ms("APB_AGENT_DRAIN_BUDGET_MS").unwrap_or(Duration::from_secs(10))
+    crate::env_duration::millis("APB_AGENT_DRAIN_BUDGET_MS").unwrap_or(Duration::from_secs(10))
 }
 
 /// How long an agent may keep running AFTER it has closed its stdout.
 ///
 /// Also not a limit on working time. An agent's actual work is governed by the
-/// node's own `timeout_seconds` through `check_cancel_timeout`, inside the
+/// node's own `timeout_seconds` through `stop::check`, inside the
 /// streaming loop; this clock does not start until that loop has already ended
 /// because stdout reached EOF. An agent that streams for six hours never comes
 /// near it. Reaching it means the agent stopped talking to us and then did not
@@ -68,14 +76,7 @@ fn drain_budget() -> Duration {
 /// forever. Deliberately generous: its job is to make an infinite wait finite,
 /// not to enforce promptness. Tests override it via `APB_AGENT_EXIT_GRACE_MS`.
 fn exit_after_eof_budget() -> Duration {
-    env_duration_ms("APB_AGENT_EXIT_GRACE_MS").unwrap_or(Duration::from_secs(300))
-}
-
-fn env_duration_ms(key: &str) -> Option<Duration> {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
+    crate::env_duration::millis("APB_AGENT_EXIT_GRACE_MS").unwrap_or(Duration::from_secs(300))
 }
 
 /// What a process that died says for itself, for the failure message that
@@ -124,29 +125,6 @@ fn active_elapsed(started: Instant, pending_ms: u128) -> Duration {
     started.elapsed().saturating_sub(pending)
 }
 
-/// Terminates the agent's whole process tree and reaps the leader.
-///
-/// Shared by the cancel path and the node-timeout path (`check_cancel_timeout`
-/// and every other early tear-down): both must kill the process GROUP, not only
-/// the direct child, so grandchildren (MCP servers, tool subprocesses, codex
-/// workers) cannot outlive a timed-out or cancelled attempt (issue 45 finding
-/// 11). Shape matches `proc::run_capture`: group kill first, then the leader
-/// through the handle (covers the case where `process_group(0)` did not take),
-/// then a wait to reap. Platform guards match `kill_process_group` (unix group
-/// form; non-unix falls back to `child.kill()` only).
-fn kill_process_tree(child: &mut Child) {
-    #[cfg(unix)]
-    kill_process_group(child.id());
-    // Also the leader through the handle: on non-unix there is no group form,
-    // and on unix this covers a spawn where `process_group(0)` did not take so
-    // the group kill above missed the leader. A second kill on an already-dead
-    // process is a harmless error we ignore.
-    let _ = child.kill();
-    // Bounded: the leader has just been SIGKILLed, which no process can catch
-    // or ignore, so this reaps a pid that is already dead or dying.
-    let _ = child.wait();
-}
-
 /// `child.wait()` with a deadline. `None` means the process was still running
 /// when `budget` ran out; the caller decides what to do about it.
 fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<ExitStatus>> {
@@ -162,161 +140,6 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
             }
             Err(e) => return Some(Err(e)),
         }
-    }
-}
-
-/// A spawned agent's stdout and stderr, read to EOF on their own threads from
-/// the moment it is spawned. Reading only after the process exits deadlocked
-/// any agent that wrote more than a pipe buffer (64 KiB on Linux) to either
-/// stream: the write blocked, so the process never exited and the attempt ran
-/// into its deadline (or forever without one).
-struct PipeCollector {
-    stdout: mpsc::Receiver<Vec<u8>>,
-    stderr: mpsc::Receiver<Vec<u8>>,
-}
-
-impl PipeCollector {
-    /// Takes the child's piped stdout and stderr and starts draining them.
-    /// With `tee`, every chunk is also appended to `<tee>/stdout.log` and
-    /// `<tee>/stderr.log` as it arrives (issue #67 item 10), so the files hold
-    /// what the agent printed even when the attempt is killed. A file that
-    /// cannot be written only loses the copy, never the attempt.
-    fn start(child: &mut Child, tee: Option<&Path>) -> Self {
-        fn drain(
-            pipe: Option<impl std::io::Read + Send + 'static>,
-            tee: Option<std::path::PathBuf>,
-        ) -> mpsc::Receiver<Vec<u8>> {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let mut file = tee.and_then(|p| std::fs::File::create(p).ok());
-                if let Some(mut p) = pipe {
-                    let mut chunk = [0u8; 8192];
-                    loop {
-                        match p.read(&mut chunk) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                buf.extend_from_slice(&chunk[..n]);
-                                if let Some(f) = file.as_mut()
-                                    && f.write_all(&chunk[..n]).is_err()
-                                {
-                                    file = None;
-                                }
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(_) => break,
-                        }
-                    }
-                }
-                let _ = tx.send(buf);
-            });
-            rx
-        }
-        PipeCollector {
-            stdout: drain(child.stdout.take(), tee.map(|d| d.join("stdout.log"))),
-            stderr: drain(child.stderr.take(), tee.map(|d| d.join("stderr.log"))),
-        }
-    }
-
-    /// The collected streams once both reached EOF, within `budget`, so a
-    /// grandchild holding the pipes open cannot stall the drive. The reading
-    /// threads are abandoned on a timeout rather than joined: they own nothing
-    /// the caller needs.
-    fn finish(
-        self,
-        mut child: Child,
-        budget: Duration,
-        program: &str,
-    ) -> Result<std::process::Output, (ErrorClass, String)> {
-        let deadline = Instant::now() + budget;
-        let held_open = || {
-            (
-                ErrorClass::Timeout,
-                format!(
-                    "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
-                     so its output could not be collected: a descendant that outlived it inherited \
-                     the pipes"
-                ),
-            )
-        };
-        let stdout = self
-            .stdout
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| held_open())?;
-        let stderr = self
-            .stderr
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| held_open())?;
-        let status = child.wait().map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("collect `{program}` output failed: {e}"),
-            )
-        })?;
-        Ok(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorClass {
-    Transport,
-    ProcessExit,
-    StructuredOutputMissing,
-    AgentReportedFailure,
-    Timeout,
-}
-
-/// Why an agent attempt failed, and the token usage its output reported
-/// anyway.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentFailure {
-    pub class: ErrorClass,
-    pub message: String,
-    /// The usage the agent's machine output carried although the attempt
-    /// failed: claude prints its errored result, usage included, and exits
-    /// non-zero. `None` when the failed output reported none. The drive loop
-    /// writes it into the failed `AttemptFinished.usage`.
-    pub usage: Option<apb_core::agent_output::AgentUsage>,
-    /// Whether the failed attempt shows a model turn: it reported token
-    /// usage, or printed a reply that is not an error result. The host
-    /// fallback treats an auth-looking failure as "cannot start" only
-    /// without one, so text such as a `git push` 403 printed after real work
-    /// never re-runs the step as a host task.
-    pub model_turn: bool,
-}
-
-impl AgentFailure {
-    pub fn new(class: ErrorClass, message: impl Into<String>) -> Self {
-        Self {
-            class,
-            message: message.into(),
-            usage: None,
-            model_turn: false,
-        }
-    }
-
-    /// The same failure, marked as having had a model turn.
-    #[must_use]
-    pub fn after_model_turn(mut self, turn: bool) -> Self {
-        self.model_turn = turn;
-        self
-    }
-
-    /// The same failure, with the usage the output reported.
-    #[must_use]
-    pub fn with_usage(mut self, usage: Option<apb_core::agent_output::AgentUsage>) -> Self {
-        self.usage = usage;
-        self
-    }
-}
-
-impl From<(ErrorClass, String)> for AgentFailure {
-    fn from((class, message): (ErrorClass, String)) -> Self {
-        Self::new(class, message)
     }
 }
 
@@ -512,6 +335,9 @@ pub struct AgentTask<'a> {
     /// timed-out attempt still leaves what it printed. `None` for internal
     /// calls (compaction, finish answers) and in tests that do not care.
     pub transcript_dir: Option<&'a Path>,
+    /// How much of the attempt's output is kept, in memory and on disk
+    /// (see `apb_core::output_limits`).
+    pub output_limits: apb_core::output_limits::OutputLimits,
 }
 
 /// What a claude step launched with the minimal environment gets.
@@ -835,6 +661,9 @@ pub struct AgentReport {
     /// `apb_core::agent_output::usage`); `None` when the output reports none.
     /// The drive loop writes it into `AttemptFinished.usage`.
     pub usage: Option<apb_core::agent_output::AgentUsage>,
+    /// What the attempt lost of its output (bounded agent output); the drive
+    /// loop writes it into `AttemptFinished.output_truncated`.
+    pub capture: OutputCapture,
 }
 
 /// Captures an agent session id from a finished attempt's raw output, for the
@@ -1339,47 +1168,6 @@ impl ClaudeAdapter {
         }
     }
 
-    /// `pending_ms` (spec 2026-07-20, Task 5): milliseconds of pending-
-    /// question time excluded from the elapsed clock, from
-    /// `pending_question_ms` below. A node's `timeout_seconds` budgets the
-    /// agent's own work, not a human/supervisor's answer time - a node that
-    /// budgets 300s of agent work must not be killed because a question sat
-    /// unanswered for an hour. `0` for the reprompt transport (a park always
-    /// spans a fresh attempt boundary, so no completed question interval ever
-    /// falls inside one attempt's own `started..now` window). For the live
-    /// `ask_user` transport (Task 11), whose single long-lived attempt DOES
-    /// span the pending question, it is recomputed each poll tick and includes
-    /// the still-open window.
-    fn check_cancel_timeout(
-        child: &mut Child,
-        cancel: &AtomicBool,
-        started: Instant,
-        timeout: Option<Duration>,
-        pending_ms: u128,
-    ) -> Option<(ErrorClass, String)> {
-        if cancel.load(Ordering::Relaxed) {
-            // A `--now` pause (issue #200) gives the agent SIGTERM and a
-            // grace period first; a stop kills at once.
-            if crate::pause::interrupt::is_graceful(cancel) {
-                crate::proc::terminate_process_group(child, crate::pause::interrupt::grace());
-            } else {
-                kill_process_tree(child);
-            }
-            return Some((ErrorClass::Transport, "cancelled".to_string()));
-        }
-        if let Some(limit) = timeout {
-            let pending = Duration::from_millis(u64::try_from(pending_ms).unwrap_or(u64::MAX));
-            if started.elapsed().saturating_sub(pending) >= limit {
-                kill_process_tree(child);
-                return Some((
-                    ErrorClass::Timeout,
-                    format!("agent timed out after {}s", limit.as_secs()),
-                ));
-            }
-        }
-        None
-    }
-
     /// Sums `pending_interval_ms` (spec 2026-07-20, Task 5) over the run's
     /// event log for `task`'s node, restricted to events at or after
     /// `since_ms` (the wall-clock instant this attempt began) so a
@@ -1470,8 +1258,8 @@ impl ClaudeAdapter {
         if let Some(cb) = on_spawn {
             cb(child.id(), started.elapsed().as_millis() as u64);
         }
-        // Drain both streams from the start (see `PipeCollector`).
-        let pipes = PipeCollector::start(&mut child, task.transcript_dir);
+        // Drain both streams from the start (see `crate::capture::Pipes`).
+        let pipes = Pipes::start(&mut child, task.transcript_dir, &task.output_limits);
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -1497,7 +1285,7 @@ impl ClaudeAdapter {
                 // down the blocked agent's process group so drive can fail the
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
@@ -1518,17 +1306,31 @@ impl ClaudeAdapter {
             if let Some(ch) = control {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
                     ));
                 }
             }
-            if let Some(err) =
-                Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
+            if let Some(stopped) =
+                stop::check(&mut child, cancel, started, task.timeout, pending_ms)
             {
-                return Err(err.into());
+                // A graceful stop let the agent print its last record: read
+                // what it left (the group is already gone, so this is quick).
+                let collected = stopped
+                    .is_graceful()
+                    .then(|| pipes.finish(child, drain_budget()).ok())
+                    .flatten();
+                let capture = collected
+                    .as_ref()
+                    .map(|c| headless_capture(task.agent, &c.stdout, &c.stderr))
+                    .unwrap_or_default();
+                return Err(stopped.failure(
+                    task.agent,
+                    collected.as_ref().map(|c| &c.stdout),
+                    capture,
+                ));
             }
             match child.try_wait() {
                 Ok(Some(_)) => break,
@@ -1549,9 +1351,13 @@ impl ClaudeAdapter {
         // block for the lifetime of that daemon. Tearing the group down first
         // is what makes EOF actually arrive.
         kill_process_group(child.id());
-        let output = pipes.finish(child, drain_budget(), &self.program)?;
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let budget = drain_budget();
+        let output = pipes
+            .finish(child, budget)
+            .map_err(|e| pipes_failure(&self.program, budget, e))?;
+        let capture = headless_capture(task.agent, &output.stdout, &output.stderr);
+        let stdout = output.stdout.text().trim().to_string();
+        let stderr = output.stderr.text().trim().to_string();
         // A failure quotes what the agent said: the reply inside its machine
         // output when there is one (claude prints its errored JSON result and
         // exits non-zero), else stdout as printed, so an empty reply never
@@ -1574,7 +1380,8 @@ impl ClaudeAdapter {
                     "agent terminated by signal {sig}: {}",
                     exit_detail(&stderr, &said())
                 ),
-            ));
+            )
+            .with_capture(capture));
         }
         if !output.status.success() {
             // The tokens were spent either way: claude prints its errored
@@ -1597,7 +1404,11 @@ impl ClaudeAdapter {
                 ),
             )
             .with_usage(usage)
-            .after_model_turn(spent || replied));
+            .after_model_turn(spent || replied)
+            .with_capture(capture));
+        }
+        if capture.transcript_incomplete {
+            return Err(incomplete_failure(capture));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
@@ -1640,6 +1451,7 @@ impl ClaudeAdapter {
             question,
             session,
             usage,
+            capture,
         })
     }
 
@@ -1720,56 +1532,42 @@ impl ClaudeAdapter {
             cb(child.id(), started.elapsed().as_millis() as u64);
         }
 
-        // Read stdout on a background thread: BufReader::lines() blocks
-        // line by line, but we also need to poll cancel/timeout concurrently.
-        // Lines go into a channel.
-        let stdout = child.stdout.take().expect("stdout piped");
-        let (tx, rx) = mpsc::channel::<String>();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+        // Stdout is read line by line on a background thread (we also poll
+        // cancel/timeout here), teed raw into the stream log as it arrives,
+        // and kept bounded (see `crate::capture::LineCapture`).
+        let log = match task.stream_log {
+            Some(p) => {
+                // `<run_dir>/agent-stream/<file>`: created under the run
+                // directory, never re-creating a deleted run.
+                if let Some(parent) = p.parent()
+                    && let Some(run_dir) = parent.parent()
+                {
+                    let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
                 }
+                CappedFile::append(p, task.output_limits.stream_log_bytes)
             }
-        });
-
-        // Drain stderr on a separate thread, otherwise heavy stderr output
-        // would fill its pipe and block the agent on write (we only read
-        // stdout).
-        // Delivered over a channel rather than through `JoinHandle::join`:
-        // there is no timed join in std, and stderr's EOF is decided by
-        // whatever still holds the write end - possibly a daemonized
-        // grandchild rather than the agent. See the bounded receive below.
-        let stderr_pipe = child.stderr.take();
-        let (err_tx, err_rx) = mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            use std::io::Read as _;
-            let mut s = String::new();
-            if let Some(mut e) = stderr_pipe {
-                let _ = e.read_to_string(&mut s);
-            }
-            let _ = err_tx.send(s);
-        });
-
-        let mut sink = task.stream_log.and_then(|p| {
-            // `<run_dir>/agent-stream/<file>`: created under the run
-            // directory, never re-creating a deleted run.
-            if let Some(parent) = p.parent()
-                && let Some(run_dir) = parent.parent()
-            {
-                let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
-            }
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-        });
+            None => CappedFile::none(),
+        };
+        let mut lines = LineCapture::start(
+            child.stdout.take().expect("stdout piped"),
+            &task.output_limits,
+            log,
+        );
+        // Stderr is drained on its own thread, otherwise heavy stderr output
+        // would fill its pipe and block the agent on write. Delivered over a
+        // channel because stderr's EOF is decided by whatever still holds
+        // the write end - possibly a daemonized grandchild rather than the
+        // agent. See the bounded receive below.
+        let err_rx = crate::capture::drain_stream(
+            child.stderr.take(),
+            &task.output_limits,
+            CappedFile::none(),
+        );
+        let stdout_name = if task.stream_log.is_some() {
+            STREAM_LOG
+        } else {
+            STREAM_STDOUT
+        };
 
         let started = Instant::now();
         // Pending-question exclusion: once for a non-live attempt, recomputed
@@ -1780,7 +1578,6 @@ impl ClaudeAdapter {
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
         let pid = child.id();
-        let mut raw_lines: Vec<String> = Vec::new();
         // Set once the agent process itself has exited: the deadline for
         // draining whatever is still buffered in the pipe afterwards.
         let mut drain_deadline: Option<Instant> = None;
@@ -1815,7 +1612,7 @@ impl ClaudeAdapter {
                 // Task 11 fix): tear down the blocked agent so drive can fail the
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
@@ -1839,7 +1636,7 @@ impl ClaudeAdapter {
             {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
@@ -1847,15 +1644,27 @@ impl ClaudeAdapter {
                 }
             }
             if drain_deadline.is_none()
-                && let Some(err) = Self::check_cancel_timeout(
-                    &mut child,
-                    cancel,
-                    started,
-                    task.timeout,
-                    pending_ms,
-                )
+                && let Some(stopped) =
+                    stop::check(&mut child, cancel, started, task.timeout, pending_ms)
             {
-                return Err(err.into());
+                // As on the headless transport: after a graceful stop, read
+                // what the agent printed on its way out.
+                // stderr gets what is left of the same window: its reader
+                // hands over its copy at EOF, which the dead group gives
+                // quickly.
+                let stderr = if stopped.is_graceful() {
+                    let deadline = Instant::now() + drain_budget();
+                    lines.drain_until(deadline);
+                    err_rx
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .ok()
+                } else {
+                    err_rx.try_recv().ok()
+                };
+                let stream = lines.finish();
+                let capture = stream_capture(task.agent, &stream, stdout_name, stderr.as_ref());
+                let drained = stopped.is_graceful().then_some(&stream);
+                return Err(stopped.failure(task.agent, drained, capture));
             }
             // This loop used to end ONLY on stdout EOF - but EOF is not the
             // agent's to give. A grandchild that inherited the pipe (a real
@@ -1869,17 +1678,10 @@ impl ClaudeAdapter {
                 kill_process_group(pid);
                 drain_deadline = Some(Instant::now() + drain_budget());
             }
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(line) => {
-                    if let Some(f) = sink.as_mut() {
-                        let _ = writeln!(f, "{line}");
-                    }
-                    raw_lines.push(line);
-                }
-                // The reader thread closed the channel: stdout reached EOF
-                // (the process finished its output) - exit and assemble the result.
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // The reader thread ended: stdout reached EOF (the process
+            // finished its output) - exit and assemble the result.
+            if lines.pump(Duration::from_millis(50)).is_err() {
+                break;
             }
             // Backstop for the one case the group kill above cannot reach: a
             // descendant that left the process group while holding the pipe.
@@ -1895,14 +1697,15 @@ impl ClaudeAdapter {
         // agent overstays it, tear down the tree and report a timeout rather
         // than hang.
         //
-        // `reader` is deliberately NOT joined. On the normal path it has
-        // already finished (the loop broke because it dropped its sender), so
-        // a join would be a no-op; on the backstop path it is still blocked on
-        // a pipe held by a descendant that escaped the group, and joining it
-        // is precisely the unbounded wait being avoided. It owns nothing the
+        // The line reader thread is deliberately NOT joined. On the normal
+        // path it has already finished (the loop broke because it dropped
+        // its sender); on the backstop path it is still blocked on a pipe
+        // held by a descendant that escaped the group, and joining it is
+        // precisely the unbounded wait being avoided. It owns nothing the
         // caller needs - every line reached us through the channel - so it is
         // abandoned and dies with the process.
-        drop(reader);
+        let stream = lines.finish();
+        let raw_lines: Vec<String> = stream.text().lines().map(str::to_string).collect();
         let grace = exit_after_eof_budget();
         let status = match wait_bounded(&mut child, grace) {
             Some(Ok(status)) => status,
@@ -1924,8 +1727,12 @@ impl ClaudeAdapter {
                 // process is noise. `Timeout` is reserved for the case where
                 // no result was ever seen, which is a genuinely unfinished
                 // node.
-                kill_process_tree(&mut child);
-                return match parse_stream_result(&raw_lines, task) {
+                stop_process_tree(&mut child, StopMode::Kill);
+                let capture = stream_capture(task.agent, &stream, stdout_name, None);
+                if capture.transcript_incomplete {
+                    return Err(incomplete_failure(capture));
+                }
+                return match parse_stream_result(&raw_lines, task, &capture) {
                     Ok(report) => Ok(report),
                     // A malformed-marker Transport error names the node and must
                     // survive the grace teardown (spec 2026-07-20, Task 6): the
@@ -1950,7 +1757,9 @@ impl ClaudeAdapter {
         // The leader is reaped; anything left in its group would still be
         // holding stderr, so clear the group before collecting.
         kill_process_group(pid);
-        let stderr = err_rx.recv_timeout(drain_budget()).unwrap_or_default();
+        let stderr_capture = err_rx.recv_timeout(drain_budget()).ok();
+        let capture = stream_capture(task.agent, &stream, stdout_name, stderr_capture.as_ref());
+        let stderr = stderr_capture.map(|c| c.text()).unwrap_or_default();
         // Signal termination is a failure even if a terminal result event was
         // streamed (issue #42, finding 6): a killed agent that a wrapper exited
         // `0` (or that lost stdout) must not be journaled as success.
@@ -1958,7 +1767,8 @@ impl ClaudeAdapter {
             return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!("agent terminated by signal {sig}: {}", stderr.trim()),
-            ));
+            )
+            .with_capture(capture));
         }
         if !status.success() {
             // As on the headless transport: the errored result still reports
@@ -1970,10 +1780,14 @@ impl ClaudeAdapter {
             .with_usage(apb_core::agent_output::usage(
                 task.agent,
                 &raw_lines.join("\n"),
-            )));
+            ))
+            .with_capture(capture));
         }
-
-        parse_stream_result(&raw_lines, task).map_err(AgentFailure::from)
+        if capture.transcript_incomplete {
+            return Err(incomplete_failure(capture));
+        }
+        parse_stream_result(&raw_lines, task, &capture)
+            .map_err(|e| AgentFailure::from(e).with_capture(capture))
     }
 }
 
@@ -1983,6 +1797,7 @@ impl ClaudeAdapter {
 fn parse_stream_result(
     lines: &[String],
     task: &AgentTask,
+    capture: &OutputCapture,
 ) -> Result<AgentReport, (ErrorClass, String)> {
     let raw = lines.join("\n");
     for line in lines.iter().rev() {
@@ -2042,6 +1857,7 @@ fn parse_stream_result(
             question,
             session,
             usage,
+            capture: capture.clone(),
         });
     }
     Err((
@@ -2292,6 +2108,7 @@ mod tests {
             status_file: None,
             hermetic_settings: settings,
             transcript_dir: None,
+            output_limits: Default::default(),
         }
     }
 
@@ -2519,6 +2336,7 @@ mod tests {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         }
     }
 
@@ -2602,8 +2420,12 @@ mod tests {
         ];
         let policy = ConnectorEnvPolicy::default();
 
-        let with_extract = parse_stream_result(&lines, &stream_task(&policy, Some("node_output")))
-            .expect("a result event");
+        let with_extract = parse_stream_result(
+            &lines,
+            &stream_task(&policy, Some("node_output")),
+            &OutputCapture::default(),
+        )
+        .expect("a result event");
         assert_eq!(
             with_extract.output, "the real summary",
             "the marker content from the early turn must win over the hook message"
@@ -2612,8 +2434,12 @@ mod tests {
 
         // Without the contract, today's behavior stands: the terminal result
         // text (the hook message) is the output.
-        let without_extract =
-            parse_stream_result(&lines, &stream_task(&policy, None)).expect("a result event");
+        let without_extract = parse_stream_result(
+            &lines,
+            &stream_task(&policy, None),
+            &OutputCapture::default(),
+        )
+        .expect("a result event");
         assert_eq!(without_extract.output, "Nothing to log.");
     }
 
@@ -2628,8 +2454,12 @@ mod tests {
                 .to_string(),
         ];
         let policy = ConnectorEnvPolicy::default();
-        let report = parse_stream_result(&lines, &stream_task(&policy, Some("node_output")))
-            .expect("a result event");
+        let report = parse_stream_result(
+            &lines,
+            &stream_task(&policy, Some("node_output")),
+            &OutputCapture::default(),
+        )
+        .expect("a result event");
         assert_eq!(report.output, "final answer");
     }
 

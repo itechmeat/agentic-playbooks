@@ -68,6 +68,14 @@ pub struct RunDetail {
     )]
     pub commits: Vec<apb_engine::run_outcome::NodeCommits>,
     // --- end of the 0.23.0 blocks ---
+    /// Unread events the run's connector inbox reads found lost to inbox
+    /// retention, one per distinct gap; empty when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_outcome::RunInboxGap>>", optional)
+    )]
+    pub inbox_gaps: Vec<apb_engine::run_outcome::RunInboxGap>,
     /// The candidate trial this run was (issue #192), with its verdict;
     /// absent for every other run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +215,7 @@ pub(crate) async fn get_run_handler(
     let usage = view.usage();
     let decisions = view.decisions();
     let commits = view.commits();
+    let inbox_gaps = view.inbox_gaps();
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
     let goal = view.goal(&run_dir);
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
@@ -237,6 +246,7 @@ pub(crate) async fn get_run_handler(
         hooks,
         children,
         commits,
+        inbox_gaps,
         attempt_models,
         goal,
         candidate_trial,

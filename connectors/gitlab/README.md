@@ -26,6 +26,8 @@ It covers issue and merge request triage, releases, and CI: reading and creating
 
 It does not touch repository contents. No commits, no branches, no file edits, no project creation or deletion, no settings. Git work stays with git.
 
+Text an agent writes into an issue or merge request comment or description is sent as text only: a GitLab quick action such as `/close` at the start of a line is escaped and shown, never run. Titles and release text are sent as written, since GitLab runs no quick action from them. Actions go through their own functions.
+
 Worth knowing before you grant it: `merge_merge_request`, `create_release`, and `trigger_pipeline` are not read-only and are not easily undone. Triggering a pipeline can deploy something. Grant those to the nodes that genuinely need them, and give the grant a `max_calls` cap when a loop could reach it.
 
 ## Doing it by hand

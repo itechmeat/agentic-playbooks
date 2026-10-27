@@ -240,6 +240,18 @@ executing. A per-account cap of 50 MB or 30 days, whichever hits first, keeps
 the store bounded; acknowledged events are dropped first, and only the size
 cap ever drops an unacknowledged one.
 
+When the size cap drops events a consumer has not acknowledged yet, its next
+read says so. The result carries `gap: {from, through}`, the inclusive range
+of sequence numbers that were stored and lost before this consumer saw them,
+at the top level next to `ok` (outside `body`, so a `response_pick`
+projection cannot remove it; a read without a loss has no `gap` key). The run
+journal records the loss once per distinct gap as an `inbox_gap` event, and
+`run_report`, `run_status`, `apb runs <id>` and the dashboard run page list
+it, so a run never reads as having processed its inbox completely when it did
+not. Events a consumer acknowledged before they were dropped are not a loss
+for that consumer. A consumer that starts reading late sees the events
+dropped before its first read as a gap too, since it never saw them.
+
 An inbound delivery never starts a run. A playbook consumes the inbox by
 polling it, an `inbox_read` call inside a loop or behind a wait node, and
 acknowledging what it processed.
@@ -278,6 +290,50 @@ To run the listener, see docs/DEPLOYMENT.md. `apb connector doctor` prints
 the exact callback URL per account, the pending depth, and whether the local
 listener answers.
 
+## What a call returns
+
+A call answers with one JSON document. On success it carries `ok: true`, the
+HTTP `status`, and the `body` (parsed when the service sent JSON, a string
+otherwise). A body over the 1 MiB read cap fails a `read_only` function as
+`incomplete_response` (see below); on any other function the body is cut at
+the cap, `truncated` is `true`, and the result says the response was not
+complete. When the function declares a `response_pick` projection, `picked`
+is `true` and `body` holds only the projected fields; `--full` skips the
+projection and returns the raw body. A paging `Link` header from the service
+surfaces verbatim as `link`.
+
+On failure it carries `ok: false` and an `error` object with a `code`, a
+human-readable `message`, and, when they apply, `http_status` and
+`retry_after_sec`. The codes: `config` (a broken or drifted connector setup),
+`permission` (no grant, no account, or the `max_calls` budget spent),
+`invalid_args`, `auth` (the service rejected the credentials), `not_found`,
+`rate_limited` (with `retry_after_sec` when the service gave one), `service`
+(any other non-2xx, a redirect, or an `error_when` reclassification inside a
+2xx), `network`, `timeout`, and `incomplete_response`.
+
+Besides an `error_when` reclassification, `incomplete_response` is the
+failure a 2xx can produce on a `read_only` function. A response body that was cut at the read cap, or whose
+read failed partway through, must not pass as complete data: the call fails
+with `reason` set to `body_cap` or `read_error` (plus `body_cap_bytes` and
+the `io_error_kind` where they apply: `unexpected_eof`, `connection_reset`,
+`connection_aborted`, `broken_pipe`, `timed_out`, `invalid_data`,
+`interrupted` or `other`), no partial body is returned, and the
+run journal records the outcome as `incomplete_response` with
+`response_complete: false`. The fix is to narrow the request (page, filter,
+or use a smaller page size) and call again; nothing retries such a call
+automatically.
+
+For a function that is not read-only the call stays a success, because its
+effect already happened. The result then returns the body that was read and
+carries `effect: "committed"` and `response_complete: false` (plus the
+`reason`) at the top level of the result JSON, where a `response_pick`
+projection cannot remove them; a complete response carries no such keys. A
+cut body is not always `truncated`: one whose read failed partway is
+`truncated: false` with `response_complete: false`, so check
+`response_complete`. The run journal records `response_complete` for every
+HTTP call that answered 2xx (and for an `incomplete_response` failure), so a
+playbook report can tell a whole response from a cut one.
+
 ## The `apb connector` CLI
 
 ```text
@@ -296,6 +352,51 @@ call without executing it, against the live connector and account config (no
 secret is resolved, so no approval is needed); probe an account with the
 dashboard healthcheck.
 `--args -` reads the JSON arguments from stdin.
+
+## Agent-written text (`text_args`)
+
+The text a connector sends is usually written by an agent, and some services
+act on text, not only show it: a line that starts with a slash command can
+close or merge something, and a reference or mention in a title can link or
+ping people. A function declares how each such string argument is prepared,
+with the optional `text_args` map from argument name to mode:
+
+```yaml
+  - name: comment_issue
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/issues/{{args.iid}}/notes"
+    body:
+      body: "{{args.body}}"
+    text_args:
+      body: markdown_no_commands
+    args_schema:
+      type: object
+      properties:
+        body: { type: string }
+```
+
+The engine applies the mode to the argument's value before it is placed into
+`body` or `body_form`, so no template can send the raw value around it. An
+argument with a mode may appear only in the body: one also used in `url`,
+`query` or `headers`, where no mode is applied, fails the manifest at load
+time. There are three modes:
+
+| Mode | Use it for | What is sent |
+| --- | --- | --- |
+| `markdown` | Text where formatting and commands are intended, such as a comment on a service that runs commands only through a separate function | The value exactly as given. Declaring it documents the intent. |
+| `markdown_no_commands` | Multi-line Markdown on a service that runs slash commands found in the text (comments, descriptions) | The value as written, except that a `/` at the start of any line (after optional spaces or tabs; a lone carriage return ends a line too) followed by a letter, digit or underscore gets a backslash, so the service shows the command as text. A `/` in the middle of a line is unchanged. Lines inside fenced code blocks are escaped too, since a fence is not a documented guarantee that a command there is ignored. |
+| `literal` | A one-line value from untrusted text, such as a title | One line: whitespace runs collapse to one space and the ends are trimmed. Every Markdown-significant character gets a backslash escape (never an HTML entity): `` \ ` * _ [ ] < > \| ~ # & @ ! $ % ``. At the start of the value a `-`, `+`, `=`, an ordered-list marker (`1.`, `2)`) or a slash command is escaped too. Bare `http://` and `https://` URLs are kept as typed, so they still link. |
+
+Only HTTP functions may declare `text_args`, and every key must be a string
+property of `args_schema`; an unknown mode or any other key fails the manifest
+at load time. Arguments without a declared mode are sent as given, as before.
+Pick `markdown_no_commands` for comment and description bodies of a service
+that executes commands from text, `literal` for titles and other single-line
+fields that the service renders as Markdown, and `markdown` where commands are
+meant to work. A field the service shows as plain text, or stores as given and
+shows with its backslashes, needs no mode: an escape there would only show up
+as a stray backslash, and a value read back and sent again would gain one more
+each time.
 
 ## Official connectors
 
@@ -405,7 +506,12 @@ so never pre-encode the slash yourself. List functions follow GitLab
 page pagination via optional `page` and `per_page` (max 100)
 arguments; omit both for the first page. Label edits go through
 `update_issue` (`labels` replaces the full set, `add_labels` and
-`remove_labels` are comma-separated deltas). `trigger_pipeline`
+`remove_labels` are comma-separated deltas). Agent-written issue and merge
+request comment bodies and descriptions are sent as `markdown_no_commands`
+(see `text_args` above), so that text can never run a quick action. Titles
+and release names and descriptions are sent as written: GitLab runs no quick
+action from them, and it stores a title as given, so a `literal` escape would
+stay in it as a visible backslash. `trigger_pipeline`
 starts CI on a branch or tag (optional `variables` is an array of
 `{key, value}` objects); grant it only when a playbook is meant to
 start pipelines, not just observe them. Healthcheck: `get_user`.
@@ -424,7 +530,8 @@ functions bake a literal `fields=` projection matching their
 argument (`state: Fixed`, `project: DEMO`, `for: me #Unresolved`)
 and pages with optional `$skip` and `$top` arguments. `create_issue`
 takes the project database id (for example `0-0`), not the short
-name; find it with `list_projects`. `apply_command` runs YouTrack's
+name; find it with `list_projects`. Comment and description text is declared `markdown` and sent as
+written, since YouTrack runs no command from it; `apply_command` runs YouTrack's
 command syntax, which can change almost anything on an issue (state,
 tags, assignment, priority, custom fields), so restrict it in grant
 allowlists accordingly. Healthcheck: `get_me`.

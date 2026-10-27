@@ -173,6 +173,65 @@ fn project_suggestion_settings_read_the_project_config() {
 }
 
 #[test]
+fn a_broken_project_section_does_not_break_the_other_one() {
+    use apb_core::config::{project_output_limits, project_suggestion_settings};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let write = |yaml: &str| std::fs::write(root.path().join(".apb/config.yaml"), yaml).unwrap();
+
+    // A typo under `output_limits:` leaves the suggestions readable.
+    write("suggestions:\n  hard_ttl_days: 7\noutput_limits:\n  tail_byte: 10\n");
+    assert_eq!(
+        project_suggestion_settings(root.path())
+            .unwrap()
+            .hard_ttl_days,
+        Some(7)
+    );
+    let err = project_output_limits(root.path()).unwrap_err();
+    assert!(err.contains("output_limits"), "was: {err}");
+
+    // A broken `suggestions:` leaves the output limits readable.
+    write("suggestions:\n  hard_ttl_days: soon\noutput_limits:\n  tail_bytes: 10\n");
+    assert_eq!(
+        project_output_limits(root.path()).unwrap().tail_bytes,
+        Some(10)
+    );
+    let err = project_suggestion_settings(root.path()).unwrap_err();
+    assert!(err.contains("suggestions"), "was: {err}");
+}
+
+#[test]
+fn a_project_config_that_is_not_a_mapping_is_rejected() {
+    use apb_core::config::project_suggestion_settings;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let path = root.path().join(".apb/config.yaml");
+
+    // An empty file sets nothing.
+    std::fs::write(&path, "").unwrap();
+    assert_eq!(
+        project_suggestion_settings(root.path())
+            .unwrap()
+            .hard_ttl_days,
+        None
+    );
+
+    for yaml in [
+        "- suggestions
+",
+        "suggestions
+",
+    ] {
+        std::fs::write(&path, yaml).unwrap();
+        let err = project_suggestion_settings(root.path()).unwrap_err();
+        assert!(
+            err.contains("mapping") && err.contains(&path.display().to_string()),
+            "{yaml:?} was: {err}"
+        );
+    }
+}
+
+#[test]
 fn server_section_loads_and_defaults() {
     let _lock = crate::common::env_lock();
     let dir = tempfile::tempdir().unwrap();

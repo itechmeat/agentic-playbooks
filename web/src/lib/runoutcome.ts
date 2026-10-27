@@ -1,4 +1,4 @@
-import type { NodeCommits, RunGoal } from './api.gen'
+import type { NodeCommits, RunGoal, RunInboxGap } from './api.gen'
 import type { WfEvent } from './types'
 
 // What a run produced beyond its node outputs (0.23.0): its goal criteria and
@@ -62,7 +62,7 @@ export function goalSummary(g: RunGoal): string {
   return parts.join(' · ')
 }
 
-// The event journal note of the 0.23.0 outcome events.
+// The event journal note of the outcome events (0.23.0, plus inbox gaps).
 export function outcomeEventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -86,7 +86,30 @@ export function outcomeEventNote(e: WfEvent): string | undefined {
       const detail = str(r.detail)
       return detail ? `${label} (${detail})` : label
     }
+    case 'inbox_gap': {
+      const from = num(r.from)
+      const through = num(r.through)
+      if (from === undefined || through === undefined) return undefined
+      return inboxGapLine({
+        node: str(r.node_id) ?? '',
+        connector: str(r.connector) ?? '',
+        account: str(r.account) ?? '',
+        from,
+        through,
+      })
+    }
     default:
       return undefined
   }
+}
+
+// One warning line per inbox gap: unread events inbox retention dropped
+// before they were read, so the run did not see its inbox whole. The
+// consumer's cursor may predate the run, so the line does not blame the run.
+export function inboxGapLine(g: RunInboxGap): string {
+  const lost =
+    g.from === g.through
+      ? `unread event ${g.from} was dropped by inbox retention before it was read`
+      : `unread events ${g.from}-${g.through} were dropped by inbox retention before they were read`
+  return `${g.connector}/${g.account}: ${lost} (found by ${g.node})`
 }

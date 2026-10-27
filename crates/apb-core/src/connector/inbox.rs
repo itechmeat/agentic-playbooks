@@ -109,6 +109,16 @@ pub enum Appended {
     Duplicate,
 }
 
+/// The inclusive range of sequence numbers a read found lost: events that
+/// were stored once and dropped by retention before this consumer ever read
+/// or acknowledged them. `from` is the first seq after the consumer's cursor,
+/// `through` the seq just before the oldest surviving event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InboxGap {
+    pub from: u64,
+    pub through: u64,
+}
+
 /// Counts for the doctor and the dashboard panel. Carries no body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Depth {
@@ -327,19 +337,36 @@ impl Inbox {
     }
 
     /// The events `consumer` has not acknowledged, oldest first, at most
-    /// `limit` of them, plus the cursor they were read from. Does not move
-    /// the cursor: at-least-once with an explicit ack is the only honest
-    /// contract when the reader is an agent that may stop mid-thought.
-    pub fn read(&self, consumer: &str, limit: usize) -> Result<(Vec<InboxEvent>, u64), InboxError> {
+    /// `limit` of them, plus the cursor they were read from and the gap
+    /// retention left behind, when it left one. Does not move the cursor:
+    /// at-least-once with an explicit ack is the only honest contract when
+    /// the reader is an agent that may stop mid-thought.
+    ///
+    /// The gap: retention may have dropped a prefix of the log this consumer
+    /// never acknowledged. Sequence numbers are dense (they are handed out
+    /// one at a time under the directory lock) and retention only ever drops
+    /// a prefix, so a first stored seq past `cursor + 1` means exactly the
+    /// closed range `cursor + 1 ..= first - 1` was stored and is now gone
+    /// unread, and that is what [`InboxGap`] reports. Events this consumer
+    /// acked before they were dropped are gone legitimately: the cursor sits
+    /// at or above them, the first stored seq is `cursor + 1` or lower, and
+    /// no gap is reported.
+    pub fn read(
+        &self,
+        consumer: &str,
+        limit: usize,
+    ) -> Result<(Vec<InboxEvent>, u64, Option<InboxGap>), InboxError> {
         check_consumer(consumer)?;
+        // The log first, the cursor second, with no lock: a concurrent ack
+        // only moves the cursor forward, so a cursor read after the log can
+        // only shrink the gap, never invent one that retention made
+        // legitimately in between.
+        let all = self.read_events()?;
         let cursor = self.cursor(consumer)?;
-        let mut out: Vec<InboxEvent> = self
-            .read_events()?
-            .into_iter()
-            .filter(|e| e.seq > cursor)
-            .collect();
+        let gap = lost_prefix(cursor, all.first().map(|e| e.seq));
+        let mut out: Vec<InboxEvent> = all.into_iter().filter(|e| e.seq > cursor).collect();
         out.truncate(limit);
-        Ok((out, cursor))
+        Ok((out, cursor, gap))
     }
 
     /// Moves `consumer`'s cursor to `up_to_seq`, forward only, and returns
@@ -754,6 +781,20 @@ fn line_bytes(event: &InboxEvent) -> u64 {
     serde_json::to_string(event)
         .map(|s| s.len() as u64 + 1)
         .unwrap_or(0)
+}
+
+/// The unread prefix a retention drop cost the consumer at `cursor`, or
+/// `None` when everything after the cursor is still stored. Shared by
+/// `read`'s gap detection so the range arithmetic lives in one place:
+/// `from` is the first seq the consumer has not seen, `through` the seq just
+/// before the oldest survivor.
+fn lost_prefix(cursor: u64, first_stored: Option<u64>) -> Option<InboxGap> {
+    let from = cursor.checked_add(1)?;
+    let first = first_stored?;
+    (first > from).then(|| InboxGap {
+        from,
+        through: first - 1,
+    })
 }
 
 /// A consumer name is a machine-facing identifier, validated like a function

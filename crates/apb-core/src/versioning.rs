@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::TreeFile;
 use crate::fsutil::atomic_write;
 use crate::registry::{Registry, is_frozen_dir, is_safe_segment, list_versions, parse_version};
 use crate::schema::{Playbook, SchemaError};
@@ -184,6 +185,37 @@ pub fn create_version_with_override(
     version_override: Option<&str>,
     make_current: bool,
 ) -> Result<String, VersioningError> {
+    create_version_impl(
+        root,
+        id,
+        &NewVersion {
+            yaml: new_yaml,
+            base_version,
+            version_override,
+            make_current,
+            imported_scripts: None,
+        },
+    )
+}
+
+/// What [`create_version_impl`] writes. `imported_scripts` is `Some` only for
+/// an import of a format-2 bundle (see [`crate::bundle`]): those files (maybe
+/// none) become the new version's `scripts/` and the base version's scripts
+/// are not carried. `None` carries the base's scripts along, as every
+/// ordinary save does.
+struct NewVersion<'a> {
+    yaml: &'a str,
+    base_version: Option<&'a str>,
+    version_override: Option<&'a str>,
+    make_current: bool,
+    imported_scripts: Option<&'a [TreeFile]>,
+}
+
+fn create_version_impl(
+    root: &Path,
+    id: &str,
+    req: &NewVersion<'_>,
+) -> Result<String, VersioningError> {
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
@@ -199,7 +231,7 @@ pub fn create_version_with_override(
 
     let base = if is_new {
         None
-    } else if let Some(v) = base_version {
+    } else if let Some(v) = req.base_version {
         if !is_safe_segment(v) {
             return Err(VersioningError::NotFound(format!("{id}@{v}")));
         }
@@ -214,7 +246,7 @@ pub fn create_version_with_override(
         list_versions(&playbook_dir)?
     };
 
-    let (mut version, bump) = if let Some(v) = version_override {
+    let (mut version, bump) = if let Some(v) = req.version_override {
         if !is_safe_segment(v) {
             return Err(VersioningError::NotFound(format!("{id}@{v}")));
         }
@@ -236,7 +268,7 @@ pub fn create_version_with_override(
         )
     };
 
-    let mut playbook = Playbook::from_yaml(new_yaml).map_err(schema_err)?;
+    let mut playbook = Playbook::from_yaml(req.yaml).map_err(schema_err)?;
     playbook.version = version.clone();
     playbook.id = id.to_string();
 
@@ -246,8 +278,21 @@ pub fn create_version_with_override(
         fs::create_dir_all(&playbook_dir)?;
     }
 
-    let version_path =
-        commit_version_dir(&playbook_dir, &version, &playbook, base.as_deref(), bump)?;
+    let scripts = match req.imported_scripts {
+        Some(files) => VersionScripts::Imported(files),
+        None => VersionScripts::CarryFrom(base.as_deref()),
+    };
+    let version_path = match commit_version_dir(&playbook_dir, &version, &playbook, scripts, bump) {
+        Ok(path) => path,
+        Err(e) => {
+            // A playbook this call created has no version and no `current`:
+            // leave nothing, so the next attempt starts it afresh.
+            if is_new {
+                discard_new_playbook_dir(&playbook_dir);
+            }
+            return Err(e);
+        }
+    };
     version = version_path
         .file_name()
         .unwrap_or_default()
@@ -268,7 +313,7 @@ pub fn create_version_with_override(
         },
     )?;
 
-    if is_new || make_current {
+    if is_new || req.make_current {
         atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
     }
     // A version a person writes ends the trial of a forward patch made from
@@ -359,6 +404,109 @@ impl Saved {
             serde_json::json!({ "id": id, "version": self.version })
         }
     }
+}
+
+/// Where the scripts of an imported version come from.
+#[derive(Debug, Clone, Copy)]
+pub enum ImportedScripts<'a> {
+    /// A format-2 bundle is authoritative: these files, and only these,
+    /// become the version's `scripts/` (an empty list means none).
+    Bundle(&'a [TreeFile]),
+    /// A format-1 bundle has no notion of scripts: the current version's
+    /// `scripts/` is carried along, as an ordinary save does.
+    CarryCurrent,
+}
+
+/// The import path behind `apb import` (see [`crate::bundle`]). Creates the
+/// YAML and its scripts as ONE new version: the scripts are written into the
+/// version's staging `scripts/` directory and the directory is committed by
+/// the usual atomic rename, so the definition digest that trust later binds
+/// to ([`crate::scope::definition_digest`]) is computed over the final
+/// content of a complete version, never over a YAML written first and
+/// patched with scripts afterwards.
+///
+/// Trust: an imported version is never auto-approved, with or without
+/// scripts. A bundle is a file from elsewhere that the local user did not
+/// write, so nothing here vouches for it; the version stays untrusted until
+/// the normal approval (MCP `playbook_approve` or an explicit acknowledge at
+/// run start).
+///
+/// An import equal to the current version (the same definition, compared as
+/// [`save_definition`] does, and for a format-2 bundle the same scripts)
+/// writes nothing and returns the current version with [`Saved::unchanged`]
+/// set; its trust is untouched. An explicit `version_override` always
+/// creates that version.
+///
+/// The `scripts` paths must already be validated by the caller (the bundle's
+/// shared script path check and its size limits); this function writes what
+/// it is given.
+pub fn save_imported(
+    root: &Path,
+    id: &str,
+    yaml: &str,
+    version_override: Option<&str>,
+    make_current: bool,
+    scripts: ImportedScripts<'_>,
+) -> Result<Saved, VersioningError> {
+    let playbook_dir = playbooks_dir(root).join(id);
+    let current = if is_safe_segment(id) {
+        read_current_pointer(&playbook_dir)
+    } else {
+        None
+    };
+    if version_override.is_none()
+        && let Some(current) = current.as_deref()
+        && same_definition(&playbook_dir, current, id, yaml)
+        && match scripts {
+            ImportedScripts::CarryCurrent => true,
+            ImportedScripts::Bundle(files) => same_scripts(&playbook_dir.join(current), files),
+        }
+    {
+        return Ok(Saved {
+            version: current.to_string(),
+            unchanged: true,
+        });
+    }
+    let version = create_version_impl(
+        root,
+        id,
+        &NewVersion {
+            yaml,
+            base_version: None,
+            version_override,
+            make_current,
+            imported_scripts: match scripts {
+                ImportedScripts::Bundle(files) => Some(files),
+                ImportedScripts::CarryCurrent => None,
+            },
+        },
+    )?;
+    // No approve_written here, by design: an import cannot vouch for a
+    // definition it did not produce.
+    Ok(Saved {
+        version,
+        unchanged: false,
+    })
+}
+
+/// Whether the `scripts/` of `version_dir` holds exactly `files` (paths,
+/// bytes and executable bits). A missing `scripts/` holds nothing; a tree
+/// that cannot be read is never the same.
+fn same_scripts(version_dir: &Path, files: &[TreeFile]) -> bool {
+    let scripts_dir = version_dir.join("scripts");
+    let mut have = if scripts_dir.is_dir() {
+        match crate::content::read_tree_files(&scripts_dir, &crate::content::TreeLimits::default())
+        {
+            Ok((have, _)) => have,
+            Err(_) => return false,
+        }
+    } else {
+        Vec::new()
+    };
+    let mut want = files.to_vec();
+    have.sort_by(|a, b| a.rel.cmp(&b.rel));
+    want.sort_by(|a, b| a.rel.cmp(&b.rel));
+    have == want
 }
 
 /// Whether `yaml`, stored as playbook `id`, would be the same definition as
@@ -502,7 +650,7 @@ pub(crate) fn create_patch_version_with(
         &playbook_dir,
         &version,
         &playbook,
-        Some(base_version),
+        VersionScripts::CarryFrom(Some(base_version)),
         VersionBump::Patch,
     )?;
     let version = version_path
@@ -1103,7 +1251,9 @@ pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, V
     })
 }
 
-fn playbooks_dir(root: &Path) -> PathBuf {
+/// The playbook store of a project root. Crate-visible so the bundle export
+/// resolves the version directory through the same helper the save paths use.
+pub(crate) fn playbooks_dir(root: &Path) -> PathBuf {
     root.join(".apb/playbooks")
 }
 
@@ -1282,11 +1432,25 @@ enum VersionBump {
     Fixed,
 }
 
+/// Where the scripts of a version being committed come from.
+#[derive(Clone, Copy)]
+enum VersionScripts<'a> {
+    /// Carry the `scripts/` of this base version along (an ordinary save);
+    /// `None` starts with an empty `scripts/`.
+    CarryFrom(Option<&'a str>),
+    /// Files an import brought (bundle format 2), already checked by the
+    /// bundle's shared path rule.
+    Imported(&'a [TreeFile]),
+}
+
+/// Builds the version in a staging directory (YAML and scripts together) and
+/// commits it by one atomic rename, so a version is complete from its first
+/// visible moment.
 fn commit_version_dir(
     playbook_dir: &Path,
     initial_version: &str,
     playbook: &Playbook,
-    base_version: Option<&str>,
+    scripts: VersionScripts<'_>,
     bump: VersionBump,
 ) -> Result<PathBuf, VersioningError> {
     let mut version = initial_version.to_string();
@@ -1297,14 +1461,10 @@ fn commit_version_dir(
         if tmp.exists() {
             remove_dir_all(&tmp)?;
         }
-        fs::create_dir_all(tmp.join("scripts"))?;
-        atomic_write(&tmp.join("playbook.yaml"), validated_yaml.as_bytes())?;
-
-        if let Some(base) = base_version {
-            let scripts_src = playbook_dir.join(base).join("scripts");
-            if scripts_src.is_dir() {
-                crate::fsutil::copy_tree(&scripts_src, &tmp.join("scripts"))?;
-            }
+        // A failed staging step leaves no half-built directory behind.
+        if let Err(e) = stage_version(playbook_dir, &tmp, &validated_yaml, scripts) {
+            let _ = remove_dir_all(&tmp);
+            return Err(e);
         }
 
         let target = playbook_dir.join(&version);
@@ -1342,6 +1502,77 @@ fn commit_version_dir(
     Err(VersioningError::Conflict(format!(
         "failed to allocate version after {MAX_RENAME_ATTEMPTS} attempts"
     )))
+}
+
+/// Removes the directory a failed first commit created, but only while it is
+/// empty: [`commit_version_dir`] already removed its own staging, so anything
+/// still there belongs to a concurrent writer (a version it committed) and
+/// must survive.
+fn discard_new_playbook_dir(playbook_dir: &Path) {
+    match fs::remove_dir(playbook_dir) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(e) => eprintln!(
+            "apb: could not remove the empty playbook directory {}: {e}",
+            playbook_dir.display()
+        ),
+    }
+}
+
+/// Writes the YAML and the scripts of a version into its staging directory
+/// `tmp`.
+fn stage_version(
+    playbook_dir: &Path,
+    tmp: &Path,
+    validated_yaml: &str,
+    scripts: VersionScripts<'_>,
+) -> Result<(), VersioningError> {
+    fs::create_dir_all(tmp.join("scripts"))?;
+    atomic_write(&tmp.join("playbook.yaml"), validated_yaml.as_bytes())?;
+    match scripts {
+        VersionScripts::Imported(files) => write_imported_scripts(&tmp.join("scripts"), files)?,
+        VersionScripts::CarryFrom(Some(base)) => {
+            let scripts_src = playbook_dir.join(base).join("scripts");
+            if scripts_src.is_dir() {
+                crate::fsutil::copy_tree(&scripts_src, &tmp.join("scripts"))?;
+            }
+        }
+        VersionScripts::CarryFrom(None) => {}
+    }
+    Ok(())
+}
+
+/// Writes validated bundle scripts into a staging `scripts/` directory.
+/// Every path was already checked by the shared bundle script path check
+/// (safe, relative segments only), so joining it cannot escape the
+/// directory. Each file goes through [`atomic_write`]; the executable bit is
+/// restored on unix and ignored elsewhere.
+fn write_imported_scripts(scripts_dir: &Path, scripts: &[TreeFile]) -> Result<(), VersioningError> {
+    for script in scripts {
+        let dst = scripts_dir.join(&script.rel);
+        crate::fsutil::atomic_write_under(scripts_dir, &dst, &script.bytes)?;
+        set_executable_bit(&dst, script.executable)?;
+    }
+    Ok(())
+}
+
+fn set_executable_bit(path: &Path, executable: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(if executable { 0o755 } else { 0o644 });
+        fs::set_permissions(path, perms)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, executable);
+        Ok(())
+    }
 }
 
 fn copy_parent_layout(
@@ -1393,7 +1624,7 @@ mod tests {
             &playbook_dir,
             "1.1.0",
             &playbook,
-            Some("1.0.0"),
+            VersionScripts::CarryFrom(Some("1.0.0")),
             VersionBump::Minor,
         )
         .unwrap();
@@ -1402,6 +1633,24 @@ mod tests {
         let yaml = fs::read_to_string(path.join("playbook.yaml")).unwrap();
         assert!(yaml.contains("version: 1.2.0"));
         assert!(!yaml.contains("version: 1.1.0"));
+    }
+
+    #[test]
+    fn failed_first_commit_keeps_a_concurrent_writers_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let playbook_dir = dir.path().join("apb");
+        fs::create_dir_all(playbook_dir.join("1.0.0")).unwrap();
+        fs::write(playbook_dir.join("1.0.0/playbook.yaml"), "committed").unwrap();
+
+        discard_new_playbook_dir(&playbook_dir);
+        assert_eq!(
+            fs::read_to_string(playbook_dir.join("1.0.0/playbook.yaml")).unwrap(),
+            "committed"
+        );
+
+        fs::remove_dir_all(playbook_dir.join("1.0.0")).unwrap();
+        discard_new_playbook_dir(&playbook_dir);
+        assert!(!playbook_dir.exists());
     }
 
     #[test]

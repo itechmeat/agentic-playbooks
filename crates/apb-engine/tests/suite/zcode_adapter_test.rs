@@ -82,6 +82,7 @@ fn task<'a>(dir: &'a Path, policy: &'a ConnectorEnvPolicy, grant_autonomy: bool)
         status_file: None,
         hermetic_settings: None,
         transcript_dir: None,
+        output_limits: Default::default(),
     }
 }
 

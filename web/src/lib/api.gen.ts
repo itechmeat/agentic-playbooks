@@ -24,6 +24,20 @@ commits: Array<CommittedArtifact>,
  */
 omitted: number, };
 
+export type RunInboxGap = { 
+/**
+ * The node whose connector call made the read.
+ */
+node: string, connector: string, account: string, 
+/**
+ * First lost sequence number (the consumer's cursor plus one).
+ */
+from: number, 
+/**
+ * Last lost sequence number, inclusive.
+ */
+through: number, };
+
 export type GoalCriterionResult = { index: number, description: string, 
 /**
  * `script`, `marker` or `manual`.
@@ -637,6 +651,11 @@ goal?: RunGoal,
  * The commits the run's nodes made on a git tree (C7); empty when none.
  */
 commits?: Array<NodeCommits>, 
+/**
+ * Unread events the run's connector inbox reads found lost to inbox
+ * retention, one per distinct gap; empty when none.
+ */
+inbox_gaps?: Array<RunInboxGap>, 
 /**
  * The candidate trial this run was (issue #192), with its verdict;
  * absent for every other run.

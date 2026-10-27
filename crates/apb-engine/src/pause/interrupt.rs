@@ -52,10 +52,7 @@ pub(crate) fn is_graceful(flag: &AtomicBool) -> bool {
 /// The grace period between SIGTERM and SIGKILL: [`GRACE_ENV`] when set to a
 /// number of milliseconds, else [`DEFAULT_GRACE`].
 pub(crate) fn grace() -> Duration {
-    std::env::var(GRACE_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map_or(DEFAULT_GRACE, Duration::from_millis)
+    crate::env_duration::millis(GRACE_ENV).unwrap_or(DEFAULT_GRACE)
 }
 
 #[cfg(test)]

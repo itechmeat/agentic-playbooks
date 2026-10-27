@@ -72,6 +72,8 @@ fn attempt(seq: u64, node: &str, ms: u64) -> Event {
     ev(
         seq,
         EventPayload::AttemptFinished {
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
             node: node.into(),
             attempt: 1,
             status: "succeeded".into(),

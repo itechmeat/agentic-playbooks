@@ -14,6 +14,7 @@
 //! that these modules consume live in `apb_core::connector`.
 
 pub mod call;
+pub mod completeness;
 pub mod contract_test;
 pub mod imap;
 pub mod inbox;
