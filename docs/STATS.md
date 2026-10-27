@@ -58,12 +58,27 @@ Per playbook version:
   (`attempt_finished.usage`); the cost is what the agent CLIs reported, over
   the runs that reported one. Usage marked `estimated` (a source reserved for
   counts apb makes itself; nothing records it yet) is summed together with
-  reported usage and is not marked apart in these figures.
+  reported usage and is not marked apart in these figures. **cost known**:
+  the finished attempts that reported a cost over every finished attempt,
+  so a cost figure says how much of the work it covers (`spend.cost_known`;
+  the text line ends with `attempts with a known cost 3/4 (75%)`).
 - **missing deliverables and output fields**: `deliverable_missing` and
   `output_fields_missing` counts.
 - **goal**: per criterion, how often it passed over the runs that checked it
   automatically, failed, could not run (`error`), or was left to a person
   (`manual`), from the `goal_checked` events.
+- **findings**: the findings the attempts reported (`attempt_notes`, see
+  "Findings and warnings" in `docs/HOWTO-authoring.md`), per kind (how many
+  and in how many runs), and the top 20 groups of one kind at one location,
+  by the runs they appeared in. A location is grouped without its trailing
+  `:line` or `:line:col`, so `src/auth.rs:12` and `src/auth.rs:40` are one
+  group. `runs_with_warnings`: the runs whose attempts reported a warning,
+  over the version's runs. Text: `findings: security: 3 findings in 2 runs`, then one
+  indented `security at src/auth.rs: 2 runs, last <run id>` line per group.
+- **baseline**: per baseline check observation, how many runs compared it,
+  how often it was met (over those runs), and in how many runs it regressed
+  or was unknown, from the latest `baseline_compared` of each run. Text:
+  `baseline unowned.count: met 3/4 (75%), regressed in 1`.
 - **models**: how many attempts ran on each model, and `model_mismatch`, how
   many of them ran on another model than the node profile's primary model
   (from the run manifest). A CLI attempt ran on the model its
@@ -107,12 +122,19 @@ than 10 runs carries a note: small samples mislead.
       "question_wait": { "count": 0 },
       "duration":      { "count": 2, "median_ms": 5000, "max_ms": 5000 },
       "spend": { "runs_with_usage": 0, "tokens": { "total": 0, "runs": 0 },
-                 "runs_with_cost": 0, "cost_usd": 0.0 },
+                 "runs_with_cost": 0, "cost_known": { "count": 0, "of": 2, "rate": 0.0 },
+                 "cost_usd": 0.0 },
       "deliverable_missing": 0, "output_fields_missing": 0,
       "models": { "GLM-5.3-Flash": 3 }, "model_mismatch": 3,
       "goal": [ { "index": 0, "description": "tests pass", "check": "script",
                   "checked": 2, "passed": { "count": 1, "of": 2, "rate": 0.5 },
                   "failed": 1, "errors": 0, "manual": 0 } ],
+      "findings": { "by_kind": [ { "kind": "security", "occurrences": 2, "runs": 2 } ],
+                    "top": [ { "kind": "security", "location": "src/auth.rs", "runs": 2,
+                               "occurrences": 2, "last_run": "demo-20260920-2" } ],
+                    "runs_with_warnings": { "count": 1, "of": 2, "rate": 0.5 } },
+      "baseline": [ { "check": "tests", "observation": "cargo_test", "compared": 2,
+                      "met": { "count": 1, "of": 2, "rate": 0.5 }, "regressed": 1, "unknown": 0 } ],
       "nodes": [ { "node": "w", "runs": 2, "first_pass": { "count": 1, "of": 2, "rate": 0.5 },
                    "retries": 1, "fallbacks": 0, "reentries": 0,
                    "duration": { "count": 2, "median_ms": 4000, "max_ms": 4000 },

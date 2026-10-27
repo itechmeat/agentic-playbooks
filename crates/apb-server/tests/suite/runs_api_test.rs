@@ -575,6 +575,50 @@ async fn run_detail_carries_the_failure_reason_of_a_failed_run() {
     assert_eq!(json["failure_reason"], "node `note`: 3 failing tests");
 }
 
+/// Every run detail carries its human outcome; a journaled warning adds the
+/// notes block and marks the run in the listing as needing a look.
+#[tokio::test]
+async fn run_detail_and_listing_carry_the_outcome_and_the_needs_a_look_marker() {
+    let dir = seed_with_run();
+    let run_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert!(
+        json["outcome"]["headline"]
+            .as_str()
+            .unwrap()
+            .starts_with("Run succeeded")
+    );
+    assert!(json.get("notes").is_none());
+    assert!(json.get("baseline").is_none());
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let mut log = apb_engine::event::EventLog::open(&run_dir).unwrap();
+    log.append(apb_engine::event::EventPayload::AttemptNotes {
+        node: "note".into(),
+        attempt: 1,
+        findings: vec![],
+        warnings: vec![apb_core::run_notes::NoteWarning {
+            subject: "the greeting".into(),
+            reason: "a person should read it once".into(),
+        }],
+        dropped: 0,
+        dropped_reasons: vec![],
+    })
+    .unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(json["notes"]["warnings"][0]["subject"], "the greeting");
+    assert_eq!(json["outcome"]["needs_look"]["warnings"], 1);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, list) = get_json(app, "/api/runs").await;
+    assert_eq!(
+        list[0]["needs_look"]["reasons"],
+        serde_json::json!(["warnings"])
+    );
+}
+
 #[tokio::test]
 async fn unknown_run_404() {
     let dir = seed_with_run();

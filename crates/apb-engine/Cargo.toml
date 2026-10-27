@@ -48,7 +48,7 @@ libc = "0.2"
 ts-rs = { version = "12", optional = true }
 
 [features]
-ts = ["dep:ts-rs"]
+ts = ["dep:ts-rs", "apb-core/ts"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

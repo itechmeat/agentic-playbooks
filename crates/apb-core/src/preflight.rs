@@ -66,11 +66,7 @@ pub fn requires_unmet(root: &Path, req: &Requires) -> Result<Vec<String>, Requir
 /// can resolve. Trust is not judged here: approval is a deliberate user act
 /// the run gate asks for.
 pub fn connector_problems(root: &Path, playbook: &Playbook) -> Vec<String> {
-    let binds = playbook
-        .nodes
-        .iter()
-        .any(|n| !n.kind.connector_bindings().is_empty());
-    if !binds {
+    if !playbook.binds_connectors() {
         return Vec::new();
     }
     let resolution = match crate::connector::resolve::resolve_playbook(root, playbook) {

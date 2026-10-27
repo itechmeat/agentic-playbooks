@@ -62,17 +62,40 @@ still reports success.
 ## 6. Today
 
 examples/playbooks/dependency-security-fix.yaml expresses the shape: baseline
-node, fix node, proof node, one change request. The gaps:
+node, fix node, proof node, one change request, and an enforced
+`baseline_check` on the project's own test command (`project_checks: { only:
+[test] }`). The engine runs the suite before the first step that can change
+anything and again at the finish: a test that passed must still pass, and a
+command that failed may fail only on the tests that failed before (named for
+`cargo test`). With `enforce: true` a new failing test fails the run with a
+`run_error` that names it. Closed:
 
-1. The baseline is a text block inside a node output, not a snapshot the
-   engine holds; nothing stops a later step from drifting from it, and no
-   check compares against it mechanically.
-2. "No new failing tests" is the agent grading its own work; no enforced
-   check re-runs the suite at run end and diffs against the baseline.
-3. The whole findings list goes to one agent call; there is no fix-by-finding
+- The test baseline is a snapshot the engine holds in the journal, taken
+  before any step could change the tree; later steps cannot drift from it,
+  and the comparison is mechanical (engine test
+  `a_new_failing_cargo_test_under_enforce_fails_the_run_naming_it`).
+- "No new failing tests" is no longer the agent grading its own work: the
+  engine re-runs the suite at run end and diffs the failing tests against
+  the baseline. A test definition edited during the run makes the
+  comparison unknown instead of comparing two different commands (engine
+  test `a_test_definition_edited_mid_run_makes_the_comparison_unknown`),
+  while the dependency bump the run exists for does not: only the
+  `scripts.test` entry of `package.json` or the recipe defines the
+  command, and `cargo test` is defined by cargo itself.
+- `cargo test --no-fail-fast` runs every test binary, and each failing test
+  is named by its binary, so a failure in one binary cannot hide a new one
+  in another.
+
+The gaps that remain:
+
+1. The audit findings are still a text block inside a node output; only the
+   tests are engine-held. For a runner other than `cargo test`, a command
+   that fails on both sides reads unknown, because its failing tests are
+   not parsed.
+2. The whole findings list goes to one agent call; there is no fix-by-finding
    loop with per-finding proof, so a crash mid-list leaves the work's state
    readable only in the transcript.
-4. Exactly one change request is prompt discipline; nothing counts the pull
+3. Exactly one change request is prompt discipline; nothing counts the pull
    requests a run opened.
 
 ## 7. Target

@@ -40,9 +40,12 @@ use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree}
 /// every caller expects to find it.
 pub use crate::run_config::RunMode;
 
+mod attempt_notes;
+mod baseline;
 mod cache;
 mod control_apply;
 mod entry;
+mod finish_answer;
 mod fork;
 mod goal;
 mod handoff;
@@ -717,6 +720,10 @@ fn drive_inner(
     // but does NOT count as a step - otherwise a long human wait would exhaust the
     // budget. The limit is checked here, at the start of the iteration.
     let mut steps = 0usize;
+    // Every check's before snapshot is journaled: set once `ensure_before`
+    // returned true, so later acting nodes do not re-read the journal. A
+    // patch cannot change `baseline_check` once an acting node started.
+    let mut baseline_before_done = false;
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
@@ -778,11 +785,30 @@ fn drive_inner(
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| root.to_path_buf());
-        let node_kind = playbook
+        let current_node = playbook
             .node(&current)
-            .ok_or_else(|| EngineError::NotFound(current.clone()))?
-            .kind
-            .clone();
+            .ok_or_else(|| EngineError::NotFound(current.clone()))?;
+        let node_kind = current_node.kind.clone();
+        // The baseline's before snapshot, ahead of the first node that can
+        // act (a finish with a prompt acts too, and a batch always contains
+        // `current`). An interrupted snapshot journals nothing: the control
+        // scan at the top of the loop applies the pause or the stop first.
+        if !baseline_before_done && apb_core::effects::node_acts(current_node) {
+            let (flag, _guard) = baseline::snapshot_flag(&fanout);
+            let run = baseline::BaselineRun {
+                playbook: &playbook,
+                run_dir,
+                root,
+                workdir: &workdir,
+                cfg,
+                scrub: &env_scrub,
+            };
+            if !baseline::ensure_before(&run, &flag, log)? {
+                steps += 1;
+                continue;
+            }
+            baseline_before_done = true;
+        }
 
         if let NodeKind::Finish {
             outcome: o,
@@ -793,8 +819,15 @@ fn drive_inner(
             // A finish-with-prompt composes the run answer via an agent (spec
             // B); a finish without a prompt is instant with an empty output
             // (unchanged). NodeStarted + attempt events are written only for the
-            // agent path.
-            let answer_output = if let Some(p) = prompt {
+            // agent path. An answer already composed before an interrupted
+            // after snapshot is reused: the resume continues at the snapshot.
+            let kept_answer = match prompt {
+                Some(_) => finish_answer::kept(run_dir, &current, &read_all(run_dir)?),
+                None => None,
+            };
+            let answer_output = if let Some(kept) = kept_answer {
+                kept
+            } else if let Some(p) = prompt {
                 log.append(EventPayload::NodeStarted {
                     node: current.clone(),
                     attempt: 1,
@@ -821,7 +854,7 @@ fn drive_inner(
                 for ev in evs {
                     log.append(ev)?;
                 }
-                if st != NodeStatus::Succeeded {
+                let answer = if st != NodeStatus::Succeeded {
                     // The CLOSING answer failed to compose. This must NOT flip
                     // the run's real outcome (issue #42 finding 5): reaching a
                     // terminal finish node means every substantive node already
@@ -844,9 +877,42 @@ fn drive_inner(
                     fallback_finish_answer(&current)
                 } else {
                     out
+                };
+                // Best-effort: without the kept answer a resume composes it
+                // again, which costs an agent call but loses nothing.
+                if let Err(e) = finish_answer::keep(run_dir, &current, log.peek_next_seq(), &answer)
+                {
+                    eprintln!(
+                        "warning: run `{run_id}`: the finish answer could not be kept for a resume, so a resume composes it again: {e}"
+                    );
                 }
+                answer
             } else {
                 String::new()
+            };
+            // The baseline's after snapshot and its comparisons: after every
+            // earlier node and the finish answer, before the finish node's
+            // checkpoint. An abort or a `--now` pause interrupts it like any
+            // node work: nothing of it is journaled, and the control scan at
+            // the top of the loop applies the pause or the stop; a resume
+            // takes it again with the answer kept above.
+            let baseline_failure = {
+                let (flag, _guard) = baseline::snapshot_flag(&fanout);
+                let run = baseline::BaselineRun {
+                    playbook: &playbook,
+                    run_dir,
+                    root,
+                    workdir: &workdir,
+                    cfg,
+                    scrub: &env_scrub,
+                };
+                match baseline::after_and_compare(&run, &flag, log)? {
+                    baseline::AfterOutcome::Compared(f) => f,
+                    baseline::AfterOutcome::Interrupted => {
+                        steps += 1;
+                        continue;
+                    }
+                }
             };
             // The declared outcome is honest only if no failure was carried
             // here past every route (issue #106): an unconditional edge moves
@@ -869,8 +935,8 @@ fn drive_inner(
                 (Outcome::Success, None) => RunStatus::Succeeded,
                 _ => RunStatus::Failed,
             };
-            // --- 0.23.0 goal criteria (C1): checked after every earlier node
-            // and the finish answer, before the finish node's checkpoint. ---
+            // The goal criteria (C1): after every earlier node and the
+            // finish answer, before the finish node's checkpoint.
             let goal_failure = goal::check(
                 &playbook,
                 run_dir,
@@ -880,7 +946,7 @@ fn drive_inner(
                 &cfg.spawn_env(),
                 log,
             )?;
-            let outcome = match goal_failure {
+            let outcome = match goal_failure.or(baseline_failure) {
                 Some(reason) if outcome == RunStatus::Succeeded => {
                     log.append(EventPayload::RunError {
                         node: Some(current.clone()),
@@ -890,7 +956,6 @@ fn drive_inner(
                 }
                 _ => outcome,
             };
-            // --- end of goal criteria ---
             let s = match outcome {
                 RunStatus::Succeeded => "succeeded",
                 _ => "failed",
@@ -902,6 +967,7 @@ fn drive_inner(
                 output: answer_output,
                 artifacts: Vec::new(),
             })?;
+            finish_answer::discard(run_dir);
             if outcome == RunStatus::Succeeded
                 && let Some(applied) = last_applied_patch.as_ref()
             {

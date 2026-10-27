@@ -1611,7 +1611,7 @@ fn execute_node_kind(
                     // continue_from re-run can restart the attempt counter, so a
                     // status file from a PRIOR execution may still sit at this
                     // attempt's path. Drop it before spawning (ok-ignored: a missing
-                    // file is the normal case) so `read_status_file` after the run
+                    // file is the normal case) so the status-file read after the run
                     // can only ever adopt a file THIS attempt actually wrote.
                     let _ = std::fs::remove_file(&status_file);
                     // This attempt's raw output (issue #67 item 10), cleared
@@ -1666,10 +1666,14 @@ fn execute_node_kind(
                             ))
                         }
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
-                            "{step_text}\n\n{}",
-                            super::status_file::INTERRUPTION_NOTE
+                            "{step_text}\n\n{}\n\n{}",
+                            super::status_file::INTERRUPTION_NOTE,
+                            super::status_file::NOTES_NOTE
                         )),
-                        None => step_text,
+                        None => std::borrow::Cow::Owned(format!(
+                            "{step_text}\n\n{}",
+                            super::status_file::NOTES_NOTE
+                        )),
                     };
                     timeout_continuation = false;
                     let task = AgentTask {
@@ -2131,7 +2135,17 @@ fn execute_node_kind(
                     // when the process then exited non-zero, was signalled, or was
                     // killed on the timeout: that exit is transport-level noise
                     // once the verdict exists (issue #74 finding 1).
-                    let verdict = super::status_file::read_status_file(&status_file);
+                    let status_doc = super::status_file::StatusFileDoc::read(&status_file);
+                    super::attempt_notes::journal(
+                        journal,
+                        node_id,
+                        attempt,
+                        status_doc.as_ref(),
+                        outcome.as_ref().ok().map(|r| &r.host_notes_dropped),
+                    )?;
+                    let verdict = status_doc
+                        .as_ref()
+                        .and_then(super::status_file::StatusFileDoc::verdict);
                     match outcome {
                         Ok(mut report) => {
                             // Interactive suspension (spec 2026-07-20): the agent

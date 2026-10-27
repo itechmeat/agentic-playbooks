@@ -5,8 +5,22 @@
 //! journaled. Every block is
 //! absent when the run journaled nothing for it, so a run without them reads
 //! exactly as before.
+//!
+//! Submodules: `baseline` (the baseline check's view), `notes` (findings and
+//! warnings), `calls` (connector calls by what they say about the outcome)
+//! and `summary` (the human outcome every surface shows, and the cheap
+//! "needs a look" marker of a run listing).
 
 use std::path::Path;
+
+pub mod baseline;
+pub mod calls;
+pub mod notes;
+pub mod summary;
+
+pub use baseline::{RunBaseline, baseline_from};
+pub use notes::RunNotes;
+pub use summary::{NeedsLook, OutcomeSummary};
 
 use serde::Serialize;
 
@@ -104,6 +118,53 @@ impl RunView {
     pub fn inbox_gaps(&self) -> Vec<RunInboxGap> {
         inbox_gaps_from(&self.events)
     }
+}
+
+impl RunView {
+    /// The run's baseline check with what the journal recorded; `None`
+    /// when the playbook declares none.
+    pub fn baseline(&self, run_dir: &Path) -> Option<RunBaseline> {
+        let playbook = crate::legacy_snapshot::load_run_playbook(run_dir);
+        baseline_from(playbook.as_ref(), &self.events)
+    }
+
+    /// The findings and warnings the run's attempts reported.
+    pub fn notes(&self) -> RunNotes {
+        RunNotes::from_events(&self.events)
+    }
+
+    /// The human outcome of the run (see [`OutcomeSummary`]).
+    pub fn outcome(&self, run_dir: &Path) -> OutcomeSummary {
+        OutcomeSummary::build(self, run_dir)
+    }
+
+    /// The run's playbook snapshot and the blocks read against it, parsed
+    /// once, for a surface that shows them next to the outcome.
+    pub fn readout(&self, run_dir: &Path) -> RunReadout {
+        self.readout_of(crate::legacy_snapshot::load_run_playbook(run_dir))
+    }
+
+    /// [`RunView::readout`] over a playbook snapshot the caller already
+    /// parsed.
+    pub fn readout_of(&self, playbook: Option<apb_core::schema::Playbook>) -> RunReadout {
+        RunReadout {
+            goal: goal_from(playbook.as_ref(), &self.events),
+            baseline: baseline_from(playbook.as_ref(), &self.events),
+            notes: self.notes(),
+            playbook,
+        }
+    }
+}
+
+/// What [`RunView::readout`] read: one parse of the playbook snapshot, so
+/// the goal, the baseline, the notes and the outcome a surface shows side
+/// by side come from the same reading.
+#[derive(Debug, Clone)]
+pub struct RunReadout {
+    pub playbook: Option<apb_core::schema::Playbook>,
+    pub goal: Option<RunGoal>,
+    pub baseline: Option<RunBaseline>,
+    pub notes: RunNotes,
 }
 
 // --- goal criteria (C1) -------------------------------------------------------

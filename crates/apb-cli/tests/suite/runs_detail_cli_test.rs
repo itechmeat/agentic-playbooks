@@ -269,3 +269,63 @@ fn runs_with_an_id_lists_branch_failures() {
             "  branch_cancelled b: fork `start`: cancelled after `a` failed\n",
         ));
 }
+
+// --- the human run outcome ---
+
+/// A run whose attempt reported a finding.
+fn project_with_a_finding() -> tempfile::TempDir {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/noted-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1790000000100,"type":"run_started","playbook":"noted","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":1790000000101,"type":"node_started","node":"w","attempt":1}"#,
+            "\n",
+            r#"{"seq":2,"ts":1790000000102,"type":"attempt_notes","node":"w","attempt":1,"findings":[{"kind":"security","location":"src/auth.rs:12","evidence":"token compared with ==","why_not_fixed":"needs a design decision"}]}"#,
+            "\n",
+            r#"{"seq":3,"ts":1790000000103,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
+            "\n",
+            r#"{"seq":4,"ts":1790000000104,"type":"run_finished","outcome":"succeeded"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn the_runs_table_marks_a_run_that_needs_a_look() {
+    let dir = project_with_a_finding();
+    apb()
+        .arg("runs")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "noted-1\tnoted\tsucceeded\tneeds a look: 1 finding",
+        ))
+        .stdout(
+            predicate::str::contains("demo-1\tdemo\tsucceeded\t1 unknown")
+                .and(predicate::str::contains("demo-1\tdemo\tsucceeded\tneeds a look").not()),
+        );
+}
+
+#[test]
+fn runs_with_an_id_prints_the_outcome_with_its_findings() {
+    let dir = project_with_a_finding();
+    apb()
+        .args(["runs", "noted-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  outcome: Run succeeded; nothing checked by the engine; needs a look (1 finding)",
+        ))
+        .stdout(predicate::str::contains("    Findings:"))
+        .stdout(predicate::str::contains(
+            "      security at src/auth.rs:12: token compared with == (not fixed: needs a design decision; reported by w attempt 1)",
+        ));
+}

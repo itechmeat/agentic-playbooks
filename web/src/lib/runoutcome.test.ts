@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { runEventJournal } from './journal'
-import { commitLines, goalBadge, goalSummary, inboxGapLine, omittedCommits } from './runoutcome'
+import { commitLines, goalSummary, goalTone, inboxGapLine, observationText, omittedCommits } from './runoutcome'
 import type { NodeCommits, RunGoal } from './api.gen'
 import type { WfEvent } from './types'
 
@@ -82,12 +82,12 @@ describe('goal', () => {
     expect(goalSummary(pending)).toBe('not checked yet · 3 criteria')
     // A statement-only goal is never pending.
     expect(goalSummary({ ...pending, criteria: [] })).toBe('no criteria to check')
-    expect(['passed', 'failed', 'error', 'manual', 'pending'].map(goalBadge)).toEqual([
-      'default',
-      'destructive',
-      'destructive',
-      'outline',
-      'secondary',
+    expect(['passed', 'failed', 'error', 'manual', 'pending'].map(goalTone)).toEqual([
+      'pass',
+      'fail',
+      'fail',
+      'neutral',
+      'neutral',
     ])
   })
 
@@ -155,5 +155,31 @@ describe('inboxGapLine', () => {
     expect(runEventJournal(events).map((e) => e.note)).toEqual([
       'echo-hooks/main: unread events 3-6 were dropped by inbox retention before they were read (found by watch)',
     ])
+  })
+})
+
+describe('baseline and notes events in the event journal', () => {
+  const num = (n: number) => ({ state: 'value', value: { type: 'number', value: n } })
+  it('notes a snapshot, a comparison and an attempt\'s notes', () => {
+    const events: WfEvent[] = [
+      { seq: 1, ts: 1, type: 'baseline_observed', check: 'unowned', phase: 'before', status: 'observed', observations: { count: num(37) } },
+      { seq: 2, ts: 2, type: 'baseline_observed', check: 'tests', phase: 'after', status: 'unknown', reason: 'the check changed the working tree' },
+      { seq: 3, ts: 3, type: 'baseline_compared', check: 'unowned', observation: 'count', rule: 'equals 0', before: num(37), after: num(40), verdict: 'not_met', regressed: true },
+      { seq: 4, ts: 4, type: 'attempt_notes', node: 'fix', attempt: 1, findings: [{}], warnings: [{}, {}], dropped: 1 },
+      { seq: 5, ts: 5, type: 'baseline_compared', check: 'tests', observation: 'npm_test', rule: 'no_new_failures', verdict: 'unknown', detail: 'after: the check changed the working tree' },
+    ]
+    expect(runEventJournal(events).map((e) => e.note)).toEqual([
+      'unowned before: observed (count 37)',
+      'tests after: unknown (the check changed the working tree)',
+      'unowned/count: 37 -> 40, equals 0: not met, worse than before',
+      '1 finding, 2 warnings, 1 dropped as malformed',
+      'tests/npm_test: unknown -> unknown, no_new_failures: unknown (after: the check changed the working tree)',
+    ])
+  })
+
+  it('reads an unknown or a list observation without guessing a value', () => {
+    expect(observationText({ state: 'unknown', reason: 'cut short' })).toBe('unknown')
+    expect(observationText({ state: 'value', value: { type: 'list', value: ['a', 'b'] } })).toBe('2 items')
+    expect(observationText(undefined)).toBe('unknown')
   })
 })

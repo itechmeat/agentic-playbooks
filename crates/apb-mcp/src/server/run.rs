@@ -521,7 +521,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "List runs recorded in the project",
+        description = "List runs recorded in the project; needs_look marks a run with a baseline regression, findings or warnings",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn runs_list(
@@ -665,7 +665,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get a summary report of a run",
+        description = "Get a summary report of a run; outcome says what was done, what the engine verified, what nobody verified, and the findings and warnings to look at",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_report(
@@ -878,7 +878,7 @@ impl WfMcp {
         description = concat!(
             "Submit the result of a host task (a run in host execution mode, or a step whose CLI could not start, hands its agent steps to you through run_wait's pending_tasks). ",
             apb_engine::host_task_contract!(),
-            " Pass run_id and task_id verbatim from pending_tasks, status succeeded (the subagent did the task), failed (it could not; the run applies its retry policy) or blocked (it needs the user: output is the question, the run waits for run_answer), and output: the subagent's final reply verbatim, including its closing yaml status block. usage (token counts), note and model (the model the subagent actually ran on) are optional. Then call run_wait again."
+            " Pass run_id and task_id verbatim from pending_tasks, status succeeded (the subagent did the task), failed (it could not; the run applies its retry policy) or blocked (it needs the user: output is the question, the run waits for run_answer), and output: the subagent's final reply verbatim, including its closing yaml status block. usage (token counts), note, model (the model the subagent actually ran on), findings and warnings are optional. Then call run_wait again."
         ),
         annotations(destructive_hint = true)
     )]
@@ -892,6 +892,8 @@ impl WfMcp {
             usage,
             note,
             model,
+            findings,
+            warnings,
             workspace,
         }): Parameters<RunTaskSubmitArgs>,
         ctx: RequestContext<RoleServer>,
@@ -909,7 +911,20 @@ impl WfMcp {
             cost_usd: u.cost_usd,
         });
         to_call_tool_result(tools::run_task_submit(
-            &root, &run_id, &task_id, &status, output, usage, note, "host", client, model,
+            &root,
+            &run_id,
+            tools::TaskReply {
+                task_id,
+                status,
+                output,
+                usage,
+                note,
+                submitted_by: "host".into(),
+                client,
+                model,
+                findings,
+                warnings,
+            },
         ))
     }
     // --- end host execution mode ---

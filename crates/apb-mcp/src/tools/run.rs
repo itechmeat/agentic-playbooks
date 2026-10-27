@@ -213,7 +213,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         out["pause"] = json!(p);
     }
     add_journal_extras(&mut out, &view);
-    add_outcome_blocks(&mut out, &view, &dir);
+    add_outcome_blocks(&mut out, &view, &dir, &view.readout(&dir));
     add_candidate_trial(&mut out, &view, &dir);
     // Issue #195: what a fork's branch-failure policy cancelled and which
     // joins refused; absent when nothing did.
@@ -238,11 +238,17 @@ fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, di
 // --- 0.23.0: run outcome blocks (C1, C7) ---
 
 /// The run's goal with the criteria results (C1), the commits its nodes made
-/// (C7) and the inbox gaps its connector reads found, each only when there is
-/// one: a run of a playbook without a goal on a tree without commits reads as
+/// (C7), the inbox gaps its connector reads found, its baseline check and the
+/// findings and warnings its attempts reported, each only when there is one:
+/// a run of a playbook without a goal on a tree without commits reads as
 /// before. Shared by `run_status` and `run_report`.
-fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
-    if let Some(goal) = view.goal(dir) {
+fn add_outcome_blocks(
+    out: &mut Value,
+    view: &apb_engine::run_view::RunView,
+    dir: &Path,
+    readout: &apb_engine::run_outcome::RunReadout,
+) {
+    if let Some(goal) = &readout.goal {
         out["goal"] = json!(goal);
     }
     let commits = view.commits();
@@ -264,6 +270,15 @@ fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir
     let gaps = view.inbox_gaps();
     if !gaps.is_empty() {
         out["inbox_gaps"] = json!(gaps);
+    }
+    // The baseline check: each observation before and after, and the
+    // verdict the finish journaled. Absent for a playbook without one.
+    if let Some(baseline) = &readout.baseline {
+        out["baseline"] = json!(baseline);
+    }
+    // The findings and warnings the attempts reported; absent when none.
+    if !readout.notes.is_empty() {
+        out["notes"] = json!(readout.notes);
     }
 }
 
@@ -329,39 +344,46 @@ fn run_execution(run_dir: &Path) -> Value {
     }
 }
 
+/// A host's reply to a task as `run_task_submit` receives it: the
+/// engine's `SubmitRequest` with the status still as written.
+pub struct TaskReply {
+    pub task_id: String,
+    pub status: String,
+    pub output: String,
+    pub usage: Option<apb_engine::host_task::SubmittedUsage>,
+    pub note: Option<String>,
+    pub submitted_by: String,
+    pub client: Option<String>,
+    pub model: Option<String>,
+    /// Problems the subagent saw and did not fix, as a JSON list.
+    pub findings: Option<Value>,
+    /// What a person should check, as a JSON list.
+    pub warnings: Option<Value>,
+}
+
 /// Records a host's reply to a pending host task (`run_task_submit`). The
 /// task may belong to the run or to one of its sub-playbook runs.
-#[allow(clippy::too_many_arguments)]
-pub fn run_task_submit(
-    root: &Path,
-    run_id: &str,
-    task_id: &str,
-    status: &str,
-    output: String,
-    usage: Option<apb_engine::host_task::SubmittedUsage>,
-    note: Option<String>,
-    submitted_by: &str,
-    client: Option<String>,
-    model: Option<String>,
-) -> Result<Value, ToolError> {
-    let Some(status) = apb_engine::host_task::SubmitStatus::parse(status) else {
+pub fn run_task_submit(root: &Path, run_id: &str, reply: TaskReply) -> Result<Value, ToolError> {
+    let Some(status) = apb_engine::host_task::SubmitStatus::parse(&reply.status) else {
         return Ok(json!({
             "error": "unknown_status",
-            "detail": format!("status must be succeeded, failed or blocked, got `{status}`"),
+            "detail": format!("status must be succeeded, failed or blocked, got `{}`", reply.status),
         }));
     };
     let receipt = apb_engine::host_task::submit_to_run(
         root,
         run_id,
         apb_engine::host_task::SubmitRequest {
-            task_id: task_id.to_string(),
+            task_id: reply.task_id,
             status,
-            output,
-            usage,
-            note,
-            submitted_by: submitted_by.to_string(),
-            client,
-            model,
+            output: reply.output,
+            usage: reply.usage,
+            note: reply.note,
+            submitted_by: reply.submitted_by,
+            client: reply.client,
+            model: reply.model,
+            findings: reply.findings,
+            warnings: reply.warnings,
         },
     )?;
     Ok(json!({
@@ -369,6 +391,8 @@ pub fn run_task_submit(
         "task_id": receipt.task_id,
         "node": receipt.node,
         "status": receipt.status,
+        "notes_dropped": receipt.notes_dropped,
+        "notes_dropped_reasons": receipt.notes_dropped_reasons,
         "next": "call run_wait again: it returns the next pending task, a question, a gate, or the end of the run",
     }))
 }
@@ -528,7 +552,8 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let view = apb_engine::run_view::RunView::load(&dir, run_id)
         .map_err(|e| ToolError::Engine(e.to_string()))?;
     let events = &view.events;
-    let pb = apb_engine::progress::load_run_playbook(&dir);
+    let readout = view.readout(&dir);
+    let pb = readout.playbook.as_ref();
     let answer = apb_engine::progress::run_answer(&dir, events);
     let mut base = json!({
         "run_id": run_id,
@@ -539,11 +564,11 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "answer": answer,
     });
     add_journal_extras(&mut base, &view);
-    add_outcome_blocks(&mut base, &view, &dir);
+    add_outcome_blocks(&mut base, &view, &dir, &readout);
 
     // duration_table is always present (empty when there is no snapshot), as
     // before; it is now built from the single events read above.
-    let table = match &pb {
+    let table = match pb {
         Some(playbook) => {
             let measured = apb_engine::progress::node_durations_seconds(events);
             build_duration_table_from(playbook, &measured)
@@ -555,7 +580,16 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }
 
     // The goal with each criterion's result (C1) is in `add_outcome_blocks`,
-    // shared with `run_status`.
+    // shared with `run_status`. The human outcome (what was done, verified,
+    // not verified, reported) is the report's own.
+    if let Some(obj) = base.as_object_mut() {
+        obj.insert(
+            "outcome".into(),
+            json!(apb_engine::run_outcome::OutcomeSummary::from_readout(
+                &view, &dir, &readout, answer
+            )),
+        );
+    }
 
     Ok(base)
 }
@@ -929,6 +963,43 @@ mod progress_tests {
         );
         assert_eq!(criteria[0]["check"], "marker");
         assert_eq!(criteria[0]["status"], "pending");
+    }
+
+    /// The report carries the human outcome, run_status the notes block, and
+    /// the listing the needs-a-look marker, all from one journaled finding.
+    #[test]
+    fn a_reported_finding_reaches_the_report_the_status_and_the_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1,"type":"node_started","node":"a","attempt":1}"#,
+                "\n",
+                r#"{"seq":2,"ts":2,"type":"attempt_notes","node":"a","attempt":1,"findings":[{"kind":"bug","location":"src/x.rs:3","evidence":"panics on empty input","why_not_fixed":"out of scope"}]}"#,
+                "\n",
+                r#"{"seq":3,"ts":3,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":""}"#,
+                "\n",
+                r#"{"seq":4,"ts":4,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let report = run_report(tmp.path(), "r1").unwrap();
+        let outcome = &report["outcome"];
+        assert_eq!(outcome["findings"][0]["location"], "src/x.rs:3");
+        assert_eq!(outcome["unverified"][0]["kind"], "self_reported_node");
+        assert_eq!(outcome["needs_look"]["reasons"], json!(["findings"]));
+        let status = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(status["notes"]["findings"][0]["kind"], "bug");
+        assert!(status.get("baseline").is_none());
+        let runs = runs_list(tmp.path()).unwrap();
+        assert_eq!(runs[0]["needs_look"]["findings"], 1);
     }
 
     /// A playbook snapshot with no `goal` block emits no `goal` key at all,

@@ -566,6 +566,12 @@ impl RunState {
                 EventPayload::ArtifactsCommitted { .. }
                 | EventPayload::GoalChecked { .. }
                 | EventPayload::ProtectedPathsModified { .. } => {}
+                // The baseline snapshots, their comparisons and an attempt's
+                // notes are reports; `crate::baseline::BaselineState` folds
+                // the baseline for the drive.
+                EventPayload::BaselineObserved { .. }
+                | EventPayload::BaselineCompared { .. }
+                | EventPayload::AttemptNotes { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a

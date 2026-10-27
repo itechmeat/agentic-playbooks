@@ -2295,3 +2295,72 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
         "mcp:claude-code"
     );
 }
+
+/// Every `run_task_submit` argument but the workspace is in the tool
+/// reference: the schema the server publishes and the documentation
+/// cannot drift apart.
+#[test]
+fn every_run_task_submit_argument_is_documented() {
+    let doc = include_str!("../../../../docs/MCP.md");
+    let tools = WfMcp::new(PathBuf::from(".")).tool_router.list_all();
+    let submit = tools.iter().find(|t| t.name == "run_task_submit").unwrap();
+    let row = doc
+        .lines()
+        .find(|l| l.starts_with("| `run_task_submit` |"))
+        .expect("run_task_submit row");
+    let props = submit.input_schema["properties"].as_object().unwrap();
+    for arg in props.keys().filter(|k| *k != "workspace") {
+        assert!(row.contains(&format!("`{arg}`")), "run_task_submit `{arg}`");
+    }
+}
+
+/// The run outcome is documented where an agent reads it: each tool row
+/// names the fields its answer carries, and the Run outcome section names
+/// every part of `outcome`.
+#[test]
+fn the_run_outcome_fields_are_documented_where_they_are_returned() {
+    let doc = include_str!("../../../../docs/MCP.md");
+    let row = |tool: &str| {
+        doc.lines()
+            .find(|l| l.starts_with(&format!("| `{tool}` |")))
+            .unwrap_or_else(|| panic!("docs/MCP.md has no `{tool}` row"))
+    };
+    for (tool, fields) in [
+        ("runs_list", &["needs_look"][..]),
+        ("run_report", &["outcome", "baseline", "notes"][..]),
+        (
+            "run_task_submit",
+            &["notes_dropped", "notes_dropped_reasons"][..],
+        ),
+    ] {
+        let row = row(tool);
+        for field in fields {
+            assert!(
+                row.contains(&format!("`{field}`")),
+                "the `{tool}` row must name `{field}`"
+            );
+        }
+    }
+    let section = doc
+        .split("\n## Run outcome\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("a Run outcome section");
+    for field in [
+        "headline",
+        "needs_look",
+        "done",
+        "verified",
+        "unverified",
+        "findings",
+        "warnings",
+        "baseline",
+        "goal_reached",
+        "agent_summary",
+    ] {
+        assert!(
+            section.contains(&format!("`{field}`")),
+            "the Run outcome section must name `{field}`"
+        );
+    }
+}

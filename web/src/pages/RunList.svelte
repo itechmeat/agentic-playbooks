@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fetchRuns } from '../lib/api'
   import { filterByProject, projectFilter } from '../lib/projectfilter'
-  import { groupRunsByParent } from '../lib/runlist'
+  import { groupRunsByParent, needsLookLabel } from '../lib/runlist'
   import { unknownEventsNote } from '../lib/runusage'
   import { candidateTrialLabel } from '../lib/versioninfo'
   import { subscribeChanges } from '../lib/ws'
@@ -77,6 +77,7 @@
           </Table.Header>
           <Table.Body>
             {#each filtered as r (`${r.workspace_id}/${r.run_id}`)}
+              {@const look = needsLookLabel(r.needs_look)}
               <Table.Row>
                 <Table.Cell class="font-mono text-xs">
                   <span class={r.parent_run ? 'pl-4' : ''}>
@@ -106,6 +107,9 @@
                     <Badge variant="outline" class="ml-1" title={pauseLine(r.pause)} data-testid="run-pause-marker">
                       {pauseMarker(r.pause)}
                     </Badge>
+                  {/if}
+                  {#if look}
+                    <span class="needs-look" title={look.title} data-testid="run-needs-look">{look.label}</span>
                   {/if}
                   {#if showsDriverDead(r.status, r.driver_dead)}
                     <Badge variant="outline" class="ml-1">needs resume</Badge>
@@ -137,3 +141,17 @@
     {/if}
   </div>
 </PageScroll>
+
+<style>
+  .needs-look {
+    display: inline-block;
+    margin-left: 0.25rem;
+    padding: 0 0.5rem;
+    border: 1px solid var(--warning);
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--warning) 15%, transparent);
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+    white-space: nowrap;
+  }
+</style>

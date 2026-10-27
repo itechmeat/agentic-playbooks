@@ -30,6 +30,19 @@ goal:
       check: { type: marker, marker: "CHANGE REQUEST:" }
     - description: Every unfixed finding carries a reason a reader can act on
       check: { type: manual }
+# The engine runs the project's own test command before the first step that
+# can change anything and again at the finish: a test that passed before must
+# still pass, and a command that failed before may fail only on the tests
+# that already failed (failing tests are named for `cargo test`; for other
+# runners a command that still fails reads unknown). enforce fails the run
+# when that is not met or cannot be told.
+baseline_check:
+  enforce: true
+  checks:
+    - id: tests
+      description: The project's test suite
+      timeout_seconds: 1800
+      project_checks: { only: [test] }
 nodes:
   - { id: start, type: start }
   - id: baseline

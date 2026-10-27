@@ -89,8 +89,8 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
     let mut failed: BTreeSet<String> = BTreeSet::new();
 
     let mut names: BTreeSet<String> = BTreeSet::new();
-    for node in &playbook.nodes {
-        for binding in node.kind.connector_bindings() {
+    for (_, bindings) in playbook.connector_sites() {
+        for binding in bindings.iter() {
             names.insert(binding.name.clone());
         }
     }
@@ -108,14 +108,13 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
     }
 
     let mut grants: BTreeMap<String, Vec<ResolvedGrant>> = BTreeMap::new();
-    for node in &playbook.nodes {
-        let bindings = node.kind.connector_bindings();
+    for (site, bindings) in playbook.connector_sites() {
         if bindings.is_empty() {
             continue;
         }
 
         let mut node_grants = Vec::new();
-        for binding in bindings {
+        for binding in bindings.iter() {
             if failed.contains(&binding.name) {
                 // The connector-level error was already recorded once; a
                 // binding referencing a broken connector adds nothing new.
@@ -126,18 +125,18 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
                 // into `names` above, so it is either in `connectors` or
                 // `failed`. Kept as a defensive error rather than a panic.
                 errors.push(format!(
-                    "node `{}`: connector `{}` was not resolved",
-                    node.id, binding.name
+                    "node `{site}`: connector `{}` was not resolved",
+                    binding.name
                 ));
                 continue;
             };
 
-            match expand_grant(&node.id, binding, resolved, &mut warnings) {
+            match expand_grant(site, binding, resolved, &mut warnings) {
                 Ok(grant) => node_grants.push(grant),
                 Err(mut errs) => errors.append(&mut errs),
             }
         }
-        grants.insert(node.id.clone(), node_grants);
+        grants.insert(site.to_string(), node_grants);
     }
 
     if secrets::gitignore_gap(root) {
@@ -253,6 +252,10 @@ fn expand_grant(
         }
     };
 
+    if node_id == crate::baseline::BASELINE_SITE {
+        errors.extend(baseline_refusals(binding, resolved, &functions));
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -274,6 +277,33 @@ fn expand_grant(
         functions,
         max_calls: binding.max_calls,
     })
+}
+
+/// Why a baseline grant cannot stand: a baseline read must not change the
+/// service, so every function it names must be `read_only`, and it must not
+/// consume an inbox. The run-start backstop for validator V63.
+fn baseline_refusals(
+    binding: &crate::schema::ConnectorBinding,
+    resolved: &ResolvedConnector,
+    functions: &[String],
+) -> Vec<String> {
+    functions
+        .iter()
+        .filter_map(|fname| {
+            let f = resolved.loaded.doc.function(fname)?;
+            let why = if f.is_inbox() {
+                "is an inbox function"
+            } else if !f.read_only {
+                "is not read-only"
+            } else {
+                return None;
+            };
+            Some(format!(
+                "baseline_check: connector `{}` function `{fname}` {why}, and a baseline read must not change anything",
+                binding.name
+            ))
+        })
+        .collect()
 }
 
 /// Env var names referenced by every installed connector's merged account
@@ -323,6 +353,9 @@ pub struct ConnectorFacts {
     /// Whether the manifest carries a `webhook:` block, which is what makes
     /// the connector able to receive anything at all.
     pub has_webhook: bool,
+    /// Names of all its functions, in manifest order (V63 names a baseline
+    /// function the connector does not declare).
+    pub functions: Vec<String>,
     /// Names of its `inbox` functions, in manifest order.
     pub inbox_functions: Vec<String>,
     /// Names of its functions flagged `irreversible: true` (V73).
@@ -418,6 +451,12 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
             name.clone(),
             ConnectorFacts {
                 has_webhook: loaded.doc.webhook.is_some(),
+                functions: loaded
+                    .doc
+                    .functions
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect(),
                 inbox_functions: loaded.doc.inbox_functions(),
                 irreversible_functions: loaded.doc.irreversible_functions(),
                 write_functions: loaded
@@ -589,6 +628,51 @@ edges: []
         let out = resolve_playbook(root.path(), &pb).unwrap();
         assert!(out.grants.is_empty());
         assert!(out.connectors.is_empty());
+    }
+
+    fn baseline_playbook(function: &str) -> Playbook {
+        Playbook::from_yaml(&format!(
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+baseline_check:
+  checks:
+    - id: open
+      connector: {{ name: mock-tracker, function: {function} }}
+      observe: [{{ id: n, type: number, path: total, expect: {{ equals: 0 }} }}]
+nodes:
+  - {{ id: s, type: start }}
+edges: []
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_baseline_site_gets_a_read_only_grant_and_refuses_a_write() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _guard = set_config_dir(cfg.path());
+        write_fixture_connector(cfg.path());
+        write_project_account(
+            root.path(),
+            "mock-tracker",
+            "accounts:\n  - name: acct1\n    base_url: https://example.com\n    token: \"{{env.MOCK_TOKEN}}\"\n",
+        );
+
+        let out = resolve_playbook(root.path(), &baseline_playbook("list_items")).unwrap();
+        let grants = out.grants.get(crate::baseline::BASELINE_SITE).unwrap();
+        assert_eq!(grants[0].functions, vec!["list_items".to_string()]);
+
+        let errs = resolve_playbook(root.path(), &baseline_playbook("create_item")).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("create_item") && e.contains("is not read-only")),
+            "{errs:?}"
+        );
     }
 
     // --- errors ---------------------------------------------------------

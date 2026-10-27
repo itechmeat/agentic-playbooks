@@ -42,7 +42,8 @@ macro_rules! host_task_contract {
 Do not launch another agent CLI or process to run it (such as claude -p, codex exec, opencode run, gemini or a ZCode CLI), and never with permission-bypass flags. \
 The profile's executor agent and model do not apply in host mode, and model_hint is advisory only: choose among the models your own subagent tool offers, use your session's model when none matches, and report the model actually used as run_task_submit model (apb tasks submit --model). \
 Pass the prompt to your subagent by path (tell it to read prompt_path, and role_path as its role) instead of copying it. \
-Bounded decisions inside the task (choose, rank, filter, map, yes/no) may be asked of the configured decision providers with `apb decide` or the MCP tool `decision_ask`; that is not running the task elsewhere."
+Bounded decisions inside the task (choose, rank, filter, map, yes/no) may be asked of the configured decision providers with `apb decide` or the MCP tool `decision_ask`; that is not running the task elsewhere. \
+Problems the subagent saw and did not fix, and what a person should check, go in run_task_submit findings and warnings (apb tasks submit --notes); they are reported only and never change the result."
     };
 }
 
@@ -182,6 +183,19 @@ pub struct Submission {
     /// The model the host reports it ran the task on, when it says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The findings the host reported for the subagent, sanitized
+    /// (`apb_core::run_notes`); merged into the attempt's status file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<apb_core::run_notes::Finding>,
+    /// The warnings the host reported, sanitized.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<apb_core::run_notes::NoteWarning>,
+    /// Findings and warnings the sanitizer dropped, and why: the attempt's
+    /// `attempt_notes` counts them with the status file's own.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub notes_dropped: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes_dropped_reasons: Vec<String>,
     #[serde(default)]
     pub submitted_ts: u64,
 }
@@ -515,6 +529,17 @@ pub struct SubmitReceipt {
     pub task_id: String,
     pub node: String,
     pub status: SubmitStatus,
+    /// Findings and warnings of this submission dropped as malformed
+    /// (`apb_core::run_notes`). It counts this submission alone: entries
+    /// past the per-attempt cap once they join the subagent's own are
+    /// dropped when the attempt is journaled, and counted there.
+    pub notes_dropped: u32,
+    /// Why they were dropped, at most `apb_core::run_notes::MAX_REASONS`.
+    pub notes_dropped_reasons: Vec<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A host's reply to a task, as a facade receives it.
@@ -529,6 +554,10 @@ pub struct SubmitRequest {
     pub client: Option<String>,
     /// The model the host ran the task on, when it reports it.
     pub model: Option<String>,
+    /// Problems the subagent saw and did not fix (a JSON list of findings).
+    pub findings: Option<serde_json::Value>,
+    /// What a person should check (a JSON list of warnings).
+    pub warnings: Option<serde_json::Value>,
 }
 
 /// The longest model name a submission may report, in characters.
@@ -574,7 +603,15 @@ pub fn submit(run_dir: &Path, req: SubmitRequest) -> Result<SubmitReceipt, Engin
             "a blocked submission needs the question for the person in `output`".into(),
         ));
     }
+    let notes = apb_core::run_notes::sanitize(
+        &req.findings.unwrap_or_default(),
+        &req.warnings.unwrap_or_default(),
+    );
     let submission = Submission {
+        findings: notes.notes.findings,
+        warnings: notes.notes.warnings,
+        notes_dropped: notes.dropped,
+        notes_dropped_reasons: notes.reasons.clone(),
         task_id: req.task_id.clone(),
         status: req.status,
         output: req.output,
@@ -598,6 +635,8 @@ pub fn submit(run_dir: &Path, req: SubmitRequest) -> Result<SubmitReceipt, Engin
             task_id: req.task_id,
             node: node.clone(),
             status: req.status,
+            notes_dropped: notes.dropped,
+            notes_dropped_reasons: notes.reasons,
         }),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(EngineError::Conflict(
             format!("host task `{}` was already submitted", req.task_id),
@@ -761,6 +800,7 @@ mod tests {
             "`apb decide`",
             "`decision_ask`",
             "that is not running the task elsewhere",
+            "run_task_submit findings and warnings",
         ] {
             assert!(
                 EXECUTION_CONTRACT.contains(phrase),
@@ -768,7 +808,7 @@ mod tests {
             );
         }
         let sentences = EXECUTION_CONTRACT.matches(". ").count() + 1;
-        assert!((2..=5).contains(&sentences), "{sentences} sentences");
+        assert!((2..=6).contains(&sentences), "{sentences} sentences");
         assert!(!EXECUTION_CONTRACT.contains(['\u{2014}', '!', '\n']));
     }
 
@@ -811,6 +851,8 @@ mod tests {
             submitted_by: "host".into(),
             client: Some("test-host".into()),
             model: None,
+            findings: None,
+            warnings: None,
         };
         submit(run, req.clone()).unwrap();
         assert!(pending_tasks(run, &events).is_empty());
@@ -836,6 +878,8 @@ mod tests {
             submitted_by: "host".into(),
             client: None,
             model: None,
+            findings: None,
+            warnings: None,
         };
         assert!(matches!(
             submit(run, req.clone()),
@@ -940,6 +984,8 @@ mod tests {
             submitted_by: "host".into(),
             client: None,
             model: None,
+            findings: None,
+            warnings: None,
         };
         let err = submit_to_run(root, "parent", req.clone()).unwrap_err();
         match err {

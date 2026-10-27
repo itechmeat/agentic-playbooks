@@ -344,6 +344,50 @@ textual report. Put the completion marker in `outputs` when you write one, or
 omit `outputs` and keep the marker in the reply text, so the check can still
 find it.
 
+### Findings and warnings (reported, never acted on)
+
+An attempt may report problems it saw and did not fix, and things a person
+should check, next to its result. Both go in the same status file:
+
+```json
+{
+  "status": "success",
+  "findings": [
+    { "kind": "security", "location": "src/auth.rs:42",
+      "evidence": "the token is compared with ==, not in constant time",
+      "why_not_fixed": "out of scope for this dependency bump" }
+  ],
+  "warnings": [
+    { "subject": "deal 9", "reason": "its owner left the company; reassign by hand" }
+  ]
+}
+```
+
+- A finding has a `kind` (a slug of `[a-z0-9_-]`, at most 40 characters;
+  the recommended ones are `bug`, `regression`, `security`, `data_quality`,
+  `config`, `docs`, `test_gap`, `performance`, `dependency`, `other`), a
+  `location` (a path with an optional `:line`, or a record; at most 200
+  characters), the `evidence` (at most 1000) and `why_not_fixed` (at most
+  500). A warning has a `subject` (at most 200) and a `reason` (at most 500).
+  Every field is required.
+- At most 20 of each per attempt. An entry with an empty or over-long field,
+  a control character or a wrong type is dropped whole and counted; nothing
+  is truncated.
+- A file with only `findings` and `warnings` and no `status` keeps the
+  textual report as the verdict. Notes never change a step's status, its
+  outputs, a route, the run context or any completion check.
+- In host execution mode the host passes them to `run_task_submit` as
+  `findings` and `warnings` (`apb tasks submit --notes '{"findings": [...],
+  "warnings": [...]}'`); they are merged into the attempt's status file.
+- Each attempt's notes are journaled as one `attempt_notes` event right
+  before its `attempt_finished`. The run outcome lists them (each finding
+  once per node, with the latest attempt that reported it), a run with any
+  is marked as needing a look in `apb runs`, `runs_list` and the dashboard,
+  and `apb stats` groups findings by kind and location across runs
+  (`docs/STATS.md`).
+
+A fresh agent_task attempt prompt carries a short paragraph with this contract.
+
 ### require_verdict (mandatory completion signal)
 
 `success_check` gates a report the agent already chose to write.
@@ -2085,6 +2129,175 @@ the goal with each criterion's result (`pending` until the run is checked).
 The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may
 change them.
+
+## baseline_check (before and after)
+
+Optional, report-only by default. A goal says what the run is for; a
+baseline says what the world looked like before the run touched it and what
+it looks like at the end, read by the engine itself rather than by an agent.
+Each check reads one source twice: once before the first node that can act,
+and once at the finish node, then compares every observation under its
+rule.
+
+```yaml
+baseline_check:
+  enforce: false            # default: report only
+  checks:
+    - id: unowned           # [a-z0-9_], at most 40
+      description: Open deals without an owner
+      timeout_seconds: 300  # default 300, at most 1800
+      connector:            # exactly one source: connector | script | project_checks
+        name: twenty
+        account: default
+        function: list_opportunities   # must be read_only, not an inbox function
+        args: { filter: "ownerId[is]:NULL,stage[in]:[{{params.open_stages}}]", limit: 1 }
+      observe:
+        - { id: count, type: number, path: totalCount, expect: { equals: 0 } }
+```
+
+**When the snapshots are taken.** "A node that can act" is one that takes
+the working-tree lock (`agent_task`, `script`, a sub-playbook, a finish
+with a prompt), binds a connector, or declares any effect other than
+`fs_read`: a human gate or a judge before it does not count. The before
+snapshot is journaled once (`baseline_observed`, `phase: before`) and never
+taken again: a pause, a quota pause, `apb resume` and a resume from a node
+reuse it. A run continued from another (`continued_from`) inherits its
+predecessor's before snapshot. A check with no before snapshot when a node
+that can act has already started (a playbook patched mid-run, a journal from
+an older apb) is journaled `missed`, and its comparisons are unknown. The
+after snapshot and one `baseline_compared` per observation are journaled at
+the finish, after the finish answer and before the goal criteria; a run that
+ends before a finish node has no after snapshot, and the outcome says so. A
+run whose nodes never act takes its before snapshot at the finish, right
+before the after one. A resume that re-runs nodes that can act takes a new
+after snapshot, and a resume after a crash between two `baseline_compared`
+events journals the missing ones before judging the whole set. An abort or
+a `--now` pause interrupts either snapshot like any node work: nothing of
+it is journaled, and the resume takes it again. A finish answer composed
+before an interrupted after snapshot is kept: the resume continues at the
+snapshot and the answer agent does not run again, unless the run moved on
+meanwhile (a node re-ran, a supervisor directive or patch, a resume that
+names its start node). A supervisor patch may not
+change `baseline_check` once a node that can act has started.
+
+**Sources.**
+
+- `connector`: one call of one function, through the run's own connector
+  grant for the reserved site `@baseline` (no node needs to bind it). The
+  function must be `read_only` and not an inbox function, and `args` may
+  template only `{{params.*}}`, so both snapshots ask the same question. The
+  observations are read from the response body. The read is unknown when
+  the call fails, its response was not read whole, or `complete_when` (a
+  path and the value it must hold; connector sources only) does not hold.
+  Numbers compare as numbers there, and a templated value (rendered as
+  text) holds a number or a bool written the same way. Use `complete_when`
+  only with a condition the page you ask for can meet: with `limit: 1`, a
+  `pageInfo.hasNextPage` is true whenever more than one record matches,
+  while a `totalCount` does not depend on the page size. The call is
+  bounded by the smaller of the check's `timeout_seconds` and the
+  function's own `timeout_sec`.
+- `script: scripts/<file>`: a script under the version's `scripts/`, pinned
+  by the run's script digest like a goal script, run with `sh` in the run's
+  working tree with `APB_RUN_ID`, `APB_RUN_DIR` and `APB_BASELINE_PHASE`
+  (`before` or `after`). Its last non-empty stdout line is one JSON object
+  the observations read from; `"complete": false` in it, a non-zero exit, a
+  timeout, more than 1 MiB of output, or any change to the git working tree
+  makes the read unknown. The working tree must be a git work tree with at
+  least one commit: one that cannot be checked (not a git repository, or
+  git failed) reads unknown with "the working tree could not be checked".
+- Scripts and project commands never see a connector secret: every env var
+  an installed connector references is removed from their environment, as
+  from every agent and script node.
+- `project_checks: { only: [test, lint, typecheck, check] }`: the project's
+  own commands, found without running anything: `package.json` scripts with
+  the package manager its lockfile names (`bun`, `pnpm`, `yarn`, otherwise
+  `npm`), `cargo check` and `cargo test --no-fail-fast` for a
+  `Cargo.toml`, and recipes named `test` or `check` in a make file
+  (`GNUmakefile`, `makefile`, `Makefile`, the first that exists, as make
+  reads them) or a `justfile`. `only` narrows the kinds; omit it for all.
+  The commands are discovered once, at before, and the after snapshot runs
+  exactly those. Its observations are fixed (no `observe`): per command its
+  status and, for `cargo test`, the failing tests, each named by its test
+  binary (a doctest without its line number); the list is read only when
+  every test binary printed its result, and more than 500 failing tests
+  read unknown. The rule is "no new failures": a command that passed must
+  still pass; one that failed may fail only on tests that already failed.
+  For a runner other than `cargo test`, a command that fails on both sides
+  reads unknown. The commands run under the same tree rule as a script: a
+  command that writes into the tree (an untracked lockfile, a build output
+  that is not ignored) or a tree that cannot be checked reads unknown.
+  What a command is compared against is its definition only: the
+  `scripts.<kind>` entry of `package.json` with its `pre<kind>` and
+  `post<kind>` scripts, every make or just rule that names the recipe with
+  its body, and the `Cargo.toml` without its dependency tables (targets,
+  auto-discovery flags, features and workspace members decide which tests
+  run). A definition that changed between the snapshots, or a manifest
+  that is gone, reads unknown; a dependency bump in the same manifest does
+  not change it. A definition is not followed into what it calls: another
+  script it runs (`npm run lint && jest`), a make prerequisite's recipe, a
+  make variable set elsewhere in the file and a workspace member's own
+  `Cargo.toml` are not compared, so keep the checked command
+  self-contained when that matters.
+
+**Observations.** Each has an `id`, a `type`, a dotted `path` into the read
+document (`data.items[].id` maps over an array) and exactly one rule in
+`expect`:
+
+- `number`: `equals`, `at_most` or `at_least: <n>`, or `change: decrease |
+  increase | no_increase | no_decrease | unchanged`. `count: true` reads the
+  length of the array at the path.
+- `list`: `change: no_new | shrink | unchanged`, or `empty: true`.
+- `field` (a string, bool or number): `equals: <value>` or `change:
+  unchanged`.
+
+A path with `[]` reads a list, so it fits only a `list` or a `count: true`
+number. A missing key, a type mismatch, a number that is not finite, a list
+of more than 500 items, an item or a field text longer than 256
+characters, or text with a control or invisible format character reads
+unknown, never zero, empty or truncated. A list is a set: an item that
+appears twice counts once, and an integer item keeps its exact digits.
+
+**Verdicts.** Each comparison is `met`, `not_met` or `unknown` (either side
+unknown, no before snapshot, or the check's input changed between the two
+snapshots: other rendered args, an edited script, an edited test
+definition). `regressed` marks an after value strictly worse than the
+before one in the rule's direction. With `enforce: true` anything but `met`
+fails a run that would otherwise succeed, with a `run_error` naming the
+check and the observation; without it the results are reported only.
+
+**What it is not.** A baseline shows the change; it never says whether the
+goal was reached. The run outcome reports "goal reached" from the goal
+criteria only, so give a playbook with a baseline a goal with checked
+criteria (V66 warns otherwise).
+
+Two worked examples ship in `examples/playbooks/`:
+
+- `crm-cleanup.yaml`: the connector check above. A run that assigns 17 of
+  37 owners before a network error reports `unowned/count: 37 -> 20, equals
+  0: not met`, with the CRM's own counts, while the marker criteria still
+  say what the agents reported.
+- `dependency-security-fix.yaml`: `project_checks: { only: [test] }` under
+  `enforce: true`. Two tests that failed before the fix may still fail; a
+  third failing test fails the run and is named.
+
+Validator codes: **V62** (structure: no checks, a duplicate or malformed id,
+not exactly one source, `observe` missing for a connector or script source
+or present for `project_checks`, `complete_when` on a source other than a
+connector, an unknown `only` kind, `timeout_seconds` out of range), **V63**
+(source safety: a script outside `scripts/`, and with the installed
+connectors known a function that writes, is an inbox function or is not
+declared; a malformed connector or function name is V23, as for a node),
+**V64** (a rule that does not fit the observation type, not exactly one
+rule, a non-finite number, a malformed path, a `[]` path on anything but a
+list or a count, `count` on a non-number), **V65** (connector args or
+`complete_when` templating anything but a declared `params.<name>`), **V66** (warning: a baseline without a goal, or with only
+manual criteria), **V67** (warning: a script or `project_checks` source while
+`worktree` reads a node output, so the two snapshots would run in different
+trees), **V68** (a node id equal to the reserved `@baseline`).
+
+`run_status`, `run_report`, `apb runs <id>` and the dashboard run page show
+each check and observation with both values and the verdict; `apb stats`
+counts each observation's results across runs.
 
 <!-- 0.24.0 eval suites -->
 ## Eval cases (evals/)

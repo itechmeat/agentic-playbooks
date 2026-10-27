@@ -175,6 +175,11 @@ pub struct Playbook {
     /// field. Relative paths resolve against the execution root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Facts read before the first node that can act and again at the
+    /// finish, compared under each observation's rule (see
+    /// [`crate::baseline`]). Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_check: Option<crate::baseline::BaselineBlock>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
@@ -327,6 +332,14 @@ impl Playbook {
     }
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The baseline checks, empty without a `baseline_check` block.
+    pub fn baseline_checks(&self) -> &[crate::baseline::BaselineCheck] {
+        self.baseline_check
+            .as_ref()
+            .map(|b| b.checks.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The run working tree template (issue #67 item 8), `None` when unset

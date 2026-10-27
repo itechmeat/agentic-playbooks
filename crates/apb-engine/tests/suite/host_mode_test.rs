@@ -77,6 +77,22 @@ fn one_node(extra: &str) -> String {
     )
 }
 
+/// A host reply with no usage, note, model or notes.
+fn request(task_id: &str, status: SubmitStatus, output: &str) -> SubmitRequest {
+    SubmitRequest {
+        task_id: task_id.into(),
+        status,
+        output: output.into(),
+        usage: None,
+        note: None,
+        submitted_by: "host".into(),
+        client: Some("test-host".into()),
+        model: None,
+        findings: None,
+        warnings: None,
+    }
+}
+
 impl Host {
     /// A project with playbook `h`, profile `main` (claude-code + haiku, the
     /// given fallbacks, a role prompt) and an agent CLI that must never run in
@@ -164,40 +180,29 @@ impl Host {
         output: &str,
         usage: Option<SubmittedUsage>,
     ) {
-        host_task::submit_to_run(
-            self.root.path(),
+        self.submit_request(
             run_id,
             SubmitRequest {
-                task_id: task_id.into(),
-                status,
-                output: output.into(),
                 usage,
-                note: None,
-                submitted_by: "host".into(),
-                client: Some("test-host".into()),
-                model: None,
+                ..request(task_id, status, output)
             },
-        )
-        .unwrap();
+        );
+    }
+
+    /// Submits `req` for a task of `run_id`.
+    fn submit_request(&self, run_id: &str, req: SubmitRequest) -> host_task::SubmitReceipt {
+        host_task::submit_to_run(self.root.path(), run_id, req).unwrap()
     }
 
     /// A `succeeded` reply that names the model the host ran it on.
     fn submit_on_model(&self, run_id: &str, task_id: &str, output: &str, model: &str) {
-        host_task::submit_to_run(
-            self.root.path(),
+        self.submit_request(
             run_id,
             SubmitRequest {
-                task_id: task_id.into(),
-                status: SubmitStatus::Succeeded,
-                output: output.into(),
-                usage: None,
-                note: None,
-                submitted_by: "host".into(),
-                client: Some("test-host".into()),
                 model: Some(model.into()),
+                ..request(task_id, SubmitStatus::Succeeded, output)
             },
-        )
-        .unwrap();
+        );
     }
 
     fn finish(&self, run_id: &str) -> (RunStatus, Vec<Event>) {
@@ -686,6 +691,75 @@ fn require_verdict_takes_the_submission_as_the_verdict_and_a_written_status_file
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(attempt_statuses(&events, "w"), vec!["succeeded"]);
     assert_eq!(node_output(&events, "v"), r#"{"url":"https://x"}"#);
+}
+
+/// Notes a host submits join the attempt's status file, the receipt counts
+/// the malformed ones and says why, the attempt journals them with the
+/// drops counted, without changing the verdict the submission gives; the
+/// subagent's leftover outputs without a verdict do not override the
+/// submission, and drop counts the subagent writes into the file are not
+/// counted.
+#[test]
+fn submitted_notes_merge_into_the_status_file_and_are_journaled() {
+    let h = Host::new(&one_node(""), &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let w = h.task(&run_id, "w");
+    let status_file = w.env.get("APB_STATUS_FILE").unwrap().clone();
+    // The subagent wrote one warning of its own and no verdict, and tried
+    // to plant drop counts of its own: the host's counts never come from
+    // the file.
+    fs::write(
+        &status_file,
+        r#"{"warnings":[{"subject":"migration","reason":"not run on staging"}],"outputs":{"url":"stale"},"notes_dropped":9,"notes_dropped_reasons":["forged"]}"#,
+    )
+    .unwrap();
+    let receipt = h.submit_request(
+        &run_id,
+        SubmitRequest {
+            findings: Some(serde_json::json!([
+                {"kind": "bug", "location": "src/pay.rs:40", "evidence": "rounds down", "why_not_fixed": "out of scope"},
+                {"kind": "bug"}
+            ])),
+            warnings: Some(serde_json::json!([{"subject": "deploy", "reason": "not verified"}])),
+            ..request(&w.task_id, SubmitStatus::Succeeded, "did it")
+        },
+    );
+    assert_eq!(receipt.notes_dropped, 1);
+    assert_eq!(
+        receipt.notes_dropped_reasons,
+        ["findings: `location` is missing"]
+    );
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&status_file).unwrap()).unwrap();
+    assert_eq!(doc["status"], "success", "{doc}");
+    assert_eq!(doc["warnings"].as_array().unwrap().len(), 2, "{doc}");
+    assert!(doc.get("outputs").is_none(), "{doc}");
+    let (findings, warnings, dropped, reasons) = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptNotes {
+                node,
+                findings,
+                warnings,
+                dropped,
+                dropped_reasons,
+                ..
+            } if node == "w" => Some((
+                findings.len(),
+                warnings.len(),
+                *dropped,
+                dropped_reasons.clone(),
+            )),
+            _ => None,
+        })
+        .expect("the attempt journals its notes");
+    assert_eq!((findings, warnings, dropped), (1, 2, 1));
+    assert_eq!(reasons, ["findings: `location` is missing"]);
+    assert_eq!(attempt_statuses(&events, "w"), vec!["succeeded"]);
 }
 
 #[test]
@@ -1393,21 +1467,14 @@ fn a_host_task_asks_a_decision_journaled_in_the_run_and_reports_its_model() {
     assert!(a.cost_usd.is_some_and(|c| c > 0.0), "{a:?}");
     assert_eq!(stub.count(), 1);
 
-    host_task::submit_to_run(
-        h.root.path(),
+    h.submit_request(
         &run_id,
         SubmitRequest {
-            task_id: task.task_id.clone(),
-            status: SubmitStatus::Succeeded,
-            output: "done".into(),
-            usage: None,
-            note: None,
-            submitted_by: "host".into(),
             client: None,
             model: Some("GLM-5.3-Flash".into()),
+            ..request(&task.task_id, SubmitStatus::Succeeded, "done")
         },
-    )
-    .unwrap();
+    );
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
     let decision = events

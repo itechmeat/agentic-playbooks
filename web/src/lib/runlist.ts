@@ -1,3 +1,6 @@
+import type { NeedsLook } from './api.gen'
+import { needsLookCounts } from './runverdict'
+
 // Groups a reverse-chronological run list so each child run sits immediately
 // after its parent (review R1-M4): newest-first order otherwise puts a child
 // ABOVE its parent (it started later), which made the existing `pl-4` indent
@@ -47,4 +50,12 @@ export function groupRunsByParent<T extends RunLike>(runs: T[]): T[] {
     place(r)
   }
   return out
+}
+
+// The run list's "needs a look" badge: its text, and the counts behind it
+// as the tooltip (`1 regression, 2 findings`), or null for a run nothing
+// calls for a look at.
+export function needsLookLabel(n: NeedsLook | null | undefined): { label: string; title: string } | null {
+  const counts = needsLookCounts(n)
+  return counts ? { label: 'needs a look', title: counts } : null
 }

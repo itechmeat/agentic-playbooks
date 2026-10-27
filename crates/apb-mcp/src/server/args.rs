@@ -697,6 +697,17 @@ pub struct RunTaskSubmitArgs {
     /// Journaled as reported; `model_hint` is only the profile's declaration.
     #[serde(default)]
     pub model: Option<String>,
+    /// Problems the subagent saw and did not fix (optional, at most 20):
+    /// a list of {kind, location, evidence, why_not_fixed}, where kind is a
+    /// lowercase slug such as bug, regression, security, data_quality,
+    /// config, docs, test_gap, performance, dependency or other. Reported
+    /// only; never changes the result.
+    #[serde(default)]
+    pub findings: Option<serde_json::Value>,
+    /// What a person should check (optional, at most 20): a list of
+    /// {subject, reason}. Reported only; never changes the result.
+    #[serde(default)]
+    pub warnings: Option<serde_json::Value>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,

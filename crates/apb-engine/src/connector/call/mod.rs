@@ -110,7 +110,18 @@ struct EventMeta {
 /// event itself for any call that actually executed; a dry-run and every gate
 /// rejection append nothing.
 pub fn execute(req: CallRequest) -> (Value, bool) {
-    match run(&req) {
+    execute_bounded(req, None)
+}
+
+/// [`execute`] bounded by `max_secs` as well as the function's own
+/// `timeout_sec`: the smaller one applies (a baseline read honours its
+/// check's `timeout_seconds`).
+pub fn execute_within(req: CallRequest, max_secs: u64) -> (Value, bool) {
+    execute_bounded(req, Some(max_secs))
+}
+
+fn execute_bounded(req: CallRequest, max_secs: Option<u64>) -> (Value, bool) {
+    match run(&req, max_secs) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Ok(ok, meta) => {
             append_event(&req, &meta);
@@ -143,14 +154,17 @@ enum Outcome {
     Gate(CallError),
 }
 
-fn run(req: &CallRequest) -> Outcome {
+fn run(req: &CallRequest, max_secs: Option<u64>) -> Outcome {
     // 1-8: gate + render. Terminates as a dry-run or a gate rejection, neither
     // of which carries event metadata.
-    let prepared = match prepare(req) {
+    let mut prepared = match prepare(req) {
         Ok(Prepared::DryRun(v)) => return Outcome::DryRun(v),
         Ok(Prepared::Call(p)) => *p,
         Err(e) => return Outcome::Gate(e),
     };
+    if let Some(secs) = max_secs {
+        prepared.cap_timeout(secs);
+    }
 
     // 6 (mock) / 9-11 (HTTP): from here the call executes and carries event
     // metadata regardless of outcome.
@@ -281,6 +295,17 @@ struct HttpCall {
 }
 
 impl PreparedCall {
+    /// Lowers the call's timeout to at most `secs` (never raises it). A
+    /// mock answers at once, and an inbox call reads local state.
+    fn cap_timeout(&mut self, secs: u64) {
+        match self {
+            PreparedCall::Http(h) => h.timeout_sec = h.timeout_sec.min(secs),
+            PreparedCall::Smtp { call, .. } => call.cap_timeout(secs),
+            PreparedCall::Imap { call, .. } => call.cap_timeout(secs),
+            PreparedCall::Mock { .. } | PreparedCall::Inbox { .. } => {}
+        }
+    }
+
     fn account(&self) -> &str {
         match self {
             PreparedCall::Mock { account, .. } => account,
@@ -1096,7 +1121,7 @@ fn attempt_floor(events: &[crate::event::Event], node_id: &str) -> (usize, Budge
 }
 
 /// Loads the snapshotted `ConnectorDoc` from `run_dir/connectors/<name>.yaml`.
-fn load_snapshot(run_dir: &Path, connector: &str) -> Result<ConnectorDoc, CallError> {
+pub(crate) fn load_snapshot(run_dir: &Path, connector: &str) -> Result<ConnectorDoc, CallError> {
     let path = run_dir.join("connectors").join(format!("{connector}.yaml"));
     let yaml = std::fs::read_to_string(&path).map_err(|e| {
         CallError::new(

@@ -465,15 +465,17 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
     if crate::effects::effective(playbook).contains(&Effect::Irreversible) {
         why.push("the playbook's effects contain `irreversible`".to_string());
     }
+    for (site, bindings) in playbook.connector_sites() {
+        if !bindings.is_empty() {
+            why.push(format!(
+                "{} binds a connector; eval runs never call real connectors and mocks are not supported yet",
+                crate::connector::sites::site_label(site)
+            ));
+        }
+    }
     for n in &playbook.nodes {
         if let Some(reason) = crate::validate::node_shipping_reason(n) {
             why.push(reason);
-        }
-        if !n.kind.connector_bindings().is_empty() {
-            why.push(format!(
-                "node `{}` binds a connector; eval runs never call real connectors and mocks are not supported yet",
-                n.id
-            ));
         }
         if matches!(n.kind, NodeKind::Playbook { .. }) {
             why.push(format!(

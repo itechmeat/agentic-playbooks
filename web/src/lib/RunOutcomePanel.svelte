@@ -1,19 +1,15 @@
 <script lang="ts">
-  import type { NodeCommits, RunGoal, RunInboxGap } from './api.gen'
-  import * as Card from '$lib/components/ui/card'
-  import { Badge } from '$lib/components/ui/badge'
-  import { commitLines, goalBadge, goalSummary, inboxGapLine, omittedCommits } from './runoutcome'
+  import type { NodeCommits, RunGoal } from './api.gen'
+  import OutcomeSection from '$lib/components/OutcomeSection.svelte'
+  import OutcomeTag from '$lib/components/OutcomeTag.svelte'
+  import { commitLines, goalSummary, goalTone, omittedCommits } from './runoutcome'
 
   // What the run produced beyond its outputs (0.23.0): the playbook's goal
   // with each criterion's result, manual ones as a checklist for a person,
-  // the commits its nodes made on a git tree, and a warning for each inbox
-  // gap its connector reads found. Each block renders only when there is one,
-  // so the page of a run without them is unchanged.
-  let {
-    goal,
-    commits,
-    inboxGaps,
-  }: { goal?: RunGoal | null; commits?: NodeCommits[] | null; inboxGaps?: RunInboxGap[] | null } = $props()
+  // and the commits its nodes made on a git tree. Each block renders only
+  // when there is one, so the page of a run without them is unchanged. The
+  // inbox gaps are part of the verdict panel's Not verified list.
+  let { goal, commits }: { goal?: RunGoal | null; commits?: NodeCommits[] | null } = $props()
 
   const lines = $derived(commitLines(commits ?? undefined))
   const omitted = $derived(omittedCommits(commits ?? undefined))
@@ -21,84 +17,90 @@
   const manual = $derived(goal ? goal.criteria.filter((c) => c.check === 'manual') : [])
 </script>
 
-{#if inboxGaps?.length}
-  <div class="inbox-gaps" role="alert" data-testid="run-inbox-gaps">
-    <p class="inbox-gaps-title">The run did not see its inbox whole</p>
-    {#each inboxGaps as g, i (i)}
-      <p class="inbox-gap-line" data-testid="run-inbox-gap">{inboxGapLine(g)}</p>
-    {/each}
-  </div>
-{/if}
-
 {#if goal}
-  <Card.Root data-testid="run-goal">
-    <Card.Header><Card.Title class="text-sm">Goal</Card.Title></Card.Header>
-    <Card.Content class="flex flex-col gap-2 text-xs">
-      <p class="break-words">{goal.statement}</p>
-      <p class="font-mono text-muted-foreground" data-testid="run-goal-summary">{goalSummary(goal)}</p>
-      {#if checked.length}
-        <ul class="flex flex-col gap-1">
-          {#each checked as c (c.index)}
-            <li class="flex flex-col" data-testid="run-goal-criterion">
-              <span class="flex items-start gap-1.5">
-                <Badge variant={goalBadge(c.status)} class="shrink-0">{c.status}</Badge>
-                <span class="min-w-0 break-words">{c.description} <span class="text-muted-foreground">· {c.check}</span></span>
-              </span>
-              {#if c.detail}<span class="break-words text-muted-foreground">{c.detail}</span>{/if}
+  <OutcomeSection title="Goal" testid="run-goal">
+    <p>{goal.statement}</p>
+    <p class="mono muted" data-testid="run-goal-summary">{goalSummary(goal)}</p>
+    {#if checked.length}
+      <ul class="list">
+        {#each checked as c (c.index)}
+          <li class="criterion" data-testid="run-goal-criterion">
+            <span class="row">
+              <OutcomeTag tone={goalTone(c.status)}>{c.status}</OutcomeTag>
+              <span>{c.description} <span class="muted">· {c.check}</span></span>
+            </span>
+            {#if c.detail}<span class="muted">{c.detail}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    {#if manual.length}
+      <div class="checklist" data-testid="run-goal-checklist">
+        <span class="muted">To confirm by hand</span>
+        <ul class="list">
+          {#each manual as c (c.index)}
+            <li class="row">
+              <span class="box" aria-hidden="true"></span>
+              <span>{c.description}</span>
             </li>
           {/each}
         </ul>
-      {/if}
-      {#if manual.length}
-        <div class="flex flex-col gap-1 border-t border-border pt-2" data-testid="run-goal-checklist">
-          <span class="text-muted-foreground">To confirm by hand</span>
-          <ul class="flex flex-col gap-1">
-            {#each manual as c (c.index)}
-              <li class="flex items-start gap-1.5">
-                <span class="mt-0.5 inline-block size-3 shrink-0 rounded-sm border border-border" aria-hidden="true"></span>
-                <span class="break-words">{c.description}</span>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-    </Card.Content>
-  </Card.Root>
+      </div>
+    {/if}
+  </OutcomeSection>
 {/if}
 
 {#if lines.length}
-  <Card.Root data-testid="run-commits">
-    <Card.Header><Card.Title class="text-sm">Commits</Card.Title></Card.Header>
-    <Card.Content class="flex flex-col gap-1 text-xs">
+  <OutcomeSection title="Commits" testid="run-commits">
+    <div class="list">
       {#each lines as c, i (i)}
-        <div data-testid="run-commit-row" class="break-words">
-          <span class="font-mono" title={c.sha}>{c.short}</span>
+        <div data-testid="run-commit-row">
+          <span class="mono" title={c.sha}>{c.short}</span>
           <span> {c.subject}</span>
-          <span class="text-muted-foreground"> · {c.node}</span>
+          <span class="muted"> · {c.node}</span>
         </div>
       {/each}
       {#if omitted > 0}
-        <p class="text-muted-foreground">and {omitted} more</p>
+        <p class="muted">and {omitted} more</p>
       {/if}
-    </Card.Content>
-  </Card.Root>
+    </div>
+  </OutcomeSection>
 {/if}
 
 <style>
-  .inbox-gaps {
+  .list {
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--warning);
-    border-radius: var(--radius, 0.5rem);
-    background: color-mix(in oklch, var(--warning) 12%, transparent);
-    font-size: 0.75rem;
   }
-  .inbox-gaps-title {
-    font-weight: 600;
+  .criterion {
+    display: flex;
+    flex-direction: column;
   }
-  .inbox-gap-line {
-    overflow-wrap: anywhere;
+  .row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.375rem;
+  }
+  .checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+  }
+  .box {
+    flex-shrink: 0;
+    width: 0.75rem;
+    height: 0.75rem;
+    margin-top: 0.125rem;
+    border: 1px solid var(--border);
+    border-radius: 0.125rem;
+  }
+  .muted {
+    color: var(--muted-foreground);
+  }
+  .mono {
+    font-family: var(--font-mono, ui-monospace, monospace);
   }
 </style>

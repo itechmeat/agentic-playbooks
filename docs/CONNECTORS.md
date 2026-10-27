@@ -178,6 +178,36 @@ marks such a binding as not callable (no accounts configured, calls will fail
 until an account is added, use the fallback path) while still listing its
 functions, so the agent routes around it instead of retrying doomed calls.
 
+### Baseline reads (the `@baseline` site)
+
+A playbook's `baseline_check` may read a connector without any node binding
+it (see "baseline_check" in `docs/HOWTO-authoring.md`):
+
+```yaml
+baseline_check:
+  checks:
+    - id: unowned
+      connector: { name: twenty, account: default, function: list_opportunities,
+                   args: { filter: "ownerId[is]:NULL", limit: 1 } }
+      observe:
+        - { id: count, type: number, path: totalCount, expect: { equals: 0 } }
+```
+
+Each such check becomes a grant for the reserved site `@baseline` (a node
+may not use that id, V68): exactly that function, on that account, frozen in
+the run manifest like a node's grant and covered by the playbook digest.
+The function must be `read_only` and must not be an inbox function: the
+validator refuses anything else when it can see the installed connector
+(V63), and the run start refuses it again when it resolves the grants. The
+engine calls it itself, in process, before the first node that can act and
+at the finish; each call is journaled as an ordinary `connector_call` with
+`node_id: "@baseline"`. A call that fails, a response not read whole, or
+one that does not satisfy the check's `complete_when` reads unknown, never
+as an empty or zero result. The call is bounded by the smaller of the
+check's `timeout_seconds` and the function's `timeout_sec`. Only the engine
+calls under `@baseline`: `apb connector call` refuses an `APB_NODE_ID` that
+starts with `@`.
+
 ## Receiving events (webhooks and the inbox)
 
 Some services never answer a poll: they push. A connector that receives

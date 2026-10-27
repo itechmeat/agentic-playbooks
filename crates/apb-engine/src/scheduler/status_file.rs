@@ -7,10 +7,10 @@
 //! back to parsing the agent's textual report when the file is absent,
 //! unreadable, invalid, or carries an unrecognized status. The read stays total
 //! and panic-free so a malformed file only means "fall back", never a crash.
+//! The same file may carry `findings` and `warnings` ([`NOTES_NOTE`]), read
+//! independently of the verdict.
 
 use std::path::Path;
-
-use serde::Deserialize;
 
 use crate::state::NodeStatus;
 
@@ -69,6 +69,21 @@ pub(crate) const INTERRUPTION_NOTE: &str = concat!(
     "final verdict in the status file.",
 );
 
+/// The paragraph appended to every fresh `agent_task` attempt: how to report
+/// a problem the attempt saw but did not fix, and what a person should
+/// check. Appended at attempt time, outside the cache-keyed prompt, like
+/// [`INTERRUPTION_NOTE`]. Notes are reported only: they never change the
+/// step's result.
+pub(crate) const NOTES_NOTE: &str = concat!(
+    "Findings and warnings: if you notice a problem you did not fix (out of scope, not yours ",
+    "to change, or too risky), you may list it in the JSON status file named by APB_STATUS_FILE ",
+    "as \"findings\": [{\"kind\": \"bug\", \"location\": \"path or record\", ",
+    "\"evidence\": \"what you saw\", \"why_not_fixed\": \"why you left it\"}], and anything ",
+    "a person should check as \"warnings\": [{\"subject\": \"what\", \"reason\": \"why\"}]. ",
+    "Both are optional, at most 20 each, and reported to the person only: they never change ",
+    "this step's result and never replace the `status` field.",
+);
+
 /// The status-file prompt note for a node, empty when the node is told nothing
 /// about the file. A `success_check` node has been told the contract since the
 /// file was introduced; a `require_verdict` node is told the stronger form (the
@@ -109,42 +124,169 @@ pub(crate) struct StatusFileReport {
     pub outputs: Option<String>,
 }
 
-/// The raw on-disk shape. `outputs` is optional and untyped so any JSON value
-/// deserializes; only a non-empty object is honored downstream.
-#[derive(Deserialize)]
-struct RawStatusFile {
-    status: String,
-    #[serde(default)]
+/// One read of an attempt's status file: the verdict fields and the notes,
+/// parsed once. The file is a JSON object; anything else reads as absent.
+/// [`StatusFileDoc::verdict`] and [`StatusFileDoc::notes`] are independent,
+/// so a file carrying only findings and warnings still delivers them while
+/// the verdict falls back to the textual report.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StatusFileDoc {
+    status: Option<String>,
     outputs: Option<serde_json::Value>,
+    findings: serde_json::Value,
+    warnings: serde_json::Value,
 }
 
-/// Reads an attempt's status file, returning `Some` only when the file exists,
-/// is valid JSON, and carries a recognized `status` (`"success"`/`"failure"`).
-/// Every other case - missing, unreadable, invalid JSON, or an unknown status
-/// string - returns `None` so the caller falls back to the textual report.
-/// A non-empty `outputs` object is serialized to compact JSON; anything else
-/// (absent, empty, or a non-object value) yields `None` outputs, keeping the
-/// agent's parsed output.
-pub(crate) fn read_status_file(path: &Path) -> Option<StatusFileReport> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let parsed: RawStatusFile = serde_json::from_str(&raw).ok()?;
-    let status = match parsed.status.as_str() {
-        "success" => NodeStatus::Succeeded,
-        "failure" => NodeStatus::Failed,
-        _ => return None,
+/// Drop counts in the file's shape. The subagent writes this file, so a
+/// host's counts never travel through it (they ride the attempt's report):
+/// these keys are never read, and a host merge removes any it finds.
+const DROPPED_KEYS: [&str; 2] = ["notes_dropped", "notes_dropped_reasons"];
+
+impl StatusFileDoc {
+    /// Reads `path`; `None` when it is missing, unreadable or not a JSON
+    /// object.
+    pub(crate) fn read(path: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let serde_json::Value::Object(mut map) = serde_json::from_str(&raw).ok()? else {
+            return None;
+        };
+        Some(StatusFileDoc {
+            status: map
+                .remove("status")
+                .and_then(|v| v.as_str().map(str::to_string)),
+            outputs: map.remove("outputs"),
+            findings: map.remove("findings").unwrap_or_default(),
+            warnings: map.remove("warnings").unwrap_or_default(),
+        })
+    }
+
+    /// The verdict, `Some` only for a recognized `status`
+    /// (`"success"`/`"failure"`); every other case falls back to the
+    /// textual report. A non-empty `outputs` object is serialized to compact
+    /// JSON; anything else (absent, empty, or a non-object value) yields
+    /// `None` outputs, keeping the agent's parsed output.
+    pub(crate) fn verdict(&self) -> Option<StatusFileReport> {
+        let status = match self.status.as_deref()? {
+            "success" => NodeStatus::Succeeded,
+            "failure" => NodeStatus::Failed,
+            _ => return None,
+        };
+        let outputs = self
+            .outputs
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .filter(|o| !o.is_empty())
+            .and_then(|o| serde_json::to_string(o).ok());
+        Some(StatusFileReport { status, outputs })
+    }
+
+    /// The findings and warnings, sanitized.
+    pub(crate) fn notes(&self) -> apb_core::run_notes::SanitizedNotes {
+        apb_core::run_notes::sanitize(&self.findings, &self.warnings)
+    }
+}
+
+/// What a host submitted for an attempt's notes: the well-formed entries.
+/// What it dropped travels with the attempt's report, not the file.
+pub(crate) struct HostNotes<'a> {
+    pub findings: &'a [apb_core::run_notes::Finding],
+    pub warnings: &'a [apb_core::run_notes::NoteWarning],
+}
+
+impl HostNotes<'_> {
+    fn is_empty(&self) -> bool {
+        self.findings.is_empty() && self.warnings.is_empty()
+    }
+}
+
+/// Records a host submission in an attempt's status file (host mode): the
+/// submission's `verdict` unless the subagent wrote a valid status of its
+/// own (which may carry named outputs and then wins; without one, its
+/// leftover `outputs` are dropped so the submission's output stands), and
+/// the submitted findings and warnings appended to the file's own. A value under `findings` or
+/// `warnings` that is not a list is kept as an entry, so it still counts as
+/// dropped. A file that exists but is not a JSON object is the subagent's:
+/// it is left alone, and an error says submitted notes could not join it.
+pub(crate) fn record_host_submission(
+    path: &Path,
+    verdict: &str,
+    notes: &HostNotes<'_>,
+) -> std::io::Result<()> {
+    let mut map = match std::fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ if notes.is_empty() => return Ok(()),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the subagent's status file is not a JSON object, so the submitted findings and warnings were not recorded",
+                ));
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => return Err(e),
     };
-    let outputs = parsed
-        .outputs
-        .as_ref()
-        .and_then(|v| v.as_object())
-        .filter(|o| !o.is_empty())
-        .and_then(|o| serde_json::to_string(o).ok());
-    Some(StatusFileReport { status, outputs })
+    let has_verdict = matches!(
+        map.get("status").and_then(|v| v.as_str()),
+        Some("success" | "failure")
+    );
+    if has_verdict && notes.is_empty() {
+        return Ok(());
+    }
+    if !has_verdict {
+        map.remove("outputs");
+        map.insert("status".into(), verdict.into());
+    }
+    let mut append = |key: &str, items: Vec<serde_json::Value>| {
+        if items.is_empty() {
+            return;
+        }
+        match map.remove(key) {
+            Some(serde_json::Value::Array(mut have)) => {
+                have.extend(items);
+                map.insert(key.into(), serde_json::Value::Array(have));
+            }
+            Some(serde_json::Value::Null) | None => {
+                map.insert(key.into(), serde_json::Value::Array(items));
+            }
+            Some(other) => {
+                let mut all = vec![other];
+                all.extend(items);
+                map.insert(key.into(), serde_json::Value::Array(all));
+            }
+        }
+    };
+    append(
+        "findings",
+        notes
+            .findings
+            .iter()
+            .filter_map(|f| serde_json::to_value(f).ok())
+            .collect(),
+    );
+    append(
+        "warnings",
+        notes
+            .warnings
+            .iter()
+            .filter_map(|w| serde_json::to_value(w).ok())
+            .collect(),
+    );
+    for key in DROPPED_KEYS {
+        map.remove(key);
+    }
+    let bytes =
+        serde_json::to_vec(&serde_json::Value::Object(map)).map_err(std::io::Error::other)?;
+    apb_core::fsutil::atomic_write_private(path, &bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_status_file(path: &Path) -> Option<StatusFileReport> {
+        StatusFileDoc::read(path)?.verdict()
+    }
 
     fn write(dir: &Path, body: &str) -> std::path::PathBuf {
         let p = dir.join("status.json");
@@ -199,6 +341,103 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(dir.path(), r#"{"status":"maybe"}"#);
         assert!(read_status_file(&p).is_none());
+    }
+
+    #[test]
+    fn notes_are_read_independently_of_the_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            r#"{"findings":[{"kind":"bug","location":"a.rs:1","evidence":"e","why_not_fixed":"w"}]}"#,
+        );
+        let doc = StatusFileDoc::read(&p).expect("an object parses");
+        assert!(doc.verdict().is_none());
+        assert_eq!(doc.notes().notes.findings.len(), 1);
+        let p = write(
+            dir.path(),
+            r#"{"status":"success","warnings":[{"subject":"s","reason":"r"}, 7]}"#,
+        );
+        let doc = StatusFileDoc::read(&p).unwrap();
+        assert_eq!(doc.verdict().unwrap().status, NodeStatus::Succeeded);
+        let notes = doc.notes();
+        assert_eq!((notes.notes.warnings.len(), notes.dropped), (1, 1));
+    }
+
+    fn host_finding() -> Vec<apb_core::run_notes::Finding> {
+        vec![apb_core::run_notes::Finding {
+            kind: "bug".into(),
+            location: "a.rs".into(),
+            evidence: "e".into(),
+            why_not_fixed: "w".into(),
+        }]
+    }
+
+    #[test]
+    fn a_subagents_malformed_list_still_counts_as_dropped_after_a_host_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            r#"{"findings":{"kind":"bug"},"outputs":{"x":"leftover"}}"#,
+        );
+        let findings = host_finding();
+        let notes = HostNotes {
+            findings: &findings,
+            warnings: &[],
+        };
+        record_host_submission(&p, "success", &notes).unwrap();
+        let doc = StatusFileDoc::read(&p).unwrap();
+        let verdict = doc.verdict().unwrap();
+        assert_eq!(verdict.status, NodeStatus::Succeeded);
+        // Without a verdict of its own, the subagent's outputs do not win.
+        assert_eq!(verdict.outputs, None);
+        let n = doc.notes();
+        // The host's finding is kept; the subagent's malformed object counts.
+        assert_eq!((n.notes.findings.len(), n.dropped), (1, 1));
+    }
+
+    #[test]
+    fn drop_counts_a_subagent_writes_into_the_file_are_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted =
+            r#"{"status":"success","notes_dropped":7,"notes_dropped_reasons":["forged"]}"#;
+        let p = write(dir.path(), planted);
+        let n = StatusFileDoc::read(&p).unwrap().notes();
+        assert_eq!((n.dropped, n.reasons.len()), (0, 0));
+        // A host merge removes them from the file.
+        let findings = host_finding();
+        let notes = HostNotes {
+            findings: &findings,
+            warnings: &[],
+        };
+        record_host_submission(&p, "success", &notes).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(!raw.contains("notes_dropped"), "{raw}");
+    }
+
+    #[test]
+    fn notes_that_cannot_join_a_non_object_file_are_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "[1, 2]");
+        let findings = host_finding();
+        let notes = HostNotes {
+            findings: &findings,
+            warnings: &[],
+        };
+        assert!(record_host_submission(&p, "success", &notes).is_err());
+        let empty = HostNotes {
+            findings: &[],
+            warnings: &[],
+        };
+        assert!(record_host_submission(&p, "success", &empty).is_ok());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "[1, 2]");
+    }
+
+    #[test]
+    fn the_notes_note_never_offers_a_file_without_a_status_as_a_verdict() {
+        // A require_verdict node fails an attempt whose file has no status,
+        // so the notes paragraph must not suggest one.
+        assert!(!NOTES_NOTE.contains("textual report"));
+        assert!(NOTES_NOTE.contains("never replace the `status` field"));
     }
 
     #[test]

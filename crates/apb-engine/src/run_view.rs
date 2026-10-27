@@ -94,6 +94,13 @@ pub struct RunUsage {
 impl RunUsage {
     /// The totals over `events`, `None` when no attempt reported usage.
     pub fn from_events(events: &[Event]) -> Option<Self> {
+        let total = Self::totals(events);
+        (total.attempts > 0).then_some(total)
+    }
+
+    /// The totals over `events`, zero when no attempt reported usage
+    /// (`finished_attempts` still counts every finished attempt).
+    pub fn totals(events: &[Event]) -> Self {
         let mut total = RunUsage::default();
         for e in events {
             let EventPayload::AttemptFinished { usage, .. } = &e.payload else {
@@ -118,7 +125,7 @@ impl RunUsage {
             }
             total.estimated |= u.source == apb_core::agent_output::UsageSource::Estimated;
         }
-        (total.attempts > 0).then_some(total)
+        total
     }
 }
 

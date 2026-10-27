@@ -40,6 +40,14 @@ export function spendText(v: VersionStats): string | null {
   return line
 }
 
+// `3/4 (75%) attempts`: how many of the version's finished attempts
+// reported a cost, so a spend figure says how much of the work it covers;
+// null before any attempt finished. The same share as `apb stats`.
+export function costKnownText(v: Pick<VersionStats, 'spend'>): string | null {
+  const k = v.spend.cost_known
+  return k.of > 0 ? `${rateText(k)} attempts` : null
+}
+
 // `glm-5.3-flash x5, opus x1 (5 differ from the profile)`: the models the
 // version's attempts actually ran on (issue #193), as `apb stats` prints
 // them, or null before any attempt.

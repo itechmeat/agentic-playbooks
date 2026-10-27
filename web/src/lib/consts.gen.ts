@@ -18,5 +18,11 @@ export const DEFAULT_PORT = 7321
 /** Legacy agent ids and the built-in agent each stands for. */
 export const AGENT_ALIASES: Readonly<Record<string, string>> = { 'claude-code': 'claude' }
 
+/** What checked a piece of evidence, in words. */
+export const EVIDENCE_SOURCE_LABELS = { goal: "goal", success_check: "success check", baseline: "baseline" } as const
+
+/** Why something is not verified, in words. */
+export const GAP_LABELS = { manual_criterion: "to confirm by hand", self_reported_node: "self-reported", goal_not_checked: "goal not checked", unknown_call: "call outcome unknown", incomplete_response: "response cut short", inbox_gap: "inbox gap", output_truncated: "output cut", baseline_unknown: "baseline unknown" } as const
+
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"
