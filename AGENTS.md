@@ -38,12 +38,18 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   function's send-once declaration and the connector's `identity`
   (`connector/idempotency.rs`) and the hidden send marker
   (`connector/marker.rs`), profiles
-  (`profile.rs` types incl. `ProfileError`, `profile_store.rs` scope resolution
-  and bundle trust, `skills.rs`), registry and versioning, schema 1->2 migrator
+  (`profile.rs` types incl. `ProfileError` and `ProfileDoc::problems`, the one
+  structural check of a run start, `apb validate` and every profile write,
+  `profile_store.rs` scope resolution and bundle trust, `skills.rs`), a
+  profile's `process_env` (`process_env.rs`: the policy, the `allow` syntax and
+  the name-only plan; `process_env/sets.rs`: the base set and each agent CLI's
+  variables), registry and versioning, schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
   shared by the validator and the engine (`graphutil.rs`), content/bundle digests
-  (`content.rs`), trust store (`trust.rs`), atomic state IO, symlinks and dir
+  (`content.rs`), the sealed type of every resolved secret with its
+  constant-time comparison and labelled redaction (`secret.rs`), trust store
+  (`trust.rs`), atomic state IO, symlinks and dir
   locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
   each agent CLI's machine output: reply and reported token usage
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
@@ -109,7 +115,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
-  (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log
+  (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/spawn_env`
+  the one environment every agent spawn gets: the process-env plan, the
+  connector scrub, the run context, the agent home), the process-env plan of
+  one agent step and its `agent_env_applied` event (`agent_env.rs`; the
+  per-step wiring in `scheduler/node/step_env`), the per-run doctor
+  (`run_doctor.rs`, `run_doctor/env` the process env rows), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping, `attempt` the
   call's attempt binding and `send_once` the send-once flow; `intent/` the
@@ -144,6 +155,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
 - A **profile** is the single executor binding for an `agent_task` node: agent +
   model + ordered fallbacks + SOUL (role prompt) + skills, with a scope
   (Project | Global | Auto). Nodes reference it by name or `{ name, scope }`.
+- A profile's `process_env` (`inherit`, the default, or `allowlist`) decides
+  which operator variables an agent process inherits. The run snapshots it in
+  the manifest; every agent spawn (attempts in start and resume forms, finish
+  answer, judge, supervisor, quota probe) gets its env through
+  `adapter::spawn_env`, which under an allowlist clears the environment and
+  copies back only the planned names. The plan is per chain step (a fallback
+  gets its own agent's set); connector-referenced names are withheld either
+  way. Scripts, checks and host-mode steps are not covered.
 - `profile_digest` = hash of profile.yaml + SOUL.md; `bundle_digest` = profile
   digest plus the actual content digests of its skills. Editing a skill changes
   the bundle and drops trust.
@@ -335,6 +354,11 @@ dependency change, regenerate and commit it; CI and the release test gate run
 - Secret values (auth files) are never returned, logged, or cached; skill
   content is never embedded into a prompt (skills are delivered by name, or as
   materialized snapshot copies for isolated nodes).
+- Resolved secrets are `apb_core::secret::Secret`: `Debug` and `Display` print
+  `***`, it is neither `Serialize` nor `PartialEq`, and it is compared only
+  through `ct_eq` (`apb_core::secret::ct_eq_str` for anything else
+  secret-derived). Read the value only through `expose_secret`, at the point
+  it must leave the process (a request header, a login, a one-time print).
 - Profile and skill names: `[a-z0-9][a-z0-9-]*`, at most 64 chars; path segments
   are validated with `is_safe_segment` / `validate_profile_name`.
 - Search the code with zg (zvec-grep) over the live files:

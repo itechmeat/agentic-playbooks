@@ -60,7 +60,7 @@ fn assert_grandchild_dead(work: &Path) {
 fn agent_task<'a>(
     work: &'a Path,
     timeout: Option<Duration>,
-    policy: &'a apb_engine::adapter::ConnectorEnvPolicy,
+    policy: &'a apb_engine::adapter::SpawnEnv,
 ) -> AgentTask<'a> {
     AgentTask {
         prompt: "go",
@@ -70,7 +70,7 @@ fn agent_task<'a>(
         stream_log: None,
         soul: None,
         grant_autonomy: false,
-        connector_policy: policy,
+        spawn_env: policy,
         interactive: false,
         report_contract: true,
         node: "test",

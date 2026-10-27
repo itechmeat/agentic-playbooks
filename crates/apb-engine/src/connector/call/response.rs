@@ -6,16 +6,9 @@ use super::*;
 use apb_core::connector::def::ErrorWhen;
 
 /// Recursively redacts secret values in a JSON value's string leaves.
-pub(crate) fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {
+pub(crate) fn redact_value(value: Value, redactions: &[Redaction]) -> Value {
     match value {
-        Value::String(mut s) => {
-            for (secret, var) in redactions {
-                if s.contains(secret.as_str()) {
-                    s = s.replace(secret.as_str(), &format!("[redacted:{var}]"));
-                }
-            }
-            Value::String(s)
-        }
+        Value::String(s) => Value::String(Redaction::apply_all_owned(s, redactions)),
         Value::Array(items) => Value::Array(
             items
                 .into_iter()

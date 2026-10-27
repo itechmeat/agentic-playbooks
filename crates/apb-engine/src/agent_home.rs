@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::EngineError;
 
+mod codex_toml;
+
 /// The environment variable codex reads for its configuration root. Verified
 /// against the installed codex CLI: it resolves `$CODEX_HOME` (defaulting to
 /// `~/.codex`) and reads `config.toml` and `auth.json` from it.
@@ -57,7 +59,7 @@ fn prepare(
 /// The real codex config root the spawned agent would otherwise inherit: an
 /// explicit `$CODEX_HOME` if set and non-empty, else `~/.codex`. `None` when
 /// neither is resolvable (no `$HOME`), which yields an empty isolated home.
-fn source_codex_home() -> Option<PathBuf> {
+pub(crate) fn source_codex_home() -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var(CODEX_HOME_ENV)
         && !explicit.is_empty()
     {
@@ -96,24 +98,37 @@ fn prepare_codex_home(source: Option<&Path>, dest: &Path) -> Result<(), EngineEr
     Ok(())
 }
 
-/// Returns `config` with every `[mcp_servers...]` / `[[mcp_servers...]]` table
-/// (including nested tables like `[mcp_servers.x.env]`) removed and every other
-/// line kept verbatim. Line-oriented rather than a full TOML round-trip: it
-/// preserves the model-relevant top-level keys and any custom provider tables a
-/// user needs to authenticate, and touches only the `mcp_servers` tables that
-/// caused the incident. A table header opens a section that runs until the next
-/// header; while inside an `mcp_servers` section every line is dropped.
+/// Returns `config` with every `mcp_servers` entry removed and every other
+/// line kept verbatim: each `[mcp_servers...]` / `[[mcp_servers...]]` table
+/// (nested tables like `[mcp_servers.x.env]` included) up to the next
+/// header, and in the root table a dotted key (`mcp_servers.x.command = ...`)
+/// or an inline table (`mcp_servers = { ... }`), with the continuation lines
+/// of a value that spans several (a multi-line array). Line-oriented rather
+/// than a full TOML round-trip: it preserves the model-relevant top-level
+/// keys and any custom provider tables a user needs to authenticate, and
+/// touches only the `mcp_servers` entries that caused the incident.
 fn strip_mcp_servers(config: &str) -> String {
     let mut out = String::new();
-    let mut in_mcp_servers = false;
+    let mut in_root = true;
+    let mut in_mcp_table = false;
+    // Open brackets of a dropped value still running over the next lines.
+    let mut open_value = 0isize;
     for line in config.lines() {
-        if let Some(root) = table_header_root(line) {
-            in_mcp_servers = root == "mcp_servers";
-            if in_mcp_servers {
-                continue;
-            }
+        if open_value > 0 {
+            open_value += codex_toml::bracket_balance(line);
+            continue;
         }
-        if !in_mcp_servers {
+        if let Some(path) = codex_toml::header_path(line) {
+            in_root = false;
+            in_mcp_table = is_mcp_servers(&path);
+        } else if let Some((key, value)) = codex_toml::key_value(line)
+            && in_root
+            && is_mcp_servers(&key)
+        {
+            open_value = codex_toml::bracket_balance(value);
+            continue;
+        }
+        if !in_mcp_table {
             out.push_str(line);
             out.push('\n');
         }
@@ -121,18 +136,44 @@ fn strip_mcp_servers(config: &str) -> String {
     out
 }
 
-/// The first dotted key segment of a TOML table header line (`[a.b]` or
-/// `[[a.b]]` -> `a`), or `None` when the trimmed line is not a table header.
-/// The segment is unquoted so a `["mcp_servers".x]` header still matches, and
-/// only the leading segment matters because that is the table's top-level key.
-fn table_header_root(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    let inner = trimmed
-        .strip_prefix("[[")
-        .and_then(|r| r.strip_suffix("]]"))
-        .or_else(|| trimmed.strip_prefix('[').and_then(|r| r.strip_suffix(']')))?;
-    let first = inner.split('.').next()?.trim();
-    Some(first.trim_matches('"'))
+/// Whether a key path starts at the top-level `mcp_servers` key.
+fn is_mcp_servers(path: &[String]) -> bool {
+    path.first().is_some_and(|k| k == "mcp_servers")
+}
+
+/// Every variable name a codex custom provider reads, from the
+/// `[model_providers.*]` tables of the codex config under `source`: each
+/// provider's `env_key` and the values of its `env_http_headers`, written as
+/// a table, a dotted key or an inline table. A `process_env: allowlist`
+/// keeps them. Empty without a config. Names only.
+pub(crate) fn provider_env_keys(source: Option<&Path>) -> Vec<String> {
+    let Some(config) = source.and_then(|s| std::fs::read_to_string(s.join("config.toml")).ok())
+    else {
+        return Vec::new();
+    };
+    provider_env_keys_in(&config)
+}
+
+fn provider_env_keys_in(config: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut table: Vec<String> = Vec::new();
+    for line in config.lines() {
+        if let Some(path) = codex_toml::header_path(line) {
+            table = path;
+            continue;
+        }
+        for (path, value) in codex_toml::string_leaves(&table, line) {
+            let names_a_variable = match path.as_slice() {
+                [root, _, key] => root == "model_providers" && key == "env_key",
+                [root, _, headers, _] => root == "model_providers" && headers == "env_http_headers",
+                _ => false,
+            };
+            if names_a_variable && !value.is_empty() && !out.contains(&value) {
+                out.push(value);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -155,6 +196,49 @@ EXAMPLE_AGENT_NAME = \"codex\"\n\
 \n\
 [desktop]\n\
 ambient-suggestions-enabled = true\n";
+
+    #[test]
+    fn provider_env_keys_come_from_model_provider_tables_only() {
+        let config = format!(
+            "{CONFIG_WITH_MCP}[model_providers.other] # trailing comment\nenv_key = 'OTHER_KEY' # comment\n[profiles.x]\nenv_key = \"NOT_A_PROVIDER\"\n[model_providers]\nazure = {{ name = \"Azure\", env_key = \"AZURE_KEY\", env_http_headers = {{ \"X-Org\" = \"ORG_VAR\" }} }}\nlocal.env_key = \"LOCAL_KEY\"\n"
+        );
+        assert_eq!(
+            provider_env_keys_in(&config),
+            vec![
+                "CUSTOM_KEY".to_string(),
+                "OTHER_KEY".to_string(),
+                "AZURE_KEY".to_string(),
+                "ORG_VAR".to_string(),
+                "LOCAL_KEY".to_string(),
+            ]
+        );
+        assert!(provider_env_keys(None).is_empty());
+    }
+
+    /// A header with a trailing comment or surrounding whitespace still
+    /// opens its table, so its `mcp_servers` body is stripped.
+    #[test]
+    fn a_commented_mcp_servers_header_is_stripped_too() {
+        let out = strip_mcp_servers(
+            "model = \"m\"\n  [mcp_servers.x]   # mine\ncommand = \"x\"\n[desktop]\n",
+        );
+        assert!(!out.contains("command"), "{out}");
+        assert!(out.contains("[desktop]"));
+    }
+
+    /// MCP servers given as root dotted keys (a multi-line array value
+    /// included) or as one inline table are dropped like a table; the same
+    /// key under another table is not the top-level one and stays.
+    #[test]
+    fn root_dotted_and_inline_mcp_servers_are_stripped() {
+        let out = strip_mcp_servers(
+            "model = \"m\"\nmcp_servers.x.command = \"x-bin\"\nmcp_servers.x.args = [\n  \"serve\", # [\n  \"--mcp\",\n]\n\"mcp_servers\" = { y = { command = \"y-bin\" } }\nkeep = 1\n[profiles.p]\nmcp_servers.z = \"kept\"\n",
+        );
+        assert_eq!(
+            out,
+            "model = \"m\"\nkeep = 1\n[profiles.p]\nmcp_servers.z = \"kept\"\n"
+        );
+    }
 
     #[test]
     fn strip_drops_every_mcp_servers_table_and_keeps_the_rest() {

@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use apb_core::connector::def::SmtpSpec;
+use apb_core::secret::Secret;
 use apb_engine::connector::call::CallErrorCode;
 use apb_engine::connector::smtp::{SmtpBuild, build};
 use serde_json::json;
@@ -198,8 +199,8 @@ fn account_no_creds(host: &str, port: u16, use_tls: bool) -> BTreeMap<String, St
     ])
 }
 
-fn secrets() -> BTreeMap<String, String> {
-    BTreeMap::from([("password".into(), "pw".into())])
+fn secrets() -> BTreeMap<String, Secret> {
+    BTreeMap::from([("password".into(), Secret::new("pw"))])
 }
 
 #[test]

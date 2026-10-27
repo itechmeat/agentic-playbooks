@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use apb_core::connector::def::{AuthSpec, ErrorWhen};
 use apb_core::connector::template::{RenderCtx, render_encoded, render_raw};
+use apb_core::secret::{Redaction, Secret};
 use serde_json::Value;
 
 use super::encode::{
@@ -46,11 +47,51 @@ pub(super) struct HttpCall {
     /// `send_raw` after a 2xx maps Ok and after body redaction, BEFORE the
     /// `response_pick` projection.
     pub(super) error_when: Option<ErrorWhen>,
-    pub(super) secrets: BTreeMap<String, String>,
+    pub(super) secrets: BTreeMap<String, Secret>,
     pub(super) account_fields: BTreeMap<String, String>,
     pub(super) timeout_sec: u64,
-    /// (resolved secret value, ENV var name) pairs for interim redaction.
-    pub(super) redactions: Vec<(String, String)>,
+    /// The resolved secrets, each with its label, for interim redaction.
+    pub(super) redactions: Vec<Redaction>,
+}
+
+/// The rendered user and password of a Basic auth spec: what the
+/// `Authorization` header encodes, and what [`Redaction::basic`] scrubs.
+pub(super) fn basic_credentials(
+    username_template: &str,
+    password_template: &str,
+    ctx: &RenderCtx,
+) -> Result<(String, Secret), CallError> {
+    let render = |t: &str| {
+        render_raw(t, ctx)
+            .map_err(|e| CallError::new(CallErrorCode::Config, format!("auth render failed: {e}")))
+    };
+    Ok((
+        render(username_template)?,
+        Secret::new(render(password_template)?),
+    ))
+}
+
+/// The redaction of the Basic credential `auth` renders, if it is Basic
+/// auth and renders at all (a render failure fails the call anyway).
+pub(super) fn basic_redaction(
+    auth: Option<&AuthSpec>,
+    account: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, Secret>,
+) -> Option<Redaction> {
+    let Some(AuthSpec::Basic {
+        username_template,
+        password_template,
+    }) = auth
+    else {
+        return None;
+    };
+    let ctx = RenderCtx {
+        account,
+        args: &Value::Null,
+        secrets,
+    };
+    let (user, pass) = basic_credentials(username_template, password_template, &ctx).ok()?;
+    Some(Redaction::basic(&user, &pass, "basic"))
 }
 
 impl HttpCall {
@@ -312,13 +353,8 @@ impl HttpCall {
                 username_template,
                 password_template,
             }) => {
-                let user = render_raw(username_template, ctx).map_err(|e| {
-                    CallError::new(CallErrorCode::Config, format!("auth render failed: {e}"))
-                })?;
-                let pass = render_raw(password_template, ctx).map_err(|e| {
-                    CallError::new(CallErrorCode::Config, format!("auth render failed: {e}"))
-                })?;
-                let token = base64_encode(format!("{user}:{pass}").as_bytes());
+                let (user, pass) = basic_credentials(username_template, password_template, ctx)?;
+                let token = base64_encode(format!("{user}:{}", pass.expose_secret()).as_bytes());
                 Ok(Some((
                     "Authorization".to_string(),
                     format!("Basic {token}"),

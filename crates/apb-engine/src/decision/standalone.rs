@@ -67,7 +67,7 @@ pub enum StandaloneOutcome {
 pub struct StandaloneDecider {
     settings: EffectiveDecisions,
     root: PathBuf,
-    chain: OnceLock<(ProviderChain, Vec<String>)>,
+    chain: OnceLock<(ProviderChain, Vec<apb_core::secret::Secret>)>,
     redactor: OnceLock<redact::Redactor>,
 }
 
@@ -136,7 +136,7 @@ impl StandaloneDecider {
         self.settings.privacy.max_state_bytes
     }
 
-    fn chain(&self) -> &(ProviderChain, Vec<String>) {
+    fn chain(&self) -> &(ProviderChain, Vec<apb_core::secret::Secret>) {
         self.chain
             .get_or_init(|| providers::build_chain(&self.settings))
     }
@@ -145,11 +145,7 @@ impl StandaloneDecider {
     /// and every variable an installed connector references.
     fn redactor(&self) -> &redact::Redactor {
         self.redactor.get_or_init(|| {
-            let mut secrets: Vec<String> =
-                apb_core::connector::resolve::all_referenced_env_names(&self.root)
-                    .iter()
-                    .filter_map(|n| apb_core::connector::secrets::resolve_var(&self.root, n))
-                    .collect();
+            let mut secrets = apb_core::connector::resolve::resolve_referenced(&self.root);
             secrets.extend(self.chain().1.iter().cloned());
             redact::Redactor::new(secrets, &self.root)
         })
@@ -466,7 +462,7 @@ mod tests {
         let d = StandaloneDecider::with_settings(settings, root);
         let _ = d.chain.set((
             ProviderChain::new(vec![Box::new(Handle(slow.clone()))]),
-            vec!["sk-live-provider-key-123456".into()],
+            vec![apb_core::secret::Secret::new("sk-live-provider-key-123456")],
         ));
         d
     }

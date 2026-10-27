@@ -20,6 +20,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::Sha256;
 
+use crate::secret::Secret;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Query parameter names of the `meta_hub` challenge dialect.
@@ -87,15 +89,15 @@ pub fn signature_is_well_formed(presented: &str, prefix: &str) -> bool {
 /// providers send uppercase; the comparison itself still leaks nothing about
 /// which byte differed. A header that does not carry the prefix, or carries
 /// a value of the wrong length, is refused without hashing anything further.
-pub fn verify_signature_hex(secret: &str, body: &[u8], presented: &str, prefix: &str) -> bool {
+pub fn verify_signature_hex(secret: &Secret, body: &[u8], presented: &str, prefix: &str) -> bool {
     if secret.is_empty() {
         return false;
     }
     let Some(hex) = well_formed_digest(presented, prefix) else {
         return false;
     };
-    let expected = hmac_sha256_hex(secret.as_bytes(), body);
-    crate::server_auth::ct_eq_str(&expected, &hex)
+    let expected = hmac_sha256_hex(secret.expose_secret().as_bytes(), body);
+    crate::secret::ct_eq_str(&expected, &hex)
 }
 
 /// The `meta_hub` challenge: echo `hub.challenge` when `hub.mode` is
@@ -103,7 +105,7 @@ pub fn verify_signature_hex(secret: &str, body: &[u8], presented: &str, prefix: 
 /// token comparison is constant time; an empty configured token never
 /// verifies, so a connector with the block but no configured secret cannot
 /// be subscribed by anyone.
-pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &str) -> Challenge {
+pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &Secret) -> Challenge {
     if verify_token.is_empty() {
         return Challenge::Reject;
     }
@@ -113,7 +115,7 @@ pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &str)
     let Some(presented) = params.get(HUB_TOKEN) else {
         return Challenge::Reject;
     };
-    if !crate::server_auth::ct_eq_str(presented, verify_token) {
+    if !verify_token.ct_eq(presented) {
         return Challenge::Reject;
     }
     match params.get(HUB_CHALLENGE) {

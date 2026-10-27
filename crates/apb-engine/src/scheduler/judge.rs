@@ -453,13 +453,19 @@ impl ProfileEmulation<'_, '_> {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };
-        let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
+        let spawn_env = crate::adapter::SpawnEnv::for_node(
             self.env_scrub.to_vec(),
             self.run_dir,
             self.node_id,
             self.overlay.clone(),
         )
-        .with_attempt(attempt);
+        .with_attempt(attempt)
+        .with_process(crate::agent_env::plan_for_entry(
+            entry.process_env.as_ref(),
+            &ri.agent_id,
+            &ri.model,
+            self.env_scrub,
+        ));
         let stream_log = self
             .run_dir
             .join("agent-stream")
@@ -477,7 +483,7 @@ impl ProfileEmulation<'_, '_> {
             soul: Some(entry.soul.as_str()),
             // An emulated decision reads and answers; it is granted nothing.
             grant_autonomy: false,
-            connector_policy: &connector_policy,
+            spawn_env: &spawn_env,
             interactive: false,
             // The reply IS the JSON answer: no status-verdict protocol.
             report_contract: false,
@@ -503,7 +509,7 @@ impl ProfileEmulation<'_, '_> {
             model: None,
             workdir: None,
             transcript: None,
-            token: connector_policy.attempt_token.clone(),
+            token: spawn_env.attempt_token.clone(),
         };
         let on_spawn = |pid: u32, spawn_ms: u64| {
             spawn_at.set(Some(std::time::Instant::now()));
@@ -511,6 +517,14 @@ impl ProfileEmulation<'_, '_> {
                 *spawn_err.borrow_mut() = Some(e);
             }
         };
+        if let Some(plan) = &spawn_env.process {
+            self.journal.append(crate::agent_env::applied_event(
+                plan,
+                self.node_id,
+                attempt,
+                &ri.agent_id,
+            ))?;
+        }
         let outcome =
             adapter.run_cancellable(&task, self.cancel, Some(&on_spawn), None, None, None);
         if let Some(e) = spawn_err.borrow_mut().take() {

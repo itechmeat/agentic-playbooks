@@ -22,6 +22,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::connector::secrets::{parse_cmd_ref, parse_env_ref};
+use crate::secret::Secret;
 
 /// The file name under the config dir.
 pub const DECISIONS_FILE: &str = "decisions.yaml";
@@ -982,17 +983,18 @@ pub fn resolve_in_all(config_dir: &Path, roots: &[&Path]) -> Resolution {
 /// GLOBAL `secrets.env`. Never from the project's `.apb/secrets.env`: the
 /// repository is untrusted, and a key it planted would route this machine's
 /// prompts through the repository owner's provider account.
-pub fn resolve_key_var(var: &str) -> Option<String> {
+pub fn resolve_key_var(var: &str) -> Option<Secret> {
     if let Ok(v) = std::env::var(var)
         && !v.is_empty()
     {
-        return Some(v);
+        return Some(Secret::new(v));
     }
     let path = crate::connector::secrets::global_secrets_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     crate::connector::secrets::parse_dotenv(&raw)
         .remove(var)
         .filter(|v| !v.is_empty())
+        .map(Secret::new)
 }
 
 // --- doctor ----------------------------------------------------------------

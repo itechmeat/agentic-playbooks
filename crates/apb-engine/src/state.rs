@@ -635,7 +635,8 @@ impl RunState {
                 // the baseline for the drive.
                 EventPayload::BaselineObserved { .. }
                 | EventPayload::BaselineCompared { .. }
-                | EventPayload::AttemptNotes { .. } => {}
+                | EventPayload::AttemptNotes { .. }
+                | EventPayload::AgentEnvApplied { .. } => {}
                 // A list visit's records; `crate::list::ListFold` folds them.
                 EventPayload::ListStarted { .. }
                 | EventPayload::ListBatchStarted { .. }

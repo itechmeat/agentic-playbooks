@@ -343,6 +343,14 @@ pub fn all_referenced_env_names(root: &Path) -> Vec<String> {
     names.into_iter().collect()
 }
 
+/// The resolved values of [`all_referenced_env_names`]: the secrets a
+/// redactor of this workspace scrubs. Variables that resolve nowhere
+/// contribute nothing.
+pub fn resolve_referenced(root: &Path) -> Vec<crate::secret::Secret> {
+    let names = all_referenced_env_names(root);
+    secrets::resolve_each(root, names.iter().map(String::as_str))
+}
+
 /// The non-secret facts about one installed connector that the playbook
 /// validator needs (spec 2026-08-16-webhook-ingest-design, V42 and V43).
 ///

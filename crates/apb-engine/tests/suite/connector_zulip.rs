@@ -341,3 +341,29 @@ fn get_messages_renders_present_query_pairs() {
         "present query pairs must render percent-encoded in BTreeMap order: {req}"
     );
 }
+
+/// A response that echoes the Basic credential back has it redacted: the
+/// base64 of `user:password` is a form of the secret no single value
+/// matches, so the call registers it on its own.
+#[test]
+fn an_echoed_basic_credential_is_redacted() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(
+        200,
+        "OK",
+        &[],
+        format!(r#"{{"user_id":12,"full_name":"Basic {BASIC_TOKEN}","email":"x","is_bot":true}}"#),
+    );
+    seed_run(run.path(), &server.base_url, "get_me");
+    let (value, ok) = call(run.path(), root.path(), "get_me", serde_json::json!({}));
+    assert!(ok, "the call failed");
+    let text = value.to_string();
+    assert!(!text.contains(BASIC_TOKEN), "the Basic credential leaked");
+    assert!(
+        text.contains("[redacted:basic]"),
+        "the credential was not labelled"
+    );
+}

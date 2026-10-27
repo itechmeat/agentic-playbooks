@@ -21,7 +21,6 @@ uuid = { version = "1.23.4", features = ["v4"] }
 # HTTP client (redirects disabled, per-call timeout) and args-schema validation.
 ureq.workspace = true
 jsonschema.workspace = true
-percent-encoding.workspace = true
 # Native SMTP execution for the `smtp` connector function kind (spec 4.2):
 # blocking low-level SmtpConnection client, STARTTLS via rustls (TLS 1.2+ by
 # default), MIME/multipart built by the library.

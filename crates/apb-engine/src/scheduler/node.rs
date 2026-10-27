@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod step_env;
+
 use super::continuation::{Continuation, continuation_prompt};
 use crate::adapter::AgentFailure;
 use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
@@ -29,10 +31,7 @@ pub(crate) fn render_node_prompt(
         cfg.instruction.as_deref(),
         budget,
     )?;
-    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-        .into_iter()
-        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-        .collect();
+    let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
     Ok(render(
         prompt,
         &cfg.params,
@@ -1079,7 +1078,7 @@ fn execute_node_kind(
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
-            let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
+            let spawn_env = crate::adapter::SpawnEnv::for_node(
                 env_scrub.to_vec(),
                 run_dir,
                 node_id,
@@ -1318,38 +1317,20 @@ fn execute_node_kind(
                 let mut timeout_continued = false;
                 // A resume that found no session is retried fresh once per step.
                 let mut lost_session_retried = false;
-                // The minimal agent environment (issue #136 item 4, the
-                // profile default): claude/claude-code get an apb-owned settings
-                // file, only the project and local setting sources and only
-                // apb's own MCP servers. The profile's declared skills are then
-                // delivered through `--add-dir` (the user source that used to
-                // provide them is not loaded), except on an isolated node,
-                // whose working directory already holds them. Other agents have
-                // no such mechanism and run as configured. The file content is
-                // fixed, so writing it once per step is enough.
-                let hermetic_settings: Option<crate::adapter::HermeticEnv> = if !step.host
-                    && entry.hermetic
-                    && crate::adapter::agent_supports_hermetic(&step.agent)
-                {
-                    let skills_dir = if !isolated && !entry.skills.is_empty() {
-                        // One copy per profile bundle per run, at a path
-                        // every node of the profile shares, so the
-                        // agent's system portion stays byte-identical
-                        // across them and a provider prompt cache hits
-                        // (issue #67 item 7). Checked against the
-                        // snapshot digests before each step and laid
-                        // down again when it drifted.
-                        Some(super::skills_copy::shared_skills_dir(run_dir, &entry)?)
-                    } else {
-                        None
-                    };
-                    Some(crate::adapter::HermeticEnv {
-                        settings: crate::adapter::write_hermetic_settings(run_dir, node_id)?,
-                        skills_dir,
-                    })
-                } else {
-                    None
-                };
+                // The minimal agent environment and the profile's
+                // `process_env` plan for this step's own agent.
+                let step_env = step_env::for_step(
+                    run_dir,
+                    node_id,
+                    &entry,
+                    &step_env::StepTarget {
+                        agent: &step.agent,
+                        model: &step.model,
+                        host: step.host,
+                    },
+                    isolated,
+                    env_scrub,
+                )?;
                 // The node's own retry budget is walked by `try_i`; an
                 // INFRASTRUCTURE retry (spec 2026-08-05 section 2.3) does not
                 // advance it, which is why this is a while loop and not
@@ -1618,7 +1599,9 @@ fn execute_node_kind(
                         )),
                     };
                     timeout_continuation = false;
-                    let attempt_policy = connector_policy.with_attempt(attempt);
+                    let attempt_policy = spawn_env
+                        .with_attempt(attempt)
+                        .with_process(step_env.process.clone());
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
@@ -1633,7 +1616,7 @@ fn execute_node_kind(
                             soul_text.as_deref()
                         },
                         grant_autonomy,
-                        connector_policy: &attempt_policy,
+                        spawn_env: &attempt_policy,
                         interactive: *interactive,
                         // Ordinary agent_task attempts carry the spec 6.2 report
                         // contract so the agent's self-assessed status routes the node.
@@ -1652,7 +1635,7 @@ fn execute_node_kind(
                         status_file: Some(status_file.clone()),
                         // Hermetic isolation (subtask S1): Some only for a
                         // hermetic profile on an isolation-capable agent.
-                        hermetic_settings: hermetic_settings.clone(),
+                        hermetic_settings: step_env.hermetic.clone(),
                         transcript_dir: Some(&transcript_dir),
                         output_limits: cfg.output_limits(),
                     };
@@ -1828,6 +1811,7 @@ fn execute_node_kind(
                         &node_dir,
                         node.kind.protect_globs(),
                     )?;
+                    step_env.journal(journal, node_id, attempt, &step.agent)?;
                     let mut outcome = adapter.run_cancellable(
                         &task,
                         cancel,
@@ -2979,10 +2963,7 @@ pub(crate) fn execute_finish_answer(
     // carries the completed nodes' recorded output but NOT the instruction header.
     let budget = playbook.context_budget(node_id);
     let context = build_terminal_context(run_dir, &events, None, &budget);
-    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-        .into_iter()
-        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-        .collect();
+    let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
     let text = render(
         prompt,
         &cfg.params,
@@ -3052,12 +3033,8 @@ pub(crate) fn execute_finish_answer(
     // Connector env isolation (spec 4.3): the finish-answer agent is a spawned
     // agent too, so its inherited connector tokens are scrubbed and it gets the
     // run-context env.
-    let connector_policy = crate::adapter::ConnectorEnvPolicy::for_node(
-        env_scrub.to_vec(),
-        run_dir,
-        node_id,
-        cfg.spawn_env(),
-    );
+    let spawn_env =
+        crate::adapter::SpawnEnv::for_node(env_scrub.to_vec(), run_dir, node_id, cfg.spawn_env());
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
     let mut last_msg = String::new();
@@ -3105,6 +3082,15 @@ pub(crate) fn execute_finish_answer(
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };
+        let step_env = step_env::process_only(
+            &entry,
+            &step_env::StepTarget {
+                agent: &ri.agent_id,
+                model: &ri.model,
+                host: host_mode,
+            },
+            env_scrub,
+        );
         for try_i in 0..=retries {
             attempt += 1;
             // Host execution mode (0.23.0): the closing answer is a host task
@@ -3147,7 +3133,9 @@ pub(crate) fn execute_finish_answer(
             let stream_log = run_dir
                 .join("agent-stream")
                 .join(format!("{node_id}-{attempt}.jsonl"));
-            let attempt_policy = connector_policy.with_attempt(attempt);
+            let attempt_policy = spawn_env
+                .with_attempt(attempt)
+                .with_process(step_env.process.clone());
             let task = AgentTask {
                 prompt: &text,
                 model: &ri.model,
@@ -3156,7 +3144,7 @@ pub(crate) fn execute_finish_answer(
                 stream_log: Some(&stream_log),
                 soul: Some(entry.soul.as_str()),
                 grant_autonomy,
-                connector_policy: &attempt_policy,
+                spawn_env: &attempt_policy,
                 // A finish-answer node is never interactive: it composes the
                 // run's terminal answer, it does not ask the user questions.
                 interactive: false,
@@ -3208,6 +3196,7 @@ pub(crate) fn execute_finish_answer(
             // live sidecar (`None`), it carries no `expected_duration`, so no
             // stall watch (`None`), and the terminal answer composition is not a
             // supervisor-interruptible node, so no control observation (`None`).
+            step_env.journal(journal, node_id, attempt, &ri.agent_id)?;
             let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
             last_close = Some(crate::host_task::FallbackOf {
                 attempt,
@@ -3482,10 +3471,7 @@ pub(crate) fn run_playbook_node(
             let budget = playbook.context_budget(node_id);
             let context =
                 build_context_for_render(run_dir, &events, cfg.instruction.as_deref(), &budget)?;
-            let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-                .into_iter()
-                .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-                .collect();
+            let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
             let state = RunState::fold(&events);
             Some(render(
                 t,
@@ -3808,10 +3794,22 @@ pub(crate) fn maybe_compact_context(
     const COMPACTION_TIMEOUT: Duration = Duration::from_secs(120);
     // Connector env isolation (spec 4.3): scrub inherited connector tokens even
     // from this internal summarizer. It performs no connector calls, so it gets
-    // no run-context env.
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
+    // no run-context env. A run that restricts any agent's environment
+    // restricts the summarizer's too: an empty allowlist for claude.
+    let spawn_env = crate::adapter::SpawnEnv {
         scrub: env_scrub.to_vec(),
         overlay: cfg.spawn_env(),
+        process: super::rebind::run_uses_allowlist(run_dir).then(|| {
+            std::sync::Arc::new(crate::agent_env::plan_for(
+                "claude",
+                &model,
+                &apb_core::process_env::ProcessEnvPolicy {
+                    policy: apb_core::process_env::ProcessEnvMode::Allowlist,
+                    allow: Vec::new(),
+                },
+                env_scrub,
+            ))
+        }),
         ..Default::default()
     };
     let task = AgentTask {
@@ -3824,7 +3822,7 @@ pub(crate) fn maybe_compact_context(
         // Context compaction only summarizes text; it needs no file or network
         // access, so it stays in the default permission posture.
         grant_autonomy: false,
-        connector_policy: &connector_policy,
+        spawn_env: &spawn_env,
         // Internal summarizer: not a playbook node, never interactive.
         interactive: false,
         // Preserve the historical report-contract posture for the summarizer; the

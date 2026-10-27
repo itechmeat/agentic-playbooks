@@ -8,10 +8,12 @@
 //! and it is exempt from the gate for exactly that reason.
 
 use crate::auth::{
-    ClientCtx, Credential, SESSION_COOKIE, cookie_value, evaluate, log_auth_failure, rate_limited,
+    ClientCtx, Credential, SESSION_COOKIE, evaluate, log_auth_failure, rate_limited, session_hash,
+    session_token,
 };
 use crate::state::AppState;
 
+use apb_core::secret::Secret;
 use apb_core::server_auth;
 use axum::Extension;
 use axum::extract::State;
@@ -34,8 +36,12 @@ pub(crate) struct LoginBody {
 /// which is the only place that can see activity: a cookie lifetime would
 /// either outlive an evicted store entry (a cookie the server no longer
 /// honors) or expire under a still-active session.
-fn session_cookie(token: &str, https: bool) -> String {
-    let mut cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax");
+fn session_cookie(token: &Secret, https: bool) -> String {
+    // The one outbound exposure of a session token: the cookie it lives in.
+    let mut cookie = format!(
+        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax",
+        token.expose_secret()
+    );
     if https {
         cookie.push_str("; Secure");
     }
@@ -78,7 +84,8 @@ pub(crate) async fn login_handler(
     // force-reloads the key file on every attempt (not only after a failure),
     // so an operator who has just issued the very first key can sign in
     // immediately without restarting the dashboard.
-    let key_id = match auth.verify_key_with_reload(body.key.trim(), now) {
+    let presented = Secret::new(body.key.trim());
+    let key_id = match auth.verify_key_with_reload(&presented, now) {
         Some(id) => id,
         None => {
             // A bad key: only now consult and feed the limiter, so repeated
@@ -102,7 +109,7 @@ pub(crate) async fn login_handler(
             };
         }
     };
-    let token = match server_auth::random_token() {
+    let token = match server_auth::random_secret() {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -114,7 +121,7 @@ pub(crate) async fn login_handler(
     };
     {
         let mut sessions = auth.sessions();
-        sessions.insert(server_auth::hash_hex(&token), now, key_id);
+        sessions.insert(session_hash(&token), now, key_id);
     }
     let res = Json(serde_json::json!({ "authenticated": true })).into_response();
     with_cookie(res, &session_cookie(&token, ctx.https))
@@ -128,9 +135,9 @@ pub(crate) async fn logout_handler(
     headers: HeaderMap,
 ) -> Response {
     let auth = state.auth.clone();
-    if let Some(token) = cookie_value(&headers, SESSION_COOKIE) {
+    if let Some(token) = session_token(&headers) {
         let mut sessions = auth.sessions();
-        sessions.remove(&server_auth::hash_hex(&token));
+        sessions.remove(&session_hash(&token));
     }
     let res = Json(serde_json::json!({ "authenticated": false })).into_response();
     with_cookie(res, &cleared_cookie(ctx.https))

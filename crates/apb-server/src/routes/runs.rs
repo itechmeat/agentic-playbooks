@@ -221,11 +221,9 @@ pub(crate) async fn get_run_handler(
         .and_then(|loaded| loaded.layout);
 
     // The run's hooks as map key -> relative path of the signal endpoint.
-    let hooks: std::collections::BTreeMap<String, String> = apb_engine::read_hooks(&run_dir)
+    let hooks = apb_engine::read_hooks(&run_dir)
         .unwrap_or_default()
-        .into_iter()
-        .map(|(k, secret)| (k, apb_engine::hook_path(&id, &secret)))
-        .collect();
+        .paths(&id);
 
     let children = view.children(&run_dir);
     let failure_reason = view.failure_reason();
@@ -590,23 +588,17 @@ pub(crate) async fn post_hook_handler(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     // The secret must match one of this run's hooks (otherwise 404 - a
-    // foreign or incorrect secret must not accept the signal). Only the
-    // comparison changes: a plain `==` leaks a live secret's bytes through
-    // response timing, so each candidate is compared in constant time. The
-    // first-match semantics of the previous `find` are preserved exactly,
-    // including the break, so a run whose hooks somehow share a secret still
-    // signals the same key it always did.
-    let mut matched: Option<&String> = None;
-    for (key, candidate) in hooks.iter() {
-        if apb_core::server_auth::ct_eq_str(candidate, &secret) {
-            matched = Some(key);
-            break;
-        }
-    }
-    let Some(key) = matched else {
+    // foreign or incorrect secret must not accept the signal), compared in
+    // constant time by `RunHooks::key_for`.
+    let Some(key) = hooks.key_for(&secret) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    match apb_engine::post_signal(&run_dir, apb_engine::SignalCommand { key: key.clone() }) {
+    match apb_engine::post_signal(
+        &run_dir,
+        apb_engine::SignalCommand {
+            key: key.to_string(),
+        },
+    ) {
         Ok(seq) => Json(serde_json::json!({ "signalled": key, "posted_seq": seq })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

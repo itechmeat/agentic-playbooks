@@ -23,7 +23,7 @@ fn write_and_find_session_by_token_roundtrip() {
     write_supervisor_session(
         dir.path(),
         "run-a",
-        "the-token",
+        &apb_core::secret::Secret::new("the-token"),
         &["observe".to_string(), "retry".to_string()],
     )
     .unwrap();
@@ -39,7 +39,13 @@ fn write_and_find_session_by_token_roundtrip() {
         "unknown token must resolve to None, got {missing:?}"
     );
 
-    let err = write_supervisor_session(dir.path(), "../../etc", "tok", &[]).unwrap_err();
+    let err = write_supervisor_session(
+        dir.path(),
+        "../../etc",
+        &apb_core::secret::Secret::new("tok"),
+        &[],
+    )
+    .unwrap_err();
     assert!(
         matches!(err, EngineError::NotFound(_)),
         "expected NotFound, got {err:?}"

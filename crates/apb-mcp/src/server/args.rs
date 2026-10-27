@@ -611,6 +611,24 @@ pub struct ProfileWriteArgs {
     /// only, no shell commands). Absent: an update keeps the stored value.
     #[serde(default)]
     pub zcode_mode: Option<String>,
+    /// Which of the operator's environment variables the agent process
+    /// inherits. Absent: an update keeps the stored value.
+    #[serde(default)]
+    pub process_env: Option<ProcessEnvInput>,
+}
+
+/// A profile's `process_env`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProcessEnvInput {
+    /// "inherit" (the whole environment, the default) or "allowlist" (only
+    /// a base set, the agent CLI's own variables and `allow`). Absent with a
+    /// non-empty `allow` means "allowlist".
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// Variable names added under "allowlist": exact names or a prefix with
+    /// one trailing `*` (`NPM_CONFIG_*`). Names only, never values.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

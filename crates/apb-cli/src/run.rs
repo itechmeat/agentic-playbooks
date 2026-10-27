@@ -388,11 +388,13 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
     let global = apb_core::config::GlobalConfig::load().ok();
     let mut ok = true;
     for (name, doc) in &docs {
-        // The executor, its fallbacks and every tier (issue #165 Part 12).
-        for problem in doc.tiers.problems() {
-            println!("profile {name}: error profile_tiers_invalid {problem}");
+        // The document's structural problems (tiers, process_env), the
+        // same check a run start and every profile write make.
+        for problem in doc.problems() {
+            println!("profile {name}: error {problem}");
             ok = false;
         }
+        // The executor, its fallbacks and every tier (issue #165 Part 12).
         if let Some(global) = &global {
             let mut seen = std::collections::BTreeSet::new();
             for (agent, _) in doc.executor_pairs() {

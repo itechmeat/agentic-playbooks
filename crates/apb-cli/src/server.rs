@@ -52,7 +52,9 @@ pub(crate) fn server_cmd(action: ServerAction) -> ExitCode {
 fn issue_cmd() -> ExitCode {
     match server_auth::issue() {
         Ok((key, record)) => {
-            println!("{key}");
+            // The intended exposure: the operator's only chance to see the
+            // issued key. `Display` of a `Secret` would print a mask.
+            println!("{}", key.expose_secret());
             println!();
             println!("key id: {}", record.id);
             println!("This key is shown once and is stored only as a hash. Save it now.");

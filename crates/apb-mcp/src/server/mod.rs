@@ -400,14 +400,18 @@ impl WfMcp {
     /// to this process's in-memory session table. If the run directory does
     /// not exist yet at minting time, the write is simply skipped - the
     /// in-memory path still works for this same process.
-    fn mint_token(&self, run_id: String, capabilities: Vec<String>) -> Result<String, ToolError> {
+    fn mint_token(
+        &self,
+        run_id: String,
+        capabilities: Vec<String>,
+    ) -> Result<apb_core::secret::Secret, ToolError> {
         let token = apb_engine::mint_supervisor_token()
             .map_err(|e| ToolError::Engine(format!("cannot mint a supervisor token: {e}")))?;
         // best-effort: if the run directory does not exist yet, the write fails - fine,
         // the in-memory path still resolves the token for this same process.
         let _ = apb_engine::write_supervisor_session(&self.root, &run_id, &token, &capabilities);
         self.sessions.lock().unwrap().insert(
-            apb_engine::supervisor_token_fingerprint(&token),
+            apb_engine::supervisor_token_fingerprint(token.expose_secret()),
             SupervisorSession {
                 run_id,
                 capabilities,
@@ -430,7 +434,16 @@ impl WfMcp {
     fn resolve_session(&self, token: &str, tool_name: &str) -> Result<String, ToolError> {
         {
             let sessions = self.sessions.lock().unwrap();
-            if let Some(session) = sessions.get(&apb_engine::supervisor_token_fingerprint(token)) {
+            // Every stored fingerprint is compared, in constant time, so the
+            // lookup's duration says nothing about the presented token.
+            let presented = apb_engine::supervisor_token_fingerprint(token);
+            let mut found = None;
+            for (fingerprint, session) in sessions.iter() {
+                if apb_core::secret::ct_eq_str(fingerprint, &presented) {
+                    found = Some(session);
+                }
+            }
+            if let Some(session) = found {
                 let cap = capability_for_tool(tool_name);
                 if !session.capabilities.iter().any(|c| c == cap) {
                     return Err(ToolError::Engine(format!("capability `{cap}` not granted")));
@@ -536,7 +549,7 @@ impl WfMcp {
         to_call_tool_result(with_warnings(
             Ok(json!({
                 "run_id": run_id,
-                "supervisor_token": token,
+                "supervisor_token": token.expose_secret(),
                 "capabilities": capabilities,
             })),
             &warnings,

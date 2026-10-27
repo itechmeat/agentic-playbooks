@@ -56,6 +56,11 @@ pub struct ManifestProfile {
     /// manifests) means `yolo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    /// The profile's `process_env`, snapshotted like `hermetic`: which
+    /// operator variables its agent processes inherit for the whole run,
+    /// resume included. Absent (and in old manifests) means `inherit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_env: Option<apb_core::process_env::ProcessEnvPolicy>,
     // --- tier routing (issue #165 Part 12) ---
     /// The profile's executor tiers, lightest first, resolved at run start
     /// like the chain. Empty for a profile without tiers (and old
@@ -509,6 +514,7 @@ mod tests {
             ephemeral: false,
             hermetic: true,
             zcode_mode: None,
+            process_env: None,
             tiers: Vec::new(),
             routed_tier: None,
             cascade: 0,

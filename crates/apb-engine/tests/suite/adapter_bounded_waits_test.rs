@@ -76,10 +76,7 @@ fn acp(program: String) -> ClaudeAdapter {
     ClaudeAdapter { program, spec }
 }
 
-fn task<'a>(
-    workdir: &'a Path,
-    policy: &'a apb_engine::adapter::ConnectorEnvPolicy,
-) -> AgentTask<'a> {
+fn task<'a>(workdir: &'a Path, policy: &'a apb_engine::adapter::SpawnEnv) -> AgentTask<'a> {
     AgentTask {
         prompt: "go",
         model: "haiku",
@@ -88,7 +85,7 @@ fn task<'a>(
         stream_log: None,
         soul: None,
         grant_autonomy: false,
-        connector_policy: policy,
+        spawn_env: policy,
         interactive: false,
         report_contract: true,
         node: "test",

@@ -1354,6 +1354,32 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "is_false")]
         enforced: bool,
     },
+    /// The process environment an agent attempt started with under a
+    /// profile's `process_env: allowlist`: how many operator variables it
+    /// kept and which ones it did not get (names only, never values).
+    /// Journaled only for allowlist attempts, right before the spawn. A
+    /// report with no state effect; the node's `node_finished` or a
+    /// `run_paused` follows, so it is safe to skip. Additive variant.
+    AgentEnvApplied {
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        agent: String,
+        #[serde(default)]
+        kept: u32,
+        /// Operator variables not passed on, sorted, at most the first 200.
+        #[serde(default)]
+        withheld: Vec<String>,
+        /// How many more were withheld beyond `withheld`.
+        #[serde(default)]
+        withheld_more: u32,
+        /// The profile's exact `allow` names the operator's env does not set.
+        #[serde(default)]
+        absent: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
     /// The findings and warnings an attempt reported (its status file, or a
     /// host submission merged into it), after sanitizing: `dropped` counts
     /// the malformed entries, `dropped_reasons` says why (at most five).

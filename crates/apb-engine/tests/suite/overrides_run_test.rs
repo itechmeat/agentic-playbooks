@@ -161,3 +161,50 @@ fn ephemeral_executor_recorded_in_manifest() {
         "skill snapshot must live under the ephemeral entry key"
     );
 }
+
+/// An ephemeral executor replaces the profile's chain, so a broken tier
+/// (never routed) does not refuse the start, while a broken `process_env`
+/// (which applies to the ephemeral executor too) does.
+#[test]
+fn an_ephemeral_executor_ignores_tier_problems_but_not_process_env_ones() {
+    let _env = common::env_lock();
+    let prog_dir = tempfile::tempdir().unwrap();
+    let prog = write_ok_agent(prog_dir.path());
+    let _agent = common::EnvVar::set("APB_AGENT_CMD", &prog);
+    let start = |extra: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path()).unwrap();
+        let wdir = dir.path().join(".apb/playbooks/ov/1.0.0");
+        fs::create_dir_all(&wdir).unwrap();
+        fs::write(wdir.join("playbook.yaml"), PLAYBOOK).unwrap();
+        fs::write(dir.path().join(".apb/playbooks/ov/current"), "1.0.0").unwrap();
+        let pdir = dir.path().join(".apb/profiles/main");
+        fs::create_dir_all(&pdir).unwrap();
+        fs::write(
+            pdir.join("profile.yaml"),
+            format!("name: main\nexecutor:\n  agent: claude-code\n  model: haiku\n{extra}"),
+        )
+        .unwrap();
+        fs::write(pdir.join("SOUL.md"), "").unwrap();
+        let opts = RunOptions {
+            overrides: Some(
+                RunOverrides::from_yaml(
+                    "nodes:\n  w:\n    ephemeral_executor: { agent: codex, model: o1 }\n",
+                )
+                .unwrap(),
+            ),
+            ..RunOptions::default()
+        };
+        run(dir.path(), "ov", None, opts).map(|r| r.outcome)
+    };
+    assert_eq!(
+        start("tiers:\n  light: { for: \"\" }\n").expect("a broken tier is never routed"),
+        RunStatus::Succeeded
+    );
+    let refused = start("process_env: { policy: inherit, allow: [GH_TOKEN] }\n")
+        .expect_err("a broken process_env refuses the start");
+    assert!(
+        refused.to_string().contains("profile_process_env_invalid"),
+        "{refused}"
+    );
+}

@@ -160,6 +160,20 @@ pub(crate) struct ProfileWriteBody {
     /// `environment`.
     #[serde(default)]
     zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    /// Which operator variables the agent process inherits; absent keeps
+    /// the stored value, like `environment`.
+    #[serde(default)]
+    process_env: Option<ProcessEnvBody>,
+}
+
+/// A profile's `process_env` (`policy`: `inherit` | `allowlist`; `allow`
+/// alone implies `allowlist`, as on every other write surface).
+#[derive(Deserialize)]
+pub(crate) struct ProcessEnvBody {
+    #[serde(default)]
+    policy: Option<String>,
+    #[serde(default)]
+    allow: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -201,6 +215,13 @@ pub(crate) async fn write_profile(
         Ok(e) => e,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
+    let process_env = match body.process_env.as_ref().map(|p| {
+        apb_core::process_env::ProcessEnvPolicy::from_surface(p.policy.as_deref(), &p.allow)
+    }) {
+        None => None,
+        Some(Ok(p)) => p,
+        Some(Err(e)) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
     let res = profile_tools::profile_write(
         &root,
         ProfileWrite {
@@ -221,8 +242,11 @@ pub(crate) async fn write_profile(
             expected_digest: body.expected_digest,
             soul_requirement,
             // Absent keeps the stored value (profile_write decides under its lock).
-            environment,
-            zcode_mode: body.zcode_mode,
+            options: profile_tools::ProfileOptions {
+                environment,
+                zcode_mode: body.zcode_mode,
+                process_env,
+            },
         },
     );
     match res {

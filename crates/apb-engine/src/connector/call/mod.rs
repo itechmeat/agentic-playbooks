@@ -50,6 +50,7 @@ use apb_core::connector::template::{
     RenderCtx, render_body, render_encoded, render_raw, resolve_optional_arg,
     single_args_placeholder,
 };
+use apb_core::secret::{Redaction, Secret};
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
@@ -619,7 +620,7 @@ pub(crate) fn render_http(
     function: &FunctionSpec,
     account_fields: &BTreeMap<String, String>,
     args: &Value,
-    secrets: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, Secret>,
     stamp: Option<&Stamp>,
 ) -> Result<RenderedRequest, CallError> {
     let ctx = RenderCtx {
@@ -857,6 +858,10 @@ fn build_prepared(
     // `rendered.headers` there, so the same bytes reach the wire and a contract
     // test alike.
     let rendered = render_http(function, &account_fields, args, &secrets, stamp)?;
+    // A Basic credential leaves as base64 of `user:password`, a form no
+    // single secret's redaction matches: it gets its own.
+    let mut redactions = redactions;
+    redactions.extend(http::basic_redaction(auth, &account_fields, &secrets));
 
     if dry_run {
         let mut out = json!({

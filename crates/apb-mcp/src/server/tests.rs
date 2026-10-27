@@ -673,10 +673,14 @@ fn minted_supervisor_tokens_are_random_256_bit_values() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let a = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let b = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     for token in [&a, &b] {
         let body = token.strip_prefix("sv-").expect("sv- prefix");
         assert!(
@@ -706,7 +710,9 @@ fn patch_playbook_rejected_without_capability() {
     // A session with only observe - patch_playbook is not granted.
     let token = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let err = server
         .resolve_session(&token, "supervisor_patch_playbook")
         .unwrap_err();
@@ -719,7 +725,9 @@ fn patch_playbook_allowed_with_capability() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("run-x".to_string(), vec!["patch_playbook".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_patch_playbook")
@@ -738,7 +746,9 @@ fn interrupt_attempt_rejected_without_capability() {
     // A session with only observe - retry (and so interrupt) is not granted.
     let token = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let err = server
         .resolve_session(&token, "supervisor_interrupt_attempt")
         .unwrap_err();
@@ -759,7 +769,9 @@ fn rebind_profile_rejected_without_the_rebind_capability() {
             "run-x".to_string(),
             vec!["observe".to_string(), "retry".to_string()],
         )
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let err = server
         .resolve_session(&token, "supervisor_rebind_profile")
         .unwrap_err();
@@ -772,7 +784,9 @@ fn rebind_profile_allowed_with_the_rebind_capability() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("run-x".to_string(), vec!["rebind".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_rebind_profile")
@@ -863,7 +877,9 @@ fn interrupt_attempt_allowed_with_retry_capability() {
             "run-x".to_string(),
             vec!["observe".to_string(), "retry".to_string()],
         )
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_interrupt_attempt")
@@ -918,7 +934,9 @@ async fn capability_gate_blocks_retry_when_observe_only() {
 
     let token = server
         .mint_token(run_id, vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
 
     let retry_result = server
         .supervisor_node_retry(Parameters(SupervisorRetryArgs {
@@ -986,7 +1004,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
     apb_engine::write_supervisor_session(
         dir.path(),
         &run_id,
-        "sv-disk-1",
+        &apb_core::secret::Secret::new("sv-disk-1"),
         &["observe".to_string(), "retry".to_string()],
     )
     .expect("write_supervisor_session");
@@ -1049,7 +1067,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
     apb_engine::write_supervisor_session(
         dir.path(),
         &run_id,
-        "sv-disk-observe-only",
+        &apb_core::secret::Secret::new("sv-disk-observe-only"),
         &["observe".to_string()],
     )
     .expect("write_supervisor_session");
@@ -1117,7 +1135,9 @@ async fn run_answer_token_path_posts_supervisor_answer_on_supervisor_node() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("r-sv".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
 
     let result = server
         .run_answer(Parameters(RunAnswerArgs {
@@ -1148,7 +1168,9 @@ async fn run_answer_token_path_relays_on_human_only_node() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("r-human".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
 
     let result = server
         .run_answer(Parameters(RunAnswerArgs {

@@ -59,6 +59,20 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
   return events.map((e) => ({ seq: e.seq, type: e.type, node: e.node ?? null, note: eventNote(e) }))
 }
 
+// A profile's `process_env: allowlist` on one attempt: how many operator
+// variables the agent kept, which it did not get (the first few by name)
+// and which allowed names the operator does not set. Names only.
+export function agentEnvNote(r: Record<string, unknown>): string {
+  const withheld = Array.isArray(r.withheld) ? r.withheld.map(String) : []
+  const more = typeof r.withheld_more === 'number' ? r.withheld_more : 0
+  const total = withheld.length + more
+  const shown = withheld.slice(0, 5)
+  const names = shown.length ? ` (${shown.join(', ')}${total > shown.length ? ', ...' : ''})` : ''
+  const absent = Array.isArray(r.absent) && r.absent.length ? `, not set: ${listOf(r.absent)}` : ''
+  const agent = typeof r.agent === 'string' && r.agent ? ` (${r.agent})` : ''
+  return `env allowlist${agent}: kept ${String(r.kept ?? 0)}, withheld ${total}${names}${absent}`
+}
+
 /** A list of node ids as `a, b`, for a note line. */
 function listOf(v: unknown): string {
   return Array.isArray(v) ? v.map(String).join(', ') : ''
@@ -71,8 +85,8 @@ function listOf(v: unknown): string {
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
 // (issue #195), or which inputs a join wrote off and a re-run revived
 // (issue #203), and what a re-run revives, the baseline check's snapshots
-// and comparisons, and the notes an attempt reported. Every other kind has
-// none.
+// and comparisons, the notes an attempt reported, and what a process_env
+// allowlist withheld from an attempt. Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -93,6 +107,8 @@ function eventNote(e: WfEvent): string | undefined {
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
     case 'attempt_started':
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
+    case 'agent_env_applied':
+      return agentEnvNote(r)
     case 'attempt_finished': {
       const notes = [attemptUsageNote(r.usage), attemptOutputNote(r.output_truncated, r.transcript_incomplete)]
       const line = notes.filter(Boolean).join(' · ')

@@ -53,6 +53,8 @@ mod migration_test;
 mod models_table_test;
 #[path = "suite/overrides_test.rs"]
 mod overrides_test;
+#[path = "suite/process_env_test.rs"]
+mod process_env_test;
 #[path = "suite/profile_resolve_test.rs"]
 mod profile_resolve_test;
 #[path = "suite/promotion_test.rs"]

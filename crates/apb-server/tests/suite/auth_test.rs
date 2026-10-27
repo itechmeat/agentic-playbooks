@@ -6,6 +6,7 @@
 //! which is precisely this situation.
 
 use apb_core::config::ServerConfig;
+use apb_core::secret::Secret;
 use apb_core::server_auth;
 use apb_server::auth::{AuthState, CSRF_HEADER, CSRF_VALUE, SESSION_COOKIE};
 use apb_server::{AppState, build_router};
@@ -28,7 +29,7 @@ use tower::ServiceExt;
 /// make the file lengths differ for a reason unrelated to what the same-tick
 /// test is about, so the ids are pinned to the unquoted form rather than the
 /// precondition being left to a coin flip.
-fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
+fn issue_unquoted_id(path: &std::path::Path) -> (Secret, apb_core::server_auth::KeyRecord) {
     loop {
         let (key, record) = server_auth::issue_into(path).unwrap();
         if yaml_serde::to_string(&record.id).unwrap().trim_end() == record.id {
@@ -48,7 +49,10 @@ fn authed(root: std::path::PathBuf) -> (String, AppState) {
     let (key, _record) = server_auth::issue_into(&path).unwrap();
     let file = server_auth::load_from(&path).unwrap();
     let auth = Arc::new(AuthState::new(None, file.keys, &ServerConfig::default()).unwrap());
-    (key, AppState::new(root).with_auth(auth))
+    (
+        key.expose_secret().to_string(),
+        AppState::new(root).with_auth(auth),
+    )
 }
 
 async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -548,7 +552,7 @@ async fn a_revoked_key_stops_working_and_a_new_one_starts_without_a_restart() {
             .unwrap()
     };
 
-    let (status, _) = send(&state, bearer(&key_a)).await;
+    let (status, _) = send(&state, bearer(key_a.expose_secret())).await;
     assert_eq!(status, StatusCode::OK, "key A works to begin with");
 
     // Rotate the file underneath the running server, exactly as
@@ -561,14 +565,14 @@ async fn a_revoked_key_stops_working_and_a_new_one_starts_without_a_restart() {
 
     // The failing request forces the reload, which is what the spec asks for:
     // no restart, effect on the very next request.
-    let (status, body) = send(&state, bearer(&key_a)).await;
+    let (status, body) = send(&state, bearer(key_a.expose_secret())).await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
         "the revoked key is rejected: {body}"
     );
 
-    let (status, _) = send(&state, bearer(&key_b)).await;
+    let (status, _) = send(&state, bearer(key_b.expose_secret())).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -683,7 +687,7 @@ async fn revoking_the_last_key_on_a_key_requiring_server_stops_the_keyless_pass_
             .unwrap()
     };
 
-    let (status, _) = send(&state, bearer(&key)).await;
+    let (status, _) = send(&state, bearer(key.expose_secret())).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -696,7 +700,7 @@ async fn revoking_the_last_key_on_a_key_requiring_server_stops_the_keyless_pass_
     // a (content-hash) reload against, which is what drops the in-memory key
     // count to zero as a side effect of this one request; the ordinary
     // "unauthenticated" 401 path answers it either way.
-    let (status, _) = send(&state, bearer(&key)).await;
+    let (status, _) = send(&state, bearer(key.expose_secret())).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // The real regression check: once the key set is empty, a request that

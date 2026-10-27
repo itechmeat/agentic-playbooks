@@ -638,7 +638,7 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
     apb_engine::write_supervisor_session(
         dir.path(),
         &run_id,
-        "sv-disk-1",
+        &apb_core::secret::Secret::new("sv-disk-1"),
         &["observe".to_string(), "retry".to_string()],
     )
     .unwrap();

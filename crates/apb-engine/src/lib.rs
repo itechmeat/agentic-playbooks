@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod agent_env;
 mod agent_home;
 pub mod baseline;
 // candidate trials (issue #192)
@@ -90,7 +91,7 @@ extern "C" fn isolate_test_config() {
 }
 
 pub use error::EngineError;
-pub use hooks::{generate_hooks, hook_path, read_hooks};
+pub use hooks::{RunHooks, generate_hooks, read_hooks};
 pub use inspect::{
     PersistedSession, WakeEvent, find_session_by_token, heartbeat_age_ms, mint_supervisor_token,
     read_supervisor_report, run_inspect, should_declare_lost, supervisor_report_or_summary,
