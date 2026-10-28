@@ -12,24 +12,6 @@ const ZCODE: &str = include_str!("../../../apb-engine/tests/fixtures/zcode/json_
 const REPORT: &str = "hello\n\n```yaml\nstatus: success\nsummary: read the file\n```";
 
 #[test]
-fn claude_json_result_gives_reply_usage_and_reported_cost() {
-    let r = reply("claude", CLAUDE).unwrap();
-    assert_eq!(r.text, REPORT);
-    assert!(!r.is_error);
-    assert_eq!(
-        usage("claude", CLAUDE).unwrap(),
-        AgentUsage {
-            input_tokens: 18,
-            output_tokens: 443,
-            cache_read_tokens: 52079,
-            cache_write_tokens: 14967,
-            cost_usd: Some(0.0373749),
-            source: UsageSource::Reported,
-        }
-    );
-}
-
-#[test]
 fn claude_stream_json_reads_the_final_result_line() {
     let stream = format!(
         "{}\n{}\n{}\n",
@@ -60,41 +42,9 @@ fn claude_is_error_and_usage_without_a_model_breakdown() {
 }
 
 #[test]
-fn codex_exec_json_gives_the_last_agent_message_and_turn_usage() {
-    assert_eq!(reply("codex", CODEX).unwrap().text, REPORT);
-    assert_eq!(
-        usage("codex", CODEX).unwrap(),
-        AgentUsage {
-            input_tokens: 24763 - 24448,
-            output_tokens: 122,
-            cache_read_tokens: 24448,
-            cache_write_tokens: 0,
-            cost_usd: None,
-            source: UsageSource::Reported,
-        }
-    );
-}
-
-#[test]
 fn a_failed_codex_turn_reports_no_reply_and_no_usage() {
     assert_eq!(reply("codex", CODEX_FAILED), None);
     assert_eq!(usage("codex", CODEX_FAILED), None);
-}
-
-#[test]
-fn opencode_json_sums_every_step() {
-    assert_eq!(reply("opencode", OPENCODE).unwrap().text, REPORT);
-    assert_eq!(
-        usage("opencode", OPENCODE).unwrap(),
-        AgentUsage {
-            input_tokens: 63799 + 217,
-            output_tokens: 56 + 24 + 3 + 17,
-            cache_read_tokens: 63744,
-            cache_write_tokens: 0,
-            cost_usd: None,
-            source: UsageSource::Reported,
-        }
-    );
 }
 
 #[test]

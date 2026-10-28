@@ -42,6 +42,14 @@ impl EnvVar {
         unsafe { std::env::set_var(key, value) };
         EnvVar { key, prior }
     }
+
+    /// `key` unset for the life of the guard, restored on drop.
+    pub fn remove(key: &'static str) -> Self {
+        let prior = std::env::var_os(key);
+        // SAFETY: as in `set`.
+        unsafe { std::env::remove_var(key) };
+        EnvVar { key, prior }
+    }
 }
 
 impl Drop for EnvVar {

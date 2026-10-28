@@ -74,6 +74,22 @@ export function agentEnvNote(r: Record<string, unknown>): string {
   return `env allowlist${agent}: kept ${String(r.kept ?? 0)}, withheld ${total}${names}${absent}`
 }
 
+/**
+ * The note of a `tool_exposure_mismatch`: what the agent did not see of what
+ * apb handed it, and the servers it saw beyond a strict MCP config.
+ */
+export function toolExposureNote(r: Record<string, unknown>): string {
+  const parts = [
+    ['missing tools', r.missing_tools],
+    ['servers not connected', r.missing_servers],
+    ['unexpected servers', r.unexpected_servers],
+  ]
+    .filter(([, v]) => Array.isArray(v) && v.length > 0)
+    .map(([label, v]) => `${String(label)}: ${listOf(v)}`)
+  const agent = typeof r.agent === 'string' && r.agent ? ` (${r.agent})` : ''
+  return `tool exposure${agent}: ${parts.join('; ')}`
+}
+
 /** A list of node ids as `a, b`, for a note line. */
 function listOf(v: unknown): string {
   return Array.isArray(v) ? v.map(String).join(', ') : ''
@@ -87,7 +103,8 @@ function listOf(v: unknown): string {
 // (issue #195), or which inputs a join wrote off and a re-run revived
 // (issue #203), and what a re-run revives, the baseline check's snapshots
 // and comparisons, the notes an attempt reported, and what a process_env
-// allowlist withheld from an attempt, and the run's notifications (who
+// allowlist withheld from an attempt, which tools an agent did not see of
+// what apb handed it, and the run's notifications (who
 // changed them, and each notification sent). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
@@ -115,6 +132,8 @@ function eventNote(e: WfEvent): string | undefined {
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
     case 'agent_env_applied':
       return agentEnvNote(r)
+    case 'tool_exposure_mismatch':
+      return toolExposureNote(r)
     case 'attempt_finished': {
       const notes = [attemptUsageNote(r.usage), attemptOutputNote(r.output_truncated, r.transcript_incomplete)]
       const line = notes.filter(Boolean).join(' · ')

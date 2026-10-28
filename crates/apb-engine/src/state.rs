@@ -638,7 +638,8 @@ impl RunState {
                 EventPayload::BaselineObserved { .. }
                 | EventPayload::BaselineCompared { .. }
                 | EventPayload::AttemptNotes { .. }
-                | EventPayload::AgentEnvApplied { .. } => {}
+                | EventPayload::AgentEnvApplied { .. }
+                | EventPayload::ToolExposureMismatch { .. } => {}
                 // A list visit's records; `crate::list::ListFold` folds them.
                 EventPayload::ListStarted { .. }
                 | EventPayload::ListBatchStarted { .. }

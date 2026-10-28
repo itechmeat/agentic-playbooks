@@ -965,6 +965,54 @@ fn live_profile_edit_after_start_does_not_affect_resume() {
     );
 }
 
+/// A fallback within the run reads the manifest too: the live profile and
+/// SOUL edited by the first attempt (after the start) never reach the
+/// second.
+#[test]
+fn live_profile_edit_mid_run_does_not_affect_a_fallback() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let dump = bin.path().join("dump.txt");
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: codex, model: haiku }\n",
+        "",
+        "OLD-SOUL-MARKER",
+    );
+    let live = proj.path().join(".apb/profiles/arch");
+    // The 1st attempt rewrites the live profile and SOUL, then fails; the
+    // 2nd (the fallback) dumps its argv.
+    let body = format!(
+        "c=\"$APB_TEST_DUMP.count\"; n=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nif [ \"$n\" = \"1\" ]; then printf 'NEW-SOUL-MARKER' > '{soul}'; printf 'name: arch\\ndescription: d\\nexecutor:\\n  agent: claude\\n  model: haiku\\n  fallbacks:\\n    - {{ agent: codex, model: live-edited-model }}\\n' > '{yaml}'; echo boom 1>&2; exit 1; fi\n{DUMP_STUB}",
+        soul = live.join("SOUL.md").display(),
+        yaml = live.join("profile.yaml").display(),
+    );
+    set_env(
+        &make_stub(bin.path(), &body),
+        home.path(),
+        cfg.path(),
+        Some(&dump),
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(
+        fs::read_to_string(live.join("SOUL.md")).unwrap(),
+        "NEW-SOUL-MARKER",
+        "the first attempt edited the live SOUL"
+    );
+    let got = fs::read_to_string(&dump).expect("the fallback dumped its args");
+    assert!(got.contains("OLD-SOUL-MARKER"), "{got}");
+    assert!(!got.contains("NEW-SOUL-MARKER"), "{got}");
+    assert!(!got.contains("live-edited-model"), "{got}");
+}
+
 /// The finish-answer path carries its OWN copy of the fallback sameness guard
 /// (`execute_finish_answer`), and only `execute_node`'s copy was covered. Same
 /// property, asserted where the second copy lives: a chain claude(haiku) ->

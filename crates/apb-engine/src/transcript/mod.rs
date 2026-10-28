@@ -20,6 +20,15 @@ mod record;
 
 pub use record::{Record, ToolUse};
 
+use apb_core::agents::Transcript;
+
+/// How the grader reads an attempt of `agent`.
+fn transcript_of(agent: &str) -> Transcript {
+    apb_core::agents::lookup(agent).map_or(Transcript::Plain, |a| {
+        a.descriptor().capabilities.transcript
+    })
+}
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -103,8 +112,10 @@ impl Source {
         self.stream == Stream::Session
     }
 
-    fn is_codex(&self) -> bool {
-        apb_core::detect::canonical_agent_id(&self.agent) == "codex"
+    /// How the grader reads this attempt's agent (its module's
+    /// `transcript` capability); plain for an agent apb does not know.
+    fn transcript(&self) -> Transcript {
+        transcript_of(&self.agent)
     }
 }
 
@@ -223,10 +234,10 @@ fn attempts(events: &[Event]) -> Vec<AttemptFacts> {
 pub fn sources(run_dir: &Path, events: &[Event]) -> Vec<Source> {
     let mut out = Vec::new();
     for a in attempts(events) {
-        let claude = apb_core::detect::canonical_agent_id(&a.agent) == "claude";
+        let session_record = transcript_of(&a.agent) == Transcript::SessionRecord;
         let streams: &[Stream] = if a.untracked {
             &[Stream::Stdout]
-        } else if claude {
+        } else if session_record {
             &[Stream::Session, Stream::Stdout, Stream::Stderr]
         } else {
             &[Stream::Stdout, Stream::Stderr]
@@ -273,7 +284,7 @@ pub fn read(source: &Source) -> View {
     let text = String::from_utf8_lossy(&raw);
     let (records, parsed_whole) = match source.stream {
         Stream::Session => claude::parse(&text),
-        Stream::Stdout if source.is_codex() => codex::parse(&text),
+        Stream::Stdout if source.transcript() == Transcript::JsonEvents => codex::parse(&text),
         Stream::Stdout | Stream::Stderr => (plain::parse(&text), true),
     };
     View {

@@ -1,0 +1,49 @@
+# Contract fixture for the opencode agent, read by `suite/agent_contract`.
+# The machine-output scenarios replay the recorded `run --format json`
+# stream in apb-core's `agent_output` fixtures (ids replaced by
+# placeholders); the rest are synthetic and say so.
+agent: opencode
+provenance: captured
+checked_against: 1.18.32
+scenarios:
+  success:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/opencode_run.jsonl
+    expect:
+      output: hello
+      final_record: true
+  error:
+    provenance: synthetic
+    stderr: "Error: Model not found: example/missing-model"
+    exit: 1
+    expect:
+      message: "Model not found"
+      model_turn: false
+  quota:
+    provenance: synthetic
+    stderr: "AI_APICallError: Too Many Requests"
+    exit: 1
+    expect:
+      kind: quota
+  session:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/opencode_run.jsonl
+    expect:
+      session: ses_test0001
+      fresh: titled
+      continues: true
+      missing: "Session not found: ses_test0001"
+  usage:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/opencode_run.jsonl
+    expect:
+      usage:
+        input_tokens: 64016
+        output_tokens: 100
+        cache_read_tokens: 63744
+        cache_write_tokens: 0
+        source: reported
+  verdict:
+    provenance: synthetic
+    stdout: |
+      {"type":"text","sessionID":"ses_test0001","part":{"type":"text","text":"stuck\n\n```yaml\nstatus: failure\nsummary: the tests fail\n```"}}
+      {"type":"step_finish","sessionID":"ses_test0001","part":{"type":"step-finish","tokens":{"input":5,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},"cost":0}}
+    expect:
+      status: failed

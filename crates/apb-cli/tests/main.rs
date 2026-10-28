@@ -41,6 +41,9 @@ mod decisions_cli_test;
 mod detached_driver_test;
 #[path = "suite/discover_cli_test.rs"]
 mod discover_cli_test;
+#[cfg(unix)]
+#[path = "suite/doctor_agents_cli_test.rs"]
+mod doctor_agents_cli_test;
 #[path = "suite/grade_cli_test.rs"]
 mod grade_cli_test;
 #[cfg(unix)]

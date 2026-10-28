@@ -429,6 +429,7 @@ impl HostAdapter<'_, '_> {
             session: None,
             usage: sub.usage.as_ref().map(|u| u.to_agent_usage()),
             capture: crate::capture::OutputCapture::default(),
+            exposure: None,
             host_notes_dropped: apb_core::run_notes::DroppedNotes {
                 count: sub.notes_dropped,
                 reasons: sub.notes_dropped_reasons.clone(),

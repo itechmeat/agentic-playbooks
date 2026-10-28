@@ -28,6 +28,10 @@ mod common;
 
 #[path = "suite/agent_actions_test.rs"]
 mod agent_actions_test;
+#[path = "suite/agent_check_test.rs"]
+mod agent_check_test;
+#[path = "suite/agents_test.rs"]
+mod agents_test;
 #[path = "suite/bundle_test.rs"]
 mod bundle_test;
 #[path = "suite/config_test.rs"]

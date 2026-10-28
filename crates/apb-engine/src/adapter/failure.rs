@@ -22,7 +22,9 @@ pub struct AgentFailure {
     /// failed: claude prints its errored result, usage included, and exits
     /// non-zero. `None` when the failed output reported none. The drive loop
     /// writes it into the failed `AttemptFinished.usage`.
-    pub usage: Option<apb_core::agent_output::AgentUsage>,
+    /// Boxed, like `exposure`: a failure travels in every `Err` of an
+    /// attempt.
+    pub usage: Option<Box<apb_core::agent_output::AgentUsage>>,
     /// Whether the failed attempt shows a model turn: it reported token
     /// usage, or printed a reply that is not an error result. The host
     /// fallback treats an auth-looking failure as "cannot start" only
@@ -31,6 +33,9 @@ pub struct AgentFailure {
     pub model_turn: bool,
     /// What the attempt lost of its output (bounded agent output).
     pub capture: OutputCapture,
+    /// The tools and MCP servers the agent reported at start (stream
+    /// transport only); `None` when its output named none.
+    pub exposure: Option<Box<apb_core::agents::ExposedTools>>,
 }
 
 impl AgentFailure {
@@ -41,6 +46,7 @@ impl AgentFailure {
             usage: None,
             model_turn: false,
             capture: OutputCapture::default(),
+            exposure: None,
         }
     }
 
@@ -58,10 +64,17 @@ impl AgentFailure {
         self
     }
 
+    /// The same failure, with the tools the agent reported it sees.
+    #[must_use]
+    pub fn with_exposure(mut self, exposure: Option<apb_core::agents::ExposedTools>) -> Self {
+        self.exposure = exposure.map(Box::new);
+        self
+    }
+
     /// The same failure, with the usage the output reported.
     #[must_use]
     pub fn with_usage(mut self, usage: Option<apb_core::agent_output::AgentUsage>) -> Self {
-        self.usage = usage;
+        self.usage = usage.map(Box::new);
         self
     }
 }

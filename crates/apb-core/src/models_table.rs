@@ -280,21 +280,15 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
     Ok(table)
 }
 
-/// Vendor a known single-vendor agent is tied to (issue #42 finding 9): used
-/// to narrow the curated table to that vendor's rows for the profile
-/// editor's model selector. An aggregator (opencode, pi, agy, hermes, cursor,
-/// qoder) or an unrecognized agent id has no entry here and keeps the whole
-/// table - it is not pinned to one vendor. The legacy `claude-code` id (still found in
-/// profiles saved before the agent id was renamed) resolves to the same
-/// vendor as `claude`.
+/// Vendor a known single-vendor agent is tied to (issue #42 finding 9), from
+/// its module's model rules: used to narrow the curated table to that
+/// vendor's rows for the profile editor's model selector. An aggregator
+/// (opencode, pi, agy, hermes, cursor, qoder) or an unrecognized agent id has
+/// none and keeps the whole table - it is not pinned to one vendor. The legacy
+/// `claude-code` id (still found in profiles saved before the agent id was
+/// renamed) resolves to the same vendor as `claude`.
 pub fn agent_vendor(agent: &str) -> Option<&'static str> {
-    match crate::detect::canonical_agent_id(agent) {
-        "claude" => Some("anthropic"),
-        "codex" => Some("openai"),
-        "grok" => Some("xai"),
-        "zcode" => Some("zhipu"),
-        _ => None,
-    }
+    crate::agents::lookup(agent)?.models().vendor()
 }
 
 /// The closed, apb-owned model list of `agent`, or `None` when the agent
@@ -304,18 +298,21 @@ pub fn agent_vendor(agent: &str) -> Option<&'static str> {
 /// detection reports it as the agent's `Static` inventory
 /// (`agent_catalog::assemble`) and the profile editor offers exactly
 /// it ([`model_options_for_agent`]), so the two can never disagree.
-/// - zcode: apb's allowlist ([`crate::zcode::model_list`]), a Rust constant
-///   because the spawn path enforces it;
+/// Which list that is comes from the agent's module
+/// ([`crate::agents::ClosedList`]); this table only resolves it:
+/// - zcode: apb's allowlist (a Rust constant because the spawn path
+///   enforces it);
 /// - claude (and the legacy `claude-code` id): `claude_static_models`;
 /// - codex: `codex_static_models`.
 ///
 /// An empty table list (an overlay may clear one) means no closed list.
 pub fn static_models_for_agent(agent: &str, table: &ModelsTable) -> Option<Vec<String>> {
-    let list = match crate::detect::canonical_agent_id(agent) {
-        a if a == crate::zcode::AGENT_ID => crate::zcode::model_list(),
-        "claude" => table.claude_static_models.clone(),
-        "codex" => table.codex_static_models.clone(),
-        _ => return None,
+    use crate::agents::ClosedList;
+    let list = match crate::agents::lookup(agent)?.models().closed_list() {
+        ClosedList::Open => return None,
+        ClosedList::ClaudeTable => table.claude_static_models.clone(),
+        ClosedList::CodexTable => table.codex_static_models.clone(),
+        ClosedList::Fixed(list) => list.iter().map(|m| m.to_string()).collect(),
     };
     (!list.is_empty()).then_some(list)
 }

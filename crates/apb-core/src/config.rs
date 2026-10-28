@@ -504,6 +504,14 @@ impl GlobalConfig {
         )
     }
 
+    /// Whether the config replaces agent `id`'s built-in form
+    /// (`agents.<id>.invocation`). Read under `id` exactly as given, the way
+    /// a run reads a profile's agent: an entry under an alias applies only
+    /// to that alias.
+    pub fn has_custom_form(&self, id: &str) -> bool {
+        self.agents.get(id).is_some_and(|a| a.invocation.is_some())
+    }
+
     /// Launch command for agent `id`, if it's described in the config.
     pub fn agent_program(&self, id: &str) -> Option<String> {
         self.agents.get(id).and_then(|a| a.program.clone())

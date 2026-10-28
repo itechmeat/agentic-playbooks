@@ -53,8 +53,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   structural check of a run start, `apb validate` and every profile write,
   `profile_store.rs` scope resolution and bundle trust, `skills.rs`), a
   profile's `process_env` (`process_env.rs`: the policy, the `allow` syntax and
-  the name-only plan; `process_env/sets.rs`: the base set and each agent CLI's
-  variables), registry and versioning (`versioning/`: `diff` the definition
+  the name-only plan; `process_env/sets.rs`: the base set, each agent's own
+  set living in its module), registry and versioning (`versioning/`: `diff` the definition
   diff, `imported` the import provenance, `approval` the approval of a
   version by its exact digest), bundle export, import and the import preview
   (`bundle/`), remembered run input per project (`run_memory/`: `key`,
@@ -73,14 +73,25 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
   another scope's store (`scope_move.rs`), schema 1->2 migrator
-  (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
+  (`schema_migrate.rs`), the built-in agents, one module each (`agents/`: the
+  registry `all` and `lookup`, `agent.rs` the `Agent` trait, its descriptor,
+  capabilities and verified CLI version, `forms.rs` the launch, resume and
+  fresh-session forms, `output.rs` the output readers with `promises` and
+  `conformance`, `setup.rs` what detection reads and the run-scoped
+  environment, `policy.rs` the model rules, `check.rs` the doctor's free
+  local check of an installed CLI (version against the verified one, the
+  built-in form's flags in its help), `exposure.rs` the tools an agent
+  reports against the ones an attempt was handed; `claude/`, `codex/`, `opencode/`
+  and `zcode/` hold their readers and helpers, the other agents one file each;
+  `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
+  agent registry (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
   shared by the validator and the engine (`graphutil.rs`), content/bundle digests
   (`content.rs`), the sealed type of every resolved secret with its
   constant-time comparison and labelled redaction (`secret.rs`), trust store
   (`trust.rs`), atomic state IO, symlinks and dir
-  locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
-  each agent CLI's machine output: reply and reported token usage
+  locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the agent-neutral
+  entry to each agent's output reader: reply and reported token usage
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
   `execution` config section, `cli` or `host` per run, the fallback rule),
   the eval case and suite format with its V80-V83 checks, digests and the
@@ -89,7 +100,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   doctor's free per-provider request (`decision_probe.rs`), the
   measured-threshold store (`decision_thresholds.rs`), one decoder per agent
   log format (`agent_actions/`: `claude` and `codex` lines as tool actions,
-  typed requests and the working directory, `command` the shell command
+  typed requests and the working directory, kept in their agent modules and
+  re-exported here, `command` the shell command
   normalizer with the destructive list, `known` the subcommand and option
   lists a step token may name) and history discovery
   (`discover/`: `walk` the bounded no-follow walk of a root, `session` a
@@ -195,10 +207,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/spawn_env`
   the one environment every agent spawn gets: the process-env plan, the
-  connector scrub, the run context, the agent home), the process-env plan of
+  connector scrub, the run context, the agent's run-scoped environment in
+  the directory `agent_home.rs` names), the process-env plan of
   one agent step and its `agent_env_applied` event (`agent_env.rs`; the
   per-step wiring in `scheduler/node/step_env`), the per-run doctor
-  (`run_doctor.rs`, `run_doctor/env` the process env rows), the append-only event log
+  (`run_doctor.rs`, `run_doctor/env` the process env rows, `run_doctor/exposure`
+  the tool exposure rows), the paid agent probe behind `apb doctor
+  --probe-agent` (`agent_probe.rs`), the expected tools of an attempt and its
+  `tool_exposure_mismatch` (`scheduler/node/exposure`), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping, `attempt` the
   call's attempt binding, `target` the snapshot grant or the live
@@ -241,7 +257,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
   subscriptions survey); non-TTY runs skip it. `apb self-update` updates
-  installer-based installs in place. `apb intent list|resolve` shows a run's
+  installer-based installs in place. `doctor.rs` is `apb doctor` (the
+  environment, `--agents`, `--run <id>`, `--probe-agent <id>`). `apb intent list|resolve` shows a run's
   send intents and records a person's decision on an unknown one. `budget.rs`
   holds the budget flags of `apb run` and `apb resume`, the estimate printing
   and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb
@@ -329,19 +346,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   model + ordered fallbacks + SOUL (role prompt) + skills, with a scope
   (Project | Global | Auto). Nodes reference it by name or `{ name, scope }`.
 - A profile's `process_env` (`inherit`, the default, or `allowlist`) decides
-  which operator variables an agent process inherits. The run snapshots it in
-  the manifest; every agent spawn (attempts in start and resume forms, finish
-  answer, judge, supervisor, quota probe) gets its env through
-  `adapter::spawn_env`, which under an allowlist clears the environment and
-  copies back only the planned names. The plan is per chain step (a fallback
-  gets its own agent's set); connector-referenced names are withheld either
-  way. Scripts, checks and host-mode steps are not covered.
+  which operator variables an agent process inherits. Every agent spawn gets
+  its env through `adapter::spawn_env`
+  ([decision record 0004](docs/adr/0004-every-agent-spawn-gets-its-env-through-spawn-env.md)).
 - `profile_digest` = hash of profile.yaml + SOUL.md; `bundle_digest` = profile
   digest plus the actual content digests of its skills. Editing a skill changes
   the bundle and drops trust.
 - A run snapshots its resolved profiles, skills, and invocations into an
-  immutable, write-once `runs/<id>/manifest.yaml`. All post-start reads (retry,
-  fallback, resume) come from that snapshot, not live files.
+  immutable, write-once `runs/<id>/manifest.yaml`
+  ([decision record 0002](docs/adr/0002-post-start-reads-come-from-the-manifest.md)).
 - One run gate for every launch surface: `apb_engine::gate::check_run`
   (lifecycle, `requires`, playbook/profile/connector trust, sub-playbook pins).
   MCP, the dashboard and the CLI all call it; they differ only in
@@ -360,8 +373,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `meta/instruction-draft.md` is a read-only seed.
 - Anti-TOCTOU: the gate returns a `RunPermit`
   (playbook digest + the exact verified profile-bundle map) in one pass; the
-  engine is handed that map verbatim as `expected_*` and rejects any drift.
-  Never recompute that map separately between gate and run.
+  engine is handed that map verbatim as `expected_*` and rejects any drift
+  ([decision record 0003](docs/adr/0003-the-run-permit-reaches-the-engine-verbatim.md)).
+- Knowledge about a built-in agent lives only in its module under
+  `apb_core::agents`
+  ([decision record 0005](docs/adr/0005-agent-knowledge-lives-in-its-module.md)).
+  A built-in form without its machine output means the CLI's format changed,
+  while a custom form read as plain text is allowed
+  ([decision record 0006](docs/adr/0006-a-built-in-form-without-machine-output-has-drifted.md)).
+  Claude's headless form keeps `--output-format json`, so the tools an agent
+  sees are checked on the stream transport only
+  ([decision record 0007](docs/adr/0007-claude-headless-keeps-json-output.md)).
 - schema 2 removed the old `executors` block; playbooks bind executors only
   through profiles. `apb migrate` converts legacy schema 1 playbooks.
 - The supervisor is an optional agent that watches a run and intervenes via the
@@ -549,7 +571,8 @@ dependency change, regenerate and commit it; CI and the release test gate run
 - No em-dashes (U+2014) and no exclamation marks in docs or user-facing strings.
   No CJK anywhere in code or prose. Machine-facing fields are English;
   user-facing chat messages are written in the user's chat language.
-- New `EventPayload` fields are added only with `#[serde(default)]`.
+- New `EventPayload` fields are added only with `#[serde(default)]`
+  ([decision record 0001](docs/adr/0001-new-events-are-safe-to-skip.md)).
 - A new `EventPayload` variant must be safe to skip up to the next checkpoint
   (`EventPayload::is_checkpoint`): an older binary skips an event type it does
   not know and counts it, and the engine continues a run only when a

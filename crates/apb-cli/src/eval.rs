@@ -33,6 +33,7 @@
 //! sub-playbook is refused before anything is created
 //! (`apb_core::eval::refusal`): eval runs never run irreversible playbooks.
 
+use crate::interrupt::interrupted;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -898,38 +899,6 @@ fn keep_checked_files(case: &core_eval::EvalCase, tree: &Path, stored: &Path) {
 /// The `stopped` text of a repetition the operator interrupted.
 const INTERRUPTED_REASON: &str = "interrupted: apb eval received a signal";
 
-static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn interrupted() -> bool {
-    INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(unix)]
-extern "C" fn on_signal(sig: libc::c_int) {
-    // A second signal ends the process the ordinary way.
-    if INTERRUPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        // SAFETY: signal() and raise() are async-signal-safe.
-        unsafe {
-            libc::signal(sig, libc::SIG_DFL);
-            libc::raise(sig);
-        }
-    }
-}
-
-/// SIGINT and SIGTERM stop the live repetition's run, wait for its driver
-/// and clean up instead of leaving a detached run with no limit behind (the
-/// driver is in its own process group, so a terminal's Ctrl-C does not
-/// reach it). A second signal ends the process at once.
-fn install_signal_handlers() {
-    #[cfg(unix)]
-    // SAFETY: the handler only touches an atomic and async-signal-safe calls.
-    unsafe {
-        let h = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        libc::signal(libc::SIGINT, h);
-        libc::signal(libc::SIGTERM, h);
-    }
-}
-
 /// The repetition whose run is in flight, for the scratch guard.
 struct LiveRun {
     tree: PathBuf,
@@ -1565,7 +1534,10 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
             );
         }
     };
-    install_signal_handlers();
+    // SIGINT and SIGTERM stop the live repetition's run, wait for its
+    // driver and clean up instead of leaving a detached run with no limit
+    // behind (the driver is in its own process group).
+    crate::interrupt::install();
     let suite_copy = scratch.join(core_eval::EVALS_DIR);
     let suite_digest = match snapshot_suite(&playbook_dir, &playbook, &scratch, |_| {}) {
         Ok(d) => d,

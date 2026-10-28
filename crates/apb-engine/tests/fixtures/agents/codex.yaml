@@ -1,0 +1,57 @@
+# Contract fixture for the codex agent, read by `suite/agent_contract`.
+# The machine-output scenarios replay the recorded `exec --json` streams in
+# apb-core's `agent_output` fixtures (ids replaced by placeholders); the rest
+# are synthetic and say so.
+agent: codex
+provenance: captured
+checked_against: 0.157.0
+scenarios:
+  success:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/codex_exec.jsonl
+    expect:
+      output: hello
+      final_record: true
+  error:
+    provenance: synthetic
+    stderr: "error: unexpected argument '--frobnicate' found"
+    exit: 2
+    expect:
+      message: "unexpected argument"
+      model_turn: false
+  quota:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/codex_exec_failed.jsonl
+    exit: 1
+    expect:
+      kind: budget
+  session:
+    provenance: synthetic
+    stdout: |
+      {"type":"turn.started"}
+      {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"done"}}
+      {"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}
+    stderr: |
+      OpenAI Codex v0.157.0
+      --------
+      session id: 01a0e454-ef08-7a33-99f4-48719b962fe3
+      --------
+    expect:
+      session: 01a0e454-ef08-7a33-99f4-48719b962fe3
+      fresh: printed
+      continues: true
+  usage:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/codex_exec.jsonl
+    expect:
+      usage:
+        input_tokens: 315
+        output_tokens: 122
+        cache_read_tokens: 24448
+        cache_write_tokens: 0
+        source: reported
+  verdict:
+    provenance: synthetic
+    stdout: |
+      {"type":"thread.started","thread_id":"01a0e454-ef08-7a33-99f4-48719b962fe3"}
+      {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"stuck\n\n```yaml\nstatus: failure\nsummary: the tests fail\n```"}}
+      {"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}
+    expect:
+      status: failed

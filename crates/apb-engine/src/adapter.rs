@@ -1,4 +1,3 @@
-use apb_core::detect::canonical_agent_id;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -8,6 +7,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 
+use apb_core::agents::claude::settings::{HERMETIC_FLAGS, HERMETIC_SETTINGS_JSON};
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 use serde::Deserialize;
 
@@ -271,7 +271,8 @@ pub struct AgentTask<'a> {
 /// What a claude step launched with the minimal environment gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HermeticEnv {
-    /// apb's own settings file ([`HERMETIC_SETTINGS_JSON`]), via `--settings`.
+    /// apb's own settings file (`HERMETIC_SETTINGS_JSON` of claude's module),
+    /// via `--settings`.
     pub settings: std::path::PathBuf,
     /// A directory whose `.claude/skills` holds the profile's declared skills,
     /// via `--add-dir`: the user setting source that would otherwise provide
@@ -281,35 +282,17 @@ pub struct HermeticEnv {
 }
 
 /// Whether an agent exposes a settings-isolation mechanism apb can drive for
-/// the minimal environment. Only claude/claude-code do; every other agent runs
-/// as it is configured (codex already gets a run-scoped home, see
-/// `agent_home`).
+/// the minimal environment (its module's `hermetic_settings` capability).
+/// Only claude/claude-code do; every other agent runs as it is configured
+/// (codex already gets a run-scoped home, see its module).
 pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
-    canonical_agent_id(agent) == "claude"
+    capabilities(agent).is_some_and(|c| c.hermetic_settings)
 }
 
-/// The apb-owned minimal claude settings written for a hermetic run. It is the
-/// highest-precedence settings source handed to claude via `--settings`, and it
-/// disables the user-scope surfaces that would otherwise leak into the run:
-/// - `hooks: {}` - no user Stop/PreToolUse/etc. hooks fire;
-/// - `enabledPlugins: {}` - no user plugins load;
-/// - `enableAllProjectMcpServers: false` - project MCP servers are not
-///   auto-enabled.
-///
-/// Kept intentionally small and apb-owned; extend deliberately. The user
-/// settings file itself is not loaded at all (see [`inject_hermetic_settings`]).
-pub(crate) const HERMETIC_SETTINGS_JSON: &str =
-    "{\n  \"hooks\": {},\n  \"enabledPlugins\": {},\n  \"enableAllProjectMcpServers\": false\n}\n";
-
-/// claude's flags for the minimal environment, after `--settings <file>`:
-/// only the project and local setting sources (the user's settings, CLAUDE.md,
-/// skills and agents stay out) and only the MCP servers passed with
-/// `--mcp-config` (apb's own ask-server on a live node). Checked with
-/// `claude -p /context`, which reports the loaded context without a model
-/// call: about 24k tokens of harness context before, 18k with these flags, on
-/// one development setup (2026-09-25).
-pub(crate) const HERMETIC_FLAGS: &[&str] =
-    &["--setting-sources", "project,local", "--strict-mcp-config"];
+/// The capabilities of a built-in agent, `None` for any other id.
+fn capabilities(agent: &str) -> Option<apb_core::agents::Capabilities> {
+    apb_core::agents::lookup(agent).map(|a| a.descriptor().capabilities)
+}
 
 /// The run-dir path of the apb-owned hermetic settings file for `node`. One
 /// file per node, not per run: parallel branches write theirs at the same
@@ -463,6 +446,11 @@ pub struct ControlHooks<'a> {
     pub interrupt: &'a AtomicBool,
 }
 
+/// The name apb's ask-server goes by in a live attempt's MCP config.
+pub const ASK_SERVER_NAME: &str = "apb";
+/// The one tool apb's ask-server offers.
+pub const ASK_TOOL: &str = "ask_user";
+
 /// Builds the `--mcp-config` JSON injected into claude for a live interactive
 /// node (spec 2026-07-20, Transport: live). Points claude at the hidden
 /// `apb __ask-server --run <id> --node <node> --attempt <n>` sidecar with a
@@ -478,7 +466,7 @@ pub fn ask_server_mcp_config(
 ) -> String {
     serde_json::json!({
         "mcpServers": {
-            "apb": {
+            ASK_SERVER_NAME: {
                 "command": exe.to_string_lossy(),
                 "args": [
                     "__ask-server",
@@ -592,6 +580,11 @@ pub struct AgentReport {
     /// What the attempt lost of its output (bounded agent output); the drive
     /// loop writes it into `AttemptFinished.output_truncated`.
     pub capture: OutputCapture,
+    /// The tools and MCP servers the agent reported at start (stream
+    /// transport only, `apb_core::agents::OutputFormat::exposed_tools`);
+    /// `None` when its output named none. The drive loop compares them with
+    /// what the attempt was handed (`tool_exposure_mismatch`).
+    pub exposure: Option<apb_core::agents::ExposedTools>,
     /// Findings and warnings a host submission dropped as malformed, and
     /// why (host mode; empty otherwise): the attempt's `attempt_notes`
     /// counts them with the status file's own. They travel here, never
@@ -600,9 +593,10 @@ pub struct AgentReport {
 }
 
 /// Captures an agent session id from a finished attempt's raw output, for the
-/// `resume` transport (spec 2026-07-20, Task 7). Dispatches on `agent_id`;
-/// returns `None` when the output carries no session id, which forces the
-/// runtime downgrade from `resume` to `reprompt`.
+/// `resume` transport (spec 2026-07-20, Task 7), with the agent module's
+/// output reader (`apb_core::agents`); returns `None` when the output carries
+/// no session id, which forces the runtime downgrade from `resume` to
+/// `reprompt`.
 ///
 /// Reality per agent under the built-in invocation forms: claude's JSON
 /// result (`--output-format json` headless, `stream-json` on the `acp`
@@ -610,13 +604,16 @@ pub struct AgentReport {
 /// `thread.started` event carrying `thread_id`, and every opencode
 /// `--format json` event carries `sessionID`; hermes/grok/cursor one-shot
 /// output is plain final-answer text with no session id, so they yield
-/// `None` here and rely on the downgrade path. The per-agent field lists
-/// below are wired so that when those agents' resumable one-shot output
-/// lands, only the field name changes here (spec Transport: resume). No
-/// parser is invented for an output shape we do not produce today: a
-/// plain-text line simply never matches.
+/// `None` here and rely on the downgrade path. Each plain-text module names
+/// the fields an id would be printed under, so that when those agents'
+/// resumable one-shot output lands, only the field name changes (spec
+/// Transport: resume). No parser is invented for an output shape we do not
+/// produce today: a plain-text line simply never matches.
 pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
-    capture_session_any(agent_id, raw).filter(|id| is_plausible_session_id(id))
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .session_id(raw)
+        .filter(|id| is_plausible_session_id(id))
 }
 
 /// A session id goes back to the agent as one argv element of its resume
@@ -632,63 +629,23 @@ fn is_plausible_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
 }
 
-fn capture_session_any(agent_id: &str, raw: &str) -> Option<String> {
-    match canonical_agent_id(agent_id) {
-        "claude" => capture_json_string_field(raw, &["session_id"]),
-        "codex" => capture_json_string_field(raw, &["thread_id", "session_id", "conversation_id"]),
-        "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
-        "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
-        "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
-        "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
-        "qoder" => capture_json_string_field(raw, &["session_id"]),
-        // zcode's `--json` prints one PRETTY-printed object, so the per-line
-        // scan above cannot see it; the zcode parser reads the whole document
-        // (and the stream-json `result` line as well).
-        "zcode" => apb_core::zcode::session_id(raw),
-        _ => None,
-    }
-}
-
 /// Captures a session id an agent prints in a human-readable header on stderr
 /// rather than in its output: `codex exec` opens with a block that holds a
 /// `session id: <uuid>` line (checked against the 0.157 binary). `None` for
 /// every other agent and when no such line is present.
 pub fn capture_session_header(agent_id: &str, stderr: &str) -> Option<String> {
-    if canonical_agent_id(agent_id) != "codex" {
-        return None;
-    }
-    stderr.lines().find_map(|line| {
-        let id = line.trim().strip_prefix("session id:")?.trim();
-        (!id.is_empty() && !id.contains(char::is_whitespace)).then(|| id.to_string())
-    })
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .stderr_session(stderr)
 }
 
-/// Scans each line of `raw` as a top-level JSON object and returns the LAST
-/// non-empty string value found under any name in `fields` (the terminal event
-/// wins, matching how the stream's final `result` event carries the id).
-/// `None` when no line parses to such an object with such a field - the plain-
-/// text one-shot case.
-fn capture_json_string_field(raw: &str, fields: &[&str]) -> Option<String> {
-    let mut found: Option<String> = None;
-    for line in raw.lines() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        for f in fields {
-            if let Some(s) = val
-                .get(*f)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                found = Some(s.to_string());
-            }
-        }
-    }
-    found
+/// The tools and MCP servers an agent reported at start in its streaming
+/// output (`apb_core::agents::OutputFormat::exposed_tools`); `None` for an
+/// agent or an output that names none.
+pub fn exposed_tools(agent_id: &str, raw: &str) -> Option<apb_core::agents::ExposedTools> {
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .exposed_tools(raw)
 }
 
 pub trait AgentAdapter {
@@ -882,7 +839,7 @@ fn drop_option(argv: &mut Vec<String>, flag: &str) {
 /// configured servers.
 fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&LiveHooks>) {
     if let Some(lh) = live
-        && canonical_agent_id(task.agent) == "claude"
+        && capabilities(task.agent).is_some_and(|c| c.live_ask_mcp)
     {
         argv.push("--mcp-config".to_string());
         argv.push(ask_server_mcp_config(
@@ -1094,10 +1051,11 @@ fn collect_assistant_text(lines: &[String]) -> String {
 
 impl ClaudeAdapter {
     pub fn from_env() -> Self {
-        let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| "claude".to_string());
+        let claude = apb_core::agents::claude::ID;
+        let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| claude.to_string());
         Self {
             program,
-            spec: crate::invocation::builtin("claude").expect("builtin claude spec"),
+            spec: crate::invocation::builtin(claude).expect("builtin claude spec"),
         }
     }
 
@@ -1376,6 +1334,7 @@ impl ClaudeAdapter {
             session,
             usage,
             capture,
+            exposure: None,
             host_notes_dropped: Default::default(),
         })
     }
@@ -1580,7 +1539,9 @@ impl ClaudeAdapter {
                 let stream = lines.finish();
                 let capture = stream_capture(task.agent, &stream, stdout_name, stderr.as_ref());
                 let drained = stopped.is_graceful().then_some(&stream);
-                return Err(stopped.failure(task.agent, drained, capture));
+                return Err(stopped
+                    .failure(task.agent, drained, capture)
+                    .with_exposure(exposed_tools(task.agent, &stream.text())));
             }
             // This loop used to end ONLY on stdout EOF - but EOF is not the
             // agent's to give. A grandchild that inherited the pipe (a real
@@ -1622,6 +1583,9 @@ impl ClaudeAdapter {
         // abandoned and dies with the process.
         let stream = lines.finish();
         let raw_lines: Vec<String> = stream.text().lines().map(str::to_string).collect();
+        // What the agent reported it sees, read only for a failure below (a
+        // report reads its own, see `parse_stream_result`).
+        let exposure = || exposed_tools(task.agent, &raw_lines.join("\n"));
         let grace = exit_after_eof_budget();
         let status = match wait_bounded(&mut child, grace) {
             Some(Ok(status)) => status,
@@ -1629,7 +1593,8 @@ impl ClaudeAdapter {
                 return Err(AgentFailure::new(
                     ErrorClass::ProcessExit,
                     format!("wait `{}` failed: {e}", self.program),
-                ));
+                )
+                .with_exposure(exposure()));
             }
             None => {
                 // The agent will not exit. Tear the tree down either way, but
@@ -1646,7 +1611,7 @@ impl ClaudeAdapter {
                 stop_process_tree(&mut child, StopMode::Kill);
                 let capture = stream_capture(task.agent, &stream, stdout_name, None);
                 if capture.transcript_incomplete {
-                    return Err(incomplete_failure(capture));
+                    return Err(incomplete_failure(capture).with_exposure(exposure()));
                 }
                 return match parse_stream_result(&raw_lines, task, &capture) {
                     Ok(report) => Ok(report),
@@ -1657,7 +1622,7 @@ impl ClaudeAdapter {
                     // event" Timeout would hide the real, node-named cause. Only a
                     // genuinely-missing result becomes the grace Timeout.
                     Err((ErrorClass::Transport, msg)) => {
-                        Err(AgentFailure::new(ErrorClass::Transport, msg))
+                        Err(AgentFailure::new(ErrorClass::Transport, msg).with_exposure(exposure()))
                     }
                     Err(_) => Err(AgentFailure::new(
                         ErrorClass::Timeout,
@@ -1666,7 +1631,8 @@ impl ClaudeAdapter {
                              running {grace:?} later; killed its process group",
                             self.program
                         ),
-                    )),
+                    )
+                    .with_exposure(exposure())),
                 };
             }
         };
@@ -1684,7 +1650,8 @@ impl ClaudeAdapter {
                 ErrorClass::ProcessExit,
                 format!("agent terminated by signal {sig}: {}", stderr.trim()),
             )
-            .with_capture(capture));
+            .with_capture(capture)
+            .with_exposure(exposure()));
         }
         if !status.success() {
             // As on the headless transport: the errored result still reports
@@ -1697,13 +1664,17 @@ impl ClaudeAdapter {
                 task.agent,
                 &raw_lines.join("\n"),
             ))
-            .with_capture(capture));
+            .with_capture(capture)
+            .with_exposure(exposure()));
         }
         if capture.transcript_incomplete {
-            return Err(incomplete_failure(capture));
+            return Err(incomplete_failure(capture).with_exposure(exposure()));
         }
-        parse_stream_result(&raw_lines, task, &capture)
-            .map_err(|e| AgentFailure::from(e).with_capture(capture))
+        parse_stream_result(&raw_lines, task, &capture).map_err(|e| {
+            AgentFailure::from(e)
+                .with_capture(capture)
+                .with_exposure(exposure())
+        })
     }
 }
 
@@ -1765,6 +1736,7 @@ fn parse_stream_result(
         // scans `raw` (every event line), not just the terminal result text.
         let session = capture_session(task.agent, &raw);
         let usage = apb_core::agent_output::usage(task.agent, &raw);
+        let exposure = exposed_tools(task.agent, &raw);
         return Ok(AgentReport {
             status,
             output,
@@ -1774,6 +1746,7 @@ fn parse_stream_result(
             session,
             usage,
             capture: capture.clone(),
+            exposure,
             host_notes_dropped: Default::default(),
         });
     }
@@ -1879,7 +1852,8 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
     // the highest priority and the headless claude form: the config-free path
     // stays unchanged.
     if let Ok(program) = std::env::var("APB_AGENT_CMD") {
-        let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
+        let spec =
+            crate::invocation::builtin(apb_core::agents::claude::ID).expect("builtin claude spec");
         return Ok(Box::new(ClaudeAdapter { program, spec }));
     }
     // Agent invocation form: config overrides the built-in default. An

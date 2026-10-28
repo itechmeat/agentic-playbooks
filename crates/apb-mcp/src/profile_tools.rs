@@ -218,23 +218,23 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     let parent = scope_dir(root, scope_enum)?;
     std::fs::create_dir_all(&parent).map_err(|e| ToolError::Engine(e.to_string()))?;
 
-    // zcode models: stored in the canonical bare spelling (the legacy
-    // `zai-individual/` prefix is accepted and dropped) and refused outside
-    // apb's allowlist, for the primary and every fallback.
-    let zcode_model = |agent: &str, model: String| -> Result<String, ToolError> {
-        if agent != apb_core::zcode::AGENT_ID {
-            return Ok(model);
+    // Each model is stored in the spelling its agent's module gives it, or
+    // refused, for the primary and every fallback (zcode: the canonical bare
+    // spelling, the legacy `zai-individual/` prefix dropped, nothing outside
+    // apb's allowlist).
+    let stored_model = |agent: &str, model: String| -> Result<String, ToolError> {
+        match apb_core::agents::lookup(agent) {
+            Some(a) => a
+                .models()
+                .canonical_model(&model)
+                .map_err(ToolError::Engine),
+            None => Ok(model),
         }
-        let family = apb_core::zcode::home_dir()
-            .map(|h| apb_core::zcode::account_family(&h))
-            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
-        apb_core::zcode::check_model_allowed(&model, &family).map_err(ToolError::Engine)?;
-        Ok(apb_core::zcode::canonical_model(&model, &family))
     };
-    let primary_model = zcode_model(&executor.agent, executor.model)?;
+    let primary_model = stored_model(&executor.agent, executor.model)?;
     let mut fallbacks = Vec::with_capacity(executor.fallbacks.len());
     for (agent, model) in executor.fallbacks {
-        let model = zcode_model(&agent, model)?;
+        let model = stored_model(&agent, model)?;
         fallbacks.push(ProfileFallback { agent, model });
     }
     let mut doc = ProfileDoc {

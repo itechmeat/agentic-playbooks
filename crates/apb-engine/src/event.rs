@@ -1459,6 +1459,31 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dropped_reasons: Vec<String>,
     },
+    /// What an agent attempt really saw differs from what apb handed it: a
+    /// tool apb's channels need is missing (the shell a node's connectors
+    /// are called through, the ask-server's `ask_user` on a live node), an
+    /// MCP server apb passed is absent or not connected, or a server other
+    /// than apb's own is present under a strict MCP config. Names only.
+    /// Checked only where the agent reports its tools (the stream
+    /// transport). Reported only: it changes no status. Written right before
+    /// the attempt's `attempt_finished`; the node's `node_finished` or a
+    /// `run_paused` follows, so it is safe to skip. Additive variant.
+    ToolExposureMismatch {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        agent: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing_tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing_servers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unexpected_servers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
     /// A visit of a list node (`list:`) started: the items it holds after
     /// the filter, how many the filter dropped, and their digest. `reopened`
     /// marks a supervisor retry after a failed visit. Written before any

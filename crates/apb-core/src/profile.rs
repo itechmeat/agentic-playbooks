@@ -440,37 +440,7 @@ impl AgentEnvironment {
     }
 }
 
-/// ZCode's `--mode` for a run that grants autonomy. In a headless run every
-/// approval request is denied, so the mode is the whole permission set:
-/// `yolo` allows everything (files, shell, network), `edit` allows file edits
-/// and nothing that needs an approval (no shell commands). A run that grants
-/// no autonomy always runs zcode in `build`, which refuses writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ZcodeMode {
-    #[default]
-    Yolo,
-    Edit,
-}
-
-impl ZcodeMode {
-    /// The value ZCode's `--mode` flag takes.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ZcodeMode::Yolo => "yolo",
-            ZcodeMode::Edit => "edit",
-        }
-    }
-
-    /// Parses `yolo` / `edit` (the surfaces' spelling).
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "yolo" => Ok(ZcodeMode::Yolo),
-            "edit" => Ok(ZcodeMode::Edit),
-            other => Err(format!("zcode_mode `{other}`: expected `edit` or `yolo`")),
-        }
-    }
-}
+pub use crate::agents::zcode::ZcodeMode;
 
 impl ProfileDoc {
     pub fn from_yaml(s: &str) -> Result<Self, String> {

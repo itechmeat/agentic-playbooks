@@ -464,8 +464,9 @@ Each built-in agent is probed at the program a run launches: `agents.<id>.progra
 from `config.yaml` when set (a name looked up on PATH, or a path used as is),
 otherwise its default binary. The default binaries (`cursor` runs as
 `cursor-agent`, `claude-code` is `claude`, zcode falls back to its home-deployed
-CLI) live in one table, `detect::BUILTIN_BINS`; the engine launches
-`detect::default_program` from the same table.
+CLI) live in the agent modules (`apb_core::agents`, see "Adding an agent"
+below); the engine launches `detect::default_program`, which reads the same
+registry.
 
 Why a memo at all: the probes run in parallel, and a cold detection on a machine
 with claude, codex, opencode, grok and zcode installed still takes about 1.6 s
@@ -475,6 +476,74 @@ detect --refresh` and MCP `agents_detect` with `refresh: true` bypass it.
 The dashboard never keeps its own copy. A reload always shows the lists of the
 `apb` that is running, and a rebuilt binary shows its new lists on the next
 reload without any cache to clear.
+
+## Adding an agent
+
+Everything apb knows about a built-in agent lives in its module under
+`crates/apb-core/src/agents/` (a file, or a directory when the agent has its
+own output reader or helpers). The rest of apb asks the registry
+(`agents::lookup`, `agents::all`) and never compares agent ids. A module
+implements `agents::Agent`:
+
+| Part | Holds |
+|---|---|
+| `descriptor()` | id, legacy aliases, binaries, version and help arguments, home install locations, category, capabilities (hermetic settings, live ask-server, long tool waits, the transcript the grader reads, the streaming transport, desktop history) and `Verified`, the CLI version and date its forms and reader were last checked against |
+| `forms()` | the built-in launch form, the resume argv and how a fresh attempt makes its session findable (an id apb assigns, a title looked up in the agent's session listing, or an id the agent prints); `None` when apb cannot launch the agent without `agents.<id>.invocation` |
+| `output()` | the reader of the agent's output (reply, usage, closing record, session id, a session header on stderr) and `promises()`, what the built-in form must carry; an agent that prints plain text uses the shared `PlainText` reader |
+| `setup()` | what detection reads (models listing, login hint, provider notes, memo inputs), the environment set kept under `process_env: allowlist`, the variables a model or the agent's own config names, and the run-scoped environment of a spawn (codex's config home, zcode's provider config) |
+| `models()` | the vendor, the closed model list, how a model id is spelled and checked, and the billing account a model spends |
+
+To add one:
+
+1. Write the module and add it to `agents::all()` at its place in the
+   detection order (the dashboard and `apb detect` keep that order).
+2. Add a contract fixture, `crates/apb-engine/tests/fixtures/agents/<id>.yaml`,
+   and the id to the `contract!` list in
+   `crates/apb-engine/tests/suite/agent_contract/mod.rs` (see
+   `docs/TESTING-GUIDELINES.md`, "The agent contract suite").
+3. Add the agent's row to the golden tables of
+   `crates/apb-core/tests/suite/agents_test.rs`.
+
+A guard test (`agents_test::agent_knowledge_stays_in_the_agent_modules`) fails
+when non-test code outside the modules names a built-in agent id as a string
+literal. One rule ties the readers to the forms (`agents::conformance`): a
+built-in form whose output is not the machine format its module promises means
+the CLI's output format changed, while a custom `agents.<id>.invocation` read
+as plain text is the allowed fallback.
+
+### Checking an installed agent
+
+`apb doctor` checks each built-in agent a profile names, and `apb doctor
+--agents` every installed built-in agent, with no model call
+(`agents::check`). The binary checked is the one a run launches: the
+configured `agents.<id>.program` when set, else the detected one. The config
+is read under the agent name a profile uses, as a run reads it:
+
+| Row | Means |
+|---|---|
+| `version X verified on D` | the installed version is the one the module's form and reader were checked against (`Verified`) |
+| `[warn] version X is newer than the verified Y` | the CLI moved on since; `apb doctor --probe-agent <id>` checks its output |
+| `[warn] help does not list <flags>` | a flag of the built-in launch, resume, autonomy, soul, fresh-session or profile-mode form is missing from the text the agent's help arguments print: the built-in form may have changed |
+| `custom invocation; output read as plain text ...` | `agents.<id>.invocation` replaces the built-in form; its help is not checked |
+
+The help runs the way detection probes run: sanitized environment, the
+filesystem root as the working directory, a timeout. Its stdout and stderr
+are both read. A version that leaves out trailing segments counts them as 0
+(`2.1` is `2.1.0`).
+
+`apb doctor --probe-agent <id> [--model <m>]` is the paid check: it prints a
+cost notice, sends one short prompt through the agent's form without
+autonomy, from an empty temporary directory, with a timeout, and checks the
+output against `promises()` (reply, session id, usage, closing record) and
+`agents::conformance`. The form and program come from the config under the
+name given (an alias reads its own entry), and the spawn is a run step's:
+connector-referenced variables are withheld, codex gets an isolated home and
+zcode its provider config inside the probe's directory, and claude its
+minimal-environment settings. It names the autonomy flags it left out,
+prints the usage and cost the agent reported, and exits 1 when the format
+drifted. Ctrl-C (or SIGTERM) stops the agent and removes the directory. A
+run step is refused (`APB_RUN_ID` or `APB_HOST_TASK` set): only a person
+spends that call.
 
 ## Checking a profile's models before a run
 

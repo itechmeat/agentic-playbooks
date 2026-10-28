@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::action::{Action, ToolCall, WebKind, str_at};
-use super::command::skill_of_path;
+use crate::agent_actions::action::{Action, ToolCall, WebKind, str_at};
+use crate::agent_actions::command::skill_of_path;
 
 /// Tools that write the file they name.
 const WRITE_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
@@ -27,7 +27,9 @@ fn action(name: &str, input: &Value, paths: &[String]) -> Vec<Action> {
     }
     let one = match name {
         "Bash" => {
-            return super::command::actions(str_at(input, "command").unwrap_or_default());
+            return crate::agent_actions::command::actions(
+                str_at(input, "command").unwrap_or_default(),
+            );
         }
         n if WRITE_TOOLS.contains(&n) => Action::Edit {
             paths: paths.to_vec(),
@@ -75,7 +77,8 @@ pub fn tool_call(item: &Value) -> ToolCall {
         .collect();
     ToolCall {
         actions: action(&name, &input, &paths),
-        destructive: str_at(&input, "command").is_some_and(super::command::is_destructive),
+        destructive: str_at(&input, "command")
+            .is_some_and(crate::agent_actions::command::is_destructive),
         name,
         input,
         paths,
@@ -128,7 +131,7 @@ pub fn user_text(line: &Value) -> Option<String> {
         }
         _ => return None,
     };
-    super::action::typed_text(&text)
+    crate::agent_actions::action::typed_text(&text)
 }
 
 /// The working directory a line was written in.
@@ -143,7 +146,7 @@ pub fn is_sidechain(line: &Value) -> bool {
 
 /// claude's config directory: `CLAUDE_CONFIG_DIR`, else `~/.claude`.
 pub fn config_dir() -> Option<PathBuf> {
-    super::action::config_dir("CLAUDE_CONFIG_DIR", ".claude")
+    crate::agent_actions::action::config_dir("CLAUDE_CONFIG_DIR", ".claude")
 }
 
 /// Where claude keeps its sessions: `projects/` of [`config_dir`].
