@@ -1294,6 +1294,7 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
         workdir: None,
         transcript: None,
         token: None,
+        isolation: None,
     })
     .unwrap();
 }

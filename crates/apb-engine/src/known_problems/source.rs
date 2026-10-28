@@ -73,17 +73,10 @@ fn is_private(rel: &str) -> bool {
 
 /// Whether git ignores `rel` in the checkout at `root` (a file kept out of
 /// the repository is often a local secret). Not a checkout, or no git:
-/// not ignored.
+/// not ignored. A repository apb refuses to run git in (a redirected one,
+/// an unreadable config) counts every file as ignored: fail closed.
 fn git_ignored(root: &Path, rel: &str) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["check-ignore", "-q", "--", rel])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    apb_core::git::succeeds(root, &["check-ignore", "-q", "--", rel]).unwrap_or(true)
 }
 
 /// A file of the project at `root/rel`, refused when the path leaves the
@@ -343,6 +336,21 @@ mod tests {
             std::fs::write(r.join("local.txt"), "kept out").unwrap();
             assert!(project_file(r, "local.txt").is_none());
             assert_eq!(project_file(r, "ok.txt").as_deref(), Some("fine"));
+            // A repository apb refuses to run git in (a planted
+            // `commondir`) reads as ignoring everything: fail closed.
+            let other = root.path().join("other");
+            std::fs::create_dir_all(&other).unwrap();
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&other)
+                .args(["init", "-q"])
+                .status();
+            std::fs::write(
+                r.join(".git/commondir"),
+                other.join(".git").to_str().unwrap(),
+            )
+            .unwrap();
+            assert!(project_file(r, "ok.txt").is_none());
         }
     }
 }

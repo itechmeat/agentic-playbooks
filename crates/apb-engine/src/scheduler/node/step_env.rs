@@ -29,6 +29,8 @@ pub(super) struct StepEnv {
     /// The `process_env: allowlist` plan, `None` for `inherit` and a host
     /// step.
     pub process: Option<Arc<EnvPlan>>,
+    /// What forced the allowlist on a profile that inherits (`isolation`).
+    pub forced_by: Option<&'static str>,
 }
 
 /// The [`StepEnv`] of `step` for node `node_id` bound to `entry`.
@@ -53,6 +55,7 @@ pub(super) fn for_step(
         return Ok(StepEnv {
             hermetic: None,
             process: None,
+            forced_by: None,
         });
     }
     let hermetic = if entry.hermetic && crate::adapter::agent_supports_hermetic(step.agent) {
@@ -77,7 +80,7 @@ pub(super) fn for_step(
     };
     Ok(StepEnv {
         hermetic,
-        ..process_only(entry, step, scrub)
+        ..process_plan(entry, step, isolated, scrub)
     })
 }
 
@@ -88,14 +91,39 @@ pub(super) fn process_only(
     step: &StepTarget,
     scrub: &[String],
 ) -> StepEnv {
-    let process = if step.host {
-        None
+    process_plan(entry, step, false, scrub)
+}
+
+/// The step's `process_env` plan. An isolated node forces the allowlist
+/// (`apb_core::process_env::plan_isolated`): a profile that inherits gets
+/// one with no extras, and the event says isolation forced it.
+fn process_plan(
+    entry: &ManifestProfile,
+    step: &StepTarget,
+    isolated: bool,
+    scrub: &[String],
+) -> StepEnv {
+    let (process, forced_by) = if step.host {
+        (None, None)
+    } else if isolated {
+        let own = entry.process_env.as_ref();
+        let policy = apb_core::process_env::plan_isolated(own);
+        let plan = crate::agent_env::plan_for(step.agent, step.model, &policy, scrub);
+        let forced = !own.is_some_and(|p| p.is_allowlist());
+        (Some(Arc::new(plan)), forced.then_some("isolation"))
     } else {
-        crate::agent_env::plan_for_entry(entry.process_env.as_ref(), step.agent, step.model, scrub)
+        let plan = crate::agent_env::plan_for_entry(
+            entry.process_env.as_ref(),
+            step.agent,
+            step.model,
+            scrub,
+        );
+        (plan, None)
     };
     StepEnv {
         hermetic: None,
         process,
+        forced_by,
     }
 }
 
@@ -110,8 +138,12 @@ impl StepEnv {
         agent: &str,
     ) -> Result<(), EngineError> {
         match &self.process {
-            Some(plan) => journal.append(crate::agent_env::applied_event(
-                plan, node_id, attempt, agent,
+            Some(plan) => journal.append(crate::agent_env::applied_event_by(
+                plan,
+                node_id,
+                attempt,
+                agent,
+                self.forced_by,
             )),
             None => Ok(()),
         }

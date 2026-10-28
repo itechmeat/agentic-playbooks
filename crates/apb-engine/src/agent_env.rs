@@ -51,6 +51,18 @@ pub(crate) fn plan_for_entry(
 /// The `agent_env_applied` event of attempt `attempt` of `node` on `agent`
 /// under `plan`.
 pub(crate) fn applied_event(plan: &EnvPlan, node: &str, attempt: u32, agent: &str) -> EventPayload {
+    applied_event_by(plan, node, attempt, agent, None)
+}
+
+/// [`applied_event`] naming what forced the allowlist (`isolation`) on a
+/// profile that inherits.
+pub(crate) fn applied_event_by(
+    plan: &EnvPlan,
+    node: &str,
+    attempt: u32,
+    agent: &str,
+    forced_by: Option<&str>,
+) -> EventPayload {
     let shown = plan.withheld.len().min(WITHHELD_JOURNALED);
     EventPayload::AgentEnvApplied {
         node: node.to_string(),
@@ -61,6 +73,7 @@ pub(crate) fn applied_event(plan: &EnvPlan, node: &str, attempt: u32, agent: &st
         withheld_more: u32::try_from(plan.withheld.len() - shown).unwrap_or(u32::MAX),
         absent: plan.absent.clone(),
         item: None,
+        forced_by: forced_by.map(str::to_string),
     }
 }
 

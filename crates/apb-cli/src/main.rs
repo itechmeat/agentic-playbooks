@@ -682,7 +682,20 @@ fn registers_workspace(command: Option<&Command>) -> bool {
     )
 }
 
+/// The hidden name of the sandbox helper: bwrap runs `apb __sandbox-exec
+/// [--scope] [--require-scope] -- <agent argv>` inside an isolation
+/// sandbox (`apb_engine::sandbox::scope::exec_main`). Dispatched before
+/// argument parsing and before anything touches the config or the registry:
+/// inside the sandbox neither is visible, and the helper must only scope
+/// itself and exec the agent.
+const SANDBOX_EXEC: &str = "__sandbox-exec";
+
 fn main() -> ExitCode {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == SANDBOX_EXEC) {
+        let code = apb_engine::sandbox::scope::exec_main(&args[2..]);
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     let cli = Cli::parse();
     let root = std::env::current_dir().expect("cwd");
     // Auto-register the workspace in the project registry (spec 6.2). Only for

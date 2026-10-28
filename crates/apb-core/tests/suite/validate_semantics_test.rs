@@ -20,51 +20,6 @@ fn error_codes(yaml: &str) -> Vec<&'static str> {
         .collect()
 }
 
-fn warn_codes(yaml: &str) -> Vec<&'static str> {
-    let playbook = Playbook::from_yaml(yaml).unwrap();
-    validate(&playbook, &ctx())
-        .issues
-        .iter()
-        .filter(|i| i.severity == Severity::Warning)
-        .map(|i| i.code)
-        .collect()
-}
-
-const ISO_WF: &str = r#"schema: 1
-id: iso
-name: Iso
-version: 1.0.0
-nodes:
-  - { id: start, type: start }
-  - { id: w, type: agent_task, prompt: "do", profile: architect, isolation: PLACEHOLDER }
-  - { id: done, type: finish, outcome: success }
-edges:
-  - { from: start, to: w }
-  - { from: w, to: done }
-"#;
-
-#[test]
-fn v16_declared_isolation_warns_not_enforced() {
-    // full and best_effort - a warning about unenforced isolation.
-    for level in ["full", "best_effort"] {
-        let yaml = ISO_WF.replace("PLACEHOLDER", level);
-        assert!(
-            error_codes(&yaml).is_empty(),
-            "iso playbook must be structurally valid ({level})"
-        );
-        assert!(
-            warn_codes(&yaml).contains(&"V16"),
-            "isolation `{level}` must warn V16"
-        );
-    }
-    // none - no warning (this is the default behavior).
-    let yaml = ISO_WF.replace("PLACEHOLDER", "none");
-    assert!(
-        !warn_codes(&yaml).contains(&"V16"),
-        "isolation none must not warn"
-    );
-}
-
 #[test]
 fn v09_condition_not_covering_outcomes() {
     // remove the failure branch from check

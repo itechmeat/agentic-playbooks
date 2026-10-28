@@ -330,6 +330,7 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
         workdir: None,
         transcript: None,
         token: None,
+        isolation: None,
     })
     .unwrap();
     run_dir
@@ -1087,6 +1088,7 @@ fn a_note_the_crashed_driver_never_applied_survives_a_stop() {
             workdir: None,
             transcript: None,
             token: None,
+            isolation: None,
         })
         .unwrap();
     }
@@ -1499,6 +1501,7 @@ fn a_note_posted_after_a_stop_survives_the_resume_that_applies_the_stop() {
             workdir: None,
             transcript: None,
             token: None,
+            isolation: None,
         })
         .unwrap();
     }

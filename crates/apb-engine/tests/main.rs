@@ -40,6 +40,19 @@ mod common;
 static ISOLATE_CONFIG: extern "C" fn() = isolate_config;
 
 extern "C" fn isolate_config() {
+    // The sandbox helper below runs this binary inside the sandbox; the
+    // order of `.init_array` entries is not guaranteed, so the helper's
+    // process must not get this setup (the real `apb __sandbox-exec` never
+    // does). A panic here would abort the process, which is acceptable for a
+    // test harness.
+    #[cfg(target_os = "linux")]
+    if std::fs::read("/proc/self/cmdline").is_ok_and(|raw| {
+        raw.split(|b| *b == 0)
+            .nth(1)
+            .is_some_and(|a| a == b"__sandbox-exec" || a == b"__test-abstract-connect")
+    }) {
+        return;
+    }
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("apb-engine-test-xdg-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -47,6 +60,48 @@ extern "C" fn isolate_config() {
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
+// The sandbox helper (`apb __sandbox-exec`): the engine runs its own
+// executable inside an isolation sandbox, which under this suite is this test
+// binary. When bwrap starts it that way, it applies the scope and execs the
+// agent before the test harness ever runs, exactly as `apb` does. The same
+// hook serves one probe of `sandbox_run_test`.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static SANDBOX_HELPER: extern "C" fn() = sandbox_helper;
+
+#[cfg(target_os = "linux")]
+extern "C" fn sandbox_helper() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(raw) = std::fs::read("/proc/self/cmdline") else {
+        return;
+    };
+    let args: Vec<std::ffi::OsString> = raw
+        .split(|b| *b == 0)
+        .map(|a| std::ffi::OsStr::from_bytes(a).to_os_string())
+        .collect();
+    let end = args.len() - usize::from(args.last().is_some_and(|a| a.is_empty()));
+    match args.get(1).and_then(|a| a.to_str()) {
+        Some("__sandbox-exec") => {
+            std::process::exit(apb_engine::sandbox::scope::exec_main(&args[2..end]));
+        }
+        // A probe the sandbox tests run inside the sandbox: connect to the
+        // abstract unix socket named by the next argument (0: connected).
+        Some("__test-abstract-connect") => {
+            use std::os::linux::net::SocketAddrExt as _;
+            let name = args
+                .get(2)
+                .map(|a| a.as_bytes().to_vec())
+                .unwrap_or_default();
+            let ok = std::os::unix::net::SocketAddr::from_abstract_name(&name)
+                .and_then(|addr| std::os::unix::net::UnixStream::connect_addr(&addr))
+                .is_ok();
+            std::process::exit(if ok { 0 } else { 3 });
+        }
+        _ => {}
     }
 }
 
@@ -187,6 +242,9 @@ mod fit_test;
 #[cfg(unix)]
 #[path = "suite/fork_failure_test.rs"]
 mod fork_failure_test;
+#[cfg(unix)]
+#[path = "suite/git_hardening_test.rs"]
+mod git_hardening_test;
 #[path = "suite/global_config_test.rs"]
 mod global_config_test;
 #[path = "suite/global_scope_run_test.rs"]
@@ -327,6 +385,9 @@ mod run_retro_test;
 mod run_wait_test;
 #[path = "suite/runner_registry_test.rs"]
 mod runner_registry_test;
+#[cfg(target_os = "linux")]
+#[path = "suite/sandbox_run_test.rs"]
+mod sandbox_run_test;
 #[path = "suite/scheduler_test.rs"]
 mod scheduler_test;
 #[path = "suite/script_node_test.rs"]

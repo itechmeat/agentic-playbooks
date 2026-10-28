@@ -110,10 +110,22 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # As in ci.yml: the Linux leg installs unprivileged bubblewrap and
+      # requires the isolation enforcement tests to run (a missing sandbox
+      # capability fails the leg instead of skipping them); macOS runs their
+      # refusal twins.
+      - name: Install bubblewrap (isolation sandbox)
+        if: matrix.linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+
       # Mirrors ci.yml: same selection as `cargo test --workspace`, same
       # #[ignore] handling, but each test in its own process so the per-test
       # timeout is enforceable and a hang becomes a named failing test.
       - name: Test
+        env:
+          APB_SANDBOX_TESTS: ${{ matrix.linux && 'require' || '' }}
         run: cargo nextest run --profile ci --workspace
 
       # nextest does not run doctests; `cargo test --workspace` did.

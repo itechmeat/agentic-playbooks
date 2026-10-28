@@ -551,6 +551,46 @@ expected: string | null,
  */
 mismatch: boolean, };
 
+export type IsolationViewEntry = { path: string, 
+/**
+ * `read_only`, `read_write` or `hidden`.
+ */
+access: string, };
+
+export type AttemptIsolation = { 
+/**
+ * `full` or `best_effort`.
+ */
+level: string, 
+/**
+ * `bwrap`, or `none` when the attempt ran without a sandbox.
+ */
+backend: string, bwrap_version?: string, 
+/**
+ * `open` or `none`.
+ */
+network: string, holds: Array<string>, 
+/**
+ * Including `credentials.env_passed:<NAME>` for each credential-shaped
+ * variable the allowlist still passes (a name, never a value).
+ */
+limits: Array<string>, 
+/**
+ * Why no sandbox was used, under `best_effort` (`code (detail)`).
+ */
+fallbacks?: Array<string>, 
+/**
+ * The bound paths (`~/...` under the home) and their access, at most
+ * [`ISOLATION_VIEW_CAP`].
+ */
+view: Array<IsolationViewEntry>, };
+
+export type AttemptIsolationRow = { node: string, 
+/**
+ * The list item the attempt ran, for an item of a list node.
+ */
+item?: string, attempt: number, isolation: AttemptIsolation, };
+
 export type Rate = { count: number, of: number, rate?: number, };
 
 export type PerRun = { total: number, runs: number, per_run?: number, };
@@ -1222,6 +1262,11 @@ estimate?: RunEstimate,
  * model (issue #193); empty before the first attempt.
  */
 attempt_models?: Array<AttemptModel>, 
+/**
+ * What each isolated attempt's isolation held and did not (level,
+ * backend, network, limits); empty for a run without one.
+ */
+isolation?: Array<AttemptIsolationRow>, 
 /**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.

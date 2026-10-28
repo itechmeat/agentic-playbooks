@@ -26,6 +26,7 @@ use crate::state::{RunState, RunStatus};
 mod check;
 mod env;
 mod exposure;
+mod isolation;
 
 pub use check::{FAIL, OK, RunCheck, WARN};
 
@@ -53,6 +54,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(model_check(&run_dir, events));
     checks.extend(env::env_checks(&run_dir, events));
     checks.extend(exposure::exposure_checks(events));
+    checks.extend(isolation::isolation_checks(events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(
         root,

@@ -31,6 +31,7 @@
   import RunPauseControls from '../lib/RunPauseControls.svelte'
   import RunNotifyControl from '../lib/RunNotifyControl.svelte'
   import AttemptModelsPanel from '../lib/AttemptModelsPanel.svelte'
+  import AttemptIsolationPanel from '../lib/AttemptIsolationPanel.svelte'
   import RunBudgetPanel from '../lib/RunBudgetPanel.svelte'
   import QualityPanel from '../lib/QualityPanel.svelte'
   import RunKnownProblemsCard from '../lib/RunKnownProblemsCard.svelte'
@@ -464,6 +465,7 @@
       {/key}
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
       <AttemptModelsPanel models={detail.attempt_models} />
+      <AttemptIsolationPanel rows={detail.isolation} />
       <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
       <QualityPanel
         {grades}

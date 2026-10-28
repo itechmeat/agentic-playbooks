@@ -849,8 +849,9 @@ root:
 `workdir` is a template rendered like a prompt, but it may read only what can
 name a path: `params.*`, `run.instruction`, `nodes.<id>.output` (or one field of
 it) and `nodes.<id>.review_decision`. Anything else is a **V47** error, and so is
-`workdir` together with `isolation` (an isolated node runs in its own
-directory). The rendered path is resolved against the run's working tree (the
+`workdir` together with `isolation` (an isolated node runs in the run's
+tree inside its sandbox, or in a scratch directory without one; see
+[Isolation](#isolation-isolation)). The rendered path is resolved against the run's working tree (the
 execution root when the run has none, see [Run working tree](#run-working-tree-worktree);
 an absolute path is kept) and must be an existing directory when the node starts.
 An empty render (the value it reads was never published) or a missing directory
@@ -915,6 +916,43 @@ execution root, keyed by that worktree's top level (a worktree never grows an
 taken first, then the project lock is released. `apb doctor --run <id>` reports
 the lock of the run's tree.
 
+### Isolation (isolation)
+
+An `agent_task` that works on a repository or documents you do not fully
+trust can run apart from the operator: in its own sandbox on Linux, with the
+operator's home, processes, ssh agent and session bus out of reach, the
+repository's git config and hooks read-only, and the environment cut to the
+profile's allowlist.
+
+```yaml
+- id: build
+  type: agent_task
+  prompt: "Build the branch and run its tests."
+  isolation:
+    level: full                 # full | best_effort | none (default)
+    network: open               # open | none; the agent's model is hosted
+    read_only: [~/.rustup]      # extra paths, `~/` or absolute
+    writable: [~/.cargo/registry]
+```
+
+- `full` refuses to run where the sandbox cannot be built
+  (`isolation_unavailable`, before anything of the run is written): no
+  bubblewrap, macOS, an agent that declares no sandbox needs (only claude
+  and codex do so far), or a host-mode run.
+- `best_effort` uses the sandbox where it can and otherwise runs in a scratch
+  directory without the project tree; every attempt records why.
+- `isolation: full` alone is the short form of `{ level: full }`.
+
+Every isolated attempt records what held and what did not (`apb runs <id>`,
+`apb doctor --run <id>`, `run_status`, the run page). The limits hold even
+in the sandbox: the host uid is unchanged, `network: open` reaches any host,
+the agent's own login is readable inside, and script nodes, goal scripts and
+project checks run outside it. The validator warns on `full` with an
+implicit network (V112) and refuses `connectors` on an isolated node (V113),
+extra paths that are relative or reach a credential location (V114), and
+extras with level `none` (V115). Mechanism, guarantees per level, the
+network and the agents' logins: [docs/ISOLATION.md](ISOLATION.md).
+
 ### Declared cache key (cache.key)
 
 `cache: auto` keys a node's result on its definition, rendered prompt, profile
@@ -970,8 +1008,9 @@ Author around it, in order of strength:
 
 An orchestrator or otherwise long-running `agent_task` node can be cut off
 mid-work by anything from a host process restart to a supervisor interrupt aimed
-at it. When its work happens inside a git worktree (an `isolation: full` or
-`best_effort` node, or an agent managing its own worktree), the recovery cost of
+at it. When its work happens inside a git worktree (the run's
+[working tree](#run-working-tree-worktree), or an agent managing its own
+worktree), the recovery cost of
 that interruption is entirely a function of how much uncommitted work existed
 when it happened.
 

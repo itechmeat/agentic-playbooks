@@ -133,6 +133,17 @@ pub struct RunDetail {
         ts(as = "Option<Vec<apb_engine::attempt_models::AttemptModel>>", optional)
     )]
     pub attempt_models: Vec<apb_engine::attempt_models::AttemptModel>,
+    /// What each isolated attempt's isolation held and did not (level,
+    /// backend, network, limits); empty for a run without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(
+            as = "Option<Vec<apb_engine::run_view::AttemptIsolationRow>>",
+            optional
+        )
+    )]
+    pub isolation: Vec<apb_engine::run_view::AttemptIsolationRow>,
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -253,6 +264,7 @@ pub(crate) async fn get_run_handler(
     let commits = view.commits();
     let inbox_gaps = view.inbox_gaps();
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
+    let isolation = view.isolation();
     // The goal, the baseline and the outcome are read against the one
     // playbook snapshot parsed above.
     let readout = view.readout_of(loaded_pb);
@@ -304,6 +316,7 @@ pub(crate) async fn get_run_handler(
         notes,
         lists,
         attempt_models,
+        isolation,
         goal,
         candidate_trial,
         known_problems,

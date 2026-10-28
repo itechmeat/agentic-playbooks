@@ -464,3 +464,42 @@ pub fn request_json(raw: &str) -> serde_json::Value {
         .and_then(|(_, body)| serde_json::from_str(body).ok())
         .unwrap_or(serde_json::Value::Null)
 }
+
+/// Whether this machine can run the isolation sandbox (Linux, unprivileged
+/// bwrap whose trial sandbox starts, and with `scope` the Landlock scope).
+/// A gated enforcement test returns early when it cannot, after one skip
+/// line naming the reason; its refusal twin runs everywhere. With
+/// `APB_SANDBOX_TESTS=require` a missing capability fails the test instead,
+/// so a CI leg that promises the sandbox cannot pass by skipping.
+pub fn sandbox_or_skip(scope: bool) -> bool {
+    use apb_core::isolation::contract::Os;
+    let host = apb_engine::sandbox::probe::host_facts();
+    let missing = if host.os != Os::Linux {
+        Some("not Linux".to_string())
+    } else if host.disabled {
+        Some("APB_SANDBOX=off".to_string())
+    } else {
+        match &host.bwrap {
+            None => Some("no bwrap".to_string()),
+            Some(b) if b.setuid => Some("bwrap is setuid".to_string()),
+            Some(b) => match &b.trial {
+                Err(e) => Some(format!("the trial sandbox failed: {e}")),
+                Ok(()) if scope && !host.scope_available() => {
+                    Some(format!("no Landlock scope (ABI {})", host.landlock_abi))
+                }
+                Ok(()) => None,
+            },
+        }
+    };
+    match missing {
+        None => true,
+        Some(why) => {
+            assert!(
+                std::env::var("APB_SANDBOX_TESTS").as_deref() != Ok("require"),
+                "APB_SANDBOX_TESTS=require: {why}"
+            );
+            eprintln!("skip: the isolation sandbox is not available here: {why}");
+            false
+        }
+    }
+}

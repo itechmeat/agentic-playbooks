@@ -46,3 +46,5 @@ followed by the rule as the title and three sections:
 | [0005](0005-agent-knowledge-lives-in-its-module.md) | Knowledge about a built-in agent lives only in its module |
 | [0006](0006-a-built-in-form-without-machine-output-has-drifted.md) | A built-in form without its machine output means the format changed; a custom form read as plain text is allowed |
 | [0007](0007-claude-headless-keeps-json-output.md) | Claude's headless form keeps `--output-format json`; tool exposure is checked on the stream transport only |
+| [0008](0008-an-isolation-level-is-a-contract-checked-before-every-spawn.md) | An isolation level is a contract apb checks before every spawn: `full` refuses what this machine cannot enforce, `best_effort` journals what it could not |
+| [0009](0009-apb-git-never-runs-a-program-the-tree-names.md) | apb's own git commands never run a program the working tree's configuration, attributes or hooks name |

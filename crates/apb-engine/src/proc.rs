@@ -227,6 +227,27 @@ fn kill_group_with(pid: u32, send: &dyn Fn(i32)) {
     }
 }
 
+/// Puts the process in its own process group, or with `session` in its own
+/// session (`setsid()` before exec: no controlling terminal, so a sandboxed
+/// process cannot push input into the operator's terminal). Either way its
+/// process group equals its pid, so a group kill reaches the whole tree.
+pub(crate) fn own_group(cmd: &mut Command, session: bool) {
+    if session {
+        // SAFETY: setsid(2) is async-signal-safe and touches only the child
+        // between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        cmd.process_group(0);
+    }
+}
+
 pub struct Captured {
     pub status: Option<ExitStatus>,
     pub stdout: String,
@@ -242,15 +263,26 @@ pub struct Captured {
 /// (with `cancelled = true` in the cancellation case). With no timeout and no
 /// cancellation, waits for completion.
 pub fn run_capture(
+    cmd: Command,
+    timeout: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<Captured> {
+    run_capture_in(cmd, timeout, cancel, false)
+}
+
+/// [`run_capture`] of a command that starts its own session (a sandboxed
+/// process, see [`own_group`]) instead of only its own process group.
+pub fn run_capture_in(
     mut cmd: Command,
     timeout: Option<Duration>,
     cancel: Option<&AtomicBool>,
+    session: bool,
 ) -> std::io::Result<Captured> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Make the child process the leader of its own process group (pgid ==
     // pid), so that on timeout the whole group can be killed (shell
     // pipelines, background jobs `&`, forks), not just the direct child.
-    cmd.process_group(0);
+    own_group(&mut cmd, session);
     let mut child = cmd.spawn()?;
 
     // Read the streams on separate threads so we don't hit pipe buffers filling up.

@@ -13,6 +13,7 @@
 //! confirmation, so those surfaces pass `true`. Connector and account trust
 //! ignore the knob on every surface (secret egress).
 
+pub mod isolation;
 pub(crate) mod trust_scan;
 
 use std::path::Path;
@@ -922,6 +923,15 @@ fn check_run_loaded(
     if let Some(req) = &loaded.playbook.requires {
         check_requires(root, req, &wref.id)?;
     }
+
+    // Isolation: a `full` node this machine cannot isolate refuses here,
+    // before anything is written. The execution mode is not known yet;
+    // prepare checks again with it.
+    let worigin = match wref.origin {
+        Origin::Global => PlaybookOrigin::Global,
+        _ => PlaybookOrigin::Project,
+    };
+    isolation::check(root, &loaded.playbook, worigin, false)?;
 
     let irreversible = consent_sources(root, &loaded.playbook, &wref.origin, Some(&tree.children));
     Ok(RunPermit {

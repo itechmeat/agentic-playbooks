@@ -2,7 +2,6 @@
 use crate::content::sha256_hex;
 use crate::validate::build_globset;
 use std::path::Path;
-use std::process::Command;
 
 /// Errors from [`files_fingerprint`]. `git_fingerprint` never returns an
 /// error: any git failure (not a repo, no HEAD yet, git missing) collapses
@@ -32,14 +31,16 @@ pub enum FingerprintError {
 /// pretending to be a valid fingerprint.
 pub fn git_fingerprint(root: &Path, exclude: &[String]) -> Option<String> {
     let ex = build_globset(exclude).ok()?;
-    let head = git(root, &["rev-parse", "HEAD"])?;
+    let repo = crate::git::Repo::locate(root).ok()?;
+    let head = repo.read(root, &["rev-parse", "HEAD"])?;
 
     let pathspecs: Vec<String> = exclude.iter().map(|g| format!(":(exclude){g}")).collect();
-    let mut diff_args = vec!["diff", "HEAD", "--binary", "--", ".", ":(exclude).apb"];
-    diff_args.extend(pathspecs.iter().map(String::as_str));
-    let diff = git(root, &diff_args)?;
+    let mut diff = repo.diff(root);
+    diff.args(["HEAD", "--binary", "--", ".", ":(exclude).apb"]);
+    diff.args(&pathspecs);
+    let diff = crate::git::stdout_of(&mut diff)?;
 
-    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = repo.read(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
 
     let mut acc = Vec::new();
     acc.extend_from_slice(head.as_bytes());
@@ -59,19 +60,11 @@ pub fn git_fingerprint(root: &Path, exclude: &[String]) -> Option<String> {
     Some(sha256_hex(&acc))
 }
 
-/// Run a git subcommand in `root` and return stdout as text, or `None` if
-/// the process could not run or exited non-zero.
+/// Run a hardened git subcommand in `root` ([`crate::git`]) and return
+/// stdout as text, or `None` if the process could not run or exited
+/// non-zero.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    crate::git::read(root, args)
 }
 
 /// Hash of exactly the files matching `include` minus `exclude`, as sorted
@@ -102,16 +95,6 @@ pub fn files_fingerprint(
 
 // --- 0.23.0 protected paths (C6) ---------------------------------------------
 
-/// `git` for the protected-path listings (0.23.0): the same as [`git`] with
-/// the repository's config-driven helpers switched off, so a listing never
-/// runs a program named in the tree's own `.git/config` (a
-/// `core.fsmonitor` hook).
-fn git_listing(root: &Path, args: &[&str]) -> Option<String> {
-    let mut full = vec!["-c", "core.fsmonitor=false"];
-    full.extend_from_slice(args);
-    git(root, &full)
-}
-
 /// Whether a directory between `root` and `rel` (both excluded) is a
 /// symlink, so `root.join(rel)` may resolve outside `root`. A missing
 /// component ends the walk: nothing below it exists to resolve.
@@ -138,7 +121,7 @@ pub fn has_symlinked_parent(root: &Path, rel: &str) -> bool {
 /// below a symlinked directory and tracked files missing from disk.
 pub fn matching_files(root: &Path, include: &[String]) -> Result<Vec<String>, FingerprintError> {
     let inc = build_globset(include).map_err(FingerprintError::Glob)?;
-    let candidates: Vec<String> = match git_listing(
+    let candidates: Vec<String> = match git(
         root,
         &[
             "ls-files",
@@ -178,7 +161,7 @@ pub fn matching_files(root: &Path, include: &[String]) -> Result<Vec<String>, Fi
 /// (`ls-files --others --ignored --exclude-standard --directory`). Empty
 /// outside a git work tree, where nothing is ignored.
 pub fn ignored_paths(root: &Path) -> Vec<String> {
-    git_listing(
+    git(
         root,
         &[
             "ls-files",
@@ -245,16 +228,19 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// Fixture-only wrapper around the production `git` helper: disables
+    /// Fixture-only hardened git (no repository pinning, so `init` works): disables
     /// commit signing so a developer's global `commit.gpgsign = true` can
     /// never make a fixture `commit` hang or fail (which the ignored return
     /// value of a bare `git(...)` call would otherwise hide until a later
     /// `git_fingerprint(...).unwrap()` panics). Production code is
     /// unchanged; only test fixtures route through this.
     fn git(root: &Path, args: &[&str]) -> Option<String> {
-        let mut full_args = vec!["-c", "commit.gpgsign=false"];
-        full_args.extend_from_slice(args);
-        super::git(root, &full_args)
+        crate::git::stdout_of(
+            crate::git::base()
+                .args(["-c", "commit.gpgsign=false", "-C"])
+                .arg(root)
+                .args(args),
+        )
     }
 
     #[test]

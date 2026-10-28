@@ -29,7 +29,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
   param rules V99 and V100, `quality` for the `quality:` block and the
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
-  block and `quality.criteria_grader` V108-V111; `nodes` also holds V68, ids that start with `@`
+  block and `quality.criteria_grader` V108-V111, `isolation` for a node's
+  `isolation` V112-V115; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, and `precedence` combining them), the run
@@ -73,7 +74,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
   another scope's store (`scope_move.rs`), schema 1->2 migrator
-  (`schema_migrate.rs`), the built-in agents, one module each (`agents/`: the
+  (`schema_migrate.rs`), a node's isolation (`isolation.rs`: the level, the
+  network, the extra paths and the machine's settings; `isolation/contract`
+  the pure contract of what this machine enforces, with its code and reason
+  sentences; `isolation/paths` the extra paths an author may name and the
+  credential locations nothing binds), the hardened git command every git
+  call apb makes goes through (`git.rs`), the built-in agents, one module each (`agents/`: the
   registry `all` and `lookup`, `agent.rs` the `Agent` trait, its descriptor,
   capabilities and verified CLI version, `forms.rs` the launch, resume and
   fresh-session forms, `output.rs` the output readers with `promises` and
@@ -81,7 +87,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   environment, `policy.rs` the model rules, `check.rs` the doctor's free
   local check of an installed CLI (version against the verified one, the
   built-in form's flags in its help), `exposure.rs` the tools an agent
-  reports against the ones an attempt was handed; `claude/`, `codex/`, `opencode/`
+  reports against the ones an attempt was handed, `sandbox.rs` what an agent
+  needs inside the sandbox (its login, files to bind or copy); `claude/`, `codex/`, `opencode/`
   and `zcode/` hold their readers and helpers, the other agents one file each;
   `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
   agent registry (`detect.rs`), curated models table
@@ -205,14 +212,23 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
-  (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/spawn_env`
+  (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/command`
+  the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
+  included, and `adapter/spawn_env`
   the one environment every agent spawn gets: the process-env plan, the
   connector scrub, the run context, the agent's run-scoped environment in
-  the directory `agent_home.rs` names), the process-env plan of
+  the directory `agent_home.rs` names, the sandbox overlay last), the
+  isolation sandbox (`sandbox/`: `probe` the cached host facts and the
+  doctor line, `view` the pure filesystem view, `bwrap` its argv, `home`
+  the sandbox home, `git_guard` the repository's read-only paths and the
+  files that redirect git, put back after every attempt, `scope` the
+  Landlock scope the hidden `apb
+  __sandbox-exec` helper applies; the per-attempt place in
+  `scheduler/node/sandbox`), the process-env plan of
   one agent step and its `agent_env_applied` event (`agent_env.rs`; the
   per-step wiring in `scheduler/node/step_env`), the per-run doctor
   (`run_doctor.rs`, `run_doctor/env` the process env rows, `run_doctor/exposure`
-  the tool exposure rows), the paid agent probe behind `apb doctor
+  the tool exposure rows, `run_doctor/isolation` the isolation rows), the paid agent probe behind `apb doctor
   --probe-agent` (`agent_probe.rs`), the expected tools of an attempt and its
   `tool_exposure_mismatch` (`scheduler/node/exposure`), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
@@ -225,7 +241,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   lookup of a marker send; `effect` what a call says about its effect), background
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate/`, with `trust_scan` the
-  connector and profile-bundle trust facts collected before any refusal),
+  connector and profile-bundle trust facts collected before any refusal and
+  `isolation` the `isolation_unavailable` refusal),
   the "will it fit here?" report (`fit/`: compatibility, `setup`, `trust` and
   consent kept apart, `report` the shapes), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
@@ -384,6 +401,22 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   Claude's headless form keeps `--output-format json`, so the tools an agent
   sees are checked on the stream transport only
   ([decision record 0007](docs/adr/0007-claude-headless-keeps-json-output.md)).
+- apb's own git commands go through `apb_core::git` (hooks, the filesystem
+  monitor and signature programs off, `GIT_*` removed), so they never run a
+  program the tree names
+  ([decision record 0009](docs/adr/0009-apb-git-never-runs-a-program-the-tree-names.md)).
+- **Isolation** (`docs/ISOLATION.md`): a node's `isolation` is a contract
+  apb checks before every spawn
+  ([decision record 0008](docs/adr/0008-an-isolation-level-is-a-contract-checked-before-every-spawn.md)).
+  `apb_core::isolation::contract::evaluate` is the one answer the gate,
+  prepare, every attempt, fit and the doctor share: `full` refuses
+  (`isolation_unavailable`) what this machine cannot enforce, `best_effort`
+  runs without a sandbox and journals why, `none` is untouched. On Linux
+  the sandbox is unprivileged bubblewrap plus the `apb __sandbox-exec`
+  helper; macOS is not supported. Every isolated attempt journals
+  `attempt_started.isolation` (holds, limits, view), shown by `apb runs
+  <id>`, `apb doctor --run`, `run_status` and the run page. An isolated
+  node always gets the env allowlist, and V113 refuses it with connectors.
 - schema 2 removed the old `executors` block; playbooks bind executors only
   through profiles. `apb migrate` converts legacy schema 1 playbooks.
 - The supervisor is an optional agent that watches a run and intervenes via the

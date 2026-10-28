@@ -5,9 +5,9 @@
 //! `git rebase -x`, `git bisect run`). None of that may reach apb's own git
 //! calls or the case scripts:
 //!
-//! - the repository-location variables are removed;
-//! - `core.fsmonitor` is off, hooks come from an empty directory, and only
-//!   the local `file` transport is allowed (the scratch `origin`);
+//! - the hardening of every apb git call applies ([`apb_core::git`]);
+//! - hooks come from an empty directory, and only the local `file`
+//!   transport is allowed (the scratch `origin`);
 //! - the system config is not read.
 
 use std::path::Path;
@@ -35,12 +35,9 @@ pub fn settings(hooks_dir: &Path) -> Vec<String> {
 }
 
 /// `git` with the hardening applied; the caller adds `-C`, its own `-c` and
-/// the subcommand.
+/// the subcommand. The settings here follow apb's own and so win over them.
 pub fn command(hooks_dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    for v in LOCATION_VARS {
-        cmd.env_remove(v);
-    }
+    let mut cmd = apb_core::git::base();
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
     for s in settings(hooks_dir) {
         cmd.arg("-c").arg(s);

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Interaction, SoulDelivery};
 
+use super::SandboxNeeds;
 use super::forms::headless;
 use super::{
     Agent, AgentCategory, AgentEnvSet, AuthHint, AuthKind, Capabilities, ClosedList, Descriptor,
@@ -91,6 +92,17 @@ impl Agent for Codex {
 struct CodexSetup;
 
 impl HostSetup for CodexSetup {
+    // The run-scoped CODEX_HOME already holds the login (`auth.json` copied
+    // in by `scoped_env`), and it lives in the run's agent home, which the
+    // sandbox binds. An api key in the environment is codex's own login too,
+    // so it is never listed as a passed credential.
+    fn sandbox_needs(&self) -> Option<SandboxNeeds> {
+        Some(SandboxNeeds {
+            env_logins: vec!["OPENAI_API_KEY", "CODEX_API_KEY"],
+            ..SandboxNeeds::none()
+        })
+    }
+
     // Classified by the KEY NAMES in auth.json (not values): `tokens` or
     // `account_id` means an account login, `OPENAI_API_KEY` an api key.
     fn auth_hint(&self, home: &Path) -> (Option<AuthHint>, Option<Vec<String>>) {

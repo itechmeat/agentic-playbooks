@@ -22,15 +22,6 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
             _ => None,
         }
     };
-    let isolated = |kind: &NodeKind| {
-        matches!(
-            kind,
-            NodeKind::AgentTask {
-                isolation: Some(Isolation::Full | Isolation::BestEffort),
-                ..
-            }
-        )
-    };
     for node in &playbook.nodes {
         let NodeKind::AgentTask {
             continue_session: Some(source_id),
@@ -62,7 +53,7 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
         if profile_of(&source.kind) != profile_of(&node.kind) {
             cold.push("the two nodes bind different profiles");
         }
-        if isolated(&source.kind) || isolated(&node.kind) {
+        if source.kind.is_isolated() || node.kind.is_isolated() {
             cold.push("an isolated node runs in its own directory");
         }
         if source.kind.workdir_template() != node.kind.workdir_template() {
@@ -197,12 +188,7 @@ pub(crate) fn check_workdir(playbook: &Playbook, r: &mut ValidationReport) {
         }
     }
     for node in &playbook.nodes {
-        if let NodeKind::AgentTask {
-            isolation: Some(Isolation::Full | Isolation::BestEffort),
-            ..
-        } = &node.kind
-            && node.kind.workdir_template().is_some()
-        {
+        if node.kind.is_isolated() && node.kind.workdir_template().is_some() {
             r.error(
                 "V47",
                 Some(&node.id),

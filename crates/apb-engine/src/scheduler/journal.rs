@@ -736,6 +736,7 @@ mod tests {
                     workdir: None,
                     transcript: None,
                     token: None,
+                    isolation: None,
                 },
             )
         };
@@ -820,6 +821,7 @@ mod tests {
                         workdir: Some(dir.to_string_lossy().into_owned()),
                         transcript: None,
                         token: None,
+                        isolation: None,
                     },
                 ),
                 at(
@@ -880,6 +882,7 @@ mod tests {
                     workdir: None,
                     transcript: None,
                     token: None,
+                    isolation: None,
                 },
             ),
             at(
@@ -935,6 +938,7 @@ mod tests {
                 workdir: None,
                 transcript: transcript.map(Into::into),
                 token: None,
+                isolation: None,
             },
         )
     }
@@ -1009,6 +1013,7 @@ mod tests {
                         workdir: None,
                         transcript: None,
                         token: None,
+                        isolation: None,
                     },
                 ),
                 at(

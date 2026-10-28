@@ -152,32 +152,6 @@ pub(crate) fn check_protect(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
-/// V16: isolation is declared. The engine materializes skills as copies into
-/// an isolated per-node workdir (skills_mode: materialized), but does not yet
-/// enforce full sandboxing (project tree, process) (spec 8.3). A warning so the
-/// enforcement boundary is stated honestly rather than implied.
-pub(crate) fn check_isolation(playbook: &Playbook, r: &mut ValidationReport) {
-    for n in &playbook.nodes {
-        if let NodeKind::AgentTask {
-            isolation: Some(iso),
-            ..
-        } = &n.kind
-            && !matches!(iso, Isolation::None)
-        {
-            let name = match iso {
-                Isolation::Full => "full",
-                Isolation::BestEffort => "best_effort",
-                Isolation::None => "none",
-            };
-            r.warn(
-                "V16",
-                Some(&n.id),
-                format!("isolation `{name}` materializes skill copies into an isolated node workdir, but full sandbox isolation (project tree, process) is not yet enforced; see spec 8.3"),
-            );
-        }
-    }
-}
-
 /// V19 (warning): an agent_task or script node without `expected_duration`
 /// (nudges authors; never blocks). V20 (error): an `expected_duration` value
 /// that cannot be parsed to seconds.

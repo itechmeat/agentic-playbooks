@@ -97,8 +97,8 @@ raw `profile.yaml`, setting `environment` changes the digest and therefore the
 bundle trust just like any other profile edit.
 
 `environment` is not a sandbox. It does not isolate the filesystem, the network, or
-the project's working tree; a node that needs isolation from concurrent branches
-still needs the node's own `isolation` setting. Pair it with `outputs.extract` on
+the project's working tree; a node that needs that needs its own `isolation`
+setting (ISOLATION.md). Pair it with `outputs.extract` on
 the node (see HOWTO-authoring.md) as the other half of output hygiene: the minimal
 environment stops local hooks from appending extra turns in the first place, and
 `outputs.extract` scopes the recorded output to the agent's own marked block when
@@ -219,8 +219,9 @@ with the OS error and spawns the agent anyway, without that protection. It is
 not isolation
 from a hostile agent running as the same user: the operator's other processes
 (a shell, an editor, another apb) stay readable through `/proc`, and files the
-user can read stay readable. Real isolation needs a separate user or a
-sandbox. macOS has no equivalent of the `/proc` hiding: there, `ps eww` by the
+user can read stay readable. Real isolation needs a sandbox: a node's
+`isolation` (ISOLATION.md), which also forces the allowlist on a profile that
+says `inherit` (`agent_env_applied` records `forced_by: isolation`). macOS has no equivalent of the `/proc` hiding: there, `ps eww` by the
 same user can show another process's environment.
 
 On macOS, a claude login kept in the Keychain does not depend on environment
@@ -344,18 +345,23 @@ live edit to the profile or SOUL after start does not affect a running or
 resuming run. Skill immutability depends on the node's `isolation`:
 
 - `isolation: full` or `best_effort`: the run materializes real copies of the
-  profile's skills from the run snapshot into a fresh per-attempt workdir
-  (`runs/<id>/work/<node>/<attempt>/.agents/skills/<name>` plus a `.claude/skills`
-  bridge) and points the agent at that workdir, so the agent reads only the
-  snapshot. Materialization happens per attempt from the immutable run snapshot,
-  so a retry or fallback does not inherit a mutated skills tree from a prior
-  attempt, and a live edit to a skill file mid-run does not affect the run. Each
-  attempt records `skills_mode: materialized`, and a node `success_check` runs in
-  that same per-attempt workdir. Note the current boundary: this isolated workdir
-  contains the
-  materialized skills but not a copy of the project tree - full project-tree
-  sandboxing arrives with worktree isolation (spec 8.3). A node that needs the
-  project's working files should use `isolation: none` until then.
+  profile's skills from the run snapshot for each attempt, so the agent reads
+  only the snapshot. Materialization happens per attempt from the immutable
+  run snapshot, so a retry or fallback does not inherit a mutated skills tree
+  from a prior attempt, and a live edit to a skill file mid-run does not
+  affect the run. Each attempt records `skills_mode: materialized`. Where the
+  copies live depends on whether the attempt gets a sandbox (ISOLATION.md):
+  - In a sandbox (Linux with bubblewrap) the attempt runs in the node's own
+    tree, the project's working files included; the copies sit in the
+    attempt's box under the run (`runs/<id>/sandbox/attempts/`)
+    and are mounted read-only over the tree's `.agents/skills` and
+    `.claude/skills`. Mount points apb had to create are removed after the
+    attempt. A `success_check` runs inside the same sandbox.
+  - Without a sandbox (`best_effort` on a machine that cannot build one) the
+    attempt runs in a fresh scratch directory
+    (`runs/<id>/work/<node>/<attempt>/.agents/skills/<name>` plus a
+    `.claude/skills` bridge) that holds the copies and no project tree, and a
+    `success_check` runs there.
 - `isolation: none` (default): skills are delivered advisory-only - the agent is
   given the skill names in its prompt and reads the live `.agents/skills/<name>`
   at run time, so a live edit mid-run can still change what it reads. Each

@@ -646,6 +646,23 @@ pub(crate) fn prepare_run_target(
             errors.join("; ")
         )));
     }
+    // Isolation, with the run's real execution mode: the gate's check again,
+    // so no start path (a trial, a child, a resume of a fresh start) runs a
+    // `full` node this machine cannot isolate. Nothing is written yet.
+    let contracts = crate::gate::isolation::node_contracts(
+        root,
+        &playbook,
+        origin,
+        execution.mode == apb_core::execution::ExecutionMode::Host,
+    );
+    let refused = crate::gate::isolation::refused(&contracts);
+    if !refused.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "{}: {}",
+            apb_core::isolation::contract::UNAVAILABLE,
+            crate::gate::isolation::text(&refused)
+        )));
+    }
 
     // --- 0.24.0 irreversible consent ---
     // Checked on the effective playbook before anything is written, so a

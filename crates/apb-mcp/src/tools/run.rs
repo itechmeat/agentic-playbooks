@@ -333,12 +333,17 @@ fn with_truncated(mut list: Value, left_out: usize) -> Value {
 // --- end of the 0.23.0 blocks ---
 
 /// The fields a run view carries only when they apply: the token usage its
-/// attempts reported, the attempts that lost part of their output, the
-/// decision-model totals, and the note about events a newer apb wrote that
-/// this binary skipped. Shared by `run_status` and `run_report`.
+/// attempts reported, what each isolated attempt's isolation held and did
+/// not, the attempts that lost part of their output, the decision-model
+/// totals, and the note about events a newer apb wrote that this binary
+/// skipped. Shared by `run_status` and `run_report`.
 fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     if let Some(usage) = view.usage() {
         out["usage"] = json!(usage);
+    }
+    let isolation = view.isolation();
+    if !isolation.is_empty() {
+        out["isolation"] = json!(isolation);
     }
     let losses = view.output_losses();
     if !losses.is_empty() {
@@ -1080,6 +1085,49 @@ mod progress_tests {
             .expect("failure_reason must be a string for a failed run with a recorded RunError");
         assert!(reason.contains("no outgoing edge"));
         assert!(reason.contains("node `a`"));
+    }
+
+    /// Each isolated attempt reaches `run_status` with its level, backend,
+    /// network and limits; a run without one carries no `isolation` key.
+    #[test]
+    fn run_status_lists_each_isolated_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1,"type":"attempt_started","node":"a","attempt":1,"agent":"claude","isolation":{"level":"full","backend":"bwrap","bwrap_version":"0.11.0","network":"none","holds":["network.none"],"limits":["user.host_uid"],"view":[{"path":"~/.claude.json","access":"read_write"}]}}"#,
+                "\n",
+                r#"{"seq":2,"ts":2,"type":"attempt_started","node":"b","attempt":1,"agent":"claude"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        let rows = out["isolation"].as_array().expect("isolation rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["node"], "a");
+        assert_eq!(rows[0]["isolation"]["backend"], "bwrap");
+        assert_eq!(rows[0]["isolation"]["limits"][0], "user.host_uid");
+        assert_eq!(rows[0]["isolation"]["view"][0]["access"], "read_write");
+
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        assert!(
+            run_status(tmp.path(), "r1")
+                .unwrap()
+                .get("isolation")
+                .is_none()
+        );
     }
 
     /// `failure_reason` stays absent (JSON `null`) for a run that is not

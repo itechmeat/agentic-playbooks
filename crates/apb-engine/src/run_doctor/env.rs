@@ -58,6 +58,7 @@ pub(super) fn env_checks(run_dir: &Path, events: &[Event]) -> Vec<RunCheck> {
             withheld_more,
             absent,
             item,
+            ..
         } = &e.payload
         {
             latest.insert(

@@ -1327,6 +1327,13 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
+    // What each isolated attempt's isolation held and did not.
+    for row in view.isolation() {
+        println!(
+            "  isolation {}",
+            sanitize_for_terminal(&row.line(), OUTCOME_LINE_MAX)
+        );
+    }
     // Issue #195: fork branch-failure policies and refused joins.
     for b in apb_engine::fork_view::entries(&view.events) {
         println!(
@@ -1421,8 +1428,9 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The longest outcome line printed: a finding's evidence alone may run to
-/// a thousand characters, and cutting it would hide what was found.
+/// The longest outcome or isolation line printed: a finding's evidence alone
+/// may run to a thousand characters, and cutting it would hide what was
+/// found; an isolation line must not lose a limit or a reason either.
 const OUTCOME_LINE_MAX: usize = 2000;
 
 /// The run's human outcome, its headline first, every line made safe for a

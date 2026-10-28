@@ -2,6 +2,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::isolation::IsolationSpec;
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 
 #[derive(Debug, thiserror::Error)]
@@ -506,6 +507,20 @@ impl Node {
 }
 
 impl NodeKind {
+    /// The declared isolation of an `agent_task`; `None` for every other
+    /// kind and when unset.
+    pub fn isolation(&self) -> Option<&IsolationSpec> {
+        match self {
+            NodeKind::AgentTask { isolation, .. } => isolation.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Whether this node runs isolated (`full` or `best_effort`).
+    pub fn is_isolated(&self) -> bool {
+        self.isolation().is_some_and(IsolationSpec::is_isolated)
+    }
+
     /// The node's `workdir` template (issue #67 item 4): the directory an
     /// agent_task or a script runs in, rendered with the prompt template
     /// engine and resolved against the execution root. `None` for every other
@@ -1344,8 +1359,10 @@ pub enum NodeKind {
         timeout_seconds: Option<u64>,
         #[serde(default)]
         workdir: Option<String>,
+        /// The node's isolation (`apb_core::isolation`): the level, the
+        /// network and the extra paths. `None` and `none` run unchanged.
         #[serde(default)]
-        isolation: Option<Isolation>,
+        isolation: Option<IsolationSpec>,
         /// Connector bindings for this node (spec
         /// 2026-07-18-connectors-design section 5): additive to schema 2, so
         /// an old playbook without the field parses unchanged. Only
@@ -1521,22 +1538,6 @@ pub enum Outcome {
 pub enum Audience {
     People,
     Agents,
-}
-
-/// Required isolation level for node execution (spec 7.3/8.3): `full` -
-/// a fully isolated sandbox, `best_effort` - isolation to the extent the
-/// adapter supports it, `none` - a shared working directory (default).
-/// Currently the field is declarative and shown in the web node form; the
-/// engine does NOT enforce it yet (real enforcement via worktree is future
-/// work, spec 8.3), so the validator warns about isolation that is declared
-/// but not enforced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Isolation {
-    Full,
-    BestEffort,
-    #[default]
-    None,
 }
 
 /// Who may answer an interactive `agent_task` node's questions (spec

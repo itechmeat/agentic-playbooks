@@ -17,7 +17,6 @@
 //! writes or rewrites a trailer itself.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use apb_core::schema::{NodeKind, Playbook};
 
@@ -29,25 +28,10 @@ use crate::event::{CommittedArtifact, EventPayload};
 pub(crate) const MAX_LISTED_COMMITS: usize = 50;
 
 /// `git -C dir <args>` stdout, `None` on any failure (no git, not a
-/// repository, a non-zero exit). The repository's config-driven programs
-/// are switched off (`core.fsmonitor`, `log.showSignature` and through it
-/// `gpg.program`), so reading `HEAD` never runs a program the tree names.
+/// repository, a non-zero exit). Hardened ([`apb_core::git`]), so reading
+/// `HEAD` never runs a program the tree names.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "log.showSignature=false",
-        ])
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    apb_core::git::read(dir, args)
 }
 
 /// The commit `HEAD` names in `dir`, `None` outside a git work tree or on an
@@ -61,7 +45,7 @@ pub(crate) fn head(dir: &Path) -> Option<String> {
 /// Whether `before` is an ancestor of (or equal to) `after`: the node's
 /// commits were added on top of where it started.
 fn is_ancestor(dir: &Path, before: &str, after: &str) -> bool {
-    git(dir, &["merge-base", "--is-ancestor", before, after]).is_some()
+    apb_core::git::succeeds(dir, &["merge-base", "--is-ancestor", before, after]).unwrap_or(false)
 }
 
 /// The commits reachable from `after` but not from `before`, newest first,
@@ -269,7 +253,7 @@ mod tests {
     use super::*;
 
     fn git_ok(dir: &Path, args: &[&str]) {
-        let st = Command::new("git")
+        let st = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args([
