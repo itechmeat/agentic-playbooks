@@ -214,6 +214,34 @@ impl ProcessEnvPolicy {
     }
 }
 
+/// The policy an isolated node's agent runs under, whatever its profile
+/// says: `inherit` (or no policy) becomes an allowlist with no extras, and
+/// an existing allowlist keeps its `allow` names. The forced allowlist
+/// applies at every isolation level other than `none`, with or without a
+/// sandbox.
+pub fn plan_isolated(policy: Option<&ProcessEnvPolicy>) -> ProcessEnvPolicy {
+    match policy {
+        Some(p) if p.is_allowlist() => p.clone(),
+        _ => ProcessEnvPolicy {
+            policy: ProcessEnvMode::Allowlist,
+            allow: Vec::new(),
+        },
+    }
+}
+
+/// The credential-shaped names (by name, `crate::token_shape`) a plan still
+/// passes, minus `logins` (the agent's own login variables, a stated limit
+/// of their own). Each one is an isolated attempt's limit
+/// `credentials.env_passed:<NAME>`.
+pub fn passed_credentials(plan: &EnvPlan, logins: &[&str]) -> Vec<String> {
+    plan.keep
+        .iter()
+        .filter(|n| crate::token_shape::name_looks_secret(n))
+        .filter(|n| !logins.iter().any(|l| same(l, n)))
+        .cloned()
+        .collect()
+}
+
 /// Whether a trigger variable's value switches its rule on: `1`, `true`,
 /// `yes` or `on` in any case, as the agent CLIs read their `*_USE_*`
 /// switches. `0`, `false` or an empty value leave the rule off.
@@ -339,6 +367,27 @@ mod tests {
         assert!(!pat("NPM_CONFIG_*").matches("NPM_TOKEN"));
         assert!(pat("GH_TOKEN").matches("GH_TOKEN"));
         assert!(!pat("GH_TOKEN").matches("GH_TOKEN_2"));
+    }
+
+    #[test]
+    fn an_isolated_node_forces_the_allowlist() {
+        assert!(plan_isolated(None).is_allowlist());
+        assert!(plan_isolated(None).allow.is_empty());
+        assert!(
+            plan_isolated(Some(&ProcessEnvPolicy::default()))
+                .allow
+                .is_empty()
+        );
+        let own = ProcessEnvPolicy {
+            policy: ProcessEnvMode::Allowlist,
+            allow: vec![pat("GH_TOKEN")],
+        };
+        assert_eq!(plan_isolated(Some(&own)), own);
+        let p = EnvPlan {
+            keep: vec!["ANTHROPIC_API_KEY".into(), "GH_TOKEN".into(), "PATH".into()],
+            ..EnvPlan::default()
+        };
+        assert_eq!(passed_credentials(&p, &["ANTHROPIC_API_KEY"]), ["GH_TOKEN"]);
     }
 
     #[test]

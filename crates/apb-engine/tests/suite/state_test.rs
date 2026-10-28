@@ -127,6 +127,7 @@ fn open_attempt_marks_interrupted() {
                 workdir: None,
                 transcript: None,
                 token: None,
+                isolation: None,
             },
         ),
     ];
@@ -223,6 +224,7 @@ fn a_legacy_resume_marker_followed_by_a_crash_reads_interrupted() {
                 workdir: None,
                 transcript: None,
                 token: None,
+                isolation: None,
             },
         ),
     ];
@@ -275,6 +277,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 workdir: None,
                 transcript: None,
                 token: None,
+                isolation: None,
             },
         ),
         ev(
@@ -317,6 +320,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 workdir: None,
                 transcript: None,
                 token: None,
+                isolation: None,
             },
         ),
     ];

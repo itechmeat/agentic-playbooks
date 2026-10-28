@@ -128,6 +128,35 @@ fn every_agent_env_set_is_pinned() {
     }
 }
 
+/// The agents whose sandboxed run is verified declare their needs; every
+/// other agent declares none, so `isolation: full` refuses it.
+#[test]
+fn sandbox_needs_are_declared_for_claude_and_codex_only() {
+    use apb_core::agents::Access;
+    for a in apb_core::agents::all() {
+        let id = a.descriptor().id;
+        let needs = a.setup().sandbox_needs();
+        match id {
+            "claude" => {
+                let n = needs.expect("claude declares its needs");
+                assert_eq!(n.binds.len(), 1);
+                assert_eq!(n.binds[0].home_rel, ".claude/.credentials.json");
+                assert_eq!(n.binds[0].access, Access::ReadWrite);
+                assert_eq!(n.copies.len(), 1);
+                assert_eq!(n.copies[0].home_rel, ".claude.json");
+                assert!(n.env_logins.contains(&"ANTHROPIC_API_KEY"));
+                assert!(n.env_logins.contains(&"CLAUDE_CODE_OAUTH_TOKEN"));
+            }
+            "codex" => {
+                let n = needs.expect("codex declares its needs");
+                assert!(n.binds.is_empty() && n.copies.is_empty());
+                assert_eq!(n.env_logins, ["OPENAI_API_KEY", "CODEX_API_KEY"]);
+            }
+            _ => assert_eq!(needs, None, "{id}"),
+        }
+    }
+}
+
 /// Registry invariants: ids are unique, an alias never names another agent,
 /// every module with forms has a valid launch form whose resume form takes
 /// the session, and a verified version carries a `YYYY-MM-DD` date.

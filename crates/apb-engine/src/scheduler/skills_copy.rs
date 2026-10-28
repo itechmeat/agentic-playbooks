@@ -64,12 +64,13 @@ fn intact(dir: &Path, entry: &ManifestProfile) -> bool {
     })
 }
 
-/// Materializes profile skills as REAL copies from the run snapshot into the
-/// isolated per-node workdir (completion-plan Task 3). The source is the snapshot
+/// Materializes profile skills as REAL copies from the run snapshot into an
+/// isolated attempt's own directory (completion-plan Task 3): its sandbox box
+/// or its scratch directory. The source is the snapshot
 /// (`run_dir/profiles/<scope>/<name>/skills/<sscope>/<sname>`), NOT the live
 /// `.agents/skills`: editing a skill after the run has started has no effect on
 /// the run. The `.claude/skills` bridge is aimed at the real copies via symlinks.
-/// The workdir is created even without skills (an isolated node execution directory).
+/// The directory is created even without skills.
 pub(crate) fn materialize_isolated_skills(
     run_dir: &Path,
     entry: &ManifestProfile,

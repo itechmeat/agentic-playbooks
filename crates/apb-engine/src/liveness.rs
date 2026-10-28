@@ -820,6 +820,7 @@ mod tests {
             workdir: None,
             transcript: None,
             token: None,
+            isolation: None,
         }
     }
 

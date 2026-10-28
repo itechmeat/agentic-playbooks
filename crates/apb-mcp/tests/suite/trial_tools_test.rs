@@ -143,6 +143,95 @@ fn trial_of_fs_writing_playbook_runs_in_worktree_and_reports_diff() {
     );
 }
 
+/// A trial never runs a program the tree names (decision record 0009): the
+/// project's config arms an external diff, a textconv and a filter driver
+/// that `.gitattributes` names for every path; the worktree checkout
+/// (smudge), the status (clean) and the diff (external diff, textconv) of
+/// the trial run none of them.
+#[test]
+fn a_trial_never_runs_a_program_the_tree_names() {
+    let _l = lock();
+    if !git_available() {
+        eprintln!("git not available, skipping");
+        return;
+    }
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+    seed(
+        proj.path(),
+        "writer",
+        WRITER,
+        Some(("write.sh", "#!/bin/sh\necho changed >> tracked.txt\n")),
+    );
+    fs::write(proj.path().join("tracked.txt"), "one\n").unwrap();
+    fs::write(
+        proj.path().join(".gitattributes"),
+        "* diff=evil filter=evil\n",
+    )
+    .unwrap();
+    git(proj.path(), &["init", "-q"]);
+    git(proj.path(), &["add", "-A"]);
+    git(
+        proj.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let marker = cfg.path().join("ran");
+    let evil = cfg.path().join("evil.sh");
+    fs::write(
+        &evil,
+        format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&evil, fs::Permissions::from_mode(0o755)).unwrap();
+    let ev = evil.to_string_lossy();
+    for k in [
+        "diff.external",
+        "diff.evil.textconv",
+        "diff.evil.command",
+        "filter.evil.clean",
+        "filter.evil.smudge",
+        "filter.evil.process",
+    ] {
+        git(proj.path(), &["config", k, &ev]);
+    }
+    git(proj.path(), &["config", "filter.evil.required", "true"]);
+
+    let res = playbook_trial(
+        proj.path(),
+        "writer",
+        None,
+        Default::default(),
+        None,
+        "project",
+    )
+    .unwrap();
+    assert_eq!(res["status"], "succeeded", "trial result: {res}");
+    assert!(
+        res["diff"].as_str().unwrap().contains("changed"),
+        "the diff shows the change: {}",
+        res["diff"]
+    );
+    assert!(
+        !marker.exists(),
+        "the trial ran a program the tree names: {}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
+}
+
 #[test]
 fn approve_activates_and_unlocks_run() {
     let _l = lock();

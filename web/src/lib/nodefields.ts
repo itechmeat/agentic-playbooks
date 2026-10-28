@@ -7,7 +7,7 @@
  * never shows a raw schema key as a label. The hints are rendered in the
  * field's info popover and are the closest thing the editor has to inline
  * docs, so they state real engine behavior - including where a field is
- * declared but not yet enforced.
+ * declared but not yet enforced, and the limits of what is.
  *
  * Keys are form fields, not schema fields: `prompt` and `finish_prompt` are
  * the same YAML key on two node kinds that mean different things, and
@@ -39,7 +39,15 @@ export const NODE_FIELDS = {
   },
   isolation: {
     label: 'Isolation',
-    hint: 'How far the node should run apart from the working copy: none is the shared directory, best_effort asks the adapter for as much isolation as it supports, full demands a fully isolated sandbox. Declarative for now - the engine records the requirement and the validator warns, but it does not yet enforce it.',
+    hint: 'How far the agent runs apart from the operator. none (the default) runs it as before. full runs it in a sandbox on Linux with bubblewrap: own process namespaces, only the node tree and declared paths visible, the git config and hooks read-only, the environment cut to an allowlist; where that is impossible the node refuses to start. best_effort uses the sandbox when it can and otherwise runs in a scratch directory, listing on every attempt what it could not enforce. See docs/ISOLATION.md.',
+  },
+  isolation_network: {
+    label: 'Network',
+    hint: 'The network of an isolated node. open (the default) is the host network, which any agent with a hosted model needs; it reaches any host, including services on this machine. none gives the agent loopback only. full with an implicit network gets a validator warning.',
+  },
+  isolation_paths: {
+    label: 'Extra paths',
+    hint: 'Paths outside the tree the sandbox binds in, read-only or writable, declared in the YAML under read_only and writable. Shown here as written; edit them in the YAML, where the validator refuses relative paths and credential locations.',
   },
   max_retries: {
     label: 'Max retries',

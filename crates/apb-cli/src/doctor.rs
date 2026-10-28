@@ -24,6 +24,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
 /// a model name) reach the terminal.
 const PROBE_TEXT_MAX: usize = 400;
 
+/// The `sandbox` line: bwrap's path, version and its own error (at most
+/// 300 characters), then the Landlock facts, which must survive the cut.
+const SANDBOX_LINE_MAX: usize = 800;
+
 /// What `apb doctor` was asked for.
 #[derive(Debug, Default)]
 pub(crate) struct DoctorArgs {
@@ -84,6 +88,16 @@ fn finish(blocking: bool) -> ExitCode {
 
 fn doctor_env(root: &Path) -> ExitCode {
     let blocking = print_report(&apb_core::doctor::diagnose(root));
+    // The isolation sandbox: not blocking, only `isolation: full` needs it.
+    let host = apb_engine::sandbox::probe::host_facts();
+    let (ok, detail) = apb_engine::sandbox::probe::doctor_line(&host);
+    // The detail carries bwrap's own output and paths: never raw control
+    // sequences on the operator's terminal.
+    line(
+        if ok { OK } else { WARN },
+        "sandbox",
+        &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
+    );
     match crate::dashboard_check::dashboard_version_line() {
         Some(Ok(detail)) => line(OK, "dashboard", &detail),
         Some(Err(detail)) => line(WARN, "dashboard", &detail),

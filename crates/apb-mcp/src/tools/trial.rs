@@ -12,10 +12,27 @@ use apb_engine::run_view::read_events;
 use apb_engine::state::{RunState, RunStatus};
 use serde_json::{Value, json};
 
+/// The hardened, pinned git ([`apb_core::git::Repo`]); `None` outside a
+/// working tree apb runs git in.
 fn git(root: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
+    apb_core::git::command(root)?.args(args).output().ok()
+}
+
+/// The hardened diff (no external diff, no textconv, no submodule) of `dir`.
+fn git_diff(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    apb_core::git::Repo::locate(dir)
+        .ok()?
+        .diff(dir)
+        .args(args)
+        .output()
+        .ok()
+}
+
+/// The hardened status (no submodule) of `dir`.
+fn git_status(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    apb_core::git::Repo::locate(dir)
+        .ok()?
+        .status(dir)
         .args(args)
         .output()
         .ok()
@@ -152,13 +169,12 @@ pub fn playbook_trial(
                     }));
                 }
                 let mut diff = String::new();
-                if let Some(o) = git(
-                    &scratch,
-                    &["status", "--porcelain", "--", ".", ":(exclude).playbook"],
-                ) {
+                if let Some(o) =
+                    git_status(&scratch, &["--porcelain", "--", ".", ":(exclude).playbook"])
+                {
                     diff.push_str(&String::from_utf8_lossy(&o.stdout));
                 }
-                if let Some(o) = git(&scratch, &["diff", "--", ".", ":(exclude).playbook"]) {
+                if let Some(o) = git_diff(&scratch, &["--", ".", ":(exclude).playbook"]) {
                     diff.push_str(&String::from_utf8_lossy(&o.stdout));
                 }
                 truncate_on_char_boundary(&mut diff, 64 * 1024);

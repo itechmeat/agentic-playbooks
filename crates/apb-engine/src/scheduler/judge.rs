@@ -510,6 +510,7 @@ impl ProfileEmulation<'_, '_> {
             workdir: None,
             transcript: None,
             token: spawn_env.attempt_token.clone(),
+            isolation: None,
         };
         let on_spawn = |pid: u32, spawn_ms: u64| {
             spawn_at.set(Some(std::time::Instant::now()));

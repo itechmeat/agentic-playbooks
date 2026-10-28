@@ -41,6 +41,80 @@ pub fn fell_back_nodes(events: &[Event]) -> Vec<String> {
     out
 }
 
+/// One isolated attempt and what its isolation held and did not: the row
+/// `apb runs <id>`, `apb doctor --run`, MCP `run_status` and the run page
+/// show.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttemptIsolationRow {
+    pub node: String,
+    /// The list item the attempt ran, for an item of a list node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub item: Option<String>,
+    pub attempt: u32,
+    pub isolation: crate::event::AttemptIsolation,
+}
+
+impl AttemptIsolationRow {
+    /// The row of an `attempt_started` that carries an isolation record.
+    pub fn of_event(e: &Event) -> Option<Self> {
+        match &e.payload {
+            EventPayload::AttemptStarted {
+                node,
+                attempt,
+                item,
+                isolation: Some(iso),
+                ..
+            } => Some(AttemptIsolationRow {
+                node: node.clone(),
+                item: item.clone(),
+                attempt: *attempt,
+                isolation: iso.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether the attempt ran in a sandbox (`backend: bwrap`). Any other
+    /// value, an empty or unknown one included, is not one.
+    pub fn sandboxed(&self) -> bool {
+        self.isolation.backend == "bwrap"
+    }
+
+    /// One line: `node `w` attempt 1: full on bwrap, network none; limits:
+    /// ...`, with the reasons a `best_effort` attempt ran without a sandbox.
+    pub fn line(&self) -> String {
+        let iso = &self.isolation;
+        let item = self
+            .item
+            .as_deref()
+            .map(|i| format!(" item `{i}`"))
+            .unwrap_or_default();
+        let limits = if iso.limits.is_empty() {
+            "none".to_string()
+        } else {
+            iso.limits.join(", ")
+        };
+        let mut line = format!(
+            "node `{}`{item} attempt {}: {} on {}, network {}; limits: {limits}",
+            self.node, self.attempt, iso.level, iso.backend, iso.network,
+        );
+        if !iso.fallbacks.is_empty() {
+            line.push_str(&format!("; no sandbox: {}", iso.fallbacks.join("; ")));
+        }
+        line
+    }
+}
+
+/// Every isolated attempt of `events`, in journal order.
+pub fn attempt_isolation(events: &[Event]) -> Vec<AttemptIsolationRow> {
+    events
+        .iter()
+        .filter_map(AttemptIsolationRow::of_event)
+        .collect()
+}
+
 /// The param names (and `instruction`) the start of the run in `run_dir`
 /// took from the project's remembered input, as its journal records them.
 /// Every start surface reports them, so input the caller never passed is
@@ -213,6 +287,11 @@ impl RunView {
     /// Token usage over the run's attempts, `None` when none reported any.
     pub fn usage(&self) -> Option<RunUsage> {
         RunUsage::from_events(&self.events)
+    }
+
+    /// Every isolated attempt with what its isolation held and did not.
+    pub fn isolation(&self) -> Vec<AttemptIsolationRow> {
+        attempt_isolation(&self.events)
     }
 
     /// The attempts that lost part of their output (bounded agent output).
@@ -484,6 +563,31 @@ mod decision_tests {
 mod tests {
     use super::*;
 
+    /// Only attempts with an isolation record get a row; a list item names
+    /// itself and a sandbox-less attempt says why.
+    #[test]
+    fn isolation_rows_cover_the_isolated_attempts_only() {
+        let events: Vec<Event> = [
+            r#"{"seq":0,"ts":1,"type":"attempt_started","node":"plain","attempt":1,"agent":"claude"}"#,
+            r#"{"seq":1,"ts":2,"type":"attempt_started","node":"w","attempt":2,"agent":"claude","item":"a.md","isolation":{"level":"full","backend":"bwrap","network":"none","limits":["user.host_uid","kernel.escapes"]}}"#,
+            r#"{"seq":2,"ts":3,"type":"attempt_started","node":"b","attempt":1,"agent":"claude","isolation":{"level":"best_effort","backend":"none","network":"open","limits":["no_sandbox"],"fallbacks":["bwrap_missing (install bubblewrap (bwrap))"]}}"#,
+        ]
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+        let rows = attempt_isolation(&events);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].sandboxed());
+        assert_eq!(
+            rows[0].line(),
+            "node `w` item `a.md` attempt 2: full on bwrap, network none; limits: user.host_uid, kernel.escapes"
+        );
+        assert!(!rows[1].sandboxed());
+        assert!(rows[1].line().ends_with(
+            "limits: no_sandbox; no sandbox: bwrap_missing (install bubblewrap (bwrap))"
+        ));
+    }
+
     /// The totals cover the attempts that reported usage; the count of all
     /// finished attempts rides along so no surface passes them off as all.
     #[test]
@@ -571,6 +675,7 @@ mod tests {
                     workdir: None,
                     transcript: None,
                     token: None,
+                    isolation: None,
                 },
             ],
             reaped_pid(),

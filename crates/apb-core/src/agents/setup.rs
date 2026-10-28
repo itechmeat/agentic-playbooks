@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::sandbox::SandboxNeeds;
 use super::types::{AgentEnvSet, AuthHint, Authority};
 
 /// One agent's host facts and needs. Every hook defaults to "nothing".
@@ -91,6 +92,13 @@ pub trait HostSetup: Send + Sync {
         _scoped_dir: Option<&Path>,
     ) -> Result<Vec<(String, PathBuf)>, ScopedEnvError> {
         Ok(Vec::new())
+    }
+
+    /// What the agent needs inside an isolation sandbox (its login), `None`
+    /// when nobody has verified a sandboxed run of it: `isolation: full`
+    /// then refuses it and `best_effort` runs it without a sandbox.
+    fn sandbox_needs(&self) -> Option<SandboxNeeds> {
+        None
     }
 }
 

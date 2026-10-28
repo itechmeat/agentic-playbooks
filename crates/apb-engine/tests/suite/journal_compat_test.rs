@@ -615,3 +615,64 @@ fn tool_exposure_mismatch_round_trips_and_is_skippable_before_a_checkpoint() {
     let events = read_all(&dir).unwrap();
     assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
 }
+
+/// The isolation fields: `attempt_started.isolation` and
+/// `agent_env_applied.forced_by` read as absent from old lines and write the
+/// old shape back when unset; a set record round trips; an isolation block
+/// of a newer shape reads as absent instead of failing the journal.
+#[test]
+fn isolation_fields_keep_old_lines_and_decode_leniently() {
+    let old = [
+        r#"{"seq":1,"ts":2,"type":"attempt_started","node":"w","attempt":1,"agent":"claude","pid":7,"spawn_ms":1}"#,
+        r#"{"seq":2,"ts":3,"type":"agent_env_applied","node":"w","attempt":1,"agent":"claude","kept":3,"withheld":["A"],"withheld_more":0,"absent":[]}"#,
+    ];
+    for line in old {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let e: Event = serde_json::from_str(old[0]).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::AttemptStarted {
+            isolation: None,
+            ..
+        }
+    ));
+    let set = old[0].replace(
+        r#""spawn_ms":1}"#,
+        r#""spawn_ms":1,"isolation":{"level":"full","backend":"bwrap","bwrap_version":"0.11.1","network":"none","holds":["network.none"],"limits":["user.host_uid","credentials.env_passed:GH_TOKEN"],"view":[{"path":"~/.rustup","access":"read_only"}]}}"#,
+    );
+    let e: Event = serde_json::from_str(&set).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), set);
+    let EventPayload::AttemptStarted {
+        isolation: Some(iso),
+        ..
+    } = &e.payload
+    else {
+        panic!("isolation decoded");
+    };
+    assert_eq!(iso.backend, "bwrap");
+    assert_eq!(iso.view[0].path, "~/.rustup");
+    let newer = old[0].replace(
+        r#""spawn_ms":1}"#,
+        r#""spawn_ms":1,"isolation":{"level":7}}"#,
+    );
+    let e: Event = serde_json::from_str(&newer).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::AttemptStarted {
+            isolation: None,
+            ..
+        }
+    ));
+    let forced = old[1].replace(r#""absent":[]}"#, r#""absent":[],"forced_by":"isolation"}"#);
+    let e: Event = serde_json::from_str(&forced).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), forced);
+    assert!(matches!(
+        e.payload,
+        EventPayload::AgentEnvApplied {
+            forced_by: Some(ref f),
+            ..
+        } if f == "isolation"
+    ));
+}

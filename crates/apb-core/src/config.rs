@@ -78,6 +78,10 @@ pub struct GlobalConfig {
     /// may read and how far back. Absent: the agents' own default
     /// directories, 90 days.
     pub discover: DiscoverSettings,
+    /// The machine's isolation settings (`crate::isolation`): the bwrap
+    /// binary and extra read-only paths every sandbox binds. Absent: bwrap
+    /// from `/usr/bin` or PATH, no extra paths.
+    pub isolation: crate::isolation::IsolationSettings,
 }
 
 /// The agent kinds a history root may hold.
@@ -474,6 +478,7 @@ impl GlobalConfig {
             .validate()
             .and_then(|()| cfg.notify.validate())
             .and_then(|()| cfg.discover.validate())
+            .and_then(|()| cfg.isolation.validate())
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         // A policy glob that does not compile would match nothing and refuse
         // every model its rule covers: report it where it is written instead.

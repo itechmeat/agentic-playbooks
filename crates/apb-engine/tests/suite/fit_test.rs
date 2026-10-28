@@ -187,3 +187,32 @@ fn memory_that_does_not_read_is_a_note_and_stays_where_it_is() {
         }
     }
 }
+
+/// One item per isolated node: a `full` node this machine cannot isolate
+/// (here the sandbox is off) blocks, a `best_effort` one is a note naming
+/// why it runs without a sandbox.
+#[test]
+fn an_isolated_node_this_machine_cannot_isolate_blocks_the_fit() {
+    let _env = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let _off = EnvVar::set("APB_SANDBOX", "off");
+    let root = tempfile::tempdir().unwrap();
+    init_project(root.path()).unwrap();
+    let full =
+        "  - { id: a, type: agent_task, prompt: hi, isolation: { level: full, network: none } }\n";
+    write_playbook(&root.path().join(".apb"), "f", &linear("f", "", full));
+    let fit = assess(root.path(), &wref(project(), "f")).unwrap();
+    let item = fit.setup.iter().find(|i| i.code == "isolation").unwrap();
+    assert_eq!(item.subject.as_deref(), Some("a"));
+    assert_eq!(item.severity, FitSeverity::Blocking);
+    assert!(item.detail.contains("disabled"), "{}", item.detail);
+    assert!(!fit.ready);
+
+    let be = "  - { id: a, type: agent_task, prompt: hi, isolation: best_effort }\n";
+    write_playbook(&root.path().join(".apb"), "b", &linear("b", "", be));
+    let fit = assess(root.path(), &wref(project(), "b")).unwrap();
+    let item = fit.setup.iter().find(|i| i.code == "isolation").unwrap();
+    assert_eq!(item.severity, FitSeverity::Note);
+    assert!(item.detail.contains("without a sandbox"), "{}", item.detail);
+}

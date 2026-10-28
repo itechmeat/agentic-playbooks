@@ -4,13 +4,11 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
-
 use apb_core::agents::claude::settings::{HERMETIC_FLAGS, HERMETIC_SETTINGS_JSON};
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 use serde::Deserialize;
 
+mod command;
 mod failure;
 mod output;
 mod spawn_env;
@@ -31,27 +29,6 @@ use crate::event::{Event, EventPayload};
 use crate::proc::{StopMode, kill_process_group, stop_process_tree};
 use crate::progress::pending_interval_ms;
 use crate::state::NodeStatus;
-
-/// Spawns the agent in its own process group so that cancellation/timeout can
-/// tear down the whole tree, not just the direct child (a real agent spawns
-/// node, MCP servers, tool subprocesses). On Unix - process_group(0) (pgid ==
-/// leader pid); on other platforms - no-op (fallback to child.kill()).
-fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
-    #[cfg(unix)]
-    cmd.process_group(0);
-    // ETXTBSY (errno 26) can transiently occur on Linux right after the
-    // executable was written. Retry briefly before surfacing the error.
-    for _ in 0..20 {
-        match cmd.spawn() {
-            Ok(child) => return Ok(child),
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    cmd.spawn()
-}
 
 /// How long the pipe collection gets once the agent process itself is gone.
 ///
@@ -659,7 +636,7 @@ pub trait AgentAdapter {
     /// `on_spawn`, when set, is invoked exactly once immediately after the agent
     /// process is successfully spawned, carrying the child pid (`child.id()`)
     /// and the wall-clock milliseconds the spawn itself took, measured around
-    /// `spawn_in_group`. The attempt-journaling path uses it to append
+    /// `command::spawn_agent`. The attempt-journaling path uses it to append
     /// `attempt_started` at spawn time so a crash mid-attempt leaves an open
     /// attempt on disk, and so an OS-level first-exec stall is visible
     /// separately from the agent's own work. It never fires if the spawn
@@ -1114,32 +1091,19 @@ impl ClaudeAdapter {
         inject_ask_server(&mut built.argv, task, live);
         inject_hermetic_settings(&mut built.argv, task);
         let (argv, stdin_payload) = built.into_parts();
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&argv)
-            .current_dir(task.workdir)
-            .stdin(if stdin_payload.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // The process env, the connector scrub, the run context, the agent
-        // home, zcode's provider config and the status file, in one place
-        // for every form (start and resume) of every transport.
-        spawn_env::prepare(&mut cmd, &spawn_target(task))?;
-        let started = std::time::Instant::now();
-        let mut child = spawn_in_group(&mut cmd).map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("spawn `{}` failed: {e}", self.program),
-            )
-        })?;
-        // Attempt journaling (spawn-time): the process exists, so record it now
-        // (pid = child.id()) before any of its work runs.
-        if let Some(cb) = on_spawn {
-            cb(child.id(), started.elapsed().as_millis() as u64);
-        }
+        let stdin = if stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        let mut child = command::spawn_agent(
+            &self.program,
+            &argv,
+            stdin,
+            task.workdir,
+            &spawn_target(task),
+            on_spawn,
+        )?;
         // Drain both streams from the start (see `crate::capture::Pipes`).
         let pipes = Pipes::start(&mut child, task.transcript_dir, &task.output_limits);
         if let Some(payload) = &stdin_payload
@@ -1384,28 +1348,14 @@ impl ClaudeAdapter {
         built.argv.push("stream-json".to_string());
         built.argv.push("--verbose".to_string());
         let (argv, _stdin) = built.into_parts();
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&argv)
-            .current_dir(task.workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // The process env, the connector scrub, the run context, the agent
-        // home, zcode's provider config and the status file, in one place
-        // for every form (start and resume) of every transport.
-        spawn_env::prepare(&mut cmd, &spawn_target(task))?;
-        let started = std::time::Instant::now();
-        let mut child = spawn_in_group(&mut cmd).map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("spawn `{}` failed: {e}", self.program),
-            )
-        })?;
-        // Attempt journaling (spawn-time): record the process (pid = child.id())
-        // now, before its streaming work runs.
-        if let Some(cb) = on_spawn {
-            cb(child.id(), started.elapsed().as_millis() as u64);
-        }
+        let mut child = command::spawn_agent(
+            &self.program,
+            &argv,
+            Stdio::null(),
+            task.workdir,
+            &spawn_target(task),
+            on_spawn,
+        )?;
 
         // Stdout is read line by line on a background thread (we also poll
         // cancel/timeout here), teed raw into the stream log as it arrives,

@@ -88,6 +88,10 @@ fn render_types() -> String {
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
         // Issue #193: the model each attempt actually ran on.
         apb_engine::attempt_models::AttemptModel::decl(&cfg),
+        // Isolation: what each isolated attempt held and did not.
+        apb_engine::event::IsolationViewEntry::decl(&cfg),
+        apb_engine::event::AttemptIsolation::decl(&cfg),
+        apb_engine::run_view::AttemptIsolationRow::decl(&cfg),
         // --- 0.23.0 stats (C3) ---
         apb_engine::run_stats::Rate::decl(&cfg),
         apb_engine::run_stats::PerRun::decl(&cfg),
@@ -315,11 +319,43 @@ fn render_consts() -> String {
             "\n/** The shortest and the longest quote a known problem's close may rest on. */\nexport const QUOTE_MIN = {QUOTE_MIN}\nexport const QUOTE_MAX = {QUOTE_MAX}\n"
         ));
     }
+    render_isolation_consts(&mut out);
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")
     ));
     out
+}
+
+/// The isolation code tables: the sentence of every hold and limit code an
+/// attempt journals, and of every reason a node is refused or runs without
+/// a sandbox, so the dashboard words them exactly as the CLI does.
+fn render_isolation_consts(out: &mut String) {
+    use apb_core::isolation::contract::{
+        ALL_CODES, ALL_REASONS, ENV_PASSED_PREFIX, ENV_PASSED_TEXT, UNAVAILABLE,
+    };
+    let quoted = |s: &str| serde_json::to_string(s).expect("a string");
+    out.push_str(&format!(
+        "\n/** The sentence of every isolation hold and limit code. */\nexport const ISOLATION_CODE_TEXTS = {{ {} }} as const\n",
+        ALL_CODES
+            .iter()
+            .map(|c| format!("{}: {}", quoted(c.id()), quoted(c.text())))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    out.push_str(&format!(
+        "\n/** The limit naming a credential-shaped variable the allowlist passes (`<prefix><NAME>`), and its sentence. */\nexport const ISOLATION_ENV_PASSED_PREFIX = {}\nexport const ISOLATION_ENV_PASSED_TEXT = {}\n",
+        quoted(ENV_PASSED_PREFIX),
+        quoted(ENV_PASSED_TEXT)
+    ));
+    out.push_str(&format!(
+        "\n/** Why a full node is refused, or a best_effort one runs without a sandbox. */\nexport const ISOLATION_REASON_TEXTS = {{ {} }} as const\n",
+        label_entries(ALL_REASONS.iter().map(|r| (r.id().to_string(), r.text())))
+    ));
+    out.push_str(&format!(
+        "\n/** The refusal code of a full node this machine cannot isolate. */\nexport const ISOLATION_UNAVAILABLE = {}\n",
+        quoted(UNAVAILABLE)
+    ));
 }
 
 /// The JSON name serde gives a unit enum variant.

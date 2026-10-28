@@ -137,6 +137,7 @@ impl Run {
             workdir: None,
             transcript: None,
             token: Some(token.clone()),
+            isolation: None,
         });
         *self.current.lock().unwrap() = AttemptClaim {
             item: None,
@@ -1213,6 +1214,7 @@ impl Run {
             workdir: None,
             transcript: None,
             token: Some(token.clone()),
+            isolation: None,
         });
         *self.current.lock().unwrap() = AttemptClaim {
             item: Some(item.into()),

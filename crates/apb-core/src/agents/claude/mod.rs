@@ -4,12 +4,14 @@
 pub mod actions;
 pub mod output;
 pub mod settings;
+pub mod state;
 
 use std::path::{Path, PathBuf};
 
 use crate::config::{Interaction, SoulDelivery};
 
 use super::forms::headless;
+use super::{Access, HomeBind, HomeCopy, SandboxNeeds};
 use super::{
     Agent, AgentCategory, AgentEnvSet, AuthHint, AuthKind, Capabilities, ClosedList, Descriptor,
     Forms, FreshForm, HostSetup, ModelPolicy, Transcript, Verified,
@@ -130,6 +132,31 @@ impl HostSetup for ClaudeSetup {
 
     fn memo_env(&self) -> Option<(&'static str, &'static str)> {
         Some(("ANTHROPIC_API_KEY", "anthropic"))
+    }
+
+    // The login is a key or token in the environment, else the oauth
+    // credentials file, bound read-write so a token refresh written in
+    // place reaches the operator's file. Checked with a stub agent
+    // (apb-engine `sandbox_run_test`): a write in place reaches the file, a
+    // rename onto it fails, since it is a single-file bind. Whether claude
+    // 2.1.312 refreshes in place is not verified against the real CLI; if it
+    // renames, the refresh fails inside the sandbox and the file keeps its
+    // token, so an env token is the reliable sandbox login. `.claude.json`
+    // is a minimal copy ([`state::minimal_state`]): the start flags and the
+    // account, never the MCP servers, projects or caches; the agent's edits
+    // stay in the sandbox.
+    fn sandbox_needs(&self) -> Option<SandboxNeeds> {
+        Some(SandboxNeeds {
+            binds: vec![HomeBind {
+                home_rel: ".claude/.credentials.json",
+                access: Access::ReadWrite,
+            }],
+            copies: vec![HomeCopy {
+                home_rel: ".claude.json",
+                sanitize: state::minimal_state,
+            }],
+            env_logins: vec!["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+        })
     }
 
     // A JSONL file named after the session under `projects/` of claude's

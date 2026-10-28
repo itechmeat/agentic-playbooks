@@ -66,6 +66,7 @@ pub mod run_stats;
 // --- end of 0.23.0 stats ---
 pub mod run_view;
 pub mod run_wait;
+pub mod sandbox;
 pub mod scheduler;
 pub mod script;
 pub mod signals;

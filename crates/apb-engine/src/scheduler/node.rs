@@ -4,6 +4,7 @@
 use super::*;
 
 mod exposure;
+mod sandbox;
 mod step_env;
 
 use super::continuation::{Continuation, continuation_prompt};
@@ -221,28 +222,52 @@ fn observe_control(
 /// report path, and a success verdict recovered from the status file after the
 /// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
 /// therefore does NOT bypass the gate.
+/// Why a reported success is rejected; `fatal`: the engine could not put
+/// the repository back, so the node fails at once instead of retrying.
+struct Rejection {
+    reason: String,
+    fatal: bool,
+}
+
+impl Rejection {
+    fn retry(reason: String) -> Self {
+        Rejection {
+            reason,
+            fatal: false,
+        }
+    }
+}
+
 fn success_check_rejection(
     protect_violation: Option<&str>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
     attempt_workdir: &Path,
+    sandbox: Option<&crate::sandbox::SandboxPlan>,
     output: &str,
-) -> Result<Option<String>, EngineError> {
+) -> Result<Option<Rejection>, EngineError> {
     // A protected file the attempt changed (C6) rejects the report before
     // any check runs: the check would judge a tree the engine just restored.
     if let Some(reason) = protect_violation {
-        return Ok(Some(reason.to_string()));
+        return Ok(Some(Rejection::retry(reason.to_string())));
     }
     match check {
         // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
         // report regardless of the agent's self-assessment. Run in the SAME
         // attempt workdir the agent worked in (for an isolated node its
         // per-attempt directory, otherwise the shared workdir), otherwise the
-        // check would validate a directory the agent never wrote to.
+        // check would validate a directory the agent never wrote to. A
+        // sandboxed attempt's check runs inside the same sandbox.
         Some(apb_core::schema::SuccessCheck::Script(check)) => {
-            let r = run_script(run_dir, attempt_workdir, check, "sh", None, None)?;
+            let r = crate::script::run_check(run_dir, attempt_workdir, check, sandbox)?;
+            if let Some(v) = sandbox.and_then(crate::sandbox::SandboxPlan::check_git) {
+                return Ok(Some(Rejection {
+                    reason: v.reason,
+                    fatal: v.fatal,
+                }));
+            }
             Ok((r.status != NodeStatus::Succeeded)
-                .then(|| format!("success_check `{check}` failed")))
+                .then(|| Rejection::retry(format!("success_check `{check}` failed"))))
         }
         // Completion-marker check (issue 45 finding 1): the literal marker must
         // appear in the node output, else the reported success is rejected. This
@@ -251,9 +276,9 @@ fn success_check_rejection(
         Some(apb_core::schema::SuccessCheck::Marker { marker })
             if !output.contains(marker.as_str()) =>
         {
-            Ok(Some(format!(
+            Ok(Some(Rejection::retry(format!(
                 "success report rejected: completion marker `{marker}` not found in output"
-            )))
+            ))))
         }
         Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => Ok(None),
     }
@@ -920,7 +945,13 @@ fn execute_node_kind(
             // or, for a `cli` run an MCP host session started, one host step
             // follows the chain for when none of its CLIs can start.
             let host_mode = manifest.is_host_mode()?;
-            let host_fallback = !host_mode && manifest.falls_back_to_host();
+            // A `full` node never falls back to the host agent: the host
+            // step runs outside any sandbox apb starts.
+            let host_fallback = !host_mode
+                && manifest.falls_back_to_host()
+                && !isolation
+                    .as_ref()
+                    .is_some_and(|s| s.level == apb_core::isolation::Level::Full);
 
             let sources = super::host::chain_sources(&entry);
             let primary_idx = sources
@@ -991,16 +1022,32 @@ fn execute_node_kind(
 
             // Skill delivery (spec 6.4, completion-plan Task 3). For an isolated
             // node (isolation full|best_effort) skills are materialized as REAL
-            // copies from the run snapshot into an isolated per-node workdir
-            // (`.agents/skills/<name>` + a `.claude/skills` bridge), and the agent is
-            // pointed at it: editing the live skill after the run has started has no
-            // effect on the run. For `isolation: none` - an advisory string of names
-            // in the shared workdir. Skill content is never embedded into the prompt
-            // (only names).
-            let isolated = matches!(
-                isolation,
-                Some(Isolation::Full) | Some(Isolation::BestEffort)
+            // copies from the run snapshot into the attempt's own place: the
+            // attempt box, mounted read-only over the tree's `.agents/skills` and
+            // `.claude/skills` inside a sandbox, or the scratch directory of a
+            // `best_effort` attempt without one. Editing the live skill after the
+            // run has started has no effect on the run. For `isolation: none` - an
+            // advisory string of names in the shared workdir. Skill content is
+            // never embedded into the prompt (only names).
+            // The node's isolation on this machine, decided before anything
+            // is spawned and again before every attempt (`node/sandbox.rs`).
+            let iso = sandbox::NodeIsolation::new(
+                isolation.as_ref(),
+                steps.iter().filter(|s| !s.host).map(|s| s.agent.as_str()),
+                host_mode,
             );
+            if let Some(output) = iso.refusal() {
+                return Ok(AttemptOutcome::Finished {
+                    status: NodeStatus::Failed,
+                    output,
+                    events,
+                });
+            }
+            let isolated = iso.isolated();
+            // A sandboxed agent gets no live ask sidecar: it could forge
+            // answers through it. It asks through its reply instead (the
+            // reprompt path).
+            let live = if iso.sandboxed() { None } else { live };
             let skills_mode = if isolated { "materialized" } else { "advisory" };
             // The blocks below are the node's standing contracts (skills,
             // connector grants, the question protocol, the status file). A
@@ -1396,42 +1443,41 @@ fn execute_node_kind(
                         }
                         _ => None,
                     };
-                    // Attempt working directory. A continued session keeps the
-                    // directory it was started in (agents key their sessions by
-                    // it). Otherwise, for an isolated node - a FRESH
-                    // per-attempt directory `work/<node>/<attempt>` with skills
-                    // freshly materialized from the snapshot: a hostile/failed
-                    // previous attempt cannot slip a modified bundle to the next one
-                    // (skills_mode: materialized would then not reflect
-                    // reality). For `isolation: none` - the shared workdir.
-                    let attempt_workdir: PathBuf = if let Some((_, Some(wd))) = &continued {
-                        // The directory stays, the skills do not: an isolated
-                        // node's snapshot copies are laid down fresh for every
-                        // attempt, so the continued session cannot hand a
-                        // modified bundle to itself either.
-                        if isolated {
-                            super::skills_copy::clear_isolated_skills(wd)?;
-                            super::skills_copy::materialize_isolated_skills(run_dir, &entry, wd)?;
+                    // Where the attempt runs, and inside what (`node/sandbox.rs`):
+                    // the node's own directory, a sandbox over the node's tree, or
+                    // for `best_effort` without one a fresh scratch directory with
+                    // the skill copies. A node this machine can no longer isolate
+                    // fails here, before anything is spawned.
+                    let place = match sandbox::place(
+                        &iso,
+                        &sandbox::AttemptInput {
+                            run_dir,
+                            node_dir: &node_dir,
+                            node_id,
+                            key: &key,
+                            attempt,
+                            entry: &entry,
+                            continued: continued.as_ref().and_then(|(_, wd)| wd.as_deref()),
+                            agent: &step.agent,
+                            program: &base_spec.as_ref().map_or_else(
+                                || step.agent.clone(),
+                                |(_, p)| p.to_string_lossy().into_owned(),
+                            ),
+                            process: step_env.process.as_deref(),
+                            settings: step_env.hermetic.as_ref().map(|h| h.settings.as_path()),
+                            host: step.host,
+                        },
+                    )? {
+                        sandbox::Placed::Run(place) => place,
+                        sandbox::Placed::Refused(output) => {
+                            return Ok(AttemptOutcome::Finished {
+                                status: NodeStatus::Failed,
+                                output,
+                                events,
+                            });
                         }
-                        wd.clone()
-                    } else if isolated {
-                        let wd = run_dir
-                            .join("work")
-                            .join(node_id)
-                            .join(key.work_segment(attempt));
-                        // Fail-closed: a missing directory is normal, but any other
-                        // cleanup error is NOT swallowed - otherwise we would materialize
-                        // skills on top of leftovers from the previous (possibly hostile) attempt.
-                        match std::fs::remove_dir_all(&wd) {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(e) => return Err(e.into()),
-                        }
-                        super::skills_copy::materialize_isolated_skills(run_dir, &entry, &wd)?;
-                        wd
-                    } else {
-                        node_dir.clone()
                     };
+                    let attempt_workdir: PathBuf = place.cwd.clone();
                     // The invocation form of this attempt: the resume form for a
                     // continued session, else the base form plus whatever makes
                     // the new session findable later (`FreshSession`).
@@ -1532,20 +1578,10 @@ fn execute_node_kind(
                         .join(format!("{}.jsonl", key.stem(attempt)));
                     // Per-attempt status file (subtask S2): the agent MAY write
                     // its final verdict here as JSON; the engine reads it before
-                    // parsing the textual report. Mirrors the agent-stream
-                    // naming. The directory is created once per attempt
-                    // (idempotent); this is set for EVERY attempt, independent of
-                    // any success_check.
-                    let status_dir = run_dir.join("agent-status");
-                    apb_core::fsutil::create_dir_under(run_dir, &status_dir)?;
-                    let status_file = status_dir.join(format!("{}.json", key.stem(attempt)));
-                    // Stale status-file removal (issue #70 item 3): a resume or
-                    // continue_from re-run can restart the attempt counter, so a
-                    // status file from a PRIOR execution may still sit at this
-                    // attempt's path. Drop it before spawning (ok-ignored: a missing
-                    // file is the normal case) so the status-file read after the run
-                    // can only ever adopt a file THIS attempt actually wrote.
-                    let _ = std::fs::remove_file(&status_file);
+                    // parsing the textual report. Set for EVERY attempt,
+                    // independent of any success_check; `place` cleared any file
+                    // a prior execution left at its path (issue #70 item 3).
+                    let status_file = place.status_file.clone();
                     // This attempt's raw output (issue #67 item 10), cleared
                     // the same way when a re-run restarts the counter.
                     let transcript_dir =
@@ -1614,7 +1650,8 @@ fn execute_node_kind(
                     timeout_continuation = false;
                     let attempt_policy = spawn_env
                         .with_attempt(attempt)
-                        .with_process(step_env.process.clone());
+                        .with_process(step_env.process.clone())
+                        .with_sandbox(place.sandbox.clone());
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
@@ -1685,6 +1722,7 @@ fn execute_node_kind(
                             workdir: attempt_dir.clone(),
                             transcript: attempt_transcript.clone(),
                             token: attempt_policy.attempt_token.clone(),
+                            isolation: place.record.clone(),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1910,7 +1948,21 @@ fn execute_node_kind(
                         Some(snapshot) => snapshot.check_and_restore(journal)?,
                         None => None,
                     };
-                    // A tampered snapshot copy fails the node at once: a retry
+                    // A sandboxed attempt's changes to what redirects git
+                    // are put back and fail it like a protected path.
+                    let protect_violation = super::protect::Violation::join(
+                        protect_violation,
+                        place
+                            .sandbox
+                            .as_deref()
+                            .and_then(crate::sandbox::SandboxPlan::check_git)
+                            .map(|g| super::protect::Violation {
+                                reason: g.reason,
+                                fatal: g.fatal,
+                            }),
+                    );
+                    // A tampered snapshot copy, or a repository the engine
+                    // could not put back, fails the node at once: a retry
                     // would start from a tree the engine could not restore.
                     if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
@@ -1934,6 +1986,12 @@ fn execute_node_kind(
                             output: v.reason.clone(),
                             events,
                         });
+                    }
+                    // A boxed status file goes where every reader looks.
+                    if let Err(e) = place.publish_status() {
+                        eprintln!(
+                            "apb: warning: node `{node_id}` attempt {attempt}: the status file was not published: {e}"
+                        );
                     }
                     let protect_violation = protect_violation.map(|v| v.reason);
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
@@ -2076,6 +2134,7 @@ fn execute_node_kind(
                             workdir: attempt_dir.clone(),
                             transcript: attempt_transcript.clone(),
                             token: attempt_policy.attempt_token.clone(),
+                            isolation: place.record.clone(),
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -2216,6 +2275,7 @@ fn execute_node_kind(
                                     node.success_check.as_ref(),
                                     run_dir,
                                     &attempt_workdir,
+                                    place.sandbox.as_deref(),
                                     &report.output,
                                 )?;
                                 match rejection {
@@ -2228,7 +2288,7 @@ fn execute_node_kind(
                                     // and fallbacks exactly like an ordinary failure.
                                     // The raw agent text is preserved for the
                                     // downstream `nodes.<id>.rejected_output`.
-                                    Some(reason) => {
+                                    Some(Rejection { reason, fatal }) => {
                                         journal.append(EventPayload::AttemptFinished {
                                             item: None,
                                             output_truncated: capture.truncated.clone(),
@@ -2244,6 +2304,13 @@ fn execute_node_kind(
                                             failure_kind: None,
                                             usage: report.usage.clone(),
                                         })?;
+                                        if fatal {
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Failed,
+                                                output: reason,
+                                                events,
+                                            });
+                                        }
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
                                         // agent text lives in `rejected_output`.
@@ -2465,6 +2532,7 @@ fn execute_node_kind(
                                         node.success_check.as_ref(),
                                         run_dir,
                                         &attempt_workdir,
+                                        place.sandbox.as_deref(),
                                         &output,
                                     )? {
                                         None => {
@@ -2529,7 +2597,7 @@ fn execute_node_kind(
                                                 });
                                             }
                                         }
-                                        Some(reason) => {
+                                        Some(Rejection { reason, fatal }) => {
                                             journal.append(EventPayload::AttemptFinished {
                                                 item: None,
                                                 output_truncated: capture.truncated.clone(),
@@ -2546,6 +2614,13 @@ fn execute_node_kind(
                                                 failure_kind: None,
                                                 usage: failed_usage.clone(),
                                             })?;
+                                            if fatal {
+                                                return Ok(AttemptOutcome::Finished {
+                                                    status: NodeStatus::Failed,
+                                                    output: reason,
+                                                    events,
+                                                });
+                                            }
                                             last_msg = format!("{reason}: {output}");
                                             last_timed_out = false;
                                         }
@@ -3226,6 +3301,7 @@ pub(crate) fn execute_finish_answer(
                     workdir: None,
                     transcript: None,
                     token: attempt_policy.attempt_token.clone(),
+                    isolation: None,
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -3266,6 +3342,7 @@ pub(crate) fn execute_finish_answer(
                     workdir: None,
                     transcript: None,
                     token: attempt_policy.attempt_token.clone(),
+                    isolation: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);

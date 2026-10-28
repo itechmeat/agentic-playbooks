@@ -179,6 +179,7 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
 
     let profiles = setup::profiles(root, origin, &refs, &store);
     setup.extend(profiles.setup);
+    setup.extend(setup::isolation_items(root, playbook, origin));
     // Remembered input only adds notes: memory that does not read is one
     // more note, never a failed report.
     let remembered = MemoryKey::for_label(resolved.origin_label, &wref.id)

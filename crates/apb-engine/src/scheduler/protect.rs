@@ -56,6 +56,20 @@ pub(crate) struct Violation {
     pub fatal: bool,
 }
 
+impl Violation {
+    /// Two violations of one attempt as one: both reasons, fatal when
+    /// either is.
+    pub fn join(a: Option<Violation>, b: Option<Violation>) -> Option<Violation> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(Violation {
+                reason: format!("{}; {}", a.reason, b.reason),
+                fatal: a.fatal || b.fatal,
+            }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 /// What restoring one change did.
 #[derive(PartialEq)]
 enum Restored {

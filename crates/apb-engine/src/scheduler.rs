@@ -8,7 +8,7 @@ use apb_core::config::{GlobalConfig, Interaction, SoulDelivery};
 use apb_core::migration::validate_migration;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::{Registry, is_safe_segment};
-use apb_core::schema::{FailurePolicy, Isolation, NodeKind, Outcome, Playbook, WaitFor};
+use apb_core::schema::{FailurePolicy, NodeKind, Outcome, Playbook, WaitFor};
 use apb_core::store::ResolvedPlaybook;
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{promote_policy, promote_version};
@@ -29,7 +29,6 @@ use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
 };
-use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
 use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree};

@@ -100,7 +100,7 @@ pub enum EventPayload {
         #[serde(default)]
         pid: Option<u32>,
         /// Wall-clock milliseconds the process spawn itself took, measured
-        /// around `spawn_in_group` and before any of the child's work runs.
+        /// around `adapter::command::spawn_agent` and before any of the child's work runs.
         /// `duration_ms` on the matching `AttemptFinished` covers the whole
         /// attempt and cannot separate a slow agent from an OS that took tens of
         /// seconds just to start the process (a first-exec security scan is the
@@ -138,6 +138,15 @@ pub enum EventPayload {
         /// (`list:`). Absent everywhere else. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        /// What the attempt's isolation held and did not (a node with
+        /// `isolation` other than `none`). `None` for every other attempt
+        /// and old logs; a shape a newer apb wrote reads as absent.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        isolation: Option<AttemptIsolation>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -1430,6 +1439,10 @@ pub enum EventPayload {
         absent: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        /// What forced the allowlist on a profile that inherits
+        /// (`isolation`); `None` when the profile asked for it itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forced_by: Option<String>,
     },
     /// The findings and warnings an attempt reported (its status file, or a
     /// host submission merged into it), after sanitizing: `dropped` counts
@@ -2209,6 +2222,49 @@ where
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
+/// At most this many view entries an attempt's isolation record keeps.
+pub const ISOLATION_VIEW_CAP: usize = 64;
+
+/// What one attempt's isolation held (`holds`) and did not (`limits`), by
+/// the code ids of `apb_core::isolation::contract`, and the paths it saw
+/// beyond the system.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AttemptIsolation {
+    /// `full` or `best_effort`.
+    pub level: String,
+    /// `bwrap`, or `none` when the attempt ran without a sandbox.
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub bwrap_version: Option<String>,
+    /// `open` or `none`.
+    pub network: String,
+    #[serde(default)]
+    pub holds: Vec<String>,
+    /// Including `credentials.env_passed:<NAME>` for each credential-shaped
+    /// variable the allowlist still passes (a name, never a value).
+    #[serde(default)]
+    pub limits: Vec<String>,
+    /// Why no sandbox was used, under `best_effort` (`code (detail)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub fallbacks: Vec<String>,
+    /// The bound paths (`~/...` under the home) and their access, at most
+    /// [`ISOLATION_VIEW_CAP`].
+    #[serde(default)]
+    pub view: Vec<IsolationViewEntry>,
+}
+
+/// One path of an attempt's sandbox view.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IsolationViewEntry {
+    pub path: String,
+    /// `read_only`, `read_write` or `hidden`.
+    pub access: String,
+}
+
 /// A compact answer in [`EventPayload::DecisionMade`]: `value` is the chosen
 /// option (choice) or the expected level (score), `p` its probability (the
 /// "yes" probability for a noul), `invalid` the reason an item was refused.
@@ -2785,6 +2841,7 @@ mod tests {
             workdir: None,
             transcript: None,
             token: None,
+            isolation: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"spawn_ms\":37"), "got {s}");

@@ -317,3 +317,55 @@ fn archives_ship_third_party_notices_that_are_checked_for_staleness() {
         .expect("test-gate.yml has a `gate` job");
     assert!(runs_check(gate), "the release gate must check the notices");
 }
+
+#[test]
+fn the_linux_test_leg_runs_the_sandbox_tests_for_real() {
+    // The isolation enforcement tests skip where bubblewrap is missing; on
+    // the Linux leg of CI and of the release gate they must run, so
+    // bubblewrap is installed (with a fresh package index) before the test
+    // step and that step makes a missing capability a failure.
+    let ci = load(&repo_root().join(".github/workflows/ci.yml"));
+    let job = ci
+        .get("jobs")
+        .and_then(|j| j.get("test-linux"))
+        .expect("ci.yml has a `test-linux` job");
+    assert_runs_the_sandbox_tests(job, "require");
+    let gate = load(&repo_root().join(".github/workflows/test-gate.yml"));
+    let job = gate
+        .get("jobs")
+        .and_then(|j| j.get("gate"))
+        .expect("test-gate.yml has a `gate` job");
+    assert_runs_the_sandbox_tests(job, "${{ matrix.linux && 'require' || '' }}");
+}
+
+fn assert_runs_the_sandbox_tests(job: &Value, required: &str) {
+    let steps = Release::steps(job);
+    fn run_of(s: &Value) -> &str {
+        s.get("run").and_then(Value::as_str).unwrap_or_default()
+    }
+    let install = steps
+        .iter()
+        .position(|s| run_of(s).contains("apt-get install -y --no-install-recommends bubblewrap"))
+        .expect("the Linux test leg installs bubblewrap");
+    assert!(
+        run_of(steps[install]).contains("apt-get update"),
+        "the package index is refreshed before the install"
+    );
+    let test = steps
+        .iter()
+        .position(|s| run_of(s).contains("cargo nextest run"))
+        .expect("the Linux test leg runs nextest");
+    assert!(install < test, "bubblewrap is installed before the tests");
+    assert_eq!(
+        steps[test]
+            .get("env")
+            .and_then(|e| e.get("APB_SANDBOX_TESTS"))
+            .and_then(Value::as_str),
+        Some(required),
+        "the Linux test step requires the sandbox tests to run"
+    );
+    assert!(
+        !run_of(steps[test]).contains("sudo"),
+        "the tests run as the normal user"
+    );
+}

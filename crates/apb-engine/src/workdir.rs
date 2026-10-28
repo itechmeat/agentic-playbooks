@@ -221,22 +221,11 @@ pub fn tree_lock_path(root: &Path, tree: Option<&Path>) -> PathBuf {
 
 /// An absolute, canonical path git reports for `dir` (`--show-toplevel`,
 /// `--git-common-dir`); `None` outside git or when git is unavailable. Only
-/// `rev-parse` runs, which reads no index and runs no hooks.
+/// the hardened `rev-parse` runs ([`apb_core::git`]), which reads no index
+/// and runs no hooks.
 pub(crate) fn git_path(dir: &Path, what: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--path-format=absolute", what])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    PathBuf::from(path).canonicalize().ok()
+    let out = apb_core::git::read(dir, &["rev-parse", "--path-format=absolute", what])?;
+    PathBuf::from(out.trim()).canonicalize().ok()
 }
 
 /// Writes the lock naming `pid`, inside the workspace's existing `.apb`: a

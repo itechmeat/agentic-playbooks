@@ -768,6 +768,7 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
         workdir: None,
         transcript: None,
         token: None,
+        isolation: None,
     })
     .unwrap();
     drop(log);
@@ -1227,6 +1228,10 @@ fn a_resumed_isolated_node_continues_its_session_in_the_same_directory() {
         ),
     );
     let _env = Env::set(&[("APB_AGENT_CMD", &stub), ("APB_PAUSE_GRACE_MS", "300")]);
+    // An isolated node may run in a sandbox, which reads the agent's login
+    // under HOME: a temp one, never the operator's.
+    let home = tempfile::tempdir().unwrap();
+    let _home = common::EnvVar::set("HOME", home.path());
     fs::write(root.join("gate"), "").unwrap();
 
     let rx = spawn_run(root, "sess");

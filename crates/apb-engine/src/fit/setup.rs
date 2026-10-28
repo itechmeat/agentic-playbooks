@@ -1,6 +1,7 @@
 //! What this machine and project must provide before a playbook can run
 //! here: its profiles and skills, the models of their executor chains, the
-//! connector accounts and secrets, and the run input a start must pass.
+//! connector accounts and secrets, the run input a start must pass, and the
+//! sandbox its isolated nodes need.
 //! The profile and model checks are the ones the adoption report prints
 //! ([`profile_findings`]), with the same codes.
 
@@ -197,6 +198,63 @@ pub(super) fn profiles(
         );
     }
     out
+}
+
+/// One item per isolated node: what its isolation gets on this machine. A
+/// `full` node this machine cannot isolate blocks (the gate refuses it); a
+/// `best_effort` node without a sandbox is a note naming why.
+pub(super) fn isolation_items(
+    root: &Path,
+    playbook: &apb_core::schema::Playbook,
+    origin: PlaybookOrigin,
+) -> Vec<FitItem> {
+    use apb_core::isolation::contract::Backend;
+    crate::gate::isolation::node_contracts(root, playbook, origin, false)
+        .into_iter()
+        .map(|n| {
+            let c = &n.contract;
+            let reasons = |r: &[apb_core::isolation::contract::Reason]| {
+                r.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            let (detail, severity) = if !c.allowed() {
+                (
+                    format!(
+                        "isolation full cannot be enforced here: {}",
+                        reasons(&c.refusals)
+                    ),
+                    FitSeverity::Blocking,
+                )
+            } else if c.backend == Backend::None {
+                (
+                    format!(
+                        "isolation {} runs without a sandbox here: {}",
+                        n.level.as_str(),
+                        reasons(&c.fallbacks)
+                    ),
+                    FitSeverity::Note,
+                )
+            } else {
+                let limits: Vec<&str> = c.limits.iter().map(|l| l.id()).collect();
+                (
+                    format!(
+                        "isolation {} is enforced by bwrap; limits: {}",
+                        n.level.as_str(),
+                        limits.join(", ")
+                    ),
+                    FitSeverity::Note,
+                )
+            };
+            FitItem {
+                code: "isolation".to_string(),
+                subject: Some(n.node),
+                detail,
+                severity,
+            }
+        })
+        .collect()
 }
 
 /// The setup items of remembered input: a remembered value that no longer

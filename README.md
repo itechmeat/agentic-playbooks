@@ -272,6 +272,7 @@ still change between minor releases. Design specs live in
 - [Playbook interview](docs/HOWTO-interview.md): capturing a process as a playbook by interviewing the user
 - [Connectors](docs/CONNECTORS.md): calling external services from playbooks
 - [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce
+- [Isolation](docs/ISOLATION.md): running an agent in a sandbox on Linux, and what each level guarantees
 - [Decision models](docs/DECISIONS.md): optional small models for checks, judges and ranking
 - [Reference scenarios](docs/scenarios/README.md): realistic code and routine situations features are checked against, with the gaps they name
 - [Run stats](docs/STATS.md) and [evals](docs/EVALS.md): measuring playbooks across runs

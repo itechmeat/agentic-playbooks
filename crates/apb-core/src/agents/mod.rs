@@ -16,6 +16,7 @@ mod exposure;
 mod forms;
 mod output;
 mod policy;
+mod sandbox;
 mod setup;
 mod types;
 
@@ -40,6 +41,7 @@ pub use output::{
     json_string_field,
 };
 pub use policy::{ClosedList, ModelPolicy, OpenModels};
+pub use sandbox::{Access, HomeBind, HomeCopy, SandboxNeeds};
 pub use setup::{HostNotes, HostSetup, NoSetup, ScopedEnvError};
 pub use types::{AgentCategory, AgentEnvSet, AuthHint, AuthKind, Authority, ModelsInventory};
 

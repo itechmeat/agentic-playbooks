@@ -26,8 +26,18 @@ impl Drop for EnvGuard {
             std::env::remove_var("APB_CONFIG_DIR");
             std::env::remove_var("HOME");
             std::env::remove_var("APB_TEST_DUMP");
+            std::env::remove_var("APB_SANDBOX");
         }
     }
+}
+
+/// The scratch-directory path of an isolated node: `best_effort` with the
+/// sandbox switched off. The forced allowlist still applies, so the profile
+/// passes the stub's dump variable by name.
+const SCRATCH_PROCESS_ENV: &str = "process_env: { policy: allowlist, allow: [APB_TEST_DUMP] }\n";
+
+fn sandbox_off() {
+    unsafe { std::env::set_var("APB_SANDBOX", "off") };
 }
 
 fn make_stub(dir: &Path, body: &str) -> String {
@@ -352,9 +362,11 @@ fn advisory_skills_line_appended_in_shared_workdir() {
 
 #[test]
 fn isolated_workdir_materializes_skill_copies() {
-    // An isolated node (isolation: full) gets REAL copies of skills from the
-    // run snapshot into a per-node workdir (.agents/skills/<name>), not a symlink
-    // and not content in the prompt. The attempt is marked skills_mode: materialized.
+    // An isolated node without a sandbox (best_effort, APB_SANDBOX=off) gets
+    // REAL copies of skills from the run snapshot into a per-node workdir
+    // (.agents/skills/<name>), not a symlink and not content in the prompt.
+    // The attempt is marked skills_mode: materialized. The sandboxed twin is
+    // in `sandbox_run_test`.
     let _l = lock();
     let _g = EnvGuard;
     let proj = tempfile::tempdir().unwrap();
@@ -362,9 +374,16 @@ fn isolated_workdir_materializes_skill_copies() {
     let cfg = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let dump = bin.path().join("dump.txt");
-    seed_playbook(proj.path(), ", isolation: full");
-    seed_profile(proj.path(), "arch", "", "skills:\n  - cs\n", "role");
+    seed_playbook(proj.path(), ", isolation: best_effort");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "",
+        &format!("skills:\n  - cs\n{SCRATCH_PROCESS_ENV}"),
+        "role",
+    );
     seed_skill(proj.path(), "cs", "SKILLBODY-secret");
+    sandbox_off();
     set_env(
         &make_stub(bin.path(), DUMP_STUB),
         home.path(),
@@ -414,16 +433,17 @@ fn isolated_retry_gets_fresh_skill_snapshot_per_attempt() {
     let cfg = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let dump = bin.path().join("dump.txt");
-    seed_playbook(proj.path(), ", isolation: full");
+    seed_playbook(proj.path(), ", isolation: best_effort");
     // Profile with a skill and a fallback: the 1st attempt (primary) will fail, the
     // 2nd (fallback) must see the original skill.
     seed_profile(
         proj.path(),
         "arch",
         "  fallbacks:\n    - { agent: codex, model: haiku }\n",
-        "skills:\n  - cs\n",
+        &format!("skills:\n  - cs\n{SCRATCH_PROCESS_ENV}"),
         "role",
     );
+    sandbox_off();
     seed_skill(proj.path(), "cs", "PRISTINE");
     // Stub: on the 1st invocation appends to its own skill directory and fails; afterwards - ok.
     let body = "c=\"$APB_TEST_DUMP.count\"; n=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nif [ \"$n\" = \"1\" ]; then echo MUTATED >> .agents/skills/cs/SKILL.md; echo boom 1>&2; exit 1; fi\necho done";

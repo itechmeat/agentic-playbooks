@@ -1139,6 +1139,71 @@ fn a_missing_agent_binary_falls_back_to_a_host_task() {
     assert_eq!(node_output(&events, "w"), "done by host");
 }
 
+/// A `full` node never falls back to the host agent, which runs outside any
+/// sandbox apb starts: an agent that is not logged in fails the node
+/// instead. The twin is `a_logged_out_agent_falls_back_to_a_host_task`.
+#[test]
+fn a_full_node_never_falls_back_to_a_host_task() {
+    let h = Host::new(
+        &one_node(", isolation: { level: full, network: none }"),
+        &[],
+    );
+    h.agent("echo 'Error: Not logged in. Please run /login' >&2\nexit 1");
+    let _lock = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _env = h.env();
+    let _home = Env::set(&[("HOME", &home.path().to_string_lossy())]);
+    let run_id = h.start(CLI_SESSION);
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Failed);
+    assert!(fallback_events(&events).is_empty(), "no host fallback");
+    assert!(h.pending(&run_id).is_empty());
+}
+
+/// A `best_effort` node's host fallback runs without a sandbox and its
+/// attempt record says so, with the reason.
+#[test]
+fn a_best_effort_host_fallback_is_recorded_without_a_sandbox() {
+    let h = Host::new(&one_node(", isolation: best_effort"), &[]);
+    h.agent("echo 'Error: Not logged in. Please run /login' >&2\nexit 1");
+    let _lock = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _env = h.env();
+    let _home = Env::set(&[("HOME", &home.path().to_string_lossy())]);
+    let run_id = h.start(CLI_SESSION);
+    let task = h.task(&run_id, "w");
+    h.submit(
+        &run_id,
+        &task.task_id,
+        SubmitStatus::Succeeded,
+        "done by host",
+    );
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    let records: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AttemptStarted {
+                isolation: Some(i), ..
+            } => Some(i.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.first().map(|r| r.backend.as_str()), Some("bwrap"));
+    let host = records.last().unwrap();
+    assert_eq!(host.backend, "none");
+    assert!(
+        host.fallbacks.iter().any(|f| f.starts_with("host_mode")),
+        "{host:?}"
+    );
+}
+
 #[test]
 fn an_interactive_fallback_task_asks_the_host_way_and_parks_on_blocked() {
     let h = Host::new(&one_node(", interactive: true"), &[]);

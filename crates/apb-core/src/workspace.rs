@@ -9,7 +9,6 @@
 //!   workspaces of the same repository together.
 
 use std::path::Path;
-use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -160,16 +159,7 @@ pub fn ensure_local_ignored(root: &Path) {
 /// git is unavailable or no remote is set. Best-effort, for linking clones
 /// together - not for security.
 pub fn fingerprint(root: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&out.stdout);
+    let url = crate::git::read(root, &["config", "--get", "remote.origin.url"])?;
     let url = url.trim();
     if url.is_empty() {
         return None;

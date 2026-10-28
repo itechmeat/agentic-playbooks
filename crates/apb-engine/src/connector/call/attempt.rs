@@ -312,6 +312,7 @@ mod tests {
                 workdir: None,
                 transcript: None,
                 token: Some(format!("tok-{seq}")),
+                isolation: None,
             },
         )
     }

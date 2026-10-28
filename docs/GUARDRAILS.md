@@ -56,7 +56,7 @@ policy to the host agent and its administrators (see "Host agent settings" below
 | Profile `process_env: allowlist` | 3 Tool and environment | Enforced (configuration) | An agent process inherits only a base set, the variables its agent CLI reads and the profile's `allow` names, not the operator's whole environment. Each attempt journals `agent_env_applied` with the withheld names; `apb doctor --run` names them when an attempt fails. Context compaction in such a run gets an empty allowlist for claude. On Linux apb also hides its own environment from the agent (non-dumpable, so `/proc/$PPID/environ` is unreadable); macOS has no equivalent. Not isolation from a hostile agent of the same user: the operator's other processes stay readable. Scripts, checks and host-mode steps keep the operator environment (PROFILES.md "Process environment"). |
 | Connector grants, `functions: read_only`, `max_calls` | 3 Tool and environment | Enforced | A node can call only the connector functions it is granted, read-only when so declared, within a per-attempt call budget. Secrets never reach the agent. |
 | `model_policy` (global config) | 3 Tool and environment | Enforced | Models outside the policy are refused at validation and run start. Lives only in the global config, out of a project's reach. |
-| `isolation` | 3 Tool and environment | Declared | A per-node working directory with skill copies. Not an OS sandbox (V16 says so). |
+| `isolation` | 3 Tool and environment | Enforced (Linux) | An unprivileged bubblewrap sandbox per attempt: own process namespaces, only the node's tree and declared paths visible, the repository's git config and hooks read-only, `.apb` masked, the environment forced to the allowlist, `network: none` or the host network. `full` refuses to run where the sandbox cannot be built (`isolation_unavailable`: no bubblewrap, macOS, an agent without declared sandbox needs, host mode); `best_effort` runs without it and records why. Every attempt lists its limits (the host uid, the open network, the agent's own login, scripts outside the sandbox). See ISOLATION.md. |
 | `human_review` | 4 Gates | Enforced | The run waits for a person's decision; nothing is preselected. |
 | `judge` nodes and edges | 4 Gates | Model-decided | A decision model answers typed questions and routes; thresholds are declared, failures take `on_unavailable`. |
 | Trust digests (playbook, profile bundle, connector, account) | 4 Gates | Enforced | A changed playbook, profile, skill or connector drops its approval; MCP starts are refused until a person approves or acknowledges. |
@@ -87,9 +87,11 @@ policy to the host agent and its administrators (see "Host agent settings" below
 
 ## Host agent settings
 
-APB does not reimplement per-tool-call hooks, permission lists or OS sandboxing:
-those belong to the host agent and its administrators, and a second, weaker
-copy inside APB would only add confusion. What matters is how an APB run
+APB does not reimplement per-tool-call hooks or permission lists: those
+belong to the host agent and its administrators, and a second, weaker copy
+inside APB would only add confusion. The one OS boundary APB owns is a node's
+`isolation`, the sandbox around the agent process it starts (ISOLATION.md);
+the host agent's own sandbox settings still apply inside it. What matters is how an APB run
 interacts with them.
 
 ### Do a project's `.claude/settings.json` hooks run under `environment: minimal`?

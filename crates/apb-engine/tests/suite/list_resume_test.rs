@@ -486,6 +486,7 @@ fn a_crashed_item_attempt_is_reaped_under_its_item_and_rerun_alone() {
         workdir: None,
         transcript: None,
         token: None,
+        isolation: None,
     })
     .unwrap();
     drop(log);

@@ -19,6 +19,12 @@ probe (`crates/apb-engine/src/adapter/spawn_env.rs`).
 - The plan is per chain step, so a fallback onto another agent gets that
   agent's set from the same profile policy.
 - Connector-referenced variables are withheld under either policy.
+- An isolated node gets the allowlist even when its profile says `inherit`
+  (`forced_by: isolation`). A sandboxed spawn then gets the sandbox overlay
+  last, after the plan, the scrub and the run context: `TMPDIR` and
+  `XDG_RUNTIME_DIR` inside the sandbox, the ssh agent, session bus and
+  display variables dropped (`adapter::command::spawn_agent`, the one spawn
+  function both transports use).
 - The paid agent probe (`apb doctor --probe-agent`) runs outside a run, under
   the default `inherit` policy: connector variables withheld, and the
   agent's scoped files and claude's minimal settings in the probe's own
@@ -45,3 +51,5 @@ calling it.
   `context_compaction_follows_the_runs_allowlist`
 - apb-engine `agent_probe_test::the_probe_spawns_like_a_run_step_without_autonomy`
   and `agent_probe_test::codex_gets_an_isolated_home_in_the_probe_directory`
+- apb-engine `sandbox_run_test::full_with_no_network_enforces_the_contract`
+  (the forced allowlist and the sandbox overlay; Linux with bubblewrap)

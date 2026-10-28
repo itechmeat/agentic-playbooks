@@ -375,3 +375,42 @@ fn runs_items_prints_one_line_per_item_in_the_state_asked() {
             "List rows: 2 processed, 1 passed, 1 needs a look",
         ));
 }
+
+// --- isolation: one line per isolated attempt ---
+
+#[test]
+fn runs_with_an_id_prints_one_isolation_line_per_isolated_attempt() {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/iso-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":1790000000001,"type":"attempt_started","node":"w","attempt":1,"agent":"claude","isolation":{"level":"full","backend":"bwrap","network":"none","limits":["user.host_uid","kernel.escapes"]}}"#,
+            "\n",
+            r#"{"seq":2,"ts":1790000000002,"type":"attempt_started","node":"b","attempt":1,"agent":"claude","isolation":{"level":"best_effort","backend":"none","network":"open","limits":["no_sandbox"],"fallbacks":["disabled (APB_SANDBOX=off)"]}}"#,
+            "\n",
+            r#"{"seq":3,"ts":1790000000003,"type":"attempt_started","node":"plain","attempt":1,"agent":"claude"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let out = apb()
+        .args(["runs", "iso-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  isolation node `w` attempt 1: full on bwrap, network none; limits: user.host_uid, kernel.escapes",
+        ))
+        .stdout(predicate::str::contains(
+            "  isolation node `b` attempt 1: best_effort on none, network open; limits: no_sandbox; no sandbox: disabled (APB_SANDBOX=off)",
+        ))
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.matches("  isolation ").count(), 2, "{text}");
+}

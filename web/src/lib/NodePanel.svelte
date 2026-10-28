@@ -24,6 +24,15 @@
   import Trash2 from '@lucide/svelte/icons/trash-2'
   import { fieldsToField, fieldToOutputs, sessionSources } from './nodeio'
   import { fromYamlField, questionSummary, toYamlField } from './judgefields'
+  import {
+    ISOLATION_LEVELS,
+    ISOLATION_NETWORKS,
+    isIsolatedLevel,
+    isolationForm,
+    isolationValue,
+    type IsolationLevel,
+    type IsolationNetwork,
+  } from './playbookedit'
 
   let {
     id,
@@ -52,12 +61,17 @@
 
   const kind = $derived(node.type)
 
-  const ISOLATION = [
-    { value: '', label: '(default: none)' },
-    { value: 'none', label: 'none' },
-    { value: 'best_effort', label: 'best_effort' },
-    { value: 'full', label: 'full' },
-  ]
+  const ISOLATION_LABELS: Record<IsolationLevel, string> = {
+    '': '(default: none)',
+    none: 'none',
+    best_effort: 'best_effort',
+    full: 'full',
+  }
+  const NETWORK_LABELS: Record<IsolationNetwork, string> = {
+    '': '(default: open)',
+    open: 'open',
+    none: 'none',
+  }
 
   // Available profiles from /api/profiles (for the node executor selector).
   let profiles = $state<{ name: string; scope: string; trusted: boolean }[]>([])
@@ -164,7 +178,6 @@
         max_retries: num(n.max_retries),
         max_loops: num(n.max_loops),
         timeout_seconds: num(n.timeout_seconds),
-        isolation: str(n.isolation),
         success_check: sc.value,
         playbook: playbookRefToField(n.playbook),
         instruction: str(n.instruction),
@@ -176,9 +189,20 @@
         judge_thresholds: toYamlField(n.thresholds),
         on_unavailable: toYamlField(n.on_unavailable),
       }
+      iso = isolationForm(n.isolation)
       yamlErrors = {}
     })
   })
+
+  // `isolation` is the shorthand or the long map: the form edits the level
+  // and the network and keeps the extra paths (shown read-only) and any
+  // other key as they are.
+  let iso = $state(isolationForm(undefined))
+  function setIsolation(change: { level?: IsolationLevel; network?: IsolationNetwork }) {
+    const value = isolationValue(node.isolation, change)
+    iso = isolationForm(value)
+    onChange?.({ isolation: value })
+  }
 
   // Judge node snippets (state, questions, thresholds, on_unavailable): a
   // snippet that does not parse is shown as an error and writes nothing.
@@ -399,9 +423,6 @@
     onChange?.(Number.isNaN(n) ? { [key]: undefined } : { [key]: n })
   }
 
-  const isolationLabel = $derived(
-    ISOLATION.find((o) => o.value === (f.isolation ?? ''))?.label ?? '(default: none)',
-  )
   const successModeLabel = $derived(
     successMode === 'marker' ? 'completion marker' : 'script path',
   )
@@ -502,19 +523,48 @@
         <Select.Root
           type="single"
           disabled={readonly}
-          value={f.isolation}
-          onValueChange={(v) => setStr('isolation', v ?? '')}
+          value={iso.level}
+          onValueChange={(v) => setIsolation({ level: (v ?? '') as IsolationLevel })}
         >
-          <Select.Trigger class="w-full">{isolationLabel}</Select.Trigger>
+          <Select.Trigger class="np-select" data-testid="np-isolation">{iso.rawLevel ? `${iso.rawLevel} (unknown)` : ISOLATION_LABELS[iso.level]}</Select.Trigger>
           <Select.Content>
             <Select.Group>
-              {#each ISOLATION as o (o.value)}
-                <Select.Item value={o.value} label={o.label}>{o.label}</Select.Item>
+              {#each ISOLATION_LEVELS as v (v)}
+                <Select.Item value={v} label={ISOLATION_LABELS[v]}>{ISOLATION_LABELS[v]}</Select.Item>
               {/each}
             </Select.Group>
           </Select.Content>
         </Select.Root>
       </Field.Field>
+      {#if isIsolatedLevel(iso.level)}
+        <Field.Field>
+          {@render fieldHead('isolation_network')}
+          <Select.Root
+            type="single"
+            disabled={readonly}
+            value={iso.network}
+            onValueChange={(v) => setIsolation({ network: (v ?? '') as IsolationNetwork })}
+          >
+            <Select.Trigger class="np-select" data-testid="np-isolation-network">{iso.rawNetwork ? `${iso.rawNetwork} (unknown)` : NETWORK_LABELS[iso.network]}</Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                {#each ISOLATION_NETWORKS as v (v)}
+                  <Select.Item value={v} label={NETWORK_LABELS[v]}>{NETWORK_LABELS[v]}</Select.Item>
+                {/each}
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        </Field.Field>
+      {/if}
+      {#if iso.readOnly.length || iso.writable.length}
+        <Field.Field>
+          {@render fieldHead('isolation_paths')}
+          <ul class="iso-paths" data-testid="np-isolation-paths">
+            {#each iso.readOnly as p (`r:${p}`)}<li><span class="iso-path">{p}</span> read-only</li>{/each}
+            {#each iso.writable as p (`w:${p}`)}<li><span class="iso-path">{p}</span> writable</li>{/each}
+          </ul>
+        </Field.Field>
+      {/if}
       <Field.Field>
         {@render fieldHead('max_retries', 'np-retries')}
         <Input
@@ -869,6 +919,21 @@
   :global(textarea.draft-input) {
     max-height: 300px;
     overflow: auto;
+  }
+  /* The trigger is a child component, so its width is set globally. */
+  :global(.np-select) {
+    width: 100%;
+  }
+  .iso-paths {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+    overflow-wrap: anywhere;
+  }
+  .iso-path {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    color: var(--foreground);
   }
   .draft-status {
     margin: 0;

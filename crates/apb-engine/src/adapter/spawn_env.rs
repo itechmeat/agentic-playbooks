@@ -5,8 +5,10 @@
 //! In order: the profile's `process_env` plan (an allowlist clears the
 //! inherited environment and copies back only the kept names), the connector
 //! scrub, the run-context variables, the pager, the eval overlay, the agent's
-//! run-scoped environment (codex's config home, zcode's provider config) and
-//! the attempt's status file. Each later step wins over an earlier one.
+//! run-scoped environment (codex's config home, zcode's provider config),
+//! the attempt's status file and, for a sandboxed attempt, the sandbox
+//! overlay (`crate::sandbox::SandboxPlan::overlay`). Each later step wins over
+//! an earlier one.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -57,6 +59,9 @@ pub struct SpawnEnv {
     /// `agent-home/<agent>/<node>` is laid down, as `run_dir` is for a run.
     /// Unlike `run_dir` it sets no run-context variable. `run_dir` wins.
     pub scoped_base: Option<PathBuf>,
+    /// The isolation sandbox the attempt's process runs in; `None` runs it
+    /// as before.
+    pub sandbox: Option<Arc<crate::sandbox::SandboxPlan>>,
 }
 
 impl SpawnEnv {
@@ -99,6 +104,14 @@ impl SpawnEnv {
     pub fn with_process(&self, process: Option<Arc<EnvPlan>>) -> Self {
         SpawnEnv {
             process,
+            ..self.clone()
+        }
+    }
+
+    /// This env inside `sandbox` (`None`: no sandbox).
+    pub fn with_sandbox(&self, sandbox: Option<Arc<crate::sandbox::SandboxPlan>>) -> Self {
+        SpawnEnv {
+            sandbox,
             ..self.clone()
         }
     }
@@ -206,7 +219,7 @@ pub(crate) struct SpawnTarget<'a> {
 
 /// The whole environment of a node agent's process, for its start and
 /// resume forms alike: [`SpawnEnv::apply`], then the agent's run-scoped
-/// environment and the attempt's status file.
+/// environment, the attempt's status file and, last, the sandbox overlay.
 pub(crate) fn prepare(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorClass, String)> {
     task.env.apply(cmd);
     apply_scoped_env(cmd, task)?;
@@ -214,6 +227,9 @@ pub(crate) fn prepare(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (Erro
     // verdict as JSON here, which the engine reads before the textual report.
     if let Some(sf) = task.status_file {
         cmd.env("APB_STATUS_FILE", sf);
+    }
+    if let Some(plan) = &task.env.sandbox {
+        plan.overlay(cmd);
     }
     Ok(())
 }
