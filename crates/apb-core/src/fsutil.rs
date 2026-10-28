@@ -143,6 +143,57 @@ pub fn ensure_no_symlink_below(anchor: &Path, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Opens the regular file at `path` for reading without following a
+/// symbolic link at its last component (`O_NOFOLLOW` on unix; elsewhere the
+/// entry is checked first). A link, a directory, a fifo or a device is
+/// refused: reading one could block or leave the tree the caller meant.
+pub fn open_regular_no_follow(path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", path.display()),
+            ));
+        }
+        File::open(path)?
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+/// Reads at most `cap` bytes of `reader`. Returns them and whether more was
+/// left unread. The reader is left right after the bytes returned (the one
+/// byte read to tell whether more is left is given back), so a second call
+/// continues where this one stopped.
+pub fn read_prefix_capped<R: io::Read + io::Seek>(
+    reader: &mut R,
+    cap: u64,
+) -> io::Result<(Vec<u8>, bool)> {
+    let mut out = Vec::new();
+    let mut limited = io::Read::take(&mut *reader, cap.saturating_add(1));
+    io::Read::read_to_end(&mut limited, &mut out)?;
+    let cut = out.len() as u64 > cap;
+    if cut {
+        out.truncate(cap as usize);
+        reader.seek(io::SeekFrom::Current(-1))?;
+    }
+    Ok((out, cut))
+}
+
 /// [`copy_tree`] into `dst` under `anchor` that never writes through a
 /// symlink already at the destination: `dst` and every existing path
 /// component below `anchor` are checked first, and every entry is checked

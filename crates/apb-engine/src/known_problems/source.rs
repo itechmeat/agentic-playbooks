@@ -87,8 +87,9 @@ fn git_ignored(root: &Path, rel: &str) -> bool {
 }
 
 /// A file of the project at `root/rel`, refused when the path leaves the
-/// root, any part of it is a symlink, it is private ([`is_private`], or
-/// git-ignored) or it is over [`MAX_SOURCE_BYTES`].
+/// root, any part of it is a symlink, it is not a regular file, it is
+/// private ([`is_private`], or git-ignored) or it is over
+/// [`MAX_SOURCE_BYTES`].
 fn project_file(root: &Path, rel: &str) -> Option<String> {
     if is_private(rel) {
         return None;
@@ -99,24 +100,14 @@ fn project_file(root: &Path, rel: &str) -> Option<String> {
             std::path::Component::Normal(p) => at.push(p),
             _ => return None,
         }
-        if std::fs::symlink_metadata(&at)
-            .ok()?
-            .file_type()
-            .is_symlink()
-        {
-            return None;
-        }
     }
-    let canon_root = std::fs::canonicalize(root).ok()?;
-    let canon = std::fs::canonicalize(&at).ok()?;
-    if !canon.starts_with(&canon_root) || !canon.is_file() {
+    apb_core::fsutil::ensure_no_symlink_below(root, &at).ok()?;
+    let mut file = apb_core::fsutil::open_regular_no_follow(&at).ok()?;
+    if git_ignored(root, rel) {
         return None;
     }
-    if std::fs::metadata(&canon).ok()?.len() > MAX_SOURCE_BYTES || git_ignored(root, rel) {
-        return None;
-    }
-    let bytes = std::fs::read(&canon).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let (bytes, over) = apb_core::fsutil::read_prefix_capped(&mut file, MAX_SOURCE_BYTES).ok()?;
+    (!over).then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The prompt of agent node `id` in `playbook`.
@@ -211,13 +202,14 @@ pub fn seen(
 ) -> Option<ProblemSource> {
     let kind = SourceKind::of(scope.kind)?;
     let text = seen_text(root, run_dir, scope, manifest, snapshot)?;
-    let scrubbed = scrubber.scrub(&text);
+    // Kept whole or not at all: a text past the cap has no excerpt.
     Some(ProblemSource {
         kind,
         name: scope.name.clone(),
         digest: digest(&text),
-        excerpt: (scrubbed.chars().count() <= EXCERPT_MAX && scrubber.flags(&scrubbed).is_none())
-            .then_some(scrubbed),
+        excerpt: scrubber
+            .stored_text(&text, EXCERPT_MAX + 1)
+            .filter(|e| e.chars().count() <= EXCERPT_MAX),
     })
 }
 
@@ -259,7 +251,8 @@ pub fn current(
         )?,
         ScopeKind::McpTool | ScopeKind::Cli | ScopeKind::Other => return None,
     };
-    let scrubbed = scrubber.scrub(&text);
+    // Shown as an excerpt is kept ([`seen`]), so the two compare alike.
+    let scrubbed = scrubber.shown_text(&text);
     Some(Current {
         digest: digest(&text),
         flagged: scrubber.flags(&scrubbed).is_some(),

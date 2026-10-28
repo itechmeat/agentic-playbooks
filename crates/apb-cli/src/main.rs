@@ -8,6 +8,7 @@ mod dashboard_check;
 mod decide;
 // --- end issue #193 ---
 mod decisions;
+mod discover;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
@@ -398,6 +399,11 @@ enum Command {
     /// reopen or close one (a close quotes the source's new text); recheck
     /// the ones whose source changed; scan earlier runs to collect them
     Problems(crate::problems::ProblemsArgs),
+    /// Find step sequences your past agent sessions repeat (Claude Code and
+    /// Codex history of the named projects) and offer them as playbook
+    /// drafts; list or show stored results, save or decline a suggestion.
+    /// No model and no network call
+    Discover(crate::discover::DiscoverCmdArgs),
     /// Show a playbook's candidate version and how it compares with
     /// current by quality, or decide it: --promote makes it current,
     /// --keep-current drops it and changes nothing
@@ -819,6 +825,7 @@ fn main() -> ExitCode {
         Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
         Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
         Some(Command::Problems(args)) => problems::problems_cmd(&root, args),
+        Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Stats {
             playbook,

@@ -124,12 +124,37 @@ code run and a mail or CRM run alike.
 | `consent` | a connector call to a function the connector declares `irreversible`, or a destructive shell command (a recursive forced delete in any spelling of its flags, a forced push including a `+` refspec, a hard reset, a forced clean, a forced branch delete, `find -delete`, dropping or truncating a table, formatting a disk, a raw disk write), a sub-agent's included. A connector action is consented by the run's irreversible consent or by an approving review gate right before its node; a shell command only by such a review. Without any consent the action is `poor` (`irreversible_without_consent`); a shell command under the run's consent alone is `partial` (`destructive_without_review`). A review decision covers only the node the run went to from that gate next, and the latest such decision before the action counts: an approval at an unrelated gate consents to nothing. No such action is `not_applicable`. When something cannot be seen (a connector that changed since the run, `connector_changed`; one the run's manifest does not record, `connector_unrecorded`; an attempt without a readable transcript), anything short of `poor` is `not_enough_data` |
 | `skill_use` | whether each skill a node's profile gives it was read (a `Skill` tool call or a `Read` of its `SKILL.md`; writing one is not a read), and for a read skill whether its node succeeded at once (`good`), after a failed attempt (`partial`) or not at all (`poor`). A skill nobody read is `not_applicable`; when no read is seen but an attempt's reads cannot be told (`unknown`), it is `not_enough_data` |
 
-Only claude keeps a session transcript apb reads for tool calls. For an
+`rules/1` reads tool calls from claude session transcripts only. For an
 attempt of any other agent the built-ins that rest on something not
 happening (`loops`, `scope`, `consent` when the journal shows no action)
-are `not_enough_data`, and its skill reads are `unknown`. So is an agent
-attempt apb keeps no transcript directory for (a finish answer, a judge):
-it is an empty, incomplete view. A transcript that was cut (the transcript
+are `not_enough_data`, and its skill reads are `unknown`.
+
+A codex attempt's `exec --json` stdout is now read as a transcript with
+tool facts too (commands, file changes, MCP calls), so a host grader can
+read and cite it. `rules/1` still does not grade from it, for
+three reasons:
+
+1. The grader id is part of the comparable key a promotion compares by.
+   If `rules/1` began to grade codex runs, one key would hold two
+   behaviours: a candidate tried after the change would be compared with
+   runs of `current` graded before it, on other evidence.
+2. A new grader version (`rules/2`) leaves every earlier `rules/1` grade
+   outside its key, so every candidate would fall back to `insufficient`
+   until enough runs are graded again. That needs grading under both
+   versions for a while, and the comparison picking the newest rules
+   version.
+3. A claim that something did not happen needs a complete view. The codex
+   stream reports completed items only, and work a sub-agent or a tool does
+   in its own thread may not show in it. A codex view can count as
+   complete only when every started item completed, no item type is
+   unknown and no sub-agent was spawned, which needs its own rule and
+   tests.
+
+Until then a codex run graded by rules gets the same levels as before:
+`outcome` from the journal, and `not_enough_data` where an absence would
+have to be claimed. An agent attempt apb keeps no transcript directory
+for (a finish answer, a judge) gets the same levels: it is an empty,
+incomplete view. A transcript that was cut (the transcript
 cap, a lost stream) makes a claim of absence `not_enough_data` too. When a
 re-run restarts the attempt counter and reuses an attempt's directory,
 only the latest attempt of it is read.
@@ -368,6 +393,8 @@ it, a person decides. A decision from a run step is refused.
 | CLI | `apb grade <run>` (rules) or `--model` (the model grader), `--show`, `--json`, `--reopen` (a host may grade the run once more); `apb grade --backfill <playbook> [--version V] [--last N] [--model]` (grades for up to N earlier ended runs without one of that grader, so a comparison has a history; runs already graded or live are skipped and do not count); `apb candidate <playbook>` with `--promote`, `--keep-current [--reason]`; the `grade` lines of `apb runs <id>` |
 | MCP | `run_grade` (`grader` `rules` or `model`), `run_grade_start`, `run_grade_read`, `run_grade_submit`, `run_grades`, `playbook_candidate`, the `grades` block of `run_status` |
 | HTTP | `GET` and `POST /api/runs/{id}/grades` (POST grades by rules, or by the model grader with `{ "grader": "model" }`, answering `skipped` when it stored nothing; 409 while the run is live); `POST /api/runs/{id}/grades/reopen` (409 without a host grade); `GET /api/playbooks/{id}/candidate`; `POST /api/playbooks/{id}/candidate/promote`; `POST /api/playbooks/{id}/candidate/keep-current` with `{ reason? }` |
+| Run report | the Quality section of the HTML run report (`apb runs <run> --html <path>`, the run page's Save report): the latest trusted grade of each grader, one row per criterion with its level, reason, why and first citations, and how many unsigned grade files were left out |
+| Stats | `apb stats` and the dashboard's stats card: per version, each criterion's good and poor shares over the graded runs, and with `--compare` how they moved (docs/STATS.md) |
 | Dashboard | the run page's Quality panel (levels, reasons, citations that open the journal event or name the transcript file, the reading line, "Grade by rules", "Grade by model", and "Grade again" once a host graded the run); the playbook page's candidate card |
 
 ## Example: a code task

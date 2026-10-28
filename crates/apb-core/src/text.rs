@@ -141,6 +141,22 @@ pub fn visible(s: &str) -> String {
     replace_hidden(s, '?')
 }
 
+/// [`visible`] for a text kept with its layout: line breaks (`\n`, and
+/// `\r\n`) and tabs stay, every other hidden character becomes `?`, a lone
+/// `\r` too (it would send a terminal back to the start of the line, so
+/// later text could hide what came before).
+pub fn visible_keeping_layout(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    (0..chars.len())
+        .map(|i| match chars[i] {
+            c @ ('\n' | '\t') => c,
+            '\r' if chars.get(i + 1) == Some(&'\n') => '\r',
+            _ if hidden_at(&chars, i) => '?',
+            c => c,
+        })
+        .collect()
+}
+
 /// `s` without its terminal escape sequences: CSI (`ESC [ ... final`, the
 /// colors and cursor moves), OSC (`ESC ] ... BEL` or `ESC \\`) and the
 /// short `ESC x` forms. For reading a tool's output as text: a colored
@@ -189,6 +205,14 @@ pub fn strip_ansi(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lone_carriage_return_is_shown_not_obeyed() {
+        assert_eq!(
+            super::visible_keeping_layout("a\r\nb\tc\rd\u{1b}"),
+            "a\r\nb\tc?d?"
+        );
+    }
+
     use super::*;
 
     #[test]

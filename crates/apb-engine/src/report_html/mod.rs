@@ -14,6 +14,7 @@
 
 pub mod markup;
 mod model;
+mod quality;
 mod sections;
 
 use std::path::Path;
@@ -45,6 +46,8 @@ pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
             sections::goal(&w, report.goal.as_ref()),
             sections::steps(&w, &report.steps),
             sections::lists(&w, &report.outcome),
+            quality::grades(&w, &report.grades, report.grades_left_out),
+            quality::known_problems(&w, report.known_problems.as_ref()),
             sections::sends(&w, &report.sends),
             sections::notifications(&w, report.notify.as_ref()),
             sections::answer(&w, report.outcome.agent_summary.as_deref()),

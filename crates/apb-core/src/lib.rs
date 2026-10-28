@@ -1,3 +1,4 @@
+pub mod agent_actions;
 pub mod agent_catalog;
 pub mod agent_output;
 pub mod baseline;
@@ -14,6 +15,7 @@ pub mod decision_probe;
 pub mod decision_thresholds;
 pub mod decisions;
 pub mod detect;
+pub mod discover;
 pub mod dismiss;
 pub mod doctor;
 pub mod duration;

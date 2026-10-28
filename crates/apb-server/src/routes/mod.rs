@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod connectors;
+pub mod discover;
 pub mod estimate;
 pub mod fit;
 pub mod memory;

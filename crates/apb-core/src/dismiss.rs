@@ -376,6 +376,13 @@ pub fn active_global() -> SuggestionView {
     view_for(None)
 }
 
+/// The record of `view` that suppresses the suggestion `pattern` (an exact
+/// match), if any: the one check every surface that offers a suggestion
+/// makes before offering it.
+pub fn suppressing<'a>(view: &'a SuggestionView, pattern: &str) -> Option<&'a ScopedRecord> {
+    view.records.iter().find(|r| r.record.pattern == pattern)
+}
+
 /// Shared body of [`active`] and [`active_global`]. `None` is the global-only
 /// view: the project scope is not read at all, which is why the placeholder
 /// root below is never used for anything (`store_dir` ignores its root

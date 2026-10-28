@@ -176,6 +176,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/suggestions/{pattern}",
             axum::routing::delete(routes::suggestions::delete_suggestion_handler),
         )
+        // History discovery, behind its own local-only route layer.
+        .merge(routes::discover::router())
         .route("/api/runs", get(routes::runs::list_runs_handler))
         .route("/api/runs/{id}", get(routes::runs::get_run_handler))
         .route(

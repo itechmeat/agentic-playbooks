@@ -1,0 +1,12 @@
+{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"rollout-1","cwd":"__CWD__","originator":"codex_exec","cli_version":"0.0.0"}}
+{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"cwd":"__CWD__","model":"model-x"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd note</environment_context>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Triage the new support mail"}]}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Triage the new support mail"}]}}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"cargo test\"]}","call_id":"c1"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["bash","-lc","cargo test"],"status":"completed","exit_code":0}}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-a\n+b\n*** End Patch","call_id":"c2"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":[{"path":"src/lib.rs","kind":"update"}]}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","server":"gmail","tool":"search","arguments":{"q":"is:unread"}}}}
+{"type":"response_item","payload":{"type":"local_shell_call","action":{"type":"exec","command":["git","push"]},"call_id":"c3"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["git","push"],"status":"completed"}}}

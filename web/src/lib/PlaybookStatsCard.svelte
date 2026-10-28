@@ -6,6 +6,11 @@
     executorGroups,
     modelsText,
     perRunText,
+    qualityDeltaText,
+    qualityDeltas,
+    qualityKey,
+    qualityLabels,
+    qualityText,
     rateText,
     spendText,
     versionsNewestFirst,
@@ -22,6 +27,8 @@
   }: { report?: StatsReport | null; loading?: boolean; error?: string | null } = $props()
 
   const versions = $derived(versionsNewestFirst(report))
+  const deltas = $derived(qualityDeltas(report?.compare))
+  const deltaLabels = $derived(qualityLabels(deltas))
 </script>
 
 <div class="stats" data-testid="playbook-stats">
@@ -34,6 +41,19 @@
   {:else if !report || report.runs === 0}
     <p class="muted" data-testid="playbook-stats-empty">No runs of this playbook yet.</p>
   {:else}
+    {#if deltas.length && report.compare?.against}
+      <section class="version" data-testid="playbook-stats-quality-deltas">
+        <div class="version-head">
+          <span class="muted">quality, {report.compare.against} against {report.compare.base}</span>
+        </div>
+        <dl>
+          {#each deltas as d, i (qualityKey(d))}
+            <dt>{deltaLabels[i]}</dt>
+            <dd>{qualityDeltaText(d)}</dd>
+          {/each}
+        </dl>
+      </section>
+    {/if}
     {#each versions as v (v.version)}
       {@const executors = executorGroups(v)}
       <section class="version" data-testid="playbook-stats-version">
@@ -77,6 +97,17 @@
                 <span class="muted">{n.node}, per executor:</span>
                 <!-- Two executors may print alike (shortened digests): key by position. -->
                 {#each n.groups as g, i (i)}<div class="group">{g}</div>{/each}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if v.quality?.length}
+          {@const labels = qualityLabels(v.quality)}
+          <ul class="quality" data-testid="playbook-stats-quality">
+            {#each v.quality as q, i (qualityKey(q))}
+              <li>
+                <span class="muted">quality {labels[i]}:</span>
+                {qualityText(q)}
               </li>
             {/each}
           </ul>
@@ -153,7 +184,8 @@
     padding-left: 0.75rem;
     font-family: var(--font-mono, ui-monospace, monospace);
   }
-  .goal {
+  .goal,
+  .quality {
     display: flex;
     flex-direction: column;
     gap: 0.125rem;

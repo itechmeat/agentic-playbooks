@@ -212,3 +212,64 @@ fn stats_shows_digest_groups_after_a_profile_change() {
     assert_eq!(nodes, ["a", "b"]);
     assert_ne!(changes[0]["base_profile"], changes[0]["against_profile"]);
 }
+
+/// Run quality in `apb stats`: once the runs are graded by rules, each
+/// version has a quality line per criterion with its counts, and
+/// `--compare` carries how the shares moved for a criterion both versions
+/// graded alike.
+#[test]
+fn stats_shows_quality_per_version_and_its_deltas() {
+    let dir = project();
+    for (id, version) in [
+        ("demo-1", "1.0.0"),
+        ("demo-2", "1.0.0"),
+        ("demo-3", "1.1.0"),
+        ("demo-4", "1.1.0"),
+    ] {
+        let snapshot = format!(
+            "schema: 2\nid: demo\nname: Demo\nversion: {version}\nquality: {{}}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: w, type: script, script: run.sh }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: w }}\n  - {{ from: w, to: done }}\n"
+        );
+        let run = dir.path().join(".apb/runs").join(id);
+        fs::write(run.join("playbook.yaml"), snapshot).unwrap();
+        apb()
+            .args(["grade", id])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+    apb()
+        .args(["stats", "--playbook", "demo"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  quality outcome (rules/1, default): good 2/2 (100%), poor 0/2 (0%) over 2 graded runs\n",
+        ))
+        .stdout(predicate::str::contains(
+            "  quality outcome (rules/1, default): good 1/2 (50%), poor 1/2 (50%) over 2 graded runs\n",
+        ));
+    let out = apb()
+        .args([
+            "stats",
+            "--playbook",
+            "demo",
+            "--compare",
+            "1.0.0",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let outcome = v["compare"]["quality"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["criterion"] == "outcome")
+        .expect("an outcome delta");
+    assert_eq!(outcome["good_delta"], -0.5);
+    assert_eq!(outcome["poor_delta"], 0.5);
+}

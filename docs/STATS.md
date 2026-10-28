@@ -94,6 +94,18 @@ Per playbook version:
   `experimental`, `stable`). So `opus` matches `claude-opus-5-5` and
   `sonnet` matches `claude-sonnet-5-5`, while `glm-5.3` and
   `glm-5.3-flash`, or `gpt-5` and `gpt-5-mini`, are different models.
+- **quality**: the levels the runs' grades gave each criterion
+  (docs/QUALITY.md), one row per comparable key: the criterion, the digest
+  of its definition, the grader (`rules/1`, `model/1`, `host/1`) and the
+  task type. Only grades this installation signed for that very run count,
+  and of each grader only the latest grade of a run: the grades a
+  promotion reads. Unlike a promotion, which weighs only the criteria that
+  count for it, every criterion is listed, informational ones too. `good` and `poor` are shares of the determinate levels
+  (good, partial, poor); `not_applicable` and `not_enough_data` stay in the
+  `tally` and out of the shares. Text: `quality outcome (rules/1, default):
+  good 2/3 (67%), poor 1/3 (33%) over 3 graded runs`. A version with no
+  graded run has no quality rows, and `apb grade` (or the dashboard's run
+  page) is how a run gets graded.
 
 Per node: the runs it ran in; first pass (its first result was a success on
 attempt 1, with no retry, fallback or later re-entry); retries, fallbacks and
@@ -117,6 +129,16 @@ differs between the two versions (`node`, `base_profile`, `against_profile`,
 `base_bundle`, `against_bundle`; text: `executor of a: profile X -> Y,
 bundle X -> Y`), so a change in the figures can be told from a change of
 model or prompt. The dashboard's stats card shows the same groups.
+
+**Quality deltas.** With `--compare`, `compare.quality` lists, for every
+comparable key both versions graded under the same definition digest (the
+delta carries that `digest`), how
+the good and poor shares moved (`against` minus `base`; text: `quality
+outcome (rules/1, default): good -50 points, poor +50 points`). A criterion whose
+definition changed between the versions has no delta: its levels were
+given against different text. The dashboard's stats card shows each
+version's quality rows and, with two versions or more, the deltas of the
+newest against the one before it.
 
 ## The run estimate
 
@@ -202,6 +224,12 @@ no history at start. The method:
                     "runs_with_warnings": { "count": 1, "of": 2, "rate": 0.5 } },
       "baseline": [ { "check": "tests", "observation": "cargo_test", "compared": 2,
                       "met": { "count": 1, "of": 2, "rate": 0.5 }, "regressed": 1, "unknown": 0 } ],
+      "quality": [ { "criterion": "outcome", "source": "builtin", "grader": "rules/1",
+                     "task_type": "default", "digest": "sha256:...", "graded_runs": 2,
+                     "tally": { "good": 2, "partial": 0, "poor": 0, "not_applicable": 0,
+                                "not_enough_data": 0 },
+                     "good": { "count": 2, "of": 2, "rate": 1.0 },
+                     "poor": { "count": 0, "of": 2, "rate": 0.0 } } ],
       "nodes": [ { "node": "w", "runs": 2, "first_pass": { "count": 1, "of": 2, "rate": 0.5 },
                    "retries": 1, "fallbacks": 0, "reentries": 0,
                    "duration": { "count": 2, "median_ms": 4000, "max_ms": 4000 },
@@ -214,13 +242,17 @@ no history at start. The method:
   "compare": { "playbook": "demo", "base": "1.0.0", "against": "1.1.0",
                "success_delta": -0.5, "first_pass_delta": 0.0,
                "retries_per_run_delta": -0.5, "loops_per_run_delta": 0.0,
-               "median_duration_delta_ms": 0 }
+               "median_duration_delta_ms": 0,
+               "quality": [ { "criterion": "outcome", "grader": "rules/1",
+                              "task_type": "default", "digest": "sha256:...",
+                              "good_delta": -0.5, "poor_delta": 0.5 } ] }
 }
 ```
 
 Versions are sorted by playbook id, then by version number, oldest first. A
 `rate`, `per_run`, `median_ms`, `max_ms`, `expected_s`, `over_expected`,
 `cost_per_run_usd`, a `compare` delta or `note` is left out when there is
-nothing to compute it from. `compare.against` is absent when no other version
+nothing to compute it from, and so are `quality` and `compare.quality` when
+they would be empty. `compare.against` is absent when no other version
 has runs. With no matching run the report is `{ "runs": 0, "versions": [],
 "note": "no runs recorded" }`.

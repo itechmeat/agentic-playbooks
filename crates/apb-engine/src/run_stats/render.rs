@@ -1,7 +1,7 @@
 //! `apb stats` as text for a terminal.
 
 use super::digests::DigestStats;
-use super::{PerRun, StatsReport, Waits, findings};
+use super::{PerRun, StatsReport, Waits, findings, quality};
 
 /// `12 s`, `3.4 min`, `1.2 h`.
 fn dur(ms: u64) -> String {
@@ -121,6 +121,9 @@ pub fn render_text(r: &StatsReport) -> String {
         for line in findings::lines(&v.findings, &v.baseline) {
             out.push_str(&format!("  {line}\n"));
         }
+        for line in quality::lines(&v.quality) {
+            out.push_str(&format!("  {line}\n"));
+        }
         for n in &v.nodes {
             let mut line = format!(
                 "  node {}: {} runs, first pass {}",
@@ -189,6 +192,16 @@ pub fn render_text(r: &StatsReport) -> String {
                     c.cost_per_run_delta_usd
                         .map_or("n/a".to_string(), |d| format!("{d:+.4} USD"))
                 ));
+                for q in &c.quality {
+                    out.push_str(&format!(
+                        "  quality {} ({}, {}): good {}, poor {}\n",
+                        apb_core::text::visible(&q.criterion),
+                        q.grader,
+                        apb_core::text::visible(&q.task_type),
+                        pct(q.good_delta),
+                        pct(q.poor_delta)
+                    ));
+                }
                 for x in &c.executor_changes {
                     out.push_str(&format!(
                         "  executor of {}: profile {} -> {}, bundle {} -> {}\n",

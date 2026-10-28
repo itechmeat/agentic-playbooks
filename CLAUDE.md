@@ -85,8 +85,18 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the eval case and suite format with its V80-V83 checks, digests and the
   machine's suite approvals (`eval.rs`), the decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line), the
-  doctor's free per-provider request (`decision_probe.rs`) and the
-  measured-threshold store (`decision_thresholds.rs`).
+  doctor's free per-provider request (`decision_probe.rs`), the
+  measured-threshold store (`decision_thresholds.rs`), one decoder per agent
+  log format (`agent_actions/`: `claude` and `codex` lines as tool actions,
+  typed requests and the working directory, `command` the shell command
+  normalizer with the destructive list, `known` the subcommand and option
+  lists a step token may name) and history discovery
+  (`discover/`: `walk` the bounded no-follow walk of a root, `session` a
+  session file as steps and requests, `token` an action as an
+  argument-free step token, `mine` the repeated n-grams, `draft` a
+  suggestion with its draft, scrubbed examples and sources, `store` the
+  signed result store, the one-time resolve of a save or a decline and
+  the saved slugs).
 - `apb-decide` - a blocking, provider-agnostic decision-model client: the
   `DecisionProvider` trait, question and answer types, the `systemone`,
   `fake` and `llm_emulation` (uncalibrated) providers and the route
@@ -127,7 +137,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   human outcome every surface shows and the "needs a look" marker), the
   cross-run metrics behind `apb stats`
   (`run_stats.rs`, `run_stats/`, `findings` for findings and baseline
-  results), the irreversible-effects consent a run
+  results, `quality` for the levels of signed grades per comparable key and
+  their `--compare` deltas), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
   `apb eval` (`eval/`),
   the operator pause: who paused a run and how, the pause every run surface
@@ -164,8 +175,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   output goes through, `rules/` the rules grader of the built-ins, `model`
   the decision-model grader of the playbook's own criteria, `session`
   a host's grading session, `store` the write-once grade files;
-  `transcript/` the attempt transcript adapter, claude's session parsed, the
-  other agents' streams as plain text; `candidate/`: the gate's choice and
+  `transcript/` the attempt transcript adapter, claude's session and
+  codex's `exec --json` stdout parsed with tool facts, the other agents'
+  streams as plain text; `candidate/`: the gate's choice and
   the trial view in `mod`, `settle` by successes, `quality` by quality with
   `resettle` after a stored grade and a person's decision; `run_history.rs`
   the earlier runs of a playbook the estimate and the comparison share),
@@ -216,9 +228,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   block, shared with the HTTP API and the CLI, `grade` for grading a run,
   its grades and the `grades` block of `run_status`, where every stored
   grade re-decides the candidate (`after_stored`), `candidate` for the
-  candidate comparison and a person's decision, and `problems` for a
+  candidate comparison and a person's decision, `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
-  all shared with the HTTP API and the CLI); `promote/` is `playbook_make_global` (the
+  and `discover` for history discovery, its stored results, a save
+  through `capture::capture_draft` and a decline, all shared with the HTTP
+  API and the CLI); `promote/` is `playbook_make_global` (the
   plan and its blockers in `plan`, the apply in `mod`); `catalog_rank` is the
   opt-in decision-model ranking behind `playbook_catalog(query)`, asked through the engine's standalone decider
   (`decision/standalone.rs`).
@@ -236,13 +250,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
   --html`, `grade.rs` is `apb grade` and the grade lines of `apb runs
   <id>`, `candidate.rs` is `apb candidate`, `problems.rs` is `apb
-  problems`.
+  problems`, `discover.rs` is `apb discover`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `memory` for remembered run
   input, `notify` for the machine's notify target and a live run's change,
   `quality` for a run's grades and a playbook's candidate, `problems` for
-  a playbook's known problems; `state.rs` also holds the tool-layer
+  a playbook's known problems, `discover` for history discovery, loopback
+  only; `state.rs` also holds the tool-layer
   answer and refusal mapping they share;
   `runs` also serves the report page), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
@@ -289,6 +304,25 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb_mcp::tools::problems`, which refuses a run step (and, on MCP, a
   decision or recheck while a run of the playbook waits on a host task);
   reading is allowed anywhere.
+- **Repeats in session history** (`docs/DISCOVER.md`): `apb discover`,
+  MCP `playbook_discover` and the dashboard's Discover page read the Claude
+  Code and Codex history of named projects under named roots
+  (`discover.roots` in the global config; only the CLI takes a typed
+  directory: `--sessions` for a history root, `--project` for a
+  project), within fixed bounds and without following a
+  link, as argument-free step tokens, and offer the repeated n-grams as
+  drafts with scrubbed examples and `<project>/<file>` sources. No model
+  and no network call; results are signed and stored under the config
+  dir; a result names projects by workspace id, and a session is its
+  deepest registered project's. Saving goes through `capture_draft`
+  (`created_by: discover`), declining through the `suggestion_dismiss`
+  store, each once under the discovery store's lock
+  (`discover::store::resolve`). Every entry, reads included, is refused
+  from a run step (`tools::discover::guard`); HTTP answers only a client
+  straight from this machine (a route layer: loopback peer, loopback
+  `Host`, no forwarding header) and never takes or returns a path.
+  `rules/1` still reads tool facts from claude sessions only (codex facts
+  are deferred to a `rules/2`, see `docs/QUALITY.md`).
 
 - A **profile** is the single executor binding for an `agent_task` node: agent +
   model + ordered fallbacks + SOUL (role prompt) + skills, with a scope

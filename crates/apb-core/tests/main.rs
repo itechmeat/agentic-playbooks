@@ -26,6 +26,8 @@ mod agent_output_test;
 #[path = "suite/common.rs"]
 mod common;
 
+#[path = "suite/agent_actions_test.rs"]
+mod agent_actions_test;
 #[path = "suite/bundle_test.rs"]
 mod bundle_test;
 #[path = "suite/config_test.rs"]
@@ -35,10 +37,16 @@ mod content_snapshot_test;
 #[cfg(unix)]
 #[path = "suite/detect_test.rs"]
 mod detect_test;
+#[path = "suite/discover_test.rs"]
+mod discover_test;
+#[path = "suite/discover_walk_test.rs"]
+mod discover_walk_test;
 #[path = "suite/doctor_test.rs"]
 mod doctor_test;
 #[path = "suite/fsutil_test.rs"]
 mod fsutil_test;
+#[path = "suite/history_fixture.rs"]
+mod history_fixture;
 #[path = "suite/inbox_store_test.rs"]
 mod inbox_store_test;
 #[path = "suite/instruction_draft_test.rs"]

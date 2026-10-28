@@ -26,6 +26,10 @@ pub struct StatsRun {
     pub execution: Option<String>,
     /// Each node's profile and bundle digests, from the manifest.
     pub node_profiles: BTreeMap<String, crate::manifest::NodeDigests>,
+    /// The run's grades that count ([`crate::grade::trusted_grades_of`]),
+    /// read only by [`StatsRun::with_grades`]: the readers that need no
+    /// quality (estimates, retros) skip the grade files and their MACs.
+    pub grades: Vec<apb_core::quality::grade::Grade>,
 }
 
 impl StatsRun {
@@ -63,7 +67,14 @@ impl StatsRun {
             node_profiles: m
                 .map(crate::manifest::RunExecutionManifest::node_digests)
                 .unwrap_or_default(),
+            grades: Vec::new(),
         })
+    }
+
+    /// The run with its grades that count read from `run_dir`.
+    pub fn with_grades(mut self, run_dir: &Path) -> Self {
+        self.grades = crate::grade::trusted_grades_of(run_dir);
+        self
     }
 
     pub(crate) fn started_ms(&self) -> Option<u128> {

@@ -17,7 +17,7 @@ mod judge;
 mod known_problems;
 mod list;
 mod node_io;
-mod nodes;
+pub(crate) mod nodes;
 mod params;
 mod quality;
 mod templates;

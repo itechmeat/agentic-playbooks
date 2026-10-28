@@ -68,3 +68,43 @@ impl Drop for ConfigSandbox {
         }
     }
 }
+
+/// One environment variable set for a test and restored on drop, so a
+/// failed assert leaves no value behind for later tests. It borrows the
+/// [`env_lock`] guard, so the compiler keeps the lock held for as long as
+/// the variable is set.
+pub struct EnvVarGuard<'l> {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+    _lock: std::marker::PhantomData<&'l MutexGuard<'static, ()>>,
+}
+
+impl<'l> EnvVarGuard<'l> {
+    pub fn set(
+        _lock: &'l MutexGuard<'static, ()>,
+        key: &'static str,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: env mutation is serialized by ENV_LOCK, held through the
+        // borrowed guard.
+        unsafe { std::env::set_var(key, value) };
+        EnvVarGuard {
+            key,
+            prev,
+            _lock: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}

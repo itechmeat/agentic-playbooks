@@ -44,6 +44,11 @@ log behind.
   is collected across runs and shown to later runs' agents as facts to
   check. A problem whose source changed is rechecked first, and it closes
   only on a quote of the new source that shows the fix.
+- **Repeats in your session history.** `apb discover` reads the Claude Code
+  and Codex history of the projects you name, finds the step sequences your
+  sessions keep repeating (code work, mail or CRM routines alike) and offers
+  each as a playbook draft with its sources. No model, no network, no tool
+  arguments kept.
 - **Local-first.** No cloud, no accounts. State lives in `.apb/` next to your
   code; versions are immutable and diffable.
 
@@ -196,6 +201,7 @@ apb adopt           adoption readiness report for a playbook
 apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
 apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
 apb suggestions     list / allow / reset save-as-playbook suggestion declines
+apb discover        find step sequences your past agent sessions repeat; list / show / save / dismiss
 apb stats           cross-run metrics per playbook version and node (read-only)
 apb grade <run>     grade an ended run by rules (--model: by the decision model); --backfill <id> grades earlier runs
 apb candidate <id>  a candidate version compared with current by quality; --promote, --keep-current
@@ -270,6 +276,7 @@ still change between minor releases. Design specs live in
 - [Reference scenarios](docs/scenarios/README.md): realistic code and routine situations features are checked against, with the gaps they name
 - [Run stats](docs/STATS.md) and [evals](docs/EVALS.md): measuring playbooks across runs
 - [Run quality](docs/QUALITY.md): grading runs on quality criteria and promoting a candidate by quality
+- [Repeats in session history](docs/DISCOVER.md): step sequences past agent sessions repeat, offered as playbook drafts
 - [Known problems](docs/KNOWN-PROBLEMS.md): what earlier runs met with a playbook's tools, shown to later runs and rechecked when the source changes
 - [CI](docs/CI.md) and [deployment](docs/DEPLOYMENT.md): running apb in pipelines and on a server
 

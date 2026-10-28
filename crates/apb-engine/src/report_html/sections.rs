@@ -24,7 +24,7 @@ impl Writer {
         Markup::text(&self.redactor.redact(text))
     }
 
-    fn el(&self, tag: &'static str, class: Option<&'static str>, text: &str) -> Markup {
+    pub(super) fn el(&self, tag: &'static str, class: Option<&'static str>, text: &str) -> Markup {
         Markup::el(tag, class, self.text(text))
     }
 
@@ -48,7 +48,7 @@ impl Writer {
         clip(&line, JOURNAL_LINE_MAX_BYTES - 1024, 1024).replace('\n', " ")
     }
 
-    fn list(&self, items: &[String]) -> Markup {
+    pub(super) fn list(&self, items: &[String]) -> Markup {
         Markup::el(
             "ul",
             None,
@@ -57,7 +57,7 @@ impl Writer {
     }
 
     /// A table with a header row and one row per entry.
-    fn table<C: AsRef<str>>(&self, head: &[&str], rows: Vec<Vec<C>>) -> Markup {
+    pub(super) fn table<C: AsRef<str>>(&self, head: &[&str], rows: Vec<Vec<C>>) -> Markup {
         let th = Markup::concat(head.iter().map(|h| self.el("th", None, h)));
         let body = rows.into_iter().map(|r| {
             Markup::el(
@@ -81,7 +81,7 @@ impl Writer {
     }
 }
 
-fn section(title: &'static str, body: Markup) -> Markup {
+pub(super) fn section(title: &'static str, body: Markup) -> Markup {
     Markup::el(
         "section",
         None,
@@ -89,7 +89,7 @@ fn section(title: &'static str, body: Markup) -> Markup {
     )
 }
 
-fn empty(text: &'static str) -> Markup {
+pub(super) fn empty(text: &'static str) -> Markup {
     Markup::el("p", Some("empty"), Markup::text(text))
 }
 

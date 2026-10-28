@@ -7,11 +7,14 @@
 //! every cut stream, `transcript_incomplete` a final record that did not
 //! read whole) and from the record format itself (a torn last line). A
 //! [`View`] is the source parsed into numbered records: claude's session
-//! through [`claude`], every other stream line by line through [`plain`].
-//! Other agents keep their sessions in their own stores, so their views
-//! carry no tool calls; a reader that needs them gets "not enough data".
+//! through [`claude`], codex's `exec --json` stdout through [`codex`] (one
+//! record per line, with the tool facts its finished items carry), every
+//! other stream line by line through [`plain`]. Other agents keep their
+//! sessions in their own stores, so their views carry no tool calls; a
+//! reader that needs them gets "not enough data".
 
 pub mod claude;
+pub mod codex;
 pub mod plain;
 mod record;
 
@@ -98,6 +101,10 @@ impl Source {
     /// Whether the agent keeps a structured session apb can read.
     pub fn structured(&self) -> bool {
         self.stream == Stream::Session
+    }
+
+    fn is_codex(&self) -> bool {
+        apb_core::detect::canonical_agent_id(&self.agent) == "codex"
     }
 }
 
@@ -266,6 +273,7 @@ pub fn read(source: &Source) -> View {
     let text = String::from_utf8_lossy(&raw);
     let (records, parsed_whole) = match source.stream {
         Stream::Session => claude::parse(&text),
+        Stream::Stdout if source.is_codex() => codex::parse(&text),
         Stream::Stdout | Stream::Stderr => (plain::parse(&text), true),
     };
     View {
