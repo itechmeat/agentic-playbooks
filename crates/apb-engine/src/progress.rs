@@ -97,6 +97,42 @@ pub struct PendingReview {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub recommendation: Option<crate::event::ReviewRecommendation>,
+    /// For a publish gate: the exact plan the person consents to, with the
+    /// nonce a consent must carry. `None` for a `human_review` gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub publish: Option<crate::publish::view::PlanView>,
+}
+
+/// The pending block of an open publish gate: the request's own
+/// instruction (it names the plan and its nonce) and the plan.
+fn pending_publish(
+    events: &[crate::event::Event],
+    node: &apb_core::schema::Node,
+) -> Option<PendingReview> {
+    let plan = crate::publish::view::plan_of(events, &node.id)?;
+    let instruction = events.iter().rev().find_map(|e| match &e.payload {
+        crate::event::EventPayload::ReviewRequested {
+            node: n,
+            instruction,
+            ..
+        } if *n == node.id => Some(instruction.clone()),
+        _ => None,
+    })?;
+    let prompt = match &node.kind {
+        NodeKind::Publish { prompt, .. } => prompt.clone(),
+        _ => None,
+    };
+    Some(PendingReview {
+        node: node.id.clone(),
+        title: node.title.clone(),
+        instruction,
+        options: apb_core::publish::OPTIONS.map(str::to_string).to_vec(),
+        how_to_decide: instruction::publish_how_to_decide(&node.id, &plan.nonce),
+        prompt,
+        recommendation: None,
+        publish: Some(plan),
+    })
 }
 
 /// The recommendation carried by a gate's latest `review_requested`.
@@ -137,6 +173,7 @@ pub fn pending_review(
             .filter(|p| !p.is_empty())
             .map(str::to_string),
         recommendation: None,
+        publish: None,
     }
 }
 
@@ -817,7 +854,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         .nodes
         .iter()
         .filter_map(|n| match &n.kind {
-            NodeKind::HumanReview { .. } if review_pending(&n.id) => {
+            NodeKind::HumanReview { .. } | NodeKind::Publish { .. } if review_pending(&n.id) => {
                 Some((n, WaitingKind::HumanReview))
             }
             NodeKind::Wait { .. } if status(&n.id) == NodeStatus::Running => {
@@ -838,6 +875,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
                 }
                 Some(pr)
             }
+            NodeKind::Publish { .. } => pending_publish(events, n),
             _ => None,
         })
         .collect();
@@ -1295,6 +1333,7 @@ edges:
                     instruction: String::new(),
                     prompt: Some("Check the changelog first.".into()),
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
         ];
@@ -1341,6 +1380,7 @@ edges:
                         instruction: String::new(),
                         prompt: None,
                         recommendation: None,
+                        plan_digest: None,
                     },
                 ),
             ];
@@ -1375,6 +1415,7 @@ edges:
             instruction: String::new(),
             prompt: None,
             recommendation: None,
+            plan_digest: None,
         };
         let events: Vec<Event> = [
             EventPayload::RunStarted {
@@ -1433,6 +1474,7 @@ edges:
                     instruction: String::new(),
                     prompt: None,
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
         ];
@@ -1461,6 +1503,7 @@ edges:
                     instruction: String::new(),
                     prompt: None,
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
             ev(
@@ -1476,6 +1519,7 @@ edges:
                     node: "r".into(),
                     decision: "approve".into(),
                     note: String::new(),
+                    plan_digest: None,
                 },
             ),
         ];
@@ -1598,6 +1642,7 @@ edges:
                     instruction: String::new(),
                     prompt: None,
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
         ];

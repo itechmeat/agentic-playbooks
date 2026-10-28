@@ -30,7 +30,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   param rules V99 and V100, `quality` for the `quality:` block and the
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
-  `isolation` V112-V115; `nodes` also holds V68, ids that start with `@`
+  `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
+  V116-V120; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, and `precedence` combining them), the run
@@ -79,7 +80,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the pure contract of what this machine enforces, with its code and reason
   sentences; `isolation/paths` the extra paths an author may name and the
   credential locations nothing binds), the hardened git command every git
-  call apb makes goes through (`git.rs`), the built-in agents, one module each (`agents/`: the
+  call apb makes goes through (`git.rs`) and its one exception, the
+  transport-enabled builder of the publish step's push and remote listings
+  run from a shadow git directory (`git/transport.rs`), the publish step's
+  pure rules (`publish.rs`: options, node outputs, refusal codes and their
+  sentences, the plan digest and nonce; `publish/`: `url` the accepted push
+  URLs, `refname` the ref and remote name rules, `porcelain` a push's
+  outcome), the built-in agents, one module each (`agents/`: the
   registry `all` and `lookup`, `agent.rs` the `Agent` trait, its descriptor,
   capabilities and verified CLI version, `forms.rs` the launch, resume and
   fresh-session forms, `output.rs` the output readers with `promises` and
@@ -148,11 +155,18 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   node and list item (`exec_key.rs`), the host task store behind `run_task_submit` and
   `apb tasks` (`host_task.rs`), the baseline check's journal fold and its
   source reads (`baseline.rs`, `baseline/`: `read` a connector or script,
-  `project` the project's commands), the read-only goal and commits blocks of the
+  `project` the project's commands), the publish step (`publish/`: `pin`
+  the remote fixed before the first acting node, `plan` the read-only plan
+  and its refusals, `intent` the push in the send ledger with its `ref` mode
+  and reconcile, `push` the one networked git call, `view` the fold the run
+  surfaces show; the drive's arm is `scheduler/publish.rs`, its consent
+  waits in `scheduler/review_gate.rs`, shared with `human_review`), the
+  read-only goal and commits blocks of the
   run surfaces (`run_outcome.rs`; `run_outcome/`: `baseline` and `notes` the
   baseline and findings views, `calls` connector calls by what they say about
   the outcome, `claims` the evidence and gap types, `commits` the commits and their `Apb-Run` trailers, `intents`
-  the send intents and the unknown ones a person resolves, `lists` the list
+  the send intents and the unknown ones a person resolves, `publish` the
+  publish nodes' lines and done lines, `lists` the list
   nodes' counts, item-check evidence and items that need a look, `summary` the
   human outcome every surface shows and the "needs a look" marker), the
   cross-run metrics behind `apb stats`
@@ -279,7 +293,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   send intents and records a person's decision on an unknown one. `budget.rs`
   holds the budget flags of `apb run` and `apb resume`, the estimate printing
   and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb
-  memory`, `make_global.rs` is `apb make-global`, `import_preview.rs` prints
+  memory`, `make_global.rs` is `apb make-global`, `publish.rs` is `apb
+  publish show|approve|skip` (thin wrappers over the review channel), `import_preview.rs` prints
   the preview `apb import` shows before it asks for acceptance. `notify.rs`
   is `apb notify` and the notify flags of `apb run` (forwarded to the
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
@@ -405,6 +420,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   monitor and signature programs off, `GIT_*` removed), so they never run a
   program the tree names
   ([decision record 0009](docs/adr/0009-apb-git-never-runs-a-program-the-tree-names.md)).
+- The **publish step** (`docs/PUBLISH.md`): a push leaves a run only
+  through a `publish` node, after a person consented to the exact plan, and
+  a push whose result is unknown is never repeated on its own
+  ([decision record 0010](docs/adr/0010-a-push-leaves-only-through-the-publish-step.md)).
+  The remote is pinned before the first acting node; the plan is read-only;
+  the consent reuses the review channel, bound to the plan by a nonce
+  (`apb_engine::review::post_decision`, one check for every surface); the
+  push is recorded in the send ledger (`@git` intent, mode `ref`) before it
+  leaves, runs through `apb_core::git::transport` from a fresh shadow git
+  directory per call, and an unknown result is reconciled read-only or
+  resolved by a person (`apb intent resolve`). A dashboard without keys
+  refuses a publish consent; `publish_only` holds sub-playbook runs too. A publish node implies the effects
+  `network`, `external` and `irreversible` (`NodeKind::implied_effects`).
 - **Isolation** (`docs/ISOLATION.md`): a node's `isolation` is a contract
   apb checks before every spawn
   ([decision record 0008](docs/adr/0008-an-isolation-level-is-a-contract-checked-before-every-spawn.md)).

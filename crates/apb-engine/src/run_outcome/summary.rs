@@ -205,6 +205,8 @@ struct Inputs<'a> {
     notes: &'a RunNotes,
     calls: Vec<ClassifiedCall>,
     intents: Vec<RunIntent>,
+    /// The publish nodes, folded once at the same `now` as `intents`.
+    publish: Vec<super::RunPublish>,
     lists: &'a [RunList],
     list_outcomes: Vec<ListOutcome>,
     /// The run's id: the run directory's name.
@@ -228,6 +230,7 @@ impl OutcomeSummary {
         readout: &super::RunReadout,
         answer: Option<String>,
     ) -> Self {
+        let now = apb_core::clock::now_ms_u64();
         let inputs = Inputs {
             playbook: readout.playbook.as_ref(),
             view,
@@ -235,7 +238,8 @@ impl OutcomeSummary {
             baseline: readout.baseline.as_ref(),
             notes: &readout.notes,
             calls: classified_calls(run_dir, &view.events),
-            intents: outcome_intents(&view.events, apb_core::clock::now_ms_u64()),
+            intents: outcome_intents(&view.events, now),
+            publish: super::publish_from(&view.events, now),
             lists: &readout.lists,
             list_outcomes: list_outcomes(readout.playbook.as_ref(), &readout.lists),
             run_id: run_dir
@@ -393,6 +397,7 @@ impl Inputs<'_> {
             ));
         }
         out.extend(self.intents.iter().filter_map(RunIntent::done_line));
+        out.extend(self.publish.iter().flat_map(super::publish::done_lines));
         out
     }
 

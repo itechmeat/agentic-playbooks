@@ -37,6 +37,8 @@
 //!   discovery needs `rev-parse --path-format` and the driver listing
 //!   `config --show-scope`.
 
+pub mod transport;
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -47,7 +49,7 @@ pub const HARDENED_SETTINGS: [&str; 9] = [
     "core.hooksPath=/dev/null",
     "log.showSignature=false",
     "protocol.allow=never",
-    "credential.helper=",
+    NO_CREDENTIAL_HELPER,
     "core.askPass=",
     "diff.ignoreSubmodules=dirty",
     "status.submoduleSummary=false",
@@ -74,6 +76,11 @@ pub const MIN_GIT: (u32, u32) = (2, 31);
 /// The filter keys that name a program, emptied for a tree's own drivers.
 const FILTER_PROGRAMS: [&str; 3] = ["clean", "smudge", "process"];
 
+/// The `-c` setting that empties the credential helper list; the one
+/// hardened setting the transport builder leaves out
+/// ([`transport::command`]), so the operator's own helper works there.
+pub(crate) const NO_CREDENTIAL_HELPER: &str = "credential.helper=";
+
 /// The names of apb's own environment variables that start with `GIT_`.
 fn git_vars() -> Vec<OsString> {
     std::env::vars_os()
@@ -88,14 +95,21 @@ fn git_vars() -> Vec<OsString> {
 /// `core.hooksPath` at its own empty directory and allows the `file`
 /// transport). Use [`Repo`] for anything that reads a working tree.
 pub fn base() -> Command {
+    let mut cmd = bare_git();
+    for s in HARDENED_SETTINGS {
+        cmd.arg("-c").arg(s);
+    }
+    cmd
+}
+
+/// `git --no-pager` without any of apb's own `GIT_*` variables and without
+/// settings: the start of [`base`] and of [`transport::command`].
+fn bare_git() -> Command {
     let mut cmd = Command::new("git");
     for k in git_vars() {
         cmd.env_remove(k);
     }
     cmd.arg("--no-pager");
-    for s in HARDENED_SETTINGS {
-        cmd.arg("-c").arg(s);
-    }
     cmd
 }
 
@@ -277,6 +291,31 @@ impl Repo {
     pub fn read(&self, dir: &Path, args: &[&str]) -> Option<String> {
         stdout_of(self.command(dir).args(args))
     }
+
+    /// The stdout of `git -C dir <args>` with `input` on its stdin (a
+    /// `--stdin` revision list, a `cat-file --batch-check` query), `None` on
+    /// any failure. One process however many lines `input` holds.
+    pub fn read_input(&self, dir: &Path, args: &[&str], input: &str) -> Option<String> {
+        use std::io::Write;
+        let mut child = self
+            .command(dir)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        // A writer thread: git may fill its stdout before it read all of
+        // its stdin.
+        let mut stdin = child.stdin.take()?;
+        let input = input.to_string();
+        let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+        let out = child.wait_with_output().ok()?;
+        writer.join().ok()?.ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
 }
 
 /// A git directory may name another common directory only as a linked
@@ -350,6 +389,11 @@ pub fn command(dir: &Path) -> Option<Command> {
 /// (no git, not a repository apb runs git in, a non-zero exit).
 pub fn read(dir: &Path, args: &[&str]) -> Option<String> {
     Repo::locate(dir).ok()?.read(dir, args)
+}
+
+/// [`Repo::read_input`] for the repository `dir` belongs to.
+pub fn read_input(dir: &Path, args: &[&str], input: &str) -> Option<String> {
+    Repo::locate(dir).ok()?.read_input(dir, args, input)
 }
 
 /// Whether the hardened `git -C dir <args>` exits 0: `Ok(false)` outside a

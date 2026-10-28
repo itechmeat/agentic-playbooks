@@ -536,11 +536,20 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         recommendation: Option<ReviewRecommendation>,
+        /// The digest of the plan a `publish` gate asks about (see
+        /// [`EventPayload::PublishPlanned`]); `None` for every `human_review`
+        /// request. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_digest: Option<String>,
     },
     ReviewDecided {
         node: String,
         decision: String,
         note: String,
+        /// The digest of exactly the plan a `publish` decision answered;
+        /// `None` for every `human_review` decision. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_digest: Option<String>,
     },
     /// An open review request that will never be decided: a supervisor's
     /// directive (`node_retry`, `run_continue_from`) moved the run off the
@@ -862,6 +871,73 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
     },
+    /// A publish node's target, pinned before the first acting node runs
+    /// (see `crate::publish::pin`): the remote's push URL and the
+    /// repository's common directory, or `refusal` (a `publish` refusal
+    /// code) when the remote is missing or its URL is refused. Journaled
+    /// before that node's `node_started`, so its `node_finished` follows.
+    /// Nothing reads it to continue a run: an older apb, which rejects the
+    /// node type anyway, may skip it. Additive variant.
+    PublishTargetPinned {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        remote: String,
+        /// Credential-free by construction: a URL carrying credentials is
+        /// refused and never journaled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheme: Option<String>,
+        #[serde(default)]
+        common_dir: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<String>,
+    },
+    /// The exact plan a publish node asks a person to consent to: what is
+    /// pushed (`after` and the commits), where (`url`, `branch`), over what
+    /// the remote holds now (`remote_before`), and the digest and nonce a
+    /// consent must carry. Followed by `review_requested`, then by
+    /// `node_finished` or `run_paused`. Additive variant.
+    PublishPlanned {
+        #[serde(default)]
+        node: String,
+        /// The source node and the seq of the `artifacts_committed` the plan
+        /// publishes (0 without one).
+        #[serde(default)]
+        from: String,
+        #[serde(default)]
+        from_seq: u64,
+        /// The remote branch, short form.
+        #[serde(default)]
+        branch: String,
+        /// The local branch `from` committed on (`refs/heads/x`).
+        #[serde(default)]
+        local_branch: String,
+        #[serde(default)]
+        after: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_before: Option<String>,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        commits: Vec<PublishCommit>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: usize,
+        /// How many of the commits the push carries, listed or omitted, this
+        /// run made. Additive: 0 in older events, where only the listed
+        /// commits' `this_run` flags count.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        this_run: usize,
+        /// Commits this run made are already reachable from the remote:
+        /// something pushed them outside the publish step.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        outside_push_suspected: bool,
+        #[serde(default)]
+        plan_digest: String,
+        #[serde(default)]
+        nonce: String,
+    },
     /// A connector inbox read found unread events that retention had already
     /// dropped (the consumer's cursor pointed past the oldest stored event).
     /// `from` and `through` bound the lost sequence numbers inclusively.
@@ -1088,6 +1164,10 @@ pub enum EventPayload {
         commits: Vec<CommittedArtifact>,
         #[serde(default, skip_serializing_if = "is_zero")]
         omitted: usize,
+        /// The branch the node committed on (`refs/heads/x`); `None` on a
+        /// detached HEAD and in old events. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     /// One goal criterion checked when the run reached a finish node (C1):
     /// `check` is `script`, `marker` or `manual`; `status` is `passed`,
@@ -1691,6 +1771,19 @@ pub struct OutputLoss {
     pub kept_bytes: u64,
     #[serde(default)]
     pub dropped_bytes_at_least: u64,
+}
+
+/// One commit of an [`EventPayload::PublishPlanned`]: the commit, and
+/// whether this run made it (a commit that was already on the branch before
+/// the run rides along and is flagged).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishCommit {
+    #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
+    pub commit: CommittedArtifact,
+    #[serde(default)]
+    pub this_run: bool,
 }
 
 /// One commit of an [`EventPayload::ArtifactsCommitted`].

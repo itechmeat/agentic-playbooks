@@ -1029,7 +1029,9 @@ engine's resilience features exist to handle.
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
 `wait`, `finish`, `playbook` (runs another playbook as a sub-run, see
 "Sub-playbooks" below), `judge` (asks a decision model typed questions, see
-"Judge nodes and judge edges" below). A playbook needs exactly one `start` and
+"Judge nodes and judge edges" below), `publish` (pushes the commits a node
+made to a pinned remote, after a person consented to the exact plan). A
+playbook needs exactly one `start` and
 at least one `finish`. Edges connect node ids; conditional edges gate on node
 status, review status, an output substring match, one structured field of a
 node's output, or a decision model's yes/no answer about the source node's
@@ -1384,6 +1386,45 @@ edges:
   - { from: review,  to: publish, condition: { type: review_status, equals: approve } }
   - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
 ```
+
+## Publishing (the publish node)
+
+To push what a node committed, end the work with a `publish` node instead of
+asking an agent to push:
+
+```yaml
+- id: publish
+  type: publish
+  from: implement           # the agent_task or script node that committed
+  remote: origin            # pinned before the first acting node runs
+  branch: "apb/{{run.id}}"  # optional; default: the branch `from` committed on
+  timeout_seconds: 300      # optional, 1 to 3600
+  prompt: "Check the subject lines"   # optional, shown to the person as is
+```
+
+When the run reaches it, apb makes a read-only plan (the URL, the branch, the
+commits with whether this run made each one, what the remote holds now) and
+waits for a person. They consent to exactly that plan with its nonce
+(`apb publish show <run>` then `apb publish approve <run> --nonce <nonce>`,
+MCP `review_decide` with `nonce`, or "Publish exactly this" on the run page
+of a dashboard with keys; one without keys shows the approve command
+instead) or decline (`apb publish skip`). A plan that changed is asked about again;
+a push whose result is unknown fails the node with `publish_unknown` and is
+never repeated until a person runs `apb intent resolve`. The outputs are
+`published`, `skipped`, `nothing_to_publish`, `already_on_remote`,
+`publish_refused: <code>`, `publish_not_sent` and `publish_unknown`; the last
+three fail the node, so a `node_status` edge or `defaults.on_failure` handles
+them like any failed node.
+
+A publish node implies `effects: [network, external, irreversible]`, so the
+run needs the start consent. It takes no `list`, `fork`, `cache`,
+`success_check`, `route`, `completion_check`, `option_descriptions`,
+`auto_decide_ok`, `auto_decide` or `inputs`/`outputs` (V118, V72). Agents
+without `isolation: full` can still push by themselves with the operator's
+credentials (V119 warns, and names scripts and sub-playbooks too);
+`publish_only: true` at the playbook level makes that an error (V120) and
+holds every sub-playbook's run to it. Details, the refusal codes and what is guaranteed:
+docs/PUBLISH.md.
 
 ## Joining parallel branches
 
@@ -2598,7 +2639,9 @@ person, a `y` to the question `apb run` asks at a terminal or
 the run manifest records as `consent: { irreversible: true, by: ... }`. A
 connector function flagged `irreversible: true` that a node is granted counts
 the same way. A node that looks like a merge, push, deploy or publish step by
-its name but declares nothing is warning V90: declare it. A
+its name but declares nothing is warning V90: declare it. A `publish` node
+implies `network`, `external` and `irreversible` without a declaration
+(see "Publishing (the publish node)"). A
 trigger or a headless start without that consent is refused before the run is
 created. A sub-playbook inherits its parent's consent, so declaring
 `irreversible` on a child makes every parent that runs it ask once, at start.

@@ -224,6 +224,18 @@ pub(super) fn sends(w: &Writer, sends: &[RunIntent]) -> Markup {
     section("Sends", w.list(&lines))
 }
 
+/// The run's publish nodes, when it has any.
+pub(super) fn publish(w: &Writer, publish: &[crate::run_outcome::RunPublish]) -> Markup {
+    if publish.is_empty() {
+        return Markup::concat([]);
+    }
+    let lines: Vec<String> = publish
+        .iter()
+        .flat_map(crate::run_outcome::publish::lines)
+        .collect();
+    section("Publish", w.list(&lines))
+}
+
 /// The notifications a person subscribed to, and what was sent.
 pub(super) fn notifications(w: &Writer, notify: Option<&RunNotify>) -> Markup {
     let Some(n) = notify else {

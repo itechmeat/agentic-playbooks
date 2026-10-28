@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::{ToolError, resolve_run_dir};
-use apb_core::registry::is_safe_segment;
 use apb_engine::control::Control;
 use apb_engine::run_config::ChildExpectation;
 use apb_engine::run_view::read_events;
@@ -249,7 +248,7 @@ const STATUS_LOOK_ITEMS: usize = 50;
 const REPORT_LIST_ITEMS: usize = 500;
 
 /// The run's goal with the criteria results (C1), the commits its nodes made
-/// (C7), the inbox gaps its connector reads found, its baseline check, the
+/// (C7), its publish nodes, the inbox gaps its connector reads found, its baseline check, the
 /// findings and warnings its attempts reported and its lists, each only when
 /// there is one:
 /// a run of a playbook without a goal on a tree without commits reads as
@@ -267,6 +266,12 @@ fn add_outcome_blocks(
     let commits = view.commits();
     if !commits.is_empty() {
         out["commits"] = json!(commits);
+    }
+    // Each publish node: the pinned target, the latest plan, whether a
+    // consent is awaited, the push's ledger state and the result.
+    let publish = view.publish();
+    if !publish.is_empty() {
+        out["publish"] = json!(publish);
     }
     // Issue #193: the model each attempt actually ran on.
     let models = apb_engine::attempt_models::run_attempt_models(dir, &view.events);
@@ -486,9 +491,7 @@ pub fn run_wait_result(
             Some(apb_engine::run_wait::NeedsInput::Question) => {
                 "answer pending_question with run_answer, then call run_wait again"
             }
-            Some(apb_engine::run_wait::NeedsInput::Review) => {
-                "relay pending_review to the user, record it with review_decide, then call run_wait again"
-            }
+            Some(apb_engine::run_wait::NeedsInput::Review) => res.review_next(),
             Some(apb_engine::run_wait::NeedsInput::HostTask) => HOST_TASK_NEXT,
             _ => "the run is parked for a supervisor decision (pending_supervisor)",
         },
@@ -833,7 +836,10 @@ pub fn run_answer(
     Ok(json!({ "posted_seq": seq }))
 }
 
-/// A human_review node decision: writes a command into the run's reviews.jsonl channel.
+/// A gate decision: writes a command into the run's reviews.jsonl channel.
+/// For a `publish` node, `nonce` is the nonce of the plan the person saw
+/// (`pending_review.publish.nonce`); the engine refuses a stale or missing
+/// one for `publish`, and stamps a `skip` without one with the open plan's.
 /// A regular run tool (not supervised): takes run_id directly.
 pub fn review_decide(
     root: &Path,
@@ -841,21 +847,17 @@ pub fn review_decide(
     node: &str,
     decision: &str,
     note: &str,
+    nonce: Option<&str>,
 ) -> Result<Value, ToolError> {
-    if !is_safe_segment(run_id) {
-        return Err(ToolError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(ToolError::NotFound(run_id.to_string()));
-    }
-    let seq = apb_engine::post_review(
+    let run_dir = resolve_run_dir(root, run_id)?;
+    let seq = apb_engine::review::post_decision(
         &run_dir,
         apb_engine::ReviewCommand {
             node: node.to_string(),
             decision: decision.to_string(),
             note: note.to_string(),
         },
+        nonce.map(str::to_string),
     )?;
     Ok(json!({ "posted_seq": seq }))
 }

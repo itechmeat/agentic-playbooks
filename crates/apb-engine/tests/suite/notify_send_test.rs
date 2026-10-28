@@ -502,6 +502,7 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
                 instruction: "Check the diff line by line".into(),
                 prompt: Some("Check the diff line by line".into()),
                 recommendation: None,
+                plan_digest: None,
             },
         ),
     ];
@@ -738,6 +739,7 @@ fn a_review_title_reaches_a_notice_as_plain_text() {
                 instruction: String::new(),
                 prompt: None,
                 recommendation: None,
+                plan_digest: None,
             },
         ),
     ];

@@ -48,6 +48,7 @@ pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
             sections::lists(&w, &report.outcome),
             quality::grades(&w, &report.grades, report.grades_left_out),
             quality::known_problems(&w, report.known_problems.as_ref()),
+            sections::publish(&w, &report.publish),
             sections::sends(&w, &report.sends),
             sections::notifications(&w, report.notify.as_ref()),
             sections::answer(&w, report.outcome.agent_summary.as_deref()),

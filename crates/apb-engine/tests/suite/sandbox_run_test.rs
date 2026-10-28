@@ -807,3 +807,34 @@ fn a_success_check_that_breaks_the_repository_fails_the_node_at_once() {
         "no retry on a tree apb could not restore"
     );
 }
+
+/// Under `publish_only` an attempt whose profile allowlist would pass a
+/// credential-shaped variable is refused before the agent starts: that
+/// variable could push by itself.
+#[test]
+fn publish_only_refuses_an_attempt_that_would_pass_a_credential() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let f = fixture(
+        "{ level: full, network: none }",
+        "touch \"$(dirname \"$0\")/ran\"; echo done",
+    );
+    let pb = f.root.join(".apb/playbooks/iso/1.0.0/playbook.yaml");
+    let yaml = fs::read_to_string(&pb)
+        .unwrap()
+        .replace("version: 1.0.0\n", "version: 1.0.0\npublish_only: true\n");
+    fs::write(&pb, yaml).unwrap();
+    let prof = f.root.join(".apb/profiles/main/profile.yaml");
+    let mut profile = fs::read_to_string(&prof).unwrap();
+    profile.push_str("process_env:\n  policy: allowlist\n  allow: [GH_TOKEN]\n");
+    fs::write(&prof, profile).unwrap();
+    let _env = env(&f);
+    let _token = EnvVar::set("GH_TOKEN", "not-a-real-token");
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let (_, output) = node_output(&events(&f.root, &res.run_id), "work").unwrap();
+    assert!(output.contains("credentials_passed"), "{output}");
+    assert!(!f.stub.with_file_name("ran").exists(), "the agent ran");
+}

@@ -35,7 +35,7 @@ const REACHES_OUT: [Effect; 2] = [Effect::Network, Effect::External];
 pub fn node_acts(node: &Node) -> bool {
     node.kind.takes_workdir_lock()
         || !node.kind.connector_bindings().is_empty()
-        || node.effects.iter().any(|e| *e != Effect::FsRead)
+        || node.own_effects().iter().any(|e| *e != Effect::FsRead)
 }
 
 /// Effects conservatively derived from the definition. An acting node - one
@@ -59,6 +59,7 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
         if !n.kind.connector_bindings().is_empty() {
             set.extend(REACHES_OUT);
         }
+        set.extend(n.kind.implied_effects().iter().copied());
     }
     for c in playbook.baseline_checks() {
         match c.source() {
@@ -80,7 +81,7 @@ pub fn effective(playbook: &Playbook) -> BTreeSet<Effect> {
     set.extend(playbook.effects.iter().copied());
     // A node's own declaration (0.23.0) widens the same way.
     for n in &playbook.nodes {
-        set.extend(n.effects.iter().copied());
+        set.extend(n.own_effects());
     }
     set
 }

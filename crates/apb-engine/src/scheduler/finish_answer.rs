@@ -89,7 +89,11 @@ fn leaves_the_answer(p: &EventPayload, notices: &HashSet<&str>) -> bool {
         | EventPayload::EnvironmentDriftAccepted { .. }
         | EventPayload::BaselineObserved { .. }
         | EventPayload::BaselineCompared { .. }
-        | EventPayload::NotifySet { .. } => true,
+        | EventPayload::NotifySet { .. }
+        // A publish target is pinned before any node acts.
+        | EventPayload::PublishTargetPinned { .. } => true,
+        // A plan leads to a push or a decision: news for the answer.
+        EventPayload::PublishPlanned { .. } => false,
         EventPayload::SendIntentRecorded { node, .. }
         | EventPayload::ConnectorCall { node_id: node, .. } => node == NOTIFY_SITE,
         EventPayload::SendIntentSettled { intent, .. } => notices.contains(intent.as_str()),

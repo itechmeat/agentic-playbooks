@@ -47,6 +47,7 @@ pub mod pause;
 pub mod people;
 pub mod proc;
 pub mod progress;
+pub mod publish;
 pub mod question;
 pub(crate) mod redact;
 pub mod report_html;

@@ -496,6 +496,7 @@
               {revision}
               workspace={isNew ? targetWorkspace : workspace}
               nodes={lastValidModel?.nodes ?? []}
+              publishOnly={lastValidModel?.publish_only === true}
             />
           </div>
         </div>

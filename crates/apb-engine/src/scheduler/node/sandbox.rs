@@ -45,6 +45,7 @@ impl<'a> NodeIsolation<'a> {
         spec: Option<&'a IsolationSpec>,
         agents: impl Iterator<Item = &'b str>,
         host_mode: bool,
+        publish_only: bool,
     ) -> Self {
         let spec = spec.filter(|s| s.is_isolated());
         let facts = spec.map(|s| NodeFacts {
@@ -52,6 +53,7 @@ impl<'a> NodeIsolation<'a> {
             network: s.network(),
             agents_without_needs: without_needs(agents),
             host_mode,
+            publish_only,
         });
         NodeIsolation { spec, facts }
     }
@@ -198,6 +200,13 @@ pub(super) fn place(iso: &NodeIsolation, input: &AttemptInput) -> Result<Placed,
             .unwrap_or_default();
         apb_core::process_env::passed_credentials(p, &logins)
     });
+    if let Some(why) = iso
+        .facts
+        .as_ref()
+        .and_then(|f| contract::credentials_refusal(f, &passed))
+    {
+        return Ok(Placed::Refused(unavailable(&[why])));
+    }
     if contract.backend == Backend::None {
         return unsandboxed(input, spec, &contract, &passed);
     }

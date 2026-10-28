@@ -292,17 +292,21 @@ export const postRunNotify = (id: string, notify: boolean, workspace = '') =>
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ notify }) },
   )
 
+// POST /api/runs/{id}/review: a gate decision. `nonce` answers a publish
+// gate only: the nonce of the plan the person saw (a stale one is a 409
+// naming the current plan).
 export const postReview = (
   id: string,
   node: string,
   decision: string,
   note = '',
   workspace = '',
+  nonce?: string,
 ) =>
   requestJson<{ posted_seq: number }>(`${run(id)}/review${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({ node, decision, note }),
+    body: JSON.stringify(nonce ? { node, decision, note, nonce } : { node, decision, note }),
   })
 
 // POST /api/runs/{id}/pause (issue #200): the Pause button. `mode` is

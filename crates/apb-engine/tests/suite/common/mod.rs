@@ -8,6 +8,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use apb_engine::event::{Event, EventPayload};
 
+#[cfg(unix)]
+pub mod bare_remote;
+
 /// One process-wide lock serializing every test that mutates shared env
 /// (`APB_AGENT_CMD`, `APB_CONFIG_DIR`, `HOME`, `PATH`,
 /// `APB_SUPERVISOR_HEARTBEAT_MS`, `APB_TEST_DUMP`, ...). Before consolidation

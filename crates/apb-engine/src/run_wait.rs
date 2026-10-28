@@ -125,7 +125,27 @@ pub struct RunWaitResult {
     pub view: std::sync::Arc<crate::run_view::RunView>,
 }
 
+/// What a caller does at an open human-review gate.
+pub const REVIEW_NEXT: &str =
+    "relay pending_review to the user, record it with review_decide, then call run_wait again";
+
+/// What a caller does at an open publish gate: the person consents to the
+/// exact plan, so the plan is shown before the nonce is passed on.
+pub const PUBLISH_NEXT: &str = "relay pending_review.publish (the exact plan: URL, branch, commits, remote state) to the user; only after they saw it, record their decision with review_decide and the plan's nonce, then call run_wait again";
+
 impl RunWaitResult {
+    /// The next step at the open review gate the wait stopped on:
+    /// [`PUBLISH_NEXT`] for a publish gate, else [`REVIEW_NEXT`].
+    pub fn review_next(&self) -> &'static str {
+        let publish = self
+            .view
+            .progress
+            .as_ref()
+            .and_then(|p| p.pending_review.as_ref())
+            .is_some_and(|r| r.publish.is_some());
+        if publish { PUBLISH_NEXT } else { REVIEW_NEXT }
+    }
+
     /// The pause of a paused (or pausing) run: reason, who, since and until.
     pub fn pause(&self) -> Option<&crate::pause::PauseInfo> {
         self.view.pause()

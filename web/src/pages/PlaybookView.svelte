@@ -227,6 +227,7 @@
   // same form the editor uses, read-only, so a prompt can be read here without
   // switching to edit mode.
   let playbookNodes = $state.raw<PlaybookNodeType[]>([])
+  let publishOnly = $state(false)
   let selectedNodeId = $state<string | null>(null)
   const selectedNode = $derived(
     selectedNodeId ? (playbookNodes.find((n) => n.id === selectedNodeId) ?? null) : null,
@@ -322,6 +323,7 @@
       nodes = flow.nodes
       edges = flow.edges
       playbookNodes = detail.playbook.nodes
+      publishOnly = detail.playbook.publish_only === true
       yamlText = detail.yaml
       name = detail.playbook.name || detail.id
       version = detail.version
@@ -456,6 +458,7 @@
     nodes = []
     edges = []
     playbookNodes = []
+    publishOnly = false
     selectedNodeId = null
     versions = []
     candidate = null
@@ -646,7 +649,7 @@
         </div>
         <div class="min-h-0 flex-1 overflow-auto">
           <div class="mx-auto w-full max-w-5xl pb-6">
-            <NodePanel {id} node={selectedNode} {workspace} nodes={playbookNodes} readonly />
+            <NodePanel {id} node={selectedNode} {workspace} nodes={playbookNodes} {publishOnly} readonly />
           </div>
         </div>
       </div>

@@ -153,14 +153,18 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
     }
 }
 
-/// Whether a template reference names a plain value a path or a key can be
-/// built from: `params.<declared>`, `run.instruction`, a node's output (or
-/// one field of it), report or review decision, of a node that exists. The
-/// set `workdir` (V47) and `cache.key` (V49) templates may read.
-fn value_ref_ok(playbook: &Playbook, cap: &str) -> bool {
+/// The `run.*` value a `workdir` (V47) or `cache.key` (V49) may read.
+pub(super) const PATH_RUN_VALUES: [&str; 1] = ["instruction"];
+
+/// Whether a template reference names a plain value a path, a key or a
+/// branch can be built from: `params.<declared>`, one of `run_values`
+/// (`run.<name>`), a node's output (or one field of it), report or review
+/// decision, of a node that exists. `workdir` (V47) and `cache.key` (V49)
+/// pass [`PATH_RUN_VALUES`]; a publish `branch` (V117) passes `id`.
+pub(super) fn value_ref_ok(playbook: &Playbook, cap: &str, run_values: &[&str]) -> bool {
     match cap.split('.').collect::<Vec<&str>>().as_slice() {
         ["params", p] => playbook.params.iter().any(|d| d.name == *p),
-        ["run", "instruction"] => true,
+        ["run", v] => run_values.contains(v),
         ["nodes", id, "output" | "report" | "review_decision"] => playbook.node(id).is_some(),
         ["nodes", id, "output" | "report", field] => {
             playbook.node(id).is_some() && !field.trim().is_empty()
@@ -176,7 +180,7 @@ fn value_ref_ok(playbook: &Playbook, cap: &str) -> bool {
 pub(crate) fn check_workdir(playbook: &Playbook, r: &mut ValidationReport) {
     for (owner, text) in workdir_texts(playbook) {
         for cap in template_refs(text) {
-            if !value_ref_ok(playbook, &cap) {
+            if !value_ref_ok(playbook, &cap, &PATH_RUN_VALUES) {
                 r.error(
                     "V47",
                     Some(owner),
@@ -262,7 +266,7 @@ pub(crate) fn check_cache_key(playbook: &Playbook, r: &mut ValidationReport) {
         };
         let refs = template_refs(key);
         for cap in &refs {
-            if !value_ref_ok(playbook, cap) {
+            if !value_ref_ok(playbook, cap, &PATH_RUN_VALUES) {
                 r.error(
                     "V49",
                     Some(&node.id),

@@ -101,11 +101,19 @@ fn a_committing_node_on_a_git_tree_journals_its_commits_and_the_run_id() {
         after,
         commits,
         omitted,
+        branch,
     } = found[0]
     else {
         unreachable!()
     };
     assert_eq!(node, "commit");
+    // The branch the node committed on is journaled with the commits.
+    assert!(
+        branch
+            .as_deref()
+            .is_some_and(|b| b.starts_with("refs/heads/")),
+        "{branch:?}"
+    );
     assert_ne!(before, after);
     assert_eq!(*omitted, 0);
     assert_eq!(commits.len(), 1);

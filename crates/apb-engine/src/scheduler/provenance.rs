@@ -34,6 +34,16 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     apb_core::git::read(dir, args)
 }
 
+/// `git -C dir <args> --stdin` with the revisions `revs` on its stdin, one
+/// per line; `None` on any failure.
+pub(crate) fn git_revs(dir: &Path, args: &[&str], revs: &[&str]) -> Option<String> {
+    let mut all = args.to_vec();
+    all.push("--stdin");
+    let mut input = revs.join("\n");
+    input.push('\n');
+    apb_core::git::read_input(dir, &all, &input)
+}
+
 /// The commit `HEAD` names in `dir`, `None` outside a git work tree or on an
 /// unborn branch.
 pub(crate) fn head(dir: &Path) -> Option<String> {
@@ -44,7 +54,7 @@ pub(crate) fn head(dir: &Path) -> Option<String> {
 
 /// Whether `before` is an ancestor of (or equal to) `after`: the node's
 /// commits were added on top of where it started.
-fn is_ancestor(dir: &Path, before: &str, after: &str) -> bool {
+pub(crate) fn is_ancestor(dir: &Path, before: &str, after: &str) -> bool {
     apb_core::git::succeeds(dir, &["merge-base", "--is-ancestor", before, after]).unwrap_or(false)
 }
 
@@ -58,12 +68,20 @@ pub(crate) fn commits_between(
     before: &str,
     after: &str,
 ) -> (Vec<CommittedArtifact>, usize) {
-    let range = format!("{before}..{after}");
-    let total = git(dir, &["rev-list", "--count", &range])
+    commits_of(dir, &[&format!("{before}..{after}")])
+}
+
+/// The commits git's revision arguments `revs` select (`after`, `^base`,
+/// `a..b`), newest first, at most [`MAX_LISTED_COMMITS`], and how many there
+/// are in all, each with its `Apb-Run` trailer values when git reads them.
+/// Every revision is a sha or a range of shas, never an option; they reach
+/// git on its stdin, so a remote with many heads never grows the argv.
+pub(crate) fn commits_of(dir: &Path, revs: &[&str]) -> (Vec<CommittedArtifact>, usize) {
+    let total = git_revs(dir, &["rev-list", "--count"], revs)
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    let listed = list_commits(dir, &range, true)
-        .or_else(|| list_commits(dir, &range, false))
+    let listed = list_commits(dir, revs, true)
+        .or_else(|| list_commits(dir, revs, false))
         .unwrap_or_default();
     (listed, total)
 }
@@ -73,16 +91,16 @@ pub(crate) fn commits_between(
 const TRAILER_FORMAT: &str =
     "--format=%H%x09%(trailers:key=Apb-Run,valueonly,unfold,separator=%x1f)%x09%s";
 
-/// `git log` over `range`, at most [`MAX_LISTED_COMMITS`], with the trailer
+/// `git log` over `revs`, at most [`MAX_LISTED_COMMITS`], with the trailer
 /// values when `trailers`; `None` when git fails or cannot read trailers.
-fn list_commits(dir: &Path, range: &str, trailers: bool) -> Option<Vec<CommittedArtifact>> {
+fn list_commits(dir: &Path, revs: &[&str], trailers: bool) -> Option<Vec<CommittedArtifact>> {
     let limit = format!("--max-count={MAX_LISTED_COMMITS}");
     let format = if trailers {
         TRAILER_FORMAT
     } else {
         "--format=%H%x09%s"
     };
-    let text = git(dir, &["log", "--no-show-signature", &limit, format, range])?;
+    let text = git_revs(dir, &["log", "--no-show-signature", &limit, format], revs)?;
     parse_log(&text, trailers)
 }
 
@@ -123,8 +141,9 @@ fn parse_log(text: &str, trailers: bool) -> Option<Vec<CommittedArtifact>> {
 }
 
 /// The directory whose `HEAD` a node's commits land in: the node's own
-/// `workdir` when it renders, else the run's working tree.
-fn node_tree(
+/// `workdir` when it renders, else the run's working tree. The publish
+/// plan resolves its source's tree through this too.
+pub(crate) fn node_tree(
     playbook: &Playbook,
     node_id: &str,
     workdir: &Path,
@@ -146,7 +165,7 @@ pub(crate) struct Tracker {
 }
 
 /// The branch `HEAD` names in `dir`, empty when it is detached.
-fn branch(dir: &Path) -> String {
+pub(crate) fn branch(dir: &Path) -> String {
     git(dir, &["symbolic-ref", "-q", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
@@ -244,6 +263,7 @@ impl Tracker {
             after,
             omitted: total.saturating_sub(commits.len()),
             commits,
+            branch: (!self.branch.is_empty()).then_some(self.branch),
         })
     }
 }
@@ -320,7 +340,7 @@ mod tests {
         assert_eq!(commits[0].apb_run, Some(vec!["r1".to_string()]));
         assert_eq!(commits[1].apb_run, Some(Vec::new()));
         // Without trailers (a git too old to read them) nothing is claimed.
-        let plain = list_commits(d, &format!("{before}..{after}"), false).unwrap();
+        let plain = list_commits(d, &[&format!("{before}..{after}")], false).unwrap();
         assert_eq!(plain[0].subject, "two");
         assert_eq!(plain[0].apb_run, None);
         // A reset back to an older commit is not a forward move.

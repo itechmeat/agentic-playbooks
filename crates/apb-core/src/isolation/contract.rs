@@ -80,6 +80,9 @@ pub struct NodeFacts {
     pub agents_without_needs: Vec<String>,
     /// The run executes its agent steps in the host (host mode).
     pub host_mode: bool,
+    /// The playbook is `publish_only`: no credential may reach an agent, so
+    /// the publish step stays the only way a push leaves the run.
+    pub publish_only: bool,
 }
 
 /// The mechanism that enforces the contract.
@@ -261,6 +264,7 @@ pub enum ReasonCode {
     HostMode,
     Disabled,
     SandboxSetup,
+    CredentialsPassed,
 }
 
 impl ReasonCode {
@@ -276,6 +280,7 @@ impl ReasonCode {
             ReasonCode::HostMode => "host_mode",
             ReasonCode::Disabled => "disabled",
             ReasonCode::SandboxSetup => "sandbox_setup",
+            ReasonCode::CredentialsPassed => "credentials_passed",
         }
     }
 
@@ -305,12 +310,15 @@ impl ReasonCode {
             ReasonCode::SandboxSetup => {
                 "The sandbox of this attempt could not be set up (a declared path, the git directory, the home or bwrap itself)."
             }
+            ReasonCode::CredentialsPassed => {
+                "Under publish_only, a credential-shaped variable the allowlist names would reach the agent."
+            }
         }
     }
 }
 
 /// Every reason, for the exported table.
-pub const ALL_REASONS: [ReasonCode; 9] = [
+pub const ALL_REASONS: [ReasonCode; 10] = [
     ReasonCode::OsUnsupported,
     ReasonCode::BwrapMissing,
     ReasonCode::BwrapSetuid,
@@ -320,6 +328,7 @@ pub const ALL_REASONS: [ReasonCode; 9] = [
     ReasonCode::HostMode,
     ReasonCode::Disabled,
     ReasonCode::SandboxSetup,
+    ReasonCode::CredentialsPassed,
 ];
 
 /// The sentence of the `credentials.env_passed:<NAME>` limit.
@@ -456,6 +465,14 @@ pub fn without_sandbox(level: Level, reasons: Vec<Reason>) -> Contract {
             ..Contract::untouched()
         },
     }
+}
+
+/// Under `publish_only`, the limit `credentials.env_passed:<NAME>` is a
+/// refusal instead: the attempt must not run when its plan still passes a
+/// credential-shaped variable (`passed`, from the attempt's env plan).
+pub fn credentials_refusal(node: &NodeFacts, passed: &[String]) -> Option<Reason> {
+    (node.publish_only && !passed.is_empty())
+        .then(|| Reason::new(ReasonCode::CredentialsPassed, passed.join(", ")))
 }
 
 /// The contract one node gets on this machine.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseDocument, type Document } from 'yaml'
 import {
+  EDITOR_NODE_KINDS,
   addEdge,
   addNode,
   removeEdge,
@@ -94,6 +95,38 @@ describe('addNode', () => {
     const before = doc.toString()
     addNode(doc, 'script', 'lint')
     expect(doc.toString()).toBe(before)
+  })
+
+  it('starts a publish node from the last node that commits and origin', () => {
+    const next = addNode(docOf(FULL_YAML), 'publish', 'ship')
+    const ship = items(next, 'nodes').find((n) => n.get('id') === 'ship')!
+    expect(ship.get('type')).toBe('publish')
+    expect(ship.get('from')).toBe('plan')
+    expect(ship.get('remote')).toBe('origin')
+    expect(EDITOR_NODE_KINDS).toContain('publish')
+  })
+
+  it('starts a publish node from the last plain source, past list nodes', () => {
+    const yaml = [
+      'id: demo',
+      'nodes:',
+      '  - { id: start, type: start }',
+      '  - { id: impl, type: agent_task, prompt: x }',
+      '  - { id: build, type: script, script: b.sh }',
+      '  - { id: each, type: agent_task, prompt: y, list: { items: { inline: [] } } }',
+      '  - just a string',
+      '',
+    ].join('\n')
+    const ship = items(addNode(docOf(yaml), 'publish', 'ship'), 'nodes').find((n) => n.get?.('id') === 'ship')!
+    expect(ship.get('from')).toBe('build')
+  })
+
+  it('starts a publish node with only the remote when nothing can commit', () => {
+    const ship = items(addNode(docOf('id: demo\nnodes:\n  - { id: start, type: start }\n'), 'publish', 'ship'), 'nodes').find(
+      (n) => n.get?.('id') === 'ship',
+    )!
+    expect(ship.get('from')).toBeUndefined()
+    expect(ship.get('remote')).toBe('origin')
   })
 
   it('creates nodes array if missing', () => {

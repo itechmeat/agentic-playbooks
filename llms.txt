@@ -101,7 +101,8 @@ apb pause <run>     pause a run (--drain default, --now, --reason, --until, --ke
 apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
 apb stop <run>      stop a run
 apb intent          list a run's send intents, or resolve one whose outcome is not known (--sent | --not-sent)
-apb review          decide a pending human_review node
+apb review          decide a pending human_review or publish node (--nonce: the plan's nonce, publish only)
+apb publish         a run's publish gate: show the exact plan, approve it by its nonce, or skip the push (show | approve --nonce N | skip)
 apb answer          answer an interactive node's pending question
 apb tasks           list or submit host tasks (host execution mode; --notes: findings and warnings)
 apb note            post a supervisor note to a run

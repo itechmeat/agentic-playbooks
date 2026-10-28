@@ -10,8 +10,8 @@ use apb_engine::control::Control;
 use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
-    ReviewCommand, RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_review,
-    post_supervisor_command, prepare_supervised_background, run, stop_run,
+    RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_supervisor_command,
+    prepare_supervised_background, run, stop_run,
 };
 
 use crate::util::{QUESTION_TEXT_MAX, open_registry, sanitize_for_terminal};
@@ -1417,6 +1417,16 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
+    // Each publish node: target, plan, consent, push and result
+    // (`apb publish show` prints the full plan).
+    for p in view.publish() {
+        for line in apb_engine::run_outcome::publish::lines(&p) {
+            println!(
+                "  publish {}",
+                sanitize_for_terminal(&line, QUESTION_TEXT_MAX * 2)
+            );
+        }
+    }
     // --- end of the 0.23.0 blocks ---
     // The human outcome: done, verified, not verified (inbox gaps among
     // them), findings, warnings, the baseline and the agent's own summary.
@@ -1825,34 +1835,31 @@ pub(crate) fn note_cmd(root: &Path, run_id: &str, text: &str) -> ExitCode {
     }
 }
 
+/// Posts a gate decision through the one review channel (the MCP
+/// `review_decide` path): the node check, the publish nonce check, the
+/// one-decision rule and the refusal of a `publish` inside a run step all
+/// live in `apb_engine::review`. `nonce` answers a publish gate only.
 pub(crate) fn review_cmd(
     root: &Path,
     run_id: &str,
     node_id: &str,
     decision: &str,
     note: &str,
+    nonce: Option<&str>,
 ) -> ExitCode {
-    if !is_safe_segment(run_id) {
-        eprintln!("review failed: invalid run id");
-        return ExitCode::from(2);
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        eprintln!("review failed: run `{run_id}` not found");
-        return ExitCode::from(2);
-    }
-    let cmd = ReviewCommand {
-        node: node_id.to_string(),
-        decision: decision.to_string(),
-        note: note.to_string(),
-    };
-    match post_review(&run_dir, cmd) {
-        Ok(seq) => {
-            println!("review posted for {run_id}/{node_id}: {decision} (seq {seq})");
+    match apb_mcp::tools::review_decide(root, run_id, node_id, decision, note, nonce) {
+        Ok(v) => {
+            println!(
+                "review posted for {run_id}/{node_id}: {decision} (seq {})",
+                v["posted_seq"]
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("review failed: {e}");
+            eprintln!(
+                "review failed: {}",
+                sanitize_for_terminal(&e.to_string(), QUESTION_TEXT_MAX * 3)
+            );
             ExitCode::from(2)
         }
     }

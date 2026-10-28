@@ -58,6 +58,17 @@ What is guaranteed, for every git apb runs on a repository through
   and a caller for whom `false` is the permissive answer fails closed (the
   known-problem source reader then treats every file as git-ignored).
 
+The one exception is the publish step's transport builder,
+`apb_core::git::transport` (`crates/apb-core/src/git/transport.rs`): its
+push and its remote listings keep every setting above except the emptied
+credential helper, so the operator's own helper from their global or system
+config works, and allow exactly one transport, the push URL's own scheme.
+They run from a shadow git directory made fresh for each call
+(`runs/<id>/publish/shadow-<random>`, an empty bare repository reaching the
+tree's objects through its alternates file), so the tree's local config,
+hooks, `url.*.insteadOf` and `url.*.pushInsteadOf` never apply to them.
+Decision record 0010 covers that step.
+
 A caller may add stricter settings after these (the eval runner points hooks
 at its own empty directory, reads no system config and allows only the
 `file` transport). The eval runner's git after an agent reads blobs only

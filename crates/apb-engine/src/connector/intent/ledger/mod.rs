@@ -40,6 +40,9 @@ pub enum IntentState {
 pub const CONFIRMED: &str = "confirmed";
 pub const NOT_SENT: &str = "not_sent";
 pub const UNKNOWN: &str = "unknown";
+/// The state name of a send recorded and not settled yet (never written as
+/// an outcome).
+pub const PENDING: &str = "pending";
 
 /// The source of a pending intent read as unknown because its sender is gone
 /// or its deadline passed.
@@ -471,7 +474,11 @@ fn members_verdict<'a>(
         })
 }
 
-/// [`effective_state`] with the process check given.
+/// [`effective_state`] with the process check given. A `ref` send (a git
+/// push) outlives the process that recorded it: it runs in its own session,
+/// so it may still be updating the remote after apb ended. Such a record
+/// stays pending until its deadline, and a reconcile never reads the remote
+/// while the push may still move it.
 fn effective_state_with(
     rec: &IntentRecord,
     now_ms: u64,
@@ -481,7 +488,7 @@ fn effective_state_with(
         IntentState::Pending { pid, deadline_ms } => {
             let detail = if now_ms > *deadline_ms {
                 Some("the call's deadline passed with no answer recorded".to_string())
-            } else if !alive(*pid) {
+            } else if rec.mode != IdempotencyMode::Ref && !alive(*pid) {
                 Some("the sending process ended with no answer recorded".to_string())
             } else {
                 None
@@ -603,7 +610,9 @@ fn decide_unknown(rec: &IntentRecord, tip: &IntentRecord, q: &AdmitQuery<'_>) ->
                 }
             }
         }
-        IdempotencyMode::Marker => Admission::Reconcile {
+        // A marker is looked up at the service, a pushed ref read back from
+        // the remote: either way, reconcile before anything else.
+        IdempotencyMode::Marker | IdempotencyMode::Ref => Admission::Reconcile {
             intent: rec.id.clone(),
         },
         IdempotencyMode::None if q.on_unknown == OnUnknown::Resend => resend(),

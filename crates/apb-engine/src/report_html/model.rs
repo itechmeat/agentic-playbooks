@@ -31,6 +31,7 @@ pub(super) struct Report {
     pub(super) goal: Option<RunGoal>,
     pub(super) steps: Vec<Step>,
     pub(super) sends: Vec<RunIntent>,
+    pub(super) publish: Vec<crate::run_outcome::RunPublish>,
     pub(super) notify: Option<RunNotify>,
     pub(super) link: Option<String>,
     pub(super) journal: Vec<Event>,
@@ -82,6 +83,7 @@ impl Report {
         let journal_cut = view.events.len().saturating_sub(JOURNAL_MAX_EVENTS);
         let status = view.run_status;
         let sends = crate::run_outcome::outcome_intents(&view.events, now);
+        let publish = crate::run_outcome::publish_from(&view.events, now);
         let notify = RunNotify::for_run(run_dir, &view.events, now);
         let known_problems = crate::known_problems::of_run(&view.events);
         let (trusted, grades_left_out) = crate::grade::split_grades_of(run_dir);
@@ -91,6 +93,7 @@ impl Report {
             playbook,
             status,
             sends,
+            publish,
             notify,
             link: crate::people::link::run_link(root, &run_id),
             goal: readout.goal,

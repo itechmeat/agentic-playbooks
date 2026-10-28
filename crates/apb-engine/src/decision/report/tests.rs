@@ -645,6 +645,7 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
                         node: "g".into(),
                         decision: decided.into(),
                         note: String::new(),
+                        plan_digest: None,
                     },
                 ),
             ],

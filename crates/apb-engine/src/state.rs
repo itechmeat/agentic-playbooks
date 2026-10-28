@@ -581,6 +581,9 @@ impl RunState {
                 // The send ledger is folded by `connector::intent::ledger`;
                 // it carries no run-state effect.
                 EventPayload::SendIntentRecorded { .. } | EventPayload::SendIntentSettled { .. } => {}
+                // A publish node's pin and plan are read by `crate::publish`
+                // and the run surfaces; the node's own events carry its state.
+                EventPayload::PublishTargetPinned { .. } | EventPayload::PublishPlanned { .. } => {}
                 // Node-cache events (spec 2026-07-19) are audit records: a hit
                 // is reported alongside the node's own NodeStarted/NodeFinished
                 // (which carry the run-state effect), and miss/stored/rejected
@@ -690,6 +693,7 @@ impl RunState {
                     node,
                     decision,
                     note,
+                    ..
                 } => {
                     s.reviews.insert(
                         node.clone(),

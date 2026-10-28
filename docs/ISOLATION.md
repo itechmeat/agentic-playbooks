@@ -181,8 +181,9 @@ These hold even when the sandbox works, and every surface shows them:
 - The agent's own provider login is readable by everything in the sandbox,
   including repository code the agent runs.
 - `network: open` reaches any host, including services listening on this
-  machine's loopback (the apb dashboard among them, which still needs its
-  token).
+  machine's loopback. The apb dashboard is one of them: with keys it needs
+  one, without keys it takes the agent's requests like any local
+  process's, apart from a publish consent, which it refuses.
 - Kernel escapes are outside the contract.
 - Script nodes, goal scripts, project checks and baseline reads run outside
   the sandbox. A sandboxed node's `success_check` runs inside the same
@@ -268,6 +269,7 @@ away, a sandbox that could not be set up) fails the node with the output
 | `agent_needs_unknown` | An agent of the node's executor chain (fallbacks included) declares no sandbox needs |
 | `host_mode` | The run executes its agent steps in the host |
 | `disabled` | `APB_SANDBOX=off` |
+| `credentials_passed` | Under `publish_only`, a credential-shaped variable the allowlist names would reach the agent (see Publishing) |
 | `sandbox_setup` | At attempt time only: this attempt's sandbox could not be set up (an extra path that resolves into a credential location, the home or above it, a missing writable path, a tree inside a credential location or around a persistence place, a git directory git cannot read or that names another one, a git older than 2.31, a `bwrap` that became setuid or went away, an unreadable global config). `best_effort` runs without a sandbox instead |
 
 The dashboard's "will it fit here?" report lists each isolated node: blocking
@@ -368,6 +370,23 @@ A review node that is useful everywhere, safer where a sandbox exists:
 
 On a machine without `bwrap`, or on macOS, it runs in a scratch directory
 with the forced allowlist, and every attempt records `no_sandbox` and why.
+
+## Publishing
+
+A playbook that pushes does it through a `publish` node (PUBLISH.md). Under
+`full` the agent has no ssh agent socket, no `~/.ssh`, `~/.git-credentials`
+or `~/.config/gh`, no credential variable beyond what the allowlist names,
+no write access to the repository's config and hooks, and no `.apb/`, so it
+cannot push by itself with the operator's credentials, and cannot consent
+to apb's push either (a dashboard without keys refuses a publish consent);
+an endpoint that needs no credentials stays reachable under `network:
+open`. V119 warns when a publishing playbook has an agent node without
+`full` (or a script, which always runs outside the sandbox, or a
+sub-playbook). `publish_only: true` makes the agent case an error (V120),
+holds a sub-playbook's run to the same rule when it starts, and at attempt
+time a credential-shaped variable the allowlist would pass to an agent
+(`credentials.env_passed`) refuses the attempt with the reason
+`credentials_passed`.
 
 ## Not in scope
 

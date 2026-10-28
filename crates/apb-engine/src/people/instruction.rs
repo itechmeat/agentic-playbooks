@@ -48,6 +48,59 @@ pub fn review_instruction(
     )
 }
 
+/// The decision mechanics for a publish gate: a consent carries the nonce
+/// of the exact plan the person saw.
+pub fn publish_how_to_decide(node_id: &str, nonce: &str) -> String {
+    let node = apb_core::publish::shell_word(node_id);
+    format!(
+        "To publish exactly this plan, run `apb publish approve <run-id> --node {node} --nonce {nonce}` \
+         or call the review_decide MCP tool with node `{node_id}`, decision `publish` and that nonce; \
+         to decline, `apb publish skip <run-id> --node {node}` or decision `skip`."
+    )
+}
+
+/// The owner-facing instruction of a publish gate: what would be pushed
+/// where, over what the remote holds now, and how to answer.
+#[allow(clippy::too_many_arguments)]
+pub fn publish_instruction(
+    node_id: &str,
+    title: Option<&str>,
+    url: &str,
+    branch: &str,
+    after: &str,
+    remote_before: Option<&str>,
+    commits: usize,
+    outside_push_suspected: bool,
+    prompt: Option<&str>,
+    nonce: &str,
+) -> String {
+    let label = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(node_id);
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    let over = match remote_before {
+        Some(b) => format!("over {}", short(b)),
+        None => "as a new branch".to_string(),
+    };
+    let guidance = prompt
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!(" {p}"))
+        .unwrap_or_default();
+    let warning = if outside_push_suspected {
+        " Warning: commits of this run are already on the remote, so something pushed them outside this step."
+    } else {
+        ""
+    };
+    format!(
+        "The run is paused at the publish step \"{label}\" and needs your consent: push {commits} commit(s) up to {} to `{url}` branch `{branch}` {over}.{warning}{guidance} \
+         Available decisions: publish, skip. {}",
+        short(after),
+        publish_how_to_decide(node_id, nonce)
+    )
+}
+
 /// Supervisor options available after a node failure/timeout wake (issue #45
 /// finding 4). Shared by the progress block and doctor so the lists never drift.
 pub fn supervisor_decision_options() -> Vec<String> {

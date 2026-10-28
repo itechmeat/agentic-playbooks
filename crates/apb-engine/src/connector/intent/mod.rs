@@ -111,7 +111,8 @@ pub struct Settlement {
 }
 
 impl Settlement {
-    fn payload(self, intent: &str) -> EventPayload {
+    /// The `send_intent_settled` record of this settlement.
+    pub(crate) fn payload(self, intent: &str) -> EventPayload {
         EventPayload::SendIntentSettled {
             intent: intent.to_string(),
             outcome: self.outcome.to_string(),
