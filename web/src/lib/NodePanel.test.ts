@@ -83,3 +83,80 @@ describe('NodePanel isolation', () => {
     expect(patches).toEqual([{ isolation: 'none' }])
   })
 })
+
+describe('NodePanel publish', () => {
+  const nodes = [
+    { id: 'start', type: 'start' },
+    { id: 'impl', type: 'agent_task' },
+    { id: 'each', type: 'agent_task', list: { items: [] } },
+    { id: 'build', type: 'script' },
+    { id: 'ship', type: 'publish' },
+  ]
+  function renderPublish(
+    extra: Record<string, unknown>,
+    onChange: (patch: Record<string, unknown>) => void = () => {},
+    publishOnly = false,
+  ) {
+    const node = { id: 'ship', type: 'publish', ...extra }
+    app = mount(NodePanel, { target: document.body, props: { id: 'p', node, onChange, nodes, publishOnly } })
+    flushSync()
+  }
+  const input = (id: string) => document.getElementById(id) as HTMLInputElement
+
+  it('shows from, remote, branch and the push timeout with its default', () => {
+    renderPublish({ from: 'impl', remote: 'origin', branch: 'apb/{{ run.id }}', timeout_seconds: 60 })
+    expect(text('np-publish-from')).toBe('impl')
+    expect(input('np-publish-remote').value).toBe('origin')
+    expect(input('np-publish-branch').value).toBe('apb/{{ run.id }}')
+    expect(input('np-publish-timeout').value).toBe('60')
+    expect(input('np-publish-timeout').placeholder).toBe('300')
+    expect(text('np-publish-only')).toContain('false')
+  })
+
+  it('offers agent tasks and scripts that are not list nodes as the source', async () => {
+    const onChange = vi.fn()
+    renderPublish({ remote: 'origin' }, onChange)
+    expect(text('np-publish-from')).toBe('(choose a node)')
+    const trigger = document.querySelector('[data-testid="np-publish-from"]') as HTMLElement
+    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }))
+    await vi.waitFor(() => expect(document.querySelector('[role="option"]')).not.toBeNull())
+    const offered = [...document.querySelectorAll('[role="option"]')].map((o) => o.textContent?.trim())
+    expect(offered).toEqual(['impl', 'build'])
+    await pick('np-publish-from', 'build')
+    expect(onChange).toHaveBeenCalledWith({ from: 'build' })
+  })
+
+  it('writes the remote, the branch and the timeout, and drops an emptied branch', () => {
+    const onChange = vi.fn()
+    renderPublish({ from: 'impl', remote: 'origin', branch: 'x' }, onChange)
+    const set = (id: string, v: string) => {
+      input(id).value = v
+      input(id).dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    set('np-publish-remote', 'upstream')
+    set('np-publish-branch', '')
+    set('np-publish-timeout', '120')
+    expect(onChange.mock.calls).toEqual([[{ remote: 'upstream' }], [{ branch: undefined }], [{ timeout_seconds: 120 }]])
+  })
+
+  it('never writes a push timeout the validator refuses', () => {
+    const onChange = vi.fn()
+    renderPublish({ from: 'impl', remote: 'origin' }, onChange)
+    for (const v of ['0', '-5', '1.5', '3601', '3600', '']) {
+      input('np-publish-timeout').value = v
+      input('np-publish-timeout').dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    expect(onChange.mock.calls).toEqual([[{ timeout_seconds: 3600 }], [{ timeout_seconds: undefined }]])
+  })
+
+  it('shows publish_only read-only', () => {
+    renderPublish({ from: 'impl', remote: 'origin' }, () => {}, true)
+    expect(text('np-publish-only')).toContain('true')
+    expect(document.querySelector('[data-testid="np-publish-only"] input')).toBeNull()
+  })
+
+  it('marks a source that is not eligible', () => {
+    renderPublish({ from: 'each', remote: 'origin' })
+    expect(text('np-publish-from')).toBe('each (not a source)')
+  })
+})

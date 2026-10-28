@@ -721,6 +721,9 @@ fn execute_node_kind(
     {
         journal_missing_inputs(journal, run_dir, node_id, template, state)?;
     }
+    if node.kind.drive_handled() {
+        return Err(drive_handled_refusal(node_id, &node.kind));
+    }
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
         NodeKind::Start => Ok(AttemptOutcome::Finished {
@@ -1035,6 +1038,8 @@ fn execute_node_kind(
                 isolation.as_ref(),
                 steps.iter().filter(|s| !s.host).map(|s| s.agent.as_str()),
                 host_mode,
+                // The run's own flag, or a parent's it is held to.
+                cfg.publish_only || playbook.publish_only,
             );
             if let Some(output) = iso.refusal() {
                 return Ok(AttemptOutcome::Finished {
@@ -3022,18 +3027,21 @@ fn execute_node_kind(
             output: String::new(),
             events,
         }),
-        // human_review is handled inside drive itself (pause until a decision), it
-        // never reaches here; this branch is defensive. wait - subphase 7b.
-        NodeKind::HumanReview { .. } => Err(EngineError::Invalid(format!(
-            "node `{node_id}` (human_review) must be handled by drive"
-        ))),
-        NodeKind::Wait { .. } => Err(EngineError::Invalid(format!(
-            "node `{node_id}` (wait) must be handled by drive"
-        ))),
-        NodeKind::Playbook { .. } => Err(EngineError::Invalid(format!(
-            "node `{node_id}` (playbook) must be handled by drive"
-        ))),
+        // Gates, waits and sub-playbooks are handled inside drive itself
+        // (`NodeKind::drive_handled`); they never reach here.
+        kind @ (NodeKind::HumanReview { .. }
+        | NodeKind::Wait { .. }
+        | NodeKind::Playbook { .. }
+        | NodeKind::Publish { .. }) => Err(drive_handled_refusal(node_id, kind)),
     }
+}
+
+/// The defensive refusal of a kind the drive loop executes itself.
+fn drive_handled_refusal(node_id: &str, kind: &NodeKind) -> EngineError {
+    EngineError::Invalid(format!(
+        "node `{node_id}` ({}) must be handled by drive",
+        kind.type_str()
+    ))
 }
 
 /// Composes the run answer for a finish-with-prompt (spec B). A reduced
@@ -3707,6 +3715,13 @@ pub(crate) fn run_playbook_node(
     opts.execution = super::host::child_execution_request(run_dir)?;
     // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
     opts.consent = inherited_consent(run_dir, run_id, node_id);
+    // The publish step (decision record 0010): a child of a run held to
+    // `publish_only` is held to it too, and a child started after its
+    // parent ran an acting node pins nothing (its tree may have been
+    // changed already).
+    opts.publish_only = cfg.publish_only || playbook.publish_only;
+    opts.parent_acted =
+        cfg.parent_acted || crate::publish::pin::acted(playbook, &events, Some(node_id));
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {

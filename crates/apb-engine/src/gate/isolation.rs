@@ -55,6 +55,7 @@ pub fn node_contracts(
                     })
                     .collect(),
                 host_mode,
+                publish_only: playbook.publish_only,
             };
             Some(NodeContract {
                 node: n.id.clone(),

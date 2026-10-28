@@ -47,6 +47,7 @@ pub mod profile;
 pub mod profile_store;
 pub mod project_checks;
 pub mod projects;
+pub mod publish;
 pub mod quality;
 pub mod registry;
 pub mod run_memory;

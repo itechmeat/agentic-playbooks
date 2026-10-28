@@ -422,6 +422,22 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("sha256:{}", hex_lower(&h.finalize()))
 }
 
+/// A short, non-secret nonce that binds a confirmation to exactly what a
+/// person was shown: `<prefix>-` and 32 hex digits of a sha256 over `lines`
+/// joined by newlines. Any change to any line changes the nonce. Shared by
+/// the start consent and the publish consent.
+pub fn short_nonce<S: AsRef<str>>(prefix: &str, lines: &[S]) -> String {
+    let input = lines
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let mut h = Sha256::new();
+    h.update(input.as_bytes());
+    let hex = hex_lower(&h.finalize());
+    format!("{prefix}-{}", &hex[..32])
+}
+
 /// The SHA-256 of `bytes` in standard base64, the form a Content Security
 /// Policy hash source (`'sha256-...'`) takes.
 pub fn sha256_base64(bytes: &[u8]) -> String {

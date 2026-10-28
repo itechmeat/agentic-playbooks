@@ -33,6 +33,7 @@ pub fn commits_from_events(events: &[Event]) -> Vec<NodeCommits> {
                 after,
                 commits,
                 omitted,
+                ..
             } => Some(NodeCommits {
                 node: node.clone(),
                 before: before.clone(),
@@ -151,6 +152,7 @@ mod tests {
                 after: commits.first().map(|c| c.sha.clone()).unwrap_or_default(),
                 commits,
                 omitted,
+                branch: None,
             },
         }
     }

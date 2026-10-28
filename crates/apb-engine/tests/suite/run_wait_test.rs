@@ -251,6 +251,7 @@ fn supervisor_wait_returns_wakes_reviews_and_the_end_in_seq_order() {
             instruction: "decide".into(),
             prompt: None,
             recommendation: None,
+            plan_digest: None,
         })
         .unwrap();
     log.append(EventPayload::RunFinished {

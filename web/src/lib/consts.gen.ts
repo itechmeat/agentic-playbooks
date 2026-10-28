@@ -6,7 +6,7 @@
 export const CURRENT_SCHEMA = 2
 
 /** Every node `type` tag. */
-export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook', 'judge'] as const
+export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook', 'judge', 'publish'] as const
 export type NodeType = (typeof NODE_TYPES)[number]
 
 /** The decisions a human_review gate without options offers. */
@@ -39,10 +39,20 @@ export const ISOLATION_ENV_PASSED_PREFIX = "credentials.env_passed:"
 export const ISOLATION_ENV_PASSED_TEXT = "A credential-shaped variable the allowlist names is passed to the agent."
 
 /** Why a full node is refused, or a best_effort one runs without a sandbox. */
-export const ISOLATION_REASON_TEXTS = { os_unsupported: "The sandbox needs Linux with bubblewrap; this system is not supported.", bwrap_missing: "Bubblewrap (bwrap) is not installed.", bwrap_setuid: "The bwrap binary is setuid root; apb uses unprivileged bwrap only.", userns_denied: "This machine refuses unprivileged user namespaces to bwrap.", scope_unavailable: "Network open under full needs the Landlock scope, which this kernel does not offer.", agent_needs_unknown: "An agent of the node's executor chain declares no sandbox needs.", host_mode: "A host-mode step runs in the host agent, outside any sandbox apb starts.", disabled: "The sandbox is turned off on this machine (APB_SANDBOX=off).", sandbox_setup: "The sandbox of this attempt could not be set up (a declared path, the git directory, the home or bwrap itself)." } as const
+export const ISOLATION_REASON_TEXTS = { os_unsupported: "The sandbox needs Linux with bubblewrap; this system is not supported.", bwrap_missing: "Bubblewrap (bwrap) is not installed.", bwrap_setuid: "The bwrap binary is setuid root; apb uses unprivileged bwrap only.", userns_denied: "This machine refuses unprivileged user namespaces to bwrap.", scope_unavailable: "Network open under full needs the Landlock scope, which this kernel does not offer.", agent_needs_unknown: "An agent of the node's executor chain declares no sandbox needs.", host_mode: "A host-mode step runs in the host agent, outside any sandbox apb starts.", disabled: "The sandbox is turned off on this machine (APB_SANDBOX=off).", sandbox_setup: "The sandbox of this attempt could not be set up (a declared path, the git directory, the home or bwrap itself).", credentials_passed: "Under publish_only, a credential-shaped variable the allowlist names would reach the agent." } as const
 
 /** The refusal code of a full node this machine cannot isolate. */
 export const ISOLATION_UNAVAILABLE = "isolation_unavailable"
+
+/** The decisions of a publish gate. */
+export const PUBLISH_OPTIONS = ['publish', 'skip'] as const
+
+/** The push timeout of a publish node: the default and the most allowed, in seconds. */
+export const PUBLISH_DEFAULT_TIMEOUT_SECONDS = 300
+export const PUBLISH_MAX_TIMEOUT_SECONDS = 3600
+
+/** Why a publish plan cannot be offered, in words. */
+export const PUBLISH_REFUSAL_TEXTS = { no_pin: "The remote was not pinned before agents ran, so the target cannot be trusted.", not_a_repository: "The working tree is not a git repository apb runs git in.", remote_missing: "The repository has no such remote.", url_refused: "The remote URL is refused: only https, ssh and file URLs without credentials are pushed to.", remote_changed: "The remote URL changed after it was pinned.", repository_changed: "The working tree belongs to another repository than the one pinned.", head_moved: "HEAD is not the commit the source node recorded.", branch_moved: "HEAD is no longer on the branch the source node committed on.", branch_invalid: "The branch is not a valid branch name.", untracked_commits: "HEAD has commits no node of this run recorded; publish from a node that commits.", not_fast_forward: "The remote branch has commits this tree does not have; integrate them first.", remote_unreachable: "The remote could not be listed.", url_rewritten: "The git configuration rewrites the remote URL to another address.", remote_writable: "The file remote lies inside the working tree or a path a node may write, so its hooks are not the operator's.", history_unreadable: "The commits the push would carry could not be read from the tree.", unrecognized: "The run recorded a refusal this apb does not know." } as const
 
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

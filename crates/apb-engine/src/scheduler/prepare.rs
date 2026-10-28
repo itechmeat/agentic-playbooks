@@ -646,6 +646,20 @@ pub(crate) fn prepare_run_target(
             errors.join("; ")
         )));
     }
+    // A child of a run held to `publish_only` is held to it too (decision
+    // record 0010): its playbook's own flag cannot lift it.
+    if opts.publish_only {
+        let open: Vec<String> = apb_core::validate::publish_only_violations(&playbook)
+            .iter()
+            .map(|o| format!("`{}` ({})", o.node, o.fix))
+            .collect();
+        if !open.is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "playbook `{id}` runs under a parent held to `publish_only`, and node(s) {} run an agent without `isolation: full`",
+                open.join(", ")
+            )));
+        }
+    }
     // Isolation, with the run's real execution mode: the gate's check again,
     // so no start path (a trial, a child, a resume of a fresh start) runs a
     // `full` node this machine cannot isolate. Nothing is written yet.
@@ -887,6 +901,8 @@ pub(crate) fn prepare_run_target(
         continued_from: opts.continued_from.clone(),
         superseded_by: None,
         depth: opts.depth,
+        publish_only: playbook.publish_only || opts.publish_only,
+        parent_acted: opts.parent_acted,
         expected_children: opts.expected_children.clone(),
         expected_connectors: opts.expected_connectors.clone(),
         expected_connector_accounts: opts.expected_connector_accounts.clone(),

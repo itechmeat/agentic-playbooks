@@ -676,3 +676,59 @@ fn isolation_fields_keep_old_lines_and_decode_leniently() {
         } if f == "isolation"
     ));
 }
+
+/// The publish step's two records round trip, are no checkpoint, and an
+/// older binary that does not know them skips them while a checkpoint
+/// follows. The fields added to known events read as absent from old lines
+/// and stay off the wire when unset.
+#[test]
+fn publish_events_round_trip_and_are_skippable_before_a_checkpoint() {
+    let pinned = r#"{"seq":2,"ts":3,"type":"publish_target_pinned","node":"pub","remote":"origin","url":"file:///r.git","scheme":"file","common_dir":"/t/.git"}"#;
+    let refused = r#"{"seq":2,"ts":3,"type":"publish_target_pinned","node":"pub","remote":"origin","common_dir":"/t/.git","refusal":"url_refused"}"#;
+    let planned = r#"{"seq":3,"ts":4,"type":"publish_planned","node":"pub","from":"work","from_seq":2,"branch":"apb/x","local_branch":"refs/heads/main","after":"bb","remote_before":"aa","url":"file:///r.git","commits":[{"sha":"bb","subject":"s","apb_run":["r1"],"this_run":true}],"outside_push_suspected":true,"plan_digest":"sha256:d","nonce":"publish-n"}"#;
+    for line in [pinned, refused, planned] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        pinned.replace("seq\":2", "seq\":1").replace("publish_target_pinned", "publish_target_from_the_future"),
+        r#"{"seq":2,"ts":2,"type":"node_started","node":"pub","attempt":1}"#.to_string(),
+        planned.replace("publish_planned", "publish_plan_from_the_future"),
+        r#"{"seq":4,"ts":5,"type":"node_finished","node":"pub","status":"succeeded","attempt":1,"output":"skipped","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 2, 4]);
+}
+
+#[test]
+fn review_and_commit_lines_keep_their_shape_with_the_publish_fields() {
+    let old = [
+        r#"{"seq":1,"ts":2,"type":"review_requested","node":"g","options":["approve"],"instruction":"i"}"#,
+        r#"{"seq":2,"ts":3,"type":"review_decided","node":"g","decision":"approve","note":""}"#,
+        r#"{"seq":3,"ts":4,"type":"artifacts_committed","node":"w","before":"a","after":"b","commits":[]}"#,
+    ];
+    for line in old {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let new = [
+        r#"{"seq":1,"ts":2,"type":"review_requested","node":"pub","options":["publish","skip"],"instruction":"i","plan_digest":"sha256:d"}"#,
+        r#"{"seq":2,"ts":3,"type":"review_decided","node":"pub","decision":"publish","note":"","plan_digest":"sha256:d"}"#,
+        r#"{"seq":3,"ts":4,"type":"artifacts_committed","node":"w","before":"a","after":"b","commits":[],"branch":"refs/heads/main"}"#,
+    ];
+    for line in new {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let e: Event = serde_json::from_str(new[1]).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewDecided { plan_digest: Some(ref d), .. } if d == "sha256:d"
+    ));
+}

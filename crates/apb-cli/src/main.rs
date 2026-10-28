@@ -25,6 +25,7 @@ mod onboarding;
 mod pause;
 mod problems;
 mod profile;
+mod publish;
 mod report;
 mod run;
 mod run_items;
@@ -375,7 +376,7 @@ enum Command {
     Stop { run_id: String },
     /// Post a supervisor note (ContextAppend) to a run's control channel
     Note { run_id: String, text: String },
-    /// Decide a human_review node of a running run
+    /// Decide a human_review or publish node of a running run
     Review {
         run_id: String,
         node_id: String,
@@ -383,6 +384,16 @@ enum Command {
         decision: String,
         #[arg(long, default_value = "")]
         note: String,
+        /// A publish node only: the nonce of the plan you checked (see
+        /// `apb publish show`)
+        #[arg(long)]
+        nonce: Option<String>,
+    },
+    /// The publish gate of a run: show the exact plan, consent to it by its
+    /// nonce, or skip the push
+    Publish {
+        #[command(subcommand)]
+        action: crate::publish::PublishAction,
     },
     /// Answer an interactive node's pending question in a running run
     Answer {
@@ -837,7 +848,9 @@ fn main() -> ExitCode {
             node_id,
             decision,
             note,
-        }) => review_cmd(&root, &run_id, &node_id, &decision, &note),
+            nonce,
+        }) => review_cmd(&root, &run_id, &node_id, &decision, &note, nonce.as_deref()),
+        Some(Command::Publish { action }) => crate::publish::publish_cmd(&root, action),
         Some(Command::Answer { run, node, text }) => {
             answer_cmd(&root, &run, node.as_deref(), &text)
         }

@@ -24,6 +24,8 @@
   import Trash2 from '@lucide/svelte/icons/trash-2'
   import { fieldsToField, fieldToOutputs, sessionSources } from './nodeio'
   import { fromYamlField, questionSummary, toYamlField } from './judgefields'
+  import { publishSources, type SourceNode } from './publish'
+  import { PUBLISH_DEFAULT_TIMEOUT_SECONDS, PUBLISH_MAX_TIMEOUT_SECONDS } from './consts.gen'
   import {
     ISOLATION_LEVELS,
     ISOLATION_NETWORKS,
@@ -42,6 +44,7 @@
     workspace = '',
     readonly = false,
     nodes = [],
+    publishOnly = false,
   }: {
     id: string
     node: PlaybookNode
@@ -53,11 +56,20 @@
     /// scrollbars and their selection (a prompt has to stay readable), the
     /// controls that only exist to change something are disabled or gone.
     readonly?: boolean
-    /// Every node of the playbook, for the continue_session picker.
-    nodes?: { id: string; type: string }[]
+    /// Every node of the playbook, for the continue_session and publish
+    /// source pickers.
+    nodes?: SourceNode[]
+    /// The playbook's top-level `publish_only`, shown read-only.
+    publishOnly?: boolean
   } = $props()
 
   const sessionOptions = $derived(sessionSources(nodes, node.id))
+  const publishFromOptions = $derived(publishSources(nodes, node.id))
+  const publishFromLabel = $derived.by(() => {
+    if (f.from === '') return '(choose a node)'
+    if (publishFromOptions.includes(f.from)) return f.from
+    return `${f.from} (not a source)`
+  })
 
   const kind = $derived(node.type)
 
@@ -188,6 +200,9 @@
         judge_questions: toYamlField(n.questions),
         judge_thresholds: toYamlField(n.thresholds),
         on_unavailable: toYamlField(n.on_unavailable),
+        from: str(n.from),
+        remote: str(n.remote),
+        branch: str(n.branch),
       }
       iso = isolationForm(n.isolation)
       yamlErrors = {}
@@ -412,6 +427,18 @@
   function setOutputFields(raw: string) {
     f.output_fields = raw
     onChange?.({ outputs: fieldToOutputs(raw, node.outputs) })
+  }
+  // A publish timeout is a whole number of seconds in 1..max (V117); any
+  // other entry stays in the box and is never written into the playbook.
+  function setPublishTimeout(raw: string) {
+    f.timeout_seconds = raw
+    if (raw === '') {
+      onChange?.({ timeout_seconds: undefined })
+      return
+    }
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < 1 || n > PUBLISH_MAX_TIMEOUT_SECONDS) return
+    onChange?.({ timeout_seconds: n })
   }
   function setNum(key: string, raw: string) {
     f[key] = raw
@@ -887,6 +914,79 @@
           oninput={(e) => setProfile(e.currentTarget.value)}
         />
       </Field.Field>
+    {:else if kind === 'publish'}
+      <Field.Field>
+        {@render fieldHead('publish_from')}
+        <Select.Root
+          type="single"
+          disabled={readonly}
+          value={f.from}
+          onValueChange={(v) => setStr('from', v ?? '')}
+        >
+          <Select.Trigger class="np-select" data-testid="np-publish-from">
+            {publishFromLabel}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              {#each publishFromOptions as v (v)}
+                <Select.Item value={v} label={v}>{v}</Select.Item>
+              {/each}
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('remote', 'np-publish-remote')}
+        <Input
+          id="np-publish-remote"
+          placeholder="origin"
+          {readonly}
+          value={f.remote}
+          oninput={(e) => setStr('remote', e.currentTarget.value.trim())}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('branch', 'np-publish-branch')}
+        <Input
+          id="np-publish-branch"
+          placeholder="(the branch the source committed on)"
+          {readonly}
+          value={f.branch}
+          oninput={(e) => setStr('branch', e.currentTarget.value.trim())}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('publish_timeout', 'np-publish-timeout')}
+        <Input
+          id="np-publish-timeout"
+          type="number"
+          min="1"
+          max={PUBLISH_MAX_TIMEOUT_SECONDS}
+          placeholder={String(PUBLISH_DEFAULT_TIMEOUT_SECONDS)}
+          {readonly}
+          value={f.timeout_seconds}
+          oninput={(e) => setPublishTimeout(e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field class="np-wide">
+        {@render fieldHead('publish_prompt', 'np-publish-prompt')}
+        <Textarea
+          id="np-publish-prompt"
+          rows={3}
+          class="draft-input"
+          {readonly}
+          value={f.prompt}
+          oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('publish_only')}
+        <p class="publish-only" data-testid="np-publish-only">
+          {publishOnly
+            ? 'true: every agent node runs with isolation full'
+            : 'false: agent nodes without isolation full can push by themselves'}
+        </p>
+      </Field.Field>
     {:else if kind === 'playbook'}
       <Field.Field>
         {@render fieldHead('playbook', 'np-pb-ref')}
@@ -934,6 +1034,15 @@
   .iso-path {
     font-family: var(--font-mono, ui-monospace, monospace);
     color: var(--foreground);
+  }
+  /* A field that takes the whole row of the form grid. */
+  :global(.np-wide) {
+    grid-column: 1 / -1;
+  }
+  .publish-only {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted-foreground);
   }
   .draft-status {
     margin: 0;

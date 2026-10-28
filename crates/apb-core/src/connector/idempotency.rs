@@ -86,12 +86,17 @@ impl Idempotency {
     }
 }
 
-/// The three modes, without their settings.
+/// The modes, without their settings. `Ref` is the engine's own mode for a
+/// git push (see [`crate::publish`]): the remote ref can be read back, so an
+/// unknown result is reconciled, never repeated. A connector manifest cannot
+/// declare it ([`Idempotency`] has no such variant), and an older apb reads
+/// `"ref"` as `none`, which refuses a repeat: the safe direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IdempotencyMode {
     Key,
     Marker,
     None,
+    Ref,
 }
 
 impl IdempotencyMode {
@@ -100,6 +105,7 @@ impl IdempotencyMode {
             IdempotencyMode::Key => "key",
             IdempotencyMode::Marker => "marker",
             IdempotencyMode::None => "none",
+            IdempotencyMode::Ref => "ref",
         }
     }
 
@@ -109,6 +115,7 @@ impl IdempotencyMode {
         match s {
             "key" => IdempotencyMode::Key,
             "marker" => IdempotencyMode::Marker,
+            "ref" => IdempotencyMode::Ref,
             _ => IdempotencyMode::None,
         }
     }
@@ -490,6 +497,7 @@ mod tests {
             IdempotencyMode::Key,
             IdempotencyMode::Marker,
             IdempotencyMode::None,
+            IdempotencyMode::Ref,
         ] {
             assert_eq!(IdempotencyMode::parse(m.as_str()), m);
         }

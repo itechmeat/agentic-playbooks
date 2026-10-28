@@ -28,6 +28,7 @@ fn fold_records_review_decision() {
                 instruction: String::new(),
                 prompt: None,
                 recommendation: None,
+                plan_digest: None,
             },
         ),
         ev(
@@ -36,6 +37,7 @@ fn fold_records_review_decision() {
                 node: "gate".into(),
                 decision: "approved".into(),
                 note: "ok".into(),
+                plan_digest: None,
             },
         ),
         ev(

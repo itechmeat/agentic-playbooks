@@ -1,7 +1,7 @@
 //! What this machine and project must provide before a playbook can run
 //! here: its profiles and skills, the models of their executor chains, the
-//! connector accounts and secrets, the run input a start must pass, and the
-//! sandbox its isolated nodes need.
+//! connector accounts and secrets, the run input a start must pass, the
+//! sandbox its isolated nodes need, and the remote its publish nodes push to.
 //! The profile and model checks are the ones the adoption report prints
 //! ([`profile_findings`]), with the same codes.
 
@@ -250,6 +250,59 @@ pub(super) fn isolation_items(
             FitItem {
                 code: "isolation".to_string(),
                 subject: Some(n.node),
+                detail,
+                severity,
+            }
+        })
+        .collect()
+}
+
+/// One item per publish node: the remote it pins on this project, and
+/// whether its push URL is one the publish step pushes to. A missing remote
+/// or a refused URL blocks: the step would refuse at its plan.
+pub(super) fn publish_items(root: &Path, playbook: &apb_core::schema::Playbook) -> Vec<FitItem> {
+    use apb_core::publish::url::PushUrl;
+    use apb_core::schema::NodeKind;
+    let repo = apb_core::git::Repo::locate(root).ok();
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.kind {
+            NodeKind::Publish { remote, .. } => Some((n.id.clone(), remote.as_str())),
+            _ => None,
+        })
+        .map(|(node, remote)| {
+            let url = repo
+                .as_ref()
+                .and_then(|r| crate::publish::pin::push_url(r, root, remote));
+            let (detail, severity) = match (&repo, url) {
+                (None, _) => (
+                    "the project is not a git working tree apb runs git in".to_string(),
+                    FitSeverity::Blocking,
+                ),
+                (Some(_), None) => (
+                    format!("the repository has no remote `{remote}`"),
+                    FitSeverity::Blocking,
+                ),
+                (Some(_), Some(text)) => match PushUrl::parse(&text) {
+                    Ok(url) => (
+                        format!(
+                            "pushes to remote `{remote}` at {} over {}",
+                            url.as_str(),
+                            url.scheme().as_str()
+                        ),
+                        FitSeverity::Note,
+                    ),
+                    // The refused URL is not shown: it may carry a credential.
+                    Err(why) => (
+                        format!("the push URL of remote `{remote}` is refused: {why}"),
+                        FitSeverity::Blocking,
+                    ),
+                },
+            };
+            FitItem {
+                code: "publish_target".to_string(),
+                subject: Some(node),
                 detail,
                 severity,
             }

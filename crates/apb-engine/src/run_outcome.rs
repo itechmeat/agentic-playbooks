@@ -9,7 +9,7 @@
 //! Submodules: `claims` (evidence and gaps), `baseline` (the baseline check's view), `notes` (findings and
 //! warnings), `calls` (connector calls by what they say about the outcome),
 //! `commits` (the commits and their `Apb-Run` trailers), `intents` (the send
-//! intents of the send ledger), `lists` (the list nodes' counts, item checks
+//! intents of the send ledger), `publish` (the publish nodes), `lists` (the list nodes' counts, item checks
 //! and items that need a look) and `summary` (the human outcome every
 //! surface shows, and the cheap "needs a look" marker of a run listing).
 
@@ -22,6 +22,7 @@ pub mod commits;
 pub mod intents;
 pub mod lists;
 pub mod notes;
+pub mod publish;
 pub mod summary;
 
 pub use baseline::{RunBaseline, baseline_from};
@@ -29,6 +30,7 @@ pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
 pub use intents::{RunIntent, intents_from, outcome_intents};
 pub use lists::ListOutcome;
 pub use notes::RunNotes;
+pub use publish::{RunPublish, publish_from};
 pub use summary::{AGENT_SUMMARY_TITLE, NeedsLook, OutcomeSummary};
 
 use serde::Serialize;
@@ -82,6 +84,11 @@ impl RunView {
     /// is not a git repository).
     pub fn commits(&self) -> Vec<NodeCommits> {
         commits_from_events(&self.events)
+    }
+
+    /// The run's publish nodes: target, plan, consent, push and result.
+    pub fn publish(&self) -> Vec<RunPublish> {
+        publish_from(&self.events, apb_core::clock::now_ms_u64())
     }
 
     /// The inbox gaps the run's connector reads journaled, empty when none:

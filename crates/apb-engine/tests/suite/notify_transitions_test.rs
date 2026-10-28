@@ -58,6 +58,7 @@ fn review(seq: u64, node: &str) -> Event {
             instruction: String::new(),
             prompt: None,
             recommendation: None,
+            plan_digest: None,
         },
     )
 }
@@ -152,6 +153,7 @@ fn an_open_review_is_due_and_a_decided_one_is_not() {
             node: "gate".into(),
             decision: "approve".into(),
             note: String::new(),
+            plan_digest: None,
         },
     ));
     assert!(ids(&events).is_empty());

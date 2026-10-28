@@ -323,6 +323,44 @@ option: string, p: number, confidence: number, provider: string, model: string, 
  */
 applied?: boolean, };
 
+export type PublishCommit = { this_run: boolean, sha: string, subject: string, 
+/**
+ * The values of the commit's `Apb-Run` trailers: `None` when they were
+ * not read (an old event, or a git too old to read trailers),
+ * `Some([])` for a commit without one. Additive.
+ */
+apb_run?: Array<string>, };
+
+export type PlanView = { url: string, branch: string, after: string, remote_before?: string, commits: Array<PublishCommit>, omitted: number, 
+/**
+ * How many of the commits the push carries this run made, listed or
+ * omitted.
+ */
+this_run: number, outside_push_suspected: boolean, plan_digest: string, nonce: string, };
+
+export type PushState = "pending" | "confirmed" | "not_sent" | "unknown";
+
+export type PushView = { intent: string, state: PushState, 
+/**
+ * The plan this push carried: what it sent where. It may be an
+ * earlier visit's plan than [`PublishView::plan`].
+ */
+after: string, branch: string, url: string, remote_before?: string, plan_digest: string, detail?: string, effect_ref?: string, };
+
+export type PublishView = { node: string, remote: string, url?: string, 
+/**
+ * The pin's refusal code, when the target could not be pinned.
+ */
+pin_refusal?: string, plan?: PlanView, 
+/**
+ * A consent to the latest plan is awaited.
+ */
+awaiting_consent: boolean, push?: PushView, 
+/**
+ * The output the node last finished with.
+ */
+result?: string, };
+
 export type PendingReview = { node: string, 
 /**
  * The gate node's title from the playbook, when it has one.
@@ -355,7 +393,12 @@ prompt?: string,
  * #165 Part 11), from the open `review_requested`; already appended to
  * `instruction` as one sentence. Never preselected.
  */
-recommendation?: ReviewRecommendation, };
+recommendation?: ReviewRecommendation, 
+/**
+ * For a publish gate: the exact plan the person consents to, with the
+ * nonce a consent must carry. `None` for a `human_review` gate.
+ */
+publish?: PlanView, };
 
 export type PendingSupervisor = { node: string, 
 /**
@@ -1201,6 +1244,12 @@ goal?: RunGoal,
  * The commits the run's nodes made on a git tree (C7); empty when none.
  */
 commits?: Array<NodeCommits>, 
+/**
+ * Each publish node: the pinned target, the latest plan, whether a
+ * consent is awaited, the push's ledger state and the result; empty
+ * for a run without one.
+ */
+publish?: Array<PublishView>, 
 /**
  * Unread events the run's connector inbox reads found lost to inbox
  * retention, one per distinct gap; empty when none.

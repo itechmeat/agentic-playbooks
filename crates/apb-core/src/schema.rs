@@ -121,7 +121,7 @@ pub enum JoinRequire {
 /// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
 /// from it, so this is the one list of node types (the dashboard's generated
 /// types, the authoring guide's doc test).
-pub const NODE_TYPES: [&str; 10] = [
+pub const NODE_TYPES: [&str; 11] = [
     "start",
     "agent_task",
     "script",
@@ -132,6 +132,7 @@ pub const NODE_TYPES: [&str; 10] = [
     "finish",
     "playbook",
     "judge",
+    "publish",
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -194,6 +195,12 @@ pub struct Playbook {
     /// schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_problems: Option<crate::known_problems::block::KnownProblemsBlock>,
+    /// Every node that runs an agent must be `isolation: full`, so the
+    /// publish step is the only way a push leaves the run (V120), and a
+    /// credential variable passed to an agent refuses the start. Additive to
+    /// schema 2; no migration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub publish_only: bool,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
@@ -453,6 +460,22 @@ impl ContextBudget {
 }
 
 impl Node {
+    /// What the node can do by its own definition: the effects it declares
+    /// plus the ones its kind implies ([`NodeKind::implied_effects`]). Every
+    /// reader of a node's effects (inferred effects, start consent, the
+    /// shipping rules) goes through this, so a kind that implies
+    /// `irreversible` cannot be read as harmless anywhere.
+    /// Declared effects come first, in their order.
+    pub fn own_effects(&self) -> Vec<Effect> {
+        let mut out = self.effects.clone();
+        for e in self.kind.implied_effects() {
+            if !out.contains(e) {
+                out.push(*e);
+            }
+        }
+        out
+    }
+
     /// The node's `list:` block, when it runs in list mode.
     pub fn list(&self) -> Option<&crate::list::ListSpec> {
         self.list.as_ref()
@@ -558,7 +581,8 @@ impl NodeKind {
             | NodeKind::HumanReview { .. }
             | NodeKind::Wait { .. }
             | NodeKind::Finish { prompt: None, .. }
-            | NodeKind::Playbook { .. } => false,
+            | NodeKind::Playbook { .. }
+            | NodeKind::Publish { .. } => false,
         }
     }
 
@@ -669,6 +693,41 @@ impl NodeKind {
         }
     }
 
+    /// The effects a node of this kind has whatever it declares. Only kinds
+    /// whose action the engine itself performs imply anything; an agent or a
+    /// script is weighed by [`crate::effects::inferred`] instead. The match is
+    /// exhaustive on purpose: a new kind decides its effects here.
+    pub fn implied_effects(&self) -> &'static [Effect] {
+        match self {
+            NodeKind::Start
+            | NodeKind::AgentTask { .. }
+            | NodeKind::Script { .. }
+            | NodeKind::Prompt { .. }
+            | NodeKind::Condition { .. }
+            | NodeKind::HumanReview { .. }
+            | NodeKind::Wait { .. }
+            | NodeKind::Finish { .. }
+            | NodeKind::Playbook { .. }
+            | NodeKind::Judge { .. } => &[],
+            // The engine pushes: it reaches a remote, outside the run, and a
+            // push cannot be taken back.
+            NodeKind::Publish { .. } => &[Effect::Network, Effect::External, Effect::Irreversible],
+        }
+    }
+
+    /// Whether the drive loop executes this kind itself (a gate, a wait, a
+    /// sub-playbook) instead of handing it to node execution. Node execution
+    /// refuses these defensively.
+    pub fn drive_handled(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::HumanReview { .. }
+                | NodeKind::Wait { .. }
+                | NodeKind::Playbook { .. }
+                | NodeKind::Publish { .. }
+        )
+    }
+
     /// The serde `type` tag of this variant, mirroring
     /// `#[serde(tag = "type", rename_all = "snake_case")]` on [`NodeKind`].
     /// Single source of truth for the node-type string a summary or catalog
@@ -687,6 +746,7 @@ impl NodeKind {
             NodeKind::Finish { .. } => 7,
             NodeKind::Playbook { .. } => 8,
             NodeKind::Judge { .. } => 9,
+            NodeKind::Publish { .. } => 10,
         }]
     }
 }
@@ -1512,6 +1572,26 @@ pub enum NodeKind {
         profile: Option<QualifiedProfileRef>,
     },
     // --- end judge node ----------------------------------------------------
+    /// Pushes the commits a node made to a remote branch, after a person
+    /// consented to the exact plan (see [`crate::publish`]). The remote is
+    /// pinned before the first acting node runs. Additive to schema 2; older
+    /// binaries reject the node type.
+    Publish {
+        /// The `agent_task` or `script` node whose commits are published.
+        from: String,
+        /// A remote of the repository, by name.
+        remote: String,
+        /// The remote branch, a template over `params.*`, `run.id` and node
+        /// outputs. Absent: the branch `from` committed on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// The push's own bound; default 300, at most 3600.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        /// Guidance for the person, shown literally.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1700,6 +1780,7 @@ mod tests {
             "{ id: n7, type: finish, outcome: success }",
             "{ id: n8, type: playbook, playbook: other }",
             "{ id: n9, type: judge, state: { s: x }, questions: { q: { type: noul, instructions: i } } }",
+            "{ id: n10, type: publish, from: n1, remote: origin }",
         ]
         .map(|n| format!("  - {n}\n"))
         .concat();

@@ -232,6 +232,30 @@ fn a_pending_send_is_in_flight_until_its_deadline_or_its_sender_ends() {
 }
 
 #[test]
+fn a_push_stays_pending_until_its_deadline_even_when_its_recorder_ended() {
+    let ref_intent = |deadline_ms: u64| {
+        let mut j = Journal::default();
+        j.intent("i1", "ref:main", NOW - 10, deadline_ms);
+        if let EventPayload::SendIntentRecorded { mode, .. } = &mut j.0[0].payload {
+            *mode = "ref".into();
+        }
+        Ledger::fold(&j.0)
+    };
+    // The push runs in its own session and may still be updating the
+    // remote: a reconcile now could read a ref it is about to move.
+    let live = ref_intent(NOW + 10);
+    assert!(matches!(
+        effective_state_with(&live.records()[0], NOW, &dead),
+        IntentState::Pending { .. }
+    ));
+    let late = ref_intent(NOW - 1);
+    assert!(matches!(
+        effective_state_with(&late.records()[0], NOW, &dead),
+        IntentState::Unknown { source, .. } if source == "orphan"
+    ));
+}
+
+#[test]
 fn an_unknown_key_send_is_replayed_inside_its_window_and_refused_or_resent_after() {
     let mut inside = Journal::default();
     inside

@@ -24,6 +24,7 @@
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
+  import PublishPanel from '../lib/PublishPanel.svelte'
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
@@ -72,6 +73,7 @@
   // same view `apb wait` and MCP run_wait decide on.
   const gates = $derived(detail ? runGates(detail) : null)
   const pending = $derived(gates?.reviews ?? [])
+  const publishes = $derived(gates?.publishes ?? [])
   const questions = $derived(gates?.questions ?? [])
   const waiting = $derived(gates?.waits ?? [])
   const supervisor = $derived(gates?.supervisor ?? null)
@@ -81,13 +83,19 @@
   const usageLine = $derived(detail?.usage ? runUsageSummary(detail.usage) : null)
   const unknownNote = $derived(unknownEventsNote(detail?.unknown_events))
 
-  async function decide(node: string, decision: string) {
+  // `nonce` answers a publish gate: the nonce of the plan shown.
+  async function decide(node: string, decision: string, nonce?: string) {
     deciding = `${node}:${decision}`
     try {
-      await postReview(id, node, decision, '', workspace)
+      await postReview(id, node, decision, '', workspace, nonce)
       await load()
     } catch (e) {
-      toast.error('Review failed', { description: String(e) })
+      // A publish decision fails when the plan moved on (a stale nonce): load
+      // the run again so the panel shows the current plan and its nonce.
+      toast.error(nonce ? 'Publish decision failed' : 'Review failed', {
+        description: String(e),
+      })
+      if (nonce) await load().catch(() => {})
     } finally {
       deciding = null
     }
@@ -345,6 +353,8 @@
     {/each}
 
     <HostTaskPanel tasks={hostTasks} />
+
+    <PublishPanel runId={id} views={detail?.publish} gates={publishes} posting={deciding} onDecide={decide} />
 
     {#if pending.length}
       <Card.Root class="border-primary/60">

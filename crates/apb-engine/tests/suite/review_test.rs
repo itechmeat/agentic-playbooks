@@ -406,6 +406,7 @@ fn review_requested(node: &str) -> EventPayload {
         instruction: String::new(),
         prompt: None,
         recommendation: None,
+        plan_digest: None,
     }
 }
 
@@ -464,6 +465,7 @@ fn post_review_on_a_gate_that_is_not_pending_is_a_conflict() {
                 node: "gate".into(),
                 decision: "approved".into(),
                 note: String::new(),
+                plan_digest: None,
             },
         ],
     );
@@ -541,6 +543,7 @@ fn a_new_request_after_the_queued_decision_is_consumed_accepts_a_new_decision() 
         node: "gate".into(),
         decision: "approved".into(),
         note: String::new(),
+        plan_digest: None,
     })
     .unwrap();
     log.append(review_requested("gate")).unwrap();

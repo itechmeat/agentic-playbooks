@@ -138,6 +138,12 @@ describe('failureEffect', () => {
     expect(failureEffect(pb, 'other')).toBeNull()
   })
 
+  it('marks a publish node, which fails on a refused plan or an unknown push', () => {
+    const pb = pbWith([{ ...successEdge, from: 'ship', condition: { type: 'node_status', node: 'ship', equals: 'success' } }])
+    pb.nodes.push({ id: 'ship', type: 'publish', title: 'Ship' })
+    expect(failureEffect(pb, 'ship')).toEqual({ kind: 'stop' })
+  })
+
   it('does not mark anything while the policy is route', () => {
     expect(failureEffect(pbWith([successEdge], 'route'), 'work')).toBeNull()
   })

@@ -304,6 +304,7 @@ fn intent_effect(rec: &IntentRecord, state: &IntentState) -> Effect {
                 IdempotencyMode::None => {
                     "apb refuses to send this intent again until a person resolves it.".to_string()
                 }
+                IdempotencyMode::Ref => "apb reads the remote branch back before anything else, and never pushes again until a person resolves it.".to_string(),
             };
             (
                 EffectKind::Unknown,

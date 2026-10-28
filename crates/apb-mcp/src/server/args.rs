@@ -403,11 +403,16 @@ pub struct RunResumeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReviewDecideArgs {
     pub run_id: String,
-    /// Identifier of the human_review node.
+    /// Identifier of the human_review or publish node.
     pub node: String,
     pub decision: String,
     #[serde(default)]
     pub note: String,
+    /// Publish gates only: the nonce of the plan the person saw
+    /// (`pending_review.publish.nonce`). Required for `publish`; pass it
+    /// only after the person was shown that exact plan.
+    #[serde(default)]
+    pub nonce: Option<String>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,

@@ -79,6 +79,10 @@ mod problems_cli_test;
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]
 mod projects_cli_test;
+// Unix-only: a shell script stands in for git on PATH.
+#[cfg(unix)]
+#[path = "suite/publish_cli_test.rs"]
+mod publish_cli_test;
 #[cfg(unix)]
 #[path = "suite/quota_pause_cli_test.rs"]
 mod quota_pause_cli_test;

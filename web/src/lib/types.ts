@@ -76,6 +76,8 @@ export interface PlaybookDetail {
     budget?: RunBudget | null
     // The run inputs the Run dialog asks for.
     params?: PlaybookParam[]
+    // Every agent node must run with isolation full (shown read-only).
+    publish_only?: boolean
   }
   layout: WfLayout | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]

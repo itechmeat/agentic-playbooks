@@ -203,7 +203,9 @@ export function nodeExits(playbook: PlaybookModel, nodeId: string): NodeExits | 
 // the policy does handle its failure. Closing that needs the edge `join` field,
 // which the editor's client-side parse does not carry today.
 // A `judge` fails when no answer comes back and its on_unavailable is `fail`.
-const FAILABLE_KINDS = new Set(['agent_task', 'script', 'playbook', 'wait', 'judge'])
+// A `publish` fails on a refused plan, a push not sent or one whose result
+// is unknown.
+const FAILABLE_KINDS = new Set(['agent_task', 'script', 'playbook', 'wait', 'judge', 'publish'])
 
 /** What the playbook's failure policy does for one node, when it applies. */
 export type FailureEffect = { kind: 'stop' } | { kind: 'route'; node: string }

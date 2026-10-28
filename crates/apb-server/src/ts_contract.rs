@@ -75,6 +75,13 @@ fn render_types() -> String {
         apb_engine::host_task::FallbackOf::decl(&cfg),
         apb_engine::host_task::PendingHostTask::decl(&cfg),
         apb_engine::event::ReviewRecommendation::decl(&cfg),
+        // The publish step: the plan a person consents to and each node's
+        // target, push and result.
+        apb_engine::event::PublishCommit::decl(&cfg),
+        apb_engine::publish::view::PlanView::decl(&cfg),
+        apb_engine::publish::view::PushState::decl(&cfg),
+        apb_engine::publish::view::PushView::decl(&cfg),
+        apb_engine::publish::view::PublishView::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
         // List mode: a list node's counts and its items.
@@ -320,6 +327,7 @@ fn render_consts() -> String {
         ));
     }
     render_isolation_consts(&mut out);
+    render_publish_consts(&mut out);
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")
@@ -355,6 +363,23 @@ fn render_isolation_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** The refusal code of a full node this machine cannot isolate. */\nexport const ISOLATION_UNAVAILABLE = {}\n",
         quoted(UNAVAILABLE)
+    ));
+}
+
+/// The publish step's decisions, its push timeout bounds and the sentence
+/// of every plan refusal, so the dashboard words them as the CLI does.
+fn render_publish_consts(out: &mut String) {
+    use apb_core::publish::{DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, OPTIONS, Refusal};
+    out.push_str(&format!(
+        "\n/** The decisions of a publish gate. */\nexport const PUBLISH_OPTIONS = {}\n",
+        ts_string_array(&OPTIONS)
+    ));
+    out.push_str(&format!(
+        "\n/** The push timeout of a publish node: the default and the most allowed, in seconds. */\nexport const PUBLISH_DEFAULT_TIMEOUT_SECONDS = {DEFAULT_TIMEOUT_SECONDS}\nexport const PUBLISH_MAX_TIMEOUT_SECONDS = {MAX_TIMEOUT_SECONDS}\n"
+    ));
+    out.push_str(&format!(
+        "\n/** Why a publish plan cannot be offered, in words. */\nexport const PUBLISH_REFUSAL_TEXTS = {{ {} }} as const\n",
+        label_entries(Refusal::ALL.iter().map(|r| (r.code().to_string(), r.sentence())))
     ));
 }
 

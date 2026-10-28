@@ -148,6 +148,14 @@ pub struct RunConfig {
     /// parent depth + 1. Enforced against `MAX_SUBPLAYBOOK_DEPTH`.
     #[serde(default)]
     pub depth: usize,
+    /// The run is held to `publish_only`: its playbook sets it, or a parent
+    /// run held to it started this one (decision record 0010).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub publish_only: bool,
+    /// A parent run started a node that can act before this child run, so
+    /// nothing is pinned for the child's publish nodes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parent_acted: bool,
     /// Verified sub-playbook pins from the policy gate, keyed by this run's
     /// playbook-node id (spec C). `None` when the start path computed no pins
     /// (a playbook with no `type: playbook` node, or a caller that never went

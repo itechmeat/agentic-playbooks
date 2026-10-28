@@ -383,6 +383,7 @@ fn gate_visit_decision<'a>(
                 node: n,
                 decision,
                 note,
+                ..
             } if n == node && open => return Ok((decision.as_str(), note.as_str())),
             _ => {}
         }
@@ -902,6 +903,7 @@ mod tests {
                 node: node.into(),
                 decision: decision.into(),
                 note: note.into(),
+                plan_digest: None,
             },
         )
     }

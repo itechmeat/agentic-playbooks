@@ -20,6 +20,7 @@ mod list;
 mod node_io;
 pub(crate) mod nodes;
 mod params;
+mod publish;
 mod quality;
 mod templates;
 
@@ -52,6 +53,7 @@ use nodes::{
     check_goal, check_interactive, check_playbook_ref, check_scripts, check_success_check,
     check_trigger,
 };
+pub use publish::{OpenAgent, publish_only_violations};
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -186,6 +188,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     params::check_params(playbook, &mut r); // V99, V100
     quality::check_quality(playbook, &mut r); // V102-V107
     known_problems::check_known_problems(playbook, &mut r); // V108-V111
+    publish::check_publish(playbook, &mut r); // V116-V120
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

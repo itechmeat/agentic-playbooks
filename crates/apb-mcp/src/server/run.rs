@@ -558,7 +558,7 @@ impl WfMcp {
 
     #[tool(
         description = concat!(
-            "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments. A run its budget paused (pause.cause budget) carries budget and a next that says to ask the person, then call run_resume with budget. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
+            "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review or publish gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. A publish gate (pending_review.publish) asks a person to consent to an exact push: relay that plan before any review_decide, as its `next` says. On reason timeout, call run_wait again with the same arguments. A run its budget paused (pause.cause budget) carries budget and a next that says to ask the person, then call run_resume with budget. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
             apb_engine::host_task_contract!(),
             " For each pending task tell your subagent to read `prompt_path` as its task and `role_path` as its system context (`prompt` and `role_prompt` carry the same text inline; pass inline_prompt: false to drop them), have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
         ),
@@ -910,7 +910,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Decide a human_review node of a run: pass run_id, node, decision and an optional note",
+        description = "Decide a gate of a run (a human_review or a publish node): pass run_id, node, decision and an optional note. A publish gate (pending_review carries publish) is a person's consent to push exactly one plan: first show the person the plan in their language (URL, branch, the commits with their this-run tags, the remote's current state, outside_push_suspected), then pass decision publish with nonce set to pending_review.publish.nonce, only after they saw that plan and agreed; never decide publish on your own judgment. A stale nonce is refused with the current plan: show that plan and ask again. skip needs no nonce.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn review_decide(
@@ -920,6 +920,7 @@ impl WfMcp {
             node,
             decision,
             note,
+            nonce,
             workspace,
         }): Parameters<ReviewDecideArgs>,
     ) -> CallToolResult {
@@ -928,7 +929,12 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::review_decide(
-            &root, &run_id, &node, &decision, &note,
+            &root,
+            &run_id,
+            &node,
+            &decision,
+            &note,
+            nonce.as_deref(),
         ))
     }
 

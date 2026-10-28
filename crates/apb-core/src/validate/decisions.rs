@@ -88,16 +88,16 @@ pub fn granted<'a>(
 }
 
 /// Why node `n` counts as a step that ships something out of reach of a
-/// later correction, strongest evidence first: its own declared
-/// `irreversible` or `secrets` effects, a granted connector function flagged
+/// later correction, strongest evidence first: its own declared or implied
+/// (a publish node) `irreversible` or `secrets` effects, a granted connector function flagged
 /// `irreversible`, then the name heuristic ([`ships`]) as the fallback.
 fn shipping_reason(
     n: &crate::schema::Node,
     connectors: &BTreeMap<String, ConnectorFacts>,
 ) -> Option<String> {
     let declared: Vec<&str> = n
-        .effects
-        .iter()
+        .own_effects()
+        .into_iter()
         .filter_map(|e| match e {
             Effect::Irreversible => Some("irreversible"),
             Effect::Secrets => Some("secrets"),
@@ -106,7 +106,7 @@ fn shipping_reason(
         .collect();
     if !declared.is_empty() {
         return Some(format!(
-            "node `{}` after the gate declares {} effects",
+            "node `{}` after the gate declares or implies {} effects",
             n.id,
             declared.join(" and ")
         ));
@@ -472,7 +472,7 @@ pub(super) fn check_undeclared_shipping(playbook: &Playbook, r: &mut ValidationR
                 | NodeKind::Finish { .. }
                 | NodeKind::Playbook { .. }
                 | NodeKind::HumanReview { .. }
-        ) || n.effects.contains(&Effect::Irreversible)
+        ) || n.own_effects().contains(&Effect::Irreversible)
             || !ships(n)
         {
             continue;
@@ -595,7 +595,7 @@ mod tests {
         assert!(
             got[0]
                 .2
-                .contains("`finalize` after the gate declares irreversible"),
+                .contains("`finalize` after the gate declares or implies irreversible"),
             "{}",
             got[0].2
         );

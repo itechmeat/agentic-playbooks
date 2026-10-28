@@ -29,6 +29,7 @@ fn node(level: Level, network: Network) -> NodeFacts {
         network,
         agents_without_needs: Vec::new(),
         host_mode: false,
+        publish_only: false,
     }
 }
 
@@ -207,4 +208,21 @@ fn every_reason_has_its_own_sentence() {
         // The wire id is what serde writes.
         assert_eq!(serde_json::to_value(r).unwrap(), r.id());
     }
+}
+
+#[test]
+fn publish_only_turns_a_passed_credential_into_a_refusal() {
+    use apb_core::isolation::contract::credentials_refusal;
+    let plain = node(Level::Full, Network::None);
+    let names = vec!["GH_TOKEN".to_string()];
+    assert_eq!(credentials_refusal(&plain, &names), None);
+    let strict = NodeFacts {
+        publish_only: true,
+        ..plain
+    };
+    assert_eq!(credentials_refusal(&strict, &[]), None);
+    let why = credentials_refusal(&strict, &names).unwrap();
+    assert_eq!(why.code, ReasonCode::CredentialsPassed);
+    assert_eq!(why.code.id(), "credentials_passed");
+    assert!(why.to_string().contains("GH_TOKEN"), "{why}");
 }

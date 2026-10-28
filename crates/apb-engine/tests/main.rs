@@ -341,6 +341,10 @@ mod prompt_cache_test;
 #[cfg(unix)]
 #[path = "suite/protect_test.rs"]
 mod protect_test;
+// Unix-only: `runner: sh` scripts and shell hooks in the bare remote.
+#[cfg(unix)]
+#[path = "suite/publish_test.rs"]
+mod publish_test;
 #[path = "suite/quality_common.rs"]
 mod quality_common;
 #[path = "suite/question_channel_test.rs"]

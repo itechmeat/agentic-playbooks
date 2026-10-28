@@ -76,8 +76,9 @@ impl RunConsent {
 /// The policy code of a refusal, shared by the gate and the engine.
 pub const REFUSAL_POLICY: &str = "irreversible_requires_confirmation";
 
-/// What in `playbook` declares `irreversible`: `playbook` for the
-/// playbook-level declaration, `node <id>` for a node's own. Sub-playbooks
+/// What in `playbook` declares or implies `irreversible`: `playbook` for the
+/// playbook-level declaration, `node <id>` for a node's own (declared, or
+/// implied by its kind). Sub-playbooks
 /// are not named here (see [`crate::gate::consent_sources`]).
 pub fn own_sources(playbook: &Playbook) -> Vec<String> {
     let mut out = Vec::new();
@@ -85,7 +86,7 @@ pub fn own_sources(playbook: &Playbook) -> Vec<String> {
         out.push("playbook".to_string());
     }
     for n in &playbook.nodes {
-        if n.effects.contains(&Effect::Irreversible) {
+        if n.own_effects().contains(&Effect::Irreversible) {
             out.push(format!("node {}", n.id));
         }
     }
@@ -144,14 +145,9 @@ pub fn consent_nonce(digest: &str, sources: &[String]) -> String {
     let mut sorted: Vec<&str> = sources.iter().map(String::as_str).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    let mut input = String::from(digest);
-    for s in sorted {
-        input.push('\n');
-        input.push_str(s);
-    }
-    let hex = apb_core::content::sha256_hex(input.as_bytes());
-    let hex = hex.strip_prefix("sha256:").unwrap_or(&hex);
-    format!("consent-{}", &hex[..32])
+    let mut lines = vec![digest];
+    lines.extend(sorted);
+    apb_core::content::short_nonce("consent", &lines)
 }
 
 /// What a launch surface passes as its confirmation of irreversible effects:

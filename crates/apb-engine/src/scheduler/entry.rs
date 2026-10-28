@@ -52,6 +52,14 @@ pub struct RunOptions {
     pub continued_from: Option<String>,
     /// Sub-playbook nesting depth of THIS run (0 for a top-level run).
     pub depth: usize,
+    /// Held to `publish_only` by a parent run (decision record 0010): the
+    /// run refuses to start unless every agent node is `isolation: full`,
+    /// and its attempts refuse a passed credential, whatever its own
+    /// playbook says.
+    pub publish_only: bool,
+    /// A parent run already started a node that can act before this child,
+    /// so the child's publish nodes pin nothing and refuse `no_pin`.
+    pub parent_acted: bool,
     /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
     pub expected_children: Option<BTreeMap<String, crate::run_config::ChildExpectation>>,
     /// Node-cache policy for the run (spec 2026-07-19). `Auto` by default via

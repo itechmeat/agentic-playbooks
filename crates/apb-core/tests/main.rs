@@ -123,6 +123,8 @@ mod validate_params_test;
 mod validate_profiles_test;
 #[path = "suite/validate_protect_test.rs"]
 mod validate_protect_test;
+#[path = "suite/validate_publish_test.rs"]
+mod validate_publish_test;
 #[path = "suite/validate_quality_test.rs"]
 mod validate_quality_test;
 #[path = "suite/validate_references_test.rs"]

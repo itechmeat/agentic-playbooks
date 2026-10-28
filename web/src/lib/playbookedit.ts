@@ -8,6 +8,7 @@ import { Document, YAMLSeq } from 'yaml'
 
 import type { NodeType } from './consts.gen'
 import { judgeSkeleton } from './judgefields'
+import { publishSkeleton, type SourceNode } from './publish'
 
 // The node kinds the editor can add, in the order a graph is usually built,
 // with the node that ends a run last. A subset of the schema's node types
@@ -20,6 +21,7 @@ export const EDITOR_NODE_KINDS = [
   'condition',
   'judge',
   'playbook',
+  'publish',
   'finish',
 ] as const satisfies readonly NodeType[]
 export type NodeKind = (typeof EDITOR_NODE_KINDS)[number]
@@ -52,13 +54,32 @@ function nodeById(nodes: YAMLSeq, id: string): ReturnType<YAMLSeq['get']> | unde
   return nodes.items.find((n) => (n as { get: (k: string) => unknown }).get('id') === id)
 }
 
+/** The plain nodes of a nodes seq, for the skeletons that look at them. A
+ * half-edited item that is not a map with a string id and type is left out. */
+function nodesOf(nodes: YAMLSeq): SourceNode[] {
+  const plain = nodes.toJSON() as unknown
+  if (!Array.isArray(plain)) return []
+  return plain.filter(
+    (n): n is SourceNode =>
+      typeof n === 'object' && n !== null && typeof n.id === 'string' && typeof n.type === 'string',
+  )
+}
+
+/** The fields a new node of `kind` starts with. A judge node starts with a
+ * question skeleton (a bare `type: judge` asks nothing and does not
+ * validate); a publish node starts from the last node that can commit and
+ * the remote `origin`. */
+function skeletonFor(kind: string, nodes: YAMLSeq): Record<string, unknown> {
+  if (kind === 'judge') return judgeSkeleton()
+  if (kind === 'publish') return publishSkeleton(nodesOf(nodes))
+  return {}
+}
+
 /** Adds a node with the given type and id. Returns a new document. */
 export function addNode(doc: Document, kind: string, id: string): Document {
   const next = doc.clone()
   const nodes = ensureNodes(next)
-  // A judge node starts with a question skeleton: a bare `type: judge` asks
-  // nothing and does not validate.
-  const extra = kind === 'judge' ? judgeSkeleton() : {}
+  const extra = skeletonFor(kind, nodes)
   const node = next.createNode({ id, type: kind, title: defaultTitle(kind, id), ...extra })
   nodes.add(node)
   return next

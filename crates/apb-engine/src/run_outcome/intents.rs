@@ -104,6 +104,13 @@ impl RunIntent {
         self.node == apb_core::connector::sites::NOTIFY_SITE
     }
 
+    /// Whether this is a publish node's push (the engine site `@git`).
+    /// Unlike a notification it is the run's own outcome: an unknown push
+    /// needs a look like any unknown send.
+    pub fn is_publish(&self) -> bool {
+        self.connector == apb_core::publish::GIT_CONNECTOR
+    }
+
     /// Whether nobody can tell if this send went out, and no replay of it
     /// tells either: a person has to resolve it.
     pub fn is_open_unknown(&self) -> bool {
@@ -139,7 +146,8 @@ impl RunIntent {
     /// own (found by apb's lookup, or confirmed by a person); `None` for
     /// every other intent, whose call already counts.
     pub fn done_line(&self) -> Option<String> {
-        if self.state != ledger::CONFIRMED {
+        // A push says what it published through `super::publish`.
+        if self.state != ledger::CONFIRMED || self.is_publish() {
             return None;
         }
         let how = match self.source.as_deref() {

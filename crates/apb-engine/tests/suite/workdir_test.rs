@@ -20,6 +20,8 @@ fn run_config_round_trips() {
         continued_from: None,
         superseded_by: None,
         depth: 0,
+        publish_only: false,
+        parent_acted: false,
         expected_children: None,
         expected_connectors: Default::default(),
         expected_connector_accounts: Default::default(),

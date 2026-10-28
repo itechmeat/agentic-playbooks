@@ -68,6 +68,15 @@ pub struct RunDetail {
     )]
     pub commits: Vec<apb_engine::run_outcome::NodeCommits>,
     // --- end of the 0.23.0 blocks ---
+    /// Each publish node: the pinned target, the latest plan, whether a
+    /// consent is awaited, the push's ledger state and the result; empty
+    /// for a run without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_outcome::RunPublish>>", optional)
+    )]
+    pub publish: Vec<apb_engine::run_outcome::RunPublish>,
     /// Unread events the run's connector inbox reads found lost to inbox
     /// retention, one per distinct gap; empty when none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -262,6 +271,7 @@ pub(crate) async fn get_run_handler(
     let usage = view.usage();
     let decisions = view.decisions();
     let commits = view.commits();
+    let publish = view.publish();
     let inbox_gaps = view.inbox_gaps();
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
     let isolation = view.isolation();
@@ -310,6 +320,7 @@ pub(crate) async fn get_run_handler(
         hooks,
         children,
         commits,
+        publish,
         inbox_gaps,
         outcome,
         baseline,
@@ -342,6 +353,28 @@ pub(crate) struct ReviewBody {
     decision: String,
     #[serde(default)]
     note: String,
+    /// A publish gate only: the nonce of the plan the person saw.
+    #[serde(default)]
+    nonce: Option<String>,
+}
+
+/// A publish consent is a person's (decision record 0010). A dashboard
+/// without keys takes any request that reaches its loopback port, and under
+/// `network: open` a sandboxed agent shares that loopback: it could read the
+/// open plan's nonce and consent to its own push. So a keyless dashboard
+/// never takes a `publish` decision; a `skip` pushes nothing and stays open.
+/// The person approves with the CLI, or issues a dashboard key first.
+fn keyless_publish_refusal(
+    auth: &crate::auth::AuthState,
+    run_id: &str,
+    body: &ReviewBody,
+) -> Option<String> {
+    (!auth.enabled() && body.decision == apb_core::publish::OPTION_PUBLISH).then(|| {
+        format!(
+            "a dashboard without keys does not take a publish consent, since anything on this machine can reach it; approve with `apb publish approve {run_id} --node {} --nonce <nonce>`, or issue a key with `apb server key issue` and sign in",
+            body.node
+        )
+    })
 }
 
 pub(crate) async fn post_review_handler(
@@ -361,24 +394,32 @@ pub(crate) async fn post_review_handler(
     if !run_dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
     }
+    if let Some(why) = keyless_publish_refusal(&state.auth, &id, &body) {
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
     let cmd = apb_engine::ReviewCommand {
         node: body.node,
         decision: body.decision,
         note: body.note,
     };
-    // The engine owns the node check (issue #103.1), so MCP `review_decide`
-    // and the `apb review` CLI inherit it; this maps its two client-fault
-    // verdicts the way `run_playbook_handler` maps its own. Neither is a
-    // server fault: `NotFound` means the decided node is not a `human_review`
-    // node of this run's playbook, `Conflict` means no decision is pending
-    // on it.
-    match apb_engine::post_review(&run_dir, cmd) {
+    // The engine owns the node check (issue #103.1) and the publish nonce
+    // check, so MCP `review_decide` and the `apb review` CLI inherit them;
+    // this maps its client-fault verdicts the way `run_playbook_handler`
+    // maps its own. None is a server fault: `NotFound` means the decided
+    // node is not a gate of this run's playbook, `Conflict` means no
+    // decision is pending on it or the nonce answers an older plan (the
+    // message names the current one), `Invalid` means a decision the gate
+    // does not offer or a `publish` without the plan's nonce.
+    match apb_engine::review::post_decision(&run_dir, cmd, body.nonce) {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()
         }
         Err(apb_engine::EngineError::Conflict(what)) => {
             (StatusCode::CONFLICT, what).into_response()
+        }
+        Err(apb_engine::EngineError::Invalid(what)) => {
+            (StatusCode::BAD_REQUEST, what).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

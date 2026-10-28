@@ -68,7 +68,8 @@ mod patch;
 mod pipeline;
 mod prepare;
 mod protect;
-mod provenance;
+pub(crate) mod provenance;
+mod publish;
 mod quota_probe;
 mod rebind;
 mod resume;
@@ -700,6 +701,20 @@ fn drive_inner(
         // `current`). An interrupted snapshot journals nothing: the control
         // scan at the top of the loop applies the pause or the stop first.
         if !baseline_before_done && apb_core::effects::node_acts(current_node) {
+            // Every publish node's remote is pinned before anything acts
+            // (see `crate::publish::pin`).
+            crate::publish::pin::ensure(&playbook, &events, log, cfg.parent_acted, |from| {
+                publish::resolved_tree(&playbook, from, &workdir, |t| {
+                    render_node_prompt(
+                        run_dir,
+                        &run_id,
+                        &state,
+                        cfg,
+                        t,
+                        &playbook.context_budget(from),
+                    )
+                })
+            })?;
             let (flag, _guard) = baseline::snapshot_flag(&fanout);
             let run = baseline::BaselineRun {
                 playbook: &playbook,
@@ -1667,125 +1682,85 @@ fn drive_inner(
         // hit); every other branch leaves it empty.
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
         let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
-            let events = read_all(run_dir)?;
-            let decided = review_decided_count(&events, &current);
-            let for_current: Vec<_> = read_reviews_after(run_dir, None)?
-                .into_iter()
-                .filter(|e| e.cmd.node == current)
-                .collect();
-            if let Some(entry) = for_current.into_iter().nth(decided) {
-                steps += 1;
-                log.append(EventPayload::NodeStarted {
-                    node: current.clone(),
-                    attempt: 1,
-                })?;
-                log.append(EventPayload::ReviewDecided {
-                    node: current.clone(),
-                    decision: entry.cmd.decision.clone(),
-                    note: entry.cmd.note.clone(),
-                })?;
-                (NodeStatus::Succeeded, entry.cmd.decision.clone())
-            } else {
-                // No decision yet: declare the request once, then wait (poll).
-                // The event carries an owner-facing pending instruction (issue
-                // #42 finding 4) so a supervising agent, or any reader of the
-                // log alone, can tell the owner an action is expected, what the
-                // options are, and how to answer.
-                if review_open_count(&events, &current) == 0 {
-                    let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let mut instruction = crate::people::instruction::review_instruction(
-                        &current,
-                        title.as_deref(),
-                        options,
-                        prompt.as_deref(),
-                    );
-                    // The review recommendation (issue #165 Part 11, 14.4),
-                    // once per visit, before the request is declared.
-                    let rec = match decisions.as_ref() {
-                        Some(runner) => {
-                            let journal = Journal::new(&mut *log);
-                            review_gate::recommend(
-                                root, run_dir, runner, &journal, &playbook, &current, &events,
-                            )
-                        }
-                        None => Default::default(),
-                    };
-                    if let Some(r) = &rec.recommendation {
-                        instruction.push_str(&crate::decision::review_triage::instruction_line(r));
-                    }
-                    log.append(EventPayload::ReviewRequested {
-                        node: current.clone(),
-                        options: apb_core::schema::effective_review_options(options),
-                        title,
-                        instruction,
-                        prompt: prompt.clone(),
-                        recommendation: rec.recommendation.clone(),
-                    })?;
-                    // Enforced: post through the review channel, so it is
-                    // consumed and journaled like a person's decision; a
-                    // decision a person already queued wins (the channel
-                    // refuses a second one), and any failure waits for the
-                    // person (fail-closed).
-                    if let Some((decision, note)) = rec.auto {
-                        let _ = crate::review::post_review(
-                            run_dir,
-                            crate::review::ReviewCommand {
-                                node: current.clone(),
-                                decision,
-                                note,
-                            },
-                        );
-                    }
-                }
-                // A directive that moves the run elsewhere (`node_retry`,
-                // `run_continue_from`) is what a supervisor sends when it sees,
-                // parked on this gate, that an earlier node went wrong. The
-                // top-of-loop scan leaves exactly such a directive at the head
-                // of the pending commands (it answers a wake, and a gate raises
-                // none), so it is applied here: the open request is withdrawn
-                // - no one can decide a gate the run has left - and the run
-                // moves on. Reaching the gate again asks anew.
-                if let Some(entry) = read_control_after(run_dir, control_cursor)?
-                    .into_iter()
-                    .next()
-                    && matches!(
-                        entry.cmd,
-                        Control::Retry { .. } | Control::ContinueFrom { .. }
-                    )
-                {
-                    let reason = match &entry.cmd {
-                        Control::Retry { node, .. } => format!("node_retry `{node}`"),
-                        Control::ContinueFrom { node } => format!("run_continue_from `{node}`"),
-                        _ => String::new(),
-                    };
-                    log.append(EventPayload::ReviewWithdrawn {
-                        node: current.clone(),
-                        reason,
-                    })?;
-                    supervisor::apply_move_directive(
+            let current_id = current.clone();
+            let step = review_gate::await_decision(
+                &mut review_gate::GateDrive {
+                    run_dir,
+                    log: &mut *log,
+                    playbook: &playbook,
+                    current: &mut current,
+                    control_cursor: &mut control_cursor,
+                    prompt_overrides: &mut prompt_overrides,
+                    frontier: &mut frontier,
+                },
+                review_gate::Consume::Nth,
+                |log, events| {
+                    review_gate::human_review_request(
+                        root,
                         run_dir,
                         log,
-                        &mut control_cursor,
-                        &mut prompt_overrides,
-                        &mut current,
-                        entry.cmd,
-                        entry.seq,
-                    )?;
-                    // The directed node runs again: the same revival as a
-                    // batch retry (issue #203), but no head rebuild, the
-                    // frontier is still the drive's own.
-                    revive::revive(
-                        log,
+                        decisions.as_ref(),
                         &playbook,
-                        &read_all(run_dir)?,
-                        std::slice::from_ref(&current),
-                        &mut frontier,
-                        &[],
-                    )?;
+                        &current_id,
+                        options,
+                        prompt.as_deref(),
+                        events,
+                    )
+                },
+            )?;
+            match step {
+                review_gate::GateStep::Decided(entry) => {
+                    steps += 1;
+                    log.append(EventPayload::NodeStarted {
+                        node: current.clone(),
+                        attempt: 1,
+                    })?;
+                    log.append(EventPayload::ReviewDecided {
+                        node: current.clone(),
+                        decision: entry.cmd.decision.clone(),
+                        note: entry.cmd.note.clone(),
+                        plan_digest: None,
+                    })?;
+                    (NodeStatus::Succeeded, entry.cmd.decision)
+                }
+                review_gate::GateStep::Moved => continue,
+                review_gate::GateStep::Waiting => {
+                    std::thread::sleep(AWAIT_CONTROL_POLL);
                     continue;
                 }
-                std::thread::sleep(AWAIT_CONTROL_POLL);
-                continue;
+            }
+        } else if matches!(node_kind, NodeKind::Publish { .. }) {
+            let run = publish::PublishRun {
+                root,
+                run_id: &run_id,
+                workdir: &workdir,
+                state: &state,
+                cfg,
+                scrub: &env_scrub,
+                abort: &run_cancel,
+            };
+            let step = publish::step(
+                &run,
+                &mut review_gate::GateDrive {
+                    run_dir,
+                    log: &mut *log,
+                    playbook: &playbook,
+                    current: &mut current,
+                    control_cursor: &mut control_cursor,
+                    prompt_overrides: &mut prompt_overrides,
+                    frontier: &mut frontier,
+                },
+            )?;
+            match step {
+                publish::PublishStep::Finished(status, output) => {
+                    steps += 1;
+                    (status, output)
+                }
+                publish::PublishStep::Again | publish::PublishStep::Moved => continue,
+                publish::PublishStep::Waiting => {
+                    std::thread::sleep(AWAIT_CONTROL_POLL);
+                    continue;
+                }
             }
         } else if let NodeKind::Wait {
             wait_for,

@@ -1,4 +1,5 @@
 import { pendingSupervisorFromPayload, type SupervisorEntry } from './supervisors'
+import type { PublishGate } from './publish'
 import type { PendingHostTask, ReviewRecommendation } from './api.gen'
 import type { RunDetail } from './types'
 
@@ -43,9 +44,12 @@ export interface HostTaskEntry {
   deadline: number | null
 }
 
-// Every gate the run page renders a panel for.
+// Every gate the run page renders a panel for. A review that carries a
+// publish plan is a publish gate: it goes to the publish panel, which shows
+// the exact plan and posts the plan's nonce, never to the review card.
 export interface RunGates {
   reviews: ReviewEntry[]
+  publishes: PublishGate[]
   questions: QuestionEntry[]
   waits: string[]
   supervisor: SupervisorEntry | null
@@ -84,14 +88,19 @@ export function deadlineNote(deadline: number | null, now: number): string | nul
 // "awaiting signal" on a run that had already stopped).
 export function runGates(detail: RunDetail): RunGates {
   const p = detail.progress
-  if (!p) return { reviews: [], questions: [], waits: [], supervisor: null, tasks: [] }
+  if (!p) return { reviews: [], publishes: [], questions: [], waits: [], supervisor: null, tasks: [] }
   return {
-    reviews: p.pending_reviews.map(({ node, options, prompt, recommendation }) => {
-      const entry: ReviewEntry = prompt ? { node, options, prompt } : { node, options }
-      const note = recommendationNote(recommendation)
-      if (note) entry.recommendation = note
-      return entry
-    }),
+    reviews: p.pending_reviews
+      .filter((r) => !r.publish)
+      .map(({ node, options, prompt, recommendation }) => {
+        const entry: ReviewEntry = prompt ? { node, options, prompt } : { node, options }
+        const note = recommendationNote(recommendation)
+        if (note) entry.recommendation = note
+        return entry
+      }),
+    publishes: p.pending_reviews.flatMap(({ node, publish, prompt }) =>
+      publish ? [prompt ? { node, plan: publish, prompt } : { node, plan: publish }] : [],
+    ),
     questions: p.pending_questions.map(({ node, question, options }) => ({
       node,
       question,
