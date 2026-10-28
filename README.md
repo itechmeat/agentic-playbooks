@@ -254,12 +254,14 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Released on the `0.x` line (the latest release is `0.25.0`); each tagged
-release has its notes in [docs/release-notes/](docs/release-notes/) and on
-the GitHub releases page. The engine, web editor, versioning, MCP surface, and
-supervisor are implemented and tested; until `1.0` the schema and CLI may
-still change between minor releases. Design specs live in
-[docs/superpowers/specs/](docs/superpowers/specs/).
+The current release is the `1.0.0-beta.1` pre-release (the latest stable
+release is `0.25.0`); each tagged release has its notes in
+[docs/release-notes/](docs/release-notes/) and on the GitHub releases page.
+The engine, web editor, versioning, MCP surface, and supervisor are
+implemented and tested. In the beta, the playbook schema and the CLI are the
+ones 1.0 intends to keep, but they may still change before `1.0.0` where
+feedback shows a problem. Installing the beta: [docs/INSTALL.md](docs/INSTALL.md).
+Design specs live in [docs/superpowers/specs/](docs/superpowers/specs/).
 
 ## Documentation
 
