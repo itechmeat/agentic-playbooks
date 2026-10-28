@@ -63,6 +63,9 @@ mod adapter_output_test;
 #[path = "suite/adapter_test.rs"]
 mod adapter_test;
 #[cfg(unix)]
+#[path = "suite/agent_contract/mod.rs"]
+mod agent_contract;
+#[cfg(unix)]
 #[path = "suite/agent_env_live_test.rs"]
 mod agent_env_live_test;
 #[cfg(unix)]
@@ -71,6 +74,9 @@ mod agent_env_run_test;
 #[cfg(unix)]
 #[path = "suite/agent_env_spawn_test.rs"]
 mod agent_env_spawn_test;
+#[cfg(unix)]
+#[path = "suite/agent_probe_test.rs"]
+mod agent_probe_test;
 #[path = "suite/agent_report_test.rs"]
 mod agent_report_test;
 #[path = "suite/agent_timeout_test.rs"]
@@ -354,6 +360,9 @@ mod supervisor_commands_test;
 #[cfg(unix)]
 #[path = "suite/token_economy_test.rs"]
 mod token_economy_test;
+#[cfg(unix)]
+#[path = "suite/tool_exposure_test.rs"]
+mod tool_exposure_test;
 #[path = "suite/transcript_codex_test.rs"]
 mod transcript_codex_test;
 #[path = "suite/transcript_read_test.rs"]

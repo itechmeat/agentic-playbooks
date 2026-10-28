@@ -25,13 +25,14 @@ use crate::state::{RunState, RunStatus};
 
 mod check;
 mod env;
+mod exposure;
 
 pub use check::{FAIL, OK, RunCheck, WARN};
 
 /// Diagnoses run `run_id` under project `root`.
 ///
 /// Returns the checks in a fixed order - run, nodes, attempts, autonomy,
-/// models, process env, driver, workdir lock, control backlog, supervisor actions - so two reports
+/// models, process env, tool exposure, driver, workdir lock, control backlog, supervisor actions - so two reports
 /// of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
@@ -51,6 +52,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(autonomy_check(&run_dir));
     checks.extend(model_check(&run_dir, events));
     checks.extend(env::env_checks(&run_dir, events));
+    checks.extend(exposure::exposure_checks(events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(
         root,

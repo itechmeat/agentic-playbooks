@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 
 use apb_core::process_env::{
-    EnvPattern, ProcessEnvMode, ProcessEnvPolicy, allowed_patterns, is_truthy, plan,
+    AgentEnvSet, EnvPattern, ProcessEnvMode, ProcessEnvPolicy, allowed_patterns, is_truthy, plan,
 };
 use apb_core::profile::{PROFILE_PROCESS_ENV_INVALID, PROFILE_TIERS_INVALID, ProfileDoc};
 
@@ -106,7 +106,7 @@ fn problems_report_both_codes() {
 #[test]
 fn a_plan_keeps_base_agent_and_allow_names_and_withholds_the_rest() {
     let allow = pats(&["GH_TOKEN", "NPM_CONFIG_*", "NPM_TOKEN"]);
-    let allowed = allowed_patterns("claude", "sonnet", &allow, |_| false, &[]);
+    let allowed = allowed_for("claude", "sonnet", &allow, |_| false, &[]);
     let p = plan(
         parent(&[
             "PATH",
@@ -155,9 +155,9 @@ fn a_plan_keeps_base_agent_and_allow_names_and_withholds_the_rest() {
 #[test]
 fn claude_cloud_credentials_follow_their_trigger() {
     let env = parent(&["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE", "AZURE_TENANT"]);
-    let off = allowed_patterns("claude", "m", &[], |_| false, &[]);
+    let off = allowed_for("claude", "m", &[], |_| false, &[]);
     assert!(!plan(env.clone(), &off, &[], &[]).keeps("AWS_PROFILE"));
-    let on = allowed_patterns("claude", "m", &[], |n| n == "CLAUDE_CODE_USE_BEDROCK", &[]);
+    let on = allowed_for("claude", "m", &[], |n| n == "CLAUDE_CODE_USE_BEDROCK", &[]);
     let p = plan(env, &on, &[], &[]);
     assert!(p.keeps("AWS_PROFILE"));
     assert!(!p.keeps("AZURE_TENANT"));
@@ -179,7 +179,7 @@ fn a_trigger_counts_only_with_a_truthy_value() {
 #[test]
 fn a_malformed_allow_entry_is_dropped_not_trusted() {
     let allow: Vec<EnvPattern> = yaml_serde::from_str("[\"*\", GH_TOKEN]").unwrap();
-    let allowed = allowed_patterns("claude", "m", &allow, |_| false, &[]);
+    let allowed = allowed_for("claude", "m", &allow, |_| false, &[]);
     let p = plan(parent(&["OPERATOR_SECRET", "GH_TOKEN"]), &allowed, &[], &[]);
     assert_eq!(p.keep, names(&["GH_TOKEN"]));
 }
@@ -187,20 +187,20 @@ fn a_malformed_allow_entry_is_dropped_not_trusted() {
 #[test]
 fn opencode_keeps_the_key_of_its_model_provider_only() {
     let env = parent(&["OPENROUTER_API_KEY", "ZHIPU_API_KEY", "OPENCODE_CONFIG"]);
-    let allowed = allowed_patterns("opencode", "openrouter/some-model", &[], |_| false, &[]);
+    let allowed = allowed_for("opencode", "openrouter/some-model", &[], |_| false, &[]);
     let p = plan(env.clone(), &allowed, &[], &[]);
     assert!(p.keeps("OPENROUTER_API_KEY"));
     assert!(p.keeps("OPENCODE_CONFIG"));
     assert!(!p.keeps("ZHIPU_API_KEY"));
-    let zai = allowed_patterns("opencode", "zai-coding-plan/glm", &[], |_| false, &[]);
+    let zai = allowed_for("opencode", "zai-coding-plan/glm", &[], |_| false, &[]);
     assert!(plan(env, &zai, &[], &[]).keeps("ZHIPU_API_KEY"));
-    assert!(apb_core::process_env::opencode_provider_keys("bare-model").is_empty());
+    assert!(apb_core::agents::opencode::provider_keys("bare-model").is_empty());
 }
 
 #[test]
 fn exact_derived_names_are_kept_and_a_custom_agent_gets_only_base_and_allow() {
     let env = parent(&["CUSTOM_PROVIDER_KEY", "OPENAI_API_KEY", "PATH"]);
-    let codex = allowed_patterns(
+    let codex = allowed_for(
         "codex",
         "m",
         &[],
@@ -213,7 +213,26 @@ fn exact_derived_names_are_kept_and_a_custom_agent_gets_only_base_and_allow() {
     // never widens the set.
     let aws = parent(&["AWS_SECRET_ACCESS_KEY"]);
     assert!(!plan(aws, &codex, &[], &[]).keeps("AWS_SECRET_ACCESS_KEY"));
-    let custom = allowed_patterns("my-agent", "m", &[], |_| false, &[]);
+    let custom = allowed_for("my-agent", "m", &[], |_| false, &[]);
     let p = plan(env, &custom, &[], &[]);
     assert_eq!(p.keep, names(&["PATH"]));
+}
+
+/// [`allowed_patterns`] for `agent` running `model`, with the agent's set and
+/// model variables from its module, as the engine assembles them.
+fn allowed_for(
+    agent: &str,
+    model: &str,
+    allow: &[EnvPattern],
+    is_on: impl Fn(&str) -> bool,
+    derived: &[String],
+) -> Vec<EnvPattern> {
+    let setup = apb_core::agents::lookup(agent).map(|a| a.setup());
+    allowed_patterns(
+        setup.map_or(AgentEnvSet::NONE, |s| s.env_set()),
+        setup.map_or(&[][..], |s| s.model_env(model)),
+        allow,
+        is_on,
+        derived,
+    )
 }

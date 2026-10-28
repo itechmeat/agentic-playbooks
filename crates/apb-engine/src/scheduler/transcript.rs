@@ -45,10 +45,10 @@ pub(crate) fn attempt_dir(run_dir: &Path, stem: &str) -> Result<PathBuf, EngineE
 }
 
 /// Copies the agent's own record of session `session` into `dir` as
-/// `session.jsonl`, best effort, up to `cap` bytes. Only claude keeps one
-/// apb can find: a JSONL file named after the session under `projects/` of
-/// its config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`), with every
-/// tool call and result. Other agents keep their sessions in their own
+/// `session.jsonl`, best effort, up to `cap` bytes. Only an agent whose
+/// module finds that record keeps one apb can read (claude: a JSONL file
+/// named after the session under `projects/` of its config directory, with
+/// every tool call and result). Other agents keep their sessions in their own
 /// stores; their raw output is still in `stdout.log` and `stderr.log`.
 /// Returns what the cap kept out of the copy.
 pub(crate) fn copy_agent_session(
@@ -57,16 +57,11 @@ pub(crate) fn copy_agent_session(
     dir: &Path,
     cap: u64,
 ) -> Option<crate::event::OutputLoss> {
-    if apb_core::detect::canonical_agent_id(agent) != "claude"
-        || !apb_core::registry::is_safe_segment(session)
-    {
+    if !apb_core::registry::is_safe_segment(session) {
         return None;
     }
-    let projects = std::fs::read_dir(apb_core::agent_actions::claude::projects_dir()?).ok()?;
-    let file = format!("{session}.jsonl");
-    let source = projects
-        .filter_map(|e| e.ok())
-        .map(|project| project.path().join(&file))
-        .find(|candidate| candidate.is_file())?;
+    let source = apb_core::agents::lookup(agent)?
+        .setup()
+        .session_record(session)?;
     crate::capture::copy_capped(&source, &dir.join("session.jsonl"), cap)
 }

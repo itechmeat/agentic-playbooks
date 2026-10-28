@@ -586,3 +586,32 @@ fn quality_events_round_trip_and_are_skippable_before_run_finished() {
         [0, 1, 2, 5]
     );
 }
+
+/// `tool_exposure_mismatch` round trips, reads with every field absent, is
+/// not a checkpoint, and an older binary skips it while a checkpoint follows.
+#[test]
+fn tool_exposure_mismatch_round_trips_and_is_skippable_before_a_checkpoint() {
+    let line = r#"{"seq":2,"ts":3,"type":"tool_exposure_mismatch","node":"a","attempt":1,"agent":"claude","missing_tools":["Bash"],"missing_servers":["apb (failed)"],"unexpected_servers":["other"],"item":"i"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+    let bare = r#"{"seq":2,"ts":3,"type":"tool_exposure_mismatch"}"#;
+    assert!(matches!(
+        serde_json::from_str::<Event>(bare).unwrap().payload,
+        EventPayload::ToolExposureMismatch { ref node, attempt: 0, ref missing_tools, item: None, .. }
+            if node.is_empty() && missing_tools.is_empty()
+    ));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        line.replace("tool_exposure_mismatch", "tool_exposure_mismatch_from_the_future"),
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
+}

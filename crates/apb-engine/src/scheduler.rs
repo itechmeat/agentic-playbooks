@@ -1946,7 +1946,8 @@ fn drive_inner(
                 (prim_agent, prim_interaction)
             };
             let live_exe: Option<std::path::PathBuf> = apb_core::fsutil::reexec_exe().ok();
-            let live_claude = apb_core::detect::canonical_agent_id(&prim_agent) == "claude";
+            let live_claude = apb_core::agents::lookup(&prim_agent)
+                .is_some_and(|a| a.descriptor().capabilities.live_ask_mcp);
             let live_injectable =
                 prim_interaction == Interaction::Live && live_claude && live_exe.is_some();
             // Downgrade reason when the ceiling is `Live` but injection is

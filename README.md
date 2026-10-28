@@ -198,7 +198,7 @@ apb subscriptions   view or declare the agent subscriptions you pay for
 apb connector       list / show / call / approve / doctor / env / init / install / test - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
-apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
+apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> one run's health, --agents every installed agent, --probe-agent <id> one paid format check)
 apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
 apb suggestions     list / allow / reset save-as-playbook suggestion declines
 apb discover        find step sequences your past agent sessions repeat; list / show / save / dismiss

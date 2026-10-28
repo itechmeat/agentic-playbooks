@@ -1,4 +1,4 @@
-//! The few TOML forms of a codex `config.toml` the agent home reads, line by
+//! The few TOML forms of a codex `config.toml` the run-scoped home reads, line by
 //! line: a table header with its key path (`[a.b]`, `[[a.b]]`, quoted keys,
 //! a trailing comment), and a `key = value` line whose value is a string or
 //! a one-line inline table, with basic-string escapes decoded. Not a TOML

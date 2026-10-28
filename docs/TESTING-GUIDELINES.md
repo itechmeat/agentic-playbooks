@@ -189,6 +189,29 @@ timing-shaped: a run that finishes before a stop lands on a fast runner.
   field, a `kept` path), not only that a directory is absent: a later
   unconditional cleanup makes an absence assertion pass whatever happened.
 
+## The agent contract suite
+
+Every built-in agent with a launch form passes one scenario set
+(`crates/apb-engine/tests/suite/agent_contract/`): success, error, quota,
+session, usage, verdict and a custom invocation form. Each scenario runs the
+real headless adapter with the agent's built-in form on a stub that replays
+the agent's fixture, `tests/fixtures/agents/<id>.yaml` (stdout, stderr, exit
+code and the expected result), and checks it against what the agent module
+promises (`OutputFormat::promises`, `agents::conformance`). A macro turns the
+list of agents into one named test per agent and scenario
+(`agent_contract::<agent>::<scenario>`).
+
+- A fixture is `captured` (it replays recorded CLI output) or `synthetic`.
+  Use a capture only where the repository already has one, and never run a
+  real agent CLI against a model to make one. A captured fixture names the
+  CLI version in `checked_against`, which must equal the module's
+  `Verified` version; a single scenario that is not a capture says
+  `provenance: synthetic`.
+- A new agent with a launch form needs a fixture and a line in the
+  `contract!` list; a completeness test fails otherwise.
+- Agent-specific tests outside the suite are for what the scenarios do not
+  cover (the exact argv of a form, a plan fallback, a side channel).
+
 ## Running tests
 
 - Scoped first, full at milestones: `cargo test -p <crate>` while

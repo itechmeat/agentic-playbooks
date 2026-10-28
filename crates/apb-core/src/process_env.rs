@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod sets;
 
-pub use sets::{AgentEnvSet, agent_set, base_set, opencode_provider_keys};
+pub use sets::{AgentEnvSet, base_set};
 
 /// At most this many `allow` entries.
 pub const MAX_ALLOW: usize = 64;
@@ -223,21 +223,21 @@ pub fn is_truthy(value: &str) -> bool {
         .any(|t| value.trim().eq_ignore_ascii_case(t))
 }
 
-/// Every pattern an agent process under `allowlist` may inherit, for the
-/// canonical agent id `agent` (an alias resolved by the caller): the base
-/// set, the agent's own set, the names its trigger rules switch on (a
+/// Every pattern an agent process under `allowlist` may inherit: the base
+/// set, the agent's own `set`, the names its trigger rules switch on (a
 /// trigger counts when `is_on` says the operator switched it on, see
-/// [`is_truthy`]), the exact names derived from its configuration
-/// (`derived`), the provider keys of an opencode model and the profile's own
-/// well-formed `allow`.
+/// [`is_truthy`]), the variables its module names for the model
+/// (`model_env`, an opencode provider's key), the exact names derived from
+/// its configuration (`derived`) and the profile's own well-formed `allow`.
+/// The caller takes `set`, `model_env` and `derived` from the agent's module
+/// (`crate::agents`); a custom agent has none of them.
 pub fn allowed_patterns(
-    agent: &str,
-    model: &str,
+    set: AgentEnvSet,
+    model_env: &[&str],
     allow: &[EnvPattern],
     is_on: impl Fn(&str) -> bool,
     derived: &[String],
 ) -> Vec<EnvPattern> {
-    let set = agent_set(agent);
     let mut out: Vec<EnvPattern> = base_set().iter().map(|s| EnvPattern::builtin(s)).collect();
     out.extend(set.always.iter().map(|s| EnvPattern::builtin(s)));
     for (trigger, names) in set.when {
@@ -245,13 +245,7 @@ pub fn allowed_patterns(
             out.extend(names.iter().map(|s| EnvPattern::builtin(s)));
         }
     }
-    if agent == "opencode" {
-        out.extend(
-            opencode_provider_keys(model)
-                .iter()
-                .map(|s| EnvPattern::builtin(s)),
-        );
-    }
+    out.extend(model_env.iter().map(|s| EnvPattern::builtin(s)));
     // A derived name comes from a config file, not from the profile: only an
     // exact, well-formed name, never a `PREFIX*` that would widen the set.
     out.extend(

@@ -123,7 +123,9 @@ pub fn spawn_supervisor_agent(
 /// `ClaudeAdapter::spawn_supervisor`), so it can block for the server maximum;
 /// other agents keep under the ~60 s default of the strictest hosts (Codex).
 pub(crate) fn supervisor_wait_ms(agent_id: &str) -> u64 {
-    if apb_core::detect::canonical_agent_id(agent_id) == "claude" {
+    if apb_core::agents::lookup(agent_id)
+        .is_some_and(|a| a.descriptor().capabilities.long_tool_wait)
+    {
         crate::run_wait::RUN_WAIT_MAX_MS
     } else {
         crate::run_wait::RUN_WAIT_DEFAULT_MS

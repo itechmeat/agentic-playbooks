@@ -9,12 +9,14 @@ mod decide;
 // --- end issue #193 ---
 mod decisions;
 mod discover;
+mod doctor;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
 mod grade;
 mod import_preview;
 mod intent;
+mod interrupt;
 mod make_global;
 mod manage;
 mod memory;
@@ -59,8 +61,8 @@ use crate::pause::pause_cmd;
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
     DriveRunArgs, answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd,
-    resume_all_cmd, resume_cmd, review_cmd, run_cmd, run_doctor, run_list, run_validate, runs_cmd,
-    stop_cmd, wait_cmd,
+    resume_all_cmd, resume_cmd, review_cmd, run_cmd, run_list, run_validate, runs_cmd, stop_cmd,
+    wait_cmd,
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
@@ -172,8 +174,21 @@ enum Command {
         /// attempts and their pid liveness, the driver and workdir-lock
         /// holders, unapplied control entries, repeated supervisor actions.
         /// Read-only, like the environment doctor: it repairs nothing.
-        #[arg(long, value_name = "ID")]
+        #[arg(long, value_name = "ID", conflicts_with_all = ["agents", "probe_agent"])]
         run: Option<String>,
+        /// Check every installed built-in agent, whether or not a profile
+        /// names it: its version against the verified one and the flags of
+        /// its built-in form in its help. Free: no model call.
+        #[arg(long, conflicts_with = "probe_agent")]
+        agents: bool,
+        /// Send one short prompt to this built-in agent and check its output
+        /// against what its built-in form promises. One paid model call;
+        /// refused inside a run step. Exit 1 when the format drifted.
+        #[arg(long, value_name = "AGENT")]
+        probe_agent: Option<String>,
+        /// The model for --probe-agent (default: the first the catalog lists).
+        #[arg(long, requires = "probe_agent")]
+        model: Option<String>,
     },
     /// Export a playbook version (YAML, layout and scripts) to a single bundle file
     Export {
@@ -690,7 +705,20 @@ fn main() -> ExitCode {
         Some(Command::Init) => run_init(&root),
         Some(Command::List) => run_list(&root),
         Some(Command::Validate { name }) => run_validate(&root, name),
-        Some(Command::Doctor { run }) => run_doctor(&root, run.as_deref()),
+        Some(Command::Doctor {
+            run,
+            agents,
+            probe_agent,
+            model,
+        }) => doctor::doctor_cmd(
+            &root,
+            doctor::DoctorArgs {
+                run,
+                agents,
+                probe_agent,
+                model,
+            },
+        ),
         Some(Command::Export { name, version, out }) => {
             export_cmd(&root, &name, version.as_deref(), out.as_deref())
         }

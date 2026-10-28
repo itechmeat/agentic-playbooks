@@ -18,6 +18,12 @@ use crate::adapter::{
     SpawnEnv, StallHooks,
 };
 
+/// Whether apb can record `agent`'s sessions in the agent's own desktop
+/// history (its module's `desktop_history` capability: zcode).
+fn keeps_desktop_history(agent: &str) -> bool {
+    apb_core::agents::lookup(agent).is_some_and(|a| a.descriptor().capabilities.desktop_history)
+}
+
 /// [`wrap`] for one step of a run: a no-op for every agent but zcode, else
 /// the global config is read live (the sync is a side channel, not part of
 /// the run's execution contract, so it is not snapshotted). `spec` is the
@@ -27,7 +33,7 @@ pub fn wrap_step(
     agent: &str,
     spec: Option<&InvocationDef>,
 ) -> Box<dyn AgentAdapter> {
-    if apb_core::detect::canonical_agent_id(agent) != apb_core::zcode::AGENT_ID {
+    if !keeps_desktop_history(agent) {
         return adapter;
     }
     let global = GlobalConfig::load().unwrap_or_default();
@@ -50,8 +56,8 @@ pub fn wrap(
     spec: &InvocationDef,
     global: &GlobalConfig,
 ) -> Box<dyn AgentAdapter> {
-    let id = apb_core::zcode::AGENT_ID;
-    if apb_core::detect::canonical_agent_id(agent) != id || !global.agent_ui_sync(id) {
+    let id = apb_core::agents::canonical_id(agent);
+    if !keeps_desktop_history(agent) || !global.agent_ui_sync(id) {
         return adapter;
     }
     let Some(home) = apb_core::zcode::home_dir() else {

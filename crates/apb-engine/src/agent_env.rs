@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use apb_core::process_env::{EnvPlan, ProcessEnvPolicy, allowed_patterns, is_truthy, plan};
+use apb_core::process_env::{
+    AgentEnvSet, EnvPlan, ProcessEnvPolicy, allowed_patterns, is_truthy, plan,
+};
 
 use crate::event::EventPayload;
 
@@ -17,18 +19,13 @@ pub(crate) const WITHHELD_JOURNALED: usize = 200;
 /// (codex provider keys), the profile's `allow`, minus the connector
 /// `scrub`.
 pub fn plan_for(agent: &str, model: &str, policy: &ProcessEnvPolicy, scrub: &[String]) -> EnvPlan {
-    let agent = apb_core::detect::canonical_agent_id(agent);
-    let derived = if agent == "codex" {
-        crate::agent_home::provider_env_keys(crate::agent_home::source_codex_home().as_deref())
-    } else {
-        Vec::new()
-    };
+    let setup = apb_core::agents::lookup(agent).map(|a| a.setup());
     let allowed = allowed_patterns(
-        agent,
-        model,
+        setup.map_or(AgentEnvSet::NONE, |s| s.env_set()),
+        setup.map_or(&[][..], |s| s.model_env(model)),
         &policy.allow,
         |name| std::env::var(name).is_ok_and(|v| is_truthy(&v)),
-        &derived,
+        &setup.map(|s| s.derived_env()).unwrap_or_default(),
     );
     plan(
         std::env::vars_os().map(|(name, _)| name),

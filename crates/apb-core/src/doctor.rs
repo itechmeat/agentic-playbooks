@@ -1,3 +1,7 @@
+//! The environment doctor (`apb doctor`): the config, the registry, the
+//! profiles and their models, the agents (`agents`), the runners and the
+//! playbooks, as one report (`report`).
+
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -8,40 +12,11 @@ use crate::registry::Registry;
 use crate::schema::{NodeKind, Playbook};
 use crate::validate::{Severity, ValidationContext, validate};
 
-/// Result of a single environment check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckStatus {
-    Ok,
-    Warn,
-    Fail,
-}
+mod agents;
+mod report;
 
-#[derive(Debug, Clone)]
-pub struct Check {
-    pub name: String,
-    pub status: CheckStatus,
-    pub detail: String,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct DoctorReport {
-    pub checks: Vec<Check>,
-}
-
-impl DoctorReport {
-    fn push(&mut self, status: CheckStatus, name: impl Into<String>, detail: impl Into<String>) {
-        self.checks.push(Check {
-            name: name.into(),
-            status,
-            detail: detail.into(),
-        });
-    }
-
-    /// Whether at least one check failed (for the CLI exit code).
-    pub fn has_failure(&self) -> bool {
-        self.checks.iter().any(|c| c.status == CheckStatus::Fail)
-    }
-}
+pub use agents::diagnose_agents;
+pub use report::{Check, CheckStatus, DoctorReport};
 
 /// Qualified references to playbook profiles (every node that runs an agent,
 /// through the same `NodeKind::effective_profile_ref` the run gate uses, plus
@@ -261,97 +236,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
             ),
         }
     }
-    // Detect spawns binaries - we call it only if at least one agent from
-    // the built-in ten is mentioned (otherwise the PATH fallback is enough;
-    // tests stay fast).
-    let detect_ids: BTreeSet<String> = crate::detect::builtin_probes()
-        .iter()
-        .map(|p| p.id.clone())
-        .collect();
-    // Normalize the mentioned agent ids to detect probe ids (claude-code ->
-    // claude), otherwise detect would not find the probe and everything
-    // would fall back to a PATH lookup for the nonexistent `claude-code`
-    // binary.
-    let want_detect = agents
-        .iter()
-        .any(|a| detect_ids.contains(crate::detect::canonical_agent_id(a)));
-    let detected = if want_detect {
-        crate::agent_catalog::agents(false)
-    } else {
-        Vec::new()
-    };
-    for agent in &agents {
-        let probe_id = crate::detect::canonical_agent_id(agent);
-        // An agent program explicitly set in the config takes priority over
-        // detect: detect probes the fixed names of the six, but here the
-        // agent may point at a custom binary (agents.<id>.program).
-        if let Some(program) = global.agent_program(agent) {
-            if program_in_path(&program) {
-                r.push(
-                    CheckStatus::Ok,
-                    format!("agent {agent}"),
-                    format!("program `{program}` found"),
-                );
-            } else {
-                r.push(
-                    CheckStatus::Warn,
-                    format!("agent {agent}"),
-                    format!("program `{program}` not found in PATH"),
-                );
-            }
-        } else if let Some(info) = detected.iter().find(|a| a.agent == probe_id) {
-            if info.installed {
-                let ver = info.version.as_deref().unwrap_or("unknown version");
-                // Print the models list authority - the boundary of what
-                // detect can confirm about launchability (spec 8.4).
-                let authority = info
-                    .models
-                    .as_ref()
-                    .map(|m| format!(", models authority: {:?}", m.authority))
-                    .unwrap_or_default();
-                r.push(
-                    CheckStatus::Ok,
-                    format!("agent {agent}"),
-                    format!("installed ({ver}){authority}"),
-                );
-                // zcode's headless CLI needs its own `zcode-agent login`: the
-                // desktop app's login does not give it a plan identity, and
-                // every run then fails with "Select a model before continuing".
-                if probe_id == crate::zcode::AGENT_ID
-                    && info
-                        .auth
-                        .as_ref()
-                        .is_some_and(|a| a.kind == crate::detect::AuthKind::None)
-                {
-                    r.push(
-                        CheckStatus::Warn,
-                        format!("agent {agent} login"),
-                        "standalone CLI not logged in to any Z.ai plan: run \
-                         `~/.zcode/server/agents/glm/zcode-agent login` once"
-                            .to_string(),
-                    );
-                }
-            } else {
-                r.push(
-                    CheckStatus::Warn,
-                    format!("agent {agent}"),
-                    "not installed (free detect)".to_string(),
-                );
-            }
-        } else if program_in_path(agent) {
-            r.push(
-                CheckStatus::Ok,
-                format!("agent {agent}"),
-                format!("program `{agent}` found"),
-            );
-        } else {
-            r.push(
-                CheckStatus::Warn,
-                format!("agent {agent}"),
-                format!("program `{agent}` not found in PATH"),
-            );
-        }
-    }
+    agents::agent_checks(&mut r, &global, &agents);
 
     let mut runners: BTreeSet<String> = BTreeSet::new();
     for (_, playbook) in &loaded {

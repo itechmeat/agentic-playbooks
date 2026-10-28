@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod exposure;
 mod step_env;
 
 use super::continuation::{Continuation, continuation_prompt};
@@ -99,7 +100,7 @@ fn resolve_session(
     let found = match sessions.get(binding)? {
         KnownSession::Id { id, workdir } => return Some((id.clone(), workdir.clone())),
         KnownSession::Titled { title, workdir } => {
-            crate::invocation::lookup_titled_session(program, workdir, title)
+            crate::invocation::lookup_titled_session(&binding.0, program, workdir, title)
                 .map(|id| (id, workdir.clone()))
         }
     };
@@ -1317,11 +1318,10 @@ fn execute_node_kind(
                         // autonomy grant of its zcode steps; the base form's
                         // `--mode build` is untouched, so a run without
                         // autonomy still cannot write.
-                        if let Some(mode) = entry.zcode_mode
-                            && apb_core::detect::canonical_agent_id(&step.agent)
-                                == apb_core::zcode::AGENT_ID
-                        {
-                            spec.autonomous_args = crate::invocation::zcode_autonomous_args(mode);
+                        if let Some(args) = entry.zcode_mode.and_then(|mode| {
+                            crate::invocation::profile_mode_args(&step.agent, mode)
+                        }) {
+                            spec.autonomous_args = args;
                         }
                         (spec, ri.canonical_executable.clone())
                     });
@@ -2016,6 +2016,7 @@ fn execute_node_kind(
                             || (handoff_source && report.status == NodeStatus::Succeeded) =>
                         {
                             crate::invocation::lookup_titled_session(
+                                &binding.0,
                                 program,
                                 &attempt_workdir,
                                 title,
@@ -2091,6 +2092,23 @@ fn execute_node_kind(
                         attempt,
                         status_doc.as_ref(),
                         outcome.as_ref().ok().map(|r| &r.host_notes_dropped),
+                    )?;
+                    // What the agent reported it sees against what it was
+                    // handed (stream transport only), before the finish.
+                    exposure::journal(
+                        journal,
+                        node_id,
+                        attempt,
+                        &step.agent,
+                        exposure::Handed {
+                            connectors: !manifest.grants_for(node_id).is_empty(),
+                            live: live.is_some(),
+                            strict_mcp: step_env.hermetic.is_some(),
+                        },
+                        match &outcome {
+                            Ok(report) => report.exposure.as_ref(),
+                            Err(f) => f.exposure.as_deref(),
+                        },
                     )?;
                     let verdict = status_doc
                         .as_ref()
@@ -2336,6 +2354,7 @@ fn execute_node_kind(
                             usage: failed_usage,
                             ..
                         }) => {
+                            let failed_usage = failed_usage.map(|u| *u);
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
                             if cancel.load(Ordering::Relaxed) {
@@ -3282,6 +3301,7 @@ pub(crate) fn execute_finish_answer(
                     capture,
                     ..
                 }) => {
+                    let failed_usage = failed_usage.map(|u| *u);
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {
                         item: None,
@@ -3801,7 +3821,8 @@ pub(crate) fn maybe_compact_context(
         .context_compact_model
         .clone()
         .unwrap_or_else(|| crate::run_config::DEFAULT_COMPACT_MODEL.to_string());
-    let adapter = adapter_for("claude")?;
+    let claude = apb_core::agents::claude::ID;
+    let adapter = adapter_for(claude)?;
     let prompt = format!(
         "Summarize the following playbook run context concisely, preserving key facts, \
          decisions, and outputs that later steps may need. Keep it to a few short \
@@ -3820,7 +3841,7 @@ pub(crate) fn maybe_compact_context(
         overlay: cfg.spawn_env(),
         process: super::rebind::run_uses_allowlist(run_dir).then(|| {
             std::sync::Arc::new(crate::agent_env::plan_for(
-                "claude",
+                claude,
                 &model,
                 &apb_core::process_env::ProcessEnvPolicy {
                     policy: apb_core::process_env::ProcessEnvMode::Allowlist,
@@ -3849,7 +3870,7 @@ pub(crate) fn maybe_compact_context(
         // behavior byte-identical.
         report_contract: true,
         node: "__context_compact",
-        agent: "claude",
+        agent: claude,
         // Internal summarizer keeps today's last-message output.
         extract: None,
         // Internal summarizer: no status-file protocol.

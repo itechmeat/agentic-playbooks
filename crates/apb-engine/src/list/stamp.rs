@@ -6,7 +6,7 @@ use crate::event::EventPayload;
 
 impl EventPayload {
     /// Sets `item` on the variants that carry one (the attempt lifecycle, a
-    /// connector call, a send intent, a decision, the agent env); every other event is
+    /// connector call, a send intent, a decision, the agent env, the tool exposure); every other event is
     /// left as it is. An item already set is kept.
     pub fn stamp_item(&mut self, id: &str) {
         match self {
@@ -17,6 +17,7 @@ impl EventPayload {
             | EventPayload::SendIntentRecorded { item, .. }
             | EventPayload::DecisionMade { item, .. }
             | EventPayload::AgentEnvApplied { item, .. }
+            | EventPayload::ToolExposureMismatch { item, .. }
                 if item.is_none() =>
             {
                 *item = Some(id.to_string());

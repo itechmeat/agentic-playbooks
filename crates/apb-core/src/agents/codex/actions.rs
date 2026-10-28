@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::action::{Action, ToolCall, WebKind, str_at};
+use crate::agent_actions::action::{Action, ToolCall, WebKind, str_at};
 
 /// Item fields that report what came of a call, not what it asked: left out
 /// of the input a repeated call is told by.
@@ -121,7 +121,7 @@ pub fn item_call(item: &Value) -> Option<ToolCall> {
     match kind.as_str() {
         "commandexecution" => {
             let line = command_line(item.get("command"))?;
-            Some(super::command::call(raw, input, &line))
+            Some(crate::agent_actions::command::call(raw, input, &line))
         }
         "filechange" => {
             let paths = change_paths(item.get("changes"));
@@ -146,21 +146,7 @@ pub fn item_call(item: &Value) -> Option<ToolCall> {
     }
 }
 
-/// The finished item of an `exec --json` stdout line (an
-/// `item.completed`).
-pub fn completed_item(line: &Value) -> Option<&Value> {
-    (str_at(line, "type") == Some("item.completed"))
-        .then(|| line.get("item"))
-        .flatten()
-}
-
-/// The reply text of an `exec --json` stdout line: an `agent_message`
-/// item's `text`.
-pub fn agent_message(line: &Value) -> Option<&str> {
-    completed_item(line)
-        .filter(|item| str_at(item, "type") == Some("agent_message"))
-        .and_then(|item| str_at(item, "text"))
-}
+pub use super::output::{agent_message, completed_item};
 
 /// The calls of one `exec --json` stdout line (an `item.completed`).
 pub fn calls_of_exec_line(line: &Value) -> Vec<ToolCall> {
@@ -216,7 +202,7 @@ fn response_call(p: &Value) -> Option<ToolCall> {
             let args = arguments(p);
             if SHELL_TOOLS.contains(&name) {
                 let line = command_line(args.get("command").or_else(|| args.get("cmd")))?;
-                return Some(super::command::call(name, args, &line));
+                return Some(crate::agent_actions::command::call(name, args, &line));
             }
             Some(match name {
                 "apply_patch" => {
@@ -251,7 +237,11 @@ fn response_call(p: &Value) -> Option<ToolCall> {
         "local_shell_call" => {
             let action = p.get("action").cloned().unwrap_or(Value::Null);
             let line = command_line(action.get("command"))?;
-            Some(super::command::call("local_shell_call", action, &line))
+            Some(crate::agent_actions::command::call(
+                "local_shell_call",
+                action,
+                &line,
+            ))
         }
         "web_search_call" => Some(one(
             "web_search_call",
@@ -313,7 +303,7 @@ pub fn user_text(line: &Value, format: RolloutFormat) -> Option<String> {
         .then(|| content_text(p.get("content")))
         .flatten()?,
     };
-    super::action::typed_text(&text)
+    crate::agent_actions::action::typed_text(&text)
 }
 
 /// The working directory a `session_meta` or `turn_context` line names.
@@ -326,7 +316,7 @@ pub fn cwd_of(line: &Value) -> Option<&str> {
 
 /// codex's home: `CODEX_HOME`, else `~/.codex`.
 pub fn home_dir() -> Option<PathBuf> {
-    super::action::config_dir("CODEX_HOME", ".codex")
+    crate::agent_actions::action::config_dir("CODEX_HOME", ".codex")
 }
 
 /// Where codex keeps its session rollouts: `sessions/` of [`home_dir`].

@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod agent_env;
 mod agent_home;
+pub mod agent_probe;
 pub mod baseline;
 pub mod budget;
 // candidate trials (issue #192)

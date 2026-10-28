@@ -45,6 +45,31 @@ user a question, apb uses one of three transports, best available first:
 MCP elicitation (spec 2025-06) would be the protocol-native fourth option,
 but as of 2026-07 no surveyed agent ships it verified in headless mode.
 
+## Which tools a live agent really sees
+
+A live node depends on the agent actually seeing the `ask_user` tool, and a
+node with connector grants on it seeing its shell (connectors are called
+through `apb connector call`, never as MCP tools). On the stream transport
+(`agents.claude.transport: acp`), claude's output opens with a
+`system/init` record that lists its tools and MCP servers with their status.
+apb compares it with what the attempt was handed: the shell when the node
+holds connector grants, apb's server connected and its `ask_user` tool on a
+live node, and, under the minimal environment's `--strict-mcp-config`, no
+other server. A server still `pending` when the record was written is not
+judged, and neither are its tools; any other status but `connected`
+(`failed`, `needs-auth`, one claude adds later) is missing. Servers named `claude.ai <name>` come from the user's claude.ai
+account rather than from any MCP config, so they never count as unexpected.
+No captured init record shows yet whether `--strict-mcp-config` drops them,
+or how often apb's server is still `pending` at that point; both rules are
+the safe reading until one does. A difference journals `tool_exposure_mismatch` before the
+attempt's `attempt_finished`; `apb doctor --run` and the dashboard journal
+show it. It is a report and changes no status. The headless default
+(`--output-format json`) prints no tool list, so nothing is checked there:
+switching the default to stream-json would change what `outputs.extract`
+scans, how much output reaches the output limits and what the grader reads
+(decision record `docs/adr/0007-claude-headless-keeps-json-output.md`).
+`apb doctor` says which of the two applies to each installed claude.
+
 ## Capability matrix (2026-07 research plus 0.8.0 implementation)
 
 Agents apb supports today. "Transport today" is the built-in `interaction`

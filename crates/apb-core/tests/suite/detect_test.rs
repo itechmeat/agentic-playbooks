@@ -43,6 +43,7 @@ struct Env {
     orig_home: Option<std::ffi::OsString>,
     orig_cfg: Option<std::ffi::OsString>,
     orig_cwd: std::path::PathBuf,
+    orig_codex_home: Option<std::ffi::OsString>,
 }
 
 // Restores PATH/HOME/APB_CONFIG_DIR/CWD to their pre-test values. Formerly
@@ -68,6 +69,10 @@ impl Drop for Env {
                 Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
                 None => std::env::remove_var("APB_CONFIG_DIR"),
             }
+            match &self.orig_codex_home {
+                Some(v) => std::env::set_var("CODEX_HOME", v),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
         }
         let _ = std::env::set_current_dir(&self.orig_cwd);
     }
@@ -83,7 +88,10 @@ fn setup() -> Env {
     let orig_home = std::env::var_os("HOME");
     let orig_cfg = std::env::var_os("APB_CONFIG_DIR");
     let orig_cwd = std::env::current_dir().unwrap();
+    // codex reads `$CODEX_HOME` before `~/.codex`.
+    let orig_codex_home = std::env::var_os("CODEX_HOME");
     unsafe {
+        std::env::remove_var("CODEX_HOME");
         std::env::set_var("PATH", bin.path());
         std::env::set_var("HOME", home.path());
         std::env::set_var("APB_CONFIG_DIR", cfg.path());
@@ -97,6 +105,7 @@ fn setup() -> Env {
         orig_home,
         orig_cfg,
         orig_cwd,
+        orig_codex_home,
         _bin: bin,
         _home: home,
         _cfg: cfg,

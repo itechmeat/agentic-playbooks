@@ -175,13 +175,13 @@ pub fn typed_text(text: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.to_string())
 }
 
-pub(super) fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
 /// The config directory of an agent: `env` when set and not empty, else
 /// `~/<home_dir>`.
-pub(super) fn config_dir(env: &str, home_dir: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn config_dir(env: &str, home_dir: &str) -> Option<std::path::PathBuf> {
     std::env::var_os(env)
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)

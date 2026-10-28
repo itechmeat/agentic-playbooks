@@ -555,7 +555,7 @@ impl ProfileEmulation<'_, '_> {
                 },
                 None,
                 None,
-                usage,
+                usage.map(|u| *u),
                 capture,
             ),
         };

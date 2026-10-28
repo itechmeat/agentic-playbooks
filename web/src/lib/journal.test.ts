@@ -221,6 +221,30 @@ describe('process env rows', () => {
   })
 })
 
+describe('tool exposure rows', () => {
+  it('names the missing tools, the servers not connected and the extra servers', () => {
+    const rows = runEventJournal([
+      {
+        seq: 1,
+        ts: 1,
+        type: 'tool_exposure_mismatch',
+        node: 'ask',
+        attempt: 2,
+        agent: 'claude',
+        missing_tools: ['mcp__apb__ask_user'],
+        missing_servers: ['apb (failed)'],
+        unexpected_servers: ['other'],
+      },
+      { seq: 2, ts: 2, type: 'tool_exposure_mismatch', node: 'build', attempt: 1, agent: 'claude', missing_tools: ['Bash'] },
+    ] as unknown as WfEvent[])
+    expect(rows[0]).toMatchObject({
+      node: 'ask',
+      note: 'tool exposure (claude): missing tools: mcp__apb__ask_user; servers not connected: apb (failed); unexpected servers: other',
+    })
+    expect(rows[1].note).toBe('tool exposure (claude): missing tools: Bash')
+  })
+})
+
 describe('notification rows', () => {
   it('labels notify_set and the sends of the engine site @notify', () => {
     const entries = runEventJournal([

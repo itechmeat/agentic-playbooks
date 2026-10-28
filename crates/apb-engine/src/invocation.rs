@@ -9,9 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use apb_core::config::{
-    GlobalConfig, Interaction, InvocationDef, PromptVia, SoulDelivery, Transport,
-};
+use apb_core::config::{GlobalConfig, InvocationDef, SoulDelivery};
 use apb_core::profile::SoulRequirement;
 
 use crate::error::EngineError;
@@ -27,8 +25,9 @@ pub struct ResolvedInvocation {
     pub executable_fingerprint: String,
 }
 
-/// Built-in invocation form for the known ten. `None` for unknown agents and
-/// for pi (details will follow once the binary exists).
+/// Built-in invocation form of a built-in agent, from its module
+/// (`apb_core::agents`). `None` for unknown agents and for pi (details will
+/// follow once the binary exists).
 ///
 /// claude, codex, opencode and zcode are asked for their machine output
 /// (`--output-format json`, `exec --json`, `run --format json`, `--json`):
@@ -47,165 +46,20 @@ pub struct ResolvedInvocation {
 /// `--` to put in front of it; the adapter sends a dash-led prompt with a
 /// leading newline instead (zcode refuses a dash-led `-p` value outright).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
-    let mk = |argv: &[&str],
-              soul: SoulDelivery,
-              soul_flag: Option<&str>,
-              autonomous_args: &[&str],
-              interaction: Interaction| InvocationDef {
-        argv: argv.iter().map(|s| s.to_string()).collect(),
-        prompt_via: PromptVia::Argv,
-        soul,
-        soul_flag: soul_flag.map(|s| s.to_string()),
-        transport: Transport::Headless,
-        autonomous_args: autonomous_args.iter().map(|s| s.to_string()).collect(),
-        interaction,
-    };
-    match apb_core::detect::canonical_agent_id(agent_id) {
-        // claude runs headless one-shot (`-p`); to actually write files and
-        // reach the network on an authorized effectful run it needs an explicit
-        // non-interactive permission mode, otherwise every tool call blocks
-        // waiting for an approval that never comes (spec 8.5).
-        //
-        // Interaction ceiling per spec 2026-07-20: claude gets `live` (the
-        // blocking `ask_user` MCP tool, Task 11); the aggregators that expose a
-        // resumable session get `resume`; agy, which does not, gets `reprompt`.
-        "claude" => Some(mk(
-            &[
-                "-p",
-                "--output-format",
-                "json",
-                "--model",
-                "{model}",
-                "--",
-                "{prompt}",
-            ],
-            SoulDelivery::Native,
-            Some("--append-system-prompt"),
-            &["--permission-mode", "bypassPermissions"],
-            Interaction::Live,
-        )),
-        // Verified against the local `agy --help`: `--dangerously-skip-permissions`
-        // auto-approves all tool permission requests, the exact equivalent of
-        // claude's flag.
-        "agy" => Some(mk(
-            &["-p", "{prompt}", "--model", "{model}"],
-            SoulDelivery::Prefix,
-            None,
-            &["--dangerously-skip-permissions"],
-            Interaction::Reprompt,
-        )),
-        // Verified against the local `codex exec --help`:
-        // `--dangerously-bypass-approvals-and-sandbox` skips all confirmation
-        // prompts and runs without sandboxing, the one-shot equivalent of
-        // claude's bypassPermissions.
-        "codex" => Some(mk(
-            &["exec", "--json", "-m", "{model}", "--", "{prompt}"],
-            SoulDelivery::Prefix,
-            None,
-            &["--dangerously-bypass-approvals-and-sandbox"],
-            Interaction::Resume,
-        )),
-        // Verified against the local `opencode run --help`: `--auto`
-        // auto-approves permissions that are not explicitly denied.
-        "opencode" => Some(mk(
-            &["run", "--format", "json", "-m", "{model}", "--", "{prompt}"],
-            SoulDelivery::Prefix,
-            None,
-            &["--auto"],
-            Interaction::Resume,
-        )),
-        // hermes one-shot mode prints only the final response text to
-        // stdout and auto-bypasses approvals by design (script mode);
-        // the SOUL travels as a prompt prefix like the other aggregators.
-        //
-        // No autonomous flag: hermes documents `--yolo` at the same top level
-        // as `-z`, but it could not be verified in combination with the
-        // one-shot `-z` form against a local binary, and shipping an
-        // unverified flag into every hermes invocation is worse than the
-        // documented gap. `apb doctor --run` warns on a node bound to hermes
-        // instead (#85 finding 1).
-        "hermes" => Some(mk(
-            &["-z", "{prompt}", "-m", "{model}"],
-            SoulDelivery::Prefix,
-            None,
-            &[],
-            Interaction::Resume,
-        )),
-        // grok runs headless one-shot via `-p/--single` and is the only new
-        // agent with a native system-prompt flag (`--system-prompt-override`),
-        // so its SOUL does not have to travel as a prompt prefix. Like claude,
-        // an authorized effectful run needs an explicit non-interactive
-        // permission mode or every tool call blocks on an approval that never
-        // arrives.
-        "grok" => Some(mk(
-            &["-p", "{prompt}", "-m", "{model}"],
-            SoulDelivery::Native,
-            Some("--system-prompt-override"),
-            &["--permission-mode", "bypassPermissions"],
-            Interaction::Resume,
-        )),
-        // cursor's `-p/--print` is a BOOLEAN flag and the prompt is a
-        // positional argument, so the prompt slot goes last, after the
-        // options. `--force` is the non-interactive approval mode and
-        // `--output-format text` pins plain stdout (it only takes effect
-        // together with `--print`). No system-prompt flag exists, so the SOUL
-        // travels as a prefix like the other aggregators.
-        "cursor" => Some(mk(
-            &["-p", "--model", "{model}", "--", "{prompt}"],
-            SoulDelivery::Prefix,
-            None,
-            &["--output-format", "text", "--force"],
-            Interaction::Resume,
-        )),
-        // qoder's `-p/--print` is a BOOLEAN flag and the prompt is a
-        // positional argument, so the prompt slot goes last, after the
-        // options, like cursor. Unlike cursor it has a real system-prompt
-        // flag; `--append-system-prompt` is used (not `--system-prompt`) so
-        // the SOUL rides alongside qoder's own agentic system prompt instead
-        // of replacing it. `--permission-mode bypass_permissions` (snake_case,
-        // unlike claude's camelCase) is the non-interactive approval mode and
-        // `--output-format text` pins plain stdout.
-        "qoder" => Some(mk(
-            &[
-                "-p",
-                "--output-format",
-                "text",
-                "--model",
-                "{model}",
-                "--",
-                "{prompt}",
-            ],
-            SoulDelivery::Native,
-            Some("--append-system-prompt"),
-            &["--permission-mode", "bypass_permissions"],
-            Interaction::Resume,
-        )),
-        // zcode (Z.ai's ZCode headless CLI, verified against zcode-agent
-        // 0.16.9). `--mode` DEFAULTS TO `yolo` for `-p`, so the base form pins
-        // `build` (every approval request is denied in `-p` mode, there is no
-        // interactive gate) and only an authorized effectful run gets `yolo`:
-        // the autonomy flags come later in argv and zcode's option parser
-        // keeps the last value. `--json` prints one JSON object with
-        // `sessionId` and `response`, which the adapter unwraps. There is no
-        // `--model` flag and no system-prompt flag: the model travels through
-        // a run-scoped provider config (see `adapter::apply_zcode_env`) and
-        // the SOUL as a prompt prefix.
-        "zcode" => Some(mk(
-            &["-p", "{prompt}", "--json", "--mode", "build"],
-            SoulDelivery::Prefix,
-            None,
-            &["--mode", "yolo"],
-            Interaction::Resume,
-        )),
-        _ => None,
-    }
+    apb_core::agents::lookup(agent_id)?
+        .forms()
+        .map(|f| f.launch)
 }
 
-/// zcode's autonomy flags for a profile's `zcode_mode`: the `--mode` that
-/// follows the base form's `build` (zcode keeps the last value). The builtin
-/// form's `yolo` is `ZcodeMode::Yolo`.
-pub fn zcode_autonomous_args(mode: apb_core::profile::ZcodeMode) -> Vec<String> {
-    vec!["--mode".to_string(), mode.as_str().to_string()]
+/// The autonomy flags a profile's `zcode_mode` asks for on `agent_id`, which
+/// replace the launch form's own; `None` for an agent whose permission mode a
+/// profile cannot pick.
+pub fn profile_mode_args(
+    agent_id: &str,
+    mode: apb_core::profile::ZcodeMode,
+) -> Option<Vec<String>> {
+    let pick = apb_core::agents::lookup(agent_id)?.forms()?.profile_mode?;
+    Some(pick(mode))
 }
 
 /// Declarative resume-form argv for an agent's `resume` transport (spec
@@ -217,93 +71,7 @@ pub fn zcode_autonomous_args(mode: apb_core::profile::ZcodeMode) -> Vec<String> 
 /// the resume argv stays as declarative as the launch argv, never string-built
 /// in the scheduler.
 pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
-    let v = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| s.to_string()).collect() };
-    match apb_core::detect::canonical_agent_id(agent_id) {
-        // claude resumes a prior session with `--resume <id>` and takes the
-        // follow-up as a fresh `-p` prompt.
-        "claude" => Some(v(&[
-            "--resume",
-            "{session}",
-            "-p",
-            "--output-format",
-            "json",
-            "--model",
-            "{model}",
-            "--",
-            "{prompt}",
-        ])),
-        // codex re-enters a conversation via `exec resume <id>`.
-        "codex" => Some(v(&[
-            "exec",
-            "resume",
-            "{session}",
-            "--json",
-            "-m",
-            "{model}",
-            "--",
-            "{prompt}",
-        ])),
-        // opencode re-enters a session via `--session <id>`.
-        "opencode" => Some(v(&[
-            "run",
-            "--session",
-            "{session}",
-            "--format",
-            "json",
-            "-m",
-            "{model}",
-            "--",
-            "{prompt}",
-        ])),
-        // hermes re-enters a session via `--resume <id>`, still in script mode.
-        "hermes" => Some(v(&[
-            "-z",
-            "--resume",
-            "{session}",
-            "{prompt}",
-            "-m",
-            "{model}",
-        ])),
-        // grok resumes by id via `-r <id>` and takes the follow-up as a fresh
-        // `-p` single-turn prompt.
-        "grok" => Some(v(&["-r", "{session}", "-p", "{prompt}", "-m", "{model}"])),
-        // cursor resumes a chat via `--resume <chatId>`; the follow-up prompt
-        // stays positional and therefore last.
-        "cursor" => Some(v(&[
-            "--resume",
-            "{session}",
-            "-p",
-            "--model",
-            "{model}",
-            "--",
-            "{prompt}",
-        ])),
-        // qoder resumes a session via `--resume <id>`; the follow-up prompt
-        // stays positional and therefore last, like cursor.
-        "qoder" => Some(v(&[
-            "--resume",
-            "{session}",
-            "-p",
-            "--output-format",
-            "text",
-            "--model",
-            "{model}",
-            "--",
-            "{prompt}",
-        ])),
-        // zcode re-enters a persisted session via `--resume sess_...`; the mode
-        // is pinned again (a resumed `-p` turn would otherwise run as yolo).
-        "zcode" => Some(v(&[
-            "--resume",
-            "{session}",
-            "-p",
-            "{prompt}",
-            "--json",
-            "--mode",
-            "build",
-        ])),
-        _ => None,
-    }
+    apb_core::agents::lookup(agent_id)?.forms()?.resume_argv()
 }
 
 /// `base` turned into its resume form for `session` (the agent's declarative
@@ -332,64 +100,42 @@ pub fn resume_spec(
     })
 }
 
-/// How a fresh attempt makes its agent session findable, so a retry, a
-/// fallback back onto the same binding or a deadline continuation can resume
-/// it instead of re-sending the whole prompt (issue #136 items 2 and 3).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FreshSession {
-    /// apb picks the id and hands it over at launch (claude `--session-id`),
-    /// so the session is known even when the attempt is killed at its
-    /// deadline, before it printed anything.
-    Assigned { id: String, args: Vec<String> },
-    /// The session gets a unique title at launch and is looked up by it
-    /// afterwards (opencode `--title`, then `session list --format json`), so
-    /// it is found even when the attempt printed no id.
-    Titled { title: String, args: Vec<String> },
-    /// Only an id the agent prints itself (on a normal exit) is known.
-    Printed,
-}
+pub use apb_core::agents::FreshSession;
 
 /// The [`FreshSession`] form of `agent_id` for a fresh attempt; `title` must be
 /// unique to the attempt (run, node and attempt number).
 pub fn fresh_session(agent_id: &str, title: &str) -> FreshSession {
-    match apb_core::detect::canonical_agent_id(agent_id) {
-        // Verified against `claude --help`: `--session-id <uuid>` uses a
-        // specific session id; `--resume <id>` continues it.
-        "claude" => {
-            let id = uuid::Uuid::new_v4().to_string();
-            FreshSession::Assigned {
-                args: vec!["--session-id".to_string(), id.clone()],
-                id,
-            }
-        }
-        // Verified against `opencode run --help` (1.18): `--title` names the
-        // session; `opencode session list --format json` lists `id` + `title`.
-        "opencode" => FreshSession::Titled {
-            args: vec!["--title".to_string(), title.to_string()],
-            title: title.to_string(),
-        },
-        _ => FreshSession::Printed,
-    }
+    apb_core::agents::lookup(agent_id)
+        .and_then(|a| a.forms())
+        .map_or(FreshSession::Printed, |f| f.fresh_session(title))
 }
 
-/// Finds the id of the opencode session titled `title` by running
-/// `<program> session list --format json` in `workdir` (the listing is scoped
-/// to the project the directory belongs to). `None` when the listing fails or
-/// holds no such session: an attempt killed before its first assistant
-/// message never persists one, and then there is nothing to resume.
-pub fn lookup_titled_session(program: &Path, workdir: &Path, title: &str) -> Option<String> {
+/// Finds the id of `agent_id`'s session titled `title` by running the
+/// agent's session listing with `program` in `workdir` (the listing is scoped
+/// to the project the directory belongs to). `None` for an agent that names
+/// no sessions, and when the listing fails or holds no such session: an
+/// attempt killed before its first assistant message never persists one, and
+/// then there is nothing to resume.
+pub fn lookup_titled_session(
+    agent_id: &str,
+    program: &Path,
+    workdir: &Path,
+    title: &str,
+) -> Option<String> {
+    let apb_core::agents::FreshForm::Titled { listing, .. } =
+        apb_core::agents::lookup(agent_id)?.forms()?.fresh
+    else {
+        return None;
+    };
     let mut cmd = std::process::Command::new(program);
-    cmd.args(["session", "list", "--format", "json"])
+    cmd.args(listing.args)
         .current_dir(workdir)
         .stdin(std::process::Stdio::null());
     let out = crate::proc::run_capture(cmd, Some(std::time::Duration::from_secs(15)), None).ok()?;
     if !out.status.is_some_and(|s| s.success()) {
         return None;
     }
-    let listed: Vec<serde_json::Value> = serde_json::from_str(out.stdout.trim()).ok()?;
-    listed.into_iter().find_map(|s| {
-        (s.get("title")?.as_str()? == title).then(|| s.get("id")?.as_str().map(str::to_string))?
-    })
+    (listing.find)(&out.stdout, title)
 }
 
 /// Agent invocation form: config (`agents:`) overrides the built-in default.
@@ -404,7 +150,12 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
         // Agent is defined in config but without an explicit form and is not
         // one of the built-in ten: historical compatibility falls back to
         // the claude form (`-p {prompt} --model {model}`).
-        .or_else(|| global.agents.get(agent_id).and(builtin("claude")))
+        .or_else(|| {
+            global
+                .agents
+                .get(agent_id)
+                .and(builtin(apb_core::agents::claude::ID))
+        })
         .ok_or_else(|| {
             EngineError::Adapter(format!(
                 "no invocation for agent `{agent_id}` (define `agents.{agent_id}.invocation` in global config)"
@@ -557,6 +308,7 @@ pub fn filter_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apb_core::config::{Interaction, PromptVia, Transport};
 
     fn ri(agent: &str, soul: SoulDelivery) -> ResolvedInvocation {
         ResolvedInvocation {
@@ -575,7 +327,7 @@ mod tests {
     /// at launch, or printed (codex, zcode).
     #[test]
     fn session_continuing_agents_have_a_resume_form() {
-        for agent in apb_core::detect::SESSION_CONTINUING_AGENTS {
+        for agent in apb_core::detect::SESSION_CONTINUING_AGENTS.iter() {
             assert!(resume_argv(agent).is_some(), "{agent}");
         }
         assert!(matches!(
@@ -689,15 +441,21 @@ mod tests {
         let spec = builtin("cursor").expect("cursor builtin spec");
         assert_eq!(
             spec.argv,
-            vec!["-p", "--model", "{model}", "--", "{prompt}"]
+            vec![
+                "-p",
+                "--output-format",
+                "text",
+                "--model",
+                "{model}",
+                "--",
+                "{prompt}"
+            ]
         );
         assert_eq!(spec.soul, SoulDelivery::Prefix);
         assert_eq!(spec.soul_flag, None);
         assert_eq!(spec.transport, Transport::Headless);
-        assert_eq!(
-            spec.autonomous_args,
-            vec!["--output-format", "text", "--force"]
-        );
+        // The output pin is no permission: only `--force` waits for autonomy.
+        assert_eq!(spec.autonomous_args, vec!["--force"]);
         assert_eq!(spec.interaction, Interaction::Resume);
         assert_eq!(
             resume_argv("cursor").expect("cursor resume argv"),
@@ -705,6 +463,8 @@ mod tests {
                 "--resume",
                 "{session}",
                 "-p",
+                "--output-format",
+                "text",
                 "--model",
                 "{model}",
                 "--",

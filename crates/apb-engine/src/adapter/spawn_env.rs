@@ -4,9 +4,9 @@
 //!
 //! In order: the profile's `process_env` plan (an allowlist clears the
 //! inherited environment and copies back only the kept names), the connector
-//! scrub, the run-context variables, the pager, the eval overlay, the
-//! run-scoped agent home, zcode's provider config and the attempt's status
-//! file. Each later step wins over an earlier one.
+//! scrub, the run-context variables, the pager, the eval overlay, the agent's
+//! run-scoped environment (codex's config home, zcode's provider config) and
+//! the attempt's status file. Each later step wins over an earlier one.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -52,6 +52,11 @@ pub struct SpawnEnv {
     /// The names an allowlisted agent keeps of apb's own environment;
     /// `None` inherits all of it.
     pub process: Option<Arc<EnvPlan>>,
+    /// Where the agent's scoped files go for a spawn that belongs to no run
+    /// (the doctor's agent probe): the base under which
+    /// `agent-home/<agent>/<node>` is laid down, as `run_dir` is for a run.
+    /// Unlike `run_dir` it sets no run-context variable. `run_dir` wins.
+    pub scoped_base: Option<PathBuf>,
 }
 
 impl SpawnEnv {
@@ -200,15 +205,11 @@ pub(crate) struct SpawnTarget<'a> {
 }
 
 /// The whole environment of a node agent's process, for its start and
-/// resume forms alike: [`SpawnEnv::apply`], then the agent home, zcode's
-/// provider config and the attempt's status file.
+/// resume forms alike: [`SpawnEnv::apply`], then the agent's run-scoped
+/// environment and the attempt's status file.
 pub(crate) fn prepare(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorClass, String)> {
     task.env.apply(cmd);
-    // Agent config isolation (spec 2026-07-21): a run-scoped config home so
-    // a spawned codex cannot inherit the user's interactive MCP config.
-    apply_agent_home(cmd, task)?;
-    // zcode's provider config and model selection (no `--model` flag).
-    apply_zcode_env(cmd, task)?;
+    apply_scoped_env(cmd, task)?;
     // Per-attempt status file (subtask S2): the agent may write its final
     // verdict as JSON here, which the engine reads before the textual report.
     if let Some(sf) = task.status_file {
@@ -217,55 +218,29 @@ pub(crate) fn prepare(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (Erro
     Ok(())
 }
 
-/// Run-scoped agent config isolation (spec 2026-07-21 run-reliability). For
-/// an agent with an isolation strategy (codex today) it prepares a private
-/// config home under the run dir and points the spawned process at it via
-/// that agent's config-root env var, so the agent can never inherit the
-/// user's interactive MCP configuration. A no-op for every other agent and
-/// for spawn paths that carry no run dir (internal, connector-less calls
-/// such as compaction).
-fn apply_agent_home(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorClass, String)> {
-    let Some(run_dir) = task.env.run_dir.as_deref() else {
+/// The agent's run-scoped environment (spec 2026-07-21 run-reliability),
+/// from its module's `scoped_env`: codex's isolated config home, so a
+/// spawned codex cannot inherit the user's interactive MCP configuration,
+/// and zcode's provider config carrying the attempt's model selection (zcode
+/// has no `--model` flag). The files live in the run's agent home for the
+/// node (`agent-home/<agent>/<node>`) when the attempt belongs to a run, or
+/// under [`SpawnEnv::scoped_base`] for a spawn outside one; spawn paths that
+/// carry neither (internal, connector-less calls such as compaction) pass
+/// none. A no-op for an agent that needs nothing.
+fn apply_scoped_env(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorClass, String)> {
+    let Some(agent) = apb_core::agents::lookup(task.agent) else {
         return Ok(());
     };
-    match crate::agent_home::env_for_agent(task.agent, run_dir, task.node) {
-        Ok(Some((name, home))) => {
-            cmd.env(name, home);
-            Ok(())
-        }
-        Ok(None) => Ok(()),
-        Err(e) => Err((
-            ErrorClass::ProcessExit,
-            format!(
-                "prepare isolated agent home for `{}` failed: {e}",
-                task.agent
-            ),
-        )),
-    }
-}
-
-/// Sets the environment a spawned zcode needs (see
-/// `apb_core::zcode::spawn_env`): the built-in provider config location, and
-/// a run-scoped personal provider config carrying the attempt's model
-/// selection as ZCode's default selection. zcode has no `--model` flag, so
-/// this IS its model passing. The scoped copy lives in the run's agent home
-/// (`agent-home/zcode/<node>`) when the attempt belongs to a run. A no-op
-/// for every other agent.
-fn apply_zcode_env(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorClass, String)> {
-    if task.agent != apb_core::zcode::AGENT_ID {
-        return Ok(());
-    }
     let scoped = task
         .env
         .run_dir
         .as_deref()
-        .map(|d| d.join("agent-home").join("zcode").join(task.node));
-    let env = apb_core::zcode::spawn_env(task.model, scoped.as_deref()).map_err(|e| {
-        (
-            ErrorClass::ProcessExit,
-            format!("prepare zcode provider config failed: {e}"),
-        )
-    })?;
+        .or(task.env.scoped_base.as_deref())
+        .map(|d| crate::agent_home::scoped_dir(d, agent.descriptor().id, task.node));
+    let env = agent
+        .setup()
+        .scoped_env(task.model, scoped.as_deref())
+        .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
     for (name, value) in env {
         cmd.env(name, value);
     }

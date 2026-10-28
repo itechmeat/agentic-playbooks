@@ -1,6 +1,7 @@
 pub mod agent_actions;
 pub mod agent_catalog;
 pub mod agent_output;
+pub mod agents;
 pub mod baseline;
 pub mod budget;
 pub mod bundle;
@@ -68,7 +69,8 @@ pub mod url_component;
 pub mod validate;
 pub mod versioning;
 pub mod workspace;
-pub mod zcode;
+// The zcode agent module, at the path its callers have always used.
+pub use agents::zcode;
 pub mod zcode_tasks_index;
 
 /// Shared lock for unit tests that touch process-global env

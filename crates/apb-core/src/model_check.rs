@@ -4,7 +4,8 @@
 //! each surface only decides how loudly to report an [`ModelIssue`].
 //!
 //! What it knows, strongest first:
-//! - zcode's allowlist (a hard gate, see [`crate::zcode::check_model_allowed`]);
+//! - an agent's own refusal (zcode's allowlist, a hard gate, see
+//!   `crate::agents::ModelPolicy::list_id`);
 //! - the global config's `model_policy` ([`ModelRule`]);
 //! - apb's closed model lists (claude, codex, zcode; see
 //!   [`models_table::static_models_for_agent`]): an id outside the list is
@@ -113,9 +114,7 @@ impl ModelContext {
         Self {
             agents: crate::agent_catalog::agents(false),
             table: models_table::load_merged().unwrap_or_else(|_| models_table::builtin()),
-            zcode_family: crate::zcode::home_dir()
-                .map(|h| crate::zcode::account_family(&h))
-                .unwrap_or_else(|| crate::zcode::DEFAULT_FAMILY.to_string()),
+            zcode_family: crate::agents::zcode::account_family_here(),
             policy: GlobalConfig::load()
                 .map(|g| g.model_policy)
                 .unwrap_or_default(),
@@ -123,40 +122,31 @@ impl ModelContext {
     }
 }
 
-/// Claude Code's own model aliases: it accepts them for `--model` and resolves
-/// them itself, so they are known models, not typos.
-const CLAUDE_ALIASES: &[&str] = &["default", "opus", "sonnet", "haiku", "fable", "opusplan"];
-
-/// The Claude model families apb knows. An unlisted id of one of them in
-/// Anthropic's id pattern is accepted with a note ([`ModelIssue::NewInFamily`]).
-const CLAUDE_FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable"];
-
 /// The first issue with running `model` on `agent`, or `None` when nothing is
 /// wrong as far as this machine can tell.
 pub fn check(agent: &str, model: &str, cx: &ModelContext) -> Option<ModelIssue> {
     let probe = detect::canonical_agent_id(agent);
-    // The id the lists name: zcode's canonical bare model without its effort
-    // suffix (`zai-individual/glm-5.3-flash@high` -> `GLM-5.3-Flash`).
-    let bare: String = if probe == crate::zcode::AGENT_ID {
-        if let Err(e) = crate::zcode::check_model_allowed(model, &cx.zcode_family) {
-            return Some(ModelIssue::NotAllowed(e));
-        }
-        let canonical = crate::zcode::canonical_model(model, &cx.zcode_family);
-        strip_effort(&canonical).to_string()
-    } else {
-        model.to_string()
+    let rules = crate::agents::lookup(probe).map(|a| a.models());
+    // The id the lists name (zcode's canonical bare model without its effort
+    // suffix, `zai-individual/glm-5.3-flash@high` -> `GLM-5.3-Flash`), or
+    // the agent's outright refusal (zcode's allowlist).
+    let bare: String = match rules.map(|r| r.list_id(model, &cx.zcode_family)) {
+        Some(Err(e)) => return Some(ModelIssue::NotAllowed(e)),
+        Some(Ok(id)) => id,
+        None => model.to_string(),
     };
     if let Some(issue) = policy_issue(probe, model, &bare, &cx.policy) {
         return Some(issue);
     }
     let closed = models_table::static_models_for_agent(probe, &cx.table);
-    // An unlisted id of a known Claude family is a newer model: noted, but
-    // only after the installed-agent check, which still has the last word.
+    // An unlisted id of a known model family (claude's) is a newer model:
+    // noted, but only after the installed-agent check, which still has the
+    // last word.
     let mut new_in_family = false;
-    if let Some(list) = &closed
-        && !on_closed_list(probe, &bare, list)
+    if let (Some(list), Some(rules)) = (&closed, rules)
+        && !rules.on_closed_list(&bare, list)
     {
-        if probe != "claude" || !is_claude_family_id(bare.strip_suffix("[1m]").unwrap_or(&bare)) {
+        if !rules.newer_in_family(&bare) {
             return Some(ModelIssue::Unknown(list.join(", ")));
         }
         new_in_family = true;
@@ -186,44 +176,6 @@ pub fn check(agent: &str, model: &str, cx: &ModelContext) -> Option<ModelIssue> 
 
 fn strip_effort(model: &str) -> &str {
     model.split_once('@').map_or(model, |(m, _)| m)
-}
-
-fn on_closed_list(probe: &str, bare: &str, list: &[String]) -> bool {
-    if list.iter().any(|m| m == bare) {
-        return true;
-    }
-    // claude: an alias, or any listed id with Claude Code's `[1m]` context
-    // suffix.
-    probe == "claude" && {
-        let base = bare.strip_suffix("[1m]").unwrap_or(bare);
-        CLAUDE_ALIASES.contains(&base) || list.iter().any(|m| m == base)
-    }
-}
-
-/// Whether `id` is `claude-<family>-<major>-<minor>` or
-/// `claude-<family>-<major>` with a known family and one- or two-digit
-/// version parts, optionally followed by a `-YYYYMMDD` date
-/// (`claude-sonnet-6-0`, `claude-opus-6`, `claude-haiku-5-5-20261007`).
-fn is_claude_family_id(id: &str) -> bool {
-    let Some(rest) = id.strip_prefix("claude-") else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('-').collect();
-    let digits = |s: &str, min: usize, max: usize| {
-        (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
-    };
-    let Some((family, version)) = parts.split_first() else {
-        return false;
-    };
-    if !CLAUDE_FAMILIES.contains(family) {
-        return false;
-    }
-    // The version: a major, an optional minor, then an optional date.
-    let numbers = match version.split_last() {
-        Some((last, rest)) if digits(last, 8, 8) => rest,
-        _ => version,
-    };
-    (1..=2).contains(&numbers.len()) && numbers.iter().all(|n| digits(n, 1, 2))
 }
 
 /// The first `model_policy` rule that covers this model and does not allow it.

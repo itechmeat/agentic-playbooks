@@ -1,0 +1,45 @@
+# Contract fixture for the zcode agent, read by `suite/agent_contract`.
+# The scenarios replay the real zcode-agent captures in `../zcode/` (see
+# `zcode_adapter_test.rs` for their provenance); the quota message is Z.ai's
+# documented one in the CLI's framing, and the verdict is synthetic.
+agent: zcode
+provenance: captured
+checked_against: 0.16.9
+scenarios:
+  success:
+    stdout_file: ../zcode/json_plan.json
+    expect:
+      output: MANGO
+      final_record: true
+  error:
+    stderr_file: ../zcode/error_no_model.stderr
+    exit: 1
+    expect:
+      message: "Model creation failed"
+      model_turn: false
+  quota:
+    provenance: synthetic
+    stderr_file: ../zcode/error_quota.stderr
+    exit: 1
+    expect:
+      kind: budget
+  session:
+    stdout_file: ../zcode/json_resume.json
+    expect:
+      session: sess_00000000-0000-4000-8000-000000000001
+      fresh: printed
+      continues: true
+  usage:
+    stdout_file: ../zcode/json_plan.json
+    expect:
+      usage:
+        input_tokens: 12939
+        output_tokens: 233
+        cache_read_tokens: 29824
+        cache_write_tokens: 0
+        source: reported
+  verdict:
+    provenance: synthetic
+    stdout: '{"sessionId":"sess_00000000-0000-4000-8000-000000000001","response":"stuck\n\n```yaml\nstatus: failure\nsummary: the tests fail\n```"}'
+    expect:
+      status: failed

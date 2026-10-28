@@ -195,7 +195,13 @@ apb doctor
 ```
 
 Shows the availability of agent binaries and runner runtimes, playbook
-validity, and the state of the config and registry.
+validity, and the state of the config and registry. For a built-in agent it
+also compares the installed version (of the configured `program` when set)
+with the one apb was verified against and looks for the flags of its
+built-in form in its help, without a model call.
+`apb doctor --agents` does that for every installed built-in agent;
+`apb doctor --probe-agent <id>` spends one model call to check the agent's
+output format (PROFILES.md, "Checking an installed agent").
 
 ## Optional: decision models
 
