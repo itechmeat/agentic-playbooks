@@ -59,6 +59,40 @@ pub fn grades_of(run_dir: &Path) -> Vec<Grade> {
     out
 }
 
+/// The grades of the run at `run_dir` that count: those made for this very
+/// run (its directory name) and signed by this installation. A copied or
+/// hand-made grade file is left out.
+pub fn trusted_grades_of(run_dir: &Path) -> Vec<Grade> {
+    split_grades_of(run_dir).0
+}
+
+/// The grades of the run at `run_dir` read once and split: those that
+/// count ([`trusted_grades_of`]), and how many were left out.
+pub fn split_grades_of(run_dir: &Path) -> (Vec<Grade>, usize) {
+    let run_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let all = grades_of(run_dir);
+    let total = all.len();
+    let trusted: Vec<Grade> = all
+        .into_iter()
+        .filter(|g| g.run_id == run_id && g.signed_here())
+        .collect();
+    let left_out = total - trusted.len();
+    (trusted, left_out)
+}
+
+/// The latest of each grader's grades, in grader order (the rules grader
+/// before a host). `grades` are oldest first, as [`grades_of`] lists them.
+pub fn latest_by_grader(grades: Vec<Grade>) -> Vec<Grade> {
+    let mut latest: std::collections::BTreeMap<GraderId, Grade> = std::collections::BTreeMap::new();
+    for g in grades {
+        latest.insert(g.grader, g);
+    }
+    latest.into_values().collect()
+}
+
 /// The latest grade of `grader` for the run, if any.
 pub fn latest_of(run_dir: &Path, grader: GraderId) -> Option<Grade> {
     grades_of(run_dir)

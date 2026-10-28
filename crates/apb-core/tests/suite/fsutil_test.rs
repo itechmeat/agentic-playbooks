@@ -99,3 +99,20 @@ fn a_private_write_is_not_blocked_by_temps_a_killed_process_left_behind() {
     apb_core::fsutil::atomic_write_private(&path, b"fresh").unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"fresh");
 }
+
+#[test]
+fn a_capped_read_leaves_the_reader_right_after_what_it_returned() {
+    let data: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+    let mut r = std::io::Cursor::new(data.clone());
+    let (head, more) = apb_core::fsutil::read_prefix_capped(&mut r, 300).unwrap();
+    assert_eq!((head.len(), more), (300, true));
+    let (rest, more) = apb_core::fsutil::read_prefix_capped(&mut r, 10_000).unwrap();
+    assert!(!more);
+    // No byte is lost between the two reads.
+    assert_eq!([head, rest].concat(), data);
+    let mut exact = std::io::Cursor::new(vec![1u8; 4]);
+    assert_eq!(
+        apb_core::fsutil::read_prefix_capped(&mut exact, 4).unwrap(),
+        (vec![1u8; 4], false)
+    );
+}

@@ -23,6 +23,7 @@ mod args;
 pub use args::*;
 
 mod decision;
+mod discover;
 mod playbook;
 mod problems;
 mod profile;
@@ -584,6 +585,7 @@ impl WfMcp {
             + Self::decision_router()
             + Self::quality_router()
             + Self::problems_router()
+            + Self::discover_router()
     }
 }
 

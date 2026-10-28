@@ -74,11 +74,7 @@ fn side(line: &Line, version: &str, runs: Runs<'_>) -> Side {
         if !ran_as_written(&d, ending) {
             continue;
         }
-        let run_id = d.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        let grades: Vec<Grade> = crate::grade::grades_of(&d)
-            .into_iter()
-            .filter(|g| g.run_id == run_id && g.signed_here())
-            .collect();
+        let grades: Vec<Grade> = crate::grade::trusted_grades_of(&d);
         if matches!(runs, Runs::Graded { .. }) && grades.is_empty() {
             continue;
         }

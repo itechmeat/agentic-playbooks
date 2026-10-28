@@ -102,15 +102,11 @@ pub fn reply(agent: &str, stdout: &str) -> Option<Reply> {
             for v in json_lines(stdout) {
                 match str_at(&v, "type") {
                     Some("turn.completed") => completed = true,
-                    Some("item.completed") => {
-                        if let Some(item) = v.get("item")
-                            && str_at(item, "type") == Some("agent_message")
-                            && let Some(t) = str_at(item, "text")
-                        {
+                    _ => {
+                        if let Some(t) = crate::agent_actions::codex::agent_message(&v) {
                             text = Some(t.to_string());
                         }
                     }
-                    _ => {}
                 }
             }
             text.or_else(|| completed.then(String::new))

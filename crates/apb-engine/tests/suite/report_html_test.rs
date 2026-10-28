@@ -197,3 +197,127 @@ fn a_secret_the_cut_runs_through_is_redacted_whole() {
         "no part of a secret cut through may reach the page"
     );
 }
+
+/// Appends `event` (a journal line without `seq` and `ts`) to the run.
+fn append_event(dir: &Path, seq: u64, event: serde_json::Value) {
+    let mut line = event;
+    line["seq"] = seq.into();
+    line["ts"] = 6.into();
+    let mut text = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    text.push_str(&format!("{line}\n"));
+    std::fs::write(dir.join("events.jsonl"), text).unwrap();
+}
+
+#[test]
+fn the_quality_and_known_problem_sections_say_when_there_is_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = run_dir(tmp.path(), true, "answer", 0);
+    let html = render(tmp.path(), &dir).unwrap();
+    assert!(html.contains("<h2>Quality</h2><p class=\"empty\">The run has no trusted grade.</p>"));
+    assert!(html.contains(
+        "<h2>Known problems shown</h2><p class=\"empty\">The run showed no known problem.</p>"
+    ));
+}
+
+#[test]
+fn the_report_shows_trusted_grades_with_their_cites_and_the_known_problems() {
+    use apb_engine::grade::{grade_rules, store};
+    let _lock = crate::common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg_var = crate::common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    apb_core::run_origin::ensure_key().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".apb")).unwrap();
+    const KNOWN: &str = "known-report-value";
+    with_known_secret(cfg.path(), tmp.path(), KNOWN);
+    let dir = run_dir(tmp.path(), true, "answer", 0);
+    let first = grade_rules(&dir).unwrap();
+    // A later grade of the same grader: the one the report shows.
+    let mut later = first.clone();
+    later.grade_id = format!("{}-later", first.grade_id);
+    later.created_at += 1;
+    later.mac = None;
+    later.criteria[0].why = format!("the run said {KNOWN} <script>x</script>");
+    // Markup in a criterion id reads as text too.
+    let mut marked = later.criteria[0].clone();
+    marked.id = "<b>bold</b>".into();
+    later.criteria.push(marked);
+    later.criteria[0].cites = (0..7)
+        .map(|i| apb_core::quality::grade::Cite::to(format!("j:{i}")))
+        .collect();
+    assert!(later.sign());
+    store::write(&dir, &later).unwrap();
+    // A grade file this installation did not sign for this run.
+    let mut forged = later.clone();
+    forged.grade_id = "rules-1-0-forged".into();
+    forged.created_at += 1;
+    forged.mac = None;
+    forged.criteria[0].why = "forged".into();
+    store::write(&dir, &forged).unwrap();
+    // A grade signed here, but for another run, copied into this one.
+    let mut copied = later.clone();
+    copied.grade_id = "rules-1-0-copied".into();
+    copied.run_id = "another-run".into();
+    copied.created_at += 2;
+    copied.mac = None;
+    copied.criteria[0].why = "copied".into();
+    assert!(copied.sign());
+    store::write(&dir, &copied).unwrap();
+    assert_eq!(apb_engine::grade::trusted_grades_of(&dir).len(), 2);
+    let (trusted, left_out) = apb_engine::grade::split_grades_of(&dir);
+    assert_eq!((trusted.len(), left_out), (2, 2));
+    // The statistics read the same trusted grades, and only when they ask
+    // for them: an estimate or a retro reads no grade file.
+    let run = apb_engine::run_stats::StatsRun::load(&dir).unwrap();
+    assert!(run.grades.is_empty());
+    assert_eq!(run.with_grades(&dir).grades.len(), 2);
+    append_event(
+        &dir,
+        4,
+        serde_json::json!({
+            "type": "known_problems_shown",
+            "shown": [{"id": "kp-1", "scope": "connector:crm.update_contact",
+                "symptom": "returns 500 on a long note", "workaround": "split the note",
+                "nodes": [], "basis": "unchanged"}],
+            "hidden": [{"id": "kp-2", "reason": "over_limit"}],
+            "unsigned": 1
+        }),
+    );
+    let html = render(tmp.path(), &dir).unwrap();
+    let quality = between(&html, "<h2>Quality</h2>", "</section>");
+    assert!(quality.contains("<td>outcome</td>"), "{quality}");
+    assert!(quality.contains("<td>rules/1</td>"));
+    assert!(
+        quality.contains("<td>j:0, j:1, j:2, j:3, j:4 and 2 more</td>"),
+        "{quality}"
+    );
+    assert!(quality.contains("the run said [redacted]"));
+    assert!(
+        !html.contains(KNOWN),
+        "a known value must not reach the page"
+    );
+    assert!(!quality.contains("forged"));
+    assert!(!quality.contains("copied"));
+    assert!(quality.contains("2 grade files not signed for this run on this machine left out."));
+    assert!(
+        quality.contains("&lt;script&gt;x&lt;/script&gt;"),
+        "{quality}"
+    );
+    assert!(
+        quality.contains("<td>&lt;b&gt;bold&lt;/b&gt;</td>"),
+        "{quality}"
+    );
+    assert!(!quality.contains("<script>") && !quality.contains("<b>"));
+    let known = between(&html, "<h2>Known problems shown</h2>", "</section>");
+    for shown in [
+        "<td>connector:crm.update_contact</td>",
+        "<td>returns 500 on a long note</td>",
+        "<td>split the note</td>",
+        "<td>every agent node</td>",
+        "<td>unchanged</td>",
+        "<td>kp-2</td><td>over_limit</td>",
+        "1 problem from a file this installation did not write left out.",
+    ] {
+        assert!(known.contains(shown), "{shown}: {known}");
+    }
+}

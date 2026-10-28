@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use apb_core::known_problems::{
-    EvidenceRef, Observation, ProblemOrigin, ProblemScope, SYMPTOM_MAX, WORKAROUND_MAX, capped,
+    EvidenceRef, Observation, ProblemOrigin, ProblemScope, SYMPTOM_MAX, WORKAROUND_MAX,
     is_tool_finding, scope_of,
 };
 use apb_core::scrub::Scrubber;
@@ -39,10 +39,7 @@ fn clean_scope(scope: ProblemScope, scrubber: &Scrubber) -> Option<ProblemScope>
 /// A sighting before its source is attached.
 pub(super) fn sightings(run_id: &str, events: &[Event], scrubber: &Scrubber) -> Vec<Observation> {
     let mut out = Vec::new();
-    let clean = |text: &str, max: usize| -> Option<String> {
-        let t = capped(&scrubber.scrub(text), max);
-        (scrubber.flags(&t).is_none() && !t.is_empty()).then_some(t)
-    };
+    let clean = |text: &str, max: usize| scrubber.stored_text(text.trim(), max);
     let mut failures: BTreeMap<FailureKey, Failures<'_>> = BTreeMap::new();
     for e in events {
         match &e.payload {

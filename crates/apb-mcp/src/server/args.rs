@@ -1152,3 +1152,58 @@ pub struct KnownProblemRecheckArgs {
     #[serde(default)]
     pub workspace: Option<String>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverArgs {
+    /// Projects to read the sessions of: `current` or workspace ids (see
+    /// projects_list). Default: the current project.
+    #[serde(default)]
+    pub projects: Option<Vec<String>>,
+    /// History roots by name (see `discover.roots` in the global config).
+    /// Default: every configured root that is there.
+    #[serde(default)]
+    pub roots: Option<Vec<String>>,
+    /// How many days back, 1 to 365. Default: the configured value, else 90.
+    #[serde(default)]
+    pub since_days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverResultsArgs {
+    /// A stored result id (`disc-...`); absent: the list of stored results.
+    #[serde(default)]
+    pub result_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverSaveArgs {
+    /// The stored result id (`disc-...`).
+    pub result_id: String,
+    /// The suggestion slug (`seq-...`).
+    pub slug: String,
+    /// `project` or `global`.
+    pub scope: String,
+    /// The draft rewritten by you (a better title or prompt); absent: the
+    /// suggestion's own draft.
+    #[serde(default)]
+    pub yaml: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverDismissArgs {
+    /// The stored result id (`disc-...`).
+    pub result_id: String,
+    /// The suggestion slug (`seq-...`).
+    pub slug: String,
+    /// `soft` (not now) or `hard` (never).
+    pub kind: String,
+    /// `project` (default) or `global` (only when the user says everywhere).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}

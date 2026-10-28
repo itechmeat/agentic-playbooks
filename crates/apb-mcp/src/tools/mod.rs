@@ -6,6 +6,7 @@ pub mod budget;
 pub mod candidate;
 pub mod capture;
 pub mod decision;
+pub mod discover;
 pub mod grade;
 pub mod intent;
 pub mod memory;

@@ -62,10 +62,7 @@ pub(crate) fn copy_agent_session(
     {
         return None;
     }
-    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
-    let projects = std::fs::read_dir(config.join("projects")).ok()?;
+    let projects = std::fs::read_dir(apb_core::agent_actions::claude::projects_dir()?).ok()?;
     let file = format!("{session}.jsonl");
     let source = projects
         .filter_map(|e| e.ok())

@@ -607,6 +607,35 @@ checked: number, passed: Rate, failed: number,
  */
 errors: number, manual: number, };
 
+export type QualityStats = { criterion: string, source: CriterionSource, 
+/**
+ * `<kind>/<version>`.
+ */
+grader: string, task_type: string, 
+/**
+ * The criterion definition's digest the levels were given under.
+ */
+digest: string, 
+/**
+ * Runs whose latest grade of the grader has the criterion.
+ */
+graded_runs: number, tally: Tally, 
+/**
+ * Good over determinate levels (good, partial, poor).
+ */
+good: Rate, 
+/**
+ * Poor over determinate levels.
+ */
+poor: Rate, };
+
+export type QualityDelta = { criterion: string, grader: string, task_type: string, 
+/**
+ * The criterion definition's digest both versions graded under: a
+ * criterion whose definition changed has one delta per digest.
+ */
+digest: string, good_delta?: number, poor_delta?: number, };
+
 export type KindCount = { kind: string, occurrences: number, runs: number, };
 
 export type FindingGroup = { kind: string, location: string, runs: number, occurrences: number, 
@@ -715,7 +744,12 @@ findings: FindingStats,
  * Each baseline observation over the runs that compared it; empty
  * when the runs had no baseline check.
  */
-baseline: Array<BaselineStats>, nodes: Array<NodeStats>, note?: string, 
+baseline: Array<BaselineStats>, 
+/**
+ * The levels its runs' signed grades gave each criterion, one row per
+ * comparable key ([`quality`]); empty when no run was graded.
+ */
+quality?: Array<QualityStats>, nodes: Array<NodeStats>, note?: string, 
 /**
  * Runs of this version that were candidate trials (issue #192): the
  * version was a forward patch on trial when they ran.
@@ -740,7 +774,12 @@ against?: string, success_delta?: number, first_pass_delta?: number, retries_per
  * Nodes whose latest executor (profile or bundle digest) differs
  * between the two versions.
  */
-executor_changes?: Array<ExecutorChange>, };
+executor_changes?: Array<ExecutorChange>, 
+/**
+ * How each criterion both versions graded under the same definition
+ * moved.
+ */
+quality?: Array<QualityDelta>, };
 
 export type StatsReport = { runs: number, 
 /**
@@ -1785,6 +1824,102 @@ runs: number,
 sightings: number, };
 
 export type ProblemDetail = { problem: ProblemView, changed_passages: Array<ChangedPassage>, };
+
+export type ProjectSeen = { workspace_id: string, name: string, };
+
+export type SourceSpan = { root: string, file: string, workspace_id: string, lines: [number, number], };
+
+export type Example = { text: string, source: SourceSpan, };
+
+export type Support = { sessions: number, days: number, 
+/**
+ * The projects, in the order of the request.
+ */
+projects: Array<ProjectSeen>, };
+
+export type SuggestionStatus = { "state": "new" } | { "state": "saved", playbook: string, version: string, scope: string, } | { "state": "dismissed" };
+
+export type Suggestion = { 
+/**
+ * `seq-` and 10 hex characters of the steps.
+ */
+slug: string, steps: Array<string>, support: Support, score: number, title: string, 
+/**
+ * The synopsis `playbook_capture` takes.
+ */
+synopsis: unknown, yaml: string, effects: Array<string>, examples: Array<Example>, sources: Array<SourceSpan>, 
+/**
+ * Things to settle before saving (`needs_profile`).
+ */
+notes?: Array<string>, status: SuggestionStatus, };
+
+export type RootReport = { name: string, agent: string, files_seen: number, files_read: number, bytes_read: number, 
+/**
+ * Files left unread, by why: `symlink`, `not_regular`, `too_old`,
+ * `other_project`, `file_cap`, `byte_cap`, `step_cap`, `unreadable`,
+ * and lines skipped as `line_too_long`.
+ */
+skipped: { [key in string]: number }, 
+/**
+ * Files read by their prefix only.
+ */
+cut_files: number, };
+
+export type ReadReport = { roots: Array<RootReport>, 
+/**
+ * Sessions with at least one step.
+ */
+sessions: number, };
+
+export type RequestEcho = { roots: Array<string>, projects: Array<ProjectSeen>, since_days: number, };
+
+export type SuppressedSlug = { slug: string, scope: string, kind: string, };
+
+export type DiscoverResult = { schema: number, 
+/**
+ * `disc-` and 10 hex characters.
+ */
+id: string, 
+/**
+ * Unix milliseconds.
+ */
+created_at: number, reader: string, miner: string, request: RequestEcho, read: ReadReport, suggestions: Array<Suggestion>, suppressed: Array<SuppressedSlug>, 
+/**
+ * Drafts dropped because their text still looked like it held a
+ * secret.
+ */
+dropped_drafts: number, 
+/**
+ * The installation's MAC over the rest (see `store`).
+ */
+mac?: string, };
+
+export type RootInfo = { name: string, agent: string, 
+/**
+ * Whether it is a real directory here now.
+ */
+available: boolean, };
+
+export type ResultView = { signed: boolean, stored: boolean, suppressed_suggestions: Array<{ pattern: string, synopsis: string, kind: string, scope: string, declines: number, snoozed_until: string }>, schema: number, 
+/**
+ * `disc-` and 10 hex characters.
+ */
+id: string, 
+/**
+ * Unix milliseconds.
+ */
+created_at: number, reader: string, miner: string, request: RequestEcho, read: ReadReport, suggestions: Array<Suggestion>, suppressed: Array<SuppressedSlug>, 
+/**
+ * Drafts dropped because their text still looked like it held a
+ * secret.
+ */
+dropped_drafts: number, 
+/**
+ * The installation's MAC over the rest (see `store`).
+ */
+mac?: string, };
+
+export type ResultSummary = { id: string, created_at: number, request: RequestEcho, sessions: number, suggestions: number, saved: number, dismissed: number, signed: boolean, };
 
 export type TrialRecord = { 
 /**

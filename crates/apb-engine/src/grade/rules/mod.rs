@@ -11,6 +11,12 @@
 //! The grader reads every view whole first (the trace says so), so every
 //! citation is a record it read and an absence rests on complete views.
 //! Its proposals go through the same evidence validator as any grader's.
+//!
+//! `rules/1` reads tool facts from structured sessions only
+//! ([`crate::transcript::Source::structured`], claude's): codex's `exec
+//! --json` stdout carries facts too, but cannot yet show that no call was
+//! left out, and the grader's id is part of the key its grades are
+//! compared under, so the same id never grades on two kinds of evidence.
 
 mod consent;
 mod finding;

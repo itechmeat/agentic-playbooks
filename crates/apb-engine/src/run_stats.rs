@@ -14,7 +14,8 @@
 //! `question_answered`); run duration; tokens and cost per run; missing
 //! deliverables and output fields; the goal criteria results; the findings
 //! and warnings the attempts reported, and each baseline observation's
-//! results ([`findings`]). Per node:
+//! results ([`findings`]); the levels the runs' signed grades gave each
+//! criterion ([`quality`]). Per node:
 //! runs it ran in, first-pass executions, retries, fallbacks, re-entries,
 //! duration against its declared `expected_duration`.
 
@@ -182,6 +183,14 @@ pub struct VersionStats {
     #[serde(flatten)]
     #[cfg_attr(feature = "ts", ts(flatten))]
     pub model_use: models::ModelUse,
+    /// The levels its runs' signed grades gave each criterion, one row per
+    /// comparable key ([`quality`]); empty when no run was graded.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<quality::QualityStats>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<quality::QualityStats>,
     pub nodes: Vec<NodeStats>,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +243,14 @@ pub struct Comparison {
     )]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub executor_changes: Vec<digests::ExecutorChange>,
+    /// How each criterion both versions graded under the same definition
+    /// moved.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<quality::QualityDelta>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<quality::QualityDelta>,
 }
 
 /// The whole report.
@@ -252,14 +269,6 @@ pub struct StatsReport {
     pub note: Option<String>,
 }
 
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
-}
-
-fn delta(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    Some(round2(b? - a?))
-}
-
 /// A semver-ish sort key: numeric components first, the text as tiebreak.
 type VersionKey = (Vec<u64>, String);
 
@@ -276,7 +285,7 @@ fn version_key(v: &str) -> VersionKey {
 pub fn stats(roots: &[PathBuf], filter: &StatsFilter) -> StatsReport {
     let runs: Vec<StatsRun> = run_dirs(roots)
         .iter()
-        .filter_map(|d| StatsRun::load(d))
+        .filter_map(|d| StatsRun::load(d).map(|r| r.with_grades(d)))
         .collect();
     build(&runs, filter)
 }
@@ -357,6 +366,7 @@ fn comparison(playbook: &str, base: &str, versions: &[VersionStats]) -> Comparis
         };
         c.cost_per_run_delta_usd = delta(a.spend.cost_per_run_usd, b.spend.cost_per_run_usd)
             .map(|d| (d * 1e4).round() / 1e4);
+        c.quality = quality::deltas(&a.quality, &b.quality);
     }
     c
 }
@@ -663,6 +673,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         findings,
         baseline,
         model_use,
+        quality: quality::of_runs(runs),
         nodes,
         note: (runs.len() < MIN_RUNS).then(|| {
             format!(
@@ -677,12 +688,15 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
 pub mod digests;
 pub mod findings;
 pub mod models;
+pub mod quality;
 mod rate;
 mod render;
 pub(crate) mod spans;
 mod stats_run;
 mod waits;
+pub use quality::{QualityDelta, QualityStats};
 pub use rate::Rate;
+use rate::{delta, round2};
 pub use render::render_text;
 use spans::active_ms;
 pub use stats_run::StatsRun;

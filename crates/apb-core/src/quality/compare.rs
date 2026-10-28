@@ -139,6 +139,15 @@ pub struct Tally {
 }
 
 impl Tally {
+    /// The levels counted.
+    pub fn of_levels<'a>(levels: impl IntoIterator<Item = &'a Level>) -> Self {
+        let mut t = Tally::default();
+        for l in levels {
+            t.add(*l);
+        }
+        t
+    }
+
     fn add(&mut self, level: Level) {
         let slot = match level {
             Level::Good => &mut self.good,
@@ -276,11 +285,7 @@ fn levels_by_key(grades: &[Grade]) -> BTreeMap<ComparableKey, Vec<Level>> {
 }
 
 fn tally(levels: Option<&Vec<Level>>) -> Tally {
-    let mut t = Tally::default();
-    for l in levels.into_iter().flatten() {
-        t.add(*l);
-    }
-    t
+    Tally::of_levels(levels.into_iter().flatten())
 }
 
 fn compare_one(candidate: Tally, current: Tally, gate: &QualityGate) -> CriterionResult {

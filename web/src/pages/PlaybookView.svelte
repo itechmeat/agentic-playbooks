@@ -59,6 +59,7 @@
   // --- 0.23.0 stats (C3) ---
   import ChartColumn from '@lucide/svelte/icons/chart-column'
   import PlaybookStatsCard from '../lib/PlaybookStatsCard.svelte'
+  import { previousVersion } from '../lib/playbookstats'
   // --- end of 0.23.0 stats ---
   import X from '@lucide/svelte/icons/x'
 
@@ -99,7 +100,17 @@
     statsLoading = true
     statsError = null
     try {
-      const r = await fetchStats(id, workspace)
+      // With two versions or more, compare the newest with the one before
+      // it, so the card shows how quality moved.
+      let r = await fetchStats(id, workspace)
+      const base = previousVersion(r)
+      if (base) {
+        try {
+          r = await fetchStats(id, workspace, /* since */ '', base)
+        } catch {
+          // The comparison is an extra: the plain report stays.
+        }
+      }
       if (key === `${workspace}/${id}`) stats = r
     } catch (e) {
       statsError = String(e)

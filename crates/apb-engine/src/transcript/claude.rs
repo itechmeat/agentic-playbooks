@@ -7,176 +7,14 @@
 //! `Read` of a `SKILL.md`), and whether it runs a destructive command
 //! ([`is_destructive`]). A sub-agent's messages carry `isSidechain`.
 
-use std::sync::LazyLock;
-
-use regex::Regex;
 use serde_json::Value;
 
 use super::record::{Record, ToolUse};
 
-/// Tools that write the file they name.
-const WRITE_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
-/// The tool that reads a file.
-const READ_TOOL: &str = "Read";
-/// Input fields that name a file.
-const PATH_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
-
-/// Shell commands that cannot be taken back and read the same in any
-/// spelling of their flags: a hard reset, dropping or truncating a database
-/// table, formatting a disk and a raw disk write. The commands whose flags
-/// come in many spellings (a recursive forced delete, a forced push, a
-/// forced clean, a forced branch delete, `find -delete`) are read token by
-/// token ([`destructive_words`]).
-pub const DESTRUCTIVE: [&str; 4] = [
-    r"\bgit\s+reset\s+--hard\b",
-    r"(?i)\b(drop|truncate)\s+(table|database|schema)\b",
-    r"\bmkfs(\.[a-z0-9]+)?\b",
-    r"\bdd\s+[^|;&]*\bof=/dev/",
-];
-
-static DESTRUCTIVE_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    DESTRUCTIVE
-        .iter()
-        .map(|p| Regex::new(p).expect("valid"))
-        .collect()
-});
-
-/// The short flags (`-rf`) and long flags (`--force`) of a command's words.
-struct Flags<'a> {
-    short: String,
-    long: Vec<&'a str>,
-}
-
-impl<'a> Flags<'a> {
-    fn of(words: &[&'a str]) -> Self {
-        let mut short = String::new();
-        let mut long = Vec::new();
-        for w in words {
-            if let Some(l) = w.strip_prefix("--") {
-                long.push(l.split('=').next().unwrap_or(l));
-            } else if let Some(s) = w.strip_prefix('-') {
-                short.push_str(s);
-            }
-        }
-        Flags { short, long }
-    }
-
-    fn has(&self, short: &[char], long: &[&str]) -> bool {
-        self.short.chars().any(|c| short.contains(&c)) || self.long.iter().any(|l| long.contains(l))
-    }
-}
-
-/// Whether one simple command (no `|`, `;` or `&`) runs a recursive forced
-/// delete, a forced push (`--force`, `-f`, `--force-with-lease`, a `+`
-/// refspec), a forced clean, a forced branch delete or `find -delete`,
-/// wherever in its words the program stands (after `sudo`, inside
-/// `find -exec`).
-fn destructive_words(words: &[&str]) -> bool {
-    let program = |w: &str| {
-        let w = w.trim_matches(['"', '\'']);
-        w.rsplit('/').next().unwrap_or(w).to_string()
-    };
-    (0..words.len()).any(|at| {
-        let rest = &words[at + 1..];
-        match program(words[at]).as_str() {
-            "rm" => {
-                let f = Flags::of(rest);
-                f.has(&['r', 'R'], &["recursive"]) && f.has(&['f'], &["force"])
-            }
-            "find" => rest.contains(&"-delete"),
-            "git" => git_destructive(rest),
-            _ => false,
-        }
-    })
-}
-
-/// Git's global options that take the next word as their value.
-const GIT_VALUE_OPTIONS: [&str; 5] = ["-C", "-c", "--git-dir", "--work-tree", "--namespace"];
-
-/// Whether the words after `git` force a push, a clean or a branch delete.
-/// Global options before the subcommand (`-C dir`, `-c k=v`,
-/// `--git-dir=..`) are skipped.
-fn git_destructive(words: &[&str]) -> bool {
-    let mut rest = words;
-    while let Some((w, tail)) = rest.split_first() {
-        if !w.starts_with('-') {
-            break;
-        }
-        rest = if GIT_VALUE_OPTIONS.contains(w) {
-            tail.get(1..).unwrap_or(&[])
-        } else {
-            tail
-        };
-    }
-    let Some((sub, args)) = rest.split_first() else {
-        return false;
-    };
-    let f = Flags::of(args);
-    match *sub {
-        "push" => {
-            f.has(&['f'], &["force", "force-with-lease"]) || args.iter().any(|a| a.starts_with('+'))
-        }
-        "clean" => f.has(&['f'], &["force"]),
-        "branch" => {
-            f.short.contains('D') || (f.has(&['d'], &["delete"]) && f.has(&['f'], &["force"]))
-        }
-        _ => false,
-    }
-}
-
-/// Whether `command` runs a destructive command: one of [`DESTRUCTIVE`],
-/// or a simple command [`destructive_words`] names.
-pub fn is_destructive(command: &str) -> bool {
-    DESTRUCTIVE_RE.iter().any(|re| re.is_match(command))
-        || command
-            .split(['|', ';', '&', '\n'])
-            .any(|part| destructive_words(&part.split_whitespace().collect::<Vec<_>>()))
-}
+pub use apb_core::agent_actions::command::{DESTRUCTIVE, is_destructive};
 
 fn tool_use(item: &Value) -> ToolUse {
-    let name = item
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let input = item.get("input").cloned().unwrap_or(Value::Null);
-    let paths: Vec<String> = PATH_FIELDS
-        .iter()
-        .filter_map(|f| input.get(*f).and_then(Value::as_str))
-        .map(str::to_string)
-        .collect();
-    let skill = if name == "Skill" {
-        ["skill", "command", "name"]
-            .iter()
-            .find_map(|f| input.get(*f).and_then(Value::as_str))
-            .map(|s| s.trim_start_matches('/').to_string())
-    } else if name == READ_TOOL {
-        // Only a read loads a skill: writing or searching a `SKILL.md` does
-        // not.
-        paths.iter().find_map(|p| skill_of_path(p))
-    } else {
-        None
-    };
-    let destructive = input
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(is_destructive);
-    ToolUse {
-        writes: WRITE_TOOLS.contains(&name.as_str()),
-        input_digest: apb_core::content::sha256_hex(input.to_string().as_bytes()),
-        name,
-        paths,
-        destructive,
-        skill,
-    }
-}
-
-/// The skill whose `SKILL.md` `path` is: the name of its directory.
-fn skill_of_path(path: &str) -> Option<String> {
-    let p = std::path::Path::new(path);
-    (p.file_name()? == "SKILL.md")
-        .then(|| p.parent()?.file_name()?.to_str().map(str::to_string))
-        .flatten()
+    ToolUse::from(&apb_core::agent_actions::claude::tool_call(item))
 }
 
 /// The text of a tool result's `content` (a string or a list of blocks).
@@ -269,57 +107,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_destructive_list_matches_only_what_it_names() {
-        for cmd in [
-            "rm -rf build",
-            "rm -fr /tmp/x",
-            "rm -Rf build",
-            "rm -r -f build",
-            "rm --recursive --force build",
-            "/bin/rm -f -R build",
-            "cd x && rm -rf y",
-            "sudo rm -rf /var/x",
-            "find . -type d -exec rm -rf {} +",
-            "git push --force origin main",
-            "git push -f",
-            "git push --force-with-lease=main origin",
-            "git push origin +main",
-            "git reset --hard HEAD~1",
-            "git clean -fdx",
-            "git clean -d --force",
-            "git branch -D old",
-            "git branch --delete --force old",
-            "git branch -d -f old",
-            "git -C repo push --force",
-            "git -c core.x=y clean -fdx",
-            "git --git-dir=.git branch -D old",
-            "git --no-pager -C repo push origin +main",
-            "find build -name '*.o' -delete",
-            "psql -c 'DROP TABLE users'",
-            "mkfs.ext4 /dev/sdb1",
-            "dd if=img of=/dev/sda",
-        ] {
-            assert!(is_destructive(cmd), "{cmd}");
-        }
-        for cmd in [
-            "rm file.txt",
-            "rm -r build",
-            "rm -f file.txt",
-            "git push origin main",
-            "git reset HEAD file",
-            "git clean -n",
-            "git branch -d merged",
-            "git -C repo push origin main",
-            "git -c push.default=current status",
-            "find . -name '*.rs'",
-            "ls -rf",
-            "cargo build",
-        ] {
-            assert!(!is_destructive(cmd), "{cmd}");
-        }
-    }
-
-    #[test]
     fn only_a_read_of_a_skill_file_loads_the_skill() {
         let call = |name: &str| {
             tool_use(&serde_json::json!({
@@ -358,14 +145,5 @@ mod tests {
             records[1].text.chars().count(),
             "[user]\n".len() + 1_000_000
         );
-    }
-
-    #[test]
-    fn a_skill_is_named_by_its_directory() {
-        assert_eq!(
-            skill_of_path("/home/u/.claude/skills/rust-skills/SKILL.md").as_deref(),
-            Some("rust-skills")
-        );
-        assert_eq!(skill_of_path("/x/README.md"), None);
     }
 }

@@ -34,6 +34,9 @@ import type {
   Remembered,
   RunGrades,
   RunNotify,
+  ResultSummary,
+  ResultView,
+  RootInfo,
 } from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
@@ -512,6 +515,33 @@ export const deleteSuggestion = (pattern: string, workspace = '', scope = 'proje
 
 // --- 0.23.0 stats (C3) ---
 // Cross-run metrics of one playbook's runs in a project (`apb stats --json`).
-export const fetchStats = (playbook: string, workspace = '', since = '') =>
-  getJson<import('../api.gen').StatsReport>(`/api/stats${qs({ workspace, playbook, since })}`)
+export const fetchStats = (playbook: string, workspace = '', since = '', compare = '') =>
+  getJson<import('../api.gen').StatsReport>(`/api/stats${qs({ workspace, playbook, since, compare })}`)
 // --- end of 0.23.0 stats ---
+
+// History discovery: the step sequences past agent sessions repeat. The
+// server answers only a browser on this machine, names roots and projects
+// by name or workspace id, and never takes or returns a path.
+const discover = '/api/discover'
+const suggestion = (id: string, slug: string) =>
+  `${discover}/${encodeURIComponent(id)}/${encodeURIComponent(slug)}`
+export const fetchDiscoverRoots = () => getJson<RootInfo[]>(`${discover}/roots`)
+export const fetchDiscoveries = () => getJson<ResultSummary[]>(discover)
+export const fetchDiscovery = (id: string) => getJson<ResultView>(`${discover}/${encodeURIComponent(id)}`)
+export interface DiscoverRequestBody {
+  workspaces: string[]
+  roots: string[]
+  since_days?: number
+}
+export const runDiscovery = (body: DiscoverRequestBody) =>
+  requestJson<ResultView>(discover, { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) })
+export const saveDiscovered = (id: string, slug: string, scope: 'project' | 'global', workspace = '') =>
+  requestJson<{ id?: string; version?: string; rejected?: string }>(
+    `${suggestion(id, slug)}/save${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ scope }) },
+  )
+export const dismissDiscovered = (id: string, slug: string, kind: 'soft' | 'hard', workspace = '') =>
+  requestJson<{ pattern?: string; snoozed_until?: string; rejected?: string }>(
+    `${suggestion(id, slug)}/dismiss${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ kind }) },
+  )

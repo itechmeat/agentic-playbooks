@@ -639,6 +639,9 @@ impl AuthState {
 pub struct ClientCtx {
     pub ip: IpAddr,
     pub https: bool,
+    /// The socket peer is a configured trusted proxy: the request was
+    /// forwarded, whatever headers it carries.
+    pub via_proxy: bool,
 }
 
 /// Derives [`ClientCtx`]. `peer` is `None` when the router is driven in
@@ -674,6 +677,7 @@ pub fn client_ctx(auth: &AuthState, headers: &HeaderMap, peer: Option<IpAddr>) -
     ClientCtx {
         ip,
         https: forwarded_https || auth.public_https,
+        via_proxy: trusted,
     }
 }
 

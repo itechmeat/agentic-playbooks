@@ -134,7 +134,7 @@ fn apply_shadowing(entries: &mut [CatalogEntry]) {
 
 /// The JSON shape of one suppressing record: what the agent needs to decide
 /// "is this the same action" (the synopsis) and how long the silence lasts.
-fn suppressed_json(records: &[ScopedRecord]) -> Vec<Value> {
+pub(crate) fn suppressed_json(records: &[ScopedRecord]) -> Vec<Value> {
     records
         .iter()
         .map(|s| {

@@ -5,6 +5,7 @@
   import UserCog from '@lucide/svelte/icons/user-cog'
   import Plug from '@lucide/svelte/icons/plug'
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
+  import Repeat from '@lucide/svelte/icons/repeat'
   import LogOut from '@lucide/svelte/icons/log-out'
   import { Button } from '$lib/components/ui/button'
   import { authState, logout } from '$lib/auth.svelte'
@@ -29,7 +30,7 @@
     title,
     actions,
   }: {
-    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | 'trust' | ''
+    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | 'trust' | 'discover' | ''
     title?: Snippet
     actions?: Snippet
   } = $props()
@@ -40,6 +41,7 @@
     { key: 'profiles', label: 'Profiles', href: '#/profiles', icon: UserCog },
     { key: 'connectors', label: 'Connectors', href: '#/connectors', icon: Plug },
     { key: 'trust', label: 'Approvals', href: '#/trust', icon: ShieldCheck },
+    { key: 'discover', label: 'Discover', href: '#/discover', icon: Repeat },
   ] as const
 </script>
 

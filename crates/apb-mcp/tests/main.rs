@@ -34,6 +34,8 @@ mod catalog_tools_test;
 mod connector_policy;
 #[path = "suite/decision_ask_test.rs"]
 mod decision_ask_test;
+#[path = "suite/discover_tool_test.rs"]
+mod discover_tool_test;
 #[path = "suite/forward_patch_tool_test.rs"]
 mod forward_patch_tool_test;
 #[path = "suite/grade_tool_test.rs"]

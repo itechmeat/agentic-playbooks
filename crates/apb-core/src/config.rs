@@ -74,6 +74,96 @@ pub struct GlobalConfig {
     /// whether every run notifies by default. Absent: no run notifies
     /// unless it names a target itself.
     pub notify: crate::notify::NotifySettings,
+    /// History discovery (`crate::discover`): the agent history roots it
+    /// may read and how far back. Absent: the agents' own default
+    /// directories, 90 days.
+    pub discover: DiscoverSettings,
+}
+
+/// The agent kinds a history root may hold.
+pub const HISTORY_AGENTS: [&str; 2] = ["claude_code", "codex"];
+
+/// One named history root of the `discover:` section.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRootSetting {
+    /// How every surface names the root (`[a-z0-9][a-z0-9_-]*`): a path is
+    /// never asked for or shown by a surface, only this name.
+    pub name: String,
+    /// One of [`HISTORY_AGENTS`].
+    pub agent: String,
+    /// The directory: absolute, or under the home directory as `~/...`
+    /// (a relative path would read a different directory from each
+    /// surface's working directory).
+    pub path: String,
+}
+
+/// The `discover:` section of the global config.
+///
+/// ```yaml
+/// discover:
+///   roots: [{ name: claude_code, agent: claude_code, path: ~/.claude/projects }]
+///   since_days: 90
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DiscoverSettings {
+    /// When given, these roots replace the defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roots: Option<Vec<HistoryRootSetting>>,
+    /// How many days back sessions are read, 1 to 365.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_days: Option<u32>,
+}
+
+impl DiscoverSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(d) = self.since_days
+            && !(1..=365).contains(&d)
+        {
+            return Err("discover.since_days must be between 1 and 365".into());
+        }
+        let mut seen = BTreeSet::new();
+        for r in self.roots.iter().flatten() {
+            if !is_root_name(&r.name) {
+                return Err(format!(
+                    "discover.roots: `{}` is not a root name ([a-z0-9][a-z0-9_-]*, at most 64 characters)",
+                    r.name
+                ));
+            }
+            if !HISTORY_AGENTS.contains(&r.agent.as_str()) {
+                return Err(format!(
+                    "discover.roots.{}: unknown agent `{}` (known: {})",
+                    r.name,
+                    r.agent,
+                    HISTORY_AGENTS.join(", ")
+                ));
+            }
+            let p = r.path.as_str();
+            if !(p.starts_with("~/") && p.len() > 2 || std::path::Path::new(p).is_absolute()) {
+                return Err(format!(
+                    "discover.roots.{}: path must be absolute or start with `~/`",
+                    r.name
+                ));
+            }
+            if !seen.insert(r.name.as_str()) {
+                return Err(format!("discover.roots: `{}` is named twice", r.name));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A history root's name: `[a-z0-9][a-z0-9_-]*`, at most 64 characters.
+pub fn is_root_name(name: &str) -> bool {
+    name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 // --- host execution mode (0.23.0) ---
@@ -383,6 +473,7 @@ impl GlobalConfig {
         cfg.output_limits
             .validate()
             .and_then(|()| cfg.notify.validate())
+            .and_then(|()| cfg.discover.validate())
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         // A policy glob that does not compile would match nothing and refuse
         // every model its rule covers: report it where it is written instead.

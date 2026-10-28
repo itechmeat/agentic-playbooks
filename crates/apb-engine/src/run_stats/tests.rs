@@ -35,6 +35,7 @@ fn run(
         expected_models: BTreeMap::new(),
         execution: Some("cli".into()),
         node_profiles: BTreeMap::new(),
+        grades: Vec::new(),
     }
 }
 
@@ -755,4 +756,145 @@ fn compare_names_the_nodes_whose_latest_executor_changed() {
     assert!(
         render_text(&report).contains("  executor of work: profile aaa012345678 -> bbb012345678")
     );
+}
+
+/// A grade of `run` by `grader` giving `criterion` (under `digest`) `level`.
+fn grade(
+    run: &str,
+    grader: &str,
+    at: u64,
+    rows: &[(&str, &str, &str)],
+) -> apb_core::quality::grade::Grade {
+    let criteria: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(id, digest, level)| {
+            serde_json::json!({"id": id, "source": "builtin", "digest": digest, "subject": "run",
+                "level": level, "reason_code": "r", "why": "w", "counts_for_promotion": true})
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "schema": 1, "grade_id": format!("{run}-{at}"), "run_id": run, "playbook": "p",
+        "version": "1.0.0", "task_type": "default", "grader": {"kind": grader, "version": 1}, "created_at": at,
+        "criteria": criteria, "reading": {"budget_chars": 1, "read_chars": 1}
+    }))
+    .unwrap()
+}
+
+fn graded(id: &str, version: &str, grades: Vec<apb_core::quality::grade::Grade>) -> StatsRun {
+    let mut r = run(id, version, None, &[(2_000, end("succeeded"))]);
+    r.grades = grades;
+    r
+}
+
+#[test]
+fn quality_rows_count_the_latest_grade_of_each_grader_per_run() {
+    let runs = vec![
+        // The later rules grade of run a replaces its earlier one.
+        graded(
+            "a",
+            "1.0.0",
+            vec![
+                grade("a", "rules", 1, &[("loops", "d1", "poor")]),
+                grade(
+                    "a",
+                    "rules",
+                    2,
+                    &[("loops", "d1", "good"), ("scope", "d1", "partial")],
+                ),
+            ],
+        ),
+        graded(
+            "b",
+            "1.0.0",
+            vec![grade("b", "rules", 1, &[("loops", "d1", "poor")])],
+        ),
+        graded(
+            "c",
+            "1.0.0",
+            vec![grade(
+                "c",
+                "rules",
+                1,
+                &[("loops", "d1", "not_enough_data")],
+            )],
+        ),
+        graded("d", "1.0.0", Vec::new()),
+    ];
+    let r = build(&runs, &StatsFilter::default());
+    let q = &r.versions[0].quality;
+    let rows: Vec<(&str, usize, String, String)> = q
+        .iter()
+        .map(|x| {
+            (
+                x.criterion.as_str(),
+                x.graded_runs,
+                x.good.text(),
+                x.poor.text(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("loops", 3, "1/2 (50%)".to_string(), "1/2 (50%)".to_string()),
+            ("scope", 1, "0/1 (0%)".to_string(), "0/1 (0%)".to_string()),
+        ]
+    );
+    assert_eq!(q[0].tally.not_enough_data, 1);
+    assert_eq!(q[0].grader, "rules/1");
+    let text = render_text(&r);
+    assert!(text.contains("  quality loops (rules/1, default): good 1/2 (50%), poor 1/2 (50%) over 3 graded runs\n"), "{text}");
+}
+
+#[test]
+fn quality_deltas_need_the_same_definition_on_both_sides() {
+    let runs = vec![
+        graded(
+            "a",
+            "1.0.0",
+            vec![grade(
+                "a",
+                "rules",
+                1,
+                &[("loops", "d1", "poor"), ("scope", "d1", "good")],
+            )],
+        ),
+        graded(
+            "b",
+            "1.1.0",
+            vec![grade(
+                "b",
+                "rules",
+                1,
+                &[("loops", "d1", "good"), ("scope", "d2", "good")],
+            )],
+        ),
+    ];
+    let r = build(
+        &runs,
+        &StatsFilter {
+            playbook: Some("p".into()),
+            compare: Some("1.0.0".into()),
+            ..Default::default()
+        },
+    );
+    let c = r.compare.as_ref().unwrap();
+    assert_eq!(c.quality.len(), 1);
+    assert_eq!(c.quality[0].criterion, "loops");
+    assert_eq!(c.quality[0].digest, "d1");
+    assert_eq!(c.quality[0].good_delta, Some(1.0));
+    assert_eq!(c.quality[0].poor_delta, Some(-1.0));
+    assert!(
+        render_text(&r)
+            .contains("  quality loops (rules/1, default): good +100 points, poor -100 points\n")
+    );
+}
+
+#[test]
+fn no_grade_means_no_quality_field() {
+    let r = build(&three_runs(), &StatsFilter::default());
+    assert!(r.versions.iter().all(|v| v.quality.is_empty()));
+    let json = serde_json::to_value(&r).unwrap();
+    assert!(json["versions"][0].get("quality").is_none());
+    assert!(!render_text(&r).contains("quality"));
 }

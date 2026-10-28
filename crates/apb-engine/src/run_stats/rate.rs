@@ -32,3 +32,13 @@ impl Rate {
         }
     }
 }
+
+/// `x` rounded to two decimals.
+pub(super) fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// `b - a`, rounded to two decimals, when both are known.
+pub(super) fn delta(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    Some(round2(b? - a?))
+}

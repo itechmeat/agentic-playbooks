@@ -37,7 +37,7 @@ use sources::{RunEnd, RunSources};
 
 pub use grader::Grader;
 pub use session::{SessionStart, SubmitOutcome, read, reopen, start_session, submit};
-pub use store::grades_of;
+pub use store::{grades_of, latest_by_grader, split_grades_of, trusted_grades_of};
 
 /// The sources of the ended run at `run_dir`.
 fn ended_sources(run_dir: &Path) -> Result<RunSources, EngineError> {

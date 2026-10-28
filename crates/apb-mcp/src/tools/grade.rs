@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use apb_core::quality::QualityRecord;
-use apb_core::quality::grade::{Grade, GraderId, Level};
+use apb_core::quality::grade::{Grade, Level};
 use apb_core::step_env::StepCaller;
 use apb_engine::grade::evidence::Proposal;
 use apb_engine::grade::reader::{ReadRequest, ReadResponse};
@@ -260,12 +260,8 @@ impl GradeLine {
 /// grader order (the rules grader before a host); empty for a run nobody
 /// graded.
 pub fn grade_lines(run_dir: &Path) -> Vec<GradeLine> {
-    let mut latest: BTreeMap<GraderId, Grade> = BTreeMap::new();
-    for g in apb_engine::grade::grades_of(run_dir) {
-        latest.insert(g.grader, g);
-    }
-    latest
-        .into_values()
+    apb_engine::grade::latest_by_grader(apb_engine::grade::grades_of(run_dir))
+        .into_iter()
         .map(|g| GradeLine {
             grader: g.grader.to_string(),
             grade_id: g.grade_id,

@@ -29,6 +29,51 @@ fn normalize(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
+/// Where a captured draft came from, as its provenance records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureOrigin<'a> {
+    /// A host agent captured an action it just performed (`playbook_capture`).
+    Agent,
+    /// A person saved a suggestion of a stored discovery result: the
+    /// suggestion's slug, the result's id, and whether the host rewrote
+    /// the draft (the pattern still names where the playbook came from).
+    Discover {
+        pattern: &'a str,
+        result: &'a str,
+        edited: bool,
+    },
+}
+
+impl CaptureOrigin<'_> {
+    /// The provenance a draft of this origin is written with.
+    fn provenance(&self, title: &str) -> Value {
+        match self {
+            CaptureOrigin::Agent => json!({ "created_by": "agent-capture", "title": title }),
+            CaptureOrigin::Discover {
+                pattern,
+                result,
+                edited,
+            } => json!({
+                "created_by": "discover",
+                "title": title,
+                "pattern": pattern,
+                "result": result,
+                "edited": edited,
+            }),
+        }
+    }
+}
+
+/// One capture: the synopsis, the scope it is saved in, the draft and
+/// where it came from.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureRequest<'a> {
+    pub synopsis: &'a Value,
+    pub scope: &'a str,
+    pub yaml: &'a str,
+    pub origin: CaptureOrigin<'a>,
+}
+
 /// Accepts an action synopsis and creates a draft playbook from it in the chosen
 /// scope (spec 8.3). Draft: does not pass the run gate until it goes through trial
 /// or explicit confirmation. Secrets and duplicates are rejected before writing.
@@ -38,6 +83,26 @@ pub fn playbook_capture(
     selected_scope: &str,
     yaml: &str,
 ) -> Result<Value, ToolError> {
+    capture_draft(
+        root,
+        CaptureRequest {
+            synopsis,
+            scope: selected_scope,
+            yaml,
+            origin: CaptureOrigin::Agent,
+        },
+    )
+}
+
+/// The one way a draft is captured, whatever offered it: the secret check,
+/// the duplicate check, the draft and its provenance.
+pub fn capture_draft(root: &Path, req: CaptureRequest<'_>) -> Result<Value, ToolError> {
+    let CaptureRequest {
+        synopsis,
+        scope: selected_scope,
+        yaml,
+        origin,
+    } = req;
     // Secret scan over the synopsis and over the yaml (spec 8.3).
     let synopsis_text = serde_json::to_string(synopsis).unwrap_or_default();
     if let Some(rejected) = secret_flag(root, Some(synopsis), &[synopsis_text.as_str(), yaml]) {
@@ -80,12 +145,12 @@ pub fn playbook_capture(
     }
 
     // Draft creation. A Conflict from core -> duplicate_id.
-    let origin = if selected_scope == "global" {
+    let store_origin = if selected_scope == "global" {
         apb_core::profile_store::PlaybookOrigin::Global
     } else {
         apb_core::profile_store::PlaybookOrigin::Project
     };
-    let version = match apb_core::versioning::create_draft_in(&parent, &id, yaml, origin) {
+    let version = match apb_core::versioning::create_draft_in(&parent, &id, yaml, store_origin) {
         Ok(v) => v,
         Err(apb_core::versioning::VersioningError::Conflict(_)) => {
             return Ok(json!({ "rejected": "duplicate_id", "id": id }));
@@ -98,10 +163,8 @@ pub fn playbook_capture(
     let playbook_dir = parent.join("playbooks").join(&id);
     apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Draft)
         .map_err(|e| ToolError::Engine(e.to_string()))?;
-    let provenance = json!({
-        "created_by": "agent-capture",
-        "title": synopsis.get("title").and_then(|t| t.as_str()).unwrap_or(""),
-    });
+    let provenance =
+        origin.provenance(synopsis.get("title").and_then(|t| t.as_str()).unwrap_or(""));
     let _ = apb_core::fsutil::atomic_write(
         &playbook_dir.join("provenance.json"),
         provenance.to_string().as_bytes(),

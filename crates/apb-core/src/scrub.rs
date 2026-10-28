@@ -137,6 +137,27 @@ impl Scrubber {
         EMAIL.replace_all(&out, "[email]").into_owned()
     }
 
+    /// [`Scrubber::scrub`] for text a person reads as written: every hidden
+    /// character but a line break or a tab becomes `?`
+    /// ([`crate::text::visible_keeping_layout`]).
+    pub fn shown_text(&self, text: &str) -> String {
+        crate::text::visible_keeping_layout(&self.scrub(text))
+    }
+
+    /// The one path of text that is stored where a person or another agent
+    /// reads it later (a known problem's symptom or source excerpt, an
+    /// example of a discovered repeat): [`Scrubber::shown_text`] of the
+    /// whole text, cut to `max_chars` characters; `None` when only
+    /// whitespace is left or the stored part still [`Scrubber::flags`]. The
+    /// scrub runs before the cut, so a secret the cut runs through is
+    /// never kept in part. A writer that must not keep even a keyed value
+    /// checks [`Scrubber::refuses`] on the result as well.
+    pub fn stored_text(&self, text: &str, max_chars: usize) -> Option<String> {
+        let shown = self.shown_text(text);
+        let cut: String = shown.chars().take(max_chars).collect();
+        (!cut.trim().is_empty() && self.flags(&cut).is_none()).then_some(cut)
+    }
+
     /// The engine's historical name of [`Scrubber::scrub`].
     pub fn redact(&self, text: &str) -> String {
         self.scrub(text)
@@ -358,6 +379,30 @@ mod tests {
         ] {
             assert_eq!(r.flags(case), None, "{case}");
         }
+    }
+
+    #[test]
+    fn stored_text_scrubs_whole_then_cuts_and_drops_what_still_flags() {
+        let root = tempfile::tempdir().unwrap();
+        let configured = format!("cfg-{}", "v4lue".repeat(3));
+        let r = Scrubber::new(vec![Secret::new(configured.clone())], root.path());
+        // The secret sits across the cut: it is scrubbed before the cut, so
+        // no part of it is kept.
+        let text = format!("  run with {configured} now\u{200B}\tok\n  ");
+        let kept = r.stored_text(text.trim(), 15).unwrap();
+        assert_eq!(kept, "run with [redac");
+        let whole = r.stored_text(text.trim(), 100).unwrap();
+        assert_eq!(whole, "run with [redacted] now?\tok");
+        assert_eq!(
+            r.stored_text("api_key: abcd1234efgh5678", 100).as_deref(),
+            Some("api_key: [redacted-token]")
+        );
+        assert_eq!(r.stored_text("   ", 10), None);
+        assert_eq!(
+            r.stored_text("Bearer eyJhbGciOi.eyJzdWIiOiIx", 100)
+                .as_deref(),
+            Some("Bearer [redacted-token]")
+        );
     }
 
     #[test]

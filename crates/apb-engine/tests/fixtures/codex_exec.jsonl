@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"thread-1"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"test result: ok","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"/etc/apb-codex-test","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"test result: ok","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"1 failed","exit_code":101,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"mcp_tool_call","server":"crm","tool":"update_contact","arguments":{"id":7},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"git push --force origin main","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_6","type":"agent_message","text":"Done."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}
