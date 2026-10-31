@@ -48,14 +48,18 @@
         }
   })
 
+  // A model not reported yet while the attempt runs is still to come.
+  const unreported = $derived(data.status === 'running' ? 'awaiting report' : 'not reported')
+
   // Second line: who executes the node, in the node color.
   const kindLine = $derived.by(() => {
     switch (data.kind) {
       case 'agent_task':
         if (!data.profile) return 'agent task'
         if (data.model) return `${data.profile} · ${shortModel(data.model)}`
-        // The attempt reported no model: say so, the request only as a hint.
-        if (data.modelHint) return `${data.profile} · not reported (hint ${shortModel(data.modelHint)})`
+        // The attempt reported no model: say so (a running one may still
+        // report), the request only as a hint.
+        if (data.modelHint) return `${data.profile} · ${unreported} (hint ${shortModel(data.modelHint)})`
         return data.profile
       case 'judge':
         return 'judge · decides'
@@ -66,6 +70,16 @@
       default:
         return data.kind.replaceAll('_', ' ')
     }
+  })
+
+  // The second line's tooltip: the full model id, or what an unreported
+  // attempt was asked for, marked as a hint.
+  const kindTitle = $derived.by(() => {
+    if (data.kind !== 'agent_task' || !data.profile) return kindLine
+    if (data.model) return `${data.profile} · ${data.model}`
+    if (data.modelHint)
+      return `${data.profile} · model ${unreported}; asked for ${data.modelHint} (a hint, not the model it ran on)`
+    return kindLine
   })
 
   // Border color by run status, over the node color. Running keeps the node
@@ -182,11 +196,7 @@
     <div
       class="truncate text-[11px]"
       style:color={k}
-      title={data.kind === 'agent_task' && data.profile && data.model
-        ? `${data.profile} · ${data.model}`
-        : data.kind === 'agent_task' && data.profile && data.modelHint
-          ? `${data.profile} · model not reported; asked for ${data.modelHint} (a hint, not the model it ran on)`
-          : kindLine}
+      title={kindTitle}
     >
       {kindLine}
     </div>

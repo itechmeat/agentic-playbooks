@@ -79,4 +79,14 @@ describe('AttemptModelsPanel', () => {
     const text = document.querySelector('[data-testid="run-current-attempt"]')?.nextElementSibling?.textContent ?? ''
     expect(text).toContain('model not reported (hint opus 5.5)')
   })
+
+  it('says a running attempt is still awaiting its model report', () => {
+    app = mount(AttemptModelsPanel, {
+      target: document.body,
+      props: { current: { node: 'build', agent: 'host', modelHint: 'claude-opus-5-5', status: 'running', tail: [] } },
+    })
+    flushSync()
+    const text = document.querySelector('[data-testid="run-current-attempt"]')?.nextElementSibling?.textContent ?? ''
+    expect(text).toContain('model awaiting report (hint opus 5.5)')
+  })
 })

@@ -231,8 +231,10 @@
       // `null`: the attempt reported no model; the profile's must not stand
       // in for it (it is in `modelHint`, shown as a hint).
       if (model === null) {
-        const { model: _planned, ...base } = n.data
-        return { ...n, data: { ...base, ...rest } }
+        const { model: planned, ...base } = n.data
+        // No hint from the journal: the profile's model is the request.
+        const hint = rest.modelHint ?? planned
+        return { ...n, data: { ...base, ...rest, ...(hint ? { modelHint: hint } : {}) } }
       }
       const m = model ?? n.data.model
       return { ...n, data: { ...n.data, ...rest, ...(m ? { model: m } : {}) } }

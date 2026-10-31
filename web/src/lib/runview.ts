@@ -173,6 +173,24 @@ function modelsByNode(models: AttemptModel[] | null | undefined): Map<string, At
 }
 
 /**
+ * The model a node's card shows. A host attempt that reported no model
+ * (its `attempt_models` row says none, or there is no row yet and the
+ * attempt is a host one) stays `null`, with what it was asked for as a hint
+ * only: the attempt's own model when `f` describes the same attempt as `m`
+ * (a host task request opens a row before its `attempt_started`), else the
+ * row's expected model.
+ */
+function modelFields(f: NodeFacts | undefined, m: AttemptModel | undefined): Pick<NodeRunData, 'model' | 'modelHint'> {
+  const unreported = m ? !m.model : f?.agent === 'host'
+  if (!unreported) {
+    const mdl = m?.model ?? f?.model
+    return mdl ? { model: mdl } : {}
+  }
+  const hint = (m ? (f?.attempt === m.attempt ? f?.model : undefined) ?? m.expected : f?.model) ?? undefined
+  return hint ? { model: null, modelHint: hint } : { model: null }
+}
+
+/**
  * The run facts of every node for its graph card: profile, the model it ran
  * on (else the profile's), attempt, duration (elapsed while running), the
  * latest note, and for a running node the elapsed share of its expected
@@ -191,16 +209,7 @@ export function nodeRunData(detail: RunDetail, now: number): Map<string, NodeRun
     if (profile) d.profile = profile
     const f = facts.get(n.id)
     const m = models.get(n.id)
-    if (m && !m.model) {
-      // The attempt reported no model (a host that named none): keep that
-      // state, and what it was asked for only as a hint.
-      d.model = null
-      const hint = f?.model ?? m.expected ?? undefined
-      if (hint) d.modelHint = hint
-    } else {
-      const mdl = m?.model ?? f?.model ?? undefined
-      if (mdl) d.model = mdl
-    }
+    Object.assign(d, modelFields(f, m))
     if (f && f.attempt > 0) d.attempt = f.attempt
     const status = detail.nodes[n.id] ?? ''
     if (f?.startedTs !== undefined) {

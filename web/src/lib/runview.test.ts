@@ -190,6 +190,36 @@ describe('runview latest attempt', () => {
     })
     expect(nodeRunData(bare, 3_000).get('build')).toMatchObject({ model: null, modelHint: 'opus' })
   })
+
+  it('takes the hint from the attempt only when it is the same attempt as the row', () => {
+    // A host task request opened the row of attempt 2 before its
+    // attempt_started: attempt 1's model is not its hint.
+    const d = detail({
+      events: [
+        ev(3, 2_000, 'node_started', { node: 'build', attempt: 1 }),
+        ev(4, 2_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'host', model: 'first-hint' }),
+      ],
+      attempt_models: [
+        { node: 'build', attempt: 1, executed_by: 'host', agent: null, model: null, expected: 'opus', mismatch: false },
+        { node: 'build', attempt: 2, executed_by: 'host', agent: null, model: null, expected: 'opus', mismatch: false },
+      ],
+    })
+    expect(nodeRunData(d, 3_000).get('build')).toMatchObject({ model: null, modelHint: 'opus' })
+  })
+
+  it('treats a host attempt with no attempt_models row as not reported', () => {
+    const d = detail({
+      events: [
+        ev(3, 2_000, 'node_started', { node: 'build', attempt: 1 }),
+        ev(4, 2_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'host', model: 'host-hint' }),
+      ],
+      attempt_models: [],
+    })
+    expect(nodeRunData(d, 3_000).get('build')).toMatchObject({ model: null, modelHint: 'host-hint' })
+    // A CLI attempt without a row still shows the model it launched with.
+    const cli = detail({ attempt_models: [] })
+    expect(nodeRunData(cli, 3_000).get('build')?.model).toBe('opus')
+  })
 })
 
 describe('runview graph helpers', () => {

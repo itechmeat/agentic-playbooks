@@ -49,7 +49,7 @@
           current.model
             ? shortModel(current.model)
             : current.modelHint
-              ? `model not reported (hint ${shortModel(current.modelHint)})`
+              ? `model ${current.status === 'running' ? 'awaiting report' : 'not reported'} (hint ${shortModel(current.modelHint)})`
               : '',
           current.attempt ? `attempt ${current.attempt}` : '',
           current.duration,
