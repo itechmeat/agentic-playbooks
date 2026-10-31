@@ -12,10 +12,11 @@
 //! an unborn branch) is skipped silently, so such a run journals exactly what
 //! it did before. The other direction, from a commit to its run, is the
 //! `Apb-Run: <run id>` commit trailer a playbook's agents write, with the id
-//! from `APB_RUN_ID` or `{{run.id}}`.
+//! from `APB_RUN_ID` or `{{run.id}}`. The trailer values are read back with
+//! each commit, so the run surfaces can flag a commit without one; apb never
+//! writes or rewrites a trailer itself.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use apb_core::schema::{NodeKind, Playbook};
 
@@ -27,25 +28,20 @@ use crate::event::{CommittedArtifact, EventPayload};
 pub(crate) const MAX_LISTED_COMMITS: usize = 50;
 
 /// `git -C dir <args>` stdout, `None` on any failure (no git, not a
-/// repository, a non-zero exit). The repository's config-driven programs
-/// are switched off (`core.fsmonitor`, `log.showSignature` and through it
-/// `gpg.program`), so reading `HEAD` never runs a program the tree names.
+/// repository, a non-zero exit). Hardened ([`apb_core::git`]), so reading
+/// `HEAD` never runs a program the tree names.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "log.showSignature=false",
-        ])
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    apb_core::git::read(dir, args)
+}
+
+/// `git -C dir <args> --stdin` with the revisions `revs` on its stdin, one
+/// per line; `None` on any failure.
+pub(crate) fn git_revs(dir: &Path, args: &[&str], revs: &[&str]) -> Option<String> {
+    let mut all = args.to_vec();
+    all.push("--stdin");
+    let mut input = revs.join("\n");
+    input.push('\n');
+    apb_core::git::read_input(dir, &all, &input)
 }
 
 /// The commit `HEAD` names in `dir`, `None` outside a git work tree or on an
@@ -58,52 +54,96 @@ pub(crate) fn head(dir: &Path) -> Option<String> {
 
 /// Whether `before` is an ancestor of (or equal to) `after`: the node's
 /// commits were added on top of where it started.
-fn is_ancestor(dir: &Path, before: &str, after: &str) -> bool {
-    git(dir, &["merge-base", "--is-ancestor", before, after]).is_some()
+pub(crate) fn is_ancestor(dir: &Path, before: &str, after: &str) -> bool {
+    apb_core::git::succeeds(dir, &["merge-base", "--is-ancestor", before, after]).unwrap_or(false)
 }
 
 /// The commits reachable from `after` but not from `before`, newest first,
 /// and how many there are in all. Callers check [`is_ancestor`] first: the
 /// range means "what the node committed" only when `after` descends from
-/// `before`.
+/// `before`. Each commit carries its `Apb-Run` trailer values; a git that
+/// cannot read trailers lists the commits without them (`apb_run: None`).
 pub(crate) fn commits_between(
     dir: &Path,
     before: &str,
     after: &str,
 ) -> (Vec<CommittedArtifact>, usize) {
-    let range = format!("{before}..{after}");
-    let total = git(dir, &["rev-list", "--count", &range])
+    commits_of(dir, &[&format!("{before}..{after}")])
+}
+
+/// The commits git's revision arguments `revs` select (`after`, `^base`,
+/// `a..b`), newest first, at most [`MAX_LISTED_COMMITS`], and how many there
+/// are in all, each with its `Apb-Run` trailer values when git reads them.
+/// Every revision is a sha or a range of shas, never an option; they reach
+/// git on its stdin, so a remote with many heads never grows the argv.
+pub(crate) fn commits_of(dir: &Path, revs: &[&str]) -> (Vec<CommittedArtifact>, usize) {
+    let total = git_revs(dir, &["rev-list", "--count"], revs)
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    let limit = format!("--max-count={MAX_LISTED_COMMITS}");
-    let listed = git(
-        dir,
-        &[
-            "log",
-            "--no-show-signature",
-            &limit,
-            "--format=%H%x09%s",
-            &range,
-        ],
-    )
-    .map(|text| {
-        text.lines()
-            .filter_map(|line| {
-                let (sha, subject) = line.split_once('\t')?;
-                Some(CommittedArtifact {
-                    sha: sha.to_string(),
-                    subject: subject.to_string(),
-                })
-            })
-            .collect::<Vec<_>>()
-    })
-    .unwrap_or_default();
+    let listed = list_commits(dir, revs, true)
+        .or_else(|| list_commits(dir, revs, false))
+        .unwrap_or_default();
     (listed, total)
 }
 
+/// The `Apb-Run` trailer values, unit-separated and unfolded (a folded
+/// value stays on one line), between the sha and the subject.
+const TRAILER_FORMAT: &str =
+    "--format=%H%x09%(trailers:key=Apb-Run,valueonly,unfold,separator=%x1f)%x09%s";
+
+/// `git log` over `revs`, at most [`MAX_LISTED_COMMITS`], with the trailer
+/// values when `trailers`; `None` when git fails or cannot read trailers.
+fn list_commits(dir: &Path, revs: &[&str], trailers: bool) -> Option<Vec<CommittedArtifact>> {
+    let limit = format!("--max-count={MAX_LISTED_COMMITS}");
+    let format = if trailers {
+        TRAILER_FORMAT
+    } else {
+        "--format=%H%x09%s"
+    };
+    let text = git_revs(dir, &["log", "--no-show-signature", &limit, format], revs)?;
+    parse_log(&text, trailers)
+}
+
+/// The commits of a `git log` printed in [`TRAILER_FORMAT`] (`trailers`) or
+/// as sha and subject. `None` when a line shows the trailer placeholder
+/// itself: a git too old to know its options prints it literally, and its
+/// text is no run id.
+fn parse_log(text: &str, trailers: bool) -> Option<Vec<CommittedArtifact>> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((sha, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        let (apb_run, subject) = if trailers {
+            let Some((values, subject)) = rest.split_once('\t') else {
+                continue;
+            };
+            if values.contains("%(") {
+                return None;
+            }
+            let ids = values
+                .split('\u{1f}')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect();
+            (Some(ids), subject)
+        } else {
+            (None, rest)
+        };
+        out.push(CommittedArtifact {
+            sha: sha.to_string(),
+            subject: subject.to_string(),
+            apb_run,
+        });
+    }
+    Some(out)
+}
+
 /// The directory whose `HEAD` a node's commits land in: the node's own
-/// `workdir` when it renders, else the run's working tree.
-fn node_tree(
+/// `workdir` when it renders, else the run's working tree. The publish
+/// plan resolves its source's tree through this too.
+pub(crate) fn node_tree(
     playbook: &Playbook,
     node_id: &str,
     workdir: &Path,
@@ -125,7 +165,7 @@ pub(crate) struct Tracker {
 }
 
 /// The branch `HEAD` names in `dir`, empty when it is detached.
-fn branch(dir: &Path) -> String {
+pub(crate) fn branch(dir: &Path) -> String {
     git(dir, &["symbolic-ref", "-q", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
@@ -223,6 +263,7 @@ impl Tracker {
             after,
             omitted: total.saturating_sub(commits.len()),
             commits,
+            branch: (!self.branch.is_empty()).then_some(self.branch),
         })
     }
 }
@@ -232,7 +273,7 @@ mod tests {
     use super::*;
 
     fn git_ok(dir: &Path, args: &[&str]) {
-        let st = Command::new("git")
+        let st = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args([
@@ -247,6 +288,25 @@ mod tests {
             .status()
             .unwrap();
         assert!(st.success(), "git {args:?}");
+    }
+
+    /// A git that cannot read trailers prints the placeholder as text: that
+    /// line is not a run id, and the listing falls back to sha and subject.
+    #[test]
+    fn a_literal_trailer_placeholder_falls_back_to_the_plain_listing() {
+        let literal = "abc\t%(trailers:key=Apb-Run,valueonly,unfold,separator=\u{1f})\tFix it\n";
+        assert_eq!(parse_log(literal, true), None);
+        let plain = parse_log("abc\tFix it\n", false).unwrap();
+        assert_eq!(plain[0].subject, "Fix it");
+        assert_eq!(plain[0].apb_run, None);
+        let read = parse_log("abc\tr-1\u{1f}r-2\tFix it\ndef\t\tOther\n", true).unwrap();
+        assert_eq!(
+            read.iter().map(|c| c.apb_run.clone()).collect::<Vec<_>>(),
+            vec![
+                Some(vec!["r-1".to_string(), "r-2".to_string()]),
+                Some(Vec::new())
+            ]
+        );
     }
 
     #[test]
@@ -276,6 +336,13 @@ mod tests {
         let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, ["two", "one"]);
         assert_eq!(commits[0].sha, after);
+        // The trailer is read; a commit without one says so.
+        assert_eq!(commits[0].apb_run, Some(vec!["r1".to_string()]));
+        assert_eq!(commits[1].apb_run, Some(Vec::new()));
+        // Without trailers (a git too old to read them) nothing is claimed.
+        let plain = list_commits(d, &[&format!("{before}..{after}")], false).unwrap();
+        assert_eq!(plain[0].subject, "two");
+        assert_eq!(plain[0].apb_run, None);
         // A reset back to an older commit is not a forward move.
         assert!(!is_ancestor(d, &after, &before));
     }

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,8 @@ use apb_engine::control::Control;
 use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
-    ReviewCommand, RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_review,
-    post_supervisor_command, prepare_supervised_background, resume_with, run, stop_run,
+    RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_supervisor_command,
+    prepare_supervised_background, run, stop_run,
 };
 
 use crate::util::{QUESTION_TEXT_MAX, open_registry, sanitize_for_terminal};
@@ -173,98 +173,6 @@ pub(crate) fn run_list(root: &Path) -> ExitCode {
     }
 }
 
-/// `apb doctor`, and with `--run <id>` the per-run doctor.
-///
-/// The two reports print the same way (one `[level] subject: detail` line per
-/// check, non-zero exit on a blocking one) because they answer the same kind
-/// of question at different scopes, and an operator should not have to learn
-/// two output formats while debugging a stuck run.
-pub(crate) fn run_doctor(root: &Path, run: Option<&str>) -> ExitCode {
-    match run {
-        Some(run_id) => doctor_run(root, run_id),
-        None => doctor_env(root),
-    }
-}
-
-/// The per-run doctor. Read-only: it names problems and repairs nothing, so
-/// the repair verbs (`apb stop`, resume) stay explicit operator decisions.
-fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
-    use apb_engine::run_doctor::{FAIL, OK, WARN, diagnose_run, has_failure};
-    let checks = match diagnose_run(root, run_id) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("doctor: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    for c in &checks {
-        let marker = match c.status {
-            OK => "[ok]  ",
-            WARN => "[warn]",
-            FAIL => "[fail]",
-            other => other,
-        };
-        println!("{marker} {}: {}", c.subject, c.detail);
-    }
-    print_pending_question_check(root, run_id);
-    if has_failure(&checks) {
-        eprintln!("doctor: found blocking problems");
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// Flags a pending interactive question on the run, if any
-/// (spec 2026-07-20-interactive-nodes, Task 9): read directly from the
-/// `questions.jsonl`/`answers.jsonl` channel files via
-/// `apb_engine::progress::from_run_dir` (Task 3), the same source
-/// `run_status` and `apb runs` use, so it is visible even before drive has
-/// journaled a `QuestionAsked` event for it. Not part of `diagnose_run`'s own
-/// fixed check order (that stays an engine-crate concern); a pending
-/// question is a normal wait state, not a blocking problem, so it never
-/// affects this command's exit code. A best-effort read: an unreadable
-/// events.jsonl simply omits the line rather than failing the whole report.
-fn print_pending_question_check(root: &Path, run_id: &str) {
-    let run_dir = root.join(".apb/runs").join(run_id);
-    let Ok(events) = apb_engine::run_view::read_events(&run_dir) else {
-        return;
-    };
-    if let Some(pq) =
-        apb_engine::progress::from_run_dir(&run_dir, &events).and_then(|p| p.pending_question)
-    {
-        println!(
-            "[warn] pending question: node `{}`: {}",
-            pq.node,
-            sanitize_for_terminal(&pq.question, QUESTION_TEXT_MAX)
-        );
-    }
-}
-
-fn doctor_env(root: &Path) -> ExitCode {
-    use apb_core::doctor::{CheckStatus, diagnose};
-    let report = diagnose(root);
-    for c in &report.checks {
-        let marker = match c.status {
-            CheckStatus::Ok => "[ok]  ",
-            CheckStatus::Warn => "[warn]",
-            CheckStatus::Fail => "[fail]",
-        };
-        println!("{marker} {}: {}", c.name, c.detail);
-    }
-    match crate::dashboard_check::dashboard_version_line() {
-        Some(Ok(detail)) => println!("[ok]   dashboard: {detail}"),
-        Some(Err(detail)) => println!("[warn] dashboard: {detail}"),
-        None => {}
-    }
-    if report.has_failure() {
-        eprintln!("doctor: found blocking problems");
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
 pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
     let reg = match open_registry(root) {
         Ok(r) => r,
@@ -388,11 +296,13 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
     let global = apb_core::config::GlobalConfig::load().ok();
     let mut ok = true;
     for (name, doc) in &docs {
-        // The executor, its fallbacks and every tier (issue #165 Part 12).
-        for problem in doc.tiers.problems() {
-            println!("profile {name}: error profile_tiers_invalid {problem}");
+        // The document's structural problems (tiers, process_env), the
+        // same check a run start and every profile write make.
+        for problem in doc.problems() {
+            println!("profile {name}: error {problem}");
             ok = false;
         }
+        // The executor, its fallbacks and every tier (issue #165 Part 12).
         if let Some(global) = &global {
             let mut seen = std::collections::BTreeSet::new();
             for (agent, _) in doc.executor_pairs() {
@@ -437,25 +347,245 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
     ok
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_cmd(
+/// The arguments of `apb run`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct RunArgs {
+    pub name: String,
+    #[arg(long)]
+    pub version: Option<String>,
+    #[arg(long)]
+    pub instruction: Option<String>,
+    /// key=value, repeatable
+    #[arg(long = "param", value_name = "K=V")]
+    pub params: Vec<String>,
+    #[arg(long)]
+    pub allow_shared_workdir: bool,
+    /// Run in the background under supervision: the engine spawns a
+    /// background supervisor agent and watches its heartbeat
+    #[arg(long)]
+    pub supervise: bool,
+    /// Start the run in a detached background process, print its id and
+    /// return at once; follow it with `apb wait <run_id>`
+    #[arg(long, conflicts_with = "supervise")]
+    pub detach: bool,
+    /// Run-level overrides YAML file (spec 11): swap models/executors
+    /// without creating a new version
+    #[arg(long)]
+    pub overrides: Option<PathBuf>,
+    /// Disable the node result cache for this run: no lookup and no
+    /// admission anywhere in the run, regardless of what individual
+    /// nodes declare
+    #[arg(long, conflicts_with = "refresh_cache")]
+    pub no_cache: bool,
+    /// Skip cache lookup (never a hit) but still write fresh results, so
+    /// a fresh execution overwrites any stale cached result
+    #[arg(long)]
+    pub refresh_cache: bool,
+    /// Run id to continue as a fresh top-level retry (issue #42 finding 10).
+    /// Links the new run to the predecessor in `apb runs`.
+    #[arg(long = "continued-from", value_name = "RUN_ID")]
+    pub continued_from: Option<String>,
+    /// The run's working tree: agent and script nodes run in this
+    /// directory (absolute, or relative to the project) and the run takes
+    /// its busy lock instead of the project's, so runs over different git
+    /// worktrees do not wait on each other. Overrides the playbook's
+    /// `worktree`
+    #[arg(long, value_name = "DIR")]
+    pub worktree: Option<String>,
+    /// Who executes the agent steps: cli (the default, the profiles'
+    /// agent CLIs) or host (no CLI is spawned; every agent step becomes
+    /// a host task that `apb tasks` lists and `apb tasks submit`
+    /// answers, meant for an MCP host session)
+    #[arg(long, value_name = "MODE")]
+    pub execution: Option<String>,
+    /// Consent to the playbook's irreversible effects (a push, a merge,
+    /// a deploy) for a start without a person at a terminal, such as a
+    /// CI step: pass the consent_nonce the refusal printed, which binds
+    /// the consent to that version of the playbook. A bare flag is
+    /// deprecated. At a terminal, apb asks instead
+    #[arg(
+        long,
+        value_name = "CONSENT_NONCE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub confirm_irreversible: Option<String>,
+    /// Internal: the eval settings of a run `apb eval` starts (a JSON
+    /// file with the spawn env overlay and the wall-clock deadline).
+    #[arg(long, value_name = "FILE", hide = true)]
+    pub eval_settings: Option<PathBuf>,
+    #[command(flatten)]
+    pub budget: crate::budget::BudgetFlags,
+    #[command(flatten)]
+    pub notify: crate::notify::NotifyFlags,
+    /// Print the estimate (time, tokens and cost from comparable runs) and
+    /// exit without starting a run. It is the playbook's own executors'
+    /// estimate, so it does not combine with --overrides or the start-only
+    /// flags
+    #[arg(
+        long,
+        conflicts_with_all = ["overrides", "detach", "supervise", "continued_from", "worktree", "confirm_irreversible"]
+    )]
+    pub estimate: bool,
+    /// Remember the given --param values and --instruction for this
+    /// playbook in this project, for the next start that passes none.
+    /// Secret params and credential-shaped values are never stored
+    #[arg(long, conflicts_with = "estimate")]
+    pub remember: bool,
+}
+
+/// `--remember`: stores what the start was given once the run gate and the
+/// budget check passed, checked against the playbook's current version,
+/// and prints what was kept and refused (names and reasons, never values).
+fn remember_input(
     root: &Path,
     name: &str,
-    version: Option<&str>,
+    params: &BTreeMap<String, String>,
+    instruction: Option<&str>,
+) {
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: name.to_string(),
+        version: None,
+    };
+    let result = apb_mcp::tools::memory::remember_for_ref(root, &wref, params, instruction);
+    match result {
+        Ok(v) => {
+            let names = |key: &str| -> Vec<String> {
+                v[key]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let stored = names("remembered");
+            let refused: Vec<String> = v["not_remembered"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|r| {
+                            format!(
+                                "{} ({})",
+                                sanitize_for_terminal(r["name"].as_str().unwrap_or(""), 64),
+                                r["reason"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let stored: Vec<String> = stored
+                .iter()
+                .map(|n| sanitize_for_terminal(n, 64))
+                .collect();
+            eprintln!(
+                "remembered for this project: {}",
+                if stored.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    stored.join(", ")
+                }
+            );
+            if !refused.is_empty() {
+                eprintln!("not remembered: {}", refused.join(", "));
+            }
+            for note in names("memory_diagnostics") {
+                eprintln!("note: {note}");
+            }
+        }
+        Err(e) => eprintln!("warning: the run input was not remembered: {e}"),
+    }
+}
+
+/// Says which params (and whether the instruction) the start of `run_id`
+/// took from the project's remembered input, so input nobody typed is
+/// never silent.
+fn print_recalled(root: &Path, run_id: &str) {
+    let recalled = apb_engine::run_view::recalled_input(&root.join(".apb/runs").join(run_id));
+    if !recalled.is_empty() {
+        let names: Vec<String> = recalled
+            .iter()
+            .map(|n| sanitize_for_terminal(n, 64))
+            .collect();
+        eprintln!("used remembered input: {}", names.join(", "));
+    }
+}
+
+/// What every CLI start sets on the engine options: the run's inputs and
+/// its mode. The rest (the gate's pins, the consent, the cache, overrides,
+/// execution and budget) is set by the caller.
+struct CliStart {
     instruction: Option<String>,
-    params: Vec<String>,
+    params: BTreeMap<String, String>,
     allow_shared_workdir: bool,
-    supervise: bool,
-    detach: bool,
-    overrides_path: Option<&Path>,
-    no_cache: bool,
-    refresh_cache: bool,
     continued_from: Option<String>,
     worktree: Option<String>,
-    execution: Option<&str>,
-    confirm_irreversible: Option<String>,
-    eval_settings: Option<&Path>,
-) -> ExitCode {
+    mode: RunMode,
+    budget: Option<apb_core::budget::BudgetRequest>,
+    notify: Option<apb_core::notify::NotifyRequest>,
+}
+
+impl CliStart {
+    /// Fail-fast on a busy workdir: this caller is a person waiting on the
+    /// answer, who can retry, not an event source whose event dies with the
+    /// refusal (see `RunOptions::workdir_queue_wait`).
+    fn options(self) -> RunOptions {
+        RunOptions {
+            instruction: self.instruction,
+            params: self.params,
+            allow_shared_workdir: self.allow_shared_workdir,
+            mode: self.mode,
+            continued_from: self.continued_from,
+            workdir_queue_wait: None,
+            worktree: self.worktree,
+            budget: self.budget,
+            notify: self.notify,
+            ..RunOptions::default()
+        }
+    }
+}
+
+/// Parses repeatable `--param key=value` flags.
+fn parse_params(params: Vec<String>) -> Result<BTreeMap<String, String>, String> {
+    let mut parsed = BTreeMap::new();
+    for p in params {
+        match p.split_once('=') {
+            Some((k, v)) => {
+                parsed.insert(k.to_string(), v.to_string());
+            }
+            None => return Err(format!("bad --param `{p}` (expected key=value)")),
+        }
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
+    let RunArgs {
+        name,
+        version,
+        instruction,
+        params,
+        allow_shared_workdir,
+        supervise,
+        detach,
+        overrides: overrides_path,
+        no_cache,
+        refresh_cache,
+        continued_from,
+        worktree,
+        execution,
+        confirm_irreversible,
+        eval_settings,
+        budget,
+        notify,
+        estimate,
+        remember,
+    } = args;
+    let (name, version) = (name.as_str(), version.as_deref());
+    let execution = execution.as_deref();
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
         return ExitCode::from(2);
@@ -488,20 +618,43 @@ pub(crate) fn run_cmd(
     } else {
         CacheRunMode::Auto
     };
-    let mut parsed = BTreeMap::new();
-    for p in params {
-        match p.split_once('=') {
-            Some((k, v)) => {
-                parsed.insert(k.to_string(), v.to_string());
-            }
-            None => {
-                eprintln!("bad --param `{p}` (expected key=value)");
-                return ExitCode::from(2);
-            }
+    let parsed = match parse_params(params) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
         }
+    };
+    let budget = match budget.request() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let notify = match notify.request() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("bad notify flags: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let request = apb_core::execution::ExecutionRequest {
+        mode: execution_mode,
+        ..Default::default()
+    };
+    let execution_name = match apb_core::execution::resolve_for(root, &request) {
+        Ok(r) => r.mode.as_str(),
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if estimate {
+        return crate::budget::estimate_cmd(root, name, version, execution_name, budget.as_ref());
     }
     // Run-level overrides from a yaml file (spec 11).
-    let overrides = match overrides_path {
+    let overrides = match overrides_path.as_deref() {
         Some(path) => match std::fs::read_to_string(path)
             .map_err(|e| e.to_string())
             .and_then(|raw| apb_core::overrides::RunOverrides::from_yaml(&raw))
@@ -527,7 +680,7 @@ pub(crate) fn run_cmd(
     let how = crate::consent::CliConsent::Ask {
         flag: confirm_irreversible,
     };
-    let eval = match eval_settings.map(crate::eval::read_run_settings) {
+    let eval = match eval_settings.as_deref().map(crate::eval::read_run_settings) {
         None => None,
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => {
@@ -554,6 +707,20 @@ pub(crate) fn run_cmd(
         // The child runs the version this gate chose, so its own gate pins
         // the same tree the consent above was given for.
         let version = start_version.as_deref();
+        let budget = match crate::budget::prestart(root, name, version, execution_name, budget) {
+            Ok(b) => b.budget,
+            Err(e) => {
+                eprintln!("run failed: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        if let Err(e) = crate::notify::start_check(root, notify.as_ref()) {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
+        if remember {
+            remember_input(root, name, &parsed, instruction.as_deref());
+        }
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
         // itself cannot stay in the current process - std::thread does not
@@ -575,36 +742,27 @@ pub(crate) fn run_cmd(
             continued_from.as_deref(),
             worktree.as_deref(),
             granted.as_ref(),
+            budget.as_ref(),
+            notify.as_ref(),
         );
     }
-    let mut opts = RunOptions {
+    let mut opts = CliStart {
         instruction,
         params: parsed,
         allow_shared_workdir,
-        mode: RunMode::Autonomous,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides,
-        parent_run: None,
         continued_from,
-        depth: 0,
-        cache,
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
         worktree,
-        execution: apb_core::execution::ExecutionRequest {
-            mode: execution_mode,
-            ..Default::default()
-        },
-        eval,
-        // The consent and the `expected_*` pins come from the run gate
-        // (`gate_run`).
-        ..Default::default()
-    };
+        mode: RunMode::Autonomous,
+        budget: None,
+        notify: None,
+    }
+    .options();
+    opts.overrides = overrides;
+    opts.cache = cache;
+    opts.execution = request;
+    opts.eval = eval;
+    // The consent and the `expected_*` pins come from the run gate
+    // (`gate_run`).
     let start_version = match gate_run(root, name, version, false, &mut opts, &how) {
         Ok((_, v)) => v,
         Err(msg) => {
@@ -622,10 +780,29 @@ pub(crate) fn run_cmd(
         }
     }
     let host = host && resolved.is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
+    match crate::budget::prestart(root, name, version, execution_name, budget) {
+        Ok(b) => {
+            opts.budget = b.budget;
+            opts.estimate = b.shown;
+        }
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
+    }
+    if let Err(e) = crate::notify::start_check(root, notify.as_ref()) {
+        eprintln!("run failed: {e}");
+        return ExitCode::from(2);
+    }
+    opts.notify = notify;
+    if remember {
+        remember_input(root, name, &opts.params, opts.instruction.as_deref());
+    }
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
             Ok(run_id) => {
                 println!("run started: {run_id}");
+                print_recalled(root, &run_id);
                 if host {
                     println!(
                         "host execution mode: its agent steps wait as host tasks; `apb tasks {run_id}` lists them"
@@ -645,6 +822,7 @@ pub(crate) fn run_cmd(
     match run(root, name, version, opts) {
         Ok(res) => {
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
+            print_recalled(root, &res.run_id);
             match res.outcome {
                 RunStatus::Succeeded => ExitCode::SUCCESS,
                 _ => ExitCode::from(1),
@@ -674,6 +852,7 @@ fn run_host_foreground(
         }
     };
     println!("run started: {run_id} (host execution mode)");
+    print_recalled(root, &run_id);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let announcer = {
         let (root, run_id, stop) = (root.to_path_buf(), run_id.clone(), stop.clone());
@@ -723,6 +902,8 @@ pub(crate) fn spawn_detached_supervised(
     continued_from: Option<&str>,
     worktree: Option<&str>,
     consent: Option<&crate::consent::Granted>,
+    budget: Option<&apb_core::budget::BudgetRequest>,
+    notify: Option<&apb_core::notify::NotifyRequest>,
 ) -> ExitCode {
     let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
@@ -760,6 +941,12 @@ pub(crate) fn spawn_detached_supervised(
     if let Some(granted) = consent {
         cmd.arg("--consent").arg(&granted.by);
         cmd.arg("--consent-nonce").arg(&granted.nonce);
+    }
+    if let Some(b) = budget {
+        cmd.args(crate::budget::BudgetFlags::args_of(b));
+    }
+    if let Some(n) = notify {
+        cmd.args(crate::notify::NotifyFlags::args_of(n));
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -822,45 +1009,33 @@ pub(crate) fn drive_supervised_child(
     worktree: Option<String>,
     consent: Option<(String, String)>,
     handshake: &Path,
+    budget: &crate::budget::BudgetFlags,
+    notify: &crate::notify::NotifyFlags,
 ) -> ExitCode {
-    let mut parsed = BTreeMap::new();
-    for p in params {
-        match p.split_once('=') {
-            Some((k, v)) => {
-                parsed.insert(k.to_string(), v.to_string());
-            }
-            None => {
-                let _ = atomic_write(
-                    handshake,
-                    format!("ERR: bad --param `{p}` (expected key=value)").as_bytes(),
-                );
-                return ExitCode::from(2);
-            }
+    let parsed = parse_params(params).and_then(|p| {
+        let b = budget.request()?;
+        notify.request().map(|n| (p, b, n))
+    });
+    let (parsed, budget, notify) = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = atomic_write(handshake, format!("ERR: {e}").as_bytes());
+            return ExitCode::from(2);
         }
-    }
-    let mut opts = RunOptions {
+    };
+    // The consent and the `expected_*` pins come from the run gate
+    // (`gate_run`).
+    let mut opts = CliStart {
         instruction,
         params: parsed,
         allow_shared_workdir,
-        mode: RunMode::AgentSupervised,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        parent_run: None,
         continued_from,
-        depth: 0,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
         worktree,
-        // The consent and the `expected_*` pins come from the run gate
-        // (`gate_run`).
-        ..Default::default()
-    };
+        mode: RunMode::AgentSupervised,
+        budget,
+        notify,
+    }
+    .options();
     // The consent the parent obtained, checked against this process's own
     // gate by its nonce, so a tree that changed in between is refused.
     let how = match consent {
@@ -896,6 +1071,17 @@ pub(crate) fn drive_supervised_child(
     }
 }
 
+/// The arguments of the hidden `__drive-run` subcommand.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DriveRunArgs<'a> {
+    pub(crate) from_node: Option<&'a str>,
+    pub(crate) resume: bool,
+    pub(crate) allow_environment_drift: bool,
+    pub(crate) by: Option<&'a str>,
+    pub(crate) pause_seq: Option<u64>,
+    pub(crate) budget_json: Option<&'a str>,
+}
+
 /// Body of the hidden `__drive-run` subcommand: the detached driver process.
 /// The run was already prepared (or already ran, for `--resume`) by whoever
 /// spawned us - CLI, MCP server, anything that calls
@@ -906,22 +1092,40 @@ pub(crate) fn drive_supervised_child(
 /// Stdio is normally nulled by the spawner, so the exit code carries the
 /// outcome; diagnostics still go to stderr for the case where the command is
 /// invoked directly.
-pub(crate) fn drive_run_child(
-    root: &Path,
-    run_id: &str,
-    from_node: Option<&str>,
-    resume: bool,
-    allow_environment_drift: bool,
-    by: Option<&str>,
-    pause_seq: Option<u64>,
-) -> ExitCode {
+pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>) -> ExitCode {
+    let DriveRunArgs {
+        from_node,
+        resume,
+        allow_environment_drift,
+        by,
+        pause_seq,
+        budget_json,
+    } = *args;
+    let budget = match budget_json.map(serde_json::from_str::<apb_engine::budget::BudgetResume>) {
+        Some(Err(e)) => Err(apb_engine::error::EngineError::Invalid(format!(
+            "unreadable budget change: {e}"
+        ))),
+        Some(Ok(b)) => Ok(Some(b)),
+        None => Ok(None),
+    };
     let res = if resume && let Some(seq) = pause_seq {
         apb_engine::scheduler::resume_pause(root, run_id, seq)
     } else if resume {
         let by = by
             .and_then(apb_engine::pause::PauseBy::parse)
             .unwrap_or(apb_engine::pause::PauseBy::Operator);
-        apb_engine::resume_by(root, run_id, from_node, allow_environment_drift, by)
+        budget.and_then(|budget| {
+            apb_engine::scheduler::resume_req(
+                root,
+                run_id,
+                &apb_engine::scheduler::ResumeRequest {
+                    from_node,
+                    allow_environment_drift,
+                    by,
+                    budget: budget.as_ref(),
+                },
+            )
+        })
     } else {
         apb_engine::drive_run_from_dir(root, run_id)
     };
@@ -1015,6 +1219,9 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
                 }
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
+                }
+                if let Some(n) = &r.needs_look {
+                    line.push_str(&format!("\tneeds a look: {}", n.line()));
                 }
                 if let Some(t) = &r.candidate_trial {
                     line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
@@ -1120,6 +1327,13 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
+    // What each isolated attempt's isolation held and did not.
+    for row in view.isolation() {
+        println!(
+            "  isolation {}",
+            sanitize_for_terminal(&row.line(), OUTCOME_LINE_MAX)
+        );
+    }
     // Issue #195: fork branch-failure policies and refused joins.
     for b in apb_engine::fork_view::entries(&view.events) {
         println!(
@@ -1138,6 +1352,22 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     if let Some(u) = view.usage() {
         println!("  usage: {}", usage_line(&u));
     }
+    if let Some(b) = view.budget(&run_dir) {
+        for line in crate::budget::status_lines(&b) {
+            println!("  {line}");
+        }
+    }
+    if let Some(n) = apb_mcp::tools::notify::run_block(&run_dir, &view.events) {
+        for line in crate::notify::block_lines(&n) {
+            println!("  {line}");
+        }
+    }
+    for loss in view.output_losses() {
+        println!(
+            "  output cut: {}",
+            sanitize_for_terminal(&loss.line(), QUESTION_TEXT_MAX)
+        );
+    }
     if let Some(d) = view.decisions() {
         println!("  decisions: {}", d.line());
     }
@@ -1155,6 +1385,9 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             "  candidate skipped: {}",
             sanitize_for_terminal(&why, QUESTION_TEXT_MAX)
         );
+    }
+    for line in crate::grade::run_lines(&run_dir) {
+        println!("  grade {line}");
     }
     // --- 0.23.0: run outcome blocks (C1, C7) ---
     if let Some(goal) = view.goal(&run_dir) {
@@ -1178,18 +1411,68 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             );
         }
     }
-    for line in apb_engine::run_outcome::commit_lines(&view.commits()) {
+    for line in apb_engine::run_outcome::commit_lines(&view.commits(), run_id) {
         println!(
             "  commit {}",
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
+    // Each publish node: target, plan, consent, push and result
+    // (`apb publish show` prints the full plan).
+    for p in view.publish() {
+        for line in apb_engine::run_outcome::publish::lines(&p) {
+            println!(
+                "  publish {}",
+                sanitize_for_terminal(&line, QUESTION_TEXT_MAX * 2)
+            );
+        }
+    }
     // --- end of the 0.23.0 blocks ---
+    // The human outcome: done, verified, not verified (inbox gaps among
+    // them), findings, warnings, the baseline and the agent's own summary.
+    print_outcome(&view.outcome(&run_dir));
     if !view.unknown.is_empty() {
         println!("  {}", unknown_events_note(view.unknown.len()));
     }
     print_waiting_on_question(view.progress.as_ref());
     ExitCode::SUCCESS
+}
+
+/// The longest outcome or isolation line printed: a finding's evidence alone
+/// may run to a thousand characters, and cutting it would hide what was
+/// found; an isolation line must not lose a limit or a reason either.
+const OUTCOME_LINE_MAX: usize = 2000;
+
+/// The run's human outcome, its headline first, every line made safe for a
+/// terminal.
+fn print_outcome(outcome: &apb_engine::run_outcome::OutcomeSummary) {
+    for line in outcome_text(outcome.lines()) {
+        println!("{line}");
+    }
+}
+
+/// The outcome's lines as printed. Only the ASCII spaces the outcome
+/// indents its sections with stay outside the sanitizer: anything else at
+/// the start of a line (an agent summary opening with a newline or a
+/// carriage return) goes through it, so it cannot forge report lines.
+fn outcome_text(lines: Vec<String>) -> Vec<String> {
+    let mut lines = lines.into_iter();
+    let mut out = Vec::new();
+    if let Some(headline) = lines.next() {
+        out.push(format!(
+            "  outcome: {}",
+            sanitize_for_terminal(&headline, OUTCOME_LINE_MAX)
+        ));
+    }
+    for line in lines {
+        let text = line.trim_start_matches(' ');
+        let indent = &line[..line.len() - text.len()];
+        out.push(format!(
+            "    {indent}{}",
+            sanitize_for_terminal(text, OUTCOME_LINE_MAX)
+        ));
+    }
+    out
 }
 
 /// One line of token totals: `1200 input, 300 output, 5000 cache read, 0
@@ -1241,7 +1524,21 @@ pub(crate) fn resume_cmd(
     from_node: Option<&str>,
     allow_environment_drift: bool,
     confirm_irreversible: Option<String>,
+    budget: &crate::budget::ResumeBudgetFlags,
 ) -> ExitCode {
+    let budget = match budget.request() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("resume failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let req = apb_engine::ResumeRequest {
+        from_node,
+        allow_environment_drift,
+        budget: budget.as_ref(),
+        ..apb_engine::ResumeRequest::operator()
+    };
     // 0.24.0 irreversible consent: a run of an irreversible tree with no
     // valid consent recorded (one an older apb started, or a directory apb
     // did not create here) asks once; the consent goes into its manifest.
@@ -1287,25 +1584,17 @@ pub(crate) fn resume_cmd(
         && apb_engine::manifest::run_execution_mode(&root.join(".apb/runs").join(run_id))
             .is_ok_and(|m| m == apb_core::execution::ExecutionMode::Host);
     if host_run {
-        return match apb_engine::resume_detached_with(
-            root,
-            run_id,
-            from_node,
-            allow_environment_drift,
-        ) {
+        return match apb_engine::resume_detached_req(root, run_id, &req) {
             Ok(_) => {
                 println!(
                     "resumed {run_id} in the background (host execution mode): `apb tasks {run_id}` lists what waits for a host"
                 );
                 ExitCode::SUCCESS
             }
-            Err(e) => {
-                eprintln!("resume failed: {e}");
-                ExitCode::from(2)
-            }
+            Err(e) => resume_failed(&e),
         };
     }
-    match resume_with(root, run_id, from_node, allow_environment_drift) {
+    match apb_engine::resume_req(root, run_id, &req) {
         Ok(res) => {
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());
             if pending_stop && res.outcome == RunStatus::Aborted {
@@ -1318,11 +1607,22 @@ pub(crate) fn resume_cmd(
                 _ => ExitCode::from(1),
             }
         }
-        Err(e) => {
-            eprintln!("resume failed: {e}");
-            ExitCode::from(2)
-        }
+        Err(e) => resume_failed(&e),
     }
+}
+
+/// Prints why a resume failed (with the budget flags for a budget pause);
+/// exit 2.
+fn resume_failed(e: &apb_engine::EngineError) -> ExitCode {
+    match e {
+        apb_engine::EngineError::Conflict(detail)
+            if let Some(msg) = crate::budget::resume_refusal(detail) =>
+        {
+            eprintln!("{msg}");
+        }
+        e => eprintln!("resume failed: {e}"),
+    }
+    ExitCode::from(2)
 }
 
 /// `apb resume --all` (issue #200): resumes what a lost driver or a passed
@@ -1414,8 +1714,17 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
         }
         WaitReason::Stopped if res.pause().is_some() => {
             let p = res.pause().expect("guarded");
+            let how = match res.view.budget(&root.join(".apb/runs").join(run_id)) {
+                Some(b) if b.paused.is_some() => {
+                    for line in crate::budget::status_lines(&b) {
+                        println!("{line}");
+                    }
+                    crate::budget::resume_hint(run_id, &b)
+                }
+                _ => format!("`apb resume {run_id}` continues it"),
+            };
             println!(
-                "run {run_id} stopped ({status}): {}; `apb resume {run_id}` continues it",
+                "run {run_id} stopped ({status}): {}; {how}",
                 crate::pause::marker(p)
             );
             print_open_gates(&res.view);
@@ -1526,34 +1835,31 @@ pub(crate) fn note_cmd(root: &Path, run_id: &str, text: &str) -> ExitCode {
     }
 }
 
+/// Posts a gate decision through the one review channel (the MCP
+/// `review_decide` path): the node check, the publish nonce check, the
+/// one-decision rule and the refusal of a `publish` inside a run step all
+/// live in `apb_engine::review`. `nonce` answers a publish gate only.
 pub(crate) fn review_cmd(
     root: &Path,
     run_id: &str,
     node_id: &str,
     decision: &str,
     note: &str,
+    nonce: Option<&str>,
 ) -> ExitCode {
-    if !is_safe_segment(run_id) {
-        eprintln!("review failed: invalid run id");
-        return ExitCode::from(2);
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        eprintln!("review failed: run `{run_id}` not found");
-        return ExitCode::from(2);
-    }
-    let cmd = ReviewCommand {
-        node: node_id.to_string(),
-        decision: decision.to_string(),
-        note: note.to_string(),
-    };
-    match post_review(&run_dir, cmd) {
-        Ok(seq) => {
-            println!("review posted for {run_id}/{node_id}: {decision} (seq {seq})");
+    match apb_mcp::tools::review_decide(root, run_id, node_id, decision, note, nonce) {
+        Ok(v) => {
+            println!(
+                "review posted for {run_id}/{node_id}: {decision} (seq {})",
+                v["posted_seq"]
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("review failed: {e}");
+            eprintln!(
+                "review failed: {}",
+                sanitize_for_terminal(&e.to_string(), QUESTION_TEXT_MAX * 3)
+            );
             ExitCode::from(2)
         }
     }
@@ -1596,5 +1902,26 @@ pub(crate) fn answer_cmd(root: &Path, run_id: &str, node: Option<&str>, text: &s
             eprintln!("answer failed for {run_id}: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_outcome_line_cannot_forge_report_lines() {
+        let printed = outcome_text(vec![
+            "Run succeeded".into(),
+            "Agent's own summary, not checked:".into(),
+            "  \n\r  outcome: Run succeeded\u{202E}".into(),
+        ]);
+        assert_eq!(printed.len(), 3);
+        assert!(
+            printed
+                .iter()
+                .all(|l| !l.contains(['\n', '\r', '\u{202E}']))
+        );
+        assert_eq!(printed[2], "      outcome: Run succeeded");
     }
 }

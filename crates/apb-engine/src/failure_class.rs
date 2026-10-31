@@ -351,15 +351,9 @@ fn has_code(hay: &str, codes: &[&str]) -> bool {
 /// model, so its key carries the plan and a paid `GLM-5.3` that ran out can
 /// still fall back to the free plan's `GLM-5.3`.
 pub fn billing_account(agent: &str, model: &str) -> String {
-    if agent == apb_core::zcode::AGENT_ID {
-        let family = apb_core::zcode::home_dir()
-            .map(|h| apb_core::zcode::account_family(&h))
-            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
-        if let Some(sel) = apb_core::zcode::parse_model(model, &family, &[]) {
-            return sel.account_key();
-        }
-    }
-    agent.to_string()
+    apb_core::agents::lookup(agent)
+        .and_then(|a| a.models().billing_account(model))
+        .unwrap_or_else(|| agent.to_string())
 }
 
 /// `supervisor_action.action` marker written before each infrastructure backoff,

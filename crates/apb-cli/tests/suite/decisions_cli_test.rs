@@ -82,7 +82,12 @@ fn a_run_without_decisions_prints_as_before() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout("demo-1\tdemo 1.0.0\tsucceeded\n  execution: cli\n  w\tsucceeded\n");
+        // No decisions line: only the run's own lines and its outcome.
+        .stdout(concat!(
+            "demo-1\tdemo 1.0.0\tsucceeded\n  execution: cli\n  w\tsucceeded\n",
+            "  outcome: Run succeeded; nothing checked by the engine\n",
+            "    Done:\n      succeeded: w\n",
+        ));
     apb()
         .args(["wait", "demo-1", "--timeout", "5"])
         .current_dir(dir.path())

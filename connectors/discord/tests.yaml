@@ -56,3 +56,42 @@ cases:
         content: "Acknowledged."
         message_reference:
           message_id: "111222333444555666"
+
+  # Every send asks Discord to honour its nonce and pings nobody.
+  - function: send_message
+    account: { api_base: https://discord.com/api/v10 }
+    args: { channel_id: "987654321098765432", content: "@everyone deploy done" }
+    expect:
+      method: POST
+      url: https://discord.com/api/v10/channels/987654321098765432/messages
+      body_contains:
+        content: "@everyone deploy done"
+        enforce_nonce: true
+        allowed_mentions: { parse: [] }
+
+  # A send of an intent carries its nonce, which Discord deduplicates by.
+  - function: send_message
+    account: { api_base: https://discord.com/api/v10 }
+    args: { channel_id: "987654321098765432", content: "Build finished on main." }
+    intent: { run: r-1, node: announce, attempt: 1, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      method: POST
+      url: https://discord.com/api/v10/channels/987654321098765432/messages
+      body_contains:
+        nonce: abcdefghijklmnopqrstuvwx
+        enforce_nonce: true
+
+  - function: reply_to_message
+    account: { api_base: https://discord.com/api/v10 }
+    args:
+      channel_id: "987654321098765432"
+      message_id: "111222333444555666"
+      content: "Acknowledged."
+    intent: { run: r-1, node: announce, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      method: POST
+      url: https://discord.com/api/v10/channels/987654321098765432/messages
+      body_contains:
+        nonce: abcdefghijklmnopqrstuvwx
+        enforce_nonce: true
+        allowed_mentions: { parse: [] }

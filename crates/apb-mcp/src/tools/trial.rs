@@ -5,17 +5,34 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::ToolError;
-use super::run::build_duration_table_from;
 use apb_core::registry::Registry;
 use apb_engine::RunOptions;
+use apb_engine::progress::build_duration_table_from;
 use apb_engine::run_view::read_events;
 use apb_engine::state::{RunState, RunStatus};
 use serde_json::{Value, json};
 
+/// The hardened, pinned git ([`apb_core::git::Repo`]); `None` outside a
+/// working tree apb runs git in.
 fn git(root: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
+    apb_core::git::command(root)?.args(args).output().ok()
+}
+
+/// The hardened diff (no external diff, no textconv, no submodule) of `dir`.
+fn git_diff(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    apb_core::git::Repo::locate(dir)
+        .ok()?
+        .diff(dir)
+        .args(args)
+        .output()
+        .ok()
+}
+
+/// The hardened status (no submodule) of `dir`.
+fn git_status(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    apb_core::git::Repo::locate(dir)
+        .ok()?
+        .status(dir)
         .args(args)
         .output()
         .ok()
@@ -75,19 +92,18 @@ pub fn playbook_trial(
 
     // Take the definition from the chosen scope; a global draft must also be runnable
     // (spec 8.3). Execution happens in the current project regardless.
-    let (definition_parent, origin_label) = match scope {
-        "project" => (root.join(".apb"), "project"),
-        "global" => (
-            apb_core::store::global_playbooks_parent()
-                .ok_or_else(|| ToolError::Engine("no global config dir".into()))?,
-            "global",
-        ),
-        other => return Err(ToolError::Engine(format!("unknown scope `{other}`"))),
-    };
+    let (scope, definition_parent) = super::scope_parent(root, scope)?;
+    let origin_label = scope.as_str();
     let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
     let loaded = reg.load(id, version)?;
     let effects = apb_core::effects::effective(&loaded.playbook);
     let digest = loaded.trust_digest()?;
+    let playbook_dir = definition_parent.join("playbooks").join(id);
+    if let Err(refusal) =
+        apb_engine::gate::check_import_approval(&playbook_dir, id, &loaded.version, &digest)
+    {
+        return Ok(json!({ "policy_refusal": refusal }));
+    }
 
     // 0.24.0: the whole tree counts, as for the consent gate: a playbook
     // whose sub-playbook (or a granted connector function) is irreversible is
@@ -153,13 +169,12 @@ pub fn playbook_trial(
                     }));
                 }
                 let mut diff = String::new();
-                if let Some(o) = git(
-                    &scratch,
-                    &["status", "--porcelain", "--", ".", ":(exclude).playbook"],
-                ) {
+                if let Some(o) =
+                    git_status(&scratch, &["--porcelain", "--", ".", ":(exclude).playbook"])
+                {
                     diff.push_str(&String::from_utf8_lossy(&o.stdout));
                 }
-                if let Some(o) = git(&scratch, &["diff", "--", ".", ":(exclude).playbook"]) {
+                if let Some(o) = git_diff(&scratch, &["--", ".", ":(exclude).playbook"]) {
                     diff.push_str(&String::from_utf8_lossy(&o.stdout));
                 }
                 truncate_on_char_boundary(&mut diff, 64 * 1024);
@@ -263,6 +278,9 @@ pub fn playbook_prepare_run(
     let mut children: Vec<Value> = Vec::new();
     list_children(&pf.children, "", &store, &mut children);
     let token = crate::plan::encode(&payload);
+    // What a run of the plan's version takes and spends in the target
+    // workspace; the budget is execute_plan's argument, not the plan's.
+    let estimate = super::budget::playbook_estimate(&root_b, id, Some(&pf.version)).ok();
     Ok(json!({
         "plan": {
             "workspace": workspace,
@@ -274,6 +292,7 @@ pub fn playbook_prepare_run(
             "profiles": profiles,
             "children": children,
             "params": params,
+            "estimate": estimate,
         },
         "plan_token": token,
     }))
@@ -305,31 +324,76 @@ fn list_children(
 }
 
 /// Activates a playbook after a successful trial or explicit confirmation (spec
-/// 8.3): lifecycle -> active, digest -> approved (agent-generated). Also works
-/// with the global scope (otherwise a global draft could never be activated).
+/// 8.3): the digest is approved (agent-generated), then the lifecycle becomes
+/// active. Also works with the global scope (otherwise a global draft could
+/// never be activated).
+///
+/// A version an import wrote with scripts is approved only by naming its
+/// exact trust digest (`digest`): without one the answer is
+/// `digest_required` with the digest and the scripts to review, and a digest
+/// that is not the version's content now is `digest_mismatch`. Neither
+/// changes anything.
 pub fn playbook_approve(
     root: &Path,
     id: &str,
     version: Option<&str>,
     scope: &str,
+    digest: Option<&str>,
 ) -> Result<Value, ToolError> {
-    let definition_parent = match scope {
-        "project" => root.join(".apb"),
-        "global" => apb_core::store::global_playbooks_parent()
-            .ok_or_else(|| ToolError::Engine("no global config dir".into()))?,
-        other => return Err(ToolError::Engine(format!("unknown scope `{other}`"))),
+    approve_playbook(
+        root,
+        id,
+        version,
+        scope,
+        digest,
+        apb_core::trust::OriginKind::AgentGenerated,
+    )
+}
+
+/// [`playbook_approve`] with the approval recorded as `origin`: an agent's
+/// (`AgentGenerated`) or a person's (`LocallyApproved`, `apb trust approve`).
+pub fn approve_playbook(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    scope: &str,
+    digest: Option<&str>,
+    origin: apb_core::trust::OriginKind,
+) -> Result<Value, ToolError> {
+    use apb_core::versioning::approval::{ApproveError, approve_version};
+    let (_, definition_parent) = super::scope_parent(root, scope)?;
+    let approved = match approve_version(&definition_parent, id, version, digest, origin) {
+        Ok(a) => a,
+        Err(ApproveError::DigestRequired { digest, scripts }) => {
+            return Ok(json!({
+                "error": "digest_required",
+                "id": id,
+                "digest": digest,
+                "scripts": scripts,
+                "detail": "this version was imported with scripts: review them, then approve again with digest set to this digest",
+            }));
+        }
+        Err(ApproveError::DigestMismatch { expected, actual }) => {
+            return Ok(json!({
+                "error": "digest_mismatch",
+                "id": id,
+                "expected": expected,
+                "actual": actual,
+                "detail": "the version's content is not the one named: review it again before approving",
+            }));
+        }
+        Err(ApproveError::Registry(e)) => return Err(ToolError::from(e)),
+        Err(e) => return Err(ToolError::Engine(e.to_string())),
     };
-    let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
-    let loaded = reg.load(id, version)?;
-    let digest = loaded.trust_digest()?;
     let playbook_dir = definition_parent.join("playbooks").join(id);
     apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Active)
         .map_err(|e| ToolError::Engine(e.to_string()))?;
-    let mut trust = apb_core::trust::TrustStore::load();
-    trust
-        .approve(&digest, id, apb_core::trust::OriginKind::AgentGenerated)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
-    Ok(
-        json!({ "id": id, "version": loaded.version, "scope": scope, "lifecycle": "active", "trusted": true }),
-    )
+    Ok(json!({
+        "id": id,
+        "version": approved.version,
+        "digest": approved.digest,
+        "scope": scope,
+        "lifecycle": "active",
+        "trusted": true,
+    }))
 }

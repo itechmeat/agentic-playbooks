@@ -45,6 +45,8 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                     "instruction" | "context" | "id" | "retro" | "active_elapsed_seconds",
                 ] => true,
                 ["run", "hooks", key] => hooks.contains(key),
+                // Reported by V86, which says why the item is not a namespace.
+                _ if crate::list::is_item_ref(&cap) => true,
                 _ => false,
             };
             if !ok {

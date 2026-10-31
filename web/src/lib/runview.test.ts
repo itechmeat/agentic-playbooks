@@ -49,6 +49,7 @@ function detail(over: Partial<RunDetail> = {}): RunDetail {
     layout: null,
     hooks: {},
     children: [],
+    outcome: { headline: 'Run running', done: [], verified: [], unverified: [], findings: [], warnings: [] },
     progress: null,
     answer: null,
     usage: null,

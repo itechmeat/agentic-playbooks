@@ -99,7 +99,7 @@ describe('RunPauseControls', () => {
     show({ status: 'paused', pause: paused })
     byTestId('run-resume-button')?.click()
     await tick()
-    expect(resumeRun).toHaveBeenCalledWith('run-1', 'w', undefined)
+    expect(resumeRun).toHaveBeenCalledWith('run-1', 'w', { consentNonce: undefined, budget: undefined })
   })
 
   it('asks for consent when the server refuses an irreversible resume, then sends the nonce', async () => {
@@ -118,7 +118,149 @@ describe('RunPauseControls', () => {
     expect(resumeRun).toHaveBeenCalledTimes(1)
     byTestId('irreversible-confirm')?.click()
     await tick()
-    expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', 'consent-abc')
+    expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', {
+      consentNonce: 'consent-abc',
+      budget: undefined,
+    })
+  })
+
+  it('resumes a budget pause through its form with a raise or a run once', async () => {
+    resumeRun.mockResolvedValue({ run_id: 'run-1', resumed_from: 'b', detached: true })
+    show({
+      status: 'paused',
+      pause: { ...paused, by: 'engine', reason: 'budget (tokens: 100 left, `b` needs ~200)', cause: 'budget' },
+      budget: {
+        limit: { tokens: 300 },
+        on_no_estimate: 'ask',
+        sets: 1,
+        tokens: { spent: 200, unknown_attempts: 0, remaining: 100 },
+        paused: { node: 'b', basis: 'median', need: { tokens: 200 }, remaining: { tokens: 100 } },
+      },
+    })
+    expect(byTestId('run-pause-cause')?.textContent).toBe('by its budget')
+    byTestId('run-resume-button')?.click()
+    flushSync()
+    expect(resumeRun).not.toHaveBeenCalled()
+    const form = byTestId('run-budget-resume-form')
+    expect(form?.textContent).toContain('paused before b')
+    form?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(byTestId('run-budget-error')?.textContent).toContain('raise or set a limit')
+    expect(resumeRun).not.toHaveBeenCalled()
+    const raise = byTestId('run-budget-raise-tokens') as HTMLInputElement
+    raise.value = '50k'
+    raise.dispatchEvent(new Event('input', { bubbles: true }))
+    flushSync()
+    form?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await tick()
+    expect(resumeRun).toHaveBeenCalledWith('run-1', 'w', {
+      consentNonce: undefined,
+      budget: { raise_tokens: 50000 },
+    })
+  })
+
+  function input(id: string, value: string) {
+    const el = byTestId(id) as HTMLInputElement
+    el.value = value
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    flushSync()
+  }
+
+  function submitBudget() {
+    byTestId('run-budget-resume-form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  }
+
+  it('opens the budget form on a budget_paused refusal and sends a run once', async () => {
+    resumeRun.mockRejectedValueOnce(new ApiError('refused', 409, 'budget_paused'))
+    resumeRun.mockResolvedValueOnce({ run_id: 'run-1', resumed_from: 'b', detached: true })
+    show({ status: 'paused', pause: paused })
+    byTestId('run-resume-button')?.click()
+    await tick()
+    flushSync()
+    expect(byTestId('run-budget-resume-form')).not.toBeNull()
+    expect(byTestId('run-budget-error')?.textContent).toContain('the budget paused this run')
+    byTestId('run-budget-once')?.click()
+    flushSync()
+    submitBudget()
+    await tick()
+    expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', { consentNonce: undefined, budget: { once: true } })
+  })
+
+  it('Resume closes a budget form a refusal opened on another pause', async () => {
+    resumeRun.mockRejectedValueOnce(new ApiError('refused', 409, 'budget_paused'))
+    show({ status: 'paused', pause: paused })
+    byTestId('run-resume-button')?.click()
+    await tick()
+    flushSync()
+    expect(byTestId('run-budget-resume-form')).not.toBeNull()
+    byTestId('run-resume-button')?.click()
+    flushSync()
+    expect(byTestId('run-budget-resume-form')).toBeNull()
+    expect(resumeRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('sets a new limit and the policy from the form', async () => {
+    resumeRun.mockRejectedValueOnce(new ApiError('refused', 409, 'budget_paused'))
+    resumeRun.mockResolvedValueOnce({ run_id: 'run-1', resumed_from: 'b', detached: true })
+    show({ status: 'paused', pause: paused })
+    byTestId('run-resume-button')?.click()
+    await tick()
+    flushSync()
+    input('run-budget-set-tokens', '500k')
+    byTestId('run-budget-policy-continue')?.click()
+    flushSync()
+    submitBudget()
+    await tick()
+    expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', {
+      consentNonce: undefined,
+      budget: { tokens: 500_000, on_no_estimate: 'continue' },
+    })
+  })
+
+  it('a failed budget resume leaves no change behind for a later plain resume', async () => {
+    resumeRun.mockRejectedValueOnce(new ApiError('refused', 409, 'budget_paused'))
+    resumeRun.mockRejectedValueOnce(new ApiError('busy', 409, 'workdir_busy', 'held'))
+    resumeRun.mockResolvedValueOnce({ run_id: 'run-1', resumed_from: 'b', detached: true })
+    show({ status: 'paused', pause: paused })
+    byTestId('run-resume-button')?.click()
+    await tick()
+    flushSync()
+    input('run-budget-raise-tokens', '50k')
+    submitBudget()
+    await tick()
+    flushSync()
+    // The Resume button toggles the form closed, then a plain resume.
+    byTestId('run-resume-button')?.click()
+    flushSync()
+    expect(byTestId('run-budget-resume-form')).toBeNull()
+    byTestId('run-resume-button')?.click()
+    await tick()
+    expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', { consentNonce: undefined, budget: undefined })
+  })
+
+  it("the consent retry of a budget resume carries the budget change", async () => {
+    resumeRun.mockRejectedValueOnce(new ApiError('refused', 409, 'budget_paused'))
+    resumeRun.mockRejectedValueOnce(
+      new ApiError('refused', 409, 'irreversible_requires_confirmation', undefined, {
+        sources: ['node pr'],
+        consent_nonce: 'consent-abc',
+      }),
+    )
+    resumeRun.mockResolvedValueOnce({ run_id: 'run-1', resumed_from: 'b', detached: true })
+    show({ status: 'paused', pause: paused })
+    byTestId('run-resume-button')?.click()
+    await tick()
+    flushSync()
+    input('run-budget-raise-tokens', '50k')
+    submitBudget()
+    await tick()
+    flushSync()
+    byTestId('irreversible-confirm')?.click()
+    await tick()
+    expect(resumeRun).toHaveBeenLastCalledWith('run-1', 'w', {
+      consentNonce: 'consent-abc',
+      budget: { raise_tokens: 50000 },
+    })
   })
 
   it('shows a busy-workdir error when another run holds the lock', async () => {

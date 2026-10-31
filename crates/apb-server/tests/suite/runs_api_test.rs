@@ -140,6 +140,7 @@ fn review_requested(node: &str) -> apb_engine::event::EventPayload {
         instruction: String::new(),
         prompt: None,
         recommendation: None,
+        plan_digest: None,
     }
 }
 
@@ -204,6 +205,7 @@ async fn get_run_detail_exposes_pending_review_prompt() {
         instruction: String::new(),
         prompt: Some("Check the changelog first.".into()),
         recommendation: None,
+        plan_digest: None,
     };
     seed_gate_run_yaml(dir.path(), "gate-2", GATE_PROMPT, &[prompt]);
     let app = build_router(AppState::new(dir.path().to_path_buf()));
@@ -268,6 +270,236 @@ async fn post_review_on_a_gate_with_no_pending_request_is_409() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(!dir.path().join(".apb/runs/gate-1/reviews.jsonl").exists());
+}
+
+const PUBLISH_GATE: &str = r#"
+schema: 2
+id: pub
+name: Publish
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh }
+  - { id: publish, type: publish, from: work, remote: origin }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: publish }
+  - { from: publish, to: done }
+"#;
+
+/// The journal of a run parked on a publish gate: the pin, the plan and the
+/// open request. Returns the payloads and the plan's nonce.
+fn publish_gate() -> (Vec<apb_engine::event::EventPayload>, String) {
+    use apb_engine::event::{CommittedArtifact, EventPayload, PublishCommit};
+    let after = "a".repeat(40);
+    let url = "file:///srv/remote.git";
+    let commits = [after.clone()];
+    let digest = apb_core::publish::plan_digest(&apb_core::publish::PlanFacts {
+        node: "publish",
+        url,
+        branch: "main",
+        after: &after,
+        remote_before: None,
+        commits: &commits,
+    });
+    let nonce = apb_core::publish::nonce(&digest);
+    let payloads = vec![
+        EventPayload::PublishTargetPinned {
+            node: "publish".into(),
+            remote: "origin".into(),
+            url: Some(url.into()),
+            scheme: Some("file".into()),
+            common_dir: "/srv/tree/.git".into(),
+            refusal: None,
+        },
+        EventPayload::PublishPlanned {
+            node: "publish".into(),
+            from: "work".into(),
+            from_seq: 1,
+            branch: "main".into(),
+            local_branch: "refs/heads/main".into(),
+            after: after.clone(),
+            remote_before: None,
+            url: url.into(),
+            commits: vec![PublishCommit {
+                commit: CommittedArtifact {
+                    sha: after,
+                    subject: "work of the run".into(),
+                    apb_run: Some(vec!["pub-1".into()]),
+                },
+                this_run: true,
+            }],
+            omitted: 0,
+            this_run: 1,
+            outside_push_suspected: false,
+            plan_digest: digest.clone(),
+            nonce: nonce.clone(),
+        },
+        EventPayload::ReviewRequested {
+            node: "publish".into(),
+            options: vec!["publish".into(), "skip".into()],
+            title: None,
+            instruction: format!("Publish with nonce {nonce}"),
+            prompt: None,
+            recommendation: None,
+            plan_digest: Some(digest),
+        },
+    ];
+    (payloads, nonce)
+}
+
+/// A dashboard state holding one issued key, and that key.
+fn keyed(root: std::path::PathBuf) -> (String, AppState) {
+    use apb_core::server_auth;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server-auth.yaml");
+    let (key, _) = server_auth::issue_into(&path).unwrap();
+    let file = server_auth::load_from(&path).unwrap();
+    let auth = std::sync::Arc::new(
+        apb_server::auth::AuthState::new(
+            None,
+            file.keys,
+            &apb_core::config::ServerConfig::default(),
+        )
+        .unwrap(),
+    );
+    (
+        key.expose_secret().to_string(),
+        AppState::new(root).with_auth(auth),
+    )
+}
+
+/// `POST uri` with `body`, as a script would send it (no `Origin`), with
+/// the bearer `key` when given; the status and the body text.
+async fn post_as(
+    app: axum::Router,
+    uri: &str,
+    key: Option<&str>,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(k) = key {
+        req = req.header("authorization", format!("Bearer {k}"));
+    }
+    let res = app
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Anything on the machine reaches a keyless dashboard, a sandboxed agent
+/// under `network: open` included, and the open plan's nonce is in the run
+/// payload: so a keyless dashboard never takes a publish consent. It points
+/// at the CLI; a skip, which pushes nothing, still goes through.
+#[tokio::test]
+async fn a_keyless_dashboard_refuses_a_publish_consent() {
+    let dir = seed_with_run();
+    let (payloads, nonce) = publish_gate();
+    seed_gate_run_yaml(dir.path(), "pub-1", PUBLISH_GATE, &payloads);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app.clone(), "/api/runs/pub-1").await;
+    assert_eq!(
+        json["progress"]["pending_reviews"][0]["publish"]["nonce"],
+        nonce
+    );
+
+    let uri = "/api/runs/pub-1/review";
+    let (status, body) = post_as(
+        app.clone(),
+        uri,
+        None,
+        serde_json::json!({ "node": "publish", "decision": "publish", "nonce": nonce }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.contains("apb publish approve pub-1 --node publish"),
+        "{body}"
+    );
+    let channel = dir.path().join(".apb/runs/pub-1/reviews.jsonl");
+    assert!(!channel.exists(), "the consent never reached the channel");
+
+    let (status, body) = post_as(
+        app,
+        uri,
+        None,
+        serde_json::json!({ "node": "publish", "decision": "skip" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A publish gate over a dashboard with keys: the run payload carries the
+/// `publish` block and the plan in the pending review; the review route
+/// takes the nonce, refuses a missing one (400) and a stale one (409,
+/// naming the current plan), and queues the current one.
+#[tokio::test]
+async fn a_publish_gate_shows_its_plan_and_takes_only_the_plans_nonce() {
+    let dir = seed_with_run();
+    let (payloads, nonce) = publish_gate();
+    seed_gate_run_yaml(dir.path(), "pub-1", PUBLISH_GATE, &payloads);
+    let (key, state) = keyed(dir.path().to_path_buf());
+    let app = build_router(state);
+
+    let req = Request::get("/api/runs/pub-1")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["publish"][0]["node"], "publish");
+    assert_eq!(json["publish"][0]["awaiting_consent"], true);
+    assert_eq!(json["publish"][0]["url"], "file:///srv/remote.git");
+    let pending = &json["progress"]["pending_reviews"][0];
+    assert_eq!(pending["publish"]["nonce"], nonce);
+    assert_eq!(pending["publish"]["commits"][0]["this_run"], true);
+
+    let uri = "/api/runs/pub-1/review";
+    let k = Some(key.as_str());
+    let (status, _) = post_as(
+        app.clone(),
+        uri,
+        k,
+        serde_json::json!({ "node": "publish", "decision": "publish" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "publish needs the nonce");
+    let (status, body) = post_as(
+        app.clone(),
+        uri,
+        k,
+        serde_json::json!({ "node": "publish", "decision": "publish",
+            "nonce": "publish-00000000000000000000000000000000" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains(&nonce));
+    let channel = dir.path().join(".apb/runs/pub-1/reviews.jsonl");
+    assert!(
+        !channel.exists(),
+        "a refused decision never reaches the channel"
+    );
+
+    let (status, body) = post_as(
+        app,
+        uri,
+        k,
+        serde_json::json!({ "node": "publish", "decision": "publish", "nonce": nonce }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"posted_seq\":0"), "{body}");
+    let line = fs::read_to_string(channel).unwrap();
+    assert!(line.contains(&nonce), "{line}");
 }
 
 const WEBHOOK_WF: &str = r#"
@@ -575,6 +807,50 @@ async fn run_detail_carries_the_failure_reason_of_a_failed_run() {
     assert_eq!(json["failure_reason"], "node `note`: 3 failing tests");
 }
 
+/// Every run detail carries its human outcome; a journaled warning adds the
+/// notes block and marks the run in the listing as needing a look.
+#[tokio::test]
+async fn run_detail_and_listing_carry_the_outcome_and_the_needs_a_look_marker() {
+    let dir = seed_with_run();
+    let run_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert!(
+        json["outcome"]["headline"]
+            .as_str()
+            .unwrap()
+            .starts_with("Run succeeded")
+    );
+    assert!(json.get("notes").is_none());
+    assert!(json.get("baseline").is_none());
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let mut log = apb_engine::event::EventLog::open(&run_dir).unwrap();
+    log.append(apb_engine::event::EventPayload::AttemptNotes {
+        node: "note".into(),
+        attempt: 1,
+        findings: vec![],
+        warnings: vec![apb_core::run_notes::NoteWarning {
+            subject: "the greeting".into(),
+            reason: "a person should read it once".into(),
+        }],
+        dropped: 0,
+        dropped_reasons: vec![],
+    })
+    .unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(json["notes"]["warnings"][0]["subject"], "the greeting");
+    assert_eq!(json["outcome"]["needs_look"]["warnings"], 1);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, list) = get_json(app, "/api/runs").await;
+    assert_eq!(
+        list[0]["needs_look"]["reasons"],
+        serde_json::json!(["warnings"])
+    );
+}
+
 #[tokio::test]
 async fn unknown_run_404() {
     let dir = seed_with_run();
@@ -629,6 +905,38 @@ async fn post_playbook_run_continued_from_establishes_lineage() {
     let succ_cfg = apb_engine::run_config::read_run_config(&runs_dir.join(&second_id)).unwrap();
     assert_eq!(pred_cfg.superseded_by.as_deref(), Some(second_id.as_str()));
     assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
+}
+
+/// The Run dialog's "Remember for this project": a start with `remember`
+/// keeps its params and instruction for the next start of this playbook.
+#[tokio::test]
+async fn post_playbook_run_remembers_its_input() {
+    let dir = seed_with_run();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({
+            "params": { "who": "world" },
+            "instruction": "greet briefly",
+            "remember": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["remembered"],
+        serde_json::json!(["who", "instruction"])
+    );
+    assert_eq!(json["not_remembered"], serde_json::json!([]));
+    let (_, memory) = get_json(app.clone(), "/api/playbooks/noagent/memory").await;
+    assert_eq!(memory["instruction"], "greet briefly");
+    assert_eq!(memory["values"][0]["value"], "world");
+
+    // A start without input says what it took from memory.
+    let (status, json) = post_json(app, "/api/playbooks/noagent/run", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["recalled"], serde_json::json!(["who", "instruction"]));
 }
 
 /// Posts a start for the script playbook and returns the response.
@@ -953,6 +1261,7 @@ fn seed_open_attempt_run(root: &std::path::Path, run_id: &str, pid: u32) {
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::AttemptStarted {
+        item: None,
         node: "note".into(),
         attempt: 1,
         agent: "claude".into(),
@@ -963,6 +1272,8 @@ fn seed_open_attempt_run(root: &std::path::Path, run_id: &str, pid: u32) {
         model: None,
         workdir: None,
         transcript: None,
+        token: None,
+        isolation: None,
     })
     .unwrap();
     fs::write(run_dir.join("driver.pid"), format!("{pid}\n")).unwrap();
@@ -1517,4 +1828,82 @@ async fn resume_refuses_a_busy_workdir_and_leaves_the_run_paused() {
         apb_engine::state::RunState::fold(&events).run_status,
         apb_engine::state::RunStatus::Paused
     );
+}
+
+const LISTED: &str = r#"
+schema: 2
+id: listed
+name: listed
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: start, type: start }
+  - id: rows
+    type: agent_task
+    prompt: Check the row in the item section.
+    list:
+      items: { inline: [ { id: a }, { id: b } ] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: rows }
+  - { from: rows, to: done }
+"#;
+
+fn item_settled(item: &str, state: &str) -> apb_engine::event::EventPayload {
+    apb_engine::event::EventPayload::ListItemSettled {
+        node: "rows".into(),
+        item: item.into(),
+        state: state.into(),
+        verdict: None,
+        note: None,
+        reason: (state == "needs_look").then(|| "failed".into()),
+        output: None,
+        round: 0,
+        carried: false,
+        check: None,
+        digest: None,
+    }
+}
+
+#[tokio::test]
+async fn run_detail_carries_the_lists_and_the_listing_marks_items_that_need_a_look() {
+    let dir = seed_with_run();
+    let started = apb_engine::event::EventPayload::ListStarted {
+        node: "rows".into(),
+        total: 2,
+        filtered_out: 0,
+        items_digest: "d".into(),
+        batch_size: 2,
+        parallel: 1,
+        reopened: false,
+    };
+    seed_gate_run_yaml(
+        dir.path(),
+        "listed-1",
+        LISTED,
+        &[
+            started,
+            item_settled("a", "passed"),
+            item_settled("b", "needs_look"),
+        ],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/listed-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let list = &json["lists"][0];
+    assert_eq!(list["node"], "rows");
+    assert_eq!(
+        (list["passed"].as_u64(), list["needs_look"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["items"][1]["reason"], "failed");
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, runs) = get_json(app, "/api/runs").await;
+    let entry = runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "listed-1")
+        .expect("the run is listed");
+    assert_eq!(entry["needs_look"]["list_items"], 1);
 }

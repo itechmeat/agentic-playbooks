@@ -8,6 +8,7 @@
 use apb_core::connector::webhook::{
     self, Challenge, HUB_CHALLENGE, HUB_MODE, HUB_TOKEN, SUBSCRIBE,
 };
+use apb_core::secret::Secret;
 use std::collections::BTreeMap;
 
 #[test]
@@ -27,9 +28,9 @@ fn hmac_matches_the_rfc_4231_vectors() {
 
 #[test]
 fn verify_accepts_the_prefixed_header_and_rejects_everything_else() {
-    let secret = "app-secret";
+    let secret = &Secret::new("app-secret");
     let body = br#"{"object":"whatsapp_business_account","entry":[{"id":"1"}]}"#;
-    let digest = webhook::hmac_sha256_hex(secret.as_bytes(), body);
+    let digest = webhook::hmac_sha256_hex(b"app-secret", body);
     let header = format!("sha256={digest}");
 
     assert!(webhook::verify_signature_hex(
@@ -44,7 +45,7 @@ fn verify_accepts_the_prefixed_header_and_rejects_everything_else() {
     assert!(webhook::verify_signature_hex(secret, body, &digest, ""));
 
     assert!(!webhook::verify_signature_hex(
-        "wrong-secret",
+        &Secret::new("wrong-secret"),
         body,
         &header,
         "sha256="
@@ -103,7 +104,7 @@ fn an_empty_secret_verifies_nothing() {
     // accept.
     let forged = format!("sha256={}", webhook::hmac_sha256_hex(b"", body));
     assert!(
-        !webhook::verify_signature_hex("", body, &forged, "sha256="),
+        !webhook::verify_signature_hex(&Secret::new(""), body, &forged, "sha256="),
         "an empty secret must not accept the digest of the empty key"
     );
     // And nothing else verifies under it either, well-formed or not.
@@ -114,7 +115,7 @@ fn an_empty_secret_verifies_nothing() {
         "deadbeef",
     ] {
         assert!(
-            !webhook::verify_signature_hex("", body, presented, "sha256="),
+            !webhook::verify_signature_hex(&Secret::new(""), body, presented, "sha256="),
             "empty secret, presented {presented:?}"
         );
     }
@@ -139,32 +140,33 @@ fn hub(mode: &str, token: &str, challenge: &str) -> BTreeMap<String, String> {
 #[test]
 fn meta_hub_echoes_the_challenge_only_on_an_exact_token_match() {
     let token = "the-verify-token";
+    let configured = &Secret::new(token);
     assert_eq!(
-        webhook::meta_hub_challenge(&hub(SUBSCRIBE, token, "1158201444"), token),
+        webhook::meta_hub_challenge(&hub(SUBSCRIBE, token, "1158201444"), configured),
         Challenge::Echo("1158201444".to_string())
     );
     assert_eq!(
-        webhook::meta_hub_challenge(&hub(SUBSCRIBE, "other", "1158201444"), token),
+        webhook::meta_hub_challenge(&hub(SUBSCRIBE, "other", "1158201444"), configured),
         Challenge::Reject,
         "a wrong token is refused"
     );
     assert_eq!(
-        webhook::meta_hub_challenge(&hub("unsubscribe", token, "1158201444"), token),
+        webhook::meta_hub_challenge(&hub("unsubscribe", token, "1158201444"), configured),
         Challenge::Reject,
         "only hub.mode=subscribe is answered"
     );
     assert_eq!(
-        webhook::meta_hub_challenge(&BTreeMap::new(), token),
+        webhook::meta_hub_challenge(&BTreeMap::new(), configured),
         Challenge::Reject,
         "missing params are refused, not treated as empty matches"
     );
     assert_eq!(
-        webhook::meta_hub_challenge(&hub(SUBSCRIBE, token, ""), token),
+        webhook::meta_hub_challenge(&hub(SUBSCRIBE, token, ""), configured),
         Challenge::Reject,
         "an empty challenge has nothing to echo"
     );
     assert_eq!(
-        webhook::meta_hub_challenge(&hub(SUBSCRIBE, "", ""), ""),
+        webhook::meta_hub_challenge(&hub(SUBSCRIBE, "", ""), &Secret::new("")),
         Challenge::Reject,
         "an empty configured token never verifies anything"
     );

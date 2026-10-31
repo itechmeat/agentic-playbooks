@@ -14,11 +14,16 @@
 
 #[path = "suite/common.rs"]
 mod common;
+#[path = "../../apb-engine/tests/support/driver_reaper.rs"]
+mod driver_reaper;
 
 #[path = "suite/advisory_tools_test.rs"]
 mod advisory_tools_test;
 #[path = "suite/ask_server_test.rs"]
 mod ask_server_test;
+#[cfg(unix)]
+#[path = "suite/budget_tools_test.rs"]
+mod budget_tools_test;
 #[path = "suite/capture_tools_test.rs"]
 mod capture_tools_test;
 #[path = "suite/catalog_rank_test.rs"]
@@ -29,17 +34,27 @@ mod catalog_tools_test;
 mod connector_policy;
 #[path = "suite/decision_ask_test.rs"]
 mod decision_ask_test;
+#[path = "suite/discover_tool_test.rs"]
+mod discover_tool_test;
 #[path = "suite/forward_patch_tool_test.rs"]
 mod forward_patch_tool_test;
+#[path = "suite/grade_tool_test.rs"]
+mod grade_tool_test;
+#[path = "suite/memory_tools_test.rs"]
+mod memory_tools_test;
 #[path = "suite/patch_tool_test.rs"]
 mod patch_tool_test;
 #[path = "suite/policy_test.rs"]
 mod policy_test;
+#[path = "suite/problems_tool_test.rs"]
+mod problems_tool_test;
 #[cfg(unix)]
 #[path = "suite/profile_e2e_test.rs"]
 mod profile_e2e_test;
 #[path = "suite/profile_tools_test.rs"]
 mod profile_tools_test;
+#[path = "suite/promote_tools_test.rs"]
+mod promote_tools_test;
 #[path = "suite/read_tools_test.rs"]
 mod read_tools_test;
 #[path = "suite/retro_tool_test.rs"]
@@ -48,6 +63,8 @@ mod retro_tool_test;
 mod review_tool_test;
 #[path = "suite/run_answer_test.rs"]
 mod run_answer_test;
+#[path = "suite/run_lists_test.rs"]
+mod run_lists_test;
 #[path = "suite/run_tools_test.rs"]
 mod run_tools_test;
 #[path = "suite/subplaybook_policy_test.rs"]

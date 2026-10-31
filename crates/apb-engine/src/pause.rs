@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod budget;
+pub mod cause;
 pub mod display;
 pub(crate) mod interrupt;
 pub mod kind;
@@ -19,8 +21,9 @@ pub mod request;
 pub mod resume_all;
 pub mod waker;
 
+pub use cause::cause_of;
 pub use interrupt::{DEFAULT_GRACE, GRACE_ENV};
-pub use kind::{PauseBy, PauseMode};
+pub use kind::{PauseBy, PauseCause, PauseMode};
 pub use probe::{WakeProbe, probe_before_wake};
 pub use request::{PauseOutcome, request_pause};
 pub use resume_all::{ResumeAllAction, ResumeAllEntry, ResumeCause, resume_all};
@@ -117,6 +120,11 @@ pub struct PauseInfo {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub pausing: bool,
+    /// Why the engine paused the run (a quota, the budget), derived from
+    /// the reason; absent for every other pause.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub cause: Option<PauseCause>,
 }
 
 /// The pause to report for a run with reported status `status`.
@@ -145,9 +153,11 @@ pub fn pause_info(
             else {
                 return None;
             };
+            let by = by.unwrap_or(PauseBy::Supervisor);
             Some(PauseInfo {
+                cause: cause_of(reason, by),
                 reason: reason.clone(),
-                by: by.unwrap_or(PauseBy::Supervisor),
+                by,
                 mode: mode.unwrap_or_default(),
                 since: Some(since),
                 until: *until,
@@ -155,14 +165,19 @@ pub fn pause_info(
                 pausing: false,
             })
         }
-        RunStatus::Running if driver_alive == Some(true) => pending.map(|p| PauseInfo {
-            reason: p.journal_reason(),
-            by: p.by.unwrap_or(PauseBy::Supervisor),
-            mode: p.mode,
-            since: None,
-            until: p.until,
-            keep_lock: p.keep_lock,
-            pausing: true,
+        RunStatus::Running if driver_alive == Some(true) => pending.map(|p| {
+            let reason = p.journal_reason();
+            let by = p.by.unwrap_or(PauseBy::Supervisor);
+            PauseInfo {
+                cause: cause_of(&reason, by),
+                reason,
+                by,
+                mode: p.mode,
+                since: None,
+                until: p.until,
+                keep_lock: p.keep_lock,
+                pausing: true,
+            }
         }),
         _ => None,
     }
@@ -432,6 +447,7 @@ mod tests {
                 600,
                 EventPayload::RunAborted {
                     reason: "stop".into(),
+                    by: None,
                 },
             ),
         ];

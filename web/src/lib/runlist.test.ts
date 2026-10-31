@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { groupRunsByParent, type RunLike } from './runlist'
+import { groupRunsByParent, needsLookLabel, type RunLike } from './runlist'
 
 function r(run_id: string, parent_run?: string | null): RunLike {
   return { run_id, parent_run }
@@ -59,5 +59,19 @@ describe('groupRunsByParent', () => {
     const before = [...runs]
     groupRunsByParent(runs)
     expect(runs).toEqual(before)
+  })
+})
+
+describe('needsLookLabel', () => {
+  it('labels a run that needs a look with its counts as the tooltip', () => {
+    expect(needsLookLabel({ reasons: ['regression', 'findings'], regressions: 1, findings: 2, warnings: 0 })).toEqual({
+      label: 'needs a look',
+      title: '1 regression, 2 findings',
+    })
+  })
+
+  it('is null for a run nothing calls for a look at', () => {
+    expect(needsLookLabel(undefined)).toBeNull()
+    expect(needsLookLabel({ reasons: [], regressions: 0, findings: 0, warnings: 0 })).toBeNull()
   })
 })

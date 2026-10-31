@@ -7,21 +7,20 @@
 //! the shared atomic-write helper. The plaintext value is returned exactly
 //! once, by `issue`, for a single print, and is never persisted or logged.
 //!
-//! Everything derived from a secret is compared with `subtle::ConstantTimeEq`;
-//! this module owns that comparison for the whole workspace (the run-hook
-//! endpoint in apb-server uses `ct_eq_str` too), so no call site re-decides
-//! whether a plain `==` on a secret is acceptable.
+//! Everything derived from a secret is compared with
+//! [`crate::secret::ct_eq_str`], so no call site re-decides whether a plain
+//! `==` on a secret is acceptable. Issued keys travel as
+//! [`crate::secret::Secret`].
 
 use std::path::{Path, PathBuf};
 
+use crate::content::hex_lower;
+use crate::fsutil::atomic_write_private;
+use crate::secret::{Secret, ct_eq_str};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
-
-use crate::content::hex_lower;
-use crate::fsutil::atomic_write_private;
 
 /// Every issued key starts with this, so an operator can recognize one on
 /// sight and a secret scanner can pattern-match it.
@@ -91,30 +90,26 @@ pub fn hash_hex(secret: &str) -> String {
     hex_lower(&h.finalize())
 }
 
-/// 32 bytes from the OS CSPRNG in unpadded base64url. Used for the key body
-/// and for session tokens; never for anything that must be human-typed.
+/// 32 bytes from the OS CSPRNG in unpadded base64url, for values that are
+/// not credentials themselves (a page nonce). Every credential (an API key,
+/// a session token, a supervisor token) comes from [`random_secret`].
 pub fn random_token() -> Result<String, AuthError> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| AuthError::Random(e.to_string()))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Constant-time string comparison. Lengths are not secret (a length mismatch
-/// returns immediately), the contents are: equal-length inputs are compared
-/// with `subtle::ConstantTimeEq` so no byte position leaks through timing.
-pub fn ct_eq_str(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.ct_eq(b).into()
+/// [`random_token`] sealed as a [`Secret`]: the body of an API key and a
+/// session token.
+pub fn random_secret() -> Result<Secret, AuthError> {
+    random_token().map(Secret::new)
 }
 
 /// The id of the key `presented` is, or `None`. Every stored key is compared
 /// even after a match so the loop's duration does not reveal which key was
 /// presented.
-pub fn verify(keys: &[KeyRecord], presented: &str) -> Option<String> {
-    let digest = hash_hex(presented);
+pub fn verify(keys: &[KeyRecord], presented: &Secret) -> Option<String> {
+    let digest = hash_hex(presented.expose_secret());
     let mut found: Option<String> = None;
     for k in keys {
         if ct_eq_str(&digest, &k.sha256) {
@@ -173,14 +168,14 @@ fn lock_for(path: &Path) -> Result<crate::fsutil::DirLock, AuthError> {
 
 /// Mints a key into `path` and returns `(plaintext, record)`. The plaintext is
 /// the caller's only chance to see it.
-pub fn issue_into(path: &Path) -> Result<(String, KeyRecord), AuthError> {
+pub fn issue_into(path: &Path) -> Result<(Secret, KeyRecord), AuthError> {
     let _lock = lock_for(path)?;
     let mut file = load_from(path)?;
     if file.keys.len() >= MAX_KEYS {
         return Err(AuthError::TooManyKeys);
     }
-    let plain = format!("{KEY_PREFIX}{}", random_token()?);
-    let sha256 = hash_hex(&plain);
+    let plain = Secret::new(format!("{KEY_PREFIX}{}", random_secret()?.expose_secret()));
+    let sha256 = hash_hex(plain.expose_secret());
     let record = KeyRecord {
         id: sha256[..8].to_string(),
         sha256,
@@ -212,7 +207,7 @@ pub fn load() -> Result<AuthFile, AuthError> {
 }
 
 /// `issue_into` on the standard config-dir path.
-pub fn issue() -> Result<(String, KeyRecord), AuthError> {
+pub fn issue() -> Result<(Secret, KeyRecord), AuthError> {
     issue_into(&auth_file_path()?)
 }
 

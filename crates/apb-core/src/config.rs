@@ -66,6 +66,108 @@ pub struct GlobalConfig {
     /// has no machine switch: a run asks for it.
     pub execution: ExecutionSettings,
     // --- end host execution mode ---
+    /// Size limits on what apb keeps of agent output
+    /// (`crate::output_limits`). Absent keys keep the defaults; a project
+    /// `.apb/config.yaml` may only lower them.
+    pub output_limits: crate::output_limits::OutputLimitSettings,
+    /// "Notify me" (`crate::notify`): the target notifications go to and
+    /// whether every run notifies by default. Absent: no run notifies
+    /// unless it names a target itself.
+    pub notify: crate::notify::NotifySettings,
+    /// History discovery (`crate::discover`): the agent history roots it
+    /// may read and how far back. Absent: the agents' own default
+    /// directories, 90 days.
+    pub discover: DiscoverSettings,
+    /// The machine's isolation settings (`crate::isolation`): the bwrap
+    /// binary and extra read-only paths every sandbox binds. Absent: bwrap
+    /// from `/usr/bin` or PATH, no extra paths.
+    pub isolation: crate::isolation::IsolationSettings,
+}
+
+/// The agent kinds a history root may hold.
+pub const HISTORY_AGENTS: [&str; 2] = ["claude_code", "codex"];
+
+/// One named history root of the `discover:` section.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRootSetting {
+    /// How every surface names the root (`[a-z0-9][a-z0-9_-]*`): a path is
+    /// never asked for or shown by a surface, only this name.
+    pub name: String,
+    /// One of [`HISTORY_AGENTS`].
+    pub agent: String,
+    /// The directory: absolute, or under the home directory as `~/...`
+    /// (a relative path would read a different directory from each
+    /// surface's working directory).
+    pub path: String,
+}
+
+/// The `discover:` section of the global config.
+///
+/// ```yaml
+/// discover:
+///   roots: [{ name: claude_code, agent: claude_code, path: ~/.claude/projects }]
+///   since_days: 90
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DiscoverSettings {
+    /// When given, these roots replace the defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roots: Option<Vec<HistoryRootSetting>>,
+    /// How many days back sessions are read, 1 to 365.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_days: Option<u32>,
+}
+
+impl DiscoverSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(d) = self.since_days
+            && !(1..=365).contains(&d)
+        {
+            return Err("discover.since_days must be between 1 and 365".into());
+        }
+        let mut seen = BTreeSet::new();
+        for r in self.roots.iter().flatten() {
+            if !is_root_name(&r.name) {
+                return Err(format!(
+                    "discover.roots: `{}` is not a root name ([a-z0-9][a-z0-9_-]*, at most 64 characters)",
+                    r.name
+                ));
+            }
+            if !HISTORY_AGENTS.contains(&r.agent.as_str()) {
+                return Err(format!(
+                    "discover.roots.{}: unknown agent `{}` (known: {})",
+                    r.name,
+                    r.agent,
+                    HISTORY_AGENTS.join(", ")
+                ));
+            }
+            let p = r.path.as_str();
+            if !(p.starts_with("~/") && p.len() > 2 || std::path::Path::new(p).is_absolute()) {
+                return Err(format!(
+                    "discover.roots.{}: path must be absolute or start with `~/`",
+                    r.name
+                ));
+            }
+            if !seen.insert(r.name.as_str()) {
+                return Err(format!("discover.roots: `{}` is named twice", r.name));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A history root's name: `[a-z0-9][a-z0-9_-]*`, at most 64 characters.
+pub fn is_root_name(name: &str) -> bool {
+    name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 // --- host execution mode (0.23.0) ---
@@ -372,6 +474,12 @@ impl GlobalConfig {
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let cfg: Self = yaml_serde::from_str(&raw)
             .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
+        cfg.output_limits
+            .validate()
+            .and_then(|()| cfg.notify.validate())
+            .and_then(|()| cfg.discover.validate())
+            .and_then(|()| cfg.isolation.validate())
+            .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
         // A policy glob that does not compile would match nothing and refuse
         // every model its rule covers: report it where it is written instead.
         for (i, rule) in cfg.model_policy.iter().enumerate() {
@@ -385,6 +493,28 @@ impl GlobalConfig {
             }
         }
         Ok(cfg)
+    }
+
+    /// The output limits for runs of the project at `root`: defaults, then
+    /// this config's `output_limits`, then the project's (lowering only).
+    pub fn output_limits_for(
+        &self,
+        root: &Path,
+    ) -> Result<crate::output_limits::OutputLimits, String> {
+        let project = project_output_limits(root)?;
+        project.validate()?;
+        Ok(
+            crate::output_limits::OutputLimits::from_global(&self.output_limits)
+                .lowered_by(&project),
+        )
+    }
+
+    /// Whether the config replaces agent `id`'s built-in form
+    /// (`agents.<id>.invocation`). Read under `id` exactly as given, the way
+    /// a run reads a profile's agent: an entry under an alias applies only
+    /// to that alias.
+    pub fn has_custom_form(&self, id: &str) -> bool {
+        self.agents.get(id).is_some_and(|a| a.invocation.is_some())
     }
 
     /// Launch command for agent `id`, if it's described in the config.
@@ -458,26 +588,66 @@ impl SuggestionSettings {
     }
 }
 
-/// Partial view of the project `.apb/config.yaml`: only the `suggestions:`
-/// section. Deliberately tolerant of the other keys that file carries
-/// (`skills_dir`, `port`), the same way `crate::skills` reads it.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct ProjectSuggestionsFile {
-    suggestions: SuggestionSettings,
-}
-
-/// The project-level `suggestions:` section. A missing file is an empty
-/// section; a malformed one is an error so a typo is not silently ignored.
-pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, String> {
+/// One section a project may set for its own runs (`suggestions:`,
+/// `output_limits:`) from the project `.apb/config.yaml`, read on its own: a
+/// typo in one section never breaks another, and the other keys that file
+/// carries (`skills_dir`, `port`) are left alone, the same way
+/// `crate::skills` reads it. A missing or empty file or section is the
+/// default; a malformed file or section, or a top level that is not a
+/// mapping, is an error so a typo is not silently ignored.
+fn project_section<T: serde::de::DeserializeOwned + Default>(
+    root: &Path,
+    key: &str,
+) -> Result<T, String> {
     let path = root.join(".apb/config.yaml");
     if !path.is_file() {
-        return Ok(SuggestionSettings::default());
+        return Ok(T::default());
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let parsed: ProjectSuggestionsFile = yaml_serde::from_str(&raw)
-        .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
-    Ok(parsed.suggestions)
+    let invalid =
+        |e: yaml_serde::Error| format!("invalid project config `{}`: {e}", path.display());
+    let doc: yaml_serde::Value = yaml_serde::from_str(&raw).map_err(invalid)?;
+    match doc {
+        // An empty file is a project that sets nothing.
+        yaml_serde::Value::Null => return Ok(T::default()),
+        yaml_serde::Value::Mapping(_) => {}
+        _ => {
+            return Err(format!(
+                "invalid project config `{}`: the top level must be a mapping",
+                path.display()
+            ));
+        }
+    }
+    match doc.get(key) {
+        None | Some(yaml_serde::Value::Null) => Ok(T::default()),
+        Some(section) => yaml_serde::from_value(section.clone())
+            .map_err(|e| format!("invalid project config `{}`: {key}: {e}", path.display())),
+    }
+}
+
+/// The project-level `suggestions:` section.
+pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, String> {
+    project_section(root, "suggestions")
+}
+
+/// The project-level `output_limits:` section (see `crate::output_limits`).
+pub fn project_output_limits(
+    root: &Path,
+) -> Result<crate::output_limits::OutputLimitSettings, String> {
+    project_section(root, "output_limits")
+}
+
+/// The project-level `notify:` section (see `crate::notify`): it may only
+/// turn the machine default off or narrow the transitions.
+pub fn project_notify(root: &Path) -> Result<crate::notify::ProjectNotify, String> {
+    let section: crate::notify::ProjectNotify = project_section(root, "notify")?;
+    section.validate().map_err(|e| {
+        format!(
+            "invalid project config `{}`: {e}",
+            root.join(".apb/config.yaml").display()
+        )
+    })?;
+    Ok(section)
 }
 
 /// The address the dashboard binds when no flag is given. Loopback, because a
@@ -591,6 +761,23 @@ impl ServerConfig {
             out.insert(addr);
         }
         Ok(out)
+    }
+
+    /// The dashboard page of run `run` of workspace `workspace`: under
+    /// `public_base_url` when one is set, else on the loopback dashboard at
+    /// `port`. Both ids are percent-encoded as path segments.
+    pub fn run_url(&self, port: u16, workspace: &str, run: &str) -> String {
+        let base = self
+            .public_base_url
+            .as_deref()
+            .map(|u| u.trim().trim_end_matches('/'))
+            .filter(|u| !u.is_empty())
+            .map_or_else(|| format!("http://127.0.0.1:{port}"), str::to_string);
+        format!(
+            "{base}/#/run/{}/{}",
+            crate::url_component::encode(workspace),
+            crate::url_component::encode(run)
+        )
     }
 
     /// Whether the configured public origin is https, which is one of the two

@@ -1,4 +1,6 @@
+mod budget;
 mod cache;
+mod candidate;
 mod connector;
 mod consent;
 mod dashboard_check;
@@ -6,14 +8,27 @@ mod dashboard_check;
 mod decide;
 // --- end issue #193 ---
 mod decisions;
+mod discover;
+mod doctor;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
+mod grade;
+mod import_preview;
+mod intent;
+mod interrupt;
+mod make_global;
 mod manage;
+mod memory;
+mod notify;
 mod onboarding;
 mod pause;
+mod problems;
 mod profile;
+mod publish;
+mod report;
 mod run;
+mod run_items;
 // --- 0.24.0 run execution mode lines ---
 mod run_mode;
 // --- end 0.24.0 run execution mode lines ---
@@ -38,6 +53,7 @@ use clap::{Parser, Subcommand};
 use crate::cache::{CacheCmd, cache_cmd};
 use crate::connector::{ConnectorAction, connector_cmd};
 use crate::decisions::{DecisionsAction, decisions_cmd};
+use crate::intent::{IntentAction, intent_cmd};
 use crate::manage::{
     ProjectsAction, adopt_cmd, detect_cmd, export_cmd, import_cmd, migrate_cmd, projects_cmd,
     run_init, subscriptions_cmd,
@@ -45,8 +61,8 @@ use crate::manage::{
 use crate::pause::pause_cmd;
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
-    answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd, resume_all_cmd,
-    resume_cmd, review_cmd, run_cmd, run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
+    DriveRunArgs, answer_cmd, drive_run_child, drive_supervised_child, note_cmd, pause_waker_cmd,
+    resume_all_cmd, resume_cmd, review_cmd, run_cmd, run_list, run_validate, runs_cmd, stop_cmd,
     wait_cmd,
 };
 use crate::selfupdate::run_self_update;
@@ -92,8 +108,45 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
-    /// Adoption readiness report for a playbook (or all project playbooks)
-    Adopt { name: Option<String> },
+    /// Will it fit here: the readiness report of a playbook (or of every
+    /// project and global playbook) for a run in this project, in four
+    /// sections (compatibility, setup, trust, consent) plus the profile and
+    /// model findings
+    Adopt {
+        name: Option<String>,
+        /// Only this definition scope: project or global (with NAME: the
+        /// playbook's scope, default project)
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Show or forget the run input a playbook remembers in this project
+    Memory {
+        #[command(subcommand)]
+        cmd: memory::MemoryCmd,
+    },
+    /// Make a project playbook available in every project: copies it with
+    /// all versions to the global store (digests and trust carry over),
+    /// carries this project's remembered input along and applies the chosen
+    /// fate of the project copy; a failed step undoes the earlier ones.
+    /// Exit codes: 0 done (or a dry run with no blockers), 2 blocked or
+    /// refused
+    MakeGlobal {
+        id: String,
+        /// What happens to the project copy: trash (restorable), retire
+        /// (the global one wins here) or keep (with its remembered input;
+        /// the pair reads ambiguous while both are active and trusted)
+        #[arg(long, required_unless_present = "dry_run")]
+        variant: Option<String>,
+        /// Also copy the project profiles it binds to the global scope
+        #[arg(long)]
+        move_profiles: bool,
+        /// Only print the plan: blockers, actions and warnings
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// View or declare agent subscriptions (spec 8). Bare command lists them;
     /// on a terminal with no prior survey it offers an interactive one.
     Subscriptions {
@@ -122,10 +175,23 @@ enum Command {
         /// attempts and their pid liveness, the driver and workdir-lock
         /// holders, unapplied control entries, repeated supervisor actions.
         /// Read-only, like the environment doctor: it repairs nothing.
-        #[arg(long, value_name = "ID")]
+        #[arg(long, value_name = "ID", conflicts_with_all = ["agents", "probe_agent"])]
         run: Option<String>,
+        /// Check every installed built-in agent, whether or not a profile
+        /// names it: its version against the verified one and the flags of
+        /// its built-in form in its help. Free: no model call.
+        #[arg(long, conflicts_with = "probe_agent")]
+        agents: bool,
+        /// Send one short prompt to this built-in agent and check its output
+        /// against what its built-in form promises. One paid model call;
+        /// refused inside a run step. Exit 1 when the format drifted.
+        #[arg(long, value_name = "AGENT")]
+        probe_agent: Option<String>,
+        /// The model for --probe-agent (default: the first the catalog lists).
+        #[arg(long, requires = "probe_agent")]
+        model: Option<String>,
     },
-    /// Export a playbook (with layout) to a single bundle file
+    /// Export a playbook version (YAML, layout and scripts) to a single bundle file
     Export {
         name: String,
         #[arg(long)]
@@ -134,17 +200,35 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Import a playbook bundle file into this project
+    /// Import a playbook bundle file into this project. Always prints a
+    /// preview first (definition diff, scripts added, removed or changed,
+    /// validation errors, the bundle digest). On a terminal it then asks;
+    /// without a terminal it imports only with --accept naming the bundle
+    /// digest, and otherwise exits 3 without writing anything. Exit codes:
+    /// 0 imported or previewed, 2 refused or error, 3 needs --accept
     Import {
         file: PathBuf,
         /// Do not set the imported version as current
         #[arg(long)]
         no_current: bool,
+        /// Only print the preview; write nothing
+        #[arg(long, conflicts_with = "accept")]
+        preview: bool,
+        /// Accept this exact file: its bundle digest as the preview prints
+        /// it (`sha256:...`)
+        #[arg(long, value_name = "BUNDLE_DIGEST")]
+        accept: Option<String>,
     },
     /// List deleted playbooks or restore one with all its versions
     Trash {
         #[command(subcommand)]
         action: TrashAction,
+    },
+    /// The send intents of a run: list what became of each send, or record
+    /// a person's decision on one whose outcome is not known
+    Intent {
+        #[command(subcommand)]
+        action: IntentAction,
     },
     /// List the approvals in the trust store, or revoke them
     Trust {
@@ -152,73 +236,7 @@ enum Command {
         action: TrustAction,
     },
     /// Run a playbook
-    Run {
-        name: String,
-        #[arg(long)]
-        version: Option<String>,
-        #[arg(long)]
-        instruction: Option<String>,
-        /// key=value, repeatable
-        #[arg(long = "param", value_name = "K=V")]
-        params: Vec<String>,
-        #[arg(long)]
-        allow_shared_workdir: bool,
-        /// Run in the background under supervision: the engine spawns a
-        /// background supervisor agent and watches its heartbeat
-        #[arg(long)]
-        supervise: bool,
-        /// Start the run in a detached background process, print its id and
-        /// return at once; follow it with `apb wait <run_id>`
-        #[arg(long, conflicts_with = "supervise")]
-        detach: bool,
-        /// Run-level overrides YAML file (spec 11): swap models/executors
-        /// without creating a new version
-        #[arg(long)]
-        overrides: Option<PathBuf>,
-        /// Disable the node result cache for this run: no lookup and no
-        /// admission anywhere in the run, regardless of what individual
-        /// nodes declare
-        #[arg(long, conflicts_with = "refresh_cache")]
-        no_cache: bool,
-        /// Skip cache lookup (never a hit) but still write fresh results, so
-        /// a fresh execution overwrites any stale cached result
-        #[arg(long)]
-        refresh_cache: bool,
-        /// Run id to continue as a fresh top-level retry (issue #42 finding 10).
-        /// Links the new run to the predecessor in `apb runs`.
-        #[arg(long = "continued-from", value_name = "RUN_ID")]
-        continued_from: Option<String>,
-        /// The run's working tree: agent and script nodes run in this
-        /// directory (absolute, or relative to the project) and the run takes
-        /// its busy lock instead of the project's, so runs over different git
-        /// worktrees do not wait on each other. Overrides the playbook's
-        /// `worktree`
-        #[arg(long, value_name = "DIR")]
-        worktree: Option<String>,
-        /// Who executes the agent steps: cli (the default, the profiles'
-        /// agent CLIs) or host (no CLI is spawned; every agent step becomes
-        /// a host task that `apb tasks` lists and `apb tasks submit`
-        /// answers, meant for an MCP host session)
-        #[arg(long, value_name = "MODE")]
-        execution: Option<String>,
-        /// Consent to the playbook's irreversible effects (a push, a merge,
-        /// a deploy) for a start without a person at a terminal, such as a
-        /// CI step: pass the consent_nonce the refusal printed, which binds
-        /// the consent to that version of the playbook. A bare flag is
-        /// deprecated. At a terminal, apb asks instead
-        #[arg(
-            long,
-            value_name = "CONSENT_NONCE",
-            num_args = 0..=1,
-            default_missing_value = "true",
-            require_equals = true
-        )]
-        confirm_irreversible: Option<String>,
-        /// Internal: the eval settings of a run `apb eval` starts (a JSON
-        /// file with the spawn env overlay and the wall-clock deadline).
-        #[arg(long, value_name = "FILE", hide = true)]
-        eval_settings: Option<PathBuf>,
-    },
+    Run(run::RunArgs),
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
     #[command(args_conflicts_with_subcommands = true)]
@@ -240,8 +258,45 @@ enum Command {
         /// Show only this run
         run_id: Option<String>,
         /// With a run id: the run as JSON, the same object as MCP run_status
-        #[arg(long, requires = "run_id")]
+        #[arg(long, requires = "run_id", conflicts_with = "items")]
         json: bool,
+        /// With a run id: one line per item of the run's list nodes
+        #[arg(long, requires = "run_id")]
+        items: bool,
+        /// With --items: only this list node
+        #[arg(long, requires = "items")]
+        node: Option<String>,
+        /// With --items: only items in this state (pending, running,
+        /// passed, needs_look)
+        #[arg(long, requires = "items")]
+        state: Option<String>,
+        /// With a run id: write the run report as one self-contained HTML
+        /// page (no script, no network) to this file, or `-` for standard
+        /// output
+        #[arg(long, value_name = "PATH", requires = "run_id", conflicts_with_all = ["json", "items"])]
+        html: Option<PathBuf>,
+    },
+    /// Notifications about runs ("Notify me"): without arguments, the
+    /// machine's notify target and whether runs here notify by default;
+    /// with a run id, that run's notifications, or a change of them with
+    /// --on, --off, --via or --to; `apb notify test` sends one test message
+    /// through the target
+    Notify {
+        /// A run id, or `test`
+        run: Option<String>,
+        /// Turn notifications on; with a comma-separated list joined by `=`
+        /// (--on=review,finished) only those transitions
+        #[arg(long, value_name = "LIST", num_args = 0..=1, require_equals = true, default_missing_value = "", conflicts_with = "off")]
+        on: Option<String>,
+        /// Turn notifications off for the run
+        #[arg(long, conflicts_with_all = ["via", "to"])]
+        off: bool,
+        /// Send through this connector account: <connector>/<account>[:function]
+        #[arg(long, value_name = "CONNECTOR/ACCOUNT[:FUNCTION]")]
+        via: Option<String>,
+        /// The recipient (a chat id, an address)
+        #[arg(long, value_name = "TO", allow_hyphen_values = true)]
+        to: Option<String>,
     },
     /// Pause a run so it can continue later (issue #200). Default `--drain`:
     /// no new node starts, running nodes finish, then the run is paused and
@@ -302,6 +357,8 @@ enum Command {
             require_equals = true
         )]
         confirm_irreversible: Option<String>,
+        #[command(flatten)]
+        budget: budget::ResumeBudgetFlags,
     },
     /// Block until a run finishes, needs input (a question, a review, a
     /// supervisor decision) or stops, then print why. A single call that
@@ -319,7 +376,7 @@ enum Command {
     Stop { run_id: String },
     /// Post a supervisor note (ContextAppend) to a run's control channel
     Note { run_id: String, text: String },
-    /// Decide a human_review node of a running run
+    /// Decide a human_review or publish node of a running run
     Review {
         run_id: String,
         node_id: String,
@@ -327,6 +384,16 @@ enum Command {
         decision: String,
         #[arg(long, default_value = "")]
         note: String,
+        /// A publish node only: the nonce of the plan you checked (see
+        /// `apb publish show`)
+        #[arg(long)]
+        nonce: Option<String>,
+    },
+    /// The publish gate of a run: show the exact plan, consent to it by its
+    /// nonce, or skip the push
+    Publish {
+        #[command(subcommand)]
+        action: crate::publish::PublishAction,
     },
     /// Answer an interactive node's pending question in a running run
     Answer {
@@ -346,6 +413,27 @@ enum Command {
         #[command(subcommand)]
         action: DecisionsAction,
     },
+    /// Grade an ended run by rules (the built-in quality criteria: outcome,
+    /// loops, scope, consent, skill use) or, with --model, its playbook's
+    /// own criteria by the project's decision model; show its stored
+    /// grades, or grade a playbook's earlier runs so a candidate comparison
+    /// has a history. A stored grade re-decides the playbook's candidate
+    /// under a quality policy. By rules no model is called
+    Grade(crate::grade::GradeArgs),
+    /// A playbook's known problems: trouble with its tools that earlier
+    /// runs reported. Without a subcommand, list them; confirm, dismiss,
+    /// reopen or close one (a close quotes the source's new text); recheck
+    /// the ones whose source changed; scan earlier runs to collect them
+    Problems(crate::problems::ProblemsArgs),
+    /// Find step sequences your past agent sessions repeat (Claude Code and
+    /// Codex history of the named projects) and offer them as playbook
+    /// drafts; list or show stored results, save or decline a suggestion.
+    /// No model and no network call
+    Discover(crate::discover::DiscoverCmdArgs),
+    /// Show a playbook's candidate version and how it compares with
+    /// current by quality, or decide it: --promote makes it current,
+    /// --keep-current drops it and changes nothing
+    Candidate(crate::candidate::CandidateArgs),
     // --- 0.23.0 stats (C3) ---
     /// Cross-run metrics per playbook version and node, from the run
     /// journals only: outcome rate, first-pass success, retries, fallbacks
@@ -512,6 +600,12 @@ enum Command {
         /// it and exit without waiting for the run itself to finish.
         #[arg(long)]
         handshake: PathBuf,
+        /// The run's budget argument, forwarded from `apb run --supervise`.
+        #[command(flatten)]
+        budget: budget::BudgetFlags,
+        /// The run's notify flags, forwarded from `apb run --supervise`.
+        #[command(flatten)]
+        notify: notify::NotifyFlags,
     },
     /// Drives an already-prepared run at `<root>/.apb/runs/<run-id>` to
     /// completion in THIS process. Spawned detached by
@@ -545,6 +639,10 @@ enum Command {
         /// when `run_resumed` is journaled. Only meaningful with `--resume`.
         #[arg(long = "pause-seq")]
         pause_seq: Option<u64>,
+        /// The budget change of the resume, as JSON, journaled next to its
+        /// `run_resumed`. Only meaningful with `--resume`.
+        #[arg(long = "budget-json")]
+        budget_json: Option<String>,
     },
     /// The waker of a paused run with an `until` (issue #200): sleeps until
     /// then and resumes the run only if the same pause still holds it. Spawned
@@ -595,7 +693,20 @@ fn registers_workspace(command: Option<&Command>) -> bool {
     )
 }
 
+/// The hidden name of the sandbox helper: bwrap runs `apb __sandbox-exec
+/// [--scope] [--require-scope] -- <agent argv>` inside an isolation
+/// sandbox (`apb_engine::sandbox::scope::exec_main`). Dispatched before
+/// argument parsing and before anything touches the config or the registry:
+/// inside the sandbox neither is visible, and the helper must only scope
+/// itself and exec the agent.
+const SANDBOX_EXEC: &str = "__sandbox-exec";
+
 fn main() -> ExitCode {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == SANDBOX_EXEC) {
+        let code = apb_engine::sandbox::scope::exec_main(&args[2..]);
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     let cli = Cli::parse();
     let root = std::env::current_dir().expect("cwd");
     // Auto-register the workspace in the project registry (spec 6.2). Only for
@@ -618,54 +729,83 @@ fn main() -> ExitCode {
         Some(Command::Init) => run_init(&root),
         Some(Command::List) => run_list(&root),
         Some(Command::Validate { name }) => run_validate(&root, name),
-        Some(Command::Doctor { run }) => run_doctor(&root, run.as_deref()),
+        Some(Command::Doctor {
+            run,
+            agents,
+            probe_agent,
+            model,
+        }) => doctor::doctor_cmd(
+            &root,
+            doctor::DoctorArgs {
+                run,
+                agents,
+                probe_agent,
+                model,
+            },
+        ),
         Some(Command::Export { name, version, out }) => {
             export_cmd(&root, &name, version.as_deref(), out.as_deref())
         }
-        Some(Command::Import { file, no_current }) => import_cmd(&root, &file, !no_current),
-        Some(Command::Trash { action }) => trash_cmd(&root, action),
-        Some(Command::Trust { action }) => trust_cmd(action),
-        Some(Command::Run {
-            name,
-            version,
-            instruction,
-            params,
-            allow_shared_workdir,
-            supervise,
-            detach,
-            overrides,
-            no_cache,
-            refresh_cache,
-            continued_from,
-            worktree,
-            execution,
-            confirm_irreversible,
-            eval_settings,
-        }) => run_cmd(
+        Some(Command::Import {
+            file,
+            no_current,
+            preview,
+            accept,
+        }) => import_cmd(
             &root,
-            &name,
-            version.as_deref(),
-            instruction,
-            params,
-            allow_shared_workdir,
-            supervise,
-            detach,
-            overrides.as_deref(),
-            no_cache,
-            refresh_cache,
-            continued_from,
-            worktree,
-            execution.as_deref(),
-            confirm_irreversible,
-            eval_settings.as_deref(),
+            &file,
+            &crate::manage::ImportFlags {
+                make_current: !no_current,
+                preview_only: preview,
+                accept: accept.as_deref(),
+            },
         ),
+        Some(Command::Trash { action }) => trash_cmd(&root, action),
+        Some(Command::Trust { action }) => trust_cmd(&root, action),
+        Some(Command::Intent { action }) => intent_cmd(&root, action),
+        Some(Command::Run(args)) => run_cmd(&root, args),
         Some(Command::Tasks {
             action,
             run_id,
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
-        Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Runs {
+            run_id: Some(run_id),
+            items: true,
+            node,
+            state,
+            ..
+        }) => run_items::items_cmd(
+            &root,
+            &run_id,
+            &run_items::ItemFilter {
+                node: node.as_deref(),
+                state: state.as_deref(),
+            },
+        ),
+        Some(Command::Runs {
+            run_id: Some(run_id),
+            html: Some(out),
+            ..
+        }) => report::html_cmd(&root, &run_id, &out),
+        Some(Command::Runs { run_id, json, .. }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Notify {
+            run,
+            on,
+            off,
+            via,
+            to,
+        }) => notify::notify_cmd(
+            &root,
+            run.as_deref(),
+            &notify::NotifyChange {
+                on: on.as_deref(),
+                off,
+                via: via.as_deref(),
+                to: to.as_deref(),
+            },
+        ),
         Some(Command::Pause {
             run_id,
             now,
@@ -674,12 +814,23 @@ fn main() -> ExitCode {
             keep_lock,
             ..
         }) => pause_cmd(&root, &run_id, now, reason, until.as_deref(), keep_lock),
-        Some(Command::Resume { all: true, .. }) => resume_all_cmd(&root),
+        Some(Command::Resume {
+            all: true, budget, ..
+        }) => match budget.request() {
+            Ok(None) => resume_all_cmd(&root),
+            _ => {
+                eprintln!(
+                    "--all takes no budget flags: change a run's budget with `apb resume <run-id>`"
+                );
+                ExitCode::from(2)
+            }
+        },
         Some(Command::Resume {
             run_id,
             from_node,
             allow_environment_drift,
             confirm_irreversible,
+            budget,
             ..
         }) => resume_cmd(
             &root,
@@ -687,6 +838,7 @@ fn main() -> ExitCode {
             from_node.as_deref(),
             allow_environment_drift,
             confirm_irreversible,
+            &budget,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
@@ -696,7 +848,9 @@ fn main() -> ExitCode {
             node_id,
             decision,
             note,
-        }) => review_cmd(&root, &run_id, &node_id, &decision, &note),
+            nonce,
+        }) => review_cmd(&root, &run_id, &node_id, &decision, &note, nonce.as_deref()),
+        Some(Command::Publish { action }) => crate::publish::publish_cmd(&root, action),
         Some(Command::Answer { run, node, text }) => {
             answer_cmd(&root, &run, node.as_deref(), &text)
         }
@@ -722,6 +876,10 @@ fn main() -> ExitCode {
         Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
         Some(Command::Decide(args)) => crate::decide::decide_cmd(&root, args),
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
+        Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
+        Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
+        Some(Command::Problems(args)) => problems::problems_cmd(&root, args),
+        Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Stats {
             playbook,
@@ -776,7 +934,24 @@ fn main() -> ExitCode {
         // --- end 0.24.0 eval suites ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
-        Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),
+        Some(Command::Adopt { name, scope }) => adopt_cmd(&root, name.as_deref(), scope.as_deref()),
+        Some(Command::Memory { cmd }) => memory::memory_cmd(&root, cmd),
+        Some(Command::MakeGlobal {
+            id,
+            variant,
+            move_profiles,
+            dry_run,
+            json,
+        }) => make_global::make_global_cmd(
+            &root,
+            make_global::MakeGlobalArgs {
+                id,
+                variant,
+                move_profiles,
+                dry_run,
+                json,
+            },
+        ),
         Some(Command::Subscriptions { decline, set }) => subscriptions_cmd(set, decline),
         Some(Command::Suggestions { action }) => suggestions_cmd(&root, action),
         Some(Command::DriveSupervised {
@@ -790,6 +965,8 @@ fn main() -> ExitCode {
             consent,
             consent_nonce,
             handshake,
+            budget,
+            notify,
         }) => drive_supervised_child(
             &root,
             &name,
@@ -801,6 +978,8 @@ fn main() -> ExitCode {
             worktree,
             consent.zip(consent_nonce),
             &handshake,
+            &budget,
+            &notify,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:
         // the spawning parent knows which project the run belongs to.
@@ -812,14 +991,18 @@ fn main() -> ExitCode {
             allow_environment_drift,
             by,
             pause_seq,
+            budget_json,
         }) => drive_run_child(
             &run_root,
             &run_id,
-            from_node.as_deref(),
-            resume,
-            allow_environment_drift,
-            by.as_deref(),
-            pause_seq,
+            &DriveRunArgs {
+                from_node: from_node.as_deref(),
+                resume,
+                allow_environment_drift,
+                by: by.as_deref(),
+                pause_seq,
+                budget_json: budget_json.as_deref(),
+            },
         ),
         Some(Command::PauseWaker {
             root: run_root,

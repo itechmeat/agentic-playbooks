@@ -22,6 +22,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::connector::secrets::{parse_cmd_ref, parse_env_ref};
+use crate::secret::Secret;
 
 /// The file name under the config dir.
 pub const DECISIONS_FILE: &str = "decisions.yaml";
@@ -33,22 +34,42 @@ pub const ALLOW_FAKE_ENV: &str = "APB_DECISIONS_ALLOW_FAKE";
 /// would be flagged (issue #165 Part 8, the 2026-09-27 Phase 0 addendum). A
 /// measured starting point, to be re-fitted on shadow data.
 pub const COMPLETION_FINAL_RESULT_CUT: f64 = 0.15;
-/// `uses.catalog_rank.max_requests_per_day` when the file sets none.
-pub const CATALOG_RANK_MAX_REQUESTS_PER_DAY: u32 = 200;
 /// The catalog coverage check's default cut: a suppression record covers
 /// the task at `p` at or above it (`uses.catalog_rank.thresholds.covered`).
 /// A starting point to be measured, like every default threshold.
 pub const CATALOG_COVERED_CUT: f64 = 0.8;
-/// `uses.host_task.max_requests_per_day` when the file sets none: the cap
-/// on decisions a host task or a script asks outside any run, per project
-/// and UTC day (inside a run the run's budget applies).
-pub const HOST_TASK_MAX_REQUESTS_PER_DAY: u32 = 200;
 /// The use of `apb decide` and the MCP tool `decision_ask` (issue #193). On
 /// by default (`advise`) whenever the file configures a provider; the file
 /// can switch it off with `uses.host_task: { mode: off }`.
 pub const HOST_TASK_USE: &str = "host_task";
+/// The use of the decision-model grader (`apb grade --model`): grades a
+/// finished run on the playbook's own criteria. Off unless the file sets it.
+pub const GRADE_USE: &str = "grade";
+/// The use of the known-problem recheck: whether a problem still holds
+/// after its source changed. Off unless the file sets it.
+pub const PROBLEM_RECHECK_USE: &str = "problem_recheck";
+/// The uses that run outside any run budget, with the most requests each may
+/// send per project and UTC day when `uses.<name>.max_requests_per_day` sets
+/// none. A host task's or a script's decisions are capped here too (inside
+/// a run the run's budget applies).
+pub const DAILY_CAPS: [(&str, u32); 4] = [
+    ("catalog_rank", 200),
+    (HOST_TASK_USE, 200),
+    (GRADE_USE, 50),
+    (PROBLEM_RECHECK_USE, 50),
+];
+
+/// The default daily cap of a daily-capped use; `None` for a use that runs
+/// inside a run's budget instead.
+pub fn default_daily_cap(use_name: &str) -> Option<u32> {
+    DAILY_CAPS
+        .iter()
+        .find(|(name, _)| *name == use_name)
+        .map(|(_, cap)| *cap)
+}
+
 /// The known use names (`uses.<name>`).
-pub const USE_NAMES: [&str; 9] = [
+pub const USE_NAMES: [&str; 11] = [
     "judge_node",
     "judge_edge",
     "completion_check",
@@ -58,6 +79,8 @@ pub const USE_NAMES: [&str; 9] = [
     "routing",
     "catalog_rank",
     "host_task",
+    GRADE_USE,
+    PROBLEM_RECHECK_USE,
 ];
 
 /// A use's mode, ordered from least to most effect.
@@ -303,10 +326,9 @@ pub struct UseSettings {
     pub mode: DecisionMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub thresholds: BTreeMap<String, f64>,
-    /// `catalog_rank` and `host_task` only (issue #165 Part 16, issue
-    /// #193): the most requests per project and UTC day outside a run
-    /// (default [`CATALOG_RANK_MAX_REQUESTS_PER_DAY`],
-    /// [`HOST_TASK_MAX_REQUESTS_PER_DAY`]).
+    /// The uses of [`DAILY_CAPS`] only (issue #165 Part 16, issue #193):
+    /// the most requests per project and UTC day outside a run (default
+    /// [`default_daily_cap`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_requests_per_day: Option<u32>,
     // --- enforce settings (issue #165 Part 14) ---
@@ -553,11 +575,15 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
     if let Some(name) = doc.uses.keys().find(|k| !USE_NAMES.contains(&k.as_str())) {
         return Err(format!("unknown use `{name}` under uses"));
     }
-    if let Some((name, _)) = doc.uses.iter().find(|(k, u)| {
-        u.max_requests_per_day.is_some() && !matches!(k.as_str(), "catalog_rank" | "host_task")
-    }) {
+    if let Some((name, _)) = doc
+        .uses
+        .iter()
+        .find(|(k, u)| u.max_requests_per_day.is_some() && default_daily_cap(k).is_none())
+    {
+        let capped: Vec<&str> = DAILY_CAPS.iter().map(|(name, _)| *name).collect();
         return Err(format!(
-            "uses.{name}.max_requests_per_day is only for catalog_rank and host_task"
+            "uses.{name}.max_requests_per_day is only for {}",
+            capped.join(", ")
         ));
     }
     let mut providers = Vec::new();
@@ -738,9 +764,12 @@ pub const DEFAULT_MAX_ACTIONS: u32 = 3;
 ///   `looping` probability.
 /// - `routing.hysteresis`: after a node of the same profile ran on a tier, a
 ///   different tier needs this confidence.
+/// - `grade.min_confidence`: a model's level below this confidence is
+///   `not_enough_data`.
 pub fn default_thresholds(use_name: &str) -> &'static [(&'static str, f64)] {
     match use_name {
         "retry_advice" => &[("min_confidence", 0.6)],
+        GRADE_USE => &[("min_confidence", 0.7)],
         "supervisor_triage" => &[("looping_max", 0.3)],
         "routing" => &[("hysteresis", 0.75)],
         _ => &[],
@@ -982,17 +1011,18 @@ pub fn resolve_in_all(config_dir: &Path, roots: &[&Path]) -> Resolution {
 /// GLOBAL `secrets.env`. Never from the project's `.apb/secrets.env`: the
 /// repository is untrusted, and a key it planted would route this machine's
 /// prompts through the repository owner's provider account.
-pub fn resolve_key_var(var: &str) -> Option<String> {
+pub fn resolve_key_var(var: &str) -> Option<Secret> {
     if let Ok(v) = std::env::var(var)
         && !v.is_empty()
     {
-        return Some(v);
+        return Some(Secret::new(v));
     }
     let path = crate::connector::secrets::global_secrets_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     crate::connector::secrets::parse_dotenv(&raw)
         .remove(var)
         .filter(|v| !v.is_empty())
+        .map(Secret::new)
 }
 
 // --- doctor ----------------------------------------------------------------

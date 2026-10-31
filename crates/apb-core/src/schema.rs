@@ -2,6 +2,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::isolation::IsolationSpec;
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +121,7 @@ pub enum JoinRequire {
 /// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
 /// from it, so this is the one list of node types (the dashboard's generated
 /// types, the authoring guide's doc test).
-pub const NODE_TYPES: [&str; 10] = [
+pub const NODE_TYPES: [&str; 11] = [
     "start",
     "agent_task",
     "script",
@@ -131,6 +132,7 @@ pub const NODE_TYPES: [&str; 10] = [
     "finish",
     "playbook",
     "judge",
+    "publish",
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -175,6 +177,30 @@ pub struct Playbook {
     /// field. Relative paths resolve against the execution root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Facts read before the first node that can act and again at the
+    /// finish, compared under each observation's rule (see
+    /// [`crate::baseline`]). Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_check: Option<crate::baseline::BaselineBlock>,
+    /// The run's default budget (see [`crate::budget`]); a run argument
+    /// overrides it per dimension. Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<crate::budget::BudgetBlock>,
+    /// How a finished run is graded and compared (see [`crate::quality`]).
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<crate::quality::QualityBlock>,
+    /// Whether and how problems earlier runs met with the playbook's tools
+    /// are shown to its agents (see [`crate::known_problems`]). Additive to
+    /// schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_problems: Option<crate::known_problems::block::KnownProblemsBlock>,
+    /// Every node that runs an agent must be `isolation: full`, so the
+    /// publish step is the only way a push leaves the run (V120), and a
+    /// credential variable passed to an agent refuses the start. Additive to
+    /// schema 2; no migration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub publish_only: bool,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
@@ -214,6 +240,9 @@ pub enum GoalCheck {
     Marker { marker: String },
     /// A check script confirms the criterion.
     Script { path: String },
+    /// A list node accounted for every item: everything processed and
+    /// nothing needing a look.
+    List { node: String },
 }
 
 /// One verifiable fact confirming the goal was reached.
@@ -329,6 +358,14 @@ impl Playbook {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    /// The baseline checks, empty without a `baseline_check` block.
+    pub fn baseline_checks(&self) -> &[crate::baseline::BaselineCheck] {
+        self.baseline_check
+            .as_ref()
+            .map(|b| b.checks.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// The run working tree template (issue #67 item 8), `None` when unset
     /// or blank.
     pub fn worktree_template(&self) -> Option<&str> {
@@ -423,6 +460,27 @@ impl ContextBudget {
 }
 
 impl Node {
+    /// What the node can do by its own definition: the effects it declares
+    /// plus the ones its kind implies ([`NodeKind::implied_effects`]). Every
+    /// reader of a node's effects (inferred effects, start consent, the
+    /// shipping rules) goes through this, so a kind that implies
+    /// `irreversible` cannot be read as harmless anywhere.
+    /// Declared effects come first, in their order.
+    pub fn own_effects(&self) -> Vec<Effect> {
+        let mut out = self.effects.clone();
+        for e in self.kind.implied_effects() {
+            if !out.contains(e) {
+                out.push(*e);
+            }
+        }
+        out
+    }
+
+    /// The node's `list:` block, when it runs in list mode.
+    pub fn list(&self) -> Option<&crate::list::ListSpec> {
+        self.list.as_ref()
+    }
+
     /// Expected seconds for progress weighting: the parsed `expected_duration`
     /// if present and valid, otherwise the per-kind default (agent_task/script
     /// = `duration::DEFAULT_TASK_SECONDS`, every other kind = 0).
@@ -472,6 +530,20 @@ impl Node {
 }
 
 impl NodeKind {
+    /// The declared isolation of an `agent_task`; `None` for every other
+    /// kind and when unset.
+    pub fn isolation(&self) -> Option<&IsolationSpec> {
+        match self {
+            NodeKind::AgentTask { isolation, .. } => isolation.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Whether this node runs isolated (`full` or `best_effort`).
+    pub fn is_isolated(&self) -> bool {
+        self.isolation().is_some_and(IsolationSpec::is_isolated)
+    }
+
     /// The node's `workdir` template (issue #67 item 4): the directory an
     /// agent_task or a script runs in, rendered with the prompt template
     /// engine and resolved against the execution root. `None` for every other
@@ -509,8 +581,16 @@ impl NodeKind {
             | NodeKind::HumanReview { .. }
             | NodeKind::Wait { .. }
             | NodeKind::Finish { prompt: None, .. }
-            | NodeKind::Playbook { .. } => false,
+            | NodeKind::Playbook { .. }
+            | NodeKind::Publish { .. } => false,
         }
+    }
+
+    /// Whether the run budget's gate weighs this node (see [`crate::budget`]):
+    /// one that runs an agent, or a `playbook` node, whose child's spend
+    /// counts toward the parent.
+    pub fn budget_gated(&self) -> bool {
+        self.runs_agent() || matches!(self, NodeKind::Playbook { .. })
     }
 
     /// Whether executing this node writes to the shared working directory and
@@ -579,6 +659,22 @@ impl NodeKind {
         }
     }
 
+    /// Whether a person reads what this node writes: an `agent_task` marked
+    /// `audience: people`, or a `finish` that composes an answer and is not
+    /// marked `audience: agents`. Connector functions with a `people:`
+    /// block are weighed by the engine, which knows the grants.
+    pub fn writes_for_people(&self) -> bool {
+        match self {
+            NodeKind::AgentTask { audience, .. } => *audience == Some(Audience::People),
+            NodeKind::Finish {
+                prompt: Some(_),
+                audience,
+                ..
+            } => *audience != Some(Audience::Agents),
+            _ => false,
+        }
+    }
+
     /// This node's connector bindings (spec 2026-07-18-connectors-design
     /// section 5). An empty slice for every kind except `agent_task`.
     pub fn connector_bindings(&self) -> &[ConnectorBinding] {
@@ -595,6 +691,41 @@ impl NodeKind {
             NodeKind::AgentTask { protect, .. } => protect,
             _ => &[],
         }
+    }
+
+    /// The effects a node of this kind has whatever it declares. Only kinds
+    /// whose action the engine itself performs imply anything; an agent or a
+    /// script is weighed by [`crate::effects::inferred`] instead. The match is
+    /// exhaustive on purpose: a new kind decides its effects here.
+    pub fn implied_effects(&self) -> &'static [Effect] {
+        match self {
+            NodeKind::Start
+            | NodeKind::AgentTask { .. }
+            | NodeKind::Script { .. }
+            | NodeKind::Prompt { .. }
+            | NodeKind::Condition { .. }
+            | NodeKind::HumanReview { .. }
+            | NodeKind::Wait { .. }
+            | NodeKind::Finish { .. }
+            | NodeKind::Playbook { .. }
+            | NodeKind::Judge { .. } => &[],
+            // The engine pushes: it reaches a remote, outside the run, and a
+            // push cannot be taken back.
+            NodeKind::Publish { .. } => &[Effect::Network, Effect::External, Effect::Irreversible],
+        }
+    }
+
+    /// Whether the drive loop executes this kind itself (a gate, a wait, a
+    /// sub-playbook) instead of handing it to node execution. Node execution
+    /// refuses these defensively.
+    pub fn drive_handled(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::HumanReview { .. }
+                | NodeKind::Wait { .. }
+                | NodeKind::Playbook { .. }
+                | NodeKind::Publish { .. }
+        )
     }
 
     /// The serde `type` tag of this variant, mirroring
@@ -615,6 +746,7 @@ impl NodeKind {
             NodeKind::Finish { .. } => 7,
             NodeKind::Playbook { .. } => 8,
             NodeKind::Judge { .. } => 9,
+            NodeKind::Publish { .. } => 10,
         }]
     }
 }
@@ -651,6 +783,11 @@ pub struct Param {
     pub options: Option<Vec<String>>,
     #[serde(default)]
     pub default: Option<yaml_serde::Value>,
+    /// The value is a secret: asked at every start, never remembered and
+    /// never written into the definition (V99: no `default`; V100: only
+    /// `type: text`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -914,18 +1051,47 @@ impl<'de> Deserialize<'de> for FunctionsAllow {
 /// A node's binding of one connector (spec 2026-07-18-connectors-design
 /// section 5): the connector folder name, an optional restriction to a
 /// subset of configured accounts (`None` - all accounts), the functions grant
-/// (`FunctionsAllow`), and an optional call budget counted per executor
-/// attempt (`apb-engine`'s `connector::call::attempt_floor`). Accepted in YAML
-/// as a bare string (shorthand, everything else default) or as an object.
-/// Structural checks (name format, duplicates, empty/duplicate list entries,
-/// `max_calls == 0`) are validator V23-V26; FS-dependent checks (connector
-/// installed, account/function exists) are a later task.
+/// (`FunctionsAllow`), an optional call budget counted per executor attempt
+/// (`apb-engine`'s `connector::call::attempt`), and what a repeat of a send
+/// with an unknown outcome does (`on_unknown`). Accepted in YAML as a bare
+/// string (shorthand, everything else default) or as an object. Structural
+/// checks (name format, duplicates, empty/duplicate list entries,
+/// `max_calls == 0`) are validator V23-V26, the send policy V69 and V84;
+/// FS-dependent checks (connector installed, account/function exists) are a
+/// later task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorBinding {
     pub name: String,
     pub accounts: Option<Vec<String>>,
     pub functions: FunctionsAllow,
     pub max_calls: Option<u32>,
+    /// What a repeat of a send whose outcome is unknown does (`None` reads
+    /// as [`OnUnknown::Refuse`]).
+    pub on_unknown: Option<OnUnknown>,
+}
+
+/// What a repeat of a send does when an earlier attempt's outcome is not
+/// known (the request timed out, the connection broke, the process died).
+/// It applies to functions that declare `idempotency: none` and to a `key`
+/// send whose key window has passed; a `marker` send with no match found is
+/// never resent automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnUnknown {
+    /// Refuse the repeat until a person decides whether it was sent.
+    #[default]
+    Refuse,
+    /// Send again: a duplicate is acceptable for this binding.
+    Resend,
+}
+
+impl OnUnknown {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnUnknown::Refuse => "refuse",
+            OnUnknown::Resend => "resend",
+        }
+    }
 }
 
 /// The object form of a connector binding. A separate struct with
@@ -941,6 +1107,8 @@ struct ConnectorBindingFull {
     functions: FunctionsAllow,
     #[serde(default)]
     max_calls: Option<u32>,
+    #[serde(default)]
+    on_unknown: Option<OnUnknown>,
 }
 
 /// An intermediate form for deserializing "string or object", mirroring
@@ -960,24 +1128,27 @@ impl<'de> Deserialize<'de> for ConnectorBinding {
                 accounts: None,
                 functions: FunctionsAllow::All,
                 max_calls: None,
+                on_unknown: None,
             },
             ConnectorBindingForm::Full(ConnectorBindingFull {
                 name,
                 accounts,
                 functions,
                 max_calls,
+                on_unknown,
             }) => Self {
                 name,
                 accounts,
                 functions,
                 max_calls,
+                on_unknown,
             },
         })
     }
 }
 
 /// Serializes back to the bare-string shorthand when `accounts`, `functions`,
-/// and `max_calls` are all default (round-trips the web form cleanly);
+/// `max_calls` and `on_unknown` are all default (round-trips the web form cleanly);
 /// otherwise as an object, omitting `functions` entirely when it is `All`
 /// (mirrors the YAML shorthand: an absent field means "every function").
 impl Serialize for ConnectorBinding {
@@ -985,6 +1156,7 @@ impl Serialize for ConnectorBinding {
         if self.accounts.is_none()
             && self.functions == FunctionsAllow::All
             && self.max_calls.is_none()
+            && self.on_unknown.is_none()
         {
             return s.serialize_str(&self.name);
         }
@@ -996,6 +1168,9 @@ impl Serialize for ConnectorBinding {
             len += 1;
         }
         if self.max_calls.is_some() {
+            len += 1;
+        }
+        if self.on_unknown.is_some() {
             len += 1;
         }
         let mut state = s.serialize_struct("ConnectorBinding", len)?;
@@ -1011,9 +1186,22 @@ impl Serialize for ConnectorBinding {
         if let Some(max_calls) = self.max_calls {
             state.serialize_field("max_calls", &max_calls)?;
         }
+        if let Some(on_unknown) = self.on_unknown {
+            state.serialize_field("on_unknown", &on_unknown)?;
+        }
         state.end()
     }
 }
+
+/// How many batch members (and list items) a run executes at once when
+/// neither the playbook nor the run declares a cap (spec 2026-08-05 section
+/// 1.3). Wide enough that a fan-out is worth batching, small enough that a
+/// fan-out of twenty nodes cannot spawn twenty agent processes at once.
+pub const DEFAULT_MAX_PARALLEL: usize = 4;
+
+/// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
+/// would exceed this depth fails its parent node.
+pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Node {
@@ -1091,6 +1279,10 @@ pub struct Node {
     /// `wait` default. Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<ForkSpec>,
+    /// List mode on an `agent_task` or `script` (see [`crate::list`]): the
+    /// step runs once per item. Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<crate::list::ListSpec>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }
@@ -1227,8 +1419,10 @@ pub enum NodeKind {
         timeout_seconds: Option<u64>,
         #[serde(default)]
         workdir: Option<String>,
+        /// The node's isolation (`apb_core::isolation`): the level, the
+        /// network and the extra paths. `None` and `none` run unchanged.
         #[serde(default)]
-        isolation: Option<Isolation>,
+        isolation: Option<IsolationSpec>,
         /// Connector bindings for this node (spec
         /// 2026-07-18-connectors-design section 5): additive to schema 2, so
         /// an old playbook without the field parses unchanged. Only
@@ -1283,6 +1477,9 @@ pub enum NodeKind {
         /// covered. Empty (the default) checks nothing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         protect: Vec<String>,
+        /// Who reads this node's output (see [`Audience`]). Absent: agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audience: Option<Audience>,
     },
     Script {
         script: String,
@@ -1332,6 +1529,10 @@ pub enum NodeKind {
         /// profile without a prompt (a binding that can never execute).
         #[serde(default)]
         profile: Option<QualifiedProfileRef>,
+        /// Who reads the composed answer (see [`Audience`]). Absent: people.
+        /// Meaningful only with `prompt` (V101).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audience: Option<Audience>,
     },
     Playbook {
         /// The child playbook to run (spec C). `scope: auto` resolves the
@@ -1371,6 +1572,26 @@ pub enum NodeKind {
         profile: Option<QualifiedProfileRef>,
     },
     // --- end judge node ----------------------------------------------------
+    /// Pushes the commits a node made to a remote branch, after a person
+    /// consented to the exact plan (see [`crate::publish`]). The remote is
+    /// pinned before the first acting node runs. Additive to schema 2; older
+    /// binaries reject the node type.
+    Publish {
+        /// The `agent_task` or `script` node whose commits are published.
+        from: String,
+        /// A remote of the repository, by name.
+        remote: String,
+        /// The remote branch, a template over `params.*`, `run.id` and node
+        /// outputs. Absent: the branch `from` committed on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// The push's own bound; default 300, at most 3600.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        /// Guidance for the person, shown literally.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1387,20 +1608,16 @@ pub enum Outcome {
     Failure,
 }
 
-/// Required isolation level for node execution (spec 7.3/8.3): `full` -
-/// a fully isolated sandbox, `best_effort` - isolation to the extent the
-/// adapter supports it, `none` - a shared working directory (default).
-/// Currently the field is declarative and shown in the web node form; the
-/// engine does NOT enforce it yet (real enforcement via worktree is future
-/// work, spec 8.3), so the validator warns about isolation that is declared
-/// but not enforced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+/// Who reads what a node writes. `people`: the output (a message, a PR
+/// description, a closing answer) is for a person, so the prompt carries
+/// apb's writing brief. `agents`: it is read by the next step only. An
+/// `agent_task` is `agents` unless it says otherwise; a `finish` with a
+/// `prompt` is `people` unless it says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Isolation {
-    Full,
-    BestEffort,
-    #[default]
-    None,
+pub enum Audience {
+    People,
+    Agents,
 }
 
 /// Who may answer an interactive `agent_task` node's questions (spec
@@ -1563,6 +1780,7 @@ mod tests {
             "{ id: n7, type: finish, outcome: success }",
             "{ id: n8, type: playbook, playbook: other }",
             "{ id: n9, type: judge, state: { s: x }, questions: { q: { type: noul, instructions: i } } }",
+            "{ id: n10, type: publish, from: n1, remote: origin }",
         ]
         .map(|n| format!("  - {n}\n"))
         .concat();
@@ -1809,6 +2027,7 @@ edges: []
             accounts: None,
             functions: FunctionsAllow::All,
             max_calls: None,
+            on_unknown: None,
         };
         let yaml = yaml_serde::to_string(&bare).unwrap();
         assert_eq!(yaml.trim(), "jira");
@@ -1821,6 +2040,7 @@ edges: []
             accounts: Some(vec!["team-bot".into()]),
             functions: FunctionsAllow::List(vec!["send_message".into()]),
             max_calls: Some(50),
+            on_unknown: None,
         };
         let yaml = yaml_serde::to_string(&full).unwrap();
         assert!(yaml.contains("name: telegram"));
@@ -1836,6 +2056,7 @@ edges: []
             accounts: None,
             functions: FunctionsAllow::ReadOnly,
             max_calls: None,
+            on_unknown: None,
         };
         let yaml = yaml_serde::to_string(&read_only).unwrap();
         assert!(yaml.contains("functions: read_only"));

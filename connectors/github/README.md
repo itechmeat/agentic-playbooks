@@ -26,6 +26,8 @@ It does not touch repository contents. No commits, no branches, no file edits, n
 
 Worth knowing before you grant it: `merge_pull`, `create_release`, and `dispatch_workflow` are not read-only and are not easily undone. A node holding `merge_pull` can merge a pull request without a human in the loop. Grant those to the nodes that genuinely need them, and give the grant a `max_calls` cap when a loop could reach it.
 
+Creating an issue and commenting are sent at most once even when a step is retried. apb appends a hidden HTML comment to the issue or comment body (invisible on GitHub), and when an earlier attempt's answer was lost, it reads the token's own account and the recent issues or comments to find that marker before deciding: found means the earlier send went through, and the retry gets its link instead of posting again. This lookup needs a token that can read `/user`, which a personal access token can and a GitHub App installation token cannot; with an installation token, a send whose answer was lost stays unknown until a person decides. `create_release` is protected only by the tag being unique, so a lost answer there is also left for a person.
+
 ## Doing it by hand
 
 If you would rather not involve an agent, `PUBLIC.md` in this folder has the account fields and a config example, and `docs/CONNECTORS.md` in the apb repository covers accounts, secrets, and trust in general. `INSTALL.md` is written for an agent but the steps read fine as a checklist.

@@ -26,6 +26,9 @@ with two files:
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
   environment: full          # optional; default minimal. See "Agent environment" below
   zcode_mode: edit           # optional, zcode steps only: yolo (default) | edit. See "ZCode (zcode)"
+  process_env:               # optional; default inherit. See "Process environment" below
+    policy: allowlist
+    allow: [GH_TOKEN, NPM_CONFIG_*]
   skills:                    # names (scope auto) or { name, scope }
     - coding-standards
     - { name: writing-plans, scope: global }
@@ -94,8 +97,8 @@ raw `profile.yaml`, setting `environment` changes the digest and therefore the
 bundle trust just like any other profile edit.
 
 `environment` is not a sandbox. It does not isolate the filesystem, the network, or
-the project's working tree; a node that needs isolation from concurrent branches
-still needs the node's own `isolation` setting. Pair it with `outputs.extract` on
+the project's working tree; a node that needs that needs its own `isolation`
+setting (ISOLATION.md). Pair it with `outputs.extract` on
 the node (see HOWTO-authoring.md) as the other half of output hygiene: the minimal
 environment stops local hooks from appending extra turns in the first place, and
 `outputs.extract` scopes the recorded output to the agent's own marked block when
@@ -107,6 +110,128 @@ not anyone chose it, so it cannot mean the opt-in, and `hermetic: true` is what
 the default does anyway. Rewrites drop it. On the write surfaces (`--hermetic`,
 the MCP and HTTP `hermetic` field) it is a deprecated alias: `true` means
 `minimal`, `false` means `full`.
+
+## Process environment
+
+`process_env` says which of the operator's environment variables an agent
+process inherits. It is separate from `environment`, which is about the
+agent's own configuration (settings, plugins, MCP servers), not the process
+environment.
+
+```yaml
+process_env:
+  policy: allowlist          # inherit (the default, written as the absence of the key) | allowlist
+  allow:                     # names added to the built-in sets
+    - GH_TOKEN
+    - NPM_CONFIG_*           # a trailing * matches by prefix
+    - SSH_AUTH_SOCK
+```
+
+- `inherit` passes everything apb itself runs with, as before.
+- `allowlist` clears the inherited environment and passes back only:
+  - the base set every agent gets: `PATH HOME USER LOGNAME SHELL LANG LANGUAGE
+    TZ TERM`, the locale categories by name (`LC_ALL LC_CTYPE LC_COLLATE
+    LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME LC_ADDRESS LC_IDENTIFICATION
+    LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE`, never an `LC_` prefix),
+    `TMPDIR TMP TEMP`, the `XDG_*_HOME` dirs and
+    `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY HTTPS_PROXY NO_PROXY
+    ALL_PROXY` and their lowercase forms), the certificate bundles
+    (`SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE
+    CURL_CA_BUNDLE`), `APB_CONFIG_DIR` and, on Windows, `SYSTEMROOT USERPROFILE
+    APPDATA LOCALAPPDATA PATHEXT COMSPEC`;
+  - the variables the agent CLI reads (the table below);
+  - the names in `allow`.
+- apb's own variables (`APB_RUN_DIR`, `APB_NODE_ID`, `APB_ATTEMPT_TOKEN`,
+  `APB_STATUS_FILE`, `CODEX_HOME`, the zcode provider config, an eval overlay)
+  are set after the plan, so they always arrive.
+- A variable a connector references is withheld under either policy, even when
+  `allow` names it.
+
+| Agent | Always | Only when the trigger is on | Derived |
+|---|---|---|---|
+| claude | `ANTHROPIC_* CLAUDE_CODE_* CLAUDE_CONFIG_DIR MCP_TIMEOUT MCP_TOOL_TIMEOUT DISABLE_TELEMETRY DISABLE_AUTOUPDATER MAX_THINKING_TOKENS` | `CLAUDE_CODE_USE_BEDROCK`: `AWS_*`; `CLAUDE_CODE_USE_VERTEX`: `GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT GCLOUD_PROJECT CLOUD_ML_REGION VERTEX_REGION_* CLOUDSDK_CONFIG`; `CLAUDE_CODE_USE_FOUNDRY`: `AZURE_*` | |
+| codex | `CODEX_* OPENAI_*` | | every `env_key` and `env_http_headers` value of the `[model_providers.*]` tables in your codex `config.toml` (as tables, dotted keys or inline tables; exact names only, a `*` there is ignored) |
+| opencode | `OPENCODE_*` | | the key of the model's provider (`anthropic/`, `openai/`, `openrouter/`, `zai/`, `zai-coding-plan/`, `google/`, `google-vertex/`, `amazon-bedrock/` (`AWS_*`), `xai/`, `deepseek/`, `groq/`, `mistral/`, `moonshotai/`, `opencode/`, `github-copilot/`) |
+| zcode | `ZCODE_*` | | |
+| hermes | `HERMES_*` | | its keys come from `~/.hermes/.env`, found through `HOME` |
+| grok | `GROK_* XAI_API_KEY` | | |
+| cursor | `CURSOR_*` (not verified against an installed CLI) | | |
+| qoder | `QODER_* QODERCLI_*` | | |
+| agy | `AGY_* ANTIGRAVITY_* GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG` | | |
+| any other agent (config `agents:`) | the base set and `allow` only | | |
+
+A trigger is on when its value is `1`, `true`, `yes` or `on` in any case;
+`CLAUDE_CODE_USE_BEDROCK=0` or `=false` keeps the cloud credentials withheld.
+
+Anything else the agent's own tools need comes through `allow`: for example
+`SSH_AUTH_SOCK` for git over ssh, `GH_TOKEN` for `gh`, or `NPM_CONFIG_*` for a
+private registry.
+
+Rules for `allow`: each entry is `[A-Za-z_][A-Za-z0-9_]*`, optionally followed by
+one `*`; the part before `*` needs at least 2 characters (a bare `*` is refused);
+no duplicates; at most 64 entries; names only, never values. `allow` under
+`policy: inherit` is refused as meaningless. A malformed block is reported as
+`profile_process_env_invalid` by `apb validate`, refused by every profile write
+and refuses a run start.
+
+The plan is made per chain step, so a fallback onto another agent gets that
+agent's set from the same profile policy. The policy applies to every agent
+process apb spawns for the profile: node attempts in their start and resume
+forms, the finish answer, the judge, the background supervisor and the quota
+probe. It is snapshotted into the run manifest at start, so a retry, a fallback
+or a resume runs under the policy the run began with, whatever the live profile
+says by then. Setting `process_env` changes `profile_digest`, so the bundle needs
+trust again. An apb older than this field rejects a profile that has it, and
+ignores it when it resumes a run: resume a run started with an allowlist with
+this apb version or a later one.
+
+Every attempt under `allowlist` journals `agent_env_applied`: the agent, how many
+variables it kept, the names it did not get (sorted, the first 200) and the
+profile's own exact `allow` names that the operator does not set. Values are
+never written anywhere. When an attempt fails under an allowlist, `apb doctor
+--run <id>` names those variables and suggests adding the one the agent needs to
+`allow`.
+
+What it does not cover:
+
+- `script` nodes, `success_check` commands, goal scripts and baseline commands
+  run author code and inherit the operator environment as before.
+- A connector call (`apb connector call`, a child of the agent) inherits the
+  agent's allowlisted environment. `{{env.VAR}}` secrets resolve from the dotenv
+  files as before; a `{{cmd:...}}` helper that needs variables such as
+  `PASSWORD_STORE_DIR`, `GNUPGHOME`, `OP_SESSION_*` or `DBUS_SESSION_BUS_ADDRESS`
+  gets them only when `allow` names them (see CONNECTORS.md).
+- Context compaction (the internal summarizer) has no profile of its own: in
+  a run where any profile (a node's, the supervisor's or a rebound one) sets
+  `allowlist`, it runs under an empty allowlist for claude (the base set and
+  claude's set); in any other run it inherits.
+- In host execution mode the host's own subagent runs the step: nothing is
+  applied there, and `apb doctor --run` says so.
+
+What `allowlist` is, and what it is not: it stops the agent from inheriting
+the operator's variables. On Linux, apb also makes itself non-dumpable before
+its first allowlisted spawn (`prctl(PR_SET_DUMPABLE, 0)`), so the agent cannot
+read apb's own environment back through `/proc/$PPID/environ` (apb's
+`/proc/<pid>/stat` and `ps` stay readable; apb then writes no core dump and
+cannot be attached to with a debugger by the same user). Should the call
+fail, apb prints one `apb: warning: could not make apb non-dumpable ...` line
+with the OS error and spawns the agent anyway, without that protection. It is
+not isolation
+from a hostile agent running as the same user: the operator's other processes
+(a shell, an editor, another apb) stay readable through `/proc`, and files the
+user can read stay readable. Real isolation needs a sandbox: a node's
+`isolation` (ISOLATION.md), which also forces the allowlist on a profile that
+says `inherit` (`agent_env_applied` records `forced_by: isolation`). macOS has no equivalent of the `/proc` hiding: there, `ps eww` by the
+same user can show another process's environment.
+
+On macOS, a claude login kept in the Keychain does not depend on environment
+variables; check a profile with `allowlist` once on the machine it runs on.
+
+Set it with `apb profile write --process-env allowlist --env-allow GH_TOKEN`
+(`--env-allow` is repeatable and implies `allowlist`), the MCP `profile_write`
+field `process_env: { policy, allow }`, or `POST /api/profiles` with the same
+object (on every surface `allow` without `policy` means `allowlist`). A write that leaves it out keeps the stored value; `policy: inherit`
+clears it.
 
 ## Host execution mode: what a profile still means
 
@@ -220,18 +345,23 @@ live edit to the profile or SOUL after start does not affect a running or
 resuming run. Skill immutability depends on the node's `isolation`:
 
 - `isolation: full` or `best_effort`: the run materializes real copies of the
-  profile's skills from the run snapshot into a fresh per-attempt workdir
-  (`runs/<id>/work/<node>/<attempt>/.agents/skills/<name>` plus a `.claude/skills`
-  bridge) and points the agent at that workdir, so the agent reads only the
-  snapshot. Materialization happens per attempt from the immutable run snapshot,
-  so a retry or fallback does not inherit a mutated skills tree from a prior
-  attempt, and a live edit to a skill file mid-run does not affect the run. Each
-  attempt records `skills_mode: materialized`, and a node `success_check` runs in
-  that same per-attempt workdir. Note the current boundary: this isolated workdir
-  contains the
-  materialized skills but not a copy of the project tree - full project-tree
-  sandboxing arrives with worktree isolation (spec 8.3). A node that needs the
-  project's working files should use `isolation: none` until then.
+  profile's skills from the run snapshot for each attempt, so the agent reads
+  only the snapshot. Materialization happens per attempt from the immutable
+  run snapshot, so a retry or fallback does not inherit a mutated skills tree
+  from a prior attempt, and a live edit to a skill file mid-run does not
+  affect the run. Each attempt records `skills_mode: materialized`. Where the
+  copies live depends on whether the attempt gets a sandbox (ISOLATION.md):
+  - In a sandbox (Linux with bubblewrap) the attempt runs in the node's own
+    tree, the project's working files included; the copies sit in the
+    attempt's box under the run (`runs/<id>/sandbox/attempts/`)
+    and are mounted read-only over the tree's `.agents/skills` and
+    `.claude/skills`. Mount points apb had to create are removed after the
+    attempt. A `success_check` runs inside the same sandbox.
+  - Without a sandbox (`best_effort` on a machine that cannot build one) the
+    attempt runs in a fresh scratch directory
+    (`runs/<id>/work/<node>/<attempt>/.agents/skills/<name>` plus a
+    `.claude/skills` bridge) that holds the copies and no project tree, and a
+    `success_check` runs there.
 - `isolation: none` (default): skills are delivered advisory-only - the agent is
   given the skill names in its prompt and reads the live `.agents/skills/<name>`
   at run time, so a live edit mid-run can still change what it reads. Each
@@ -340,8 +470,9 @@ Each built-in agent is probed at the program a run launches: `agents.<id>.progra
 from `config.yaml` when set (a name looked up on PATH, or a path used as is),
 otherwise its default binary. The default binaries (`cursor` runs as
 `cursor-agent`, `claude-code` is `claude`, zcode falls back to its home-deployed
-CLI) live in one table, `detect::BUILTIN_BINS`; the engine launches
-`detect::default_program` from the same table.
+CLI) live in the agent modules (`apb_core::agents`, see "Adding an agent"
+below); the engine launches `detect::default_program`, which reads the same
+registry.
 
 Why a memo at all: the probes run in parallel, and a cold detection on a machine
 with claude, codex, opencode, grok and zcode installed still takes about 1.6 s
@@ -351,6 +482,74 @@ detect --refresh` and MCP `agents_detect` with `refresh: true` bypass it.
 The dashboard never keeps its own copy. A reload always shows the lists of the
 `apb` that is running, and a rebuilt binary shows its new lists on the next
 reload without any cache to clear.
+
+## Adding an agent
+
+Everything apb knows about a built-in agent lives in its module under
+`crates/apb-core/src/agents/` (a file, or a directory when the agent has its
+own output reader or helpers). The rest of apb asks the registry
+(`agents::lookup`, `agents::all`) and never compares agent ids. A module
+implements `agents::Agent`:
+
+| Part | Holds |
+|---|---|
+| `descriptor()` | id, legacy aliases, binaries, version and help arguments, home install locations, category, capabilities (hermetic settings, live ask-server, long tool waits, the transcript the grader reads, the streaming transport, desktop history) and `Verified`, the CLI version and date its forms and reader were last checked against |
+| `forms()` | the built-in launch form, the resume argv and how a fresh attempt makes its session findable (an id apb assigns, a title looked up in the agent's session listing, or an id the agent prints); `None` when apb cannot launch the agent without `agents.<id>.invocation` |
+| `output()` | the reader of the agent's output (reply, usage, closing record, session id, a session header on stderr) and `promises()`, what the built-in form must carry; an agent that prints plain text uses the shared `PlainText` reader |
+| `setup()` | what detection reads (models listing, login hint, provider notes, memo inputs), the environment set kept under `process_env: allowlist`, the variables a model or the agent's own config names, and the run-scoped environment of a spawn (codex's config home, zcode's provider config) |
+| `models()` | the vendor, the closed model list, how a model id is spelled and checked, and the billing account a model spends |
+
+To add one:
+
+1. Write the module and add it to `agents::all()` at its place in the
+   detection order (the dashboard and `apb detect` keep that order).
+2. Add a contract fixture, `crates/apb-engine/tests/fixtures/agents/<id>.yaml`,
+   and the id to the `contract!` list in
+   `crates/apb-engine/tests/suite/agent_contract/mod.rs` (see
+   `docs/TESTING-GUIDELINES.md`, "The agent contract suite").
+3. Add the agent's row to the golden tables of
+   `crates/apb-core/tests/suite/agents_test.rs`.
+
+A guard test (`agents_test::agent_knowledge_stays_in_the_agent_modules`) fails
+when non-test code outside the modules names a built-in agent id as a string
+literal. One rule ties the readers to the forms (`agents::conformance`): a
+built-in form whose output is not the machine format its module promises means
+the CLI's output format changed, while a custom `agents.<id>.invocation` read
+as plain text is the allowed fallback.
+
+### Checking an installed agent
+
+`apb doctor` checks each built-in agent a profile names, and `apb doctor
+--agents` every installed built-in agent, with no model call
+(`agents::check`). The binary checked is the one a run launches: the
+configured `agents.<id>.program` when set, else the detected one. The config
+is read under the agent name a profile uses, as a run reads it:
+
+| Row | Means |
+|---|---|
+| `version X verified on D` | the installed version is the one the module's form and reader were checked against (`Verified`) |
+| `[warn] version X is newer than the verified Y` | the CLI moved on since; `apb doctor --probe-agent <id>` checks its output |
+| `[warn] help does not list <flags>` | a flag of the built-in launch, resume, autonomy, soul, fresh-session or profile-mode form is missing from the text the agent's help arguments print: the built-in form may have changed |
+| `custom invocation; output read as plain text ...` | `agents.<id>.invocation` replaces the built-in form; its help is not checked |
+
+The help runs the way detection probes run: sanitized environment, the
+filesystem root as the working directory, a timeout. Its stdout and stderr
+are both read. A version that leaves out trailing segments counts them as 0
+(`2.1` is `2.1.0`).
+
+`apb doctor --probe-agent <id> [--model <m>]` is the paid check: it prints a
+cost notice, sends one short prompt through the agent's form without
+autonomy, from an empty temporary directory, with a timeout, and checks the
+output against `promises()` (reply, session id, usage, closing record) and
+`agents::conformance`. The form and program come from the config under the
+name given (an alias reads its own entry), and the spawn is a run step's:
+connector-referenced variables are withheld, codex gets an isolated home and
+zcode its provider config inside the probe's directory, and claude its
+minimal-environment settings. It names the autonomy flags it left out,
+prints the usage and cost the agent reported, and exits 1 when the format
+drifted. Ctrl-C (or SIGTERM) stops the agent and removes the directory. A
+run step is refused (`APB_RUN_ID` or `APB_HOST_TASK` set): only a person
+spends that call.
 
 ## Checking a profile's models before a run
 

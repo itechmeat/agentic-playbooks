@@ -9,18 +9,8 @@
 
 use std::collections::BTreeMap;
 
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-
 use super::common::{ConnectorError, validate_snake_name};
-
-/// Percent-encoding set for substituted template values in URL path/query
-/// context: every non-alphanumeric byte except the RFC 3986 unreserved marks
-/// `-._~`.
-const URL_VALUE: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
+use crate::secret::Secret;
 
 /// Which part of a `RenderCtx` a placeholder resolves against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +32,9 @@ pub enum Namespace {
 pub struct RenderCtx<'a> {
     pub account: &'a BTreeMap<String, String>,
     pub args: &'a serde_json::Value,
-    pub secrets: &'a BTreeMap<String, String>,
+    /// Sealed: a value is exposed only by [`resolve`], into the rendered
+    /// outgoing request text.
+    pub secrets: &'a BTreeMap<String, Secret>,
 }
 
 /// One piece of a scanned template: either a literal run of text or a
@@ -160,11 +152,15 @@ fn resolve(
                 "unresolved placeholder `{{{{account.{name}}}}}` in template `{template}`"
             ))
         }),
-        Namespace::Secret => ctx.secrets.get(name).cloned().ok_or_else(|| {
-            ConnectorError::Invalid(format!(
-                "unresolved placeholder `{{{{secret.{name}}}}}` in template `{template}`"
-            ))
-        }),
+        Namespace::Secret => ctx
+            .secrets
+            .get(name)
+            .map(|s| s.expose_secret().to_string())
+            .ok_or_else(|| {
+                ConnectorError::Invalid(format!(
+                    "unresolved placeholder `{{{{secret.{name}}}}}` in template `{template}`"
+                ))
+            }),
         Namespace::Args => {
             if name.is_empty() {
                 return Err(ConnectorError::Invalid(format!(
@@ -211,7 +207,7 @@ fn render(template: &str, ctx: &RenderCtx, encode: bool) -> Result<String, Conne
             Token::Placeholder(ns, name) => {
                 let value = resolve(ns, &name, ctx, template)?;
                 if encode {
-                    out.push_str(&utf8_percent_encode(&value, URL_VALUE).to_string());
+                    out.push_str(&crate::url_component::encode(&value));
                 } else {
                     out.push_str(&value);
                 }
@@ -261,6 +257,14 @@ pub fn resolve_optional_arg<'a>(ctx: &'a RenderCtx, field: &str) -> Option<&'a s
     }
 }
 
+/// Whether a top-level body string is the whole-args form `"{{args}}"`,
+/// which renders as the arguments object itself. Exact match: any other
+/// text around it makes an ordinary interpolated string. The one rule
+/// `render_body` and the idempotency validator share.
+pub fn is_whole_args_body(s: &str) -> bool {
+    s == "{{args}}"
+}
+
 /// Renders a body value: a top-level `"{{args}}"` string renders as a clone
 /// of `ctx.args` (the wave 1 whole-forward form); a top-level single
 /// placeholder (`"{{args.field}}"`) renders as the typed value of that arg,
@@ -276,7 +280,7 @@ pub fn render_body(
     ctx: &RenderCtx,
 ) -> Result<serde_json::Value, ConnectorError> {
     if let serde_json::Value::String(s) = body {
-        if s == "{{args}}" {
+        if is_whole_args_body(s) {
             return Ok(ctx.args.clone());
         }
         if let Some(field) = single_args_placeholder(s) {
@@ -345,7 +349,7 @@ mod tests {
     fn empty_ctx<'a>(
         account: &'a BTreeMap<String, String>,
         args: &'a serde_json::Value,
-        secrets: &'a BTreeMap<String, String>,
+        secrets: &'a BTreeMap<String, Secret>,
     ) -> RenderCtx<'a> {
         RenderCtx {
             account,

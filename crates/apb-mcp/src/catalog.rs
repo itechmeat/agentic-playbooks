@@ -14,7 +14,7 @@ use apb_core::schema::{Effect, Requires, Trigger};
 use apb_core::scope::{Origin, PlaybookRef, digest_str};
 use apb_core::store::global_playbooks_parent;
 use apb_core::trust::{Lifecycle, TrustStore, read_lifecycle};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// A catalog entry: a qualified ref plus everything needed for matching and
@@ -134,7 +134,7 @@ fn apply_shadowing(entries: &mut [CatalogEntry]) {
 
 /// The JSON shape of one suppressing record: what the agent needs to decide
 /// "is this the same action" (the synopsis) and how long the silence lasts.
-fn suppressed_json(records: &[ScopedRecord]) -> Vec<Value> {
+pub(crate) fn suppressed_json(records: &[ScopedRecord]) -> Vec<Value> {
     records
         .iter()
         .map(|s| {
@@ -200,9 +200,22 @@ fn compute_revision(
     digest_str(&lines.join("\n"))
 }
 
+/// What a catalog call asks for.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CatalogRequest<'a> {
+    /// The workspace_id of a foreign workspace, stamped into its project
+    /// refs; `None` for the current one.
+    pub workspace_id: Option<&'a str>,
+    /// The revision the client holds: a match returns `{ unchanged: true }`.
+    pub revision: Option<&'a str>,
+    /// A cap on the number of entries (after sorting and shadowing).
+    pub limit: Option<usize>,
+    /// Add a [`apb_engine::fit::FitSummary`] to every entry that is not
+    /// shadowed. It depends on the project, so it stays out of the revision.
+    pub fit: bool,
+}
+
 /// Builds the catalog for the project root `root` plus the global store.
-/// `revision` - if it matches, returns `{ unchanged: true }`. `limit` -
-/// an optional cap on the number of entries (after sorting and shadowing).
 /// `suppressed` - the merged active suggestion-decision records for this
 /// project (`apb_core::dismiss::active`), returned both as the v1
 /// `dismissed_patterns` slug list and as the full `suppressed_suggestions`.
@@ -214,9 +227,7 @@ fn compute_revision(
 /// separately surface the store's own diagnostics to get the full picture.
 pub fn build(
     root: &Path,
-    workspace_id: Option<&str>,
-    revision: Option<&str>,
-    limit: Option<usize>,
+    req: &CatalogRequest<'_>,
     suppressed: Vec<ScopedRecord>,
     store_diagnostics: Vec<String>,
 ) -> Value {
@@ -232,7 +243,7 @@ pub fn build(
     // the current workspace - None.
     if let Ok(reg) = Registry::open(root) {
         let parent = root.join(".apb");
-        let ws = workspace_id.map(|s| s.to_string());
+        let ws = req.workspace_id.map(|s| s.to_string());
         collect_scope(
             &reg,
             &parent,
@@ -271,7 +282,11 @@ pub fn build(
     // unchanged response too: otherwise a client with the previous revision would not learn that
     // the profile count changed (creating a profile intentionally does not move the revision).
     let profiles_count = count_profiles(root);
-    if let Some(rev) = revision
+    // The fit depends on the project (trust, agents, accounts, memory), not
+    // on the definitions the revision covers: a request for it is always
+    // answered in full.
+    if !req.fit
+        && let Some(rev) = req.revision
         && rev == catalog_revision
     {
         return json!({
@@ -281,7 +296,7 @@ pub fn build(
         });
     }
 
-    if let Some(n) = limit {
+    if let Some(n) = req.limit {
         entries.truncate(n);
     }
 
@@ -291,6 +306,10 @@ pub fn build(
         .iter()
         .map(|s| s.record.pattern.clone())
         .collect();
+    let mut entries = json!(entries);
+    if req.fit {
+        add_fit(root, &mut entries);
+    }
     json!({
         "catalog_revision": catalog_revision,
         "entries": entries,
@@ -299,6 +318,31 @@ pub fn build(
         "suppressed_suggestions": suppressed_json(&suppressed),
         "profiles_hint": { "count": profiles_count },
     })
+}
+
+/// Adds `fit` (a [`apb_engine::fit::FitSummary`]) to every entry of the
+/// serialized `entries` that is not shadowed, assessed for a run in `root`;
+/// `fit_error` when no report could be made.
+pub fn add_fit(root: &Path, entries: &mut Value) {
+    let Some(list) = entries.as_array_mut() else {
+        return;
+    };
+    for entry in list {
+        if entry["shadowed"].as_bool() == Some(true) {
+            continue;
+        }
+        let wref = match PlaybookRef::deserialize(&entry["ref"]) {
+            Ok(r) => r,
+            Err(e) => {
+                entry["fit_error"] = json!(format!("unreadable ref: {e}"));
+                continue;
+            }
+        };
+        match apb_engine::fit::assess(root, &wref) {
+            Ok(report) => entry["fit"] = json!(report.summary()),
+            Err(e) => entry["fit_error"] = json!(e.to_string()),
+        }
+    }
 }
 
 /// A cheap count of profiles (project + global) - the number of subdirectories with

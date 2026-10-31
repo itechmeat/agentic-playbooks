@@ -7,6 +7,8 @@
 
 #[path = "suite/common.rs"]
 mod common;
+#[path = "../../apb-engine/tests/support/driver_reaper.rs"]
+mod driver_reaper;
 
 #[path = "suite/answer_api_test.rs"]
 mod answer_api_test;
@@ -18,18 +20,31 @@ mod auth_endpoints_test;
 mod auth_test;
 #[path = "suite/bind_interlock_test.rs"]
 mod bind_interlock_test;
+#[cfg(unix)]
+#[path = "suite/budget_api_test.rs"]
+mod budget_api_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
+#[path = "suite/discover_api_test.rs"]
+mod discover_api_test;
+#[path = "suite/fit_api_test.rs"]
+mod fit_api_test;
 #[path = "suite/inbox_api_test.rs"]
 mod inbox_api_test;
 #[path = "suite/ingest_test.rs"]
 mod ingest_test;
-#[path = "suite/input_draft_api_test.rs"]
-mod input_draft_api_test;
+#[path = "suite/memory_api_test.rs"]
+mod memory_api_test;
 #[path = "suite/meta_api_test.rs"]
 mod meta_api_test;
+#[path = "suite/notify_api_test.rs"]
+mod notify_api_test;
+#[path = "suite/problems_api_test.rs"]
+mod problems_api_test;
 #[path = "suite/profiles_api_test.rs"]
 mod profiles_api_test;
+#[path = "suite/quality_api_test.rs"]
+mod quality_api_test;
 #[path = "suite/runs_api_test.rs"]
 mod runs_api_test;
 #[path = "suite/runs_watch_test.rs"]

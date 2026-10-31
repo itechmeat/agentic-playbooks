@@ -21,6 +21,10 @@ pub enum Control {
     Pause(crate::pause::PauseRequest),
     Abort {
         reason: String,
+        /// Who asked for the stop; journaled on the `run_aborted` it
+        /// becomes. Absent in older control files. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<crate::pause::kind::PauseBy>,
     },
     ContextAppend {
         note: String,
@@ -198,11 +202,20 @@ pub fn write_control_cursor(run_dir: &Path, seq: u64) -> Result<(), EngineError>
 /// second resume is what continues past it - see the release notes' stop, note,
 /// resume pattern.
 pub fn pending_stop_seq(run_dir: &Path) -> Result<Option<u64>, EngineError> {
+    Ok(pending_stop(run_dir)?.map(|(seq, _)| seq))
+}
+
+/// [`pending_stop_seq`] with who asked for the stop.
+pub fn pending_stop(
+    run_dir: &Path,
+) -> Result<Option<(u64, Option<crate::pause::kind::PauseBy>)>, EngineError> {
     let cursor = read_control_cursor(run_dir)?;
     Ok(read_control_after(run_dir, cursor)?
         .iter()
-        .find(|e| matches!(e.cmd, Control::Abort { .. }))
-        .map(|e| e.seq))
+        .find_map(|e| match &e.cmd {
+            Control::Abort { by, .. } => Some((e.seq, *by)),
+            _ => None,
+        }))
 }
 
 /// The first UNAPPLIED `Pause` in this run's control queue, if any (issue

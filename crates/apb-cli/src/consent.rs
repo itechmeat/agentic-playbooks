@@ -83,7 +83,7 @@ pub(crate) fn obtain(need: &ConsentNeed, how: &CliConsent) -> Result<Granted, St
 /// The run this process was started from (`APB_RUN_ID`, which the engine
 /// sets for every agent and script step), if any.
 fn parent_run() -> Option<String> {
-    std::env::var("APB_RUN_ID").ok().filter(|v| !v.is_empty())
+    crate::util::StepCaller::from_env().run_id
 }
 
 /// The refusal of a start from inside the run `parent`: an agent or script
@@ -124,12 +124,12 @@ fn ask(need: &ConsentNeed) -> Option<bool> {
 }
 
 #[cfg(unix)]
-fn open_tty() -> Option<std::fs::File> {
+pub(crate) fn open_tty() -> Option<std::fs::File> {
     std::fs::File::open("/dev/tty").ok()
 }
 
 #[cfg(not(unix))]
-fn open_tty() -> Option<std::fs::File> {
+pub(crate) fn open_tty() -> Option<std::fs::File> {
     // No controlling-terminal device: the Windows console input handle.
     std::fs::File::open("CONIN$").ok()
 }

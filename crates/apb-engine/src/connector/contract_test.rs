@@ -8,17 +8,30 @@
 use std::collections::BTreeMap;
 
 use apb_core::connector::contract::{
-    Envelope, ExpectKind, ImapExpect, InboxExpect, TestCase, TestsDoc,
+    Envelope, ExpectKind, ImapExpect, InboxExpect, IntentCase, ReconcileExpect, ReconcileOutcome,
+    TestCase, TestsDoc,
 };
 use apb_core::connector::def::{ConnectorDoc, FunctionSpec, InboxOp};
+use apb_core::connector::idempotency::Idempotency;
 use apb_core::connector::inbox::InboxEvent;
+use apb_core::secret::Secret;
 use serde_json::Value;
 
 use crate::connector::call::render_http;
+use crate::connector::intent::reconcile::{self, Listing, Match};
+use crate::connector::intent::stamp::Stamp;
 
 /// The fixed value every secret account field resolves to in the offline
 /// runner. A real secret is never read (spec 4.6).
 const SECRET_STUB: &str = "test-secret";
+
+/// Every secret field of `doc` bound to [`SECRET_STUB`].
+fn stub_secrets(doc: &ConnectorDoc) -> BTreeMap<String, Secret> {
+    doc.secret_fields()
+        .into_iter()
+        .map(|f| (f, Secret::new(SECRET_STUB)))
+        .collect()
+}
 
 /// The result of one contract-test case.
 pub struct CaseResult {
@@ -77,17 +90,27 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             headers,
             body_contains,
             body_form_contains,
-        } => eval_http(
-            doc,
-            function,
-            &case.account,
-            &args,
-            method,
-            url,
-            headers,
-            body_contains,
-            body_form_contains,
-        ),
+        } => {
+            let fields = case.intent.as_ref().map(IntentCase::marker_fields);
+            let stamp = case.intent.as_ref().map(|i| Stamp::Send {
+                nonce: &i.nonce,
+                marker: fields.as_ref(),
+            });
+            let input = HttpInput {
+                account: &case.account,
+                args: &args,
+                stamp: stamp.as_ref(),
+            };
+            let expect = HttpExpect {
+                method,
+                url,
+                headers,
+                body_contains,
+                body_form_contains,
+            };
+            eval_http(doc, function, &input, &expect)
+        }
+        ExpectKind::Reconcile(expected) => eval_reconcile(doc, function, case, expected),
         ExpectKind::Smtp(envelope) => eval_smtp(doc, function, &case.account, &args, envelope),
         ExpectKind::Imap(expected) => eval_imap(doc, function, &case.account, &args, expected),
         ExpectKind::Inbox(expected) => eval_inbox(function, &args, expected),
@@ -116,18 +139,36 @@ fn eval_mock(function: &FunctionSpec, status: u16, body: &Value) -> Result<(), S
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What an HTTP case renders: the fake account, the args, and the stamp of
+/// its intent (when the case declares one).
+struct HttpInput<'a> {
+    account: &'a BTreeMap<String, String>,
+    args: &'a Value,
+    stamp: Option<&'a Stamp<'a>>,
+}
+
+/// What an HTTP case expects of the rendered request.
+struct HttpExpect<'a> {
+    method: &'a str,
+    url: &'a str,
+    headers: Option<&'a BTreeMap<String, String>>,
+    body_contains: Option<&'a Value>,
+    body_form_contains: Option<&'a BTreeMap<String, String>>,
+}
+
 fn eval_http(
     doc: &ConnectorDoc,
     function: &FunctionSpec,
-    account: &BTreeMap<String, String>,
-    args: &Value,
-    method: &str,
-    url: &str,
-    headers: Option<&BTreeMap<String, String>>,
-    body_contains: Option<&Value>,
-    body_form_contains: Option<&BTreeMap<String, String>>,
+    input: &HttpInput<'_>,
+    expect: &HttpExpect<'_>,
 ) -> Result<(), String> {
+    let &HttpExpect {
+        method,
+        url,
+        headers,
+        body_contains,
+        body_form_contains,
+    } = expect;
     if function.mock.is_some() {
         return Err(format!(
             "function `{}` is a mock but the case expects an HTTP request",
@@ -140,12 +181,8 @@ fn eval_http(
             function.name
         ));
     }
-    let secrets: BTreeMap<String, String> = doc
-        .secret_fields()
-        .into_iter()
-        .map(|f| (f, SECRET_STUB.to_string()))
-        .collect();
-    let rendered = render_http(function, account, args, &secrets)
+    let secrets = stub_secrets(doc);
+    let rendered = render_http(function, input.account, input.args, &secrets, input.stamp)
         .map_err(|e| format!("render failed: {}", e.message))?;
     if !rendered.method.eq_ignore_ascii_case(method) {
         return Err(format!(
@@ -218,6 +255,57 @@ fn eval_http(
     Ok(())
 }
 
+/// Checks a reconciliation offline: the case's intent gives the marker, the
+/// identity response gives the connector's own account, and the listing
+/// response is matched the way a live repeat would match it.
+fn eval_reconcile(
+    doc: &ConnectorDoc,
+    function: &FunctionSpec,
+    case: &TestCase,
+    expected: &ReconcileExpect,
+) -> Result<(), String> {
+    let Some(Idempotency::Marker {
+        reconcile: spec,
+        format,
+        ..
+    }) = &function.idempotency
+    else {
+        return Err(format!(
+            "function `{}` declares no marker idempotency but the case expects a reconciliation",
+            function.name
+        ));
+    };
+    let identity = doc
+        .identity
+        .as_ref()
+        .ok_or_else(|| "the connector declares no identity".to_string())?;
+    let intent = case
+        .intent
+        .as_ref()
+        .ok_or_else(|| "a reconcile case needs an `intent`".to_string())?;
+    let me = reconcile::self_id(identity, &expected.identity)
+        .ok_or_else(|| "the identity response holds no id at the identity path".to_string())?;
+    let marker = apb_core::connector::marker::render(*format, &intent.marker_fields());
+    let listing = Listing {
+        body: &expected.response,
+        next_page: expected.next_page,
+    };
+    let found = reconcile::match_items(spec, listing, &me, &marker);
+    match (&found, expected.outcome) {
+        (Match::Found { item_ref }, ReconcileOutcome::Found) => match &expected.item_ref {
+            Some(want) if item_ref.as_deref() != Some(want.as_str()) => Err(format!(
+                "reconcile found the item, but its reference is {item_ref:?}, expected `{want}`"
+            )),
+            _ => Ok(()),
+        },
+        (Match::Absent { .. }, ReconcileOutcome::Absent)
+        | (Match::Inconclusive { .. }, ReconcileOutcome::Inconclusive) => Ok(()),
+        (other, want) => Err(format!(
+            "reconcile concluded {other:?}, the case expects {want:?}"
+        )),
+    }
+}
+
 /// Matches an smtp `envelope` expectation. Renders the function's envelope
 /// offline through `connector_smtp::build` in dry-run mode (secrets stubbed, no
 /// connection), then compares only the envelope fields the expectation carries
@@ -237,11 +325,7 @@ fn eval_smtp(
             function.name
         )
     })?;
-    let secrets: BTreeMap<String, String> = doc
-        .secret_fields()
-        .into_iter()
-        .map(|f| (f, SECRET_STUB.to_string()))
-        .collect();
+    let secrets = stub_secrets(doc);
     let built = crate::connector::smtp::build(
         spec,
         account,
@@ -328,11 +412,7 @@ fn eval_imap(
             function.name
         )
     })?;
-    let secrets: BTreeMap<String, String> = doc
-        .secret_fields()
-        .into_iter()
-        .map(|f| (f, SECRET_STUB.to_string()))
-        .collect();
+    let secrets = stub_secrets(doc);
     let built = crate::connector::imap::build(
         spec,
         account,
@@ -902,6 +982,39 @@ functions:
             "detail: {}",
             report.results[0].detail
         );
+    }
+
+    /// `text_args` prepares the value placed into the form body.
+    #[test]
+    fn text_args_prepare_the_form_body() {
+        let doc = ConnectorDoc::from_yaml(
+            "name: chat\nversion: 0.1.0\nfunctions:\n  - name: send\n    description: d\n    method: POST\n    url: https://chat.example.com/messages\n    body_form: { content: \"{{args.content}}\" }\n    text_args: { content: markdown_no_commands }\n    args_schema: { type: object, properties: { content: { type: string } } }\n",
+            "chat",
+        )
+        .unwrap();
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send\n    args: { content: \"/close\" }\n    expect:\n      method: POST\n      url: https://chat.example.com/messages\n      body_form_contains: { content: \"\\\\/close\" }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc, &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
+    /// A body that is the whole args object (`body: "{{args}}"`) carries the
+    /// prepared value too, and the args without a mode as given.
+    #[test]
+    fn text_args_prepare_a_whole_args_body() {
+        let doc = ConnectorDoc::from_yaml(
+            "name: tracker\nversion: 0.1.0\nfunctions:\n  - name: create\n    description: d\n    method: POST\n    url: https://tracker.example.com/items\n    body: \"{{args}}\"\n    text_args: { text: markdown_no_commands }\n    args_schema: { type: object, properties: { text: { type: string }, note: { type: string } } }\n",
+            "tracker",
+        )
+        .unwrap();
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: create\n    args: { text: \"/close\", note: \"/close\" }\n    expect:\n      method: POST\n      url: https://tracker.example.com/items\n      body_contains: { text: \"\\\\/close\", note: \"/close\" }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc, &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
     }
 
     #[test]

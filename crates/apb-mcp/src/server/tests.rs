@@ -5,6 +5,7 @@
 #![allow(clippy::await_holding_lock)]
 use super::*;
 use rmcp::handler::server::wrapper::Parameters;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -123,6 +124,8 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "suggestion_dismiss",
         "playbook_trial",
         "playbook_approve",
+        "playbook_memory",
+        "playbook_make_global",
         "playbook_prepare_run",
         "playbook_execute_plan",
         "playbook_get",
@@ -140,10 +143,26 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_wait",
         "run_events",
         "run_report",
+        "run_report_html",
         "run_retro_context",
+        "run_grade",
+        "run_grade_start",
+        "run_grade_read",
+        "run_grade_submit",
+        "run_grades",
+        "playbook_candidate",
+        "playbook_known_problems",
+        "known_problem_decide",
+        "known_problem_recheck",
+        "playbook_discover",
+        "playbook_discover_results",
+        "playbook_discover_save",
+        "playbook_discover_dismiss",
         "run_resume",
         "run_stop",
         "run_pause",
+        "run_notify",
+        "run_intent_resolve",
         "review_decide",
         "run_answer",
         "run_task_submit",
@@ -315,6 +334,8 @@ fn tools_carry_safety_annotations() {
         "run_events",
         "run_report",
         "run_retro_context",
+        "run_grades",
+        "playbook_candidate",
         "supervisor_wait_event",
         "supervisor_run_inspect",
     ] {
@@ -327,6 +348,8 @@ fn tools_carry_safety_annotations() {
     }
     for n in [
         "playbook_run",
+        "playbook_memory",
+        "playbook_make_global",
         "playbook_create",
         "playbook_update",
         "playbook_delete",
@@ -335,6 +358,8 @@ fn tools_carry_safety_annotations() {
         "run_resume",
         "run_stop",
         "run_pause",
+        "run_notify",
+        "run_intent_resolve",
         "review_decide",
         "run_answer",
         "run_task_submit",
@@ -354,6 +379,29 @@ fn tools_carry_safety_annotations() {
             "destructive tool `{n}` must not be read-only"
         );
     }
+    // Writes a file in the workspace, so a host that runs read-only tools
+    // unasked must ask first; it replaces only its own derived page.
+    assert_eq!(read_only("run_report_html"), Some(false));
+    assert_eq!(destructive("run_report_html"), Some(false));
+    // A grading session writes its reading state and the grade into the
+    // run, never anything the run made: not read-only, not destructive.
+    for n in ["run_grade_start", "run_grade_read", "run_grade_submit"] {
+        assert_eq!(read_only(n), None, "tool `{n}`");
+        assert_eq!(destructive(n), Some(false), "tool `{n}`");
+    }
+    // The supervisor's server offers read-only tools only.
+    let supervisor = WfMcp::for_supervisor(PathBuf::from("."));
+    let offered: Vec<String> = supervisor
+        .tool_router
+        .list_all()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(offered.contains(&"run_report".to_string()));
+    assert!(!offered.contains(&"run_report_html".to_string()));
+    // A supervisor reads grades but never grades.
+    assert!(offered.contains(&"run_grades".to_string()));
+    assert!(!offered.contains(&"run_grade_submit".to_string()));
 }
 
 #[tokio::test]
@@ -377,6 +425,7 @@ async fn playbook_get_missing_id_surfaces_as_tool_error() {
             version: None,
             workspace: None,
             detail: None,
+            estimate: None,
         }))
         .await;
     assert_eq!(result.is_error, Some(true));
@@ -398,6 +447,7 @@ async fn playbook_get_default_returns_summary_without_prompts() {
             version: None,
             workspace: None,
             detail: None,
+            estimate: None,
         }))
         .await;
     assert_eq!(
@@ -468,6 +518,7 @@ async fn playbook_get_default_returns_summary_without_prompts() {
             version: None,
             workspace: None,
             detail: Some("full".to_string()),
+            estimate: None,
         }))
         .await;
     let full_body = result_text(&full);
@@ -492,6 +543,7 @@ async fn playbook_get_detail_full_returns_full_payload() {
             version: None,
             workspace: None,
             detail: Some("full".to_string()),
+            estimate: None,
         }))
         .await;
     assert_eq!(result.is_error, Some(false));
@@ -521,6 +573,7 @@ async fn playbook_get_invalid_detail_falls_back_to_summary() {
             version: None,
             workspace: None,
             detail: Some("bogus".to_string()),
+            estimate: None,
         }))
         .await;
     assert_eq!(
@@ -570,6 +623,9 @@ async fn supervise_self_returns_token() {
             continued_from: None,
             worktree: None,
             execution: None,
+            budget: None,
+            remember: None,
+            notify: None,
         }))
         .await;
 
@@ -584,6 +640,112 @@ async fn supervise_self_returns_token() {
         text.contains("supervisor_token"),
         "expected supervisor_token in response, got: {text}"
     );
+}
+
+/// `remember: true` keeps the start's params and instruction for the next
+/// start in this project, once the gate let it through; the answer names
+/// what was remembered and refuses a credential-shaped value by name only.
+#[tokio::test]
+async fn playbook_run_remember_keeps_the_input_for_this_project() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_noagent(dir.path());
+    let vdir = dir.path().join(".apb/playbooks/noagent_sv/1.0.0");
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT.replace(
+            "version: 1.0.0\n",
+            "version: 1.0.0\nparams:\n  - { name: who, type: text }\n  - { name: key, type: text }\n",
+        ),
+    )
+    .expect("write playbook");
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let token = format!("ghp_{}", "b".repeat(36));
+    let result = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent_sv".to_string(),
+            version: None,
+            params: BTreeMap::from([
+                ("who".to_string(), "world".to_string()),
+                ("key".to_string(), token.clone()),
+            ]),
+            instruction: Some("greet".to_string()),
+            supervise: None,
+            background: None,
+            acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
+            scope: None,
+            continued_from: None,
+            worktree: None,
+            execution: None,
+            budget: None,
+            remember: Some(true),
+            notify: None,
+        }))
+        .await;
+    let text = result_text(&result);
+    assert_eq!(result.is_error, Some(false), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("json body");
+    assert_eq!(v["remembered"], serde_json::json!(["who", "instruction"]));
+    assert_eq!(
+        v["not_remembered"],
+        serde_json::json!([{ "name": "key", "reason": "value_looks_secret" }])
+    );
+    assert!(!text.contains(&token), "a refused value is never echoed");
+
+    let memory = tools::memory::playbook_memory(
+        dir.path(),
+        &tools::memory::MemoryTarget {
+            id: "noagent_sv",
+            scope: "project",
+            version: None,
+        },
+        tools::memory::MemoryAction::Get,
+    )
+    .expect("memory");
+    assert_eq!(memory["instruction"], "greet");
+    assert_eq!(memory["values"][0]["value"], "world");
+
+    let start = |version: Option<&str>, who: &str| PlaybookRunArgs {
+        id: "noagent_sv".to_string(),
+        version: version.map(str::to_string),
+        params: if who.is_empty() {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("who".to_string(), who.to_string())])
+        },
+        instruction: None,
+        supervise: None,
+        background: None,
+        acknowledge_untrusted: Some(true),
+        confirm_irreversible: None,
+        scope: None,
+        continued_from: None,
+        worktree: None,
+        execution: None,
+        budget: None,
+        remember: Some(true),
+        notify: None,
+    };
+    // A refused start remembers nothing.
+    let refused = server
+        .playbook_run(Parameters(start(Some("9.9.9"), "nobody")))
+        .await;
+    assert!(!result_text(&refused).contains("\"run_id\""));
+    // A start without input says what it took from memory.
+    let again = server.playbook_run(Parameters(start(None, ""))).await;
+    let v: serde_json::Value = serde_json::from_str(&result_text(&again)).expect("json body");
+    assert_eq!(v["recalled"], serde_json::json!(["who", "instruction"]));
+    let memory = tools::memory::playbook_memory(
+        dir.path(),
+        &tools::memory::MemoryTarget {
+            id: "noagent_sv",
+            scope: "project",
+            version: None,
+        },
+        tools::memory::MemoryAction::Get,
+    )
+    .expect("memory");
+    assert_eq!(memory["values"][0]["value"], "world");
 }
 
 /// Non-blocking start (`background: true`): a run with a script node
@@ -616,6 +778,9 @@ async fn background_run_returns_run_id_without_blocking() {
             continued_from: None,
             worktree: None,
             execution: None,
+            budget: None,
+            remember: None,
+            notify: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -671,10 +836,14 @@ fn minted_supervisor_tokens_are_random_256_bit_values() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let a = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let b = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     for token in [&a, &b] {
         let body = token.strip_prefix("sv-").expect("sv- prefix");
         assert!(
@@ -682,7 +851,7 @@ fn minted_supervisor_tokens_are_random_256_bit_values() {
                 && body
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
-            "token body must be 32 random bytes in unpadded base64url, got {token}"
+            "token body must be 32 random bytes in unpadded base64url"
         );
     }
     assert_ne!(a, b);
@@ -704,7 +873,9 @@ fn patch_playbook_rejected_without_capability() {
     // A session with only observe - patch_playbook is not granted.
     let token = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let err = server
         .resolve_session(&token, "supervisor_patch_playbook")
         .unwrap_err();
@@ -717,7 +888,9 @@ fn patch_playbook_allowed_with_capability() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("run-x".to_string(), vec!["patch_playbook".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_patch_playbook")
@@ -736,7 +909,9 @@ fn interrupt_attempt_rejected_without_capability() {
     // A session with only observe - retry (and so interrupt) is not granted.
     let token = server
         .mint_token("run-x".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let err = server
         .resolve_session(&token, "supervisor_interrupt_attempt")
         .unwrap_err();
@@ -757,7 +932,9 @@ fn rebind_profile_rejected_without_the_rebind_capability() {
             "run-x".to_string(),
             vec!["observe".to_string(), "retry".to_string()],
         )
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     let err = server
         .resolve_session(&token, "supervisor_rebind_profile")
         .unwrap_err();
@@ -770,7 +947,9 @@ fn rebind_profile_allowed_with_the_rebind_capability() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("run-x".to_string(), vec!["rebind".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_rebind_profile")
@@ -861,7 +1040,9 @@ fn interrupt_attempt_allowed_with_retry_capability() {
             "run-x".to_string(),
             vec!["observe".to_string(), "retry".to_string()],
         )
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_interrupt_attempt")
@@ -898,25 +1079,18 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         dir.path(),
         "noagent_sv",
         None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        tools::StartArgs {
+            ..Default::default()
+        },
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
 
     let token = server
         .mint_token(run_id, vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
 
     let retry_result = server
         .supervisor_node_retry(Parameters(SupervisorRetryArgs {
@@ -965,18 +1139,9 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         dir.path(),
         "noagent_sv",
         None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        tools::StartArgs {
+            ..Default::default()
+        },
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -984,7 +1149,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
     apb_engine::write_supervisor_session(
         dir.path(),
         &run_id,
-        "sv-disk-1",
+        &apb_core::secret::Secret::new("sv-disk-1"),
         &["observe".to_string(), "retry".to_string()],
     )
     .expect("write_supervisor_session");
@@ -1028,18 +1193,9 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         dir.path(),
         "noagent_sv",
         None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        tools::StartArgs {
+            ..Default::default()
+        },
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -1047,7 +1203,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
     apb_engine::write_supervisor_session(
         dir.path(),
         &run_id,
-        "sv-disk-observe-only",
+        &apb_core::secret::Secret::new("sv-disk-observe-only"),
         &["observe".to_string()],
     )
     .expect("write_supervisor_session");
@@ -1115,7 +1271,9 @@ async fn run_answer_token_path_posts_supervisor_answer_on_supervisor_node() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("r-sv".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
 
     let result = server
         .run_answer(Parameters(RunAnswerArgs {
@@ -1146,7 +1304,9 @@ async fn run_answer_token_path_relays_on_human_only_node() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let token = server
         .mint_token("r-human".to_string(), vec!["observe".to_string()])
-        .unwrap();
+        .unwrap()
+        .expose_secret()
+        .to_string();
 
     let result = server
         .run_answer(Parameters(RunAnswerArgs {
@@ -1418,6 +1578,7 @@ async fn prepare_then_execute_runs_in_target_workspace() {
             plan_token: token,
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1461,6 +1622,7 @@ async fn token_is_single_use() {
             plan_token: token.clone(),
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     assert!(result_text(&first).contains("run_ref"));
@@ -1469,6 +1631,7 @@ async fn token_is_single_use() {
             plan_token: token,
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     assert!(
@@ -1504,6 +1667,7 @@ async fn digest_drift_invalidates_plan() {
             plan_token: token,
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     assert!(
@@ -1536,6 +1700,7 @@ async fn tampered_token_is_rejected() {
             plan_token: forged,
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     assert!(
@@ -1607,6 +1772,7 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
             plan_token: token.clone(),
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     assert!(
@@ -1620,6 +1786,7 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
             plan_token: token,
             acknowledge_untrusted: Some(true),
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     assert!(
@@ -1680,6 +1847,7 @@ async fn execute_plan_refuses_an_unapproved_child_without_acknowledge() {
             plan_token: token,
             acknowledge_untrusted: None,
             confirm_irreversible: None,
+            budget: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
@@ -1740,6 +1908,9 @@ async fn global_scope_playbook_runs_in_current_project() {
             continued_from: None,
             worktree: None,
             execution: None,
+            budget: None,
+            remember: None,
+            notify: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1828,6 +1999,7 @@ async fn catalog_ranking_runs_off_the_runtime_and_keeps_tier0() {
                     limit: None,
                     workspace: None,
                     query: Some("implement the task".into()),
+                    fit: None,
                 }))
                 .await
         })
@@ -1884,6 +2056,9 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             continued_from: None,
             worktree: None,
             execution: Some("host".to_string()),
+            budget: None,
+            remember: None,
+            notify: None,
         }))
         .await;
     unsafe {
@@ -1993,6 +2168,9 @@ fn rel_args(
         continued_from: None,
         worktree: None,
         execution: None,
+        budget: None,
+        remember: None,
+        notify: None,
     }
 }
 
@@ -2198,6 +2376,7 @@ async fn execute_plan_needs_the_consent_nonce_and_records_the_client() {
                 plan_token: token,
                 acknowledge_untrusted: None,
                 confirm_irreversible: confirm,
+                budget: None,
             }),
             Some("claude-code".to_string()),
         )
@@ -2272,6 +2451,8 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
                 acknowledge_untrusted: Some(true),
                 confirm_irreversible: confirm,
                 workspace: None,
+                budget: None,
+                confirm_budget: None,
             },
             Some("claude-code".into()),
         )
@@ -2295,3 +2476,83 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
         "mcp:claude-code"
     );
 }
+
+/// Every `run_task_submit` argument but the workspace is in the tool
+/// reference: the schema the server publishes and the documentation
+/// cannot drift apart.
+#[test]
+fn every_run_task_submit_argument_is_documented() {
+    let doc = include_str!("../../../../docs/MCP.md");
+    let tools = WfMcp::new(PathBuf::from(".")).tool_router.list_all();
+    let submit = tools.iter().find(|t| t.name == "run_task_submit").unwrap();
+    let row = doc
+        .lines()
+        .find(|l| l.starts_with("| `run_task_submit` |"))
+        .expect("run_task_submit row");
+    let props = submit.input_schema["properties"].as_object().unwrap();
+    for arg in props.keys().filter(|k| *k != "workspace") {
+        assert!(row.contains(&format!("`{arg}`")), "run_task_submit `{arg}`");
+    }
+}
+
+/// The run outcome is documented where an agent reads it: each tool row
+/// names the fields its answer carries, and the Run outcome section names
+/// every part of `outcome`.
+#[test]
+fn the_run_outcome_fields_are_documented_where_they_are_returned() {
+    let doc = include_str!("../../../../docs/MCP.md");
+    let row = |tool: &str| {
+        doc.lines()
+            .find(|l| l.starts_with(&format!("| `{tool}` |")))
+            .unwrap_or_else(|| panic!("docs/MCP.md has no `{tool}` row"))
+    };
+    for (tool, fields) in [
+        ("runs_list", &["needs_look"][..]),
+        ("run_report", &["outcome", "baseline", "notes"][..]),
+        (
+            "run_task_submit",
+            &["notes_dropped", "notes_dropped_reasons"][..],
+        ),
+    ] {
+        let row = row(tool);
+        for field in fields {
+            assert!(
+                row.contains(&format!("`{field}`")),
+                "the `{tool}` row must name `{field}`"
+            );
+        }
+    }
+    let section = doc
+        .split("\n## Run outcome\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("a Run outcome section");
+    for field in [
+        "headline",
+        "needs_look",
+        "done",
+        "verified",
+        "unverified",
+        "findings",
+        "warnings",
+        "baseline",
+        "goal_reached",
+        "agent_summary",
+    ] {
+        assert!(
+            section.contains(&format!("`{field}`")),
+            "the Run outcome section must name `{field}`"
+        );
+    }
+}
+
+// The run budget on the playbook tools (the pre-start decision, the start
+// answer, the plan and playbook_get estimates).
+mod budget;
+#[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
+mod driver_reaper;
+mod notify;
+// Known problems: the read, a person's decision and a recheck.
+mod problems;
+// Run quality: grading sessions, grades and the candidate.
+mod quality;

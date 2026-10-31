@@ -66,11 +66,7 @@ pub fn requires_unmet(root: &Path, req: &Requires) -> Result<Vec<String>, Requir
 /// can resolve. Trust is not judged here: approval is a deliberate user act
 /// the run gate asks for.
 pub fn connector_problems(root: &Path, playbook: &Playbook) -> Vec<String> {
-    let binds = playbook
-        .nodes
-        .iter()
-        .any(|n| !n.kind.connector_bindings().is_empty());
-    if !binds {
+    if !playbook.binds_connectors() {
         return Vec::new();
     }
     let resolution = match crate::connector::resolve::resolve_playbook(root, playbook) {
@@ -333,7 +329,9 @@ fn script_in_run_copy(version_dir: &Path, file: &Path) -> bool {
     target.starts_with(&scripts) && target.is_file()
 }
 
-fn missing_scripts(version_dir: &Path, playbook: &Playbook) -> Vec<crate::validate::Issue> {
+/// The V92 half of [`missing_references`]: script nodes whose file the
+/// version directory `version_dir` lacks.
+pub fn missing_scripts(version_dir: &Path, playbook: &Playbook) -> Vec<crate::validate::Issue> {
     use crate::schema::{GoalCheck, NodeKind, SuccessCheck};
     let mut out = Vec::new();
     let mut check = |node: &str, what: &str, path: &str| {

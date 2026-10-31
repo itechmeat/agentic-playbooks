@@ -1,0 +1,91 @@
+schema: 2
+id: crm-cleanup
+name: CRM owner cleanup
+description: >-
+  Count the open opportunities in the Twenty CRM that have no owner, assign
+  each one with the playbook's rule (a single default owner), then recount
+  to prove what is left. A failure in the middle must leave an honest count
+  of the deals still unowned; see docs/scenarios/crm-cleanup.md.
+version: 1.0.0
+params:
+  - { name: default_owner_id, type: text, label: "Twenty user id (uuid) that unowned open deals are assigned to" }
+  - { name: open_stages, type: text, label: "The open opportunity stages, comma-joined, e.g. NEW,SCREENING,MEETING,PROPOSAL" }
+defaults:
+  profile: main
+effects: [network, external]
+goal:
+  statement: >-
+    Every open opportunity without an owner carries the rule's owner, and a
+    recount after the assignment shows zero open opportunities without an
+    owner, or names the deals that closed or failed meanwhile.
+  criteria:
+    - description: The first count reports how many open deals are unowned
+      check: { type: marker, marker: "UNOWNED BEFORE:" }
+    - description: The assignment step reports one update per deal it touched
+      check: { type: marker, marker: "ASSIGNED:" }
+    - description: The recount reports how many open deals are still unowned
+      check: { type: marker, marker: "UNOWNED AFTER:" }
+    - description: The recount is zero and every counted deal carries the rule's owner
+      check: { type: manual }
+# The engine reads the unowned count itself, before the first step that can
+# act and again at the finish, so the report shows 37 -> 0 (or 37 -> 20 after
+# a failure in the middle) from the CRM, not from an agent's reply. Report
+# only: the goal above decides whether the run reached what it was for.
+baseline_check:
+  checks:
+    - id: unowned
+      description: Open deals without an owner
+      connector:
+        name: twenty
+        account: default
+        function: list_opportunities
+        args: { filter: "ownerId[is]:NULL,stage[in]:[{{params.open_stages}}]", limit: 1 }
+      observe:
+        - { id: count, type: number, path: totalCount, expect: { equals: 0 } }
+nodes:
+  - { id: start, type: start }
+  - id: count_unowned
+    type: agent_task
+    title: Count the unowned open deals
+    expected_duration: 5m
+    prompt: >-
+      List open opportunities with the twenty connector's list_opportunities
+      function (filter on stage for the open stages {{params.open_stages}}, page through with
+      starting_after until pageInfo.hasNextPage is false). From them select
+      the deals with no owner set. List each such deal's id, name, stage
+      and company. Change nothing. End with a line `UNOWNED BEFORE: <n>
+      open deals without an owner`.
+    connectors:
+      - { name: twenty, accounts: [default], functions: [list_opportunities], max_calls: 10 }
+  - id: assign_owners
+    type: agent_task
+    title: Assign the rule's owner
+    expected_duration: 10m
+    prompt: >-
+      For every deal in {{nodes.count_unowned.output}}, set its owner to
+      {{params.default_owner_id}} with the twenty connector's
+      update_opportunity function, the record carrying only the owner field
+      of this workspace. One update per deal, keyed by the deal's id; skip
+      no deal. Keep a running count in your reply. End with a line
+      `ASSIGNED: <k> of <n> deals`, and name every deal whose update failed
+      with the error you hit.
+    connectors:
+      - { name: twenty, accounts: [default], functions: [update_opportunity], max_calls: 60 }
+  - id: recount
+    type: agent_task
+    title: Recount and prove
+    expected_duration: 5m
+    prompt: >-
+      Repeat the count from {{nodes.count_unowned.output}}: list open
+      opportunities with the twenty connector's list_opportunities function
+      the same way, select the deals with no owner, and report their ids
+      and names. Change nothing. End with a line `UNOWNED AFTER: <n> open
+      deals without an owner`.
+    connectors:
+      - { name: twenty, accounts: [default], functions: [list_opportunities], max_calls: 10 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: count_unowned }
+  - { from: count_unowned, to: assign_owners }
+  - { from: assign_owners, to: recount }
+  - { from: recount, to: finish }

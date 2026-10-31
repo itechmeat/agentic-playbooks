@@ -93,24 +93,29 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
-apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal)
-apb runs            list runs (apb runs <id> [--json]: one run with its execution mode)
+apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
+apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item; --html <path|->: the report as one self-contained page)
+apb notify          the machine's notify target, a run's notifications or a person's change of them (--on[=LIST], --off, --via, --to; refused inside a run step); apb notify test sends a test message
 apb wait <run>      block until a run finishes, needs input or stops
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
 apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
 apb stop <run>      stop a run
-apb review          decide a pending human_review node
+apb intent          list a run's send intents, or resolve one whose outcome is not known (--sent | --not-sent)
+apb review          decide a pending human_review or publish node (--nonce: the plan's nonce, publish only)
+apb publish         a run's publish gate: show the exact plan, approve it by its nonce, or skip the push (show | approve --nonce N | skip)
 apb answer          answer an interactive node's pending question
-apb tasks           list or submit host tasks (host execution mode)
+apb tasks           list or submit host tasks (host execution mode; --notes: findings and warnings)
 apb note            post a supervisor note to a run
-apb export          export a playbook (with layout) to a bundle file
-apb import          import a playbook bundle into this project
+apb export          export a playbook version (YAML, layout, scripts) to a bundle file
+apb import          preview and import a playbook bundle into this project (--preview; --accept <bundle digest> without a terminal, else exit 3)
 apb trash           list deleted playbooks, restore one with its versions
-apb trust           list approvals (trust.json), revoke by digest or id
+apb trust           list approvals (trust.json), revoke by digest or id, approve a version (--digest for imported scripts)
 apb profile         manage agent profiles
 apb connector       list or manage connectors
 apb detect          detect installed coding agents
-apb adopt           adoption readiness report for a playbook
+apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
+apb memory          show or clear the remembered run input of a playbook in this project
+apb make-global     make a project playbook available in every project (--variant trash|retire|keep, --dry-run)
 apb subscriptions   view or declare agent subscriptions
 apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2
@@ -119,6 +124,10 @@ apb cache           inspect and manage the node result cache
 apb decide          ask the configured decision providers a bounded question (host tasks, scripts)
 apb decisions       decision-model report, stored thresholds, replay
 apb stats           cross-run metrics per playbook version and node (read-only)
+apb grade <run>     grade an ended run by rules (built-in quality criteria) or by the decision model (--model: the playbook's own criteria); --show, --json, --reopen; --backfill <playbook> [--version] [--last N] [--model]
+apb candidate <id>  a playbook's candidate compared with current by quality (--promote, --keep-current [--reason])
+apb problems <id>   a playbook's known problems (--json); confirm|dismiss|reopen <pid> [--reason]; close <pid> --quote; recheck [<pid>] [--holds|--model]; scan [--last N]
+apb discover        step sequences past agent sessions repeat, as drafts (--project <ws|dir>, --all-projects, --root <name>, --sessions <dir> --agent claude-code|codex, --since 30d, --json); list; show <id> [--paths]; save <id> <slug> [--scope]; dismiss <id> <slug> [--hard] [--global]
 apb eval <id>       run a playbook's eval cases in scratch repositories, store and compare pass counts
 apb projects        list or manage the workspace registry
 apb dashboard       web UI on port 7321
@@ -143,17 +152,22 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 ## Docs
 
 - [Install guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INSTALL.md): detailed installation methods and environment checks
-- [MCP tools reference](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/MCP.md): full tool surface, annotations, safety model
-- [Run stats](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/STATS.md): `apb stats`, cross-run metrics from the run journals
+- [MCP tools reference](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/MCP.md): full tool surface, annotations, safety model, the run outcome (done, verified, not verified, findings, warnings, baseline, unknown sends)
+- [Run stats](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/STATS.md): `apb stats`, cross-run metrics from the run journals, per executor digest, quality per criterion over signed grades and its deltas in `--compare`, and the run estimate (`apb run --estimate`)
+- [Run quality](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/QUALITY.md): the `quality:` block, built-in criteria graded by rules as a run ends, a host's bounded grading session with cited evidence, the opt-in decision-model grader (`criteria_grader`), promotion of a candidate by quality (`apb grade`, `apb candidate`)
+- [Repeats in session history](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DISCOVER.md): `apb discover` and MCP `playbook_discover`, the Claude Code and Codex history of named projects read within bounds, argument-free step tokens, repeated sequences offered as playbook drafts with scrubbed examples and sources, saved through capture or declined (`playbook_discover_save`, `playbook_discover_dismiss`)
+- [Known problems](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/KNOWN-PROBLEMS.md): the `known_problems:` block, tool-problem findings and repeated connector failures collected per playbook, shown to later runs as facts to check, rechecked when their source changes and closed only on a quote of the new source (`apb problems`, MCP `playbook_known_problems`, `known_problem_decide`, `known_problem_recheck`)
 - [Eval suites](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
 - [Host integration](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
-- [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
-- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating
+- [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills; `process_env: allowlist` limits which operator environment variables an agent process inherits
+- [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, list processing (`list:` runs a step once per item, in batches, with an engine check per item and per-item state kept across retries, pauses and loops), a run `budget:` (a token or dollar limit; the run pauses before a node whose median spend in comparable runs no longer fits, `on_no_estimate: ask|pause|continue`), goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings, the retry briefing, `Apb-Run` trailer reporting
 - [Guardrails](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
 - [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
-- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust
+- [Notifications](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/NOTIFY.md): "Notify me": a run tells a person about a waiting review or question, a pause they did not make and its end, through a connector they configured; trust checked at set time and at every send
+- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust, sending once (the send ledger, `--intent`, `on_unknown`)
 - [Deployment](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DEPLOYMENT.md): running the dashboard on a server behind a TLS proxy with API keys
 - [Decision models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DECISIONS.md): optional small models for completion checks, judge nodes, retry advice and catalog ranking
+- [Reference scenarios](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/scenarios/README.md): realistic code and routine situations features are checked against, each naming today's gaps
 - [Interactive agents](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/INTERACTIVE-AGENTS.md): `interactive: true` nodes that ask the user a question mid-run
 - [Playbook interview](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-interview.md): how an agent interviews a user to capture a process as a playbook
 - [Feedback loop](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/FEEDBACK-LOOP.md): how agents report apb defects found during supervised runs
@@ -162,3 +176,4 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 
 - [Design spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-07-08-workflows-cli-design.md): full system design and rationale
 - [Agent profiles spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-07-12-agent-profiles-design.md): profiles, trust, skills, scope resolution
+- [List processing spec](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/superpowers/specs/2026-10-27-list-processing-design.md): list nodes, the item state machine, item checks, send-once per item, the review panel examples

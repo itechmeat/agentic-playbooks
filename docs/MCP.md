@@ -30,27 +30,33 @@ Reads (read-only):
 | Tool | What it does |
 | --- | --- |
 | `playbook_list` | List of the project's playbooks |
-| `playbook_catalog` | Compact structural catalog (project + global scope): trigger, effects, trust, shadowing; `catalog_revision` for cheap repeat calls; optional `query` for opt-in advisory ranking |
+| `playbook_catalog` | Compact structural catalog (project + global scope): trigger, effects, trust, shadowing; `catalog_revision` for cheap repeat calls; optional `query` for opt-in advisory ranking; `fit: true` adds `fit` to every entry that is not shadowed: `ready`, `compatible`, `setup` (how many setup items), `trusted` and `needs_consent` for a run in this project (`fit_error` when no report could be made). The fit depends on the project, so it stays out of `catalog_revision`, and a call with `fit: true` is always answered in full, never `unchanged` |
 | `projects_list` | User's workspace registry: id, name, path, state |
 | `playbook_howto` | Tier 2: authoring detail (pull only when creating/reworking) |
 | `playbook_interview` | Tier 2: the interview guide for building a playbook from a user interview (pull only when the user describes a process to automate) |
-| `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
+| `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload); `estimate: true` adds `estimate`, what a run of the version takes and spends (see Run budget below) |
 | `playbook_validate` | Validate a playbook, list of issues, including a profile or a script a run would not find (V91, V92); `valid` is false only on an error, and V91 is a warning when only the global store could provide the profile |
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
-| `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
-| `runs_list` | List of runs |
-| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `branch_failures`: what a fork's `on_branch_failure` policy did and which `require: all_succeeded` joins refused (`seq`, `kind` `branch_failed`, `branch_cancelled` or `join_refused`, `node`, `detail`), absent when nothing did. `pending_tasks` and `execution`: see Host execution mode below |
-| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below); `inline_prompt: false` drops each task's inline `prompt` and `role_prompt` (default `true`) for a host whose subagents read `prompt_path` and `role_path` |
-| `run_events` | Run events, optionally from a given seq |
-| `run_report` | Short run summary; carries `usage`, `decisions`, `goal`, `commits` and `unknown_events` like `run_status` |
+| `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust, and `estimate` (see Run budget below) |
+| `runs_list` | List of runs; `needs_look` (`reasons`: `regression`, `findings`, `warnings`, `unknown_sends`, `list_items`, with the `regressions`, `findings` and `warnings` counts, plus `unknown_sends` and `list_items` when not zero) marks a run with a baseline regression, notes its attempts reported, sends whose outcome is not known or list items that need a look, absent when none (see Run outcome below) |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `finished_attempts`: every attempt the run finished, with or without usage, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal (a goal with a statement only has empty `criteria`); `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `publish`: per publish node, the pinned target and what became of it (`node`, `remote`, `url`, `pin_refusal`, `plan` as in `pending_review.publish`, `awaiting_consent`, `push`: the latest push with `intent`, `state` `pending`, `confirmed`, `not_sent` or `unknown`, the `after`, `branch`, `url`, `remote_before` and `plan_digest` of the plan it carried (possibly an earlier visit's than `plan`), `detail` and `effect_ref`, and `result`: the output the node last finished with), absent for a run without one (see `docs/PUBLISH.md`). `attempt_models`: per attempt, the model it actually ran on (`node`, `attempt`, `executed_by` `cli` or `host`, `agent`, `model`, null when a host reported none, `expected`: the node profile's primary model, `mismatch`), absent before the first attempt; `model_mismatch`: how many attempts differ, absent when none. `output_truncated`: per attempt that lost part of its output (`node`, `attempt`, `truncated` with `stream`, `kept_bytes`, `dropped_bytes_at_least` per cut stream, `transcript_incomplete`), absent when none did (see "Bounded agent output" in `docs/HOWTO-authoring.md`). `inbox_gaps`: per connector inbox read that found unread events retention had already dropped (`node`, `connector`, `account`, `from`, `through`, the inclusive range lost), absent when the run journaled no gap. `baseline`: the playbook's baseline check (`enforce`, per check `id`, `description`, `source`, `before_status`, `before_reason`, `inherited_from`, `after_status` and `observations` with `id`, `rule`, `before`, `after`, `change`, `verdict` `met`, `not_met`, `unknown` or `pending`, `regressed`, `detail`; the `met`, `not_met`, `unknown` and `regressions` counts), absent when the playbook declares none. `notes`: the findings and warnings the attempts reported (`findings` with `node`, `attempt`, `kind`, `location`, `evidence`, `why_not_fixed`; `warnings` with `node`, `attempt`, `subject`, `reason`; `dropped`: malformed entries left out), each kept once per node with its latest attempt, absent when none. `branch_failures`: what a fork's `on_branch_failure` policy did and which `require: all_succeeded` joins refused (`seq`, `kind` `branch_failed`, `branch_cancelled` or `join_refused`, `node`, `detail`), absent when nothing did. `lists`: per list node (`list:`) that started a visit, its counts and at most 50 of its items that need a look, with `items_truncated` when more do (see List nodes below), absent for a run without a list. `pending_tasks` and `execution`: see Host execution mode below. `estimate` and `budget`: see Run budget below. `notify`: see Notifications below. `grades`: the latest grade of each grader (the rules grader first), criterion by level, absent for a run nobody graded (see Run quality below). `known_problems`: what the run showed its agents (`shown`: `id`, `scope`, `symptom`, `workaround`, `nodes`, `basis`) and what it hid (`hidden`: `id`, `reason`), absent for a run whose playbook shows nothing (see Known problems below) |
+| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below); `inline_prompt: false` drops each task's inline `prompt` and `role_prompt` (default `true`) for a host whose subagents read `prompt_path` and `role_path`. A run its budget paused carries `budget` and a `next` that says to ask the person (see Run budget below). At a publish gate `next` says to relay `pending_review.publish` (the exact plan) to the person and to pass its nonce to `review_decide` only after they saw it |
+| `run_events` | Run events, optionally from a given seq. An attempt under a profile's `process_env: allowlist` journals `agent_env_applied` (`node`, `attempt`, `agent`, `kept`, `withheld`: the variable names it did not get, sorted, at most 200, `withheld_more`, `absent`: the profile's own `allow` names the operator does not set, `item` for a list item); names only, never values; an attempt whose agent reported tools or MCP servers that differ from what apb handed it (stream transport only) journals `tool_exposure_mismatch` (`node`, `attempt`, `agent`, `missing_tools`, `missing_servers`, `unexpected_servers`, `item`) |
+| `run_report` | Short run summary; carries `usage`, `output_truncated`, `decisions`, `goal`, `commits`, `publish`, `inbox_gaps`, `baseline`, `notes` and `unknown_events` like `run_status`, `lists` with the items of every list node, at most 500 per list (see List nodes below), and `outcome`: the human outcome of the run (see Run outcome below), and `notify` (see Notifications below). A leftover `format` answers `unknown_format` pointing to `run_report_html` |
+| `run_report_html` | Writes the run report as one self-contained page to `runs/<id>/report.html` (replacing the one there) and answers only `{ run_id, path, bytes }`, never the page; give the person the path. Not read-only, so a host asks before it writes; not offered to a supervisor session |
 | `run_retro_context` | The retrospective numbers of a run for whoever improves its playbook: `{ run_id, compare_last? }`. Per node (in the order the nodes first started): `duration_ms` (finished executions summed), `expected_s` and `over_expected` (the declared `expected_duration`), `executions`, `reentries`, `retries`, `fallbacks`, `tokens` and `cost_usd` (as the agents or the host reported them), `models` (the models the attempts actually ran on), `host_wait_ms`, `profile` (the manifest binding), `baseline_median_ms`, and `attempts`: per attempt `model` with `model_source` (`cli`: the binding the CLI started with; `host`: the model the host reported in its submission; `unreported`: a host task whose host named none, never inferred), `declared_model` (the profile's model or fallback hint a host may ignore), `status`, `duration_ms`, `failure_kind`, `verdict` (the status file: `success`, `failure` or `invalid`), `tokens`, `cost_usd`, `host_tasks` and `host_wait_ms` (from `host_task_requested` to the host's `host_task_submitted`). Per run: `outcome` (absent while live; the report is as of the last journal line), `execution`, `duration_ms`, `tokens`, `cost_usd`, `goal` (as in `run_status`) and `baseline`: the last `compare_last` (default 10, at most 100, 0 for none) finished runs of the same playbook version that apb created on this machine (`run_ids` newest first, `success`, `median_duration_ms`, `duration_delta_ms`, `median_tokens`, `median_cost_usd`), absent when there is none. A prompt gets the same report as text through `{{run.retro}}` (HOWTO-authoring, "Retrospective node") |
+| `run_grades` | A run's stored grades, oldest first (`{ run_id, grades }`): per criterion the level, `reason_code`, `why`, the cited references and `counts_for_promotion`, plus the grader (`rules/1`, `host/1`) and the reading trace (counts, never text). See Run quality below |
+| `playbook_candidate` | A project playbook's candidate version and how it compares with `current` by quality (`{ id, candidate }`, `candidate: null` without one): `trials`, the `gate`, the `decision` as it stands (`verdict` `promote`, `keep_current`, `wait` or `needs_person`, the reason, per criterion the tallies of each side and the result) and the decision `recorded` last. Read-only: a person decides with `apb candidate` or the dashboard |
+| `playbook_known_problems` | A playbook's known problems (`{ id, scope?, problem? }`): trouble with its tools that earlier runs reported, each with `scope`, `symptom`, `workaround`, `runs`, `status` (`open`, `closed`, `dismissed`), the latest recheck, `significant` (a run starting now is shown it), `needs_look` (its latest recheck could not settle it or proposes a close) and `source_now` (`unchanged`, `changed`, `unreadable`; absent for a problem without a readable source). With `problem`: that problem and `changed_passages`, the passages of its source that are new since it was seen. Allowed from a run step. See Known problems below |
+| `run_grade` | Grade an ended run, only when the user asks: `{ run_id, grader? }` with `grader` `rules` (default, the built-in criteria, free) or `model` (the playbook's own criteria through the project's decision model, only when `decisions.yaml` turns its `grade` use on and lets run outputs be sent). Answers `{ grader, grade?, skipped?, candidate?, candidate_error? }`; `skipped` names why nothing was stored (`off`, `no_criteria`, `budget`, `send`, `busy`, `state_too_large`). Not read-only; not offered to a supervisor session |
+| `run_grade_start`, `run_grade_read`, `run_grade_submit` | A host's grading session over an ended run, for the playbook's own quality criteria, only when the user asks. Not read-only (they write the session's reading state and the grade into the run) and not destructive; not offered to a supervisor session. See Run quality below |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
 | `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names, configured account names and `account_commands` (per account, each secret read from a command, with the command line); never other account fields or secrets |
 | `trust_list` | The approvals in the user's trust store: `digest`, `id`, `kind` (`playbook`, `profile_bundle`, `connector`, `connector_account`), `origin_kind`, `approved_at_ms`; optional `kind` filter |
 | `agents_detect` | Agent detection: presence, version, category, local hints for models/providers/auth. The detection itself is local - apb runs `--version` and reads local config, makes no network requests of its own (what the third-party CLI does when actually run is not something apb controls) |
 | `profile_howto` | How to write profiles: format, selection rules, model table with assignments, subscriptions, detection (pull only when working with profiles) |
-| `playbook_adopt_report` | Adoption readiness: profile resolvability, skill presence, bundle trust, model availability by detection |
+| `playbook_adopt_report` | Will it fit here: adoption readiness of one playbook (`id`, with `scope` `project` by default or `global`) or of every project and global playbook (`scope` narrows to one store), for a run in this project or in `workspace`. Each report is `{id, scope, fit, findings}` (`fit_error` in place of `fit` when no report could be made; a playbook that does not load, or a store asked for by `id` that does not exist, gives only `{id, scope, findings: [{code: playbook_unloadable}]}`): `fit` keeps four sections apart (`compatibility`: what the project cannot change by configuration, such as `requires`, the lifecycle, the sub-playbook tree, missing scripts and connectors that do not resolve; `setup`: profiles, skills, models, connector accounts and secrets, param values with `param_needs_value` and `remembered_incompatible`, and notes `remembered_ignored` and `remembered_unreadable` for memory that was ignored or could not be read; `trust`: each digest with `approved` and `acknowledge_covers`; `consent`: the irreversible sources and the tree's effects), with `ready` (no blocking compatibility or setup item; a start may still need trust or consent) and `trusted` reported separately, so an untrusted playbook can be ready. `findings` keeps the profile codes (`profile_missing`, `untrusted`, `model_unverifiable` and the other model codes). `diagnostics` lists a store that does not exist (`playbook_store_missing`: no project store here, or a `scope` asked for that this machine lacks) |
 
 Read-only tools over definitions and runs accept an optional `workspace`
 (workspace_id from `projects_list`) to read from another of the user's
@@ -74,29 +80,138 @@ Mutations (destructive):
 
 | Tool | What it does |
 | --- | --- |
-| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected, and a playbook whose tree declares `irreversible` needs `confirm_irreversible` with the refusal's `consent_nonce` after asking the person (`irreversible_requires_confirmation` otherwise; see below). `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees. `execution: "host"` (only when the person asks for mono, host or single-agent mode, or for your own subagents) spawns no agent CLI: every agent step becomes a host task, and the run always starts in the background; see "Host execution mode" below |
+| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected, and a playbook whose tree declares `irreversible` needs `confirm_irreversible` with the refusal's `consent_nonce` after asking the person (`irreversible_requires_confirmation` otherwise; see below). `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees. `execution: "host"` (only when the person asks for mono, host or single-agent mode, or for your own subagents) spawns no agent CLI: every agent step becomes a host task, and the run always starts in the background; see "Host execution mode" below. `budget` limits the run's spend (see Run budget below). `notify` (only when the person asked to hear about the run) is `true`, `false` or `{ on, target }` (see Notifications below). `remember: true` keeps the call's `params` and `instruction` for this playbook in this project once the start succeeded (a refused or failed start remembers nothing); the answer lists `remembered` (names), `not_remembered` (`name`, `reason`: a secret param, a param named like a credential or a credential-shaped value is never stored) and `memory_diagnostics` when earlier memory was replaced. Every successful start answer lists `recalled`: the params (and `instruction`) the start took from this project's memory, absent when none |
 | `playbook_capture` | Distill an action into a draft playbook in the chosen scope (not executed until trial) |
-| `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. Accepts an `instruction`, exactly like `playbook_run` |
-| `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |
-| `playbook_execute_plan` | Phase 2: execute a confirmed cross-workspace plan by `plan_token` |
+| `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. A version imported with scripts and not approved by digest is refused (`policy_refusal` with `imported_scripts_require_approval`), as on `playbook_run`. Accepts an `instruction`, exactly like `playbook_run` |
+| `playbook_approve` | Activation after trial/confirmation: digest trusted, lifecycle active. A version an import wrote with scripts needs `digest`, its exact trust digest: without it the answer is `digest_required` with the `digest` and the `scripts` (path, sha256, bytes) to show the person, and a digest that is not the content now is `digest_mismatch`; neither changes anything. This records consent, it does not stop you: show the person the scripts before you approve, since the approval is recorded as yours (`agent_generated`) |
+| `playbook_execute_plan` | Phase 2: execute a confirmed cross-workspace plan by `plan_token`; takes `budget` like `playbook_run` |
 | `suggestion_dismiss` | Record the user's decline of a save-as-playbook suggestion: `kind` `soft` (a not-now decline whose silence escalates along the backoff schedule) or `hard` (an explicit never-again, the default so an old-style call is unchanged), a one-sentence `synopsis` of the action, and `scope` `project` (default) or `global`. The `pattern` must be a lowercase slug (`[a-z0-9][a-z0-9-]*`, at most 64 chars), so the record stays addressable by `apb suggestions` and the dashboard. Returns the stored record with the server-computed `snoozed_until`, plus a `diagnostics` array when the `suggestions:` config section is invalid or a broken store had to be moved aside. A project-scope dismiss on a directory with no `.apb` yet initializes it, since the call only happens on a root the user already connected apb to |
 | `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest); a definition equal to the current version creates nothing and answers `unchanged: true` |
 | `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create); `unchanged: true` when the definition did not change |
 | `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
 | `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save when it has no scripts. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
 | `trust_revoke` | Revoke approvals: `target` is a digest (exactly that approval) or an id (every approval under it; `kind` narrows it). Returns what was revoked. The same path as `apb trust revoke` and the dashboard's Trust view |
-| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true` |
+| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true`; a run its budget paused needs `budget` (see Run budget below) |
 | `run_pause` | Pause a run so it can continue later (operator tool: any live or paused run, `by: operator`, no supervisor token). `mode` `drain` (default: running nodes finish) or `now` (running nodes are interrupted and run again on resume); optional `reason`, `until` (RFC 3339 or a duration such as `90m`; the run resumes by itself then) and `keep_lock`. See Pause and resume below |
+| `run_notify` | Change whether a person hears about a live run: `notify` `true` (the run's current target, or the machine's), `false`, or `{ on }` with only transitions it notifies about already. Never a target (the argument has no such field, so the call fails as invalid parameters), never a wider list (`invalid_notify`; on a run that is off, the bound is the list it last had, or else the default): the person changes those in the dashboard or with `apb notify`. The target is checked now and its digests pinned; `notify_unavailable` when it cannot be used, `run_ended` for a run that ended. Answers with the run's `notify` block. Not offered to a supervisor session. See Notifications below |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
-| `review_decide` | Decide a run's human_review node |
+| `run_intent_resolve` | Records a person's decision on a send whose outcome is not known (`run_id`, `intent`: the `si-...` id the outcome's `call outcome unknown` gap and `apb intent list` name, not the `--intent` label; `sent`, optional `note`): `sent: true` makes a repeat of the send answer `already_sent`, `false` lets it go out again. Ask the user first and pass on only their answer, never decide it alone. Refused for a send whose outcome is known or that is still in flight. A subagent (a host task's or an agent step's) must never call it and reports the send as a finding instead; like `review_decide` this is an instruction, since the server cannot tell a person's session from a subagent sharing it (the CLI `apb intent resolve` refuses inside a run). See Run outcome below and "Sending once" in CONNECTORS.md |
+| `review_decide` | Decide a run's gate: a human_review node, or a publish node (`run_id`, `node`, `decision`, optional `note`, and for a publish node `nonce`). A publish gate's `pending_review` carries `publish` (the plan: `url`, `branch`, `after`, `remote_before`, `commits` with `this_run` and `apb_run`, `omitted`, `this_run`: how many of all the commits the push carries this run made, `outside_push_suspected`, `plan_digest`, `nonce`): show the person that exact plan first, then pass `decision: publish` with `nonce` only after they saw it and agreed; never decide it alone. A missing nonce is refused, a stale one is a conflict that names the current plan (show it and ask again); `skip` needs no nonce. A subagent must never call it for a publish gate. See `docs/PUBLISH.md` |
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
 | `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`, or a host task submitted as `blocked`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
-| `run_task_submit` | Host execution mode: submit a subagent's reply to a pending host task (`run_id`, `task_id`, `status` `succeeded`, `failed` or `blocked`, `output` verbatim, optional `usage` and `note`); attributed `submitted_by: host` with the MCP client name. A parent run accepts its sub-playbook runs' tasks |
+| `run_task_submit` | Host execution mode: submit a subagent's reply to a pending host task (`run_id`, `task_id`, `status` `succeeded`, `failed` or `blocked`, `output` verbatim, optional `usage`, `note`, `model`, and `findings` and `warnings`: problems the subagent saw and did not fix, and what a person should check, in the shapes of Run outcome below; malformed entries are dropped and counted as `notes_dropped` in the answer, with `notes_dropped_reasons` saying why, and none of them changes the task's result); attributed `submitted_by: host` with the MCP client name. A parent run accepts its sub-playbook runs' tasks |
 | `decision_ask` | Ask the configured decision providers a bounded question (`kind` `choose`, `rank`, `filter`, `map`, `is` or `score`, `question`, `options`, `items`, `criteria`), from a host task or a script; with `run_id` (and `node_id`) it is journaled in the run as `decision_made` with `use_site: host_task` and the run's budget applies. Returns `answered: true` with the answer, or `answered: false` with `refused` and a `reason` (see `docs/DECISIONS.md`, "Host-task decisions") |
-| `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
+| `known_problem_decide` | A person's decision on a known problem, relayed only on the person's explicit word: `{ id, problem, action, quote?, reason?, scope? }` with `action` `confirm`, `dismiss`, `reopen` or `close`; a close needs `quote`, text copied exactly from the source's new text that its old text does not have (a problem whose source cannot be read closes on the person's word, with a quote of 12 to 400 characters). Answers the problem as stored. Refused from a run step, and while a run of the playbook waits on a host task (the session is doing the run's work) |
+| `known_problem_recheck` | Recheck a known problem whose source changed: `{ id, problem, by, verdict?, quote?, why?, scope? }` with `by` `model` (the project's decision model, when its `problem_recheck` use is on) or `host` (`verdict` `holds`, `closed` or `undetermined`; a `closed` verdict needs `quote` from a changed passage and is stored as `closed_proposed`, hidden until a person decides). `verdict`, `quote` and `why` belong to `by: host` only. Answers the stored recheck record. Refused from a run step, and while a run of the playbook waits on a host task |
+| `playbook_discover` | Look for step sequences the user's past agent sessions repeat, only when the user asks: `{ projects?, roots?, since_days? }` with `projects` `current` or workspace ids (default the current project), `roots` history root names from `discover.roots` in the global config (default every configured root that is there), `since_days` 1 to 365. No model call, no network call. Answers the stored result (`id`, `read`, `suggestions` with argument-free `steps`, `support`, `effects`, scrubbed `examples`, `sources` as root name, `<project>/<file>`, workspace id and lines, the draft `yaml` and `status`; `suppressed`: suggestions a decline or an earlier save left out), `signed`, `stored` and `suppressed_suggestions` (the catalog's shape, to compare by meaning). Never a path. `busy` while another discovery runs. Refused from a run step. See docs/DISCOVER.md |
+| `playbook_discover_results` | The stored discovery results, newest first (`id`, `created_at`, `request`, `sessions`, `suggestions`, `saved`, `dismissed`, `signed`), or with `result_id` one result in full, with the declines that hold now in its projects (`suppressed_suggestions`). Read-only. Refused from a run step |
+| `playbook_discover_save` | Save one suggestion of a stored result as a draft playbook, on the user's word: `{ result_id, slug, scope, yaml?, workspace? }` (`yaml`: the draft as the host rewrote it). Goes through `playbook_capture`'s secret and duplicate checks; the provenance is `created_by: discover` with `pattern`, `result` and `edited` (true for a rewritten draft). The suggestion's own draft names the first profile where it is saved. Only a result this installation signed is saved from, and a suggestion once; later discoveries leave it out by its slug, whatever id the playbook got, in the project it was saved in (everywhere for a global save). A save the result could not record answers with a `warning`. Refused from a run step |
+| `playbook_discover_dismiss` | Record the user's decline of one suggestion: `{ result_id, slug, kind, scope?, workspace? }` with `kind` `soft` (not now) or `hard` (never), written where `suggestion_dismiss` writes, with the suggestion's title as the synopsis; later discoveries leave it out. Refused from a run step |
+| `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only. Optional `environment`, `zcode_mode` and `process_env: { policy: inherit \| allowlist, allow: [NAME, PREFIX*] }` (which operator variables the agent process inherits, see PROFILES.md "Process environment"); a field left out keeps the stored value |
+| `playbook_memory` | Remembered run input of a playbook in this project (`id`, `scope` of the definition, `action`): `get` (default) returns it checked against the playbook's params now (`instruction`, `instruction_source` `memory`, `legacy_draft` or `none`, `values` with `status` `compatible` or `incompatible` and a `reason`, `missing`: params a start must still pass, `schema_changed`); `set` remembers `params` and/or `instruction` (merged, checked against the current version; an empty instruction clears it on purpose; a stored value that no longer fits is dropped) and answers `stored`, `refused` and `diagnostics`; `clear` forgets `what` (`all`, `params`, `instruction`) and works even when the playbook no longer loads. Values live in `.apb/memory/<scope>/<id>.json` of the project (git-ignored), so a global playbook remembers per project; a global playbook's file is bound to this installation, and one a checkout brought is ignored with a diagnostic. `workspace` reads another workspace's memory (get only) |
+| `playbook_make_global` | Make a project playbook available in every project (`id`, `variant`, `move_profiles`, `dry_run`): copies it with every version to the global store (digests, and so trust, carry over), carries the project's remembered input to the global scope (moved; copied with `keep`), and applies the chosen fate of the project copy: `trash` (restorable), `retire` (the catalog shadows it) or `keep` (the pair is `ambiguous` while both are active and trusted, until one is retired; otherwise the project copy is `shadowed`). Ask the person which. A step that fails undoes the earlier ones. The answer carries the `plan` (`blockers`, `actions`, `warnings`) and, once applied, the global playbook's `fit` (null with a warning when it cannot be built). Blockers: `not_found`, `no_global_store` (this machine has no global config directory), `global_id_taken`, `candidate_on_trial`, `scripts_undigestable`, `invalid_as_global` (the version fails validation as a global playbook), `profile_project_only` (pass `move_profiles`), `profile_has_project_skills`, `profile_unreadable`, `sub_playbook_not_global`, `variant_fate_required`. Warnings: `sub_playbook_per_project`, `connector_accounts_project_only`, `profile_shadow_change` (the global profile of the name, or the content of a skill it uses, differs), `same_id_elsewhere` (another project on this machine has its own playbook with this id; reported, never changed). Errors after the plan: `digest_changed` (the global copy did not digest like the source and was removed), `copy_unreadable` (the global copy could not be loaded; removed), `unknown_variant`. `dry_run` only reports |
 | `profile_move` | Copy a profile between scopes (the source remains) |
 | `profile_delete` | Delete a profile (blocked on references unless forced) |
 | `subscriptions_set` | Record agents' declared subscriptions, or opt out of the poll (overlay + onboarding state) |
+
+## Run quality
+
+A playbook's `quality:` block declares the criteria its runs are graded on
+(docs/QUALITY.md). The built-ins are graded by apb's rules as a run ends;
+`run_status` then carries `grades`, the latest grade of each grader as
+`{ grader, grade_id, levels: { <criterion>: <level> } }`, absent for a run
+nobody graded. The playbook's own criteria are graded by the host, only
+when the user asks:
+
+1. `run_grade_start { run_id, budget_chars? }` opens a session (one per run
+   at a time, open for an hour, 200000 characters by default; a run takes
+   one host grade, and a new session is refused until a person reopens the
+   run with `apb grade <run> --reopen` or the dashboard) and returns
+   `session`, `expires_at`, `criteria` (id, subject, `applies_when`,
+   `evidence`, `reads`, the `good`, `partial` and `poor` descriptions) and
+   `outline` (the run's views: `journal`, `outputs`, `connector_calls`,
+   `findings`, one per attempt stream `t:<stem>/<session|stdout|stderr>`).
+2. `run_grade_read { run_id, session, op, ref?, span?, view?, from?, count?,
+   query? }`: `op` `outline`, `children` (`view`, `from`, `count`: the
+   view's references with short snippets), `read` (`ref`, optionally a
+   `span` `[from, to]`), `page` (`view`, `from`, `count`: records, each
+   whole) or `search` (`query`, optionally one `view`). Answers `items`
+   (`ref`, redacted `text`, `citable`), `read_chars`, `budget_chars` and a
+   `note` when it stopped short (the budget, the page size: every
+   character a listing or a search returns counts too). Only
+   `citable: true` items (a record read whole) may be cited, and only from
+   the views the criterion reads; outline, children and search answers
+   route.
+3. `run_grade_submit { run_id, session, grades: [{ criterion, level,
+   reason_code, why, cites: [{ ref, span? }], absence }] }`: one entry per
+   criterion; `level` `good`, `partial`, `poor`, `not_applicable` or
+   `not_enough_data`; `absence: true` claims that something did not happen
+   and needs at least one view of the kinds the criterion reads, each
+   complete and read to its end. `reason_code` is a short slug
+   (`[a-z0-9_]`, at most 40 characters; anything else is stored as the
+   level's name); `not_applicable` is stored but never counts toward
+   promoting a candidate. Two entries for one criterion are refused.
+   Answers `status: graded` with the stored `grade`, or `status: rejected`
+   with `problems` (`criterion`, `problem`): correct them and submit once
+   more; a level changed without a record newly read whole becomes
+   `not_enough_data`.
+
+A stored grade re-decides the playbook's candidate when it is on trial
+under `promote_supervisor_patches: { when: quality }`; the answer then
+carries `candidate` (the decision recorded: `verdict`, `reason`, the
+comparison, `decided_by: apb`) or `candidate_error`. `apb grade`, `apb
+grade --backfill` and the dashboard's "Grade by rules" re-decide the same
+way. `run_grade { run_id, grader }` grades on request by `rules` or by
+`model`: the model grader grades the playbook's own criteria through the
+project's decision model (docs/QUALITY.md, "The model grader"), and
+answers `skipped` with the reason when it stored nothing. A malformed
+argument (an unknown `op`, `level` or `grader`, a `read` without
+`ref`) answers `{ error: "invalid_arguments", detail }`. The grading tools
+are refused when the MCP server itself runs as a step of a run
+(`APB_RUN_ID` or `APB_HOST_TASK` in its environment): a run never grades
+its own playbook's runs.
+
+## Known problems
+
+A playbook's runs report trouble with their tools as findings (`kind:
+tool_problem`, a location such as `connector:crm.update_contact` or
+`path:scripts/build.sh`), and connector calls that fail alike are counted
+too. apb keeps them per playbook, and a playbook with a `known_problems:`
+block shows the significant ones to its agents as facts to check
+(docs/KNOWN-PROBLEMS.md). `playbook_known_problems` reads them; the run
+surfaces carry `known_problems`, what one run was shown and what it hid.
+
+Deciding is a person's: `known_problem_decide` records a person's confirm,
+dismiss, reopen or close, relayed by the host only on the person's explicit
+word. A close rests on a quote of the source's new text: read
+`playbook_known_problems { id, problem }` for `changed_passages` and copy
+one exactly. `known_problem_recheck { by: host }` is the host's own reading;
+its close waits for a person as `closed_proposed`. `{ by: model }` asks the
+project's decision model, only when `decisions.yaml` turns
+`uses.problem_recheck` on. Both writing tools are refused when the MCP
+server runs as a step of a run, and while a run of the playbook waits on a
+host task: in host execution mode the session relaying the person's word
+is also the one doing the run's work. A malformed argument (an unknown
+`action`, `by` or `verdict`, a close without `quote`, `by: host` without
+`verdict`, `by: model` with any of the host's fields) answers `{ error:
+"invalid_arguments", detail }`. `apb problems` and the dashboard's known
+problems card do the same.
+
+## Repeats in session history
+
+`playbook_discover` reads the Claude Code and Codex history of the
+projects it is given, within fixed bounds, and finds the step sequences
+the sessions keep repeating (docs/DISCOVER.md). Call it only when the user
+asks to look for repeats; never on your own initiative. Show the user each
+suggestion's steps, support and sources, compare it with
+`suppressed_suggestions` by meaning, and save one
+(`playbook_discover_save`) or record a decline
+(`playbook_discover_dismiss`) only on the user's word. A surface never
+names a history directory: roots are configured by name in the global
+config, and a result names files only as `<project>/<file>` under a root
+name. Every discovery tool, the reading ones too, is refused when the MCP
+server runs as a step of a run: reading session history is a person's act.
+`apb discover` and the dashboard's Discover page do the same.
 
 ## Run policy and trust
 
@@ -111,7 +226,7 @@ run directory and refuses to start when the copy does not match the digest
 the gate checked.
 
 A save through apb itself - `playbook_create` / `playbook_update`, the
-dashboard editor, `apb import` - goes through one save path
+dashboard editor - goes through one save path
 (`apb_core::versioning::save_definition`). A definition equal to the current
 version (compared in the stored form, the `version:` field and formatting set
 aside) writes nothing: no version is created, trust is untouched and the
@@ -119,7 +234,21 @@ answer carries `unchanged: true`. Otherwise the save approves the digest it wrot
 the user asked for that write, so its result is trusted (the same rule as
 `profile_write`). A save writes YAML only and carries the base version's
 scripts along, so a result with scripts is approved only when its base was
-approved and the scripts are unchanged. A restore from the trash
+approved and the scripts are unchanged. `apb import` is the exception
+(`apb_core::versioning::save_imported`): it writes the YAML and the bundle's
+scripts as one new version (a format-2 bundle that lists no scripts gives a
+version without scripts) and never approves it, with or without scripts,
+because the bundle came from elsewhere; the import says so, and the version
+waits for `playbook_approve` (or a run confirmation) like any untrusted
+content. A version imported with scripts goes further: it runs only after an
+approval that names its exact digest (`playbook_approve` with `digest`, or
+`apb trust approve --digest`), for the playbook and every sub-playbook, and
+`acknowledge_untrusted` does not stand in for it (refusal
+`imported_scripts_require_approval` with `id`, `version`, `digest` and
+`scripts`). A script changed after the approval digests differently and needs
+a new one. The rule rests on the import record in the version's provenance
+sidecar: it hardens the import path, while content someone writes into the
+repository directly is untrusted repository content as before. A restore from the trash
 (`playbook_trash_restore`, the dashboard's Trash view, `apb trash restore`)
 goes through one path too (`apb_core::versioning::restore_from_trash`) and
 approves the restored current version the same way when it has no scripts;
@@ -211,7 +340,7 @@ supervisor agent that `apb run --supervise` spawns gets
 (agents pass their environment to their MCP servers) serves only the
 `supervisor_*` tools, the read-only tools and `run_answer`, whose `run_id`
 path (answering as the human) it refuses. The operator's run control
-(`run_stop`, `run_pause`, `run_resume`, `review_decide`), authoring and run starts take no
+(`run_stop`, `run_pause`, `run_resume`, `review_decide`, `run_intent_resolve`), authoring and run starts take no
 token, so they are not offered to a supervisor. One is worth naming regardless, because its polling contract is easy
 to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
 until the run's next wake, a new human_review gate, the end of the run, or a
@@ -365,7 +494,9 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
   pending for 1.5 s before `run_wait` reports it, so a wait right after
   `run_answer` or `review_decide` does not return the gate just answered.
 - If the run hits a human_review node, the client resolves it via
-  `review_decide`, and the run continues.
+  `review_decide`, and the run continues. At a publish node it first shows
+  the person `pending_review.publish`, the exact plan, and passes its
+  `nonce` only after they agreed (see `docs/PUBLISH.md`).
 - If the run hits an interactive `agent_task` node that asked a question
   (`run_status.pending_question` non-null), the client resolves it via
   `run_answer`, and the run continues.
@@ -423,6 +554,99 @@ hands a single step to it as a host task when none of the step's CLIs can
 start (`execution_fallback`). `docs/HOST-INTEGRATION.md` has the whole
 protocol, when an agent should choose the mode, and the fallback's
 switches.
+
+## Run outcome
+
+`run_report` answers what a run did and how much of that anyone checked, as
+`outcome`:
+
+- `headline`: one line, such as `Run succeeded; 2 of 3 checks passed; 5 not
+  verified; needs a look (1 finding, 1 warning)`.
+- `done`: the steps that succeeded (start and finish aside), the commits per
+  node (with how many lack an `Apb-Run` trailer for this run or name another
+  run), the connector writes that went through, per function, and the sends
+  apb's lookup found or a person confirmed went out.
+- `verified`: what the engine itself checked, each `{ source, subject,
+  result, detail? }`. `source` is `goal` (a script, marker or list criterion,
+  `result` `passed`, `failed` or `error`), `success_check` (a node whose
+  `success_check` passed), `baseline` (a compared observation, `result`
+  `met` or `not_met`) or `item_check` (a list node's item check once an
+  item was processed: `result` `passed` when no item needs a look, else
+  `failed`, and a detail such as `41 of 43 items passed, connector
+  asana.get_task`).
+- `unverified`: what nobody checked, each `{ kind, subject, detail? }`.
+  `kind` is `manual_criterion` (a person confirms it), `self_reported_node`
+  (an `agent_task` that succeeded with no `success_check`: its own report is
+  the only evidence), `goal_not_checked` (the run ended before a finish
+  node), `unknown_call` (a connector write that timed out, hit a network
+  error or a server error: whether it changed anything is not known; for a
+  send-once function one gap per send intent, whose detail names the intent
+  and `apb intent resolve <run> <si-id> --sent|--not-sent`, also for a send
+  whose process died before its call was recorded, and none once a replay,
+  apb's lookup or a person settled it; a replay that did not go out leaves
+  the send it repeated open),
+  `incomplete_response` (a connector response cut short), `inbox_gap`
+  (unread inbox events lost to retention), `output_truncated` (an attempt's
+  output was cut), `baseline_unknown` (an observation that could not be
+  compared, or a check with no after snapshot in a run that ended),
+  `item_needs_look` (a list item its check, its step or its send left for a
+  person; `subject` is `<node>/<item id>`, the detail says why; at most 30,
+  then one `and N more` entry) or `self_reported_items` (a list node with
+  no item check whose items passed on the agent's own report).
+- `lists`: per list node `{ node, total, processed, passed,
+  passed_with_note, needs_look, check? }`, where `check` says how each item
+  was checked (`connector asana.get_task`, `script scripts/x.sh`, `output
+  blocking equals 0`, `judge`) and is absent for a list without a check;
+  absent for a run without a list. The text rendering prints one line per
+  list right under the headline.
+- `findings` and `warnings`: as in `notes` above.
+- `baseline`: the baseline check told as `problem` (what the before snapshot
+  found), `change` (each observation before and after, its rule and verdict)
+  and `goal_reached`, which comes from the goal criteria only (every checked
+  criterion passed and no manual one waits) and is absent when they cannot
+  tell. A baseline shows the change; it never decides the goal.
+- `agent_summary`: the finish node's answer, the agent's own account,
+  labelled as not checked.
+- `needs_look`: as in `runs_list`. Only a baseline regression, findings,
+  warnings, unknown sends (`unknown_sends`) or list items that need a look
+  (`list_items`) set it, read from the journal alone; a failed run says so
+  in its status instead. Resolve an unknown send
+  with `run_intent_resolve` after asking the user.
+
+`apb runs <id>` prints the same outcome as text, and `apb runs` marks a run
+that needs a look.
+
+## List nodes
+
+A node with `list:` runs its step once per item and keeps every item's
+state in the journal (HOWTO-authoring, "List processing"). `run_status` and
+`run_report` carry those states as `lists`, one entry per list node that
+started a visit (its latest visit), absent for a run without a list:
+
+- `node`, `title` (when the node has one);
+- the counts `total` (items after the filter), `processed` (`passed` plus
+  `needs_look`), `passed` (with a note included), `passed_with_note`,
+  `needs_look`, `pending` and `running`;
+- `batch` (the batch running or last run, from 1) and `batches` (how many
+  the visit needs at its batch size);
+- `items`, each `{ id, state, round, verdict?, note?, reason?, attempts }`:
+  `state` is `pending`, `running`, `passed` or `needs_look`; `round` counts
+  the re-runs after a rejection (0 for the first run); `verdict` is the
+  check's last word (`accept`, `accept_with_note`, `reject`); `reason` says
+  why an item needs a look (`rejected`, `check_unknown`, `unknown_send`,
+  `failed`, `item_too_large`); `attempts` counts the item's attempts in the
+  visit.
+
+`run_status` keeps the counts whole but lists only the items that need a
+look, at most 50 per list, so a status read on a 500-item list stays small;
+a list with more carries `items_truncated`, the needs-look items left out.
+`run_report` lists the items in list order, at most 500 per list; a list
+with more carries `items_truncated`, the count left out, and `apb runs
+<id> --items` prints them all. The dashboard run detail carries the same
+`lists`, the progress report carries the counts per list, and `apb runs
+<id> --items [--node N] [--state pending|running|passed|needs_look]`
+prints one line per item. An item whose unknown send blocks it is resolved
+like any other send, with `run_intent_resolve` after asking the user.
 
 ## Detached runs, resume, and stop
 
@@ -539,6 +763,117 @@ endpoint answers 409 `{"error": "workdir_busy", "detail": ...}`, and the run
 stays paused. A waker whose `until` arrives while the tree is busy keeps
 waiting and resumes the run once the lock frees, and `apb resume --all`
 leaves such a run as it is for a later pass.
+
+## Run budget
+
+A run's `budget` (the playbook's `budget:` block, or the `budget` argument of
+`playbook_run` and `playbook_execute_plan`, which overrides it per field)
+pauses the run before an agent or `playbook` node whose median spend in
+comparable runs no longer fits what is left. The rules, the estimate and the
+limits are in "budget" in `docs/HOWTO-authoring.md`.
+
+```json
+{ "id": "triage-and-fix", "budget": { "tokens": 400000, "usd": 4.0, "on_no_estimate": "ask" } }
+```
+
+- **`budget_needs_decision`.** With `on_no_estimate` `ask` (the default), a
+  gated node with no estimate in a dimension the budget limits (a node with
+  token history only, under a dollar limit, included), and no
+  `on_no_estimate` in the argument, the start is refused instead of run: `{ "error":
+  "budget_needs_decision", "unestimated": [...], "estimate": {...},
+  "options": ["pause", "continue"], "instruction": ... }`. Ask the person
+  whether the run pauses before such a node or runs it, then call again with
+  `budget.on_no_estimate` set to the answer. `invalid_budget` refuses a zero
+  or negative amount, an unknown policy, `on_no_estimate` alone without
+  any limit, and a set and a raise of the same dimension in one resume.
+- **Answers.** Every start answer (`playbook_run` in each mode,
+  `playbook_execute_plan`) carries `estimate`: the run figures the run
+  started with (`comparable` counts, `time`, `tokens`, `cost_usd`, each a
+  median with a range, `unestimated`, `unestimated_tokens`,
+  `unestimated_cost`, `note`) and a `summary` text (the pre-start check's
+  estimate, kept as the run's snapshot, so the history is read once), and
+  `budget` when the run has one; `warnings` names a dollar limit no
+  comparable attempt can weigh (no cost reported) and an estimate over a
+  limit. `run_status` and `run_wait` carry the same `estimate` and `budget`:
+  `limit`, `on_no_estimate`, `source` (`playbook`, `run` or `resume`), per
+  limited dimension `tokens` and `usd` with `spent`, `unknown_attempts`,
+  `imputed` (the estimate for the attempts that reported nothing) and
+  `remaining`, `sets`, `paused` (the `node`, `batch`, `basis`, `need` and
+  `remaining` of the budget pause holding the run) and `waiver`.
+  `playbook_get(estimate: true)` and `playbook_prepare_run` (as
+  `plan.estimate`) give the estimate before a start, per node too.
+- **A budget pause.** The run's `pause` has `cause: "budget"` and `by:
+  "engine"`. `run_wait` returns `reason: "stopped"` with `budget` and a
+  `next` that says to ask the person whether to raise the budget, set a new
+  one or let the paused node run once.
+- **`budget_paused`.** A plain `run_resume` of such a run is refused with `{
+  "error": "budget_paused", "detail": ..., "budget": {...}, "next": ... }`.
+  Resume it with `budget: { raise_tokens, raise_usd, tokens, usd,
+  on_no_estimate, once }`: a raise adds to the limit in force, `tokens` and
+  `usd` set a new one, `once` lets the paused node run once over the budget.
+  Only a person changes a budget: a `run_resume` with `budget` is answered
+  first with `{ "error": "budget_change_requires_confirmation", "change":
+  ..., "budget_nonce": ..., "instruction": ... }`; show the person the
+  change and, if they agree, call again with the same `budget` and
+  `confirm_budget` set to `budget_nonce`. The nonce binds the change to the
+  run and its pause; it is not a secret, so this makes you ask, it does not
+  prove a person answered. A run a supervisor agent watches refuses budget
+  changes here (`budget_change_refused`): a person uses `apb resume` or the
+  dashboard. The change is journaled with the resume's `run_resumed` only
+  once the resume is admitted, so a refused resume changes nothing. A
+  running run's budget does not change (pause it first).
+- **HTTP.** `GET /api/playbooks/{id}/estimate?workspace=&version=` returns
+  the estimate. `POST /api/playbooks/{id}/run` takes `budget` and answers
+  409 with the same `budget_needs_decision` body; `POST
+  /api/runs/{id}/resume` takes `budget` and answers 409 `budget_paused`;
+  `GET /api/runs/{id}` carries `budget` and `estimate`.
+
+## Notifications
+
+A run can tell a person about its transitions (a review or a question
+waiting, a pause the engine or the supervisor made, the end) through a
+connector they configured on the machine. The full model, the config and the
+trust rules are in `docs/NOTIFY.md`; the MCP side:
+
+- `playbook_run` takes `notify` only when the person asked: `true` (the
+  machine's target), `false` (none for this run, whatever the machine
+  default), or `{ "on": ["review", "finished"], "target": { "connector":
+  "telegram", "account": "me", "function": "send_message", "to": "123" } }`
+  (each field left out takes the machine's). A request that cannot be
+  honoured is refused before the run exists: `{ "error":
+  "notify_unavailable", "detail": ... }`; a malformed one is
+  `invalid_notify`, and so is a `target` in a start made from inside a run
+  step (`APB_RUN_ID` or `APB_HOST_TASK` set in the server's environment).
+  A machine default that cannot be used only adds a warning to the start
+  answer.
+- `run_notify { run_id, notify }` turns a live run's notifications on
+  (`true`: the run's current target, or the machine's) or off (`false`), or
+  keeps fewer transitions (`{ "on": ["review"] }`, only ones the person
+  chose: those in force, or on a run that is off the ones it last had, or
+  else the default; a wider list is `invalid_notify`, checked against the
+  journal the change is made on), and answers with its `notify` block;
+  `run_ended` for a run that has ended. It never takes a target (a
+  `target` field fails as invalid parameters): an agent cannot redirect a
+  person's notifications. A new target comes from
+  the person, in the dashboard or with `apb notify <run> --via/--to` from a
+  terminal outside any run (inside a run step the CLI refuses it too).
+- `run_status` and `run_report` carry `notify` when the run ever had a
+  subscription: `active`, `target` (`connector`, `account`, `function`, `to`;
+  no digest, no secret), `on`, `source` (`run`, `project`, `machine`,
+  `person`, `parent`), `sent` (per transition `transition` such as
+  `review.12`, `state` `pending`, `confirmed`, `not_sent` or `unknown`, and
+  `at`) and `problems` (including a notification given up because the run
+  ended).
+- Notifications are not part of the run permit. The target is trust-checked
+  when it is set and at every send against the digests pinned then.
+- **HTTP.** `POST /api/playbooks/{id}/run` takes `notify` (409
+  `notify_unavailable`, 400 `invalid_notify`); `POST /api/runs/{id}/notify`
+  takes `{ "notify": ... }` (409 `run_ended` on a finished run);
+  `GET /api/notify` shows the machine's target and whether runs of the
+  workspace notify by default; `GET /api/runs/{id}` carries `notify`;
+  `GET /api/runs/{id}/report.html` serves the report page as a download with
+  its own Content Security Policy and `X-Content-Type-Options: nosniff`. A
+  `notify` value of the wrong shape answers 400 `invalid_notify` like MCP.
 
 ## Connecting (local agents, no relay)
 

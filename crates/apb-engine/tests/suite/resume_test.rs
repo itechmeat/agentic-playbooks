@@ -120,6 +120,7 @@ fn keep_journal_through<F: Fn(&EventPayload) -> bool>(root: &Path, run_id: &str,
 
 fn attempt_started(node: &str) -> EventPayload {
     EventPayload::AttemptStarted {
+        item: None,
         node: node.into(),
         attempt: 1,
         agent: "claude-code".into(),
@@ -130,6 +131,8 @@ fn attempt_started(node: &str) -> EventPayload {
         model: None,
         workdir: None,
         transcript: None,
+        token: None,
+        isolation: None,
     }
 }
 
@@ -469,11 +472,13 @@ fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
 
     let pb = apb_core::schema::Playbook::from_yaml(RLOOP_PLAYBOOK).unwrap();
     let heads = apb_engine::parallel::pending_heads(&pb, &state);
+    // Only `tick`: `check` took its bounded edge, and that edge being spent
+    // by the very traversal does not make `check` take its fallback into
+    // `done` as well.
     assert_eq!(
         heads,
-        vec!["done".to_string(), "tick".to_string()],
-        "pending_heads must rebuild the same concrete branch heads a \
-         pre-change binary returned, got: {heads:?}"
+        vec!["tick".to_string()],
+        "pending_heads must rebuild the branch head the traversal names, got: {heads:?}"
     );
 
     let res = resume(dir.path(), run_id, None).unwrap();

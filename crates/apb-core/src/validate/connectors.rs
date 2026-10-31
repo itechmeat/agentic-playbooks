@@ -43,47 +43,109 @@ pub(crate) fn check_connectors(
     ctx: &ValidationContext,
     r: &mut ValidationReport,
 ) {
-    for n in &playbook.nodes {
+    for (site, bindings) in playbook.connector_sites() {
+        let site: &str = &site;
+        let label = crate::connector::sites::site_label(site);
         let mut seen_connectors = HashSet::new();
-        for b in n.kind.connector_bindings() {
+        for b in bindings.iter() {
             if !seen_connectors.insert(b.name.as_str()) {
                 r.error(
                     "V24",
-                    Some(&n.id),
-                    format!(
-                        "node `{}` binds connector `{}` more than once",
-                        n.id, b.name
-                    ),
+                    Some(site),
+                    format!("{} binds connector `{}` more than once", label, b.name),
                 );
             }
             if let Err(msg) = crate::profile::validate_profile_name(&b.name) {
                 r.error(
                     "V23",
-                    Some(&n.id),
+                    Some(site),
                     format!(
-                        "node `{}` connector `{}` has an invalid name: {msg}",
-                        n.id, b.name
+                        "{} connector `{}` has an invalid name: {msg}",
+                        label, b.name
                     ),
                 );
             }
             if let Some(accounts) = &b.accounts {
-                check_connector_list(&n.id, &b.name, "accounts", accounts, r, |item| {
+                check_connector_list(site, &b.name, "accounts", accounts, r, |item| {
                     crate::profile::validate_profile_name(item)
                 });
             }
             if let FunctionsAllow::List(names) = &b.functions {
-                check_connector_list(&n.id, &b.name, "functions", names, r, |item| {
+                check_connector_list(site, &b.name, "functions", names, r, |item| {
                     crate::connector::validate_snake_name(item)
                 });
             }
             if b.max_calls == Some(0) {
                 r.error(
                     "V26",
-                    Some(&n.id),
-                    format!("node `{}` connector `{}` has max_calls 0", n.id, b.name),
+                    Some(site),
+                    format!("{label} connector `{}` has max_calls 0", b.name),
                 );
             }
-            check_inbox_binding(&n.id, b, ctx, r);
+            check_inbox_binding(site, b, ctx, r);
+            check_send_policy(site, b, ctx, r);
+        }
+    }
+}
+
+/// V69 (error): a binding sets `on_unknown`, but none of the functions it
+/// grants declares `idempotency: none` or `key`, the only modes the policy
+/// applies to, so the setting would never take effect. V84 (error):
+/// `on_unknown: resend` on a binding that grants a function flagged
+/// `irreversible`, where a duplicate cannot be taken back.
+///
+/// Both read `ctx.connectors` and are silent when the connector is unknown
+/// there or its manifest no longer loads (V42 reports that).
+fn check_send_policy(
+    site: &str,
+    b: &crate::schema::ConnectorBinding,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
+    use crate::connector::idempotency::IdempotencyMode;
+    use crate::schema::OnUnknown;
+    let Some(policy) = b.on_unknown else {
+        return;
+    };
+    let Some(facts) = ctx.connectors.get(&b.name) else {
+        return;
+    };
+    if facts.load_error.is_some() {
+        return;
+    }
+    let label = crate::connector::sites::site_label(site);
+    let applies: Vec<String> = facts
+        .idempotency
+        .iter()
+        .filter(|(_, mode)| matches!(mode, IdempotencyMode::None | IdempotencyMode::Key))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if super::decisions::granted(b, &applies).is_empty() {
+        r.error(
+            "V69",
+            Some(site),
+            format!(
+                "{label} connector `{}` sets on_unknown, but none of the functions it grants declares idempotency `none` or `key`: a function with no idempotency declaration is not tracked at all, and a `marker` send is never resent automatically",
+                b.name
+            ),
+        );
+    }
+    if policy == OnUnknown::Resend {
+        let irreversible = super::decisions::granted(b, &facts.irreversible_functions);
+        if !irreversible.is_empty() {
+            r.error(
+                "V84",
+                Some(site),
+                format!(
+                    "{label} connector `{}` sets on_unknown: resend but grants irreversible function(s) {}, where a duplicate cannot be taken back",
+                    b.name,
+                    irreversible
+                        .iter()
+                        .map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
         }
     }
 }
@@ -97,6 +159,7 @@ fn check_inbox_binding(
     ctx: &ValidationContext,
     r: &mut ValidationReport,
 ) {
+    let label = crate::connector::sites::site_label(node_id);
     let Some(facts) = ctx.connectors.get(&b.name) else {
         return;
     };
@@ -119,7 +182,7 @@ fn check_inbox_binding(
             "V42",
             Some(node_id),
             format!(
-                "node `{node_id}` binds connector `{}`, which is installed but its manifest no longer loads, so none of its functions can be relied on: {err}",
+                "{label} binds connector `{}`, which is installed but its manifest no longer loads, so none of its functions can be relied on: {err}",
                 b.name
             ),
         );
@@ -149,7 +212,7 @@ fn check_inbox_binding(
             "V42",
             Some(node_id),
             format!(
-                "node `{node_id}` grants inbox function(s) {} of connector `{}`, which declares no webhook block, so no event can ever be delivered to that inbox",
+                "{label} grants inbox function(s) {} of connector `{}`, which declares no webhook block, so no event can ever be delivered to that inbox",
                 granted
                     .iter()
                     .map(|f| f.as_str())
@@ -182,7 +245,7 @@ fn check_inbox_binding(
                 "V43",
                 Some(node_id),
                 format!(
-                    "node `{node_id}` grants inbox functions of connector `{}` on account `{account}`, whose webhook block references account field(s) {} that the account does not define, so a delivery could not be verified",
+                    "{label} grants inbox functions of connector `{}` on account `{account}`, whose webhook block references account field(s) {} that the account does not define, so a delivery could not be verified",
                     b.name,
                     missing.join(", ")
                 ),
@@ -203,13 +266,14 @@ pub(crate) fn check_connector_list(
     r: &mut ValidationReport,
     validate: impl Fn(&str) -> Result<(), String>,
 ) {
+    let label = crate::connector::sites::site_label(node_id);
     let mut seen = HashSet::new();
     for item in items {
         if item.is_empty() {
             r.error(
                 "V25",
                 Some(node_id),
-                format!("node `{node_id}` connector `{connector}` has an empty {field} entry"),
+                format!("{label} connector `{connector}` has an empty {field} entry"),
             );
             continue;
         }
@@ -217,18 +281,14 @@ pub(crate) fn check_connector_list(
             r.error(
                 "V25",
                 Some(node_id),
-                format!(
-                    "node `{node_id}` connector `{connector}` has duplicate {field} entry `{item}`"
-                ),
+                format!("{label} connector `{connector}` has duplicate {field} entry `{item}`"),
             );
         }
         if let Err(msg) = validate(item) {
             r.error(
                 "V23",
                 Some(node_id),
-                format!(
-                    "node `{node_id}` connector `{connector}` {field} entry `{item}` is invalid: {msg}"
-                ),
+                format!("{label} connector `{connector}` {field} entry `{item}` is invalid: {msg}"),
             );
         }
     }

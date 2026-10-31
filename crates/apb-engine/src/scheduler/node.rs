@@ -3,6 +3,11 @@
 
 use super::*;
 
+mod exposure;
+mod sandbox;
+mod step_env;
+
+use super::continuation::{Continuation, continuation_prompt};
 use crate::adapter::AgentFailure;
 use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
 
@@ -28,10 +33,7 @@ pub(crate) fn render_node_prompt(
         cfg.instruction.as_deref(),
         budget,
     )?;
-    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-        .into_iter()
-        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-        .collect();
+    let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
     Ok(render(
         prompt,
         &cfg.params,
@@ -99,7 +101,7 @@ fn resolve_session(
     let found = match sessions.get(binding)? {
         KnownSession::Id { id, workdir } => return Some((id.clone(), workdir.clone())),
         KnownSession::Titled { title, workdir } => {
-            crate::invocation::lookup_titled_session(program, workdir, title)
+            crate::invocation::lookup_titled_session(&binding.0, program, workdir, title)
                 .map(|id| (id, workdir.clone()))
         }
     };
@@ -121,59 +123,6 @@ fn resolve_session(
     }
 }
 
-/// How much of the last failure a continuation prompt quotes.
-const CONTINUATION_REASON_MAX_BYTES: usize = 2048;
-
-/// Why a session is being continued (issue #136 items 2 and 3).
-enum Continuation<'a> {
-    /// The last attempt was stopped at its deadline.
-    Deadline,
-    /// The last attempt was cut short by a `--now` pause (issue #200).
-    Paused,
-    /// An attempt ended without recording a required verdict.
-    Interrupted,
-    /// The last attempt failed with this text (clipped when quoted).
-    Failed(&'a str),
-}
-
-/// The prompt that continues a session after its attempt did not finish: the
-/// session already holds the node prompt, so only what happened is said.
-/// `verdict_file` adds the reminder to record the verdict in the new
-/// attempt's status file (the interruption note already carries it).
-fn continuation_prompt(why: Continuation<'_>, verdict_file: bool) -> String {
-    let mut out = match why {
-        Continuation::Deadline => {
-            "Your previous turn was stopped at its time limit before it finished. \
-             Continue where you stopped; do not redo work that is already done."
-                .to_string()
-        }
-        Continuation::Paused => "Your previous turn was stopped by a pause before it finished. \
-             Continue where you stopped; do not redo work that is already done."
-            .to_string(),
-        Continuation::Interrupted => return super::status_file::INTERRUPTION_NOTE.to_string(),
-        Continuation::Failed(reason) => {
-            let reason = reason.trim();
-            let mut cut = reason.len().min(CONTINUATION_REASON_MAX_BYTES);
-            while !reason.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            format!(
-                "Your previous attempt at this task did not succeed:\n\n{}\n\n\
-                 Continue in this session: fix what is wrong and finish the task. \
-                 Do not redo work that is already done.",
-                &reason[..cut]
-            )
-        }
-    };
-    if verdict_file {
-        out.push_str(
-            " Record your final verdict in the status file named by APB_STATUS_FILE \
-             (a new file for this attempt) before your turn ends.",
-        );
-    }
-    out
-}
-
 /// The prompt of an answer round that resumes the asking session: the user's
 /// answer and one line pointing back at the contracts the session already
 /// holds. Everything else the first turn carried (skills, connector grants,
@@ -186,33 +135,6 @@ pub(crate) fn answer_followup(answer: &str) -> String {
 /// See [`answer_followup`].
 const ANSWER_FOLLOWUP_NOTE: &str = "(The user's answer to your question. Continue the task; the \
      instructions from the start of this session still apply, including how to finish your reply.)";
-
-/// A `resume`-transport re-invocation of an interactive node (spec 2026-07-20,
-/// Task 7). Carries the session id captured from the attempt that asked, plus
-/// the user's answer to hand the agent as the follow-up prompt. When present,
-/// `execute_node` re-enters the primary executor's own session via its resume
-/// form instead of re-invoking from scratch with a transcript. Chosen by the
-/// drive loop, which downgrades to a plain (`resume: None`) re-invocation when
-/// no session was captured or the agent has no resume form.
-pub(crate) struct ResumeContext {
-    pub session: String,
-    pub answer: String,
-}
-
-/// A `live`-transport execution of an interactive node (spec 2026-07-20, Task
-/// 11). Present only when the drive loop resolved the node's `interaction` to
-/// `Live` on claude/claude-code AND could resolve the current exe; a downgrade
-/// hands `None`. When present, `execute_node` injects the `apb __ask-server`
-/// sidecar into the claude argv, appends the live prompt paragraph instead of
-/// the marker contract, and drives the channel observation on this (the drive)
-/// thread via the adapter's per-poll `on_tick`.
-pub(crate) struct LiveContext {
-    /// Current apb executable, resolved by the drive layer (a resolution
-    /// failure downgrades before we get here, so this is always present).
-    pub exe: std::path::PathBuf,
-    /// Per-server tool timeout in ms handed to the sidecar injection.
-    pub timeout_ms: u64,
-}
 
 /// The seq of the last control entry currently posted, or `None` when the
 /// channel is empty. Used as the mid-attempt observation baseline
@@ -300,28 +222,52 @@ fn observe_control(
 /// report path, and a success verdict recovered from the status file after the
 /// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
 /// therefore does NOT bypass the gate.
+/// Why a reported success is rejected; `fatal`: the engine could not put
+/// the repository back, so the node fails at once instead of retrying.
+struct Rejection {
+    reason: String,
+    fatal: bool,
+}
+
+impl Rejection {
+    fn retry(reason: String) -> Self {
+        Rejection {
+            reason,
+            fatal: false,
+        }
+    }
+}
+
 fn success_check_rejection(
     protect_violation: Option<&str>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
     attempt_workdir: &Path,
+    sandbox: Option<&crate::sandbox::SandboxPlan>,
     output: &str,
-) -> Result<Option<String>, EngineError> {
+) -> Result<Option<Rejection>, EngineError> {
     // A protected file the attempt changed (C6) rejects the report before
     // any check runs: the check would judge a tree the engine just restored.
     if let Some(reason) = protect_violation {
-        return Ok(Some(reason.to_string()));
+        return Ok(Some(Rejection::retry(reason.to_string())));
     }
     match check {
         // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
         // report regardless of the agent's self-assessment. Run in the SAME
         // attempt workdir the agent worked in (for an isolated node its
         // per-attempt directory, otherwise the shared workdir), otherwise the
-        // check would validate a directory the agent never wrote to.
+        // check would validate a directory the agent never wrote to. A
+        // sandboxed attempt's check runs inside the same sandbox.
         Some(apb_core::schema::SuccessCheck::Script(check)) => {
-            let r = run_script(run_dir, attempt_workdir, check, "sh", None, None)?;
+            let r = crate::script::run_check(run_dir, attempt_workdir, check, sandbox)?;
+            if let Some(v) = sandbox.and_then(crate::sandbox::SandboxPlan::check_git) {
+                return Ok(Some(Rejection {
+                    reason: v.reason,
+                    fatal: v.fatal,
+                }));
+            }
             Ok((r.status != NodeStatus::Succeeded)
-                .then(|| format!("success_check `{check}` failed")))
+                .then(|| Rejection::retry(format!("success_check `{check}` failed"))))
         }
         // Completion-marker check (issue 45 finding 1): the literal marker must
         // appear in the node output, else the reported success is rejected. This
@@ -330,9 +276,9 @@ fn success_check_rejection(
         Some(apb_core::schema::SuccessCheck::Marker { marker })
             if !output.contains(marker.as_str()) =>
         {
-            Ok(Some(format!(
+            Ok(Some(Rejection::retry(format!(
                 "success report rejected: completion marker `{marker}` not found in output"
-            )))
+            ))))
         }
         Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => Ok(None),
     }
@@ -501,25 +447,37 @@ fn route_execution(
 /// rather than a second hand-built event.
 pub(super) fn journal_interrupted_attempt(
     journal: &Journal,
-    node_id: &str,
-    attempt: u32,
-    duration_ms: Option<u64>,
-    session: Option<String>,
-    partial: &str,
-    failure_kind: Option<FailureKind>,
+    attempt: InterruptedAttempt<'_>,
 ) -> Result<(), EngineError> {
     journal.append(EventPayload::AttemptFinished {
-        node: node_id.into(),
-        attempt,
+        item: None,
+        output_truncated: attempt.capture.truncated,
+        transcript_incomplete: attempt.capture.transcript_incomplete,
+        node: attempt.node_id.into(),
+        attempt: attempt.attempt,
         status: NodeStatus::Interrupted.as_str().into(),
-        duration_ms,
-        session,
+        duration_ms: attempt.duration_ms,
+        session: attempt.session,
         summary: None,
         rejected_output: None,
-        partial_output: (!partial.trim().is_empty()).then(|| partial.to_string()),
-        failure_kind: failure_kind.map(|k| k.as_str().to_string()),
+        partial_output: (!attempt.partial.trim().is_empty()).then(|| attempt.partial.to_string()),
+        failure_kind: attempt.failure_kind.map(|k| k.as_str().to_string()),
         usage: None,
     })
+}
+
+/// One attempt [`journal_interrupted_attempt`] records.
+#[derive(Debug, Default)]
+pub(super) struct InterruptedAttempt<'a> {
+    pub(super) node_id: &'a str,
+    pub(super) attempt: u32,
+    pub(super) duration_ms: Option<u64>,
+    pub(super) session: Option<String>,
+    /// What the attempt produced before it ended.
+    pub(super) partial: &'a str,
+    pub(super) failure_kind: Option<FailureKind>,
+    /// What the attempt lost of its output.
+    pub(super) capture: crate::capture::OutputCapture,
 }
 
 /// What an attempt that failed on a provider quota does next (issue #200,
@@ -594,7 +552,7 @@ fn effective_failure_kind(detail: &str, class: ErrorClass, require_verdict: bool
 /// a finish-with-prompt composes through `execute_finish_answer` and a
 /// sub-playbook instruction through `run_playbook_node`, neither of which passes
 /// through [`execute_node`].
-fn prompt_template(kind: &NodeKind) -> Option<&str> {
+pub(super) fn prompt_template(kind: &NodeKind) -> Option<&str> {
     match kind {
         NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => Some(prompt.as_str()),
         _ => None,
@@ -630,7 +588,7 @@ fn prompt_template(kind: &NodeKind) -> Option<&str> {
 /// One anomaly per node execution (not per attempt), listing every hole with the
 /// reason it is one, journaled through the same `WakeRaised { Anomaly }`
 /// mechanism as the empty-output anomaly.
-fn journal_missing_inputs(
+pub(super) fn journal_missing_inputs(
     journal: &Journal,
     run_dir: &Path,
     node_id: &str,
@@ -675,25 +633,23 @@ fn journal_missing_inputs(
 /// `track_provenance` is false for a member of a concurrent batch that
 /// shares the tree with a sibling: `HEAD` moves by both, so no commit could
 /// be attributed to one node.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
-    playbook: &Playbook,
-    run_dir: &Path,
-    workdir: &Path,
+    ctx: &NodeCtx<'_, '_>,
     node_id: &str,
-    run_id: &str,
-    state: &RunState,
-    cfg: &RunConfig,
-    override_prompt: Option<String>,
-    cancel: &AtomicBool,
-    env_scrub: &[String],
-    journal: &Journal,
-    decisions: Option<&crate::decision::DecisionRunner>,
-    resume: Option<ResumeContext>,
-    live: Option<LiveContext>,
-    track_provenance: bool,
+    opts: ExecOptions<'_>,
 ) -> Result<AttemptOutcome, EngineError> {
-    let tracker = track_provenance
+    let NodeCtx {
+        playbook,
+        run_dir,
+        workdir,
+        run_id,
+        state,
+        cfg,
+        journal,
+        ..
+    } = *ctx;
+    let tracker = opts
+        .track_provenance
         .then(|| {
             super::provenance::Tracker::start(playbook, run_dir, node_id, workdir, |t| {
                 render_node_prompt(
@@ -707,27 +663,15 @@ pub(crate) fn execute_node(
             })
         })
         .flatten();
-    let outcome = execute_node_kind(
-        playbook,
-        run_dir,
-        workdir,
-        node_id,
-        run_id,
-        state,
-        cfg,
-        override_prompt,
-        cancel,
-        env_scrub,
-        journal,
-        decisions,
-        resume,
-        live,
-    )?;
+    let outcome = execute_node_kind(ctx, node_id, opts)?;
     match (tracker, &outcome) {
         (Some(t), AttemptOutcome::Finished { .. }) => t.finish(run_dir, journal)?,
-        (Some(t), AttemptOutcome::Suspended { .. } | AttemptOutcome::QuotaPaused { .. }) => {
-            t.park(run_dir)
-        }
+        (
+            Some(t),
+            AttemptOutcome::Suspended { .. }
+            | AttemptOutcome::EnginePaused { .. }
+            | AttemptOutcome::Halted { .. },
+        ) => t.park(run_dir),
         (None, _) => {}
     }
     Ok(outcome)
@@ -735,23 +679,32 @@ pub(crate) fn execute_node(
 
 // --- end of run provenance ----------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn execute_node_kind(
-    playbook: &Playbook,
-    run_dir: &Path,
-    workdir: &Path,
+    ctx: &NodeCtx<'_, '_>,
     node_id: &str,
-    run_id: &str,
-    state: &RunState,
-    cfg: &RunConfig,
-    override_prompt: Option<String>,
-    cancel: &AtomicBool,
-    env_scrub: &[String],
-    journal: &Journal,
-    decisions: Option<&crate::decision::DecisionRunner>,
-    resume: Option<ResumeContext>,
-    live: Option<LiveContext>,
+    opts: ExecOptions<'_>,
 ) -> Result<AttemptOutcome, EngineError> {
+    let NodeCtx {
+        playbook,
+        run_dir,
+        workdir,
+        run_id,
+        state,
+        cfg,
+        cancel,
+        env_scrub,
+        journal,
+        decisions,
+    } = *ctx;
+    let ExecOptions {
+        override_prompt,
+        resume,
+        live,
+        item,
+        ..
+    } = opts;
+    // The execution's key: the node, and for a list item the item.
+    let key = crate::exec_key::ExecKey::new(node_id, item.map(|i| i.id.as_str()));
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
@@ -760,11 +713,16 @@ fn execute_node_kind(
     // interactive path share, and it fires once per execution. Skipped when the
     // node's own template is not what runs: a prompt override replaces it
     // wholesale, and a resume re-invocation carries only the user's answer.
+    // A list item's shared template was checked once for the whole list.
     if override_prompt.is_none()
         && resume.is_none()
+        && item.is_none()
         && let Some(template) = prompt_template(&node.kind)
     {
         journal_missing_inputs(journal, run_dir, node_id, template, state)?;
+    }
+    if node.kind.drive_handled() {
+        return Err(drive_handled_refusal(node_id, &node.kind));
     }
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
@@ -821,6 +779,10 @@ fn execute_node_kind(
             // per-attempt `on_tick` closure can capture them freely; only ever
             // consulted on the live path.
             let live_q_timeout: Option<u64> = *question_timeout_seconds;
+            // A list item's own section, after everything its items share.
+            let item_section = item
+                .map(|i| format!("\n\n{}", i.section))
+                .unwrap_or_default();
             let live_default: Option<String> = default_answer.clone();
             // The node's own directory (issue #67 item 4). An unresolvable
             // `workdir` fails the node before anything is spawned.
@@ -847,10 +809,12 @@ fn execute_node_kind(
             // answer (the prior context lives in the agent's own session); an
             // ordinary attempt renders the node prompt (or takes the reprompt
             // override the drive loop supplied).
-            let mut text = match (&resume, &override_prompt) {
-                (Some(rc), _) => answer_followup(&rc.answer),
-                (None, Some(p)) => p.clone(),
-                (None, None) => render_node_prompt(
+            let mut text = match (&resume, &override_prompt, item) {
+                (Some(rc), _, _) => answer_followup(&rc.answer),
+                (None, Some(p), _) => p.clone(),
+                // A list item: the template its list rendered once.
+                (None, None, Some(i)) => i.template.clone(),
+                (None, None, None) => render_node_prompt(
                     run_dir,
                     run_id,
                     state,
@@ -879,13 +843,21 @@ fn execute_node_kind(
                 text = crate::context::assemble_agent_prompt(
                     &text,
                     cfg.instruction.as_deref(),
+                    node_id,
                     events,
                 );
             }
             // The completion check's `task`: the prompt as rendered for this
-            // execution, before any retry continuation replaces it.
-            let task_prompt = text.clone();
+            // execution (with a list item's own section), before any retry
+            // continuation replaces it.
+            let task_prompt = match item {
+                Some(i) if resume.is_none() => format!("{text}\n\n{}", i.section),
+                _ => text.clone(),
+            };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
+            // How to report findings, tool problems too when the playbook
+            // collects known problems.
+            let notes_note = super::status_file::notes_note(playbook.known_problems.is_some());
             // Required verdict (spec 2026-08-05 section 2.2). The node field is a
             // plain bool, so it can only turn the requirement ON; a playbook-wide
             // `defaults.require_verdict` turns it on for every agent_task. Same
@@ -951,6 +923,7 @@ fn execute_node_kind(
             // an execution, possibly through the rebind overlay read below.
             if let Some(runner) = decisions
                 && resume.is_none()
+                && item.is_none()
                 && node.route == Some(apb_core::schema::RouteSetting::Auto)
             {
                 route_execution(
@@ -975,7 +948,13 @@ fn execute_node_kind(
             // or, for a `cli` run an MCP host session started, one host step
             // follows the chain for when none of its CLIs can start.
             let host_mode = manifest.is_host_mode()?;
-            let host_fallback = !host_mode && manifest.falls_back_to_host();
+            // A `full` node never falls back to the host agent: the host
+            // step runs outside any sandbox apb starts.
+            let host_fallback = !host_mode
+                && manifest.falls_back_to_host()
+                && !isolation
+                    .as_ref()
+                    .is_some_and(|s| s.level == apb_core::isolation::Level::Full);
 
             let sources = super::host::chain_sources(&entry);
             let primary_idx = sources
@@ -1046,16 +1025,34 @@ fn execute_node_kind(
 
             // Skill delivery (spec 6.4, completion-plan Task 3). For an isolated
             // node (isolation full|best_effort) skills are materialized as REAL
-            // copies from the run snapshot into an isolated per-node workdir
-            // (`.agents/skills/<name>` + a `.claude/skills` bridge), and the agent is
-            // pointed at it: editing the live skill after the run has started has no
-            // effect on the run. For `isolation: none` - an advisory string of names
-            // in the shared workdir. Skill content is never embedded into the prompt
-            // (only names).
-            let isolated = matches!(
-                isolation,
-                Some(Isolation::Full) | Some(Isolation::BestEffort)
+            // copies from the run snapshot into the attempt's own place: the
+            // attempt box, mounted read-only over the tree's `.agents/skills` and
+            // `.claude/skills` inside a sandbox, or the scratch directory of a
+            // `best_effort` attempt without one. Editing the live skill after the
+            // run has started has no effect on the run. For `isolation: none` - an
+            // advisory string of names in the shared workdir. Skill content is
+            // never embedded into the prompt (only names).
+            // The node's isolation on this machine, decided before anything
+            // is spawned and again before every attempt (`node/sandbox.rs`).
+            let iso = sandbox::NodeIsolation::new(
+                isolation.as_ref(),
+                steps.iter().filter(|s| !s.host).map(|s| s.agent.as_str()),
+                host_mode,
+                // The run's own flag, or a parent's it is held to.
+                cfg.publish_only || playbook.publish_only,
             );
+            if let Some(output) = iso.refusal() {
+                return Ok(AttemptOutcome::Finished {
+                    status: NodeStatus::Failed,
+                    output,
+                    events,
+                });
+            }
+            let isolated = iso.isolated();
+            // A sandboxed agent gets no live ask sidecar: it could forge
+            // answers through it. It asks through its reply instead (the
+            // reprompt path).
+            let live = if iso.sandboxed() { None } else { live };
             let skills_mode = if isolated { "materialized" } else { "advisory" };
             // The blocks below are the node's standing contracts (skills,
             // connector grants, the question protocol, the status file). A
@@ -1075,9 +1072,12 @@ fn execute_node_kind(
             // call and how. Built only from the run snapshot (manifest non-secret
             // fields + snapshotted ConnectorDocs), so no secret reaches the prompt.
             let grants = manifest.grants_for(node_id);
-            if first_turn && !grants.is_empty() {
-                let docs =
-                    crate::connector::prompt::load_snapshot_docs(run_dir, &manifest.connectors);
+            if first_turn {
+                let docs = if grants.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    crate::connector::prompt::load_snapshot_docs(run_dir, &manifest.connectors)
+                };
                 let block = crate::connector::prompt::instruction_block(
                     grants,
                     &manifest.connectors,
@@ -1085,6 +1085,12 @@ fn execute_node_kind(
                 );
                 if !block.is_empty() {
                     text = format!("{text}\n\n{block}");
+                }
+                // The writing brief, once, for a node whose output people
+                // read: marked `audience: people`, or granted a function
+                // that writes to people.
+                if crate::people::brief::applies(&node.kind, grants, &docs) {
+                    crate::people::brief::append_to(&mut text);
                 }
             }
 
@@ -1123,9 +1129,13 @@ fn execute_node_kind(
             let status_note = super::status_file::status_file_note(
                 node.success_check.is_some(),
                 require_verdict,
-                node.outputs
-                    .as_ref()
-                    .map_or(&[][..], |o| o.fields.as_slice()),
+                match item {
+                    Some(i) => i.outputs.as_slice(),
+                    None => node
+                        .outputs
+                        .as_ref()
+                        .map_or(&[][..], |o| o.fields.as_slice()),
+                },
             );
             if first_turn && !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
@@ -1134,12 +1144,13 @@ fn execute_node_kind(
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
-            let connector_policy = crate::adapter::ConnectorEnvPolicy {
-                scrub: env_scrub.to_vec(),
-                run_dir: Some(run_dir.to_path_buf()),
-                node_id: Some(node_id.to_string()),
-                overlay: cfg.spawn_env(),
-            };
+            let spawn_env = crate::adapter::SpawnEnv::for_node(
+                env_scrub.to_vec(),
+                run_dir,
+                node_id,
+                cfg.spawn_env(),
+            )
+            .with_item(key.item);
 
             // Agent sessions this execution's attempts left behind, by binding
             // (issue #136 item 2). A later attempt on the same (agent, model) -
@@ -1209,9 +1220,9 @@ fn execute_node_kind(
             let mut pause_session = false;
             if resume.is_none()
                 && !host_mode
-                && let Some(paused) = journaled.as_deref().and_then(|events| {
-                    super::journal::paused_attempt_session(run_dir, events, node_id)
-                })
+                && let Some(paused) = journaled
+                    .as_deref()
+                    .and_then(|events| super::journal::paused_attempt_session(run_dir, events, key))
             {
                 // The session is bound to the directory it ran in: an
                 // isolated node resumes in the interrupted attempt's own
@@ -1255,10 +1266,10 @@ fn execute_node_kind(
             // split, not this flag.
             let mut was_interrupted = require_verdict
                 && match &journaled {
-                    Some(events) => super::journal::last_attempt_interrupted(events, node_id),
+                    Some(events) => super::journal::last_attempt_interrupted(events, key),
                     // A resume re-invocation skipped the read above; pay for one
                     // rather than silently drop the note.
-                    None => super::journal::last_attempt_interrupted(&read_all(run_dir)?, node_id),
+                    None => super::journal::last_attempt_interrupted(&read_all(run_dir)?, key),
                 };
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
@@ -1359,11 +1370,10 @@ fn execute_node_kind(
                         // autonomy grant of its zcode steps; the base form's
                         // `--mode build` is untouched, so a run without
                         // autonomy still cannot write.
-                        if let Some(mode) = entry.zcode_mode
-                            && apb_core::detect::canonical_agent_id(&step.agent)
-                                == apb_core::zcode::AGENT_ID
-                        {
-                            spec.autonomous_args = crate::invocation::zcode_autonomous_args(mode);
+                        if let Some(args) = entry.zcode_mode.and_then(|mode| {
+                            crate::invocation::profile_mode_args(&step.agent, mode)
+                        }) {
+                            spec.autonomous_args = args;
                         }
                         (spec, ri.canonical_executable.clone())
                     });
@@ -1372,38 +1382,20 @@ fn execute_node_kind(
                 let mut timeout_continued = false;
                 // A resume that found no session is retried fresh once per step.
                 let mut lost_session_retried = false;
-                // The minimal agent environment (issue #136 item 4, the
-                // profile default): claude/claude-code get an apb-owned settings
-                // file, only the project and local setting sources and only
-                // apb's own MCP servers. The profile's declared skills are then
-                // delivered through `--add-dir` (the user source that used to
-                // provide them is not loaded), except on an isolated node,
-                // whose working directory already holds them. Other agents have
-                // no such mechanism and run as configured. The file content is
-                // fixed, so writing it once per step is enough.
-                let hermetic_settings: Option<crate::adapter::HermeticEnv> = if !step.host
-                    && entry.hermetic
-                    && crate::adapter::agent_supports_hermetic(&step.agent)
-                {
-                    let skills_dir = if !isolated && !entry.skills.is_empty() {
-                        // One copy per profile bundle per run, at a path
-                        // every node of the profile shares, so the
-                        // agent's system portion stays byte-identical
-                        // across them and a provider prompt cache hits
-                        // (issue #67 item 7). Checked against the
-                        // snapshot digests before each step and laid
-                        // down again when it drifted.
-                        Some(super::skills_copy::shared_skills_dir(run_dir, &entry)?)
-                    } else {
-                        None
-                    };
-                    Some(crate::adapter::HermeticEnv {
-                        settings: crate::adapter::write_hermetic_settings(run_dir, node_id)?,
-                        skills_dir,
-                    })
-                } else {
-                    None
-                };
+                // The minimal agent environment and the profile's
+                // `process_env` plan for this step's own agent.
+                let step_env = step_env::for_step(
+                    run_dir,
+                    node_id,
+                    &entry,
+                    &step_env::StepTarget {
+                        agent: &step.agent,
+                        model: &step.model,
+                        host: step.host,
+                    },
+                    isolated,
+                    env_scrub,
+                )?;
                 // The node's own retry budget is walked by `try_i`; an
                 // INFRASTRUCTURE retry (spec 2026-08-05 section 2.3) does not
                 // advance it, which is why this is a while loop and not
@@ -1456,39 +1448,41 @@ fn execute_node_kind(
                         }
                         _ => None,
                     };
-                    // Attempt working directory. A continued session keeps the
-                    // directory it was started in (agents key their sessions by
-                    // it). Otherwise, for an isolated node - a FRESH
-                    // per-attempt directory `work/<node>/<attempt>` with skills
-                    // freshly materialized from the snapshot: a hostile/failed
-                    // previous attempt cannot slip a modified bundle to the next one
-                    // (skills_mode: materialized would then not reflect
-                    // reality). For `isolation: none` - the shared workdir.
-                    let attempt_workdir: PathBuf = if let Some((_, Some(wd))) = &continued {
-                        // The directory stays, the skills do not: an isolated
-                        // node's snapshot copies are laid down fresh for every
-                        // attempt, so the continued session cannot hand a
-                        // modified bundle to itself either.
-                        if isolated {
-                            super::skills_copy::clear_isolated_skills(wd)?;
-                            super::skills_copy::materialize_isolated_skills(run_dir, &entry, wd)?;
+                    // Where the attempt runs, and inside what (`node/sandbox.rs`):
+                    // the node's own directory, a sandbox over the node's tree, or
+                    // for `best_effort` without one a fresh scratch directory with
+                    // the skill copies. A node this machine can no longer isolate
+                    // fails here, before anything is spawned.
+                    let place = match sandbox::place(
+                        &iso,
+                        &sandbox::AttemptInput {
+                            run_dir,
+                            node_dir: &node_dir,
+                            node_id,
+                            key: &key,
+                            attempt,
+                            entry: &entry,
+                            continued: continued.as_ref().and_then(|(_, wd)| wd.as_deref()),
+                            agent: &step.agent,
+                            program: &base_spec.as_ref().map_or_else(
+                                || step.agent.clone(),
+                                |(_, p)| p.to_string_lossy().into_owned(),
+                            ),
+                            process: step_env.process.as_deref(),
+                            settings: step_env.hermetic.as_ref().map(|h| h.settings.as_path()),
+                            host: step.host,
+                        },
+                    )? {
+                        sandbox::Placed::Run(place) => place,
+                        sandbox::Placed::Refused(output) => {
+                            return Ok(AttemptOutcome::Finished {
+                                status: NodeStatus::Failed,
+                                output,
+                                events,
+                            });
                         }
-                        wd.clone()
-                    } else if isolated {
-                        let wd = run_dir.join("work").join(node_id).join(attempt.to_string());
-                        // Fail-closed: a missing directory is normal, but any other
-                        // cleanup error is NOT swallowed - otherwise we would materialize
-                        // skills on top of leftovers from the previous (possibly hostile) attempt.
-                        match std::fs::remove_dir_all(&wd) {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(e) => return Err(e.into()),
-                        }
-                        super::skills_copy::materialize_isolated_skills(run_dir, &entry, &wd)?;
-                        wd
-                    } else {
-                        node_dir.clone()
                     };
+                    let attempt_workdir: PathBuf = place.cwd.clone();
                     // The invocation form of this attempt: the resume form for a
                     // continued session, else the base form plus whatever makes
                     // the new session findable later (`FreshSession`).
@@ -1550,7 +1544,7 @@ fn execute_node_kind(
                                     None => {
                                         let f = crate::invocation::fresh_session(
                                             &step.agent,
-                                            &format!("apb {run_id} {node_id} {attempt}"),
+                                            &key.session_title(run_id, attempt),
                                         );
                                         let mut spec = base.clone();
                                         match &f {
@@ -1586,26 +1580,17 @@ fn execute_node_kind(
                     // file per attempt. The headless field ignores it.
                     let stream_log = run_dir
                         .join("agent-stream")
-                        .join(format!("{node_id}-{attempt}.jsonl"));
+                        .join(format!("{}.jsonl", key.stem(attempt)));
                     // Per-attempt status file (subtask S2): the agent MAY write
                     // its final verdict here as JSON; the engine reads it before
-                    // parsing the textual report. Mirrors the agent-stream
-                    // naming. The directory is created once per attempt
-                    // (idempotent); this is set for EVERY attempt, independent of
-                    // any success_check.
-                    let status_dir = run_dir.join("agent-status");
-                    apb_core::fsutil::create_dir_under(run_dir, &status_dir)?;
-                    let status_file = status_dir.join(format!("{node_id}-{attempt}.json"));
-                    // Stale status-file removal (issue #70 item 3): a resume or
-                    // continue_from re-run can restart the attempt counter, so a
-                    // status file from a PRIOR execution may still sit at this
-                    // attempt's path. Drop it before spawning (ok-ignored: a missing
-                    // file is the normal case) so `read_status_file` after the run
-                    // can only ever adopt a file THIS attempt actually wrote.
-                    let _ = std::fs::remove_file(&status_file);
+                    // parsing the textual report. Set for EVERY attempt,
+                    // independent of any success_check; `place` cleared any file
+                    // a prior execution left at its path (issue #70 item 3).
+                    let status_file = place.status_file.clone();
                     // This attempt's raw output (issue #67 item 10), cleared
                     // the same way when a re-run restarts the counter.
-                    let transcript_dir = super::transcript::attempt_dir(run_dir, node_id, attempt)?;
+                    let transcript_dir =
+                        super::transcript::attempt_dir(run_dir, &key.stem(attempt))?;
                     // This attempt's prompt. A continued session already holds the
                     // node prompt, so it gets only what happened since: the answer
                     // (answer round), the deadline note, or why the last attempt
@@ -1647,20 +1632,31 @@ fn execute_node_kind(
                             // Supervisor notes applied since reach the continued
                             // session too: it never saw the assembled prompt that
                             // would carry them.
-                            let notes =
-                                crate::context::supervisor_notes_section(&read_all(run_dir)?);
+                            let journal_now = read_all(run_dir)?;
+                            let notes = crate::context::supervisor_notes_section(&journal_now);
                             std::borrow::Cow::Owned(format!(
-                                "{}{notes}",
-                                continuation_prompt(why, !status_note.is_empty())
+                                "{}{}{notes}",
+                                continuation_prompt(why, !status_note.is_empty()),
+                                super::attempt_memory::retry_briefing(run_dir, &journal_now, key)
                             ))
                         }
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
-                            "{step_text}\n\n{}",
-                            super::status_file::INTERRUPTION_NOTE
+                            "{step_text}\n\n{}\n\n{}{item_section}{}",
+                            super::status_file::INTERRUPTION_NOTE,
+                            notes_note,
+                            super::attempt_memory::retry_briefing_now(run_dir, key)
                         )),
-                        None => step_text,
+                        None => std::borrow::Cow::Owned(format!(
+                            "{step_text}\n\n{}{item_section}{}",
+                            notes_note,
+                            super::attempt_memory::retry_briefing_now(run_dir, key)
+                        )),
                     };
                     timeout_continuation = false;
+                    let attempt_policy = spawn_env
+                        .with_attempt(attempt)
+                        .with_process(step_env.process.clone())
+                        .with_sandbox(place.sandbox.clone());
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
@@ -1675,7 +1671,7 @@ fn execute_node_kind(
                             soul_text.as_deref()
                         },
                         grant_autonomy,
-                        connector_policy: &connector_policy,
+                        spawn_env: &attempt_policy,
                         interactive: *interactive,
                         // Ordinary agent_task attempts carry the spec 6.2 report
                         // contract so the agent's self-assessed status routes the node.
@@ -1694,8 +1690,9 @@ fn execute_node_kind(
                         status_file: Some(status_file.clone()),
                         // Hermetic isolation (subtask S1): Some only for a
                         // hermetic profile on an isolation-capable agent.
-                        hermetic_settings: hermetic_settings.clone(),
+                        hermetic_settings: step_env.hermetic.clone(),
                         transcript_dir: Some(&transcript_dir),
+                        output_limits: cfg.output_limits(),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -1713,11 +1710,12 @@ fn execute_node_kind(
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
                     let attempt_model = Some(step.model.clone());
-                    let attempt_transcript = Some(super::transcript::relative(node_id, attempt));
+                    let attempt_transcript = Some(super::transcript::relative(&key.stem(attempt)));
                     let attempt_dir = Some(attempt_workdir.display().to_string());
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
                         if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                            item: None,
                             node: node_id.to_string(),
                             attempt: cur_attempt,
                             agent: agent_name.clone(),
@@ -1728,6 +1726,8 @@ fn execute_node_kind(
                             model: attempt_model.clone(),
                             workdir: attempt_dir.clone(),
                             transcript: attempt_transcript.clone(),
+                            token: attempt_policy.attempt_token.clone(),
+                            isolation: place.record.clone(),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1748,6 +1748,7 @@ fn execute_node_kind(
                     let timeout_msg: std::cell::RefCell<Option<String>> =
                         std::cell::RefCell::new(None);
                     let abort = AtomicBool::new(false);
+                    let notifier = crate::notify::send::Notifier::of_run_dir(run_dir);
                     let on_tick = || {
                         if tick_err.borrow().is_some() || abort.load(Ordering::Relaxed) {
                             return;
@@ -1760,6 +1761,7 @@ fn execute_node_kind(
                             journal,
                             live_q_timeout,
                             live_default.as_deref(),
+                            notifier.as_ref(),
                         ) {
                             Ok(Some(msg)) => {
                                 *timeout_msg.borrow_mut() = Some(msg);
@@ -1867,6 +1869,7 @@ fn execute_node_kind(
                         &node_dir,
                         node.kind.protect_globs(),
                     )?;
+                    step_env.journal(journal, node_id, attempt, &step.agent)?;
                     let mut outcome = adapter.run_cancellable(
                         &task,
                         cancel,
@@ -1933,21 +1936,45 @@ fn execute_node_kind(
                     // attempt meanwhile (issue #107).
                     if spawn_at.get().is_some() {
                         journal.append(EventPayload::AttemptExited {
+                            item: None,
                             node: node_id.into(),
                             attempt,
                         })?;
                     }
+                    // What the attempt lost of its output (bounded agent
+                    // output), for every `attempt_finished` below.
+                    let mut capture = match &outcome {
+                        Ok(report) => report.capture.clone(),
+                        Err(f) => f.capture.clone(),
+                    };
                     // --- 0.23.0 protected paths (C6): undo and name any change
                     // to a protected file before anything else reads the tree. ---
                     let protect_violation = match protect_snapshot {
                         Some(snapshot) => snapshot.check_and_restore(journal)?,
                         None => None,
                     };
-                    // A tampered snapshot copy fails the node at once: a retry
+                    // A sandboxed attempt's changes to what redirects git
+                    // are put back and fail it like a protected path.
+                    let protect_violation = super::protect::Violation::join(
+                        protect_violation,
+                        place
+                            .sandbox
+                            .as_deref()
+                            .and_then(crate::sandbox::SandboxPlan::check_git)
+                            .map(|g| super::protect::Violation {
+                                reason: g.reason,
+                                fatal: g.fatal,
+                            }),
+                    );
+                    // A tampered snapshot copy, or a repository the engine
+                    // could not put back, fails the node at once: a retry
                     // would start from a tree the engine could not restore.
                     if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
+                            item: None,
+                            output_truncated: capture.truncated.clone(),
+                            transcript_incomplete: capture.transcript_incomplete,
                             node: node_id.into(),
                             attempt,
                             status: "failed".into(),
@@ -1965,6 +1992,12 @@ fn execute_node_kind(
                             events,
                         });
                     }
+                    // A boxed status file goes where every reader looks.
+                    if let Err(e) = place.publish_status() {
+                        eprintln!(
+                            "apb: warning: node `{node_id}` attempt {attempt}: the status file was not published: {e}"
+                        );
+                    }
                     let protect_violation = protect_violation.map(|v| v.reason);
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
                     // fix): the adapter tore the agent down on the abort flag.
@@ -1974,6 +2007,9 @@ fn execute_node_kind(
                     if let Some(msg) = timeout_msg.borrow_mut().take() {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
+                            item: None,
+                            output_truncated: capture.truncated.clone(),
+                            transcript_incomplete: capture.transcript_incomplete,
                             node: node_id.into(),
                             attempt,
                             status: "failed".into(),
@@ -2007,11 +2043,12 @@ fn execute_node_kind(
                             _ => None,
                         });
                         if let Some(sid) = sid {
-                            super::transcript::copy_agent_session(
+                            capture.record(super::transcript::copy_agent_session(
                                 &step.agent,
                                 &sid,
                                 &transcript_dir,
-                            );
+                                cfg.output_limits().session_copy_bytes,
+                            ));
                         }
                     }
                     // Remember the session this attempt ran in (issue #136 item
@@ -2042,6 +2079,7 @@ fn execute_node_kind(
                             || (handoff_source && report.status == NodeStatus::Succeeded) =>
                         {
                             crate::invocation::lookup_titled_session(
+                                &binding.0,
                                 program,
                                 &attempt_workdir,
                                 title,
@@ -2089,6 +2127,7 @@ fn execute_node_kind(
                     // by an attempt_started.
                     if spawn_instant.is_none() {
                         journal.append(EventPayload::AttemptStarted {
+                            item: None,
                             node: node_id.into(),
                             attempt,
                             agent: step.agent.clone(),
@@ -2099,6 +2138,8 @@ fn execute_node_kind(
                             model: attempt_model.clone(),
                             workdir: attempt_dir.clone(),
                             transcript: attempt_transcript.clone(),
+                            token: attempt_policy.attempt_token.clone(),
+                            isolation: place.record.clone(),
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -2108,7 +2149,34 @@ fn execute_node_kind(
                     // when the process then exited non-zero, was signalled, or was
                     // killed on the timeout: that exit is transport-level noise
                     // once the verdict exists (issue #74 finding 1).
-                    let verdict = super::status_file::read_status_file(&status_file);
+                    let status_doc = super::status_file::StatusFileDoc::read(&status_file);
+                    super::attempt_notes::journal(
+                        journal,
+                        node_id,
+                        attempt,
+                        status_doc.as_ref(),
+                        outcome.as_ref().ok().map(|r| &r.host_notes_dropped),
+                    )?;
+                    // What the agent reported it sees against what it was
+                    // handed (stream transport only), before the finish.
+                    exposure::journal(
+                        journal,
+                        node_id,
+                        attempt,
+                        &step.agent,
+                        exposure::Handed {
+                            connectors: !manifest.grants_for(node_id).is_empty(),
+                            live: live.is_some(),
+                            strict_mcp: step_env.hermetic.is_some(),
+                        },
+                        match &outcome {
+                            Ok(report) => report.exposure.as_ref(),
+                            Err(f) => f.exposure.as_deref(),
+                        },
+                    )?;
+                    let verdict = status_doc
+                        .as_ref()
+                        .and_then(super::status_file::StatusFileDoc::verdict);
                     match outcome {
                         Ok(mut report) => {
                             // Interactive suspension (spec 2026-07-20): the agent
@@ -2120,6 +2188,9 @@ fn execute_node_kind(
                             // interactive nodes.
                             if *interactive && let Some(q) = report.question {
                                 journal.append(EventPayload::AttemptFinished {
+                                    item: None,
+                                    output_truncated: capture.truncated.clone(),
+                                    transcript_incomplete: capture.transcript_incomplete,
                                     node: node_id.into(),
                                     attempt,
                                     status: report.status.as_str().into(),
@@ -2164,16 +2235,20 @@ fn execute_node_kind(
                                 // done.
                                 journal_interrupted_attempt(
                                     journal,
-                                    node_id,
-                                    attempt,
-                                    duration_ms,
-                                    report.session.clone(),
-                                    &report.output,
-                                    // The process exited NORMALLY, there is no
-                                    // failure detail to classify: what the agent
-                                    // printed is mid-work text, not an error
-                                    // message from the transport.
-                                    None,
+                                    InterruptedAttempt {
+                                        node_id,
+                                        attempt,
+                                        duration_ms,
+                                        session: report.session.clone(),
+                                        partial: &report.output,
+                                        // The process exited NORMALLY, there is
+                                        // no failure detail to classify: what
+                                        // the agent printed is mid-work text,
+                                        // not an error message from the
+                                        // transport.
+                                        failure_kind: None,
+                                        capture: capture.clone(),
+                                    },
                                 )?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -2205,6 +2280,7 @@ fn execute_node_kind(
                                     node.success_check.as_ref(),
                                     run_dir,
                                     &attempt_workdir,
+                                    place.sandbox.as_deref(),
                                     &report.output,
                                 )?;
                                 match rejection {
@@ -2217,8 +2293,11 @@ fn execute_node_kind(
                                     // and fallbacks exactly like an ordinary failure.
                                     // The raw agent text is preserved for the
                                     // downstream `nodes.<id>.rejected_output`.
-                                    Some(reason) => {
+                                    Some(Rejection { reason, fatal }) => {
                                         journal.append(EventPayload::AttemptFinished {
+                                            item: None,
+                                            output_truncated: capture.truncated.clone(),
+                                            transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
                                             attempt,
                                             status: "failed".into(),
@@ -2230,6 +2309,13 @@ fn execute_node_kind(
                                             failure_kind: None,
                                             usage: report.usage.clone(),
                                         })?;
+                                        if fatal {
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Failed,
+                                                output: reason,
+                                                events,
+                                            });
+                                        }
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
                                         // agent text lives in `rejected_output`.
@@ -2237,16 +2323,21 @@ fn execute_node_kind(
                                         last_timed_out = false;
                                     }
                                     None => {
-                                        let check = completion_check(
-                                            decisions,
-                                            journal,
-                                            run_dir,
-                                            node,
-                                            attempt,
-                                            &task_prompt,
-                                            &report.output,
-                                            try_i < retries,
-                                        )?;
+                                        // A list item's own check decides it.
+                                        let check = if item.is_some_and(|i| i.checked) {
+                                            Default::default()
+                                        } else {
+                                            completion_check(
+                                                decisions,
+                                                journal,
+                                                run_dir,
+                                                node,
+                                                attempt,
+                                                &task_prompt,
+                                                &report.output,
+                                                try_i < retries,
+                                            )?
+                                        };
                                         let duration_ms = duration_ms
                                             .map(|d| d + check.elapsed.as_millis() as u64);
                                         // Completion enforce (issue #165 Part
@@ -2254,6 +2345,10 @@ fn execute_node_kind(
                                         // failure, like a success_check one.
                                         if let Some(reason) = check.reject {
                                             journal.append(EventPayload::AttemptFinished {
+                                                item: None,
+                                                output_truncated: capture.truncated.clone(),
+                                                transcript_incomplete: capture
+                                                    .transcript_incomplete,
                                                 node: node_id.into(),
                                                 attempt,
                                                 status: "failed".into(),
@@ -2273,6 +2368,9 @@ fn execute_node_kind(
                                             continue;
                                         }
                                         journal.append(EventPayload::AttemptFinished {
+                                            item: None,
+                                            output_truncated: capture.truncated.clone(),
+                                            transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
                                             attempt,
                                             status: report.status.as_str().into(),
@@ -2304,6 +2402,9 @@ fn execute_node_kind(
                                 }
                             } else {
                                 journal.append(EventPayload::AttemptFinished {
+                                    item: None,
+                                    output_truncated: capture.truncated.clone(),
+                                    transcript_incomplete: capture.transcript_incomplete,
                                     node: node_id.into(),
                                     attempt,
                                     status: report.status.as_str().into(),
@@ -2325,6 +2426,7 @@ fn execute_node_kind(
                             usage: failed_usage,
                             ..
                         }) => {
+                            let failed_usage = failed_usage.map(|u| *u);
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
                             if cancel.load(Ordering::Relaxed) {
@@ -2387,6 +2489,9 @@ fn execute_node_kind(
                                         ),
                                     )?;
                                     journal.append(EventPayload::AttemptFinished {
+                                        item: None,
+                                        output_truncated: capture.truncated.clone(),
+                                        transcript_incomplete: capture.transcript_incomplete,
                                         node: node_id.into(),
                                         attempt,
                                         status: attempt_status.into(),
@@ -2432,25 +2537,34 @@ fn execute_node_kind(
                                         node.success_check.as_ref(),
                                         run_dir,
                                         &attempt_workdir,
+                                        place.sandbox.as_deref(),
                                         &output,
                                     )? {
                                         None => {
-                                            let check = completion_check(
-                                                decisions,
-                                                journal,
-                                                run_dir,
-                                                node,
-                                                attempt,
-                                                &task_prompt,
-                                                &output,
-                                                try_i < retries,
-                                            )?;
+                                            let check = if item.is_some_and(|i| i.checked) {
+                                                Default::default()
+                                            } else {
+                                                completion_check(
+                                                    decisions,
+                                                    journal,
+                                                    run_dir,
+                                                    node,
+                                                    attempt,
+                                                    &task_prompt,
+                                                    &output,
+                                                    try_i < retries,
+                                                )?
+                                            };
                                             let duration_ms = duration_ms
                                                 .map(|d| d + check.elapsed.as_millis() as u64);
                                             if let Some(reason) = check.reject {
                                                 // Completion enforce (issue #165
                                                 // Part 14.1), as on the Ok branch.
                                                 journal.append(EventPayload::AttemptFinished {
+                                                    item: None,
+                                                    output_truncated: capture.truncated.clone(),
+                                                    transcript_incomplete: capture
+                                                        .transcript_incomplete,
                                                     node: node_id.into(),
                                                     attempt,
                                                     status: "failed".into(),
@@ -2466,6 +2580,10 @@ fn execute_node_kind(
                                                 last_timed_out = false;
                                             } else {
                                                 journal.append(EventPayload::AttemptFinished {
+                                                    item: None,
+                                                    output_truncated: capture.truncated.clone(),
+                                                    transcript_incomplete: capture
+                                                        .transcript_incomplete,
                                                     node: node_id.into(),
                                                     attempt,
                                                     status: NodeStatus::Succeeded.as_str().into(),
@@ -2484,8 +2602,12 @@ fn execute_node_kind(
                                                 });
                                             }
                                         }
-                                        Some(reason) => {
+                                        Some(Rejection { reason, fatal }) => {
                                             journal.append(EventPayload::AttemptFinished {
+                                                item: None,
+                                                output_truncated: capture.truncated.clone(),
+                                                transcript_incomplete: capture
+                                                    .transcript_incomplete,
                                                 node: node_id.into(),
                                                 attempt,
                                                 status: "failed".into(),
@@ -2497,6 +2619,13 @@ fn execute_node_kind(
                                                 failure_kind: None,
                                                 usage: failed_usage.clone(),
                                             })?;
+                                            if fatal {
+                                                return Ok(AttemptOutcome::Finished {
+                                                    status: NodeStatus::Failed,
+                                                    output: reason,
+                                                    events,
+                                                });
+                                            }
                                             last_msg = format!("{reason}: {output}");
                                             last_timed_out = false;
                                         }
@@ -2508,6 +2637,9 @@ fn execute_node_kind(
                                 // raw CLI error text.
                                 Some(sfr) => {
                                     journal.append(EventPayload::AttemptFinished {
+                                        item: None,
+                                        output_truncated: capture.truncated.clone(),
+                                        transcript_incomplete: capture.transcript_incomplete,
                                         node: node_id.into(),
                                         attempt,
                                         status: attempt_status.into(),
@@ -2571,26 +2703,35 @@ fn execute_node_kind(
                                         // node again.
                                         journal_interrupted_attempt(
                                             journal,
-                                            node_id,
-                                            attempt,
-                                            duration_ms,
-                                            None,
-                                            &msg,
-                                            failure_kind,
+                                            InterruptedAttempt {
+                                                node_id,
+                                                attempt,
+                                                duration_ms,
+                                                session: None,
+                                                partial: &msg,
+                                                failure_kind,
+                                                capture: capture.clone(),
+                                            },
                                         )?;
                                     } else if require_verdict {
                                         journal_interrupted_attempt(
                                             journal,
-                                            node_id,
-                                            attempt,
-                                            duration_ms,
-                                            None,
-                                            &msg,
-                                            failure_kind,
+                                            InterruptedAttempt {
+                                                node_id,
+                                                attempt,
+                                                duration_ms,
+                                                session: None,
+                                                partial: &msg,
+                                                failure_kind,
+                                                capture: capture.clone(),
+                                            },
                                         )?;
                                         was_interrupted = true;
                                     } else {
                                         journal.append(EventPayload::AttemptFinished {
+                                            item: None,
+                                            output_truncated: capture.truncated.clone(),
+                                            transcript_incomplete: capture.transcript_incomplete,
                                             node: node_id.into(),
                                             attempt,
                                             status: attempt_status.into(),
@@ -2632,7 +2773,7 @@ fn execute_node_kind(
                                 lost_session_retried = true;
                                 infra_retry = true;
                             } else if let Some(QuotaDecision::Pause { until }) = quota {
-                                return Ok(AttemptOutcome::QuotaPaused {
+                                return Ok(AttemptOutcome::EnginePaused {
                                     pause: crate::pause::quota::quota_pause(
                                         &step.agent,
                                         &step.model,
@@ -2842,6 +2983,18 @@ fn execute_node_kind(
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
             let mut env = crate::script::run_env(run_dir, Some(node_id));
+            if let Some(i) = item {
+                match i.script_env() {
+                    Ok(item_env) => env.extend(item_env),
+                    Err(msg) => {
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: msg,
+                            events,
+                        });
+                    }
+                }
+            }
             let overlay = cfg.spawn_env();
             env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
             let r = crate::script::run_script_with_env(
@@ -2874,18 +3027,21 @@ fn execute_node_kind(
             output: String::new(),
             events,
         }),
-        // human_review is handled inside drive itself (pause until a decision), it
-        // never reaches here; this branch is defensive. wait - subphase 7b.
-        NodeKind::HumanReview { .. } => Err(EngineError::Invalid(format!(
-            "node `{node_id}` (human_review) must be handled by drive"
-        ))),
-        NodeKind::Wait { .. } => Err(EngineError::Invalid(format!(
-            "node `{node_id}` (wait) must be handled by drive"
-        ))),
-        NodeKind::Playbook { .. } => Err(EngineError::Invalid(format!(
-            "node `{node_id}` (playbook) must be handled by drive"
-        ))),
+        // Gates, waits and sub-playbooks are handled inside drive itself
+        // (`NodeKind::drive_handled`); they never reach here.
+        kind @ (NodeKind::HumanReview { .. }
+        | NodeKind::Wait { .. }
+        | NodeKind::Playbook { .. }
+        | NodeKind::Publish { .. }) => Err(drive_handled_refusal(node_id, kind)),
     }
+}
+
+/// The defensive refusal of a kind the drive loop executes itself.
+fn drive_handled_refusal(node_id: &str, kind: &NodeKind) -> EngineError {
+    EngineError::Invalid(format!(
+        "node `{node_id}` ({}) must be handled by drive",
+        kind.type_str()
+    ))
 }
 
 /// Composes the run answer for a finish-with-prompt (spec B). A reduced
@@ -2924,10 +3080,7 @@ pub(crate) fn execute_finish_answer(
     // carries the completed nodes' recorded output but NOT the instruction header.
     let budget = playbook.context_budget(node_id);
     let context = build_terminal_context(run_dir, &events, None, &budget);
-    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-        .into_iter()
-        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-        .collect();
+    let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
     let text = render(
         prompt,
         &cfg.params,
@@ -2964,11 +3117,15 @@ pub(crate) fn execute_finish_answer(
     // missing-input hole as any node template, and it does not pass through
     // `execute_node` where that check lives (Task 4 handover note 5).
     journal_missing_inputs(journal, run_dir, node_id, prompt, state)?;
+    let for_people = playbook
+        .node(node_id)
+        .is_some_and(|n| n.kind.writes_for_people());
     let text = crate::context::assemble_finish_answer_prompt(
         &text,
         cfg.instruction.as_deref(),
         &events,
         auto_context,
+        for_people,
     );
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
@@ -2997,12 +3154,8 @@ pub(crate) fn execute_finish_answer(
     // Connector env isolation (spec 4.3): the finish-answer agent is a spawned
     // agent too, so its inherited connector tokens are scrubbed and it gets the
     // run-context env.
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
-        scrub: env_scrub.to_vec(),
-        run_dir: Some(run_dir.to_path_buf()),
-        node_id: Some(node_id.to_string()),
-        overlay: cfg.spawn_env(),
-    };
+    let spawn_env =
+        crate::adapter::SpawnEnv::for_node(env_scrub.to_vec(), run_dir, node_id, cfg.spawn_env());
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
     let mut last_msg = String::new();
@@ -3050,6 +3203,15 @@ pub(crate) fn execute_finish_answer(
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };
+        let step_env = step_env::process_only(
+            &entry,
+            &step_env::StepTarget {
+                agent: &ri.agent_id,
+                model: &ri.model,
+                host: host_mode,
+            },
+            env_scrub,
+        );
         for try_i in 0..=retries {
             attempt += 1;
             // Host execution mode (0.23.0): the closing answer is a host task
@@ -3092,6 +3254,9 @@ pub(crate) fn execute_finish_answer(
             let stream_log = run_dir
                 .join("agent-stream")
                 .join(format!("{node_id}-{attempt}.jsonl"));
+            let attempt_policy = spawn_env
+                .with_attempt(attempt)
+                .with_process(step_env.process.clone());
             let task = AgentTask {
                 prompt: &text,
                 model: &ri.model,
@@ -3100,7 +3265,7 @@ pub(crate) fn execute_finish_answer(
                 stream_log: Some(&stream_log),
                 soul: Some(entry.soul.as_str()),
                 grant_autonomy,
-                connector_policy: &connector_policy,
+                spawn_env: &attempt_policy,
                 // A finish-answer node is never interactive: it composes the
                 // run's terminal answer, it does not ask the user questions.
                 interactive: false,
@@ -3117,6 +3282,7 @@ pub(crate) fn execute_finish_answer(
                 // Internal finish-answer composition: no hermetic isolation.
                 hermetic_settings: None,
                 transcript_dir: None,
+                output_limits: cfg.output_limits(),
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -3131,6 +3297,7 @@ pub(crate) fn execute_finish_answer(
             let on_spawn = |pid: u32, spawn_ms: u64| {
                 spawn_at.set(Some(std::time::Instant::now()));
                 if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                    item: None,
                     node: node_id.to_string(),
                     attempt: cur_attempt,
                     agent: agent_name.clone(),
@@ -3141,6 +3308,8 @@ pub(crate) fn execute_finish_answer(
                     model: None,
                     workdir: None,
                     transcript: None,
+                    token: attempt_policy.attempt_token.clone(),
+                    isolation: None,
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -3149,6 +3318,7 @@ pub(crate) fn execute_finish_answer(
             // live sidecar (`None`), it carries no `expected_duration`, so no
             // stall watch (`None`), and the terminal answer composition is not a
             // supervisor-interruptible node, so no control observation (`None`).
+            step_env.journal(journal, node_id, attempt, &ri.agent_id)?;
             let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
             last_close = Some(crate::host_task::FallbackOf {
                 attempt,
@@ -3168,6 +3338,7 @@ pub(crate) fn execute_finish_answer(
             // (pid unknown) so every attempt_finished is preceded by a started.
             if spawn_instant.is_none() {
                 journal.append(EventPayload::AttemptStarted {
+                    item: None,
                     node: node_id.into(),
                     attempt,
                     agent: agent_label.clone(),
@@ -3178,12 +3349,17 @@ pub(crate) fn execute_finish_answer(
                     model: None,
                     workdir: None,
                     transcript: None,
+                    token: attempt_policy.attempt_token.clone(),
+                    isolation: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
             match outcome {
                 Ok(report) => {
                     journal.append(EventPayload::AttemptFinished {
+                        item: None,
+                        output_truncated: report.capture.truncated.clone(),
+                        transcript_incomplete: report.capture.transcript_incomplete,
                         node: node_id.into(),
                         attempt,
                         status: report.status.as_str().into(),
@@ -3207,10 +3383,15 @@ pub(crate) fn execute_finish_answer(
                     class,
                     message: msg,
                     usage: failed_usage,
+                    capture,
                     ..
                 }) => {
+                    let failed_usage = failed_usage.map(|u| *u);
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {
+                        item: None,
+                        output_truncated: capture.truncated,
+                        transcript_incomplete: capture.transcript_incomplete,
                         node: node_id.into(),
                         attempt,
                         status: if last_timed_out {
@@ -3399,7 +3580,7 @@ pub(crate) fn run_playbook_node(
             None,
             false,
             true,
-            Some(crate::pause::PauseBy::Engine),
+            crate::pause::PauseBy::Engine,
         )?;
         // Nested resume can also mirror wakes onto the parent log.
         log.resync_seq()?;
@@ -3414,10 +3595,7 @@ pub(crate) fn run_playbook_node(
             let budget = playbook.context_budget(node_id);
             let context =
                 build_context_for_render(run_dir, &events, cfg.instruction.as_deref(), &budget)?;
-            let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-                .into_iter()
-                .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-                .collect();
+            let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
             let state = RunState::fold(&events);
             Some(render(
                 t,
@@ -3537,6 +3715,13 @@ pub(crate) fn run_playbook_node(
     opts.execution = super::host::child_execution_request(run_dir)?;
     // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
     opts.consent = inherited_consent(run_dir, run_id, node_id);
+    // The publish step (decision record 0010): a child of a run held to
+    // `publish_only` is held to it too, and a child started after its
+    // parent ran an acting node pins nothing (its tree may have been
+    // changed already).
+    opts.publish_only = cfg.publish_only || playbook.publish_only;
+    opts.parent_acted =
+        cfg.parent_acted || crate::publish::pin::acted(playbook, &events, Some(node_id));
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -3669,7 +3854,8 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
         && !is_interactive(playbook, node)
         && playbook
             .node(node)
-            .is_none_or(|n| n.kind.protect_globs().is_empty())
+            // A list node runs its items on its own pool, on the sequential arm.
+            .is_none_or(|n| n.kind.protect_globs().is_empty() && n.list().is_none())
         && !matches!(
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))
@@ -3727,7 +3913,8 @@ pub(crate) fn maybe_compact_context(
         .context_compact_model
         .clone()
         .unwrap_or_else(|| crate::run_config::DEFAULT_COMPACT_MODEL.to_string());
-    let adapter = adapter_for("claude")?;
+    let claude = apb_core::agents::claude::ID;
+    let adapter = adapter_for(claude)?;
     let prompt = format!(
         "Summarize the following playbook run context concisely, preserving key facts, \
          decisions, and outputs that later steps may need. Keep it to a few short \
@@ -3739,12 +3926,23 @@ pub(crate) fn maybe_compact_context(
     const COMPACTION_TIMEOUT: Duration = Duration::from_secs(120);
     // Connector env isolation (spec 4.3): scrub inherited connector tokens even
     // from this internal summarizer. It performs no connector calls, so it gets
-    // no run-context env.
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
+    // no run-context env. A run that restricts any agent's environment
+    // restricts the summarizer's too: an empty allowlist for claude.
+    let spawn_env = crate::adapter::SpawnEnv {
         scrub: env_scrub.to_vec(),
-        run_dir: None,
-        node_id: None,
         overlay: cfg.spawn_env(),
+        process: super::rebind::run_uses_allowlist(run_dir).then(|| {
+            std::sync::Arc::new(crate::agent_env::plan_for(
+                claude,
+                &model,
+                &apb_core::process_env::ProcessEnvPolicy {
+                    policy: apb_core::process_env::ProcessEnvMode::Allowlist,
+                    allow: Vec::new(),
+                },
+                env_scrub,
+            ))
+        }),
+        ..Default::default()
     };
     let task = AgentTask {
         prompt: &prompt,
@@ -3756,7 +3954,7 @@ pub(crate) fn maybe_compact_context(
         // Context compaction only summarizes text; it needs no file or network
         // access, so it stays in the default permission posture.
         grant_autonomy: false,
-        connector_policy: &connector_policy,
+        spawn_env: &spawn_env,
         // Internal summarizer: not a playbook node, never interactive.
         interactive: false,
         // Preserve the historical report-contract posture for the summarizer; the
@@ -3764,7 +3962,7 @@ pub(crate) fn maybe_compact_context(
         // behavior byte-identical.
         report_contract: true,
         node: "__context_compact",
-        agent: "claude",
+        agent: claude,
         // Internal summarizer keeps today's last-message output.
         extract: None,
         // Internal summarizer: no status-file protocol.
@@ -3772,6 +3970,7 @@ pub(crate) fn maybe_compact_context(
         // Internal summarizer: no hermetic isolation.
         hermetic_settings: None,
         transcript_dir: None,
+        output_limits: cfg.output_limits(),
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.
@@ -4023,9 +4222,12 @@ pub(crate) fn advance_frontier(
     // taken hop, so it is filtered out: `journaled_hops` is what
     // `routed_targets`/`pending_heads` trust as "every hop the drive loop
     // actually took", and the record outlives even a patch that removes the
-    // edge. Deduplicated against the folded hop set (which includes prior
-    // drives), so a loop cannot grow the journal without bound; the counted
-    // record below is deliberately NOT deduped.
+    // edge. Deduplicated per execution of `node`: a hop already journaled
+    // after `node` last started (a resume advancing past it again) is not
+    // written twice, while every loop round writes its own, because routing
+    // reads only the hops of a node's latest execution
+    // (`RunState::hop_of_latest_run`). The counted record below is
+    // deliberately NOT deduped.
     for e in &selected {
         if raced_out.contains(&e.to) {
             continue;
@@ -4033,6 +4235,7 @@ pub(crate) fn advance_frontier(
         if state
             .journaled_hops
             .contains(&(node.to_string(), e.to.clone()))
+            && state.hop_of_latest_run(node, &e.to)
         {
             continue;
         }

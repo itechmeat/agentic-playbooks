@@ -13,31 +13,61 @@
 
 use std::collections::BTreeSet;
 
-use crate::schema::{Effect, Playbook};
+use crate::baseline::BaselineSource;
+use crate::schema::{Effect, Node, Playbook};
+
+/// The full set an acting node is considered capable of.
+const ACTING: [Effect; 4] = [
+    Effect::FsRead,
+    Effect::FsWrite,
+    Effect::Network,
+    Effect::External,
+];
+/// What reaching an external service over HTTP implies.
+const REACHES_OUT: [Effect; 2] = [Effect::Network, Effect::External];
+
+/// Whether executing `node` can change anything: it holds the workdir lock
+/// (an agent, a script, a sub-playbook, a finish with a prompt; see
+/// `NodeKind::takes_workdir_lock`), it binds a connector, or it declares an
+/// effect other than `fs_read`. The baseline's before snapshot is taken
+/// before the first such node, and [`inferred`] is built on it so the two
+/// cannot drift.
+pub fn node_acts(node: &Node) -> bool {
+    node.kind.takes_workdir_lock()
+        || !node.kind.connector_bindings().is_empty()
+        || node.own_effects().iter().any(|e| *e != Effect::FsRead)
+}
 
 /// Effects conservatively derived from the definition. An acting node - one
 /// that runs an agent, runs a script, or runs a sub-playbook in the shared
 /// workdir - is considered capable of file writes, network access, and
-/// external actions. Membership is exactly `NodeKind::takes_workdir_lock`
-/// (= `runs_agent() || Script || Playbook`): effects and the workdir-lock
-/// predicate share one definition so they can never diverge (review I5/M3).
-/// The compile-time "a new variant must be classified" guard now lives in
-/// `NodeKind::runs_agent`, which `takes_workdir_lock` builds on.
+/// external actions; a node that only binds a connector reaches an external
+/// service over HTTP regardless of its kind (spec 12's automatic catalog
+/// flag, which also feeds `preflight`). A node acting only through a
+/// declared effect adds nothing here: its declaration joins in
+/// [`effective`].
+///
+/// The baseline check's sources count too: a connector source reaches out,
+/// a script or project-checks source runs a program in the tree like a
+/// script node.
 pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
     let mut set = BTreeSet::new();
-    for n in &playbook.nodes {
+    for n in playbook.nodes.iter().filter(|n| node_acts(n)) {
         if n.kind.takes_workdir_lock() {
-            set.insert(Effect::FsRead);
-            set.insert(Effect::FsWrite);
-            set.insert(Effect::Network);
-            set.insert(Effect::External);
+            set.extend(ACTING);
         }
-        // A node with a non-empty connector binding reaches an external
-        // service over HTTP regardless of node kind (spec 12's automatic
-        // catalog flag), which also feeds `preflight` for free.
         if !n.kind.connector_bindings().is_empty() {
-            set.insert(Effect::Network);
-            set.insert(Effect::External);
+            set.extend(REACHES_OUT);
+        }
+        set.extend(n.kind.implied_effects().iter().copied());
+    }
+    for c in playbook.baseline_checks() {
+        match c.source() {
+            Some(BaselineSource::Connector(_)) => set.extend(REACHES_OUT),
+            Some(BaselineSource::Script(_) | BaselineSource::ProjectChecks(_)) => {
+                set.extend(ACTING)
+            }
+            None => {}
         }
     }
     set
@@ -51,7 +81,7 @@ pub fn effective(playbook: &Playbook) -> BTreeSet<Effect> {
     set.extend(playbook.effects.iter().copied());
     // A node's own declaration (0.23.0) widens the same way.
     for n in &playbook.nodes {
-        set.extend(n.effects.iter().copied());
+        set.extend(n.own_effects());
     }
     set
 }
@@ -152,5 +182,49 @@ edges:
   - { from: note, to: done }
 "#;
         assert!(inferred(&playbook(yaml)).is_empty());
+        assert!(playbook(yaml).nodes.iter().all(|n| !node_acts(n)));
+    }
+
+    #[test]
+    fn a_node_acts_by_kind_binding_or_declared_effect() {
+        let p = playbook(SCRIPT_WF);
+        assert!(node_acts(p.node("work").unwrap()));
+        assert!(!node_acts(p.node("start").unwrap()));
+        let yaml = SCRIPT_WF.replace(
+            "{ id: done, type: finish, outcome: success }",
+            "{ id: done, type: finish, outcome: success, effects: [fs_read] }",
+        );
+        assert!(!node_acts(playbook(&yaml).node("done").unwrap()));
+        let yaml = SCRIPT_WF.replace(
+            "{ id: done, type: finish, outcome: success }",
+            "{ id: done, type: finish, outcome: success, effects: [external] }",
+        );
+        assert!(node_acts(playbook(&yaml).node("done").unwrap()));
+    }
+
+    #[test]
+    fn baseline_sources_widen_the_inferred_effects() {
+        let control = r#"
+schema: 2
+id: c
+name: C
+version: 1.0.0
+baseline_check:
+  checks:
+    - { id: deals, connector: { name: crm, function: count }, observe: [{ id: n, type: number, path: n, expect: { equals: 0 } }] }
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+"#;
+        let set = inferred(&playbook(control));
+        assert!(set.contains(&Effect::Network) && set.contains(&Effect::External));
+        assert!(!set.contains(&Effect::FsWrite));
+        let tests = control.replace(
+            "connector: { name: crm, function: count }, observe: [{ id: n, type: number, path: n, expect: { equals: 0 } }]",
+            "project_checks: { only: [test] }",
+        );
+        assert!(inferred(&playbook(&tests)).contains(&Effect::FsWrite));
     }
 }

@@ -28,6 +28,10 @@ pub struct PlaybookGetArgs {
     /// playbook + layout). Any other value falls back to summary.
     #[serde(default)]
     pub detail: Option<String>,
+    /// true adds `estimate`: how long a run of this version takes and what
+    /// it spends, from comparable past runs in this workspace. Read-only.
+    #[serde(default)]
+    pub estimate: Option<bool>,
 }
 
 /// An argument with only an optional workspace - for read tools without any
@@ -98,6 +102,102 @@ pub struct PlaybookRunArgs {
     #[serde(default)]
     pub execution: Option<String>,
     // --- end host execution mode ---
+    /// The run's budget: a token and/or dollar limit and what happens
+    /// before a node with no estimate; each field overrides the playbook's
+    /// `budget:` block. A start refused with budget_needs_decision is
+    /// started again with on_no_estimate set to the person's answer.
+    #[serde(default)]
+    pub budget: Option<BudgetArg>,
+    /// Remember the given params and instruction for this playbook in this
+    /// project, for the next start that passes none. Applied once the start
+    /// succeeded. Secret params, params named like a credential and
+    /// credential-shaped values are never stored; the answer lists what was
+    /// (`remembered`) and was not (`not_remembered`).
+    #[serde(default)]
+    pub remember: Option<bool>,
+    /// Tell the person about this run's transitions (a review or a question
+    /// waiting, a pause they did not make, the end) through a connector:
+    /// true uses the machine's notify target, false turns notifications off
+    /// for this run, an object sets `on` (review, question, paused,
+    /// finished) and/or `target`. Pass it only when the person asked. A
+    /// target that cannot carry notifications or is not approved refuses
+    /// the start (notify_unavailable).
+    #[serde(default)]
+    pub notify: Option<crate::tools::notify::NotifyArg>,
+}
+
+/// A run's budget argument. A predictive stop, not a security control: the
+/// run pauses before a node whose median spend from comparable runs no
+/// longer fits.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct BudgetArg {
+    /// Input plus output tokens over the run's agent attempts.
+    #[serde(default)]
+    pub tokens: Option<u64>,
+    /// Reported cost in US dollars.
+    #[serde(default)]
+    pub usd: Option<f64>,
+    /// ask (default), pause or continue: what the run does before a node
+    /// it cannot estimate.
+    #[serde(default)]
+    pub on_no_estimate: Option<String>,
+}
+
+impl BudgetArg {
+    /// The engine request, or the `invalid_budget` refusal.
+    pub fn request(
+        arg: Option<&Self>,
+    ) -> Result<Option<apb_core::budget::BudgetRequest>, serde_json::Value> {
+        match arg {
+            None => Ok(None),
+            Some(a) => {
+                crate::tools::budget::start_request(a.tokens, a.usd, a.on_no_estimate.as_deref())
+            }
+        }
+    }
+}
+
+/// A resume's budget change: raise or set a limit, change on_no_estimate,
+/// or let the node the budget paused before run once over it.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct BudgetResumeArg {
+    /// Tokens added to the token limit in force.
+    #[serde(default)]
+    pub raise_tokens: Option<u64>,
+    /// Dollars added to the dollar limit in force.
+    #[serde(default)]
+    pub raise_usd: Option<f64>,
+    /// A new token limit.
+    #[serde(default)]
+    pub tokens: Option<u64>,
+    /// A new dollar limit.
+    #[serde(default)]
+    pub usd: Option<f64>,
+    /// ask, pause or continue.
+    #[serde(default)]
+    pub on_no_estimate: Option<String>,
+    /// Let the paused node run once over the budget.
+    #[serde(default)]
+    pub once: bool,
+}
+
+impl BudgetResumeArg {
+    /// The engine request, or the `invalid_budget` refusal.
+    pub fn request(
+        arg: Option<&Self>,
+    ) -> Result<Option<apb_engine::budget::BudgetResume>, serde_json::Value> {
+        match arg {
+            None => Ok(None),
+            Some(a) => crate::tools::budget::resume_request(crate::tools::budget::ResumeArgs {
+                raise_tokens: a.raise_tokens,
+                raise_usd: a.raise_usd,
+                tokens: a.tokens,
+                usd: a.usd,
+                on_no_estimate: a.on_no_estimate.as_deref(),
+                once: a.once,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -141,6 +241,31 @@ pub struct RunRefArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunReportArgs {
+    pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Gone: the page is written by `run_report_html`. Not offered in the
+    /// schema; a host that still sends it is told where the page went.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub format: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunNotifyArgs {
+    pub run_id: String,
+    /// true: notify through the run's current target or the machine's;
+    /// false: stop notifying; `{ on: [...] }` keeps only these
+    /// transitions. Never a target: a person changes that.
+    pub notify: crate::tools::notify::NotifyChangeArg,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunPauseArgs {
     pub run_id: String,
     /// `drain` (default): no new node starts, running nodes finish, then the
@@ -159,6 +284,22 @@ pub struct RunPauseArgs {
     /// tree (default false: the lock is released).
     #[serde(default)]
     pub keep_lock: bool,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunIntentResolveArgs {
+    pub run_id: String,
+    /// The send intent id (`si-...`), as the run outcome's gap names it.
+    pub intent: String,
+    /// The person's answer: true when the send did go out, false when it
+    /// did not.
+    pub sent: bool,
+    /// What the person checked, kept with the decision.
+    #[serde(default)]
+    pub note: Option<String>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -249,16 +390,29 @@ pub struct RunResumeArgs {
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// The budget change a run its budget paused needs to continue (a plain
+    /// resume of it is refused with budget_paused); ask the person first.
+    #[serde(default)]
+    pub budget: Option<BudgetResumeArg>,
+    /// The person's confirmation of `budget`: the `budget_nonce` of the
+    /// `budget_change_requires_confirmation` refusal they were shown.
+    #[serde(default)]
+    pub confirm_budget: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReviewDecideArgs {
     pub run_id: String,
-    /// Identifier of the human_review node.
+    /// Identifier of the human_review or publish node.
     pub node: String,
     pub decision: String,
     #[serde(default)]
     pub note: String,
+    /// Publish gates only: the nonce of the plan the person saw
+    /// (`pending_review.publish.nonce`). Required for `publish`; pass it
+    /// only after the person was shown that exact plan.
+    #[serde(default)]
+    pub nonce: Option<String>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -433,6 +587,11 @@ pub struct PlaybookCatalogArgs {
     /// `needs_playbook_p` and `covered_by`; otherwise ignored.
     #[serde(default)]
     pub query: Option<String>,
+    /// Add `fit` to each entry that is not shadowed: whether it can run in
+    /// this project (ready, compatible, setup items, trusted,
+    /// needs_consent). Not part of the revision.
+    #[serde(default)]
+    pub fit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -498,6 +657,57 @@ pub struct PlaybookApproveArgs {
     /// Definition scope: "project" (default) or "global".
     #[serde(default)]
     pub scope: Option<String>,
+    /// The exact trust digest being approved. Required for a version an
+    /// import wrote with scripts (the refusal `digest_required` names it and
+    /// lists the scripts to show the user first); a digest that is not the
+    /// version's content now is refused with `digest_mismatch`.
+    #[serde(default)]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookMemoryArgs {
+    pub id: String,
+    /// Definition scope: "project" (default) or "global".
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// "get" (default), "set" or "clear".
+    #[serde(default)]
+    pub action: Option<String>,
+    /// set: param values to remember (merged into what is stored).
+    #[serde(default)]
+    pub params: Option<BTreeMap<String, String>>,
+    /// set: the instruction to remember; an empty string clears it on
+    /// purpose (no fallback to a legacy draft).
+    #[serde(default)]
+    pub instruction: Option<String>,
+    /// clear: "all" (default), "params" or "instruction".
+    #[serde(default)]
+    pub what: Option<String>,
+    /// get only: workspace_id of another workspace whose memory to read.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookMakeGlobalArgs {
+    /// The project playbook to make available in every project.
+    pub id: String,
+    /// What happens to the project copy: "trash" (moved to the project
+    /// trash, restorable), "retire" (kept, retired, so the global one wins)
+    /// or "keep" (both stay, the project copy with its remembered input;
+    /// the catalog marks the pair ambiguous while both are active and
+    /// trusted, else the global one shadows it).
+    /// Required unless dry_run.
+    #[serde(default)]
+    pub variant: Option<String>,
+    /// Also copy project profiles the playbook binds to the global scope
+    /// (refused for a profile with project skills).
+    #[serde(default)]
+    pub move_profiles: bool,
+    /// Only report the plan: blockers, actions and warnings. Changes nothing.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -527,9 +737,16 @@ pub struct AgentsDetectArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AdoptReportArgs {
-    /// A specific playbook; None - all playbooks of the project.
+    /// A specific playbook; None - every project and global playbook.
     #[serde(default)]
     pub id: Option<String>,
+    /// "project" or "global": only that scope (with `id`: the definition's
+    /// scope, default project).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace to assess in. None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// One declared subscription (for subscriptions_set).
@@ -595,6 +812,24 @@ pub struct ProfileWriteArgs {
     /// only, no shell commands). Absent: an update keeps the stored value.
     #[serde(default)]
     pub zcode_mode: Option<String>,
+    /// Which of the operator's environment variables the agent process
+    /// inherits. Absent: an update keeps the stored value.
+    #[serde(default)]
+    pub process_env: Option<ProcessEnvInput>,
+}
+
+/// A profile's `process_env`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProcessEnvInput {
+    /// "inherit" (the whole environment, the default) or "allowlist" (only
+    /// a base set, the agent CLI's own variables and `allow`). Absent with a
+    /// non-empty `allow` means "allowlist".
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// Variable names added under "allowlist": exact names or a prefix with
+    /// one trailing `*` (`NPM_CONFIG_*`). Names only, never values.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -638,6 +873,9 @@ pub struct PlaybookExecutePlanArgs {
     /// for one release) `true`.
     #[serde(default)]
     pub confirm_irreversible: Option<ConfirmIrreversibleArg>,
+    /// The run's budget (see playbook_run).
+    #[serde(default)]
+    pub budget: Option<BudgetArg>,
 }
 
 /// `confirm_irreversible`: the refusal's `consent_nonce` (a string), or a
@@ -697,6 +935,17 @@ pub struct RunTaskSubmitArgs {
     /// Journaled as reported; `model_hint` is only the profile's declaration.
     #[serde(default)]
     pub model: Option<String>,
+    /// Problems the subagent saw and did not fix (optional, at most 20):
+    /// a list of {kind, location, evidence, why_not_fixed}, where kind is a
+    /// lowercase slug such as bug, regression, security, data_quality,
+    /// config, docs, test_gap, performance, dependency or other. Reported
+    /// only; never changes the result.
+    #[serde(default)]
+    pub findings: Option<serde_json::Value>,
+    /// What a person should check (optional, at most 20): a list of
+    /// {subject, reason}. Reported only; never changes the result.
+    #[serde(default)]
+    pub warnings: Option<serde_json::Value>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -733,3 +982,233 @@ pub struct DecisionAskArgs {
     pub workspace: Option<String>,
 }
 // --- end issue #193 ---
+
+// --- run quality ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeStartArgs {
+    /// The ended run to grade.
+    pub run_id: String,
+    /// The characters the session may read (default 200000).
+    #[serde(default)]
+    pub budget_chars: Option<u64>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeReadArgs {
+    pub run_id: String,
+    /// The session run_grade_start returned.
+    pub session: String,
+    /// outline | children | read | page | search.
+    pub op: String,
+    /// read: the record reference (`j:<seq>`, `o:<node>`, `s:<stem>`,
+    /// `t:<stem>/<session|stdout|stderr>#<record>`).
+    #[serde(default, rename = "ref")]
+    pub r#ref: Option<String>,
+    /// read: a character span `[from, to]` of the record instead of all of
+    /// it (a span is not a full read).
+    #[serde(default)]
+    pub span: Option<[u64; 2]>,
+    /// children, page: the view (`journal`, `outputs`, `t:<stem>/session`,
+    /// ...); search: only this view.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// children, page: the first record index (default 0).
+    #[serde(default)]
+    pub from: Option<u64>,
+    /// children, page: how many records (at most 200).
+    #[serde(default)]
+    pub count: Option<u64>,
+    /// search: the phrase to find.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// One citation of a grade: a record the session read in full.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GradeCiteArg {
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    #[serde(default)]
+    pub span: Option<[u64; 2]>,
+}
+
+/// The level of one criterion and what it rests on.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GradeProposalArg {
+    /// The criterion id.
+    pub criterion: String,
+    /// good | partial | poor | not_applicable | not_enough_data.
+    pub level: String,
+    /// A short machine slug for why (`checked_replies`).
+    #[serde(default)]
+    pub reason_code: String,
+    /// One sentence for a person; never quote the run.
+    #[serde(default)]
+    pub why: String,
+    /// The records the level rests on, each read in full.
+    #[serde(default)]
+    pub cites: Vec<GradeCiteArg>,
+    /// true claims that something did not happen: every view the criterion
+    /// reads must be complete and read to its end.
+    #[serde(default)]
+    pub absence: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeSubmitArgs {
+    pub run_id: String,
+    pub session: String,
+    /// One entry per criterion of the session.
+    pub grades: Vec<GradeProposalArg>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradesArgs {
+    pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunGradeArgs {
+    pub run_id: String,
+    /// `rules` (default): the built-in criteria, free. `model`: the
+    /// playbook's own criteria through the project's decision model, only
+    /// when its `grade` use is on.
+    #[serde(default)]
+    pub grader: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KnownProblemsArgs {
+    /// The playbook id.
+    pub id: String,
+    /// `project` or `global`; defaults to where the playbook lives.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// One problem id (`kp-...`): returns it with the passages of its
+    /// source that are new since it was seen.
+    #[serde(default)]
+    pub problem: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KnownProblemDecideArgs {
+    /// The playbook id.
+    pub id: String,
+    /// The problem id (`kp-...`).
+    pub problem: String,
+    /// `confirm`, `dismiss`, `reopen` or `close`.
+    pub action: String,
+    /// With `close`: text the person copied exactly from the source's new
+    /// text that shows the fix.
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// The person's reason, kept with the decision.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// `project` or `global`; defaults to where the playbook lives.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KnownProblemRecheckArgs {
+    /// The playbook id.
+    pub id: String,
+    /// The problem id (`kp-...`).
+    pub problem: String,
+    /// `model` (the project's decision model, when its `problem_recheck`
+    /// use is on) or `host` (your own reading of the changed passages).
+    pub by: String,
+    /// With `host`: `holds`, `closed` or `undetermined`.
+    #[serde(default)]
+    pub verdict: Option<String>,
+    /// With `host` and `closed`: a changed passage copied exactly.
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// With `host`: a short reason.
+    #[serde(default)]
+    pub why: Option<String>,
+    /// `project` or `global`; defaults to where the playbook lives.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverArgs {
+    /// Projects to read the sessions of: `current` or workspace ids (see
+    /// projects_list). Default: the current project.
+    #[serde(default)]
+    pub projects: Option<Vec<String>>,
+    /// History roots by name (see `discover.roots` in the global config).
+    /// Default: every configured root that is there.
+    #[serde(default)]
+    pub roots: Option<Vec<String>>,
+    /// How many days back, 1 to 365. Default: the configured value, else 90.
+    #[serde(default)]
+    pub since_days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverResultsArgs {
+    /// A stored result id (`disc-...`); absent: the list of stored results.
+    #[serde(default)]
+    pub result_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverSaveArgs {
+    /// The stored result id (`disc-...`).
+    pub result_id: String,
+    /// The suggestion slug (`seq-...`).
+    pub slug: String,
+    /// `project` or `global`.
+    pub scope: String,
+    /// The draft rewritten by you (a better title or prompt); absent: the
+    /// suggestion's own draft.
+    #[serde(default)]
+    pub yaml: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookDiscoverDismissArgs {
+    /// The stored result id (`disc-...`).
+    pub result_id: String,
+    /// The suggestion slug (`seq-...`).
+    pub slug: String,
+    /// `soft` (not now) or `hard` (never).
+    pub kind: String,
+    /// `project` (default) or `global` (only when the user says everywhere).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}

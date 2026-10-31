@@ -1,0 +1,45 @@
+# Contract fixture for the grok agent, read by `suite/agent_contract`.
+# grok's built-in form prints plain text, so every scenario is synthetic.
+agent: grok
+provenance: synthetic
+scenarios:
+  success:
+    stdout: &reply |
+      PONG
+
+      ```yaml
+      status: success
+      summary: done
+      ```
+    expect:
+      output: PONG
+  error:
+    stderr: "error: unknown option '--frobnicate'"
+    exit: 2
+    expect:
+      message: "unknown option"
+      model_turn: false
+  quota:
+    stderr: "Error: 429 Too Many Requests, retry after 60"
+    exit: 1
+    expect:
+      kind: quota
+      retry_after_secs: 60
+  session:
+    stdout: *reply
+    expect:
+      fresh: printed
+      continues: false
+  usage:
+    stdout: *reply
+    expect: {}
+  verdict:
+    stdout: |
+      stuck
+
+      ```yaml
+      status: failure
+      summary: the tests fail
+      ```
+    expect:
+      status: failed

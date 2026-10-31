@@ -1,5 +1,5 @@
 name: zulip
-version: 0.1.0
+version: 0.2.0
 healthcheck: get_me
 auth:
   kind: basic
@@ -91,6 +91,8 @@ functions:
         topic: { type: string, description: "topic name within the stream" }
         content: { type: string, description: "message body in Zulip markdown" }
       required: [to, topic, content]
+    people: { to: to, subject: topic, text: content }
+    idempotency: { mode: none, result_ref: id }
     examples:
       - args:
           to: general
@@ -114,6 +116,8 @@ functions:
           description: "recipient user id, or a JSON-encoded array string of ids for several recipients, e.g. \"[12, 34]\""
         content: { type: string, description: "message body in Zulip markdown" }
       required: [to, content]
+    people: { to: to, text: content }
+    idempotency: { mode: none, result_ref: id }
     examples:
       - args:
           to: "12"

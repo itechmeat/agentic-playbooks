@@ -4,9 +4,16 @@
 
 pub mod auth;
 pub mod connectors;
+pub mod discover;
+pub mod estimate;
+pub mod fit;
+pub mod memory;
 pub mod meta;
+pub mod notify;
 pub mod playbooks;
+pub mod problems;
 pub mod profiles;
+pub mod quality;
 pub mod runs;
 // --- 0.23.0 stats (C3) ---
 pub mod stats;

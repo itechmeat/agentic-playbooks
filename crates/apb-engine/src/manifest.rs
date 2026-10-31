@@ -56,6 +56,11 @@ pub struct ManifestProfile {
     /// manifests) means `yolo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    /// The profile's `process_env`, snapshotted like `hermetic`: which
+    /// operator variables its agent processes inherit for the whole run,
+    /// resume included. Absent (and in old manifests) means `inherit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_env: Option<apb_core::process_env::ProcessEnvPolicy>,
     // --- tier routing (issue #165 Part 12) ---
     /// The profile's executor tiers, lightest first, resolved at run start
     /// like the chain. Empty for a profile without tiers (and old
@@ -129,8 +134,9 @@ pub struct ManifestConnector {
 }
 
 /// A single node's grant against one connector: which accounts, which
-/// functions, and an optional call budget counted per executor attempt
-/// (`connector::call::attempt_floor`).
+/// functions, an optional call budget counted per executor attempt
+/// (`connector::call::attempt`), and what a repeat of a send with an unknown
+/// outcome does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestConnectorGrant {
     pub connector: String,
@@ -138,6 +144,17 @@ pub struct ManifestConnectorGrant {
     pub accounts: Vec<String>,
     pub functions: Vec<String>,
     pub max_calls: Option<u32>,
+    /// `None` (and every older manifest) reads as `refuse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_unknown: Option<apb_core::schema::OnUnknown>,
+}
+
+/// A node's executor digests in a run: its profile (`profile.yaml` plus
+/// SOUL, so the model and run overrides) and its bundle (plus skills).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeDigests {
+    pub profile: String,
+    pub bundle: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -196,6 +213,12 @@ pub struct RunExecutionManifest {
     /// [`crate::gate::RunPermit::candidate_skipped`]). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_skipped: Option<String>,
+    /// The kind of task the run does: the playbook's `quality.task_type`
+    /// rendered over the start's params (`default` without one), present
+    /// only for a playbook with a `quality:` block. Fixed at start, so a
+    /// later edit cannot change which runs a past run is compared with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<String>,
 }
 
 // --- host execution mode (0.23.0) ---
@@ -299,6 +322,25 @@ impl RunExecutionManifest {
             && self.consent.is_none()
             && !self.candidate_trial
             && self.candidate_skipped.is_none()
+            && self.task_type.is_none()
+    }
+
+    /// Each bound node's profile and bundle digests (the supervisor's
+    /// binding included), through the profiles the bindings name.
+    pub fn node_digests(&self) -> BTreeMap<String, NodeDigests> {
+        self.node_bindings
+            .keys()
+            .filter_map(|node| {
+                let p = self.for_node(node)?;
+                Some((
+                    node.clone(),
+                    NodeDigests {
+                        profile: p.profile_digest.clone(),
+                        bundle: p.bundle_digest.clone(),
+                    },
+                ))
+            })
+            .collect()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {
@@ -505,6 +547,7 @@ mod tests {
             ephemeral: false,
             hermetic: true,
             zcode_mode: None,
+            process_env: None,
             tiers: Vec::new(),
             routed_tier: None,
             cascade: 0,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::event::Event;
 
 fn ev(seq: u64, ts: u128, v: serde_json::Value) -> Event {
     Event {
@@ -32,6 +33,9 @@ fn run(
         snapshot: snapshot.map(|y| apb_core::schema::Playbook::from_yaml(y).unwrap()),
         candidate_trial: false,
         expected_models: BTreeMap::new(),
+        execution: Some("cli".into()),
+        node_profiles: BTreeMap::new(),
+        grades: Vec::new(),
     }
 }
 
@@ -411,4 +415,486 @@ fn a_two_hour_pause_is_left_out_of_run_and_node_durations() {
     let work = v.nodes.iter().find(|n| n.node == "work").unwrap();
     assert_eq!(work.duration.median_ms, Some(8_000));
     assert_eq!(work.over_expected.unwrap().text(), "0/1 (0%)");
+}
+
+fn notes(
+    node: &str,
+    attempt: u32,
+    findings: serde_json::Value,
+    warnings: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({"type": "attempt_notes", "node": node, "attempt": attempt,
+                       "findings": findings, "warnings": warnings})
+}
+
+fn finding(kind: &str, location: &str) -> serde_json::Value {
+    serde_json::json!({"kind": kind, "location": location, "evidence": "seen", "why_not_fixed": "scope"})
+}
+
+#[test]
+fn findings_group_by_kind_and_location_across_runs() {
+    use serde_json::json;
+    let runs = vec![
+        run(
+            "a",
+            "1.0.0",
+            None,
+            &[
+                (
+                    2_000,
+                    notes("work", 1, json!([finding("bug", "src/a.rs:10")]), json!([])),
+                ),
+                // A retry reporting the same finding again counts once.
+                (
+                    2_500,
+                    notes("work", 2, json!([finding("bug", "src/a.rs:10")]), json!([])),
+                ),
+                (3_000, end("succeeded")),
+            ],
+        ),
+        run(
+            "b",
+            "1.0.0",
+            None,
+            &[
+                (
+                    2_000,
+                    notes(
+                        "work",
+                        1,
+                        json!([
+                            finding("bug", "src/a.rs:44:2"),
+                            finding("docs", "README.md")
+                        ]),
+                        json!([{"subject": "deploy", "reason": "not checked"}]),
+                    ),
+                ),
+                (3_000, end("succeeded")),
+            ],
+        ),
+    ];
+    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let bug = v.findings.by_kind.iter().find(|k| k.kind == "bug").unwrap();
+    assert_eq!((bug.occurrences, bug.runs), (2, 2));
+    let top = &v.findings.top[0];
+    assert_eq!(
+        (
+            top.kind.as_str(),
+            top.location.as_str(),
+            top.runs,
+            top.last_run.as_str()
+        ),
+        ("bug", "src/a.rs", 2, "b")
+    );
+    assert_eq!(v.findings.runs_with_warnings.text(), "1/2 (50%)");
+    let text = render_text(&build(&runs, &StatsFilter::default()));
+    assert!(text.contains("bug at src/a.rs: 2 runs, last b"), "{text}");
+    assert!(
+        text.contains("findings: bug: 2 findings in 2 runs"),
+        "{text}"
+    );
+}
+
+/// The last run is the one that started last, whatever order the runs
+/// arrive in (several project roots list theirs one after another).
+#[test]
+fn the_last_run_of_a_finding_is_the_one_that_started_last() {
+    use serde_json::json;
+    let reported = || notes("work", 1, json!([finding("bug", "src/a.rs")]), json!([]));
+    let mut newer = run("newer", "1.0.0", None, &[(9_000, reported())]);
+    newer.events[0].ts = 8_000;
+    let older = run("older", "1.0.0", None, &[(2_000, reported())]);
+    let v = &build(&[newer, older], &StatsFilter::default()).versions[0];
+    assert_eq!(v.findings.top[0].last_run, "newer");
+}
+
+#[test]
+fn a_hidden_character_in_a_reported_location_never_reaches_the_terminal() {
+    use serde_json::json;
+    let runs = vec![run(
+        "a",
+        "1.0.0",
+        None,
+        &[(
+            2_000,
+            notes(
+                "work",
+                1,
+                json!([finding("bug", "src/a.rs\u{202E}\u{1b}[2J")]),
+                json!([]),
+            ),
+        )],
+    )];
+    let text = render_text(&build(&runs, &StatsFilter::default()));
+    assert!(!text.contains('\u{202E}') && !text.contains('\u{1b}'));
+    assert!(text.contains("bug at src/a.rs??[2J"));
+}
+
+#[test]
+fn a_hidden_character_in_a_baseline_name_never_reaches_the_terminal() {
+    use serde_json::json;
+    let (check, observation) = ("deals\u{1b}[2J", "count\u{202E}");
+    let runs = vec![run(
+        "a",
+        "1.0.0",
+        None,
+        &[
+            (
+                1_900,
+                json!({"type": "baseline_observed", "check": check, "phase": "after",
+                       "status": "observed", "input_digest": "d"}),
+            ),
+            (
+                2_000,
+                json!({"type": "baseline_compared", "check": check, "observation": observation,
+                       "rule": "equals 0", "verdict": "met", "regressed": false}),
+            ),
+            (3_000, end("succeeded")),
+        ],
+    )];
+    let text = render_text(&build(&runs, &StatsFilter::default()));
+    assert!(!text.contains('\u{202E}') && !text.contains('\u{1b}'));
+    assert!(text.contains("baseline deals?[2J.count?: met"), "{text}");
+}
+
+#[test]
+fn cost_known_counts_attempts_that_reported_a_cost() {
+    use serde_json::json;
+    let attempt = |usage: serde_json::Value| json!({"type": "attempt_finished", "node": "work", "attempt": 1, "status": "succeeded", "usage": usage});
+    let reported = |cost: Option<f64>| {
+        json!({"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0,
+               "cache_write_tokens": 0, "cost_usd": cost, "source": "reported"})
+    };
+    let runs = vec![
+        run(
+            "a",
+            "1.0.0",
+            None,
+            &[
+                (2_000, attempt(reported(Some(0.01)))),
+                (2_100, attempt(reported(None))),
+                (2_200, attempt(serde_json::Value::Null)),
+                (3_000, end("succeeded")),
+            ],
+        ),
+        run(
+            "b",
+            "1.0.0",
+            None,
+            &[
+                (2_000, attempt(serde_json::Value::Null)),
+                (3_000, end("succeeded")),
+            ],
+        ),
+    ];
+    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    assert_eq!((v.spend.cost_known.count, v.spend.cost_known.of), (1, 4));
+}
+
+#[test]
+fn baseline_observations_count_met_regressed_and_unknown() {
+    use serde_json::json;
+    let compared = |verdict: &str, regressed: Option<bool>| {
+        json!({"type": "baseline_compared", "check": "deals", "observation": "count",
+               "rule": "equals 0", "verdict": verdict, "regressed": regressed})
+    };
+    let after = json!({"type": "baseline_observed", "check": "deals", "phase": "after",
+                       "status": "observed", "input_digest": "d"});
+    let runs = vec![
+        run(
+            "a",
+            "1.0.0",
+            None,
+            &[
+                (1_900, after.clone()),
+                (2_000, compared("met", Some(false))),
+                (3_000, end("succeeded")),
+            ],
+        ),
+        // The current comparison of a run is the one that counts: a node
+        // that started after one makes it stale, and a new after snapshot
+        // starts over.
+        run(
+            "b",
+            "1.0.0",
+            None,
+            &[
+                (1_900, after.clone()),
+                (2_000, compared("met", Some(false))),
+                (2_100, started("work")),
+                (2_400, after.clone()),
+                (2_500, compared("not_met", Some(true))),
+                (3_000, end("failed")),
+            ],
+        ),
+        run(
+            "c",
+            "1.0.0",
+            None,
+            &[
+                (1_900, after.clone()),
+                (2_000, compared("unknown", None)),
+                (3_000, end("succeeded")),
+            ],
+        ),
+        // A comparison a later node made stale counts nowhere.
+        run(
+            "d",
+            "1.0.0",
+            None,
+            &[
+                (1_900, after),
+                (2_000, compared("not_met", Some(true))),
+                (2_100, started("work")),
+                (3_000, end("failed")),
+            ],
+        ),
+    ];
+    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let b = &v.baseline[0];
+    assert_eq!(
+        (b.compared, b.met.count, b.regressed, b.unknown),
+        (3, 1, 1, 1)
+    );
+    let text = render_text(&build(&runs, &StatsFilter::default()));
+    assert!(
+        text.contains("baseline deals.count: met 1/3 (33%), regressed in 1, unknown in 1"),
+        "{text}"
+    );
+}
+
+fn bind(mut r: StatsRun, profile: &str) -> StatsRun {
+    r.node_profiles.insert(
+        "work".into(),
+        crate::manifest::NodeDigests {
+            profile: format!("{profile}0123456789abcdef"),
+            bundle: format!("b{profile}0123456789abcdef"),
+        },
+    );
+    r
+}
+
+fn attempt_with(tokens: u64) -> serde_json::Value {
+    serde_json::json!({"type": "attempt_finished", "node": "work", "attempt": 1, "status": "succeeded", "usage": {"input_tokens": tokens, "output_tokens": 0, "source": "reported"}})
+}
+
+fn one_visit(id: &str, version: &str, tokens: u64) -> StatsRun {
+    run(
+        id,
+        version,
+        Some(SNAPSHOT),
+        &[
+            (1_000, started("work")),
+            (2_000, attempt_with(tokens)),
+            (3_000, finished("work", "succeeded", 1)),
+            (4_000, end("succeeded")),
+        ],
+    )
+}
+
+#[test]
+fn a_profile_change_within_a_version_splits_the_node_by_digest() {
+    let runs = vec![
+        bind(one_visit("r1", "1.0.0", 100), "aaa"),
+        bind(one_visit("r2", "1.0.0", 300), "aaa"),
+        bind(one_visit("r3", "1.0.0", 900), "bbb"),
+    ];
+    let report = build(&runs, &StatsFilter::default());
+    let work = report.versions[0]
+        .nodes
+        .iter()
+        .find(|n| n.node == "work")
+        .unwrap();
+    let groups: Vec<_> = work
+        .digests
+        .iter()
+        .map(|d| (d.profile.as_str(), d.runs, d.tokens_per_visit))
+        .collect();
+    assert_eq!(
+        groups,
+        vec![
+            ("aaa012345678", 2, Some(100)),
+            ("bbb012345678", 1, Some(900))
+        ]
+    );
+    let text = render_text(&report);
+    assert!(
+        text.contains("    profile aaa012345678 (bundle baaa01234567): 2 runs, first pass 2/2")
+    );
+    // One executor throughout: no groups.
+    let same = vec![bind(one_visit("r1", "1.0.0", 1), "aaa")];
+    let report = build(&same, &StatsFilter::default());
+    assert!(
+        report.versions[0]
+            .nodes
+            .iter()
+            .all(|n| n.digests.is_empty())
+    );
+}
+
+#[test]
+fn compare_names_the_nodes_whose_latest_executor_changed() {
+    let runs = vec![
+        bind(one_visit("r1", "1.0.0", 1), "aaa"),
+        bind(one_visit("r2", "1.1.0", 1), "bbb"),
+    ];
+    let filter = StatsFilter {
+        playbook: Some("p".into()),
+        compare: Some("1.0.0".into()),
+        ..StatsFilter::default()
+    };
+    let report = build(&runs, &filter);
+    let c = report.compare.as_ref().unwrap();
+    assert_eq!(c.executor_changes.len(), 1);
+    assert_eq!(
+        (
+            c.executor_changes[0].node.as_str(),
+            c.executor_changes[0].against_profile.as_str()
+        ),
+        ("work", "bbb012345678")
+    );
+    assert!(
+        render_text(&report).contains("  executor of work: profile aaa012345678 -> bbb012345678")
+    );
+}
+
+/// A grade of `run` by `grader` giving `criterion` (under `digest`) `level`.
+fn grade(
+    run: &str,
+    grader: &str,
+    at: u64,
+    rows: &[(&str, &str, &str)],
+) -> apb_core::quality::grade::Grade {
+    let criteria: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(id, digest, level)| {
+            serde_json::json!({"id": id, "source": "builtin", "digest": digest, "subject": "run",
+                "level": level, "reason_code": "r", "why": "w", "counts_for_promotion": true})
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "schema": 1, "grade_id": format!("{run}-{at}"), "run_id": run, "playbook": "p",
+        "version": "1.0.0", "task_type": "default", "grader": {"kind": grader, "version": 1}, "created_at": at,
+        "criteria": criteria, "reading": {"budget_chars": 1, "read_chars": 1}
+    }))
+    .unwrap()
+}
+
+fn graded(id: &str, version: &str, grades: Vec<apb_core::quality::grade::Grade>) -> StatsRun {
+    let mut r = run(id, version, None, &[(2_000, end("succeeded"))]);
+    r.grades = grades;
+    r
+}
+
+#[test]
+fn quality_rows_count_the_latest_grade_of_each_grader_per_run() {
+    let runs = vec![
+        // The later rules grade of run a replaces its earlier one.
+        graded(
+            "a",
+            "1.0.0",
+            vec![
+                grade("a", "rules", 1, &[("loops", "d1", "poor")]),
+                grade(
+                    "a",
+                    "rules",
+                    2,
+                    &[("loops", "d1", "good"), ("scope", "d1", "partial")],
+                ),
+            ],
+        ),
+        graded(
+            "b",
+            "1.0.0",
+            vec![grade("b", "rules", 1, &[("loops", "d1", "poor")])],
+        ),
+        graded(
+            "c",
+            "1.0.0",
+            vec![grade(
+                "c",
+                "rules",
+                1,
+                &[("loops", "d1", "not_enough_data")],
+            )],
+        ),
+        graded("d", "1.0.0", Vec::new()),
+    ];
+    let r = build(&runs, &StatsFilter::default());
+    let q = &r.versions[0].quality;
+    let rows: Vec<(&str, usize, String, String)> = q
+        .iter()
+        .map(|x| {
+            (
+                x.criterion.as_str(),
+                x.graded_runs,
+                x.good.text(),
+                x.poor.text(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("loops", 3, "1/2 (50%)".to_string(), "1/2 (50%)".to_string()),
+            ("scope", 1, "0/1 (0%)".to_string(), "0/1 (0%)".to_string()),
+        ]
+    );
+    assert_eq!(q[0].tally.not_enough_data, 1);
+    assert_eq!(q[0].grader, "rules/1");
+    let text = render_text(&r);
+    assert!(text.contains("  quality loops (rules/1, default): good 1/2 (50%), poor 1/2 (50%) over 3 graded runs\n"), "{text}");
+}
+
+#[test]
+fn quality_deltas_need_the_same_definition_on_both_sides() {
+    let runs = vec![
+        graded(
+            "a",
+            "1.0.0",
+            vec![grade(
+                "a",
+                "rules",
+                1,
+                &[("loops", "d1", "poor"), ("scope", "d1", "good")],
+            )],
+        ),
+        graded(
+            "b",
+            "1.1.0",
+            vec![grade(
+                "b",
+                "rules",
+                1,
+                &[("loops", "d1", "good"), ("scope", "d2", "good")],
+            )],
+        ),
+    ];
+    let r = build(
+        &runs,
+        &StatsFilter {
+            playbook: Some("p".into()),
+            compare: Some("1.0.0".into()),
+            ..Default::default()
+        },
+    );
+    let c = r.compare.as_ref().unwrap();
+    assert_eq!(c.quality.len(), 1);
+    assert_eq!(c.quality[0].criterion, "loops");
+    assert_eq!(c.quality[0].digest, "d1");
+    assert_eq!(c.quality[0].good_delta, Some(1.0));
+    assert_eq!(c.quality[0].poor_delta, Some(-1.0));
+    assert!(
+        render_text(&r)
+            .contains("  quality loops (rules/1, default): good +100 points, poor -100 points\n")
+    );
+}
+
+#[test]
+fn no_grade_means_no_quality_field() {
+    let r = build(&three_runs(), &StatsFilter::default());
+    assert!(r.versions.iter().all(|v| v.quality.is_empty()));
+    let json = serde_json::to_value(&r).unwrap();
+    assert!(json["versions"][0].get("quality").is_none());
+    assert!(!render_text(&r).contains("quality"));
 }

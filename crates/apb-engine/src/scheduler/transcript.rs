@@ -1,14 +1,16 @@
 //! Per-attempt transcripts (issue #67 item 10): every agent attempt keeps
 //! what it printed, and for claude the CLI's own session transcript, in
-//! `<run>/attempts/<node>-<attempt>/`, referenced from `attempt_started`.
+//! `<run>/attempts/<node>-<attempt>/` (`<node>.i-<item digest>-<attempt>/` for a
+//! list item), referenced from `attempt_started`.
 //! Diagnosing an attempt that died then is a file read instead of a
 //! reconstruction from the working tree.
 
 use super::*;
 
-/// The run-relative transcript directory of one attempt.
-pub(crate) fn relative(node_id: &str, attempt: u32) -> String {
-    format!("attempts/{node_id}-{attempt}")
+/// The run-relative transcript directory of one attempt, named by its
+/// [`crate::exec_key::ExecKey::stem`].
+pub(crate) fn relative(stem: &str) -> String {
+    format!("attempts/{stem}")
 }
 
 /// The file in an attempt's transcript directory holding the agent session
@@ -30,12 +32,8 @@ pub(crate) fn record_session(run_dir: &Path, dir: &Path, session: &str) {
 /// directory left by an earlier execution whose attempt counter restarted
 /// (a resume, a continue_from) is cleared first, so it only ever holds what
 /// this attempt wrote.
-pub(crate) fn attempt_dir(
-    run_dir: &Path,
-    node_id: &str,
-    attempt: u32,
-) -> Result<PathBuf, EngineError> {
-    let dir = run_dir.join(relative(node_id, attempt));
+pub(crate) fn attempt_dir(run_dir: &Path, stem: &str) -> Result<PathBuf, EngineError> {
+    let dir = run_dir.join(relative(stem));
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -47,32 +45,23 @@ pub(crate) fn attempt_dir(
 }
 
 /// Copies the agent's own record of session `session` into `dir` as
-/// `session.jsonl`, best effort. Only claude keeps one apb can find: a JSONL
-/// file named after the session under `projects/` of its config directory
-/// (`CLAUDE_CONFIG_DIR`, else `~/.claude`), with every tool call and result.
-/// Other agents keep their sessions in their own stores; their raw output is
-/// still in `stdout.log` and `stderr.log`.
-pub(crate) fn copy_agent_session(agent: &str, session: &str, dir: &Path) {
-    if apb_core::detect::canonical_agent_id(agent) != "claude"
-        || !apb_core::registry::is_safe_segment(session)
-    {
-        return;
+/// `session.jsonl`, best effort, up to `cap` bytes. Only an agent whose
+/// module finds that record keeps one apb can read (claude: a JSONL file
+/// named after the session under `projects/` of its config directory, with
+/// every tool call and result). Other agents keep their sessions in their own
+/// stores; their raw output is still in `stdout.log` and `stderr.log`.
+/// Returns what the cap kept out of the copy.
+pub(crate) fn copy_agent_session(
+    agent: &str,
+    session: &str,
+    dir: &Path,
+    cap: u64,
+) -> Option<crate::event::OutputLoss> {
+    if !apb_core::registry::is_safe_segment(session) {
+        return None;
     }
-    let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
-    else {
-        return;
-    };
-    let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
-        return;
-    };
-    let file = format!("{session}.jsonl");
-    for project in projects.filter_map(|e| e.ok()) {
-        let candidate = project.path().join(&file);
-        if candidate.is_file() {
-            let _ = std::fs::copy(&candidate, dir.join("session.jsonl"));
-            return;
-        }
-    }
+    let source = apb_core::agents::lookup(agent)?
+        .setup()
+        .session_record(session)?;
+    crate::capture::copy_capped(&source, &dir.join("session.jsonl"), cap)
 }

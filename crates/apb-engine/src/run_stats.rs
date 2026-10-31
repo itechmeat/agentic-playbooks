@@ -12,18 +12,21 @@
 //! traversals (bounded edges back into a node that ran) per run; human gate wait (`review_requested` to the matching
 //! `review_decided`) and question wait (`question_asked` to
 //! `question_answered`); run duration; tokens and cost per run; missing
-//! deliverables and output fields; and the goal criteria results. Per node:
+//! deliverables and output fields; the goal criteria results; the findings
+//! and warnings the attempts reported, and each baseline observation's
+//! results ([`findings`]); the levels the runs' signed grades gave each
+//! criterion ([`quality`]). Per node:
 //! runs it ran in, first-pass executions, retries, fallbacks, re-entries,
 //! duration against its declared `expected_duration`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::decision::report::stats::{median, rate};
-use crate::decision::report::{RunJournal, run_dirs};
-use crate::event::{Event, EventPayload};
+use crate::decision::report::run_dirs;
+use crate::event::EventPayload;
+use crate::run_estimate::sample::RunSample;
 use crate::run_view::RunUsage;
 
 /// Below this many runs a version's rates are flagged as indicative only.
@@ -40,85 +43,6 @@ pub struct StatsFilter {
     /// Compare this version with the latest other version seen (needs
     /// `playbook`).
     pub compare: Option<String>,
-}
-
-/// One run as the statistics read it.
-#[derive(Debug, Clone)]
-pub struct StatsRun {
-    pub run_id: String,
-    pub playbook: String,
-    pub version: String,
-    pub events: Vec<Event>,
-    /// The run's playbook snapshot, for `expected_duration`.
-    pub snapshot: Option<apb_core::schema::Playbook>,
-    /// The run was a candidate trial (issue #192, from its manifest).
-    pub candidate_trial: bool,
-    /// Each node's profile primary model, from the run manifest (issue
-    /// #193).
-    pub expected_models: BTreeMap<String, String>,
-}
-
-impl StatsRun {
-    /// Reads one run directory; `None` when its journal does not read.
-    pub fn load(run_dir: &Path) -> Option<Self> {
-        let j = RunJournal::load(run_dir)?;
-        let version = j
-            .events
-            .iter()
-            .find_map(|e| match &e.payload {
-                EventPayload::RunStarted { version, .. } => Some(version.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        Some(StatsRun {
-            run_id: j.run_id,
-            playbook: j.playbook,
-            version,
-            events: j.events,
-            snapshot: crate::legacy_snapshot::load_run_playbook(run_dir),
-            candidate_trial: crate::manifest::read(run_dir)
-                .ok()
-                .flatten()
-                .is_some_and(|m| m.candidate_trial),
-            expected_models: crate::attempt_models::primary_models(run_dir),
-        })
-    }
-
-    fn started_ms(&self) -> Option<u128> {
-        self.events.iter().find_map(|e| match &e.payload {
-            EventPayload::RunStarted { .. } => Some(e.ts),
-            _ => None,
-        })
-    }
-}
-
-/// `count` of `of`, and the share when `of` is not zero.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct Rate {
-    pub count: usize,
-    pub of: usize,
-    #[cfg_attr(feature = "ts", ts(optional))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate: Option<f64>,
-}
-
-impl Rate {
-    fn new(count: usize, of: usize) -> Self {
-        Rate {
-            count,
-            of,
-            rate: rate(count, of),
-        }
-    }
-
-    /// `7/9 (78%)`, or `0/0`.
-    pub fn text(&self) -> String {
-        match self.rate {
-            Some(r) => format!("{}/{} ({:.0}%)", self.count, self.of, r * 100.0),
-            None => format!("{}/{}", self.count, self.of),
-        }
-    }
 }
 
 /// A total over runs and its mean per run.
@@ -138,29 +62,6 @@ impl PerRun {
             total,
             runs,
             per_run: (runs > 0).then(|| round2(total as f64 / runs as f64)),
-        }
-    }
-}
-
-/// A distribution of millisecond durations: how many, and the median.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct Waits {
-    pub count: usize,
-    #[cfg_attr(feature = "ts", ts(optional))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_ms: Option<u64>,
-    #[cfg_attr(feature = "ts", ts(optional))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_ms: Option<u64>,
-}
-
-impl Waits {
-    fn of(mut values: Vec<u64>) -> Self {
-        Waits {
-            count: values.len(),
-            max_ms: values.iter().copied().max(),
-            median_ms: median(&mut values),
         }
     }
 }
@@ -186,6 +87,9 @@ pub struct Spend {
     pub tokens: PerRun,
     /// Runs that reported a cost.
     pub runs_with_cost: usize,
+    /// Finished attempts that reported a cost, over every finished attempt:
+    /// how much of the spend the cost figures cover.
+    pub cost_known: Rate,
     pub cost_usd: f64,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +142,11 @@ pub struct NodeStats {
     #[serde(flatten)]
     #[cfg_attr(feature = "ts", ts(flatten))]
     pub model_use: models::ModelUse,
+    /// Its figures per executor digest, when the runs of the version bound
+    /// it to more than one ([`digests`]).
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<digests::DigestStats>>", optional))]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub digests: Vec<digests::DigestStats>,
 }
 
 /// One playbook version over its runs.
@@ -265,10 +174,23 @@ pub struct VersionStats {
     pub output_fields_missing: usize,
     /// Empty when the runs checked no goal.
     pub goal: Vec<GoalStats>,
+    /// The findings and warnings the runs' attempts reported.
+    pub findings: findings::FindingStats,
+    /// Each baseline observation over the runs that compared it; empty
+    /// when the runs had no baseline check.
+    pub baseline: Vec<findings::BaselineStats>,
     /// The models its attempts actually ran on (issue #193).
     #[serde(flatten)]
     #[cfg_attr(feature = "ts", ts(flatten))]
     pub model_use: models::ModelUse,
+    /// The levels its runs' signed grades gave each criterion, one row per
+    /// comparable key ([`quality`]); empty when no run was graded.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<quality::QualityStats>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<quality::QualityStats>,
     pub nodes: Vec<NodeStats>,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,6 +235,22 @@ pub struct Comparison {
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_run_delta_usd: Option<f64>,
+    /// Nodes whose latest executor (profile or bundle digest) differs
+    /// between the two versions.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<digests::ExecutorChange>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub executor_changes: Vec<digests::ExecutorChange>,
+    /// How each criterion both versions graded under the same definition
+    /// moved.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<quality::QualityDelta>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<quality::QualityDelta>,
 }
 
 /// The whole report.
@@ -331,14 +269,6 @@ pub struct StatsReport {
     pub note: Option<String>,
 }
 
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
-}
-
-fn delta(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    Some(round2(b? - a?))
-}
-
 /// A semver-ish sort key: numeric components first, the text as tiebreak.
 type VersionKey = (Vec<u64>, String);
 
@@ -355,7 +285,7 @@ fn version_key(v: &str) -> VersionKey {
 pub fn stats(roots: &[PathBuf], filter: &StatsFilter) -> StatsReport {
     let runs: Vec<StatsRun> = run_dirs(roots)
         .iter()
-        .filter_map(|d| StatsRun::load(d))
+        .filter_map(|d| StatsRun::load(d).map(|r| r.with_grades(d)))
         .collect();
     build(&runs, filter)
 }
@@ -380,11 +310,23 @@ pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
             .push(r);
     }
     let versions: Vec<VersionStats> = groups
-        .into_iter()
-        .map(|((playbook, (_, version)), runs)| version_stats(&playbook, &version, &runs))
+        .iter()
+        .map(|((playbook, (_, version)), runs)| version_stats(playbook, version, runs))
         .collect();
     let compare = match (&filter.playbook, &filter.compare) {
-        (Some(p), Some(base)) => Some(comparison(p, base, &versions)),
+        (Some(p), Some(base)) => {
+            let mut c = comparison(p, base, &versions);
+            let of = |v: &str| {
+                groups
+                    .get(&(p.clone(), version_key(v)))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+            };
+            if let Some(against) = &c.against {
+                c.executor_changes = digests::executor_changes(of(base), of(against));
+            }
+            Some(c)
+        }
         _ => None,
     };
     StatsReport {
@@ -424,6 +366,7 @@ fn comparison(playbook: &str, base: &str, versions: &[VersionStats]) -> Comparis
         };
         c.cost_per_run_delta_usd = delta(a.spend.cost_per_run_usd, b.spend.cost_per_run_usd)
             .map(|d| (d * 1e4).round() / 1e4);
+        c.quality = quality::deltas(&a.quality, &b.quality);
     }
     c
 }
@@ -466,51 +409,6 @@ struct GoalAcc {
     failed: usize,
     errors: usize,
     manual: usize,
-}
-
-fn ms(from: u128, to: u128) -> u64 {
-    u64::try_from(to.saturating_sub(from)).unwrap_or(u64::MAX)
-}
-
-/// Like [`ms`], without the time the run spent paused in between (issue
-/// #200): run and node durations measure the run's active time.
-/// `paused` comes from [`crate::pause::paused_intervals`], computed once per
-/// run rather than once per measured span.
-fn active_ms(paused: &[(u128, u128)], from: u128, to: u128) -> u64 {
-    ms(from, to).saturating_sub(
-        u64::try_from(crate::pause::paused_ms_in(paused, from, to)).unwrap_or(u64::MAX),
-    )
-}
-
-/// Pairs each `open` of a node with the next `close` of the same node, in
-/// journal order, and returns the waits in milliseconds. A `withdraw` closes
-/// the oldest open request of the node without a wait: the request was never
-/// answered, and the next visit asks anew.
-fn waits(
-    events: &[Event],
-    open: fn(&EventPayload) -> Option<&str>,
-    close: fn(&EventPayload) -> Option<&str>,
-    withdraw: fn(&EventPayload) -> Option<&str>,
-) -> Vec<u64> {
-    let mut pending: BTreeMap<&str, Vec<u128>> = BTreeMap::new();
-    let mut out = Vec::new();
-    for e in events {
-        if let Some(n) = open(&e.payload) {
-            pending.entry(n).or_default().push(e.ts);
-        } else if let Some(n) = close(&e.payload)
-            && let Some(q) = pending.get_mut(n)
-            && !q.is_empty()
-        {
-            let t = q.remove(0);
-            out.push(ms(t, e.ts));
-        } else if let Some(n) = withdraw(&e.payload)
-            && let Some(q) = pending.get_mut(n)
-            && !q.is_empty()
-        {
-            q.remove(0);
-        }
-    }
-    out
 }
 
 fn run_facts(
@@ -629,33 +527,7 @@ fn run_facts(
             acc.first_pass += 1;
         }
     }
-    f.gate_waits = waits(
-        ev,
-        |p| match p {
-            EventPayload::ReviewRequested { node, .. } => Some(node),
-            _ => None,
-        },
-        |p| match p {
-            EventPayload::ReviewDecided { node, .. } => Some(node),
-            _ => None,
-        },
-        |p| match p {
-            EventPayload::ReviewWithdrawn { node, .. } => Some(node),
-            _ => None,
-        },
-    );
-    f.question_waits = waits(
-        ev,
-        |p| match p {
-            EventPayload::QuestionAsked { node, .. } => Some(node),
-            _ => None,
-        },
-        |p| match p {
-            EventPayload::QuestionAnswered { node, .. } => Some(node),
-            _ => None,
-        },
-        |_| None,
-    );
+    (f.gate_waits, f.question_waits) = spans::human_waits(ev);
     f
 }
 
@@ -669,7 +541,15 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     let (mut dm, mut ofm) = (0usize, 0usize);
     let mut spend = Spend::default();
     let (mut tokens, mut cost) = (0u64, 0f64);
+    let (mut cost_attempts, mut finished_attempts) = (0usize, 0usize);
+    let mut notes = findings::Acc::default();
     for run in runs {
+        notes.add(
+            &run.run_id,
+            run.started_ms().unwrap_or(0),
+            run.snapshot.as_ref(),
+            &run.events,
+        );
         let f = run_facts(run, &mut nodes, &mut goal);
         match f.outcome {
             Some("succeeded") => outcomes.succeeded += 1,
@@ -693,9 +573,12 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         durations.extend(f.duration);
         dm += f.deliverable_missing;
         ofm += f.output_fields_missing;
-        if let Some(u) = RunUsage::from_events(&run.events) {
+        let u = RunUsage::totals(&run.events);
+        cost_attempts += u.cost_attempts as usize;
+        finished_attempts += u.finished_attempts as usize;
+        if u.attempts > 0 {
             spend.runs_with_usage += 1;
-            tokens = tokens.saturating_add(u.input_tokens.saturating_add(u.output_tokens));
+            tokens = tokens.saturating_add(u.billable_tokens());
             if let Some(c) = u.cost_usd {
                 spend.runs_with_cost += 1;
                 cost += c;
@@ -704,6 +587,8 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     }
     let finished = outcomes.succeeded + outcomes.failed + outcomes.aborted;
     spend.tokens = PerRun::new(tokens, spend.runs_with_usage);
+    spend.cost_known = Rate::new(cost_attempts, finished_attempts);
+    let (findings, baseline) = notes.finish();
     // `+ 0.0`: an empty float sum is -0.0.
     spend.cost_usd = (cost * 1e8).round() / 1e8 + 0.0;
     spend.cost_per_run_usd = (spend.runs_with_cost > 0)
@@ -714,6 +599,14 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         runs.iter()
             .map(|r| (r.events.as_slice(), &r.expected_models)),
     );
+    // Samples only when some node changed its executor within the version.
+    let samples: BTreeMap<String, RunSample> = if digests::any_change(runs) {
+        runs.iter()
+            .map(|r| (r.run_id.clone(), RunSample::of(&r.run_id, &r.events, None)))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
     let nodes: Vec<NodeStats> = nodes
         .into_iter()
         .map(|(node, a)| {
@@ -740,6 +633,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
                 deliverable_missing: a.deliverable_missing,
                 output_fields_missing: a.output_fields_missing,
                 model_use: node_models.remove(&node).unwrap_or_default(),
+                digests: digests::node_digests(&node, runs, &samples),
                 node,
             }
         })
@@ -776,7 +670,10 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         deliverable_missing: dm,
         output_fields_missing: ofm,
         goal,
+        findings,
+        baseline,
         model_use,
+        quality: quality::of_runs(runs),
         nodes,
         note: (runs.len() < MIN_RUNS).then(|| {
             format!(
@@ -788,187 +685,22 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     }
 }
 
-/// `12 s`, `3.4 min`, `1.2 h`.
-fn dur(ms: u64) -> String {
-    let s = ms as f64 / 1000.0;
-    if s < 60.0 {
-        format!("{s:.0} s")
-    } else if s < 3600.0 {
-        format!("{:.1} min", s / 60.0)
-    } else {
-        format!("{:.1} h", s / 3600.0)
-    }
-}
-
-fn waits_text(w: &Waits) -> String {
-    match w.median_ms {
-        Some(m) => format!("median {} over {}", dur(m), w.count),
-        None => "none".to_string(),
-    }
-}
-
-fn per_run_text(p: &PerRun) -> String {
-    match p.per_run {
-        Some(x) => format!("{x:.2} per run ({} over {} runs)", p.total, p.runs),
-        None => "0".to_string(),
-    }
-}
-
-/// The report as text for a terminal.
-pub fn render_text(r: &StatsReport) -> String {
-    let mut out = String::new();
-    if let Some(note) = &r.note {
-        out.push_str(note);
-        out.push('\n');
-        return out;
-    }
-    out.push_str(&format!("{} runs\n", r.runs));
-    for v in &r.versions {
-        out.push_str(&format!(
-            "\n{} {}: {} runs\n",
-            v.playbook, v.version, v.runs
-        ));
-        if let Some(note) = &v.note {
-            out.push_str(&format!("  note: {note}\n"));
-        }
-        if v.candidate_trials > 0 {
-            out.push_str(&format!(
-                "  candidate trials: {} of {} runs\n",
-                v.candidate_trials, v.runs
-            ));
-        }
-        let o = &v.outcomes;
-        out.push_str(&format!(
-            "  outcome: {} succeeded ({} succeeded, {} failed, {} aborted, {} other)\n",
-            v.success.text(),
-            o.succeeded,
-            o.failed,
-            o.aborted,
-            o.other
-        ));
-        out.push_str(&format!("  first pass: {}\n", v.first_pass.text()));
-        out.push_str(&format!("  retries: {}\n", per_run_text(&v.retries)));
-        out.push_str(&format!("  fallbacks: {}\n", per_run_text(&v.fallbacks)));
-        out.push_str(&format!(
-            "  loop traversals: {}\n",
-            per_run_text(&v.loop_traversals)
-        ));
-        out.push_str(&format!("  gate wait: {}\n", waits_text(&v.gate_wait)));
-        out.push_str(&format!(
-            "  question wait: {}\n",
-            waits_text(&v.question_wait)
-        ));
-        out.push_str(&format!("  run duration: {}\n", waits_text(&v.duration)));
-        if let Some(m) = v.model_use.text() {
-            out.push_str(&format!("  models: {m}\n"));
-        }
-        let s = &v.spend;
-        if s.runs_with_usage > 0 {
-            let mut line = format!("  tokens: {}", per_run_text(&s.tokens));
-            if let Some(c) = s.cost_per_run_usd {
-                line.push_str(&format!(
-                    ", ${c:.4} per run reported by {} of {} runs",
-                    s.runs_with_cost, v.runs
-                ));
-            }
-            out.push_str(&line);
-            out.push('\n');
-        }
-        if v.deliverable_missing + v.output_fields_missing > 0 {
-            out.push_str(&format!(
-                "  missing: {} deliverables, {} output field sets\n",
-                v.deliverable_missing, v.output_fields_missing
-            ));
-        }
-        for g in &v.goal {
-            let result = if g.check == "manual" {
-                format!("manual in {} runs", g.manual)
-            } else {
-                let mut t = format!("passed {}", g.passed.text());
-                if g.errors > 0 {
-                    t.push_str(&format!(", {} could not run", g.errors));
-                }
-                t
-            };
-            out.push_str(&format!(
-                "  goal {}: {} ({}): {result}\n",
-                g.index + 1,
-                g.description,
-                g.check
-            ));
-        }
-        for n in &v.nodes {
-            let mut line = format!(
-                "  node {}: {} runs, first pass {}",
-                n.node,
-                n.runs,
-                n.first_pass.text()
-            );
-            if n.retries + n.fallbacks + n.reentries > 0 {
-                line.push_str(&format!(
-                    ", {} retries, {} fallbacks, {} re-entries",
-                    n.retries, n.fallbacks, n.reentries
-                ));
-            }
-            if let Some(m) = n.duration.median_ms {
-                line.push_str(&format!(", median {}", dur(m)));
-            }
-            if let (Some(e), Some(over)) = (n.expected_s, &n.over_expected) {
-                line.push_str(&format!(
-                    ", over the expected {} in {}",
-                    dur(e * 1000),
-                    over.text()
-                ));
-            }
-            if let Some(m) = n.model_use.text() {
-                line.push_str(&format!(", models {m}"));
-            }
-            out.push_str(&line);
-            out.push('\n');
-        }
-    }
-    if let Some(c) = &r.compare {
-        out.push_str(&format!("\ncompare {} {}", c.playbook, c.base));
-        let base_ran = r
-            .versions
-            .iter()
-            .any(|v| v.playbook == c.playbook && v.version == c.base);
-        match &c.against {
-            _ if !base_ran => out.push_str(&format!(": no runs of {}\n", c.base)),
-            None => out.push_str(": no other version has runs\n"),
-            Some(a) => {
-                out.push_str(&format!(" -> {a}\n"));
-                let pct = |d: Option<f64>| {
-                    d.map_or("n/a".to_string(), |x| format!("{:+.0} points", x * 100.0))
-                };
-                let num = |d: Option<f64>| d.map_or("n/a".to_string(), |x| format!("{x:+.2}"));
-                out.push_str(&format!("  success: {}\n", pct(c.success_delta)));
-                out.push_str(&format!("  first pass: {}\n", pct(c.first_pass_delta)));
-                out.push_str(&format!(
-                    "  retries per run: {}\n",
-                    num(c.retries_per_run_delta)
-                ));
-                out.push_str(&format!(
-                    "  loop traversals per run: {}\n",
-                    num(c.loops_per_run_delta)
-                ));
-                out.push_str(&format!(
-                    "  median run duration: {}\n",
-                    c.median_duration_delta_ms
-                        .map_or("n/a".to_string(), |d| format!("{d:+} ms"))
-                ));
-                out.push_str(&format!(
-                    "  cost per run: {}\n",
-                    c.cost_per_run_delta_usd
-                        .map_or("n/a".to_string(), |d| format!("{d:+.4} USD"))
-                ));
-            }
-        }
-    }
-    out
-}
-
+pub mod digests;
+pub mod findings;
 pub mod models;
+pub mod quality;
+mod rate;
+mod render;
+pub(crate) mod spans;
+mod stats_run;
+mod waits;
+pub use quality::{QualityDelta, QualityStats};
+pub use rate::Rate;
+use rate::{delta, round2};
+pub use render::render_text;
+use spans::active_ms;
+pub use stats_run::StatsRun;
+pub use waits::Waits;
 
 #[cfg(test)]
 mod tests;

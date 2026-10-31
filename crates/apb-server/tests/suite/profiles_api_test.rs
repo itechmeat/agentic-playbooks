@@ -4,6 +4,7 @@
 //! this consolidated binary (see `crate::common`). POST auto-approves the
 //! bundle in the TrustStore, so we isolate the config into a temp directory.
 
+use crate::common::EnvVar;
 use apb_server::{AppState, build_router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -120,17 +121,17 @@ async fn profile_update_preserves_environment_when_body_omits_it() {
     let proj = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("APB_CONFIG_DIR", cfg.path());
-        std::env::set_var("HOME", home.path());
-    }
+    let _env = [
+        EnvVar::set("APB_CONFIG_DIR", cfg.path()),
+        EnvVar::set("HOME", home.path()),
+    ];
     apb_core::registry::init_project(proj.path()).unwrap();
     // Seed a profile that opted into the full environment.
     let dir = proj.path().join(".apb/profiles/herm");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("profile.yaml"),
-        "name: herm\ndescription: d\nexecutor:\n  agent: claude\n  model: haiku\nenvironment: full\n",
+        "name: herm\ndescription: d\nexecutor:\n  agent: claude\n  model: haiku\nenvironment: full\nprocess_env:\n  policy: allowlist\n  allow: [GH_TOKEN]\n",
     )
     .unwrap();
     std::fs::write(dir.join("SOUL.md"), "").unwrap();
@@ -167,9 +168,81 @@ async fn profile_update_preserves_environment_when_body_omits_it() {
         written.contains("environment: full"),
         "web update must preserve environment: full, got: {written}"
     );
+    assert!(
+        written.contains("policy: allowlist") && written.contains("GH_TOKEN"),
+        "web update must preserve process_env, got: {written}"
+    );
+}
 
-    unsafe {
-        std::env::remove_var("APB_CONFIG_DIR");
-        std::env::remove_var("HOME");
+/// POST writes a `process_env` allowlist, `allow` alone implying it;
+/// refuses a malformed one and `allow` under `inherit` with 400, writing
+/// nothing; and an explicit `inherit` on an update drops a stored
+/// allowlist.
+#[tokio::test]
+async fn profile_post_writes_validates_and_reverts_process_env() {
+    let _lock = crate::common::env_lock().await;
+    let proj = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _env = [
+        EnvVar::set("APB_CONFIG_DIR", cfg.path()),
+        EnvVar::set("HOME", home.path()),
+    ];
+    apb_core::registry::init_project(proj.path()).unwrap();
+    let root = proj.path().to_path_buf();
+    let body = |name: &str, process_env: serde_json::Value| {
+        serde_json::json!({
+            "name": name,
+            "scope": "project",
+            "agent": "claude",
+            "model": "haiku",
+            "process_env": process_env,
+        })
+    };
+    let profile_yaml = |name: &str| {
+        std::fs::read_to_string(
+            proj.path()
+                .join(format!(".apb/profiles/{name}/profile.yaml")),
+        )
+        .unwrap()
+    };
+
+    let app = build_router(AppState::new(root.clone()));
+    let (status, _) = post_json(
+        app,
+        "/api/profiles",
+        body("envok", serde_json::json!({ "allow": ["NPM_CONFIG_*"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let written = profile_yaml("envok");
+    assert!(written.contains("policy: allowlist"), "{written}");
+    assert!(written.contains("NPM_CONFIG_*"), "{written}");
+
+    for (name, bad) in [
+        (
+            "envbad",
+            serde_json::json!({ "policy": "allowlist", "allow": ["*"] }),
+        ),
+        (
+            "envmix",
+            serde_json::json!({ "policy": "inherit", "allow": ["GH_TOKEN"] }),
+        ),
+    ] {
+        let app = build_router(AppState::new(root.clone()));
+        let (status, _) = post_json(app, "/api/profiles", body(name, bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+        assert!(!proj.path().join(format!(".apb/profiles/{name}")).exists());
     }
+
+    let app = build_router(AppState::new(root.clone()));
+    let (_, got) = get_json(app, "/api/profiles/envok?scope=project").await;
+    let digest = got["profile_digest"].as_str().expect("digest").to_string();
+    let mut revert = body("envok", serde_json::json!({ "policy": "inherit" }));
+    revert["expected_digest"] = serde_json::json!(digest);
+    let app = build_router(AppState::new(root.clone()));
+    let (status, _) = post_json(app, "/api/profiles", revert).await;
+    assert_eq!(status, StatusCode::OK);
+    let written = profile_yaml("envok");
+    assert!(!written.contains("process_env"), "{written}");
 }

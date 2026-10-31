@@ -173,18 +173,14 @@ fn gated_run_threads_child_pins_into_parent_config() {
         dir.path(),
         "parent",
         None,
-        std::collections::BTreeMap::new(),
-        None,
-        Some(permit.playbook_digest.clone()),
-        Some(permit.profile_bundles.clone()),
-        Some(permit.children.clone()),
-        permit.connectors.clone(),
-        permit.connector_accounts.clone(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            expected_digest: Some(permit.playbook_digest.clone()),
+            expected_profile_bundles: Some(permit.profile_bundles.clone()),
+            expected_children: Some(permit.children.clone()),
+            expected_connectors: permit.connectors.clone(),
+            expected_connector_accounts: permit.connector_accounts.clone(),
+            ..Default::default()
+        },
     )
     .expect("gated run");
     let run_id = out["run_id"].as_str().expect("run_id");

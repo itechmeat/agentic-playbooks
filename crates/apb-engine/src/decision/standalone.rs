@@ -1,26 +1,26 @@
-//! Decisions outside a run (issue #165 Part 16): the MCP catalog ranking
-//! asks through the same configuration, provider chain and redaction as a
-//! run, but has no run journal. Each decision is logged as one JSON line in
+//! Decisions outside a run (issue #165 Part 16): the MCP catalog ranking,
+//! host tasks, the model grader and the known-problem recheck ask through
+//! the same configuration, provider chain and redaction as a run, but have
+//! no run journal. Each decision is logged as one JSON line in
 //! `<root>/.apb/decisions.jsonl` (git-ignored, `workspace::LOCAL_ENTRIES`)
 //! with the `decision_made` fields minus node and attempt, and a use's
 //! `max_requests_per_day` caps the requests per project and UTC day.
 //!
 //! Every step fails open: the caller gets an outcome and keeps today's
 //! behaviour on anything but `Answered`. Nothing here is ever applied by the
-//! engine; the one caller (catalog ranking) is advisory by definition.
+//! engine on its own: each caller applies its own mode rule.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use apb_core::decisions::{
-    CATALOG_RANK_MAX_REQUESTS_PER_DAY, DecisionMode, EffectiveDecisions, SendClass,
-};
+use apb_core::decisions::{DecisionMode, EffectiveDecisions, SendClass};
 use apb_decide::{Answer, DecisionRequest, ProviderChain, Question, UseSite};
 use serde_json::{Value, json};
 
-use super::{compact_answer, list_price_per_million, providers, redact, redact_value};
+use super::{compact_answer, list_price_per_million, providers};
+use crate::redact;
 
 /// The log file under `<root>/.apb/`.
 pub const DECISIONS_LOG: &str = "decisions.jsonl";
@@ -67,7 +67,7 @@ pub enum StandaloneOutcome {
 pub struct StandaloneDecider {
     settings: EffectiveDecisions,
     root: PathBuf,
-    chain: OnceLock<(ProviderChain, Vec<String>)>,
+    chain: OnceLock<(ProviderChain, Vec<apb_core::secret::Secret>)>,
     redactor: OnceLock<redact::Redactor>,
 }
 
@@ -124,6 +124,11 @@ impl StandaloneDecider {
         self.settings.threshold(site.as_str(), name)
     }
 
+    /// Whether an `enforce` use may act on an uncalibrated answer.
+    pub fn allows_uncalibrated(&self, site: UseSite) -> bool {
+        self.settings.allows_uncalibrated(site.as_str())
+    }
+
     /// Whether any configured provider resolved (its key and account id):
     /// without one nothing can be asked, and a caller keeps today's
     /// behaviour without saying so.
@@ -131,12 +136,17 @@ impl StandaloneDecider {
         !self.chain().0.is_empty()
     }
 
+    /// Whether `privacy.send` allows material of `class`.
+    pub fn sends(&self, class: SendClass) -> bool {
+        self.settings.sends(class)
+    }
+
     /// The byte budget of one request's state.
     pub fn max_state_bytes(&self) -> usize {
         self.settings.privacy.max_state_bytes
     }
 
-    fn chain(&self) -> &(ProviderChain, Vec<String>) {
+    fn chain(&self) -> &(ProviderChain, Vec<apb_core::secret::Secret>) {
         self.chain
             .get_or_init(|| providers::build_chain(&self.settings))
     }
@@ -144,15 +154,8 @@ impl StandaloneDecider {
     /// The same secrets a run of this project redacts: the provider keys
     /// and every variable an installed connector references.
     fn redactor(&self) -> &redact::Redactor {
-        self.redactor.get_or_init(|| {
-            let mut secrets: Vec<String> =
-                apb_core::connector::resolve::all_referenced_env_names(&self.root)
-                    .iter()
-                    .filter_map(|n| apb_core::connector::secrets::resolve_var(&self.root, n))
-                    .collect();
-            secrets.extend(self.chain().1.iter().cloned());
-            redact::Redactor::new(secrets, &self.root)
-        })
+        self.redactor
+            .get_or_init(|| redact::Redactor::for_workspace(&self.root, self.chain().1.clone()))
     }
 
     /// `text` as a request would carry it: redacted when `privacy.redact` is
@@ -175,10 +178,8 @@ impl StandaloneDecider {
             .uses
             .get(site.as_str())
             .and_then(|u| u.max_requests_per_day)
-            .unwrap_or(match site {
-                UseSite::HostTask => apb_core::decisions::HOST_TASK_MAX_REQUESTS_PER_DAY,
-                _ => CATALOG_RANK_MAX_REQUESTS_PER_DAY,
-            })
+            .or_else(|| apb_core::decisions::default_daily_cap(site.as_str()))
+            .unwrap_or(0)
     }
 
     /// Opens the log without following a link, and only as a regular file:
@@ -294,10 +295,10 @@ impl StandaloneDecider {
             // The questions carry text too (a suggestion's synopsis).
             let questions = serde_json::to_value(&questions)
                 .ok()
-                .map(|v| redact_value(self.redactor(), v))
+                .map(|v| self.redactor().redact_value(v))
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or(questions);
-            (redact_value(self.redactor(), state), questions)
+            (self.redactor().redact_value(state), questions)
         } else {
             (state, questions)
         };
@@ -466,7 +467,7 @@ mod tests {
         let d = StandaloneDecider::with_settings(settings, root);
         let _ = d.chain.set((
             ProviderChain::new(vec![Box::new(Handle(slow.clone()))]),
-            vec!["sk-live-provider-key-123456".into()],
+            vec![apb_core::secret::Secret::new("sk-live-provider-key-123456")],
         ));
         d
     }

@@ -2,10 +2,18 @@
 //! rmcp plumbing in [`crate::server`]. One module per domain; this file holds
 //! the shared error type and the two lookups every domain starts from.
 
+pub mod budget;
+pub mod candidate;
 pub mod capture;
 pub mod decision;
+pub mod discover;
+pub mod grade;
+pub mod intent;
+pub mod memory;
 pub mod meta;
+pub mod notify;
 pub mod playbook;
+pub mod problems;
 pub mod retro;
 pub mod run;
 pub mod supervisor;
@@ -13,6 +21,7 @@ pub mod trial;
 
 pub use capture::*;
 pub use decision::*;
+pub use intent::*;
 pub use meta::*;
 pub use playbook::*;
 pub use retro::*;
@@ -38,6 +47,21 @@ pub enum ToolError {
     /// surfaces can map it to 409 without a fragile substring search in the text.
     #[error("conflict: {0}")]
     Conflict(String),
+}
+
+/// Refuses `what` when `step` is a run step (see
+/// [`apb_core::step_env::StepCaller::refusal`]): grading a run, deciding
+/// a candidate and deciding, rechecking or collecting known problems are
+/// never done by a step of a run. The one guard every surface (MCP, the
+/// CLI, the HTTP API) reaches through this tool layer.
+pub(crate) fn outside_run(
+    step: &apb_core::step_env::StepCaller,
+    what: &str,
+) -> Result<(), ToolError> {
+    match step.refusal(what) {
+        Some(why) => Err(ToolError::Conflict(why)),
+        None => Ok(()),
+    }
 }
 
 impl From<RegistryError> for ToolError {
@@ -84,6 +108,22 @@ impl From<VersioningError> for ToolError {
 /// of the same `Vec<Issue>`.
 fn render_validation_issues(issues: &[Issue]) -> String {
     apb_core::validate::render_issues(issues)
+}
+
+/// A playbook scope argument (`project` or `global`) and the definition
+/// parent it names: `<root>/.apb` or the global store's parent.
+pub(crate) fn scope_parent(
+    root: &Path,
+    scope: &str,
+) -> Result<(apb_core::scope::Scope, std::path::PathBuf), ToolError> {
+    use apb_core::scope::Scope;
+    match Scope::parse(scope) {
+        Some(Scope::Project) => Ok((Scope::Project, root.join(".apb"))),
+        Some(Scope::Global) => apb_core::store::global_playbooks_parent()
+            .map(|p| (Scope::Global, p))
+            .ok_or_else(|| ToolError::Engine("no global config dir".into())),
+        None => Err(ToolError::Engine(format!("unknown scope `{scope}`"))),
+    }
 }
 
 fn open(root: &Path) -> Result<Registry, ToolError> {

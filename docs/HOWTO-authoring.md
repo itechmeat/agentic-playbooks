@@ -13,16 +13,78 @@ A playbook is a YAML document with these top-level fields:
 - `name` (string, display name, any language)
 - `description` (string, free text, any language; not used for matching)
 - `version` (string, `X.Y.Z`)
-- `params` (list): each `{ name, type, label?, options?, default? }`
+- `params` (list): each `{ name, type, label?, options?, default?, secret? }`
 - `defaults` (profile, retries, timeout, on_failure)
-- `trigger`, `requires`, `effects`, `goal` (see below)
+- `trigger`, `requires`, `effects`, `budget`, `goal` (see below)
 - `nodes` (list) and `edges` (list)
 
 Every save through apb (`playbook_create` / `playbook_update`, the dashboard
 editor, `apb import`) creates a new immutable version, except when the
 definition equals the current version apart from its `version:` field and
-formatting: then nothing is written, the current version and its trust stay as
-they are, and the answer says `unchanged: true`.
+formatting (for an import of a format-2 bundle, the scripts must also match,
+none when the bundle lists none):
+then nothing is written, the current version and its trust stay as they are,
+and the answer says `unchanged: true`.
+
+`apb export` writes one version as a single bundle file: the YAML, the editor
+layout and every regular file under the version's `scripts/` (bundle format
+2; a version over the scripts limits, or one holding symlinks, refuses to
+export rather than lose files). `apb import` checks those files again and
+writes the YAML and the scripts as one new version, which holds exactly the
+bundle's scripts: none when the bundle lists none, never the scripts of the
+version that was current. An imported version is never approved by the
+import, with or without scripts: it stays untrusted until it is approved
+(`playbook_approve`, or a run confirmation). Older bundles (format 1) predate
+scripts: they still import, carry no scripts themselves, and their version
+keeps the current version's scripts as an ordinary save does. Sharing a
+playbook, the preview before an import and the approval of imported scripts
+are described in "Sharing a playbook" below.
+
+### One playbook with params, or several playbooks
+
+When two uses of a process differ only in data (which project, which channel,
+which threshold), write one playbook and make that data a `params` entry. When
+they differ in which steps run or in what order, write separate playbooks:
+a param that switches whole branches on and off hides two processes in one
+graph, and each of them gets harder to read, test and trust.
+
+- Code: "fix the failing tests in service A" and "the same in service B" are
+  one playbook with a `service` param. "Fix the failing tests" and "upgrade a
+  dependency, then fix what broke" are two playbooks, since the second has an
+  extra step before the fix.
+- Routine: "post the weekly report to #sales" and "to #support" are one
+  playbook with a `channel` param. "Post the weekly report" and "chase every
+  overdue invoice, then post a summary" are two playbooks, since the steps
+  differ.
+
+```yaml
+params:
+  - { name: channel, type: text, label: "Channel to post the report to", default: "#sales" }
+```
+
+### Secret params
+
+A param that carries a credential (an API token, a password) is marked
+`secret: true`. apb never remembers its value for the next start (see
+"Remembered run input" below), the dashboard asks for it in a password field
+at every start and never prefills it, and a remembered value of a param that
+became secret is never used. Two validator errors keep a secret out of the
+definition itself:
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V99 | error | a `secret: true` param has a `default`: the secret would sit in the YAML |
+| V100 | error | a `secret: true` param is not `type: text` |
+
+```yaml
+params:
+  - { name: deploy_token, type: text, label: "Deploy token", secret: true }
+```
+
+A secret param still reaches the run like any param (the run's
+configuration records the values it started with), so prefer a connector
+account or an environment variable for a credential the playbook uses on
+every run.
 
 ## Visual editor and graph check
 
@@ -115,10 +177,26 @@ plus one per question and answer round under `reprompt` or `resume` interaction
 (not under `live`, which spans every round in one attempt). A script node runs
 no executor, so its count restarts per visit instead.
 
+A function that declares `idempotency` (the official ones that send: github
+issues, comments and releases, discord, telegram, smtp, whatsapp) is sent at most once
+per intent: a repeat of a send that went through gets the earlier result
+instead of a second copy. Tell the agent to pass `--intent <stable name>` on
+such a call and the same name on every attempt (the connector block of the
+prompt marks those functions `send-once`). A send whose outcome nobody can
+tell is refused on a repeat until a person decides (`apb intent resolve`,
+which refuses inside a run; an agent step reports such a send as a finding);
+`on_unknown: resend` on the binding lets it go out again instead, where a
+rare duplicate is better than a missing message:
+
+```yaml
+    connectors:
+      - { name: telegram, functions: [send_message], on_unknown: resend }
+```
+
 The binding is covered by the playbook digest, but the connector folder
 and each account are digest-pinned separately and must be approved before a run.
-Installing connectors, configuring accounts, secrets, trust, and the
-`apb connector` CLI are covered in CONNECTORS.md.
+Installing connectors, configuring accounts, secrets, trust, sending once and
+the `apb connector` CLI are covered in CONNECTORS.md.
 
 ## Success checks
 
@@ -288,6 +366,14 @@ In a prompt: "commit with the trailer `Apb-Run: {{run.id}}`". From a script:
 `git commit -m "..." -m "Apb-Run: $APB_RUN_ID"`. `git log --grep "Apb-Run: <id>"`
 then finds every commit of a run.
 
+The engine reads the trailer back when it records a node's commits. A commit
+without it, or one naming another run, is flagged in `apb runs <id>`
+(`[no Apb-Run trailer]`, `[Apb-Run names <id>]`), on the dashboard's commit
+list, and in the outcome's done line (`impl: 3 commits (1 without an Apb-Run
+trailer)`). apb never adds or rewrites a trailer itself, and leaves the
+repository's git hooks alone; with a git too old to read trailers nothing is
+flagged.
+
 ### Status file (APB_STATUS_FILE)
 
 Each agent_task attempt is handed an `APB_STATUS_FILE` environment variable
@@ -307,6 +393,57 @@ then looks for its marker inside the `outputs` JSON rather than in the agent's
 textual report. Put the completion marker in `outputs` when you write one, or
 omit `outputs` and keep the marker in the reply text, so the check can still
 find it.
+
+### Findings and warnings (reported, never acted on)
+
+An attempt may report problems it saw and did not fix, and things a person
+should check, next to its result. Both go in the same status file:
+
+```json
+{
+  "status": "success",
+  "findings": [
+    { "kind": "security", "location": "src/auth.rs:42",
+      "evidence": "the token is compared with ==, not in constant time",
+      "why_not_fixed": "out of scope for this dependency bump" }
+  ],
+  "warnings": [
+    { "subject": "deal 9", "reason": "its owner left the company; reassign by hand" }
+  ]
+}
+```
+
+- A finding has a `kind` (a slug of `[a-z0-9_-]`, at most 40 characters;
+  the recommended ones are `bug`, `regression`, `security`, `data_quality`,
+  `config`, `docs`, `test_gap`, `performance`, `dependency`, `other`), a
+  `location` (a path with an optional `:line`, or a record; at most 200
+  characters), the `evidence` (at most 1000) and `why_not_fixed` (at most
+  500). A warning has a `subject` (at most 200) and a `reason` (at most 500).
+  Every field is required, except a finding's optional `workaround` (at
+  most 500): how the attempt got around the problem.
+- A finding about a tool rather than the work (`kind: tool_problem`, or a
+  `location` such as `connector:crm.update_contact`, `mcp:notion.search`,
+  `cli:make`, `skill:release-notes`, `path:scripts/build.sh` or
+  `node:review`) is also collected as a known problem of the playbook
+  (`docs/KNOWN-PROBLEMS.md`); a playbook with a `known_problems:` block
+  shows the ones that recur to its later runs.
+- At most 20 of each per attempt. An entry with an empty or over-long field,
+  a control character or a wrong type is dropped whole and counted; nothing
+  is truncated.
+- A file with only `findings` and `warnings` and no `status` keeps the
+  textual report as the verdict. Notes never change a step's status, its
+  outputs, a route, the run context or any completion check.
+- In host execution mode the host passes them to `run_task_submit` as
+  `findings` and `warnings` (`apb tasks submit --notes '{"findings": [...],
+  "warnings": [...]}'`); they are merged into the attempt's status file.
+- Each attempt's notes are journaled as one `attempt_notes` event right
+  before its `attempt_finished`. The run outcome lists them (each finding
+  once per node, with the latest attempt that reported it), a run with any
+  is marked as needing a look in `apb runs`, `runs_list` and the dashboard,
+  and `apb stats` groups findings by kind and location across runs
+  (`docs/STATS.md`).
+
+A fresh agent_task attempt prompt carries a short paragraph with this contract.
 
 ### require_verdict (mandatory completion signal)
 
@@ -446,6 +583,256 @@ fails the node, the same policy as `deliverable_missing`. Validation warns
 source node's `outputs.fields` does not declare. A node that declares nothing is
 not checked.
 
+### List processing (list:)
+
+An `agent_task` or a `script` node with a `list:` block runs its step once
+per item of a list instead of once for the whole list. The engine loads the
+items, admits them in batches, runs each item's step on its own, checks each
+item's result, and keeps every item's state in the run journal. A retry, a
+pause, a crash or a later loop visit repeats only the items that did not
+pass, and every run surface counts the items instead of trusting an agent's
+summary of them.
+
+```yaml
+- id: file_tasks
+  type: agent_task
+  prompt: >-
+    The item section holds one triaged message. Create one task for it with
+    the tracker connector and write the output task_gid.
+  connectors:
+    - { name: asana, accounts: [default], functions: [create_task], max_calls: 2 }
+  list:
+    items:
+      from: { node: triage, field: items }    # or `inline: [ ... ]`, exactly one
+      key: id                                 # the item field that names it (default id)
+      max_items: 100                          # default 100, at most 500
+      where: { state: passed, field: actionable, equals: "true" }   # optional filter
+    batch:
+      size: 10        # items admitted per batch (default 10)
+      parallel: 2     # items running at once (default 1)
+      retries: 1      # re-runs of an item its check rejected (default 1, at most 5)
+    item_outputs: [task_gid]   # the fields each item's step writes
+    check:                     # optional; exactly one of output, script, connector, judge
+      connector:
+        name: asana
+        account: default
+        function: get_task
+        args: { task: "{{item_output.task_gid}}" }
+        accept_when: { path: data.gid, exists: true }
+    on_needs_look: continue    # or fail
+    rerun: all                 # or not_passed
+```
+
+**Items.** `items.from` names an earlier node and one of its declared
+`outputs.fields` holding a JSON array of objects, or a list node and its
+field `items` (below). `items.inline` writes the objects in the playbook.
+Every item is a JSON object; `key` names the field that identifies it, a
+non-blank string or an integer of at most 128 characters. An id reaches
+prompts, the environment and journal lines, so it may not hold a backtick,
+a line break, a tab or any separator other than a plain space, a control
+character or an invisible formatting mark (bidi embeddings, overrides and
+isolates included). Duplicate ids, a
+missing or malformed key, a source that is not a JSON array, or more items
+than `max_items` fail the node before any item runs, with a message that
+names the problem (duplicate ids are listed). `where` keeps the items whose
+`field` equals `equals` (compared as an `output_field` condition compares:
+a string as is, a number or a boolean in its JSON form). `equals: null`
+keeps an item whose field is present and null; a missing field is not equal
+to it, and no other `equals` matches a missing field. A field that holds an
+object or an array never matches. The dropped items are counted as
+`filtered_out`. An item larger than 8 KiB of JSON is never
+handed to a step: it needs a look at once (`item_too_large`).
+
+From a list node the items are that node's `items` entries, keyed by their
+`id` (the `key` setting is not read): each item is the earlier item object
+with the earlier step's outputs added under `output`. `where.field` then
+reads those earlier outputs, and `where.state` keeps the items that ended in
+one state there (`where: { state: passed }`). Both may be given, and an
+item is kept only when both hold: `where: { state: passed, field:
+actionable, equals: "true" }` takes the items whose check passed and whose
+step read actionable, so an item its check rejected never reaches the
+next step on the strength of an output nobody confirmed. `where.state` on
+any other source is a validation error.
+
+**Item states.** An item is `pending`, `running`, `passed` or `needs_look`;
+the last two are final for the visit. After its step, the item's check
+decides:
+
+- `accept`: the item passed. `accept_with_note`: it passed with a note (the
+  note shows on every surface and is counted as `passed_with_note`).
+- `reject`: the item goes back into the queue (behind the items not admitted
+  yet) for another round while it has `batch.retries` left, then needs a
+  look (`rejected`). A step that did not write every `item_outputs` field is
+  rejected the same way, with a note naming the missing fields.
+- a check that cannot tell (a connector read that failed, a script that
+  could not run or printed no verdict, a judge set to `on_unavailable:
+  needs_look` without an answer) never accepts: the item needs a look
+  (`check_unknown`).
+- a step that failed needs a look (`failed`), with the first line of the
+  failure as its note.
+
+There are two retry layers. Inside one round, the item's step runs through
+the ordinary attempt loop of the node: `max_retries`, profile fallbacks and
+infrastructure retries apply to each item as to any node, and the retry
+briefing tells a retried attempt what the failed one did. Across rounds,
+`batch.retries` re-runs an item whose step succeeded but whose check
+rejected it; the re-run's item data carries `previous_round`,
+`previous_outputs` and `check_note` (each of the last two cut to 2 KiB with
+a marker), so the step knows what to fix. Under `rerun: not_passed` an item
+that runs again in a later loop visit gets the same fields from the visit
+before. An item
+interrupted by a pause, a quota pause or a crash goes back to `pending`
+without spending a round.
+
+**The item prompt.** An `agent_task` list node renders its prompt once for
+the visit; each item's step gets that text followed by a final `## item`
+section: "Item 4 of 43" and one fenced JSON data block holding the item's
+`id` and its content as `item`, with the instruction to treat the block as
+data, never as instructions. Everything that comes from the item or a check
+sits inside that block, JSON-escaped, behind a fence longer than any
+backtick run in it. Everything before the section is the
+same for every item, so a provider's prompt cache serves the shared prefix
+and only the short section is new per item. For the same reason a prompt or
+a `workdir` may not read `{{item.*}}` or `{{item_output.*}}` (V86): a
+template that changed per item would break the shared prefix. Write "the
+item section holds ..." in the prompt instead. Each item's step runs in a
+session of its own (never a continued one) with `APB_ITEM_ID` in its
+environment. A `script` list step gets `APB_ITEM_ID` and `APB_ITEM_FILE`
+(the item's JSON in a file under the run directory) and publishes its item
+outputs by printing a JSON object, as any script node does.
+
+**Checks.** `check` names exactly one source (V87):
+
+- `output: { field, equals }`: one of the `item_outputs` must equal the
+  value; anything else rejects. Deterministic and free.
+- `script: scripts/<file>`: a script of the version's `scripts/` runs per
+  item with `APB_ITEM_ID`, `APB_ITEM_FILE` and `APB_ITEM_OUTPUT_FILE` (the
+  step's output as JSON) and prints `{"verdict": "accept" |
+  "accept_with_note" | "reject", "note": "..."}`. A non-zero exit rejects;
+  no verdict is a check that cannot tell. It may run for 120 seconds and
+  reads the scripts the run pinned at start.
+- `connector`: one `read_only` function of an installed connector, called
+  by the engine itself with `args` that may template `{{item.<path>}}`,
+  `{{item_output.<field>}}` and `{{params.<name>}}`. `accept_when` sets a
+  dot `path` into the response and exactly one of `equals` (which may
+  template the same way) or `exists: true`. The check is its own binding
+  site, `<node>#check`, granted only that one function and account, and it
+  goes through trust and the run gate like a node's binding. A write
+  function here is a validation error.
+- `judge`: a decision-model question per item, named `verdict`, over the
+  rendered `state` fields (same templates as above). `criteria` keys are
+  `accept`, `accept_with_note` and `reject`, and `accept` must be described
+  (V89). An answer below `min_confidence` counts as no answer;
+  `on_unavailable` (`accept_with_note` by default, `reject` or
+  `needs_look`) decides what no answer means. See `docs/DECISIONS.md` for
+  the providers.
+
+A list without `check` accepts every item whose step succeeded and wrote
+its `item_outputs`; the validator warns (V93) and the run outcome lists the
+items as passed on the agent's own report. When a check is set, the item
+does not also get the decision-model completion check, and tier routing is
+not asked per item.
+
+**The node's output.** When every item is final the node publishes one JSON
+object, whatever its `outputs.fields` say: `total` (items after the filter),
+`processed` (`passed` plus `needs_look`), `passed` (including those with a
+note), `passed_with_note`, `needs_look`, `filtered_out`, and `items`, one
+entry per item with `id`, `state`, `note`, `item` and `output` (the item's
+declared outputs). Later nodes read the fields by name
+(`{{nodes.file_tasks.output.needs_look}}`, an `output_field` condition on
+`passed`) or take the node as the source of another list. With
+`on_needs_look: continue` (the default) the node succeeds and reports the
+items; with `on_needs_look: fail` the node fails with the same output, so a
+failure route or a supervisor sees it.
+
+**Sending once.** A list step is repeated by design, so every write
+function a list node is granted must declare `idempotency` (V88): an
+undeclared write could act twice for one item. A send is keyed by the node
+and the item, so one item's send never answers another's. Without
+`--intent` an item's send carries the fixed label `item:send`: one item
+sends a function once, and a rerun that words the payload differently is
+still the same send (it gets `already_sent` once the first went out). An
+item that sends one function more than once names each send with its own
+`--intent`. A call that names an item (`APB_ITEM_ID`) with no running
+attempt of its own is refused: a made-up item id can neither send nor
+reset a spent `max_calls`. When an item's step fails
+and a send it made has an unknown outcome:
+
+- a `key` or `marker` send gets one free reconcile run in the same round:
+  the repeat replays the key or looks the marker up through the send
+  ledger, so the service answers from what it already has.
+- a `none` send settles the item as needing a look (`unknown_send`). The
+  item is never sent again on its own: a supervisor retry skips it until a
+  person resolves the send with `apb intent resolve` (`--sent` or
+  `--not-sent`); either way the next retry runs the item again, a repeat
+  of a send resolved as sent is answered `already_sent`, and the item's
+  check decides. A
+  binding's `on_unknown: resend` does not change this once the item has
+  settled: no later round, visit or supervisor retry runs it again on its
+  own while that send's outcome is unknown.
+
+**What a list node may not be.** V85 refuses `list:` on any node type other
+than `agent_task` and `script`, on an interactive node, on a node that
+continues another node's session or whose session another node continues,
+on a node with `cache` or `success_check` (use `list.check`), on a node
+with `protect` while `batch.parallel` is above 1, and refuses a zero
+`batch.size` or `batch.parallel`, `batch.retries` above 5, `max_items`
+outside 1 to 500 and a `key` that is not an identifier. A run in host
+execution mode with a list node is refused at start: list nodes need
+`execution: cli` in this release.
+
+**Validator codes.**
+
+| Code | Level | What it covers |
+|---|---|---|
+| V85 | error | where `list:` may sit and its numbers (above) |
+| V86 | error | the item source: exactly one of `from` and `inline`, a source that finishes before the node, a declared field (or `items` of a list node), `where` shapes (`field` with `equals`, `state` only from a list node, both together when both must hold), usable inline items; and `{{item.*}}` in a prompt or `workdir` |
+| V87 | error | the check: one source, an `output` field among `item_outputs`, a script under `scripts/`, a read-only connector function, a valid `accept_when`, check templates limited to `item.*`, `item_output.<item_outputs>` and `params.*` |
+| V88 | error | a granted write function without an `idempotency` declaration |
+| V89 | error | a judge check's criteria keys, `min_confidence` in (0, 1], `on_unavailable` |
+| V93 | warning | a list without a check; `rerun: not_passed` on a node in no cycle |
+| V94 | warning | `batch.parallel` above the playbook's `max_parallel` |
+| V95 | error | a `type: list` goal criterion that names a node without `list:` |
+
+**Pause, resume, quota and stop.** Before an item starts, the runner reads
+the run's control channel, so no item starts after a pause request returned.
+A drain pause lets the running items finish and admits no new one; a
+`--now` pause kills the running items, which journal `interrupted` and go
+back to pending; a quota pause of one item stops admission, lets the other
+running items finish and pauses the run until the quota window passes. The
+visit stays open in each case: the node gets no `node_finished`, and the
+resume continues the same visit with only the items that are not final
+(when the source still yields the same items; a changed list starts a new
+visit). A crashed item attempt is reaped under its item and runs again
+alone. A stop ends the visit cancelled with its open items left open.
+
+A failed list visit (for example under `on_needs_look: fail`) is reopened
+by a supervisor retry (`supervisor_node_retry`): the items that passed are
+kept, the items that need a look run again, except an item too large to
+run and an item whose unknown send nobody resolved yet. Any other later
+visit of the node, such as a loop back to it, is a new visit governed by
+`rerun`.
+
+**Surfaces.** `run_status` and `run_report` carry a `lists` block (counts
+per list node; `run_status` names at most 50 items that need a look per
+list, `run_report` every item; see `docs/MCP.md`). The run outcome counts
+each list, names every item that needs a look as a gap (at most 30, then
+one "and N more" line), lists a list without a check as self-reported, and
+reads the run as needing a look while an item does. After every batch a
+`run_progress` event carries a line such as "12 of 43 processed, 11
+passed, 1 needs a look"; the dashboard run page shows a card per list
+with its counts and a filterable item table, and the graph shows `12/43`
+on the list node. `apb runs <id> --items [--node N] [--state
+pending|running|passed|needs_look]` prints one line per item. The journal
+records `list_started`, `list_batch_started` and `list_item_settled`, and
+the attempt, connector call, send intent and decision events of an item
+carry its id in `item`.
+
+**Compatibility.** The `list:` block is additive to schema 2. An older apb
+reads the playbook but ignores the block and would run the node once for
+the whole list, so start and resume list runs with this apb or a newer
+one.
+
 ### Node working directory (workdir)
 
 An `agent_task` or a `script` node can run somewhere other than the execution
@@ -462,8 +849,9 @@ root:
 `workdir` is a template rendered like a prompt, but it may read only what can
 name a path: `params.*`, `run.instruction`, `nodes.<id>.output` (or one field of
 it) and `nodes.<id>.review_decision`. Anything else is a **V47** error, and so is
-`workdir` together with `isolation` (an isolated node runs in its own
-directory). The rendered path is resolved against the run's working tree (the
+`workdir` together with `isolation` (an isolated node runs in the run's
+tree inside its sandbox, or in a scratch directory without one; see
+[Isolation](#isolation-isolation)). The rendered path is resolved against the run's working tree (the
 execution root when the run has none, see [Run working tree](#run-working-tree-worktree);
 an absolute path is kept) and must be an existing directory when the node starts.
 An empty render (the value it reads was never published) or a missing directory
@@ -528,6 +916,43 @@ execution root, keyed by that worktree's top level (a worktree never grows an
 taken first, then the project lock is released. `apb doctor --run <id>` reports
 the lock of the run's tree.
 
+### Isolation (isolation)
+
+An `agent_task` that works on a repository or documents you do not fully
+trust can run apart from the operator: in its own sandbox on Linux, with the
+operator's home, processes, ssh agent and session bus out of reach, the
+repository's git config and hooks read-only, and the environment cut to the
+profile's allowlist.
+
+```yaml
+- id: build
+  type: agent_task
+  prompt: "Build the branch and run its tests."
+  isolation:
+    level: full                 # full | best_effort | none (default)
+    network: open               # open | none; the agent's model is hosted
+    read_only: [~/.rustup]      # extra paths, `~/` or absolute
+    writable: [~/.cargo/registry]
+```
+
+- `full` refuses to run where the sandbox cannot be built
+  (`isolation_unavailable`, before anything of the run is written): no
+  bubblewrap, macOS, an agent that declares no sandbox needs (only claude
+  and codex do so far), or a host-mode run.
+- `best_effort` uses the sandbox where it can and otherwise runs in a scratch
+  directory without the project tree; every attempt records why.
+- `isolation: full` alone is the short form of `{ level: full }`.
+
+Every isolated attempt records what held and what did not (`apb runs <id>`,
+`apb doctor --run <id>`, `run_status`, the run page). The limits hold even
+in the sandbox: the host uid is unchanged, `network: open` reaches any host,
+the agent's own login is readable inside, and script nodes, goal scripts and
+project checks run outside it. The validator warns on `full` with an
+implicit network (V112) and refuses `connectors` on an isolated node (V113),
+extra paths that are relative or reach a credential location (V114), and
+extras with level `none` (V115). Mechanism, guarantees per level, the
+network and the agents' logins: [docs/ISOLATION.md](ISOLATION.md).
+
 ### Declared cache key (cache.key)
 
 `cache: auto` keys a node's result on its definition, rendered prompt, profile
@@ -583,8 +1008,9 @@ Author around it, in order of strength:
 
 An orchestrator or otherwise long-running `agent_task` node can be cut off
 mid-work by anything from a host process restart to a supervisor interrupt aimed
-at it. When its work happens inside a git worktree (an `isolation: full` or
-`best_effort` node, or an agent managing its own worktree), the recovery cost of
+at it. When its work happens inside a git worktree (the run's
+[working tree](#run-working-tree-worktree), or an agent managing its own
+worktree), the recovery cost of
 that interruption is entirely a function of how much uncommitted work existed
 when it happened.
 
@@ -603,7 +1029,9 @@ engine's resilience features exist to handle.
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
 `wait`, `finish`, `playbook` (runs another playbook as a sub-run, see
 "Sub-playbooks" below), `judge` (asks a decision model typed questions, see
-"Judge nodes and judge edges" below). A playbook needs exactly one `start` and
+"Judge nodes and judge edges" below), `publish` (pushes the commits a node
+made to a pinned remote, after a person consented to the exact plan). A
+playbook needs exactly one `start` and
 at least one `finish`. Edges connect node ids; conditional edges gate on node
 status, review status, an output substring match, one structured field of a
 node's output, or a decision model's yes/no answer about the source node's
@@ -959,6 +1387,45 @@ edges:
   - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
 ```
 
+## Publishing (the publish node)
+
+To push what a node committed, end the work with a `publish` node instead of
+asking an agent to push:
+
+```yaml
+- id: publish
+  type: publish
+  from: implement           # the agent_task or script node that committed
+  remote: origin            # pinned before the first acting node runs
+  branch: "apb/{{run.id}}"  # optional; default: the branch `from` committed on
+  timeout_seconds: 300      # optional, 1 to 3600
+  prompt: "Check the subject lines"   # optional, shown to the person as is
+```
+
+When the run reaches it, apb makes a read-only plan (the URL, the branch, the
+commits with whether this run made each one, what the remote holds now) and
+waits for a person. They consent to exactly that plan with its nonce
+(`apb publish show <run>` then `apb publish approve <run> --nonce <nonce>`,
+MCP `review_decide` with `nonce`, or "Publish exactly this" on the run page
+of a dashboard with keys; one without keys shows the approve command
+instead) or decline (`apb publish skip`). A plan that changed is asked about again;
+a push whose result is unknown fails the node with `publish_unknown` and is
+never repeated until a person runs `apb intent resolve`. The outputs are
+`published`, `skipped`, `nothing_to_publish`, `already_on_remote`,
+`publish_refused: <code>`, `publish_not_sent` and `publish_unknown`; the last
+three fail the node, so a `node_status` edge or `defaults.on_failure` handles
+them like any failed node.
+
+A publish node implies `effects: [network, external, irreversible]`, so the
+run needs the start consent. It takes no `list`, `fork`, `cache`,
+`success_check`, `route`, `completion_check`, `option_descriptions`,
+`auto_decide_ok`, `auto_decide` or `inputs`/`outputs` (V118, V72). Agents
+without `isolation: full` can still push by themselves with the operator's
+credentials (V119 warns, and names scripts and sub-playbooks too);
+`publish_only: true` at the playbook level makes that an error (V120) and
+holds every sub-playbook's run to it. Details, the refusal codes and what is guaranteed:
+docs/PUBLISH.md.
+
 ## Joining parallel branches
 
 Several unconditional outgoing edges from one node are a fork: every target starts
@@ -995,6 +1462,17 @@ satisfied instead of leaving the join waiting forever, and the run journals a
 decision is auditable afterwards. That is routine graph bookkeeping rather than an
 anomaly - an either-or merge has one by construction - so no supervisor is woken
 for it.
+
+**A join inside a loop** weighs each round on its own. An input counts as
+delivered only when its source finished after the join last started; a
+source that delivered into the round before has yet to run in this one, so
+the join waits for it while something still leads there, and writes it off
+when nothing does (its gate kept it out this round). A node's routing is
+read from its latest execution: an edge it took in an earlier round does
+not keep that branch live, and a bounded edge its own traversal spent is
+still the edge it took, never a fallback it did not take. So a finish node
+fed both by a collector and by the fallback of a spent fix loop ends the
+run when the collector routes into it.
 
 A write-off holds only for the pass that made it. When an operator or a
 supervisor asks for a node to run again (`resume --from-node`, or a
@@ -1234,6 +1712,14 @@ playbooks whose branches are resource-heavy (large builds, rate-limited external
 calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
 
+A list node (`list:`) never joins a batch: it runs alone on the sequential
+path, and its items run on the list's own worker pool, at most
+`min(batch.parallel, max_parallel)` at a time. `batch.parallel` above the
+playbook's `max_parallel` (or the default 4 when the playbook sets none) is
+a validator warning (V94): the cap still wins. As with a branch node, the
+commits an item's step makes are recorded only when the pool runs one item
+at a time.
+
 One shape never joins a batch at all, whatever the cap says: a node with an
 explicit `join:` edge (and a join with `require: all_succeeded`). Only an explicit barrier can be recorded failed with the
 barrier's own reason when one of its inputs failed, and raise a wake for a
@@ -1359,6 +1845,15 @@ any other timeout (next fallback step, or the node ends `timed_out`). A node
 without `require_verdict` keeps the plain rule: a deadline kill moves on to the
 fallback chain.
 
+A deadline kill is graceful: the agent's process group gets SIGTERM, then up
+to `APB_TIMEOUT_GRACE_MS` milliseconds (default 5000) to exit, then SIGKILL,
+the same stop path a `--now` pause uses. What the agent printed on its way
+out is drained within the usual drain budget, and when it holds a complete
+final record (claude prints one, with its usage, when it is stopped) the
+attempt keeps that token usage and cost. The attempt stays `timed_out`
+whatever the record says; a partial record is ignored, and an agent that
+prints nothing leaves its usage unknown, never zero.
+
 A `transient` failure is retried on the SAME executor out of a separate
 infrastructure budget that never touches `max_retries`: the node's own retry count
 does not move and no retry is journaled against it, while each infrastructure
@@ -1440,6 +1935,35 @@ attempt it continues instead of a fresh one. If the agent answers that the
 session does not exist, the engine drops it and starts fresh once, without
 spending a retry.
 
+### The retry briefing
+
+Every attempt that repeats a step gets a briefing on what the earlier attempts
+did, as apb recorded it: a section `What earlier attempts of this step did
+(apb's record)` appended to its prompt, after the continuation note of a
+continued session, after the node prompt of a fresh one, and in the prompt of
+a host task. It covers every attempt since the node last succeeded: retries,
+infrastructure retries, fallback steps, deadline continuations, resumes after
+a pause or a crash, a supervisor retry and a failure route back into the
+node. A first attempt, an answer round, a session handoff and a loop visit
+after a success get none. It lists:
+
+- each earlier attempt with its agent, model and how it ended;
+- the sends of `send-once` functions, grouped as confirmed (do not send
+  again; a repeat with the same `--intent` returns the earlier result),
+  unknown (what apb will do on a repeat; never send it under another name,
+  report it as a finding) and not sent (may be sent again);
+- writes to connector functions without a send-once declaration, by the same
+  three outcomes;
+- the attempts with no connector writes recorded.
+
+At most 30 such lines are listed and the rest is counted. It ends by naming
+what apb does not record, so a missing line is never read as "it did not
+happen": anything done outside `apb connector call` (shell commands, other
+API calls, messages sent another way, git pushes) and the file changes and
+commits in the working tree, which the agent checks with `git status` and
+`git log`. The briefing sits outside the node's cache key, and the default
+retry policy is unchanged.
+
 ### Continuing another node's session (continue_session)
 
 Consecutive nodes on the same profile often need the same understanding of the
@@ -1492,6 +2016,51 @@ still leaves what it said and ran. For `claude`, whose text output does not show
 its tool calls, the CLI's own session transcript (every tool call and result) is
 copied there as `session.jsonl`. Other agents keep their sessions in their own
 stores. `agent-stream/` still holds the streamed events of the `acp` transport.
+
+### Bounded agent output
+
+apb never keeps an unbounded amount of what an agent prints. In memory each
+stream keeps its beginning (the head, where session ids are) and its end (the
+tail, where every supported CLI prints its final record: claude's `result`,
+codex's `turn.completed`, opencode's last `step_finish`, or the error
+record that ends a failed codex or opencode run); the middle of a
+longer stream is dropped. On disk `stdout.log`, `stderr.log`, the `acp`
+transport's stream log and the `session.jsonl` copy each stop at a size cap:
+the file then ends with one line saying how many bytes were written and that
+the rest was not kept, while apb keeps reading the agent, so a cap never
+blocks or kills it. On the `acp` transport a single line as long as the tail
+or longer is never kept whole either.
+
+The limits are in the `output_limits` section of the global `config.yaml`:
+
+```yaml
+output_limits:
+  head_bytes: 2097152          # in memory, per stream (2 MiB)
+  tail_bytes: 6291456          # in memory, per stream (6 MiB); also bounds an acp line and the acp queue
+  log_file_bytes: 67108864     # stdout.log and stderr.log, each (64 MiB)
+  stream_log_bytes: 67108864   # the acp stream log (64 MiB)
+  session_copy_bytes: 67108864 # the session.jsonl copy (64 MiB)
+  stream_line_queue: 1024      # acp lines buffered between the reader and the engine (at most tail_bytes in all)
+```
+
+Every key is optional and must be positive. A project `.apb/config.yaml` may
+carry the same section to lower a limit for its own runs; a larger project
+value is ignored. A run resolves its limits once, when it starts.
+
+An attempt that lost part of its output says so on its `attempt_finished`:
+`output_truncated` lists each cut stream (`stdout`, `stderr`, `stream_log`,
+`session_copy`) with the bytes kept and the bytes dropped at least, and is
+absent when nothing was cut; a stream counts as cut only when neither the
+memory copy nor its file holds all of it. When the agent's final record
+itself was cut (it fell into the dropped middle, its line was longer than the
+tail, or the stream ended inside it) the attempt is never a success: it fails
+with "the agent's final result could not be read whole: output exceeded the
+limit", classified `agent` (not a quota or a transport failure), and
+`transcript_incomplete` is set. A status file verdict still decides the
+attempt, as it does for any other abnormal end, since the status file is not
+part of the cut output. Token usage then counts only the records that were
+kept. `run_status`, `run_report`, `apb runs <id>` and the dashboard journal
+show both fields.
 
 A transcript holds whatever the agent printed or read, secrets included, so it
 must never reach git. APB keeps `<project>/.apb/.gitignore` listing its
@@ -1704,6 +2273,17 @@ ends the loop there. This behaves the same as routing the loop through a
 `condition` node (`review -> again -> review` with `max_loops: 2` on `again`),
 including on resume and inside parallel branches.
 
+A list node inside a loop runs a new visit each time the loop reaches it.
+With `rerun: all` (the default) every item runs again. With `rerun:
+not_passed` the items that passed in the previous visit are carried over
+as passed (as long as their content is unchanged) and only the others run,
+each told in its item section what it reported and what the check said the
+visit before. A reviewer panel is the typical shape: the list node fails
+under `on_needs_look: fail`, a bounded edge routes to a fix, the fix routes
+back to the list, and only the reviewers still open review again
+(examples/playbooks/review-panel-list.yaml). `rerun: not_passed` on a node
+that sits in no cycle has no effect, and the validator warns (V93).
+
 ## expected_duration (progress estimates)
 
 Every node may carry an optional `expected_duration`: the estimated wall time
@@ -1725,12 +2305,67 @@ zero work, so leave their estimate at the default.
 ## Run input prompt (Start node)
 
 Every run can carry a free-form "input prompt": the text available to node
-prompts as `{{run.instruction}}`. Edit it on the Start node in the web editor.
-Typing autosaves a draft that is NOT part of the playbook definition: it does
-not create a version and does not change trust, and a frozen playbook still
-accepts draft edits. At run start the value is resolved once: an explicitly
-passed instruction wins, otherwise the current draft, otherwise none. The chosen
-value is snapshotted immutably into the run.
+prompts as `{{run.instruction}}`. Edit it on the Start node in the web editor,
+or in the Run dialog. What you type there is remembered for this project
+(see "Remembered run input" below): it is NOT part of the playbook
+definition, does not create a version and does not change trust, and a frozen
+playbook still accepts it. At run start the value is resolved once and
+snapshotted immutably into the run.
+
+### Remembered run input
+
+A person who runs a playbook with the same values every time does not have to
+type them again: the param values and the instruction can be remembered per
+project. The Run dialog's "Remember for this project", `apb run --remember`
+and `playbook_run` with `remember: true` keep what the start passed;
+`playbook_memory` and `apb memory show|clear` read and forget it.
+
+- Where: `.apb/memory/<project|global>/<id>.json` in the project, git
+  ignored. A global playbook remembers different values in every project.
+  Its memory file carries a MAC under this installation's key, so a file
+  that came with a checkout (not saved by apb on this machine) is ignored
+  with a diagnostic, as is a signed file put under another playbook's
+  name: a repository cannot seed a trusted global playbook. Without a
+  usable config directory for the key, saving a global playbook's input
+  fails instead of writing a file the next read would ignore. Making a
+  playbook global re-checks the moved values like a save.
+- Precedence at start: an explicit value wins, then a compatible remembered
+  value, then the param's `default`. For the instruction: an explicit one
+  (an explicit empty one too), then the remembered one, then the legacy
+  draft. A sub-playbook child takes nothing from memory or the old draft:
+  the parent's consent covers its defaults and the instruction the parent
+  passes. The
+  run's `run_provenance` event lists what came from memory (`remembered`),
+  and every start surface says it: `recalled` in the `playbook_run` and
+  dashboard answers, a `used remembered input:` line from `apb run`.
+- A start remembers its input only once it succeeded (for `apb run`, once
+  the run gate and the budget check passed), checked against the
+  playbook's current version; a refused start changes nothing.
+- Values are bound to the params as they were saved. After the params
+  change, each value is checked again: one whose param is gone, whose value
+  no longer parses as the param's type, that is not one of the options now,
+  or whose param became secret is reported as incompatible with the
+  reason, never used. A value that still fits a changed type is used
+  (`schema_changed` says the params changed). The next save drops every
+  value that no longer fits, so the file never keeps one.
+- Never stored: a `secret: true` param, a param whose name says it holds a
+  credential (`password`, `token`, `secret`, `api_key` and the like), and
+  any value or instruction that looks like a credential (a token prefix
+  such as `ghp_`, a JWT, a bearer header, a value after `password=` or
+  `api_key:`, a URL with a password, a Slack webhook, a long random
+  string). They are refused by name with a reason; the value is not
+  echoed. Making a playbook global does not carry an old instruction draft
+  that looks like a credential either.
+- Reading memory changes nothing: a file that does not parse reads as
+  empty with a diagnostic, and the next save moves it aside
+  (`<id>.json.corrupt-<time>`). A file of a newer format is left alone.
+
+Behaviour change for an existing project: the old instruction draft lived in
+the definition (`meta/instruction-draft.md`), so a project that committed it
+shared one draft through git, and a global playbook shared one draft across
+every project. That file is now read only, as a seed: it is used when
+nothing is remembered, and an edit goes to the project's local memory
+instead. Delete the committed file once nobody needs the seed.
 
 `playbook_trial` accepts the same `instruction` argument as `playbook_run`, so
 an instruction-driven draft can be trialed with a real instruction before it
@@ -1746,6 +2381,48 @@ run_report. A finish without a prompt stays instant and free with no answer.
 Do not set a profile without a prompt (validator V21). Estimate
 expected_duration on a finish-with-prompt like any agent step.
 
+The answer is written for a person by default: the composer's prompt carries
+apb's writing brief (see "Writing for people" below). When the answer is
+read by another agent instead (a sub-playbook whose parent parses it, a run
+whose caller is a script), set `audience: agents` on the finish node and the
+brief is left out. `audience` on a finish without a prompt has no effect
+(validator V101, a warning).
+
+## Writing for people
+
+Some of what a run writes is read by a person, not by the next step: the
+finish answer, a pull request description, a reminder mail, a chat post, a
+note in a CRM. For that text apb adds one fixed brief to the agent's prompt:
+lead with the conclusion, say who acts next and what they do, state facts
+(numbers, names, links) and mark what was not checked as not verified, use
+the reader's words instead of apb's internal terms, keep it short.
+
+The brief goes only where a person reads the output:
+
+- the finish composer, unless the finish node says `audience: agents`;
+- an `agent_task` marked `audience: people`;
+- a node granted a connector function that declares a `people:` block (the
+  official `telegram`, `slack`, `smtp` and `zulip` send functions and
+  `github.create_pull`; see "Text people read" in `docs/CONNECTORS.md`).
+  Its connector block also names the arguments people read.
+
+```yaml
+  - id: draft_reminder
+    type: agent_task
+    audience: people        # the mail draft is read by the customer
+    prompt: >-
+      Draft the payment reminder for {{item.name}} ...
+```
+
+`audience` is allowed on `agent_task` and `finish` (`people` or `agents`).
+Every other prompt stays byte for byte as it was, so cache keys do not
+change. The brief shapes how an agent writes; it is not a check. The run's
+own report says what was verified and what was not, whatever the answer
+claims (see "Run outcome" in `docs/MCP.md`).
+
+To hear about a run while it waits for you (a review, a question, a pause, the
+end) through a chat or mail you already use, see `docs/NOTIFY.md`.
+
 ## Host execution mode (running without agent CLIs)
 
 A playbook needs nothing special to run in host execution mode (informally
@@ -1757,7 +2434,8 @@ or for the run to use your own subagents. Do not choose it yourself. The only
 other way a step runs as a host task is the automatic fallback below, when no
 CLI of the step can start. Nothing detects a host by name, there is no
 machine switch, and a project `.apb/config.yaml` can only turn the fallback
-off.
+off. A playbook with a list node (`list:`) is refused in host mode at run
+start: list nodes run with `execution: cli` only in this release.
 
 In host mode apb spawns no agent CLI. Every agent step (and a finish answer)
 becomes a host task that `run_wait` returns in `pending_tasks`, each with the
@@ -1831,7 +2509,7 @@ patches become the norm:
 supervisor:
   policy:
     capabilities: [observe, retry, rebind, patch_playbook]  # default: all
-    promote_supervisor_patches: on_success  # | always | manual | { after_n_successes: 3 }
+    promote_supervisor_patches: on_success  # | always | manual | { after_n_successes: 3 } | { when: quality }
     trial_candidates: next_run              # | off | { share: 0.3 }
 ```
 
@@ -1843,6 +2521,14 @@ supervisor:
   runs: `on_success` and `always` promote on the first successful trial,
   `{ after_n_successes: N }` on the N-th, `manual` never (a person promotes it
   with the dashboard's "Use"; the trials still count and still reject).
+  `{ when: quality, compare, min_runs, max_trials, window, margin }`
+  compares the candidate's graded trial runs with the graded runs of
+  `current`, criterion by criterion, and promotes (only when shown not
+  worse, within `margin`), keeps `current`, waits for more trials or hands
+  the decision to a person; one failed trial alone rejects nothing. It
+  needs a `quality:` block with criteria in force, `outcome` among them
+  (V107); a gate that does not read falls back to `manual` (V106); see
+  "quality (run quality)" below and docs/QUALITY.md.
 - `trial_candidates`: whether a run started without an explicit version runs
   the playbook's candidate version. `next_run` (default): every such start
   does; `off`: none (the candidate runs only when asked for by version);
@@ -1866,8 +2552,8 @@ children never do.
 
 A forward patch may not change the goal, the declared or effective effects,
 the irreversible steps, `requires`, the `supervisor` block, the decision
-opt-ins in `defaults` (`host_decisions`, `retry_advice`), `worktree`, a
-node's connector grants or the sub-playbook a node runs; it must pass the
+opt-ins in `defaults` (`host_decisions`, `retry_advice`), `worktree`, the
+`quality:` block, a node's connector grants or the sub-playbook a node runs; it must pass the
 validator and be classified `improvement`. It may bind another profile: the
 run gate checks the candidate's profiles on their own. Its base must be
 `current` or the candidate on trial (`stale_base` otherwise).
@@ -1905,6 +2591,40 @@ Scope (project vs global) is only about where the definition is stored, not
 about applicability. A global playbook still declares `requires` to stay honest
 about where it can run.
 
+## Will it fit here?
+
+Before a playbook runs in a project, one read-only report tells whether it
+can, in four separate sections, so a missing trust approval never hides a
+missing file and the other way round:
+
+- **Compatibility**: what the project cannot change by configuration: the
+  lifecycle, `requires`, the sub-playbook tree, scripts the version lacks
+  (V92) and connectors that do not resolve. Cold session handoffs and
+  `protect` globs that match nothing are notes.
+- **Setup**: what a person can provide: profiles, skills and the models of
+  their executor chains, connector accounts and secret env vars, and param
+  values a start must pass (`param_needs_value`) or that memory holds in a
+  form that no longer fits (`remembered_incompatible`).
+- **Trust**: each digest of the tree (the playbook, imported scripts,
+  profile bundles, connectors and accounts, sub-playbooks) with whether it is
+  approved and whether an acknowledge at start stands in for it.
+- **Consent**: the irreversible sources a start must be agreed to, and the
+  effects of the whole tree.
+
+`ready` (no blocking compatibility or setup item) and `trusted` are reported
+apart: an untrusted playbook can be ready. `ready` does not mean a start goes
+through unasked: `trusted` and `needs_consent` say what a start must still
+be approved or agreed to. When the sub-playbook tree cannot be resolved, a
+`tree_not_assessed` note says the effects and trust items cover the
+playbook alone; memory that cannot be read is a `remembered_unreadable`
+note, and memory that is ignored (corrupt, or not saved by this
+installation) a `remembered_ignored` note, never a failed report. The same report backs
+`playbook_adopt_report` (with `scope` and `workspace`), `playbook_catalog`
+with `fit: true` (a summary per entry), `apb adopt [--scope]` and the
+dashboard's Fit panel. For a global playbook the report answers for the
+project it is asked about: the same playbook may fit one project and not
+another while its trust stays the same.
+
 ## effects
 
 `effects` declares the playbook's side effects. Declarations can only widen what
@@ -1919,7 +2639,9 @@ person, a `y` to the question `apb run` asks at a terminal or
 the run manifest records as `consent: { irreversible: true, by: ... }`. A
 connector function flagged `irreversible: true` that a node is granted counts
 the same way. A node that looks like a merge, push, deploy or publish step by
-its name but declares nothing is warning V90: declare it. A
+its name but declares nothing is warning V90: declare it. A `publish` node
+implies `network`, `external` and `irreversible` without a declaration
+(see "Publishing (the publish node)"). A
 trigger or a headless start without that consent is refused before the run is
 created. A sub-playbook inherits its parent's consent, so declaring
 `irreversible` on a child makes every parent that runs it ask once, at start.
@@ -1939,6 +2661,145 @@ A node's declaration widens the playbook's effective effects the same way
 name of the node: an automatic review
 decision (`auto_decide`) is refused on a gate followed by a node that
 declares `irreversible` or `secrets`, whatever the node is called.
+
+## budget (run spend limit)
+
+`budget` caps what a run spends, in tokens, in US dollars or in both. It is a
+predictive stop: before each agent node and each `playbook` node, the engine
+checks whether what is left still covers the node's median spend in
+comparable past runs, and pauses the run before the node when it does not.
+
+```yaml
+budget:
+  tokens: 400000          # input plus output tokens of the run's agent attempts (cache excluded)
+  usd: 4.00               # cost the agent CLIs reported, in US dollars
+  on_no_estimate: ask     # ask (default) | pause | continue
+```
+
+At least one of `tokens` and `usd` is required. `on_no_estimate` says what
+happens before a node that has no estimate (no comparable run reported its
+spend) or when what the run spent is unknown: `continue` runs it, `pause`
+pauses the run before it, and `ask` makes the person decide at start (see
+below); an `ask` nobody answered acts as `pause`. One exception: a run that
+already spent its limit (what its attempts reported alone reaches it)
+pauses before the next gated node under `continue` too.
+
+**Precedence.** A run argument overrides the block per field: MCP
+`playbook_run` and `playbook_execute_plan` take `budget: { tokens, usd,
+on_no_estimate }`, `apb run` takes `--budget-tokens 300k`, `--budget-usd 3.50`
+and `--on-no-estimate continue`, and the dashboard's Run dialog has a token
+and a dollar input. A run may set a higher or a lower limit than the block.
+With neither a block nor a run argument the run has no budget and no gate.
+An `on_no_estimate` without any limit (in the block or the run) is refused:
+`apb run` exits with an error, MCP and HTTP answer `invalid_budget`, and a
+block with only `on_no_estimate` is a V96 error. A token amount takes `_`
+separators (`300_000`), never a `,`: `1,5m` is refused, not read as `15m`.
+
+**The estimate.** A top-level run with a budget, or one a launch surface
+showed an estimate for, writes the estimate it started with
+(`runs/<id>/estimate.json`; best effort, a failed write never fails the
+start; with run overrides it is computed for the overridden bindings, not
+taken from the one shown), from the newest 50 runs of the same playbook
+version and execution mode (`cli` or `host`) among the project's newest 200
+run directories this apb created (a planted run directory takes no place
+among them). A node's spend comes
+only from runs where it ran with the same profile digest (its `profile.yaml`
+and SOUL, so its model too). `apb run --estimate`, MCP
+`playbook_get(estimate: true)` and the Run dialog show it before a start:
+time, tokens and cost with a range, how many comparable runs there are, how
+many attempts reported no usage, and the nodes with no estimate. Below 3
+comparable runs it is indicative only. See `docs/STATS.md` for the method.
+
+**The gate.** Before a gated node starts a visit, per limited dimension:
+
+- the node's need is the median spend of one visit of it;
+- what is left is the limit minus what the run spent, minus the medians of
+  the members of a parallel batch that were admitted and are still running
+  (so parallel branches do not all pass against the same amount);
+- an attempt that reported no usage (or no cost, for dollars) is never
+  counted as zero: it is estimated with its node's median per attempt, and
+  when no median exists what was spent is unknown. What the attempts did
+  report is still a lower bound: when it alone leaves nothing (basis
+  `exhausted`) or less than the need (basis `median`), the run pauses
+  whatever the policy; only while it still fits does `on_no_estimate`
+  decide;
+- a list node is gated before each batch, with the median per item times
+  the items of the batch; a node in a loop is gated at every traversal;
+- a node that fell back to another executor in this run (a profile fallback
+  in its latest visit, or a host fallback at any time) has no estimate,
+  because its history is another executor's.
+
+When less is left than the need, the run pauses before the node (the journal
+has `budget_gate` with `decision: paused` and `run_paused` with `by: engine`
+and a reason that starts with `budget (`). A plain admission journals nothing.
+
+**At start.** With `on_no_estimate: ask` and a gated node that has no
+estimate in a dimension the budget limits (a node with token history but no
+cost history counts under a dollar limit), the person decides before the run
+starts: MCP refuses the start
+with `budget_needs_decision` (the estimate and the nodes) until the call sets
+`budget.on_no_estimate`, the dashboard's Run dialog shows a pause or continue
+choice, and `apb run` asks at a terminal (without one, `ask` stays and the
+run pauses before such a node).
+
+**Resume.** A run its budget paused does not continue on a plain resume: the
+refusal (`budget_paused`, `apb resume` exit 2) names the node, what it needs
+and what is left. Resume it with a change:
+
+- a raise, added to the limit in force: `--raise-budget-tokens 100k`,
+  `--raise-budget-usd 2` (MCP `run_resume` `budget: { raise_tokens,
+  raise_usd }`, the dashboard's Resume form);
+- a new limit: `--budget-tokens`, `--budget-usd` (`tokens`, `usd`);
+- another policy: `--on-no-estimate continue` (`on_no_estimate`);
+- or `--over-budget-once` (`once`): the paused node (or the next batch of a
+  list node) runs once over the budget, then the gate applies again.
+
+A set and a raise of the same dimension in one resume are refused. A raise,
+a new limit or a policy is journaled as `budget_set` with `source: resume`,
+and `once` as `budget_gate` with `decision: waived`; what was spent is never
+reset. Both are journaled only when the resume is admitted, under the run's
+event lock right before its `run_resumed`: a refused resume (environment
+drift, a finished run, a busy workdir, another resume that won) journals
+none, and a change is applied once per pause, so a second submit of it for
+the same pause is refused. A waiver covers the pause it resolved: a later
+budget pause, or a resume from another node, drops it. A running run's
+budget does not change: pause it first. A budget may also be set at resume
+on a run that had none.
+
+**Who changes a budget.** The engine refuses a budget change, and a plain
+resume of a budget pause, from a supervisor or from its own waker. That a
+person stands behind an operator's change is each surface's rule: `apb
+resume` and the dashboard are a person at a terminal or a browser; MCP
+`run_resume` answers a `budget` first with
+`budget_change_requires_confirmation` and a `budget_nonce`, and applies it
+only when called again with `confirm_budget` set to that nonce, after the
+agent showed the person the change. Like the irreversible consent nonce it
+is not a secret: it makes the agent stop and ask, it cannot prove a person
+answered. A run a supervisor agent watches refuses budget changes over MCP
+outright (`budget_change_refused`).
+
+**Limits.**
+
+- It is not a ceiling: a node the gate admitted may spend past the limit,
+  and the estimate's range is wide on purpose (the medians of the nodes add
+  up as if they moved together).
+- A sub-playbook's spend counts toward its parent's budget and its
+  `playbook` node is gated as one node, but nothing inside the child is
+  gated, and the child's own `budget:` block is ignored under a parent.
+- What decision models spend is not counted; they keep their own budget
+  (`docs/DECISIONS.md`).
+- A subscription plan that reports no cost leaves the dollar dimension
+  without an estimate: with a dollar limit, `on_no_estimate` decides before
+  every gated node, and the start answer warns about it.
+- An older apb that reads a journal with `budget_set` or `budget_gate`
+  refuses to continue the run only until the next checkpoint, then continues
+  it without enforcing the budget.
+
+| Code | Level | What it covers |
+|---|---|---|
+| V96 | error | `budget` declares neither `tokens` nor `usd` |
+| V97 | error | `budget.tokens` is 0, or `budget.usd` is not a finite amount greater than 0 |
+| V98 | warning | a `budget` on a playbook with no agent node and no `playbook` node, so it never applies |
 
 ## goal (target and criteria)
 
@@ -1973,9 +2834,15 @@ validates its playbooks.
     matches the digest the run pinned at start: when an earlier node changed
     it, every `script` criterion is `error` (so `enforce` fails the run)
     instead of running an edited check.
-- `enforce` (bool, default `false`): a failed `script` or `marker` criterion
-  fails a run that would otherwise succeed, with a `run_error` naming the
-  criterion. Without it the results are only reported. V41 warns when
+  - `check: { type: list, node: <id> }`: the latest visit of a list node
+    (`list:`) processed every item and none needs a look. It counts the
+    engine's own item states, so "every row was handled" no longer rests on
+    an agent's tally. Before the finish, run surfaces show where the list
+    stands ("list `send`: 12 of 43 processed, 11 passed, 1 needs a look").
+    Naming a node without `list:` is validator error **V95**.
+- `enforce` (bool, default `false`): a failed `script`, `marker` or `list`
+  criterion fails a run that would otherwise succeed, with a `run_error`
+  naming the criterion. Without it the results are only reported. V41 warns when
   `enforce` is set and every criterion is manual, because nothing could fail.
 
 When the checks run: when the run reaches a finish node, after every node
@@ -1995,6 +2862,252 @@ the goal with each criterion's result (`pending` until the run is checked).
 The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may
 change them.
+
+## known_problems (what earlier runs met with the tools)
+
+Optional. Every run adds the trouble it met with its tools to the
+playbook's store: findings about a tool (above), and connector calls of one
+function that failed alike at least twice in the run. With the block, the
+problems that recur are shown to later runs' agents, in a trailing
+`## known problems` section of the attempt prompt, as facts to check
+(docs/KNOWN-PROBLEMS.md has the full reference):
+
+```yaml
+known_problems:
+  show: significant   # significant (default) | confirmed (a person's only) | off
+  min_runs: 2         # 1 to 20 distinct runs make a problem significant
+  max_shown: 5        # 1 to 10 per attempt prompt
+```
+
+- A problem about a connector function is shown only to the agent nodes
+  that bind that connector, one about a skill only to the nodes whose
+  profile carries it, one about a node to that node (none of them matching:
+  it is not shown); the rest go to every agent node.
+- An agent's symptom or workaround text is shown only once that exact
+  wording recurs in `min_runs` runs (or a person confirmed it).
+- With the block, the attempt's status-file paragraph also asks for
+  `tool_problem` findings with a `workaround`.
+- A problem whose source (the connector function, the skill, the file, the
+  node's prompt) changed is rechecked before it is shown again; it closes
+  only on a quote of the new source that shows the fix, and a person
+  decides with `apb problems` or the dashboard's Problems panel.
+- Without the block nothing is shown or journaled: prompts stay as they
+  were. V108 refuses a malformed block, V109 warns when there is no
+  `agent_task` node to show anything to.
+
+## quality (run quality)
+
+A run that succeeded can still have gone badly. The `quality:` block names
+what a good run looks like, so every run is graded and versions compare
+on more than success (docs/QUALITY.md has the full reference):
+
+```yaml
+quality:
+  task_type: "{{params.kind}}"   # optional, params only: runs compare within one type
+  grade_on_finish: rules         # the default; off leaves grading to apb grade
+  builtins:
+    scope: { off: "the task is to reorganize the whole repository" }
+  criteria:                      # at most 3 of the playbook's own
+    - id: first-error
+      subject: { node: triage }  # or run
+      evidence: presence         # presence | absence | both
+      reads: [outputs, transcripts]
+      levels:
+        good: "likely_cause cites the first error in the log"
+        partial: "likely_cause names the step but cites a follow-up error"
+        poor: "likely_cause names an error the log does not show"
+```
+
+- The built-ins (`outcome`, `loops`, `scope`, `consent`, `skill_use`) are
+  graded by rules as every run ends, from the journal and the transcripts,
+  without a model. They grade a mail or CRM run as well as a code run:
+  irreversible connector calls without consent and repeated failing calls
+  come from the journal.
+- The playbook's own criteria are graded by a host agent when a person asks
+  (MCP `run_grade_start`, `run_grade_read`, `run_grade_submit`), citing the
+  records it read in full. A grade keeps references, counts and one short
+  redacted `why`, never the source text it read. A run takes one host
+  grade until a person reopens it (`apb grade <run> --reopen`).
+- Or by the project's decision model (`apb grade <run> --model`, MCP
+  `run_grade { grader: model }`), only when `decisions.yaml` turns
+  `uses.grade` on; `criteria_grader: model` makes a candidate comparison
+  expect those grades instead of a host's (V110 refuses an unknown value,
+  V111 warns when there are no criteria of the playbook's own).
+- Write each level as something checkable against a record. Editing a
+  criterion starts a new comparison history (its digest changes).
+- `apb grade <run>` grades a run by rules (`--model` by the decision
+  model), `apb grade --backfill <id>` grades earlier runs, `apb candidate
+  <id>` shows and decides a candidate.
+
+## baseline_check (before and after)
+
+Optional, report-only by default. A goal says what the run is for; a
+baseline says what the world looked like before the run touched it and what
+it looks like at the end, read by the engine itself rather than by an agent.
+Each check reads one source twice: once before the first node that can act,
+and once at the finish node, then compares every observation under its
+rule.
+
+```yaml
+baseline_check:
+  enforce: false            # default: report only
+  checks:
+    - id: unowned           # [a-z0-9_], at most 40
+      description: Open deals without an owner
+      timeout_seconds: 300  # default 300, at most 1800
+      connector:            # exactly one source: connector | script | project_checks
+        name: twenty
+        account: default
+        function: list_opportunities   # must be read_only, not an inbox function
+        args: { filter: "ownerId[is]:NULL,stage[in]:[{{params.open_stages}}]", limit: 1 }
+      observe:
+        - { id: count, type: number, path: totalCount, expect: { equals: 0 } }
+```
+
+**When the snapshots are taken.** "A node that can act" is one that takes
+the working-tree lock (`agent_task`, `script`, a sub-playbook, a finish
+with a prompt), binds a connector, or declares any effect other than
+`fs_read`: a human gate or a judge before it does not count. The before
+snapshot is journaled once (`baseline_observed`, `phase: before`) and never
+taken again: a pause, a quota pause, `apb resume` and a resume from a node
+reuse it. A run continued from another (`continued_from`) inherits its
+predecessor's before snapshot. A check with no before snapshot when a node
+that can act has already started (a playbook patched mid-run, a journal from
+an older apb) is journaled `missed`, and its comparisons are unknown. The
+after snapshot and one `baseline_compared` per observation are journaled at
+the finish, after the finish answer and before the goal criteria; a run that
+ends before a finish node has no after snapshot, and the outcome says so. A
+run whose nodes never act takes its before snapshot at the finish, right
+before the after one. A resume that re-runs nodes that can act takes a new
+after snapshot, and a resume after a crash between two `baseline_compared`
+events journals the missing ones before judging the whole set. An abort or
+a `--now` pause interrupts either snapshot like any node work: nothing of
+it is journaled, and the resume takes it again. A finish answer composed
+before an interrupted after snapshot is kept: the resume continues at the
+snapshot and the answer agent does not run again, unless the run moved on
+meanwhile (a node re-ran, a supervisor directive or patch, a resume that
+names its start node). A supervisor patch may not
+change `baseline_check` once a node that can act has started.
+
+**Sources.**
+
+- `connector`: one call of one function, through the run's own connector
+  grant for the reserved site `@baseline` (no node needs to bind it). The
+  function must be `read_only` and not an inbox function, and `args` may
+  template only `{{params.*}}`, so both snapshots ask the same question. The
+  observations are read from the response body. The read is unknown when
+  the call fails, its response was not read whole, or `complete_when` (a
+  path and the value it must hold; connector sources only) does not hold.
+  Numbers compare as numbers there, and a templated value (rendered as
+  text) holds a number or a bool written the same way. Use `complete_when`
+  only with a condition the page you ask for can meet: with `limit: 1`, a
+  `pageInfo.hasNextPage` is true whenever more than one record matches,
+  while a `totalCount` does not depend on the page size. The call is
+  bounded by the smaller of the check's `timeout_seconds` and the
+  function's own `timeout_sec`.
+- `script: scripts/<file>`: a script under the version's `scripts/`, pinned
+  by the run's script digest like a goal script, run with `sh` in the run's
+  working tree with `APB_RUN_ID`, `APB_RUN_DIR` and `APB_BASELINE_PHASE`
+  (`before` or `after`). Its last non-empty stdout line is one JSON object
+  the observations read from; `"complete": false` in it, a non-zero exit, a
+  timeout, more than 1 MiB of output, or any change to the git working tree
+  makes the read unknown. The working tree must be a git work tree with at
+  least one commit: one that cannot be checked (not a git repository, or
+  git failed) reads unknown with "the working tree could not be checked".
+- Scripts and project commands never see a connector secret: every env var
+  an installed connector references is removed from their environment, as
+  from every agent and script node.
+- `project_checks: { only: [test, lint, typecheck, check] }`: the project's
+  own commands, found without running anything: `package.json` scripts with
+  the package manager its lockfile names (`bun`, `pnpm`, `yarn`, otherwise
+  `npm`), `cargo check` and `cargo test --no-fail-fast` for a
+  `Cargo.toml`, and recipes named `test` or `check` in a make file
+  (`GNUmakefile`, `makefile`, `Makefile`, the first that exists, as make
+  reads them) or a `justfile`. `only` narrows the kinds; omit it for all.
+  The commands are discovered once, at before, and the after snapshot runs
+  exactly those. Its observations are fixed (no `observe`): per command its
+  status and, for `cargo test`, the failing tests, each named by its test
+  binary (a doctest without its line number); the list is read only when
+  every test binary printed its result, and more than 500 failing tests
+  read unknown. The rule is "no new failures": a command that passed must
+  still pass; one that failed may fail only on tests that already failed.
+  For a runner other than `cargo test`, a command that fails on both sides
+  reads unknown. The commands run under the same tree rule as a script: a
+  command that writes into the tree (an untracked lockfile, a build output
+  that is not ignored) or a tree that cannot be checked reads unknown.
+  What a command is compared against is its definition only: the
+  `scripts.<kind>` entry of `package.json` with its `pre<kind>` and
+  `post<kind>` scripts, every make or just rule that names the recipe with
+  its body, and the `Cargo.toml` without its dependency tables (targets,
+  auto-discovery flags, features and workspace members decide which tests
+  run). A definition that changed between the snapshots, or a manifest
+  that is gone, reads unknown; a dependency bump in the same manifest does
+  not change it. A definition is not followed into what it calls: another
+  script it runs (`npm run lint && jest`), a make prerequisite's recipe, a
+  make variable set elsewhere in the file and a workspace member's own
+  `Cargo.toml` are not compared, so keep the checked command
+  self-contained when that matters.
+
+**Observations.** Each has an `id`, a `type`, a dotted `path` into the read
+document (`data.items[].id` maps over an array) and exactly one rule in
+`expect`:
+
+- `number`: `equals`, `at_most` or `at_least: <n>`, or `change: decrease |
+  increase | no_increase | no_decrease | unchanged`. `count: true` reads the
+  length of the array at the path.
+- `list`: `change: no_new | shrink | unchanged`, or `empty: true`.
+- `field` (a string, bool or number): `equals: <value>` or `change:
+  unchanged`.
+
+A path with `[]` reads a list, so it fits only a `list` or a `count: true`
+number. A missing key, a type mismatch, a number that is not finite, a list
+of more than 500 items, an item or a field text longer than 256
+characters, or text with a control or invisible format character reads
+unknown, never zero, empty or truncated. A list is a set: an item that
+appears twice counts once, and an integer item keeps its exact digits.
+
+**Verdicts.** Each comparison is `met`, `not_met` or `unknown` (either side
+unknown, no before snapshot, or the check's input changed between the two
+snapshots: other rendered args, an edited script, an edited test
+definition). `regressed` marks an after value strictly worse than the
+before one in the rule's direction. With `enforce: true` anything but `met`
+fails a run that would otherwise succeed, with a `run_error` naming the
+check and the observation; without it the results are reported only.
+
+**What it is not.** A baseline shows the change; it never says whether the
+goal was reached. The run outcome reports "goal reached" from the goal
+criteria only, so give a playbook with a baseline a goal with checked
+criteria (V66 warns otherwise).
+
+Two worked examples ship in `examples/playbooks/`:
+
+- `crm-cleanup.yaml`: the connector check above. A run that assigns 17 of
+  37 owners before a network error reports `unowned/count: 37 -> 20, equals
+  0: not met`, with the CRM's own counts, while the marker criteria still
+  say what the agents reported.
+- `dependency-security-fix.yaml`: `project_checks: { only: [test] }` under
+  `enforce: true`. Two tests that failed before the fix may still fail; a
+  third failing test fails the run and is named.
+
+Validator codes: **V62** (structure: no checks, a duplicate or malformed id,
+not exactly one source, `observe` missing for a connector or script source
+or present for `project_checks`, `complete_when` on a source other than a
+connector, an unknown `only` kind, `timeout_seconds` out of range), **V63**
+(source safety: a script outside `scripts/`, and with the installed
+connectors known a function that writes, is an inbox function or is not
+declared; a malformed connector or function name is V23, as for a node),
+**V64** (a rule that does not fit the observation type, not exactly one
+rule, a non-finite number, a malformed path, a `[]` path on anything but a
+list or a count, `count` on a non-number), **V65** (connector args or
+`complete_when` templating anything but a declared `params.<name>`), **V66** (warning: a baseline without a goal, or with only
+manual criteria), **V67** (warning: a script or `project_checks` source while
+`worktree` reads a node output, so the two snapshots would run in different
+trees), **V68** (a node id that starts with `@`: those ids, `@baseline` and
+`@notify`, are reserved for the engine).
+
+`run_status`, `run_report`, `apb runs <id>` and the dashboard run page show
+each check and observation with both values and the verdict; `apb stats`
+counts each observation's results across runs.
 
 <!-- 0.24.0 eval suites -->
 ## Eval cases (evals/)
@@ -2016,13 +3129,115 @@ Keep the cases small (the fixture of the repository's own
 `branch-quality-review` suite is a twenty-line crate), tag a quick subset,
 and set `limits` and `budget` in `suite.yaml`: every repetition is a paid
 agent run. The format, the checks and the storage are in `docs/EVALS.md`.
+
+List nodes (`list:`) run in evals like any other node, except that a
+`connector` item check is a connector binding site and is refused like
+every other one (V81). To assert the counts, give the playbook a `type:
+list` goal criterion: `checks.goal: required` then needs every item
+processed with none left for a look, and an `events` check may name
+`list_started`, `list_batch_started` and `list_item_settled`.
 <!-- end 0.24.0 eval suites -->
 
 ## Secrets
 
 Never put secret values in a playbook or in a capture synopsis. Reference them
-by env or config key name, or a placeholder param. Concrete secret-looking
-values are rejected at capture and should never be committed to a definition.
+by env or config key name, or a `secret: true` param (see "Secret params").
+Concrete secret-looking values are rejected at capture and should never be
+committed to a definition.
+
+## Sharing a playbook
+
+`apb export <id> --out file.json` writes one version as a bundle: the YAML
+(in the form a save writes it, so a hand-edited version loses its comments
+and formatting here, as on any save), the editor layout, the scripts, and an
+`origin` block (the exporter's digest of the version, its scope, the apb
+version and the export time). The digest in `origin` is the one an import
+of the bundle under the same id and version computes. Nothing in `origin`
+is trusted by the importer; it only tells where the file says it came
+from.
+
+`apb import file.json` always prints a preview first: whether the playbook is
+new or the bundle equals the current version, the definition diff against the
+current version (nodes added, removed and changed, edges added and removed),
+the scripts it adds, removes and changes, the validation errors that would
+refuse it, and the bundle digest. `--preview` stops there. A bundle equal to
+the current version (naming no other version) writes nothing: apb prints
+"nothing to import" and exits 0, with or without a terminal. A bundle the
+import would refuse (validation errors, or a version that already exists
+with other content) stops after the preview with exit 2, before anyone is
+asked to accept it. Otherwise, to import, accept that exact file: on a
+terminal apb asks y/N; without a terminal pass `--accept <bundle digest>`
+from the preview.
+
+Behaviour change: without a terminal and without `--accept`, `apb import`
+now exits 3 and writes nothing (it used to import at once), except for the
+unchanged and refused cases above. A wrong `--accept` is refused with
+exit 2.
+
+The version an import writes records where it came from (`created_by:
+import`, the bundle digest, the file's base name, the declared id and
+version, the scripts by sha256 and the final trust digest); the dashboard's
+version history shows "imported from <file>". A version imported with
+scripts carries code nobody on this machine wrote, so it runs only after an
+approval that names its exact digest, for the playbook and every
+sub-playbook:
+
+```sh
+apb trust approve <id> --version <version> --digest <digest>
+```
+
+(MCP: `playbook_approve` with `digest`). Without a digest the approval is
+refused and prints the digest and the scripts as they are now; an
+acknowledge at start does not stand in for it (refusal
+`imported_scripts_require_approval`), and a script changed after the approval
+needs a new one. The rule holds for every way a version runs: a trial
+(`playbook_trial`) and a sub-playbook child are refused the same way. It
+follows the scripts too: a version saved or patched on top of an imported
+version nobody approved yet keeps the import record, so it needs the same
+approval by digest. Once an imported version is approved, a save that
+carries its scripts unchanged is trusted like any save. The dashboard marks
+a waiting version "awaiting approval".
+
+Over MCP this approval records consent; it does not stop an agent. The
+refusal names the digest, so an agent can approve by sending it back: the
+tool asks the agent to show the scripts to the person first, and the
+approval is recorded as the agent's (`agent_generated`). A person approves
+on the CLI or the dashboard by naming the digest themselves.
+
+## Making a playbook global
+
+A project playbook that every project could use is made global in one
+command:
+
+```sh
+apb make-global <id> --dry-run
+apb make-global <id> --variant trash|retire|keep [--move-profiles]
+```
+
+(MCP: `playbook_make_global`). It copies the playbook with every version to
+the global store; digests depend on content only, so the copy keeps its
+trust. The project's remembered input moves to the global scope (with
+`keep` it is copied, since the project copy keeps running here). The
+`variant` decides what happens to the project copy: `trash` moves it to the
+project trash (restorable), `retire` keeps it retired so the global one wins
+here, `keep` leaves both: while both are active and trusted the catalog
+marks the pair ambiguous until one is retired, otherwise the global one
+shadows the project copy. A step that fails undoes the earlier ones (the
+global copy, the copied profiles, the memory), so a retry starts from the
+same state.
+
+The dry run lists what stops it (a global playbook with the same id, a
+candidate version on trial, a version that fails validation as a global
+playbook, an `auto` profile only this project has: pass `--move-profiles` to
+copy it, unless it uses project skills, an `auto` sub-playbook only this
+project has) and what to know (an explicit `scope: project` sub-playbook
+resolves per project, connector accounts this project configures, a global
+profile of the same name that differs, other projects on this machine with
+their own playbook of this id, which are reported and never changed; a
+global profile counts as different when its own files or the content of a
+skill it uses differ). Once applied, the answer ends with the global
+playbook's fit report for this project (none, with a warning, when it
+cannot be built); a dry run and a blocked run answer with the plan only.
 
 ## Recurring review findings go into project memory
 
@@ -2111,7 +3326,8 @@ both directions so either end leads to the other:
   so `git log --grep 'Apb-Run: <run id>'` finds the run's commits and a
   commit leads back to `.apb/runs/<run id>/`. On a git working tree apb
   also records the commits each node made (HEAD before and after the node)
-  as an `artifacts_committed` event, and the run report lists them. A final
+  as an `artifacts_committed` event, and the run report lists them, flagging
+  a commit whose trailer is missing or names another run. A final
   node that comments on the tracker record with the run id and those
   commits closes the loop from the record side. "Run provenance" above
   has the details.

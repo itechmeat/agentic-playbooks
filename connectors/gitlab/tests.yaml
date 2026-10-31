@@ -69,6 +69,79 @@ cases:
       url: https://gitlab.com/api/v4/projects/42/issues/7/notes
       body_contains: { body: "Looking into this." }
 
+  # Text modes: agent-written text must never run a GitLab quick action.
+  - function: comment_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, body: "/close" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues/7/notes
+      body_contains: { body: '\/close' }
+
+  - function: comment_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, body: "  \t/assign @me" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues/7/notes
+      body_contains: { body: "  \t\\/assign @me" }
+
+  - function: comment_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, body: "Fixed in **main**.\n/label ~done\nThanks @user" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues/7/notes
+      body_contains: { body: "Fixed in **main**.\n\\/label ~done\nThanks @user" }
+
+  - function: comment_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, body: "Please do not /close this yet, see a/b." }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues/7/notes
+      body_contains: { body: "Please do not /close this yet, see a/b." }
+
+  - function: comment_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, body: "`/close` closes the issue" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues/7/notes
+      body_contains: { body: "`/close` closes the issue" }
+
+  - function: comment_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 3, body: "Run this:\n```\n/merge\n```" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/merge_requests/3/notes
+      body_contains: { body: "Run this:\n```\n\\/merge\n```" }
+
+  - function: create_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", title: "Regression from #12 @user ~label", description: "Seen again.\n/assign @user" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues
+      body_contains: { title: "Regression from #12 @user ~label", description: "Seen again.\n\\/assign @user" }
+
+  - function: update_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, title: "/close   *now*\n", description: "/close" }
+    expect:
+      method: PUT
+      url: https://gitlab.com/api/v4/projects/42/issues/7
+      body_contains: { title: "/close   *now*\n", description: '\/close' }
+
+  - function: create_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", source_branch: feature, target_branch: main, title: "1. Fix [docs](https://example.com/a_b)", description: "Details\n /merge" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/merge_requests
+      body_contains: { title: "1. Fix [docs](https://example.com/a_b)", description: "Details\n \\/merge" }
+
   - function: list_merge_requests
     account: { api_base: https://gitlab.com/api/v4 }
     args: { project: "42", state: opened, page: 2, per_page: 10 }

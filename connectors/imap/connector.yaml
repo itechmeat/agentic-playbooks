@@ -120,6 +120,7 @@ functions:
         folder: { type: string, description: "the mailbox folder the messages live in, for example INBOX" }
         uids: { type: string, description: "comma-separated uid list, for example \"101,102\"" }
       required: [folder, uids]
+    idempotency: { mode: none }
     examples:
       - args: { folder: INBOX, uids: "101,102" }
         note: "mark_read and mark_unread are separate functions, so a grant allowlist can permit one without the other."

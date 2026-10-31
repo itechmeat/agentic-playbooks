@@ -44,8 +44,29 @@ fn render_types() -> String {
         // 0.23.0 run outcome blocks (C1, C7).
         apb_engine::event::CommittedArtifact::decl(&cfg),
         apb_engine::run_outcome::NodeCommits::decl(&cfg),
+        apb_engine::run_outcome::RunInboxGap::decl(&cfg),
         apb_engine::run_outcome::GoalCriterionResult::decl(&cfg),
         apb_engine::run_outcome::RunGoal::decl(&cfg),
+        // The human run outcome: baseline, notes, the summary.
+        apb_core::baseline::ObservedValue::decl(&cfg),
+        apb_core::baseline::Observation::decl(&cfg),
+        apb_engine::run_outcome::baseline::ObservationView::decl(&cfg),
+        apb_engine::run_outcome::baseline::BaselineCheckView::decl(&cfg),
+        apb_engine::run_outcome::RunBaseline::decl(&cfg),
+        apb_core::run_notes::Finding::decl(&cfg),
+        apb_core::run_notes::NoteWarning::decl(&cfg),
+        apb_engine::run_outcome::notes::RunFinding::decl(&cfg),
+        apb_engine::run_outcome::notes::RunWarning::decl(&cfg),
+        apb_engine::run_outcome::RunNotes::decl(&cfg),
+        apb_engine::run_outcome::summary::EvidenceSource::decl(&cfg),
+        apb_engine::run_outcome::summary::Evidence::decl(&cfg),
+        apb_engine::run_outcome::summary::GapKind::decl(&cfg),
+        apb_engine::run_outcome::summary::Gap::decl(&cfg),
+        apb_engine::run_outcome::summary::BaselineOutcome::decl(&cfg),
+        apb_engine::run_outcome::summary::NeedsLookReason::decl(&cfg),
+        apb_engine::run_outcome::NeedsLook::decl(&cfg),
+        apb_engine::run_outcome::ListOutcome::decl(&cfg),
+        apb_engine::run_outcome::OutcomeSummary::decl(&cfg),
         apb_engine::state::RunStatus::decl(&cfg),
         apb_engine::state::NodeStatus::decl(&cfg),
         apb_engine::progress::WaitingKind::decl(&cfg),
@@ -54,8 +75,19 @@ fn render_types() -> String {
         apb_engine::host_task::FallbackOf::decl(&cfg),
         apb_engine::host_task::PendingHostTask::decl(&cfg),
         apb_engine::event::ReviewRecommendation::decl(&cfg),
+        // The publish step: the plan a person consents to and each node's
+        // target, push and result.
+        apb_engine::event::PublishCommit::decl(&cfg),
+        apb_engine::publish::view::PlanView::decl(&cfg),
+        apb_engine::publish::view::PushState::decl(&cfg),
+        apb_engine::publish::view::PushView::decl(&cfg),
+        apb_engine::publish::view::PublishView::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
+        // List mode: a list node's counts and its items.
+        apb_engine::list::ListProgress::decl(&cfg),
+        apb_engine::list::RunListItem::decl(&cfg),
+        apb_engine::list::RunList::decl(&cfg),
         apb_engine::progress::ProgressSummary::decl(&cfg),
         apb_engine::run_view::ChildRun::decl(&cfg),
         apb_engine::run_view::RunUsage::decl(&cfg),
@@ -63,6 +95,10 @@ fn render_types() -> String {
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
         // Issue #193: the model each attempt actually ran on.
         apb_engine::attempt_models::AttemptModel::decl(&cfg),
+        // Isolation: what each isolated attempt held and did not.
+        apb_engine::event::IsolationViewEntry::decl(&cfg),
+        apb_engine::event::AttemptIsolation::decl(&cfg),
+        apb_engine::run_view::AttemptIsolationRow::decl(&cfg),
         // --- 0.23.0 stats (C3) ---
         apb_engine::run_stats::Rate::decl(&cfg),
         apb_engine::run_stats::PerRun::decl(&cfg),
@@ -71,6 +107,14 @@ fn render_types() -> String {
         apb_engine::run_stats::Spend::decl(&cfg),
         apb_engine::run_stats::models::ModelUse::decl(&cfg),
         apb_engine::run_stats::GoalStats::decl(&cfg),
+        apb_engine::run_stats::QualityStats::decl(&cfg),
+        apb_engine::run_stats::QualityDelta::decl(&cfg),
+        apb_engine::run_stats::findings::KindCount::decl(&cfg),
+        apb_engine::run_stats::findings::FindingGroup::decl(&cfg),
+        apb_engine::run_stats::findings::FindingStats::decl(&cfg),
+        apb_engine::run_stats::findings::BaselineStats::decl(&cfg),
+        apb_engine::run_stats::digests::DigestStats::decl(&cfg),
+        apb_engine::run_stats::digests::ExecutorChange::decl(&cfg),
         apb_engine::run_stats::NodeStats::decl(&cfg),
         apb_engine::run_stats::VersionStats::decl(&cfg),
         apb_engine::run_stats::Comparison::decl(&cfg),
@@ -83,7 +127,38 @@ fn render_types() -> String {
         // Issue #200: operator pause.
         apb_engine::pause::PauseBy::decl(&cfg),
         apb_engine::pause::PauseMode::decl(&cfg),
+        apb_engine::pause::PauseCause::decl(&cfg),
         apb_engine::pause::PauseInfo::decl(&cfg),
+        // The run budget and the run estimate.
+        apb_core::budget::OnNoEstimate::decl(&cfg),
+        apb_core::budget::BudgetLimit::decl(&cfg),
+        apb_core::budget::BudgetSource::decl(&cfg),
+        apb_engine::budget::BudgetAmount::decl(&cfg),
+        apb_engine::budget::SpentDim::decl(&cfg),
+        apb_engine::budget::BudgetSpent::decl(&cfg),
+        apb_engine::budget::GateDecision::decl(&cfg),
+        apb_engine::budget::GateBasis::decl(&cfg),
+        apb_engine::budget::DimStatus::decl(&cfg),
+        apb_engine::budget::PausedAt::decl(&cfg),
+        apb_engine::budget::BudgetStatus::decl(&cfg),
+        apb_engine::run_estimate::Spread::<f64>::decl(&cfg),
+        apb_engine::run_estimate::SpreadKind::decl(&cfg),
+        apb_engine::run_estimate::EstimateBasis::decl(&cfg),
+        apb_engine::run_estimate::Comparable::decl(&cfg),
+        apb_engine::run_estimate::TimeEstimate::decl(&cfg),
+        apb_engine::run_estimate::SpendEstimate::<f64>::decl(&cfg),
+        apb_engine::run_estimate::NodeSpread::decl(&cfg),
+        apb_engine::run_estimate::AttemptMedian::decl(&cfg),
+        apb_engine::run_estimate::ItemsBasis::decl(&cfg),
+        apb_engine::run_estimate::ListEstimate::decl(&cfg),
+        apb_engine::run_estimate::NodeEstimate::decl(&cfg),
+        apb_engine::run_estimate::RunEstimate::decl(&cfg),
+        // "Notify me".
+        apb_core::notify::Transition::decl(&cfg),
+        apb_core::notify::NotifyTarget::decl(&cfg),
+        apb_engine::notify::view::NotifySent::decl(&cfg),
+        apb_engine::notify::RunNotify::decl(&cfg),
+        crate::routes::notify::MachineNotify::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),
@@ -94,6 +169,95 @@ fn render_types() -> String {
         apb_core::trust::OriginKind::decl(&cfg),
         apb_core::trust::TrustEntry::decl(&cfg),
         crate::routes::trust::TrustRevoked::decl(&cfg),
+        // "Will it fit here?"
+        apb_engine::fit::FitSeverity::decl(&cfg),
+        apb_engine::fit::FitItem::decl(&cfg),
+        apb_engine::fit::TrustItem::decl(&cfg),
+        apb_engine::fit::ConsentView::decl(&cfg),
+        apb_engine::fit::FitReport::decl(&cfg),
+        apb_engine::fit::FitSummary::decl(&cfg),
+        // Remembered run input.
+        apb_core::run_memory::Incompat::decl(&cfg),
+        apb_core::run_memory::InstructionSource::decl(&cfg),
+        apb_core::run_memory::ValueStatus::decl(&cfg),
+        apb_core::run_memory::RecalledValue::decl(&cfg),
+        apb_core::run_memory::Recall::decl(&cfg),
+        apb_core::run_memory::Refused::decl(&cfg),
+        apb_core::run_memory::Remembered::decl(&cfg),
+        // Version history and import provenance.
+        apb_core::versioning::BundleOrigin::decl(&cfg),
+        apb_core::versioning::ScriptEntry::decl(&cfg),
+        apb_core::versioning::ImportProvenance::decl(&cfg),
+        apb_core::quality::compare::ComparableKey::decl(&cfg),
+        apb_core::quality::compare::Tally::decl(&cfg),
+        apb_core::quality::compare::CriterionResult::decl(&cfg),
+        apb_core::quality::compare::CriterionComparison::decl(&cfg),
+        apb_core::quality::compare::Verdict::decl(&cfg),
+        apb_core::quality::compare::QualityRecord::decl(&cfg),
+        // Run quality: grades, the candidate comparison and the decisions.
+        apb_core::quality::criteria::CriterionSource::decl(&cfg),
+        apb_core::quality::grade::Level::decl(&cfg),
+        apb_core::quality::grade::Cite::decl(&cfg),
+        apb_core::quality::grade::ViewEnd::decl(&cfg),
+        apb_core::quality::grade::CriterionGrade::decl(&cfg),
+        apb_core::quality::grade::ReadOp::decl(&cfg),
+        apb_core::quality::grade::ViewRead::decl(&cfg),
+        apb_core::quality::grade::ReadTrace::decl(&cfg),
+        apb_core::quality::grade::GraderKind::decl(&cfg),
+        apb_core::quality::grade::GraderId::decl(&cfg),
+        apb_core::quality::grade::SkillReadState::decl(&cfg),
+        apb_core::quality::grade::SkillRead::decl(&cfg),
+        apb_core::quality::grade::Grade::decl(&cfg),
+        apb_core::quality::compare::CompareMode::decl(&cfg),
+        apb_core::quality::compare::QualityGate::decl(&cfg),
+        apb_core::quality::compare::QualityDecision::decl(&cfg),
+        apb_engine::candidate::CandidateQualityView::decl(&cfg),
+        apb_mcp::tools::grade::Graded::decl(&cfg),
+        crate::routes::quality::RunGrades::decl(&cfg),
+        crate::routes::quality::PlaybookCandidate::decl(&cfg),
+        // Known problems: the store as the surfaces show it, a run's shown
+        // and hidden problems, and one problem with its changed passages.
+        apb_core::known_problems::ScopeKind::decl(&cfg),
+        apb_core::known_problems::ProblemScope::decl(&cfg),
+        apb_core::known_problems::ProblemOrigin::decl(&cfg),
+        apb_core::known_problems::EvidenceRef::decl(&cfg),
+        apb_core::known_problems::SourceKind::decl(&cfg),
+        apb_core::known_problems::ProblemSource::decl(&cfg),
+        apb_core::known_problems::ProblemStatus::decl(&cfg),
+        apb_core::known_problems::Decided::decl(&cfg),
+        apb_core::known_problems::RecheckVerdict::decl(&cfg),
+        apb_core::known_problems::RecheckBasis::decl(&cfg),
+        apb_core::known_problems::Quote::decl(&cfg),
+        apb_core::known_problems::RecheckRecord::decl(&cfg),
+        apb_core::known_problems::KnownProblem::decl(&cfg),
+        apb_core::known_problems::ReportedText::decl(&cfg),
+        apb_core::known_problems::ShownProblem::decl(&cfg),
+        apb_core::known_problems::HiddenProblem::decl(&cfg),
+        apb_engine::known_problems::SourceNow::decl(&cfg),
+        apb_engine::known_problems::ProblemView::decl(&cfg),
+        apb_engine::known_problems::ProblemsView::decl(&cfg),
+        apb_engine::known_problems::RunKnownProblems::decl(&cfg),
+        apb_engine::known_problems::ChangedPassage::decl(&cfg),
+        apb_engine::known_problems::ScanReport::decl(&cfg),
+        apb_mcp::tools::problems::ProblemDetail::decl(&cfg),
+        // History discovery: a result, its suggestions and the listings.
+        apb_core::discover::ProjectSeen::decl(&cfg),
+        apb_core::discover::SourceSpan::decl(&cfg),
+        apb_core::discover::Example::decl(&cfg),
+        apb_core::discover::Support::decl(&cfg),
+        apb_core::discover::SuggestionStatus::decl(&cfg),
+        apb_core::discover::Suggestion::decl(&cfg),
+        apb_core::discover::RootReport::decl(&cfg),
+        apb_core::discover::ReadReport::decl(&cfg),
+        apb_core::discover::RequestEcho::decl(&cfg),
+        apb_core::discover::SuppressedSlug::decl(&cfg),
+        apb_core::discover::DiscoverResult::decl(&cfg),
+        apb_mcp::tools::discover::RootInfo::decl(&cfg),
+        apb_mcp::tools::discover::ResultView::decl(&cfg),
+        apb_mcp::tools::discover::ResultSummary::decl(&cfg),
+        apb_core::versioning::TrialRecord::decl(&cfg),
+        apb_core::versioning::VersionProvenance::decl(&cfg),
+        apb_core::versioning::VersionInfo::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"
@@ -106,7 +270,10 @@ fn render_types() -> String {
     out
 }
 
-/// The generated constants module (no imports).
+/// The generated constants module (no imports: `vite.config.ts` reads it
+/// too). The label maps keep their exact keys (`as const`), so the
+/// dashboard can hold them to the generated enums and a variant without a
+/// label fails type-checking.
 fn render_consts() -> String {
     use apb_core::schema;
     let mut out = String::from(HEADER);
@@ -122,6 +289,14 @@ fn render_consts() -> String {
         "\n/** The decisions a human_review gate without options offers. */\nexport const DEFAULT_REVIEW_OPTIONS = {}\n",
         ts_string_array(&schema::DEFAULT_REVIEW_OPTIONS)
     ));
+    let transitions: Vec<&str> = apb_core::notify::Transition::ALL
+        .iter()
+        .map(|t| t.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every run transition a person can be notified about, in report order. */\nexport const NOTIFY_TRANSITIONS = {}\n",
+        ts_string_array(&transitions)
+    ));
     out.push_str(&format!(
         "\n/** The dashboard's default port (the dev server proxies to it). */\nexport const DEFAULT_PORT = {}\n",
         apb_core::config::DEFAULT_PORT
@@ -134,11 +309,94 @@ fn render_consts() -> String {
             .collect::<Vec<_>>()
             .join(", ")
     ));
+    {
+        use apb_engine::run_outcome::summary::{EvidenceSource, GapKind};
+        out.push_str(&format!(
+            "\n/** What checked a piece of evidence, in words. */\nexport const EVIDENCE_SOURCE_LABELS = {{ {} }} as const\n",
+            label_entries(EvidenceSource::ALL.iter().map(|s| (serde_key(s), s.label())))
+        ));
+        out.push_str(&format!(
+            "\n/** Why something is not verified, in words. */\nexport const GAP_LABELS = {{ {} }} as const\n",
+            label_entries(GapKind::ALL.iter().map(|k| (serde_key(k), k.label())))
+        ));
+    }
+    {
+        use apb_core::known_problems::recheck::{QUOTE_MAX, QUOTE_MIN};
+        out.push_str(&format!(
+            "\n/** The shortest and the longest quote a known problem's close may rest on. */\nexport const QUOTE_MIN = {QUOTE_MIN}\nexport const QUOTE_MAX = {QUOTE_MAX}\n"
+        ));
+    }
+    render_isolation_consts(&mut out);
+    render_publish_consts(&mut out);
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")
     ));
     out
+}
+
+/// The isolation code tables: the sentence of every hold and limit code an
+/// attempt journals, and of every reason a node is refused or runs without
+/// a sandbox, so the dashboard words them exactly as the CLI does.
+fn render_isolation_consts(out: &mut String) {
+    use apb_core::isolation::contract::{
+        ALL_CODES, ALL_REASONS, ENV_PASSED_PREFIX, ENV_PASSED_TEXT, UNAVAILABLE,
+    };
+    let quoted = |s: &str| serde_json::to_string(s).expect("a string");
+    out.push_str(&format!(
+        "\n/** The sentence of every isolation hold and limit code. */\nexport const ISOLATION_CODE_TEXTS = {{ {} }} as const\n",
+        ALL_CODES
+            .iter()
+            .map(|c| format!("{}: {}", quoted(c.id()), quoted(c.text())))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    out.push_str(&format!(
+        "\n/** The limit naming a credential-shaped variable the allowlist passes (`<prefix><NAME>`), and its sentence. */\nexport const ISOLATION_ENV_PASSED_PREFIX = {}\nexport const ISOLATION_ENV_PASSED_TEXT = {}\n",
+        quoted(ENV_PASSED_PREFIX),
+        quoted(ENV_PASSED_TEXT)
+    ));
+    out.push_str(&format!(
+        "\n/** Why a full node is refused, or a best_effort one runs without a sandbox. */\nexport const ISOLATION_REASON_TEXTS = {{ {} }} as const\n",
+        label_entries(ALL_REASONS.iter().map(|r| (r.id().to_string(), r.text())))
+    ));
+    out.push_str(&format!(
+        "\n/** The refusal code of a full node this machine cannot isolate. */\nexport const ISOLATION_UNAVAILABLE = {}\n",
+        quoted(UNAVAILABLE)
+    ));
+}
+
+/// The publish step's decisions, its push timeout bounds and the sentence
+/// of every plan refusal, so the dashboard words them as the CLI does.
+fn render_publish_consts(out: &mut String) {
+    use apb_core::publish::{DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, OPTIONS, Refusal};
+    out.push_str(&format!(
+        "\n/** The decisions of a publish gate. */\nexport const PUBLISH_OPTIONS = {}\n",
+        ts_string_array(&OPTIONS)
+    ));
+    out.push_str(&format!(
+        "\n/** The push timeout of a publish node: the default and the most allowed, in seconds. */\nexport const PUBLISH_DEFAULT_TIMEOUT_SECONDS = {DEFAULT_TIMEOUT_SECONDS}\nexport const PUBLISH_MAX_TIMEOUT_SECONDS = {MAX_TIMEOUT_SECONDS}\n"
+    ));
+    out.push_str(&format!(
+        "\n/** Why a publish plan cannot be offered, in words. */\nexport const PUBLISH_REFUSAL_TEXTS = {{ {} }} as const\n",
+        label_entries(Refusal::ALL.iter().map(|r| (r.code().to_string(), r.sentence())))
+    ));
+}
+
+/// The JSON name serde gives a unit enum variant.
+fn serde_key(v: &impl serde::Serialize) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .expect("a unit variant serializes to a string")
+}
+
+/// `key: 'label', ...` for a TypeScript object literal.
+fn label_entries(pairs: impl Iterator<Item = (String, &'static str)>) -> String {
+    pairs
+        .map(|(k, l)| format!("{k}: {}", serde_json::to_string(l).expect("a string")))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[test]

@@ -14,7 +14,7 @@ use apb_engine::forward_patch::{ForwardPatchRequest, create};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-const ID: &str = "trial";
+pub(crate) const ID: &str = "trial";
 
 /// `{policy}` goes under `supervisor.policy`; `{p1}` is the first node's
 /// script.
@@ -57,7 +57,7 @@ fn seed(root: &Path, policy: &str) {
 /// Approves the digest of the person-made version 1.0.0, as a save
 /// through apb or `playbook_approve` would: the line a candidate inherits
 /// its trust from.
-fn approve_base(root: &Path) {
+pub(crate) fn approve_base(root: &Path) {
     let loaded = apb_core::registry::Registry::open(root)
         .unwrap()
         .load(ID, Some("1.0.0"))
@@ -74,7 +74,7 @@ fn approve_base(root: &Path) {
 /// Starts a run the way every surface does: the gate (which may pick the
 /// candidate), its permit applied, the version it chose. The base version
 /// is trusted.
-fn start(root: &Path) -> (String, RunStatus, Option<String>) {
+pub(crate) fn start(root: &Path) -> (String, RunStatus, Option<String>) {
     approve_base(root);
     start_as_is(root, true).0
 }
@@ -98,13 +98,13 @@ fn start_as_is(root: &Path, ack: bool) -> ((String, RunStatus, Option<String>), 
     ((res.run_id, res.outcome, chosen), skipped)
 }
 
-fn pointer(root: &Path, name: &str) -> Option<String> {
+pub(crate) fn pointer(root: &Path, name: &str) -> Option<String> {
     fs::read_to_string(root.join(".apb/playbooks").join(ID).join(name))
         .ok()
         .map(|s| s.trim().to_string())
 }
 
-fn forward(root: &Path, run_id: &str, yaml: &str) -> String {
+pub(crate) fn forward(root: &Path, run_id: &str, yaml: &str) -> String {
     create(
         root,
         run_id,
@@ -119,7 +119,7 @@ fn forward(root: &Path, run_id: &str, yaml: &str) -> String {
     .version
 }
 
-fn events_of(root: &Path, run_id: &str) -> Vec<EventPayload> {
+pub(crate) fn events_of(root: &Path, run_id: &str) -> Vec<EventPayload> {
     read_all(&root.join(".apb/runs").join(run_id))
         .unwrap()
         .into_iter()
@@ -173,7 +173,7 @@ fn a_forward_patch_changes_an_executed_node_and_the_next_run_promotes_it() {
     ));
     let n = events.len();
     assert!(
-        matches!(&events[n - 2], EventPayload::CandidatePromoted { version, run_id, successes: 1 } if version == "1.0.1" && *run_id == second),
+        matches!(&events[n - 2], EventPayload::CandidatePromoted { version, run_id, successes: 1, basis } if version == "1.0.1" && *run_id == second && basis.as_deref() == Some("successes")),
         "{:?}",
         &events[n - 2..]
     );
@@ -280,7 +280,7 @@ fn after_n_successes_promotes_on_the_nth_trial() {
     assert!(
         events_of(root, &third)
             .iter()
-            .any(|e| matches!(e, EventPayload::CandidatePromoted { successes: 2, .. }))
+            .any(|e| matches!(e, EventPayload::CandidatePromoted { successes: 2, basis, .. } if basis.as_deref() == Some("successes")))
     );
     assert_eq!(pointer(root, "current").as_deref(), Some("1.0.1"));
 }
@@ -366,7 +366,7 @@ fn a_goal_criterion_that_does_not_hold_rejects_the_candidate() {
     assert_eq!(pointer(root, "current").as_deref(), Some("1.0.0"));
 }
 
-fn forward_err(root: &Path, run_id: &str, yaml: &str) -> String {
+pub(crate) fn forward_err(root: &Path, run_id: &str, yaml: &str) -> String {
     create(
         root,
         run_id,

@@ -39,3 +39,17 @@ functions:
     url: "{{account.base_url}}/items"
     body: "{{args}}"
     args_schema: { type: object, properties: { title: { type: string } }, required: [title] }
+  - name: notify_person
+    description: Send a message to a person
+    method: POST
+    url: "{{account.base_url}}/messages"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string }
+        subject: { type: string }
+        text: { type: string }
+      required: [to, text]
+    people: { to: to, subject: subject, text: text }
+    idempotency: { mode: none, result_ref: id }

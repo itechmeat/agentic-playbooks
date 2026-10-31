@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::{ToolError, resolve_run_dir};
-use apb_core::registry::is_safe_segment;
 use apb_engine::control::Control;
 use apb_engine::run_config::ChildExpectation;
 use apb_engine::run_view::read_events;
@@ -15,59 +14,74 @@ use apb_engine::{
 };
 use serde_json::{Value, json};
 
-#[allow(clippy::too_many_arguments)]
+/// What every MCP start hands the engine besides the playbook and its
+/// version: the run's inputs and the permit the run gate returned.
+#[derive(Debug, Default)]
+pub struct StartArgs {
+    pub params: BTreeMap<String, String>,
+    pub instruction: Option<String>,
+    pub expected_digest: Option<String>,
+    pub expected_profile_bundles: Option<BTreeMap<String, String>>,
+    pub expected_children: Option<BTreeMap<String, ChildExpectation>>,
+    pub expected_connectors: BTreeMap<String, String>,
+    pub expected_connector_accounts: BTreeMap<String, String>,
+    pub continued_from: Option<String>,
+    pub worktree: Option<String>,
+    /// host execution mode (0.23.0).
+    pub execution: apb_core::execution::ExecutionRequest,
+    /// 0.24.0: the irreversible consent the caller obtained from the person.
+    pub consent: Option<apb_engine::consent::RunConsent>,
+    /// Issue #192: why the gate left a waiting candidate out (the permit's
+    /// `candidate_skipped`), recorded in the manifest for `run_status`.
+    pub candidate_skipped: Option<String>,
+    /// The run's budget argument, over the playbook's `budget:` block.
+    pub budget: Option<apb_core::budget::BudgetRequest>,
+    /// The estimate the pre-start check showed, kept as the run's snapshot.
+    pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
+    /// The run's notification request, checked by `notify::start_check`.
+    pub notify: Option<apb_core::notify::NotifyRequest>,
+}
+
+/// The engine options of an MCP start in `mode`. Fail-fast on a busy
+/// workdir: this caller is a person waiting on the answer, who can retry,
+/// not an event source whose event dies with the refusal (see
+/// `RunOptions::workdir_queue_wait`).
+pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
+    RunOptions {
+        instruction: a.instruction,
+        params: a.params,
+        mode,
+        expected_digest: a.expected_digest,
+        expected_profile_bundles: a.expected_profile_bundles,
+        continued_from: a.continued_from,
+        expected_children: a.expected_children,
+        expected_connectors: a.expected_connectors,
+        expected_connector_accounts: a.expected_connector_accounts,
+        workdir_queue_wait: None,
+        worktree: a.worktree,
+        execution: a.execution,
+        consent: a.consent,
+        candidate_skipped: a.candidate_skipped,
+        budget: a.budget,
+        estimate: a.estimate,
+        notify: a.notify,
+        ..RunOptions::default()
+    }
+}
+
+/// Runs a playbook of the project at `root` to its end (autonomous); the
+/// answer carries the run's estimate and budget.
 pub fn playbook_run(
     root: &Path,
     id: &str,
     version: Option<&str>,
-    params: BTreeMap<String, String>,
-    instruction: Option<String>,
-    expected_digest: Option<String>,
-    expected_profile_bundles: Option<BTreeMap<String, String>>,
-    expected_children: Option<BTreeMap<String, ChildExpectation>>,
-    expected_connectors: BTreeMap<String, String>,
-    expected_connector_accounts: BTreeMap<String, String>,
-    continued_from: Option<String>,
-    worktree: Option<String>,
-    // host execution mode (0.23.0)
-    execution: apb_core::execution::ExecutionRequest,
-    // 0.24.0: the irreversible consent the caller obtained from the person.
-    consent: Option<apb_engine::consent::RunConsent>,
-    // Issue #192: why the gate left a waiting candidate out (the permit's
-    // `candidate_skipped`), recorded in the manifest for `run_status`.
-    candidate_skipped: Option<String>,
+    args: StartArgs,
 ) -> Result<Value, ToolError> {
-    let opts = RunOptions {
-        instruction,
-        params,
-        allow_shared_workdir: false,
-        mode: RunMode::Autonomous,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        expected_digest,
-        expected_profile_bundles,
-        parent_run: None,
-        continued_from,
-        depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
-        worktree,
-        execution,
-        consent,
-        eval: None,
-        candidate_skipped,
-    };
-    let res = run(root, id, version, opts)?;
-    Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
+    let res = run(root, id, version, start_options(args, RunMode::Autonomous))?;
+    Ok(super::budget::with_start_blocks(
+        root,
+        json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }),
+    ))
 }
 
 /// A non-blocking run start for a regular (non-supervised) MCP client:
@@ -80,59 +94,18 @@ pub fn playbook_run(
 /// policy gate, permit verification and manifest snapshot all complete here,
 /// in-process, and only the drive loop is handed across - so an `apb mcp`
 /// bound to a chat session that dies no longer takes the run with it.
-#[allow(clippy::too_many_arguments)]
 pub fn playbook_run_background(
     root: &Path,
     id: &str,
     version: Option<&str>,
-    params: BTreeMap<String, String>,
-    instruction: Option<String>,
-    expected_digest: Option<String>,
-    expected_profile_bundles: Option<BTreeMap<String, String>>,
-    expected_children: Option<BTreeMap<String, ChildExpectation>>,
-    expected_connectors: BTreeMap<String, String>,
-    expected_connector_accounts: BTreeMap<String, String>,
-    continued_from: Option<String>,
-    worktree: Option<String>,
-    // host execution mode (0.23.0)
-    execution: apb_core::execution::ExecutionRequest,
-    // 0.24.0: the irreversible consent the caller obtained from the person.
-    consent: Option<apb_engine::consent::RunConsent>,
-    // Issue #192: why the gate left a waiting candidate out (the permit's
-    // `candidate_skipped`), recorded in the manifest for `run_status`.
-    candidate_skipped: Option<String>,
+    args: StartArgs,
 ) -> Result<Value, ToolError> {
-    let opts = RunOptions {
-        instruction,
-        params,
-        allow_shared_workdir: false,
-        mode: RunMode::Autonomous,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        expected_digest,
-        expected_profile_bundles,
-        parent_run: None,
-        continued_from,
-        depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
-        worktree,
-        execution,
-        consent,
-        eval: None,
-        candidate_skipped,
-    };
+    let opts = start_options(args, RunMode::Autonomous);
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
-    Ok(json!({ "run_id": run_id }))
+    Ok(super::budget::with_start_blocks(
+        root,
+        json!({ "run_id": run_id }),
+    ))
 }
 
 pub fn runs_list(root: &Path) -> Result<Value, ToolError> {
@@ -213,8 +186,16 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         out["pause"] = json!(p);
     }
     add_journal_extras(&mut out, &view);
-    add_outcome_blocks(&mut out, &view, &dir);
-    add_candidate_trial(&mut out, &view, &dir);
+    add_outcome_blocks(
+        &mut out,
+        &view,
+        &dir,
+        &view.readout(&dir),
+        ListItems::NeedingALook,
+    );
+    add_trial_and_grades(&mut out, &view, &dir);
+    super::budget::add_run_blocks(&mut out, &dir, &view);
+    super::notify::add_run_block(&mut out, &dir, &view.events);
     // Issue #195: what a fork's branch-failure policy cancelled and which
     // joins refused; absent when nothing did.
     let branch_failures = apb_engine::fork_view::entries(&view.events);
@@ -224,30 +205,73 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     Ok(out)
 }
 
-/// Issue #192: the candidate trial this run was, with its verdict; absent
-/// for every other run.
-fn add_candidate_trial(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
+/// Issue #192: the candidate trial this run was, with its verdict, the
+/// run's grades and its known problems; each absent when there is none.
+fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
     if let Some(t) = apb_engine::candidate::trial_of(dir, &view.events) {
         out["candidate_trial"] = json!(t);
     }
     if let Some(why) = apb_engine::candidate::skipped_of(dir) {
         out["candidate_skipped"] = json!(why);
     }
+    // Run quality: the latest grade of each grader, criterion by level;
+    // absent for a run nobody graded. `run_grades` returns the grades whole.
+    let grades = super::grade::grade_lines(dir);
+    if !grades.is_empty() {
+        out["grades"] = json!(grades);
+    }
+    // Known problems: what the run showed its agents and what it hid;
+    // absent for a run whose playbook shows nothing.
+    if let Some(k) = super::problems::run_block(&view.events) {
+        out["known_problems"] = json!(k);
+    }
 }
 
 // --- 0.23.0: run outcome blocks (C1, C7) ---
 
-/// The run's goal with the criteria results (C1) and the commits its nodes
-/// made (C7), each only when there is one: a run of a playbook without a
-/// goal on a tree without commits reads as before. Shared by `run_status`
-/// and `run_report`.
-fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
-    if let Some(goal) = view.goal(dir) {
+/// Which items of each list a run surface carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListItems {
+    /// `run_status`: the counts and at most [`STATUS_LOOK_ITEMS`] items
+    /// that need a look.
+    NeedingALook,
+    /// `run_report`: every item up to [`REPORT_LIST_ITEMS`], and how many
+    /// it left out.
+    All,
+}
+
+/// The most items that need a look `run_status` names per list.
+const STATUS_LOOK_ITEMS: usize = 50;
+
+/// The most items `run_report` names per list; `items_truncated` counts
+/// the rest, which `apb runs <id> --items` prints.
+const REPORT_LIST_ITEMS: usize = 500;
+
+/// The run's goal with the criteria results (C1), the commits its nodes made
+/// (C7), its publish nodes, the inbox gaps its connector reads found, its baseline check, the
+/// findings and warnings its attempts reported and its lists, each only when
+/// there is one:
+/// a run of a playbook without a goal on a tree without commits reads as
+/// before. Shared by `run_status` and `run_report`.
+fn add_outcome_blocks(
+    out: &mut Value,
+    view: &apb_engine::run_view::RunView,
+    dir: &Path,
+    readout: &apb_engine::run_outcome::RunReadout,
+    list_items: ListItems,
+) {
+    if let Some(goal) = &readout.goal {
         out["goal"] = json!(goal);
     }
     let commits = view.commits();
     if !commits.is_empty() {
         out["commits"] = json!(commits);
+    }
+    // Each publish node: the pinned target, the latest plan, whether a
+    // consent is awaited, the push's ledger state and the result.
+    let publish = view.publish();
+    if !publish.is_empty() {
+        out["publish"] = json!(publish);
     }
     // Issue #193: the model each attempt actually ran on.
     let models = apb_engine::attempt_models::run_attempt_models(dir, &view.events);
@@ -258,16 +282,77 @@ fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir
             out["model_mismatch"] = json!(mismatches);
         }
     }
+    // The inbox gaps the run's connector reads journaled: retention dropped
+    // unread events, so the run's view of its inbox was incomplete. Absent
+    // when the run journaled none, like every other outcome block.
+    let gaps = view.inbox_gaps();
+    if !gaps.is_empty() {
+        out["inbox_gaps"] = json!(gaps);
+    }
+    // The baseline check: each observation before and after, and the
+    // verdict the finish journaled. Absent for a playbook without one.
+    if let Some(baseline) = &readout.baseline {
+        out["baseline"] = json!(baseline);
+    }
+    // The findings and warnings the attempts reported; absent when none.
+    if !readout.notes.is_empty() {
+        out["notes"] = json!(readout.notes);
+    }
+    // Each list node's counts and items; absent for a run without a list.
+    if !readout.lists.is_empty() {
+        out["lists"] = match list_items {
+            ListItems::All => json!(
+                readout
+                    .lists
+                    .iter()
+                    .map(|l| {
+                        let (first, left_out) = l.first_items(REPORT_LIST_ITEMS);
+                        with_truncated(json!(first), left_out)
+                    })
+                    .collect::<Vec<_>>()
+            ),
+            ListItems::NeedingALook => json!(
+                readout
+                    .lists
+                    .iter()
+                    .map(|l| {
+                        let named = l.needing_a_look(STATUS_LOOK_ITEMS);
+                        let left_out = (l.needs_look as usize).saturating_sub(named.items.len());
+                        with_truncated(json!(named), left_out)
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        };
+    }
+}
+
+/// A list as a surface carries it, with `items_truncated` counting the
+/// items its `items` leaves out (absent when none).
+fn with_truncated(mut list: Value, left_out: usize) -> Value {
+    if left_out > 0 {
+        list["items_truncated"] = json!(left_out);
+    }
+    list
 }
 
 // --- end of the 0.23.0 blocks ---
 
 /// The fields a run view carries only when they apply: the token usage its
-/// attempts reported, the decision-model totals, and the note about events a newer apb wrote that this
-/// binary skipped. Shared by `run_status` and `run_report`.
+/// attempts reported, what each isolated attempt's isolation held and did
+/// not, the attempts that lost part of their output, the decision-model
+/// totals, and the note about events a newer apb wrote that this binary
+/// skipped. Shared by `run_status` and `run_report`.
 fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     if let Some(usage) = view.usage() {
         out["usage"] = json!(usage);
+    }
+    let isolation = view.isolation();
+    if !isolation.is_empty() {
+        out["isolation"] = json!(isolation);
+    }
+    let losses = view.output_losses();
+    if !losses.is_empty() {
+        out["output_truncated"] = json!(losses);
     }
     // One compact object; each decision's detail stays in `run_events`.
     if let Some(decisions) = view.decisions() {
@@ -317,39 +402,46 @@ fn run_execution(run_dir: &Path) -> Value {
     }
 }
 
+/// A host's reply to a task as `run_task_submit` receives it: the
+/// engine's `SubmitRequest` with the status still as written.
+pub struct TaskReply {
+    pub task_id: String,
+    pub status: String,
+    pub output: String,
+    pub usage: Option<apb_engine::host_task::SubmittedUsage>,
+    pub note: Option<String>,
+    pub submitted_by: String,
+    pub client: Option<String>,
+    pub model: Option<String>,
+    /// Problems the subagent saw and did not fix, as a JSON list.
+    pub findings: Option<Value>,
+    /// What a person should check, as a JSON list.
+    pub warnings: Option<Value>,
+}
+
 /// Records a host's reply to a pending host task (`run_task_submit`). The
 /// task may belong to the run or to one of its sub-playbook runs.
-#[allow(clippy::too_many_arguments)]
-pub fn run_task_submit(
-    root: &Path,
-    run_id: &str,
-    task_id: &str,
-    status: &str,
-    output: String,
-    usage: Option<apb_engine::host_task::SubmittedUsage>,
-    note: Option<String>,
-    submitted_by: &str,
-    client: Option<String>,
-    model: Option<String>,
-) -> Result<Value, ToolError> {
-    let Some(status) = apb_engine::host_task::SubmitStatus::parse(status) else {
+pub fn run_task_submit(root: &Path, run_id: &str, reply: TaskReply) -> Result<Value, ToolError> {
+    let Some(status) = apb_engine::host_task::SubmitStatus::parse(&reply.status) else {
         return Ok(json!({
             "error": "unknown_status",
-            "detail": format!("status must be succeeded, failed or blocked, got `{status}`"),
+            "detail": format!("status must be succeeded, failed or blocked, got `{}`", reply.status),
         }));
     };
     let receipt = apb_engine::host_task::submit_to_run(
         root,
         run_id,
         apb_engine::host_task::SubmitRequest {
-            task_id: task_id.to_string(),
+            task_id: reply.task_id,
             status,
-            output,
-            usage,
-            note,
-            submitted_by: submitted_by.to_string(),
-            client,
-            model,
+            output: reply.output,
+            usage: reply.usage,
+            note: reply.note,
+            submitted_by: reply.submitted_by,
+            client: reply.client,
+            model: reply.model,
+            findings: reply.findings,
+            warnings: reply.warnings,
         },
     )?;
     Ok(json!({
@@ -357,6 +449,8 @@ pub fn run_task_submit(
         "task_id": receipt.task_id,
         "node": receipt.node,
         "status": receipt.status,
+        "notes_dropped": receipt.notes_dropped,
+        "notes_dropped_reasons": receipt.notes_dropped_reasons,
         "next": "call run_wait again: it returns the next pending task, a question, a gate, or the end of the run",
     }))
 }
@@ -397,14 +491,15 @@ pub fn run_wait_result(
             Some(apb_engine::run_wait::NeedsInput::Question) => {
                 "answer pending_question with run_answer, then call run_wait again"
             }
-            Some(apb_engine::run_wait::NeedsInput::Review) => {
-                "relay pending_review to the user, record it with review_decide, then call run_wait again"
-            }
+            Some(apb_engine::run_wait::NeedsInput::Review) => res.review_next(),
             Some(apb_engine::run_wait::NeedsInput::HostTask) => HOST_TASK_NEXT,
             _ => "the run is parked for a supervisor decision (pending_supervisor)",
         },
         WaitReason::Stopped if res.driver_alive == Some(false) => {
             "the run's driver is dead, so the run is interrupted; run_resume continues it"
+        }
+        WaitReason::Stopped if super::budget::budget_paused(view) => {
+            super::budget::BUDGET_PAUSE_NEXT
         }
         WaitReason::Stopped if res.pause().is_some() => {
             "the run is paused (see pause); run_resume continues it, also before pause.until. Gates stay open and are listed in pending_*"
@@ -468,6 +563,7 @@ pub fn run_wait_result(
             out[key] = value;
         }
     }
+    super::budget::add_run_blocks(&mut out, &dir, view);
     Ok(out)
 }
 
@@ -479,28 +575,6 @@ pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Va
     Ok(
         json!({ "events": serde_json::to_value(filtered).map_err(|e| ToolError::Engine(e.to_string()))? }),
     )
-}
-
-/// Per-node expected vs measured durations for calibration (spec 5). Measured
-/// comes from the run's events; expected from the playbook version bound to
-/// the run. The maintaining agent uses this to update estimates via
-/// playbook_update; the engine never rewrites the playbook.
-pub(crate) fn build_duration_table_from(
-    playbook: &apb_core::schema::Playbook,
-    measured: &BTreeMap<String, u64>,
-) -> Vec<Value> {
-    playbook
-        .nodes
-        .iter()
-        .map(|n| {
-            json!({
-                "node": n.id,
-                "kind": n.kind.type_str(),
-                "expected_seconds": n.expected_seconds(),
-                "measured_seconds": measured.get(&n.id),
-            })
-        })
-        .collect()
 }
 
 pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
@@ -516,7 +590,8 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let view = apb_engine::run_view::RunView::load(&dir, run_id)
         .map_err(|e| ToolError::Engine(e.to_string()))?;
     let events = &view.events;
-    let pb = apb_engine::progress::load_run_playbook(&dir);
+    let readout = view.readout(&dir);
+    let pb = readout.playbook.as_ref();
     let answer = apb_engine::progress::run_answer(&dir, events);
     let mut base = json!({
         "run_id": run_id,
@@ -527,14 +602,14 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "answer": answer,
     });
     add_journal_extras(&mut base, &view);
-    add_outcome_blocks(&mut base, &view, &dir);
+    add_outcome_blocks(&mut base, &view, &dir, &readout, ListItems::All);
 
     // duration_table is always present (empty when there is no snapshot), as
     // before; it is now built from the single events read above.
-    let table = match &pb {
+    let table = match pb {
         Some(playbook) => {
             let measured = apb_engine::progress::node_durations_seconds(events);
-            build_duration_table_from(playbook, &measured)
+            apb_engine::progress::build_duration_table_from(playbook, &measured)
         }
         None => Vec::new(),
     };
@@ -543,9 +618,40 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }
 
     // The goal with each criterion's result (C1) is in `add_outcome_blocks`,
-    // shared with `run_status`.
+    // shared with `run_status`. The human outcome (what was done, verified,
+    // not verified, reported) is the report's own.
+    if let Some(obj) = base.as_object_mut() {
+        obj.insert(
+            "outcome".into(),
+            json!(apb_engine::run_outcome::OutcomeSummary::from_readout(
+                &view, &dir, &readout, answer
+            )),
+        );
+    }
+    super::notify::add_run_block(&mut base, &dir, events);
 
     Ok(base)
+}
+
+/// The file `run_report` with format html writes, inside the run's
+/// directory.
+pub const REPORT_HTML_FILE: &str = "report.html";
+
+/// `run_report_html`: renders the run's report as one self-contained page,
+/// writes it to `runs/<id>/report.html` and answers with its path and
+/// size. The page never travels in the answer: it is for a person to open,
+/// not for the model to read.
+pub fn run_report_html(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    let html = apb_engine::report_html::render(root, &dir)?;
+    let path = dir.join(REPORT_HTML_FILE);
+    apb_core::fsutil::atomic_write(&path, html.as_bytes())
+        .map_err(|e| ToolError::Engine(format!("cannot write {}: {e}", path.display())))?;
+    Ok(json!({
+        "run_id": run_id,
+        "path": path.to_string_lossy(),
+        "bytes": html.len(),
+    }))
 }
 
 pub fn run_resume(
@@ -553,6 +659,7 @@ pub fn run_resume(
     run_id: &str,
     from_node: Option<&str>,
     allow_environment_drift: bool,
+    budget: Option<&apb_engine::budget::BudgetResume>,
 ) -> Result<Value, ToolError> {
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
@@ -575,7 +682,24 @@ pub fn run_resume(
     // did not allow is returned as an Err HERE (issue #45 finding 3), instead
     // of the old detached spawn whose child failed its own check on null stdio
     // and left this ack reporting `detached: true` for a run that never moved.
-    apb_engine::resume_detached_with(root, run_id, from_node, allow_environment_drift)?;
+    // A budget pause resumes only with a budget change (see
+    // `apb_engine::budget::admit_resume`); its refusal is an answer the
+    // caller acts on, with the budget it is about.
+    let req = apb_engine::ResumeRequest {
+        from_node,
+        allow_environment_drift,
+        budget,
+        ..apb_engine::ResumeRequest::operator()
+    };
+    match apb_engine::resume_detached_req(root, run_id, &req) {
+        Ok(_) => {}
+        Err(apb_engine::EngineError::Conflict(detail)) => {
+            let dir = root.join(".apb/runs").join(run_id);
+            return super::budget::resume_refusal(&dir, run_id, &detail)
+                .ok_or(ToolError::Conflict(detail));
+        }
+        Err(e) => return Err(e.into()),
+    }
     let mut ack = json!({
         "run_id": run_id,
         "resumed_from": decision.start_node,
@@ -621,62 +745,21 @@ fn early_resume_until(root: &Path, run_id: &str) -> Option<u64> {
 /// detached driver process (see `playbook_run_background`). The supervisor
 /// access token is minted by the server layer (Phase 4b, Task 3), not this
 /// function.
-#[allow(clippy::too_many_arguments)]
 pub fn playbook_run_supervised(
     root: &Path,
     id: &str,
     version: Option<&str>,
-    params: BTreeMap<String, String>,
-    instruction: Option<String>,
-    expected_digest: Option<String>,
-    expected_profile_bundles: Option<BTreeMap<String, String>>,
-    expected_children: Option<BTreeMap<String, ChildExpectation>>,
-    expected_connectors: BTreeMap<String, String>,
-    expected_connector_accounts: BTreeMap<String, String>,
-    continued_from: Option<String>,
-    worktree: Option<String>,
-    // host execution mode (0.23.0)
-    execution: apb_core::execution::ExecutionRequest,
-    // 0.24.0: the irreversible consent the caller obtained from the person.
-    consent: Option<apb_engine::consent::RunConsent>,
-    // Issue #192: why the gate left a waiting candidate out (the permit's
-    // `candidate_skipped`), recorded in the manifest for `run_status`.
-    candidate_skipped: Option<String>,
+    args: StartArgs,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
     // (heartbeat oversight in drive does not touch this path).
-    let opts = RunOptions {
-        instruction,
-        params,
-        allow_shared_workdir: false,
-        mode: RunMode::Supervised,
-        max_patches_per_run: None,
-        context_max_bytes: None,
-        context_compact_model: None,
-        overrides: None,
-        expected_digest,
-        expected_profile_bundles,
-        parent_run: None,
-        continued_from,
-        depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
-        cache: Default::default(),
-        max_parallel: None,
-        // Fail-fast on a busy workdir: this caller is a person waiting on the
-        // answer, who can retry, not an event source whose event dies with the
-        // refusal (see `RunOptions::workdir_queue_wait`).
-        workdir_queue_wait: None,
-        worktree,
-        execution,
-        consent,
-        eval: None,
-        candidate_skipped,
-    };
+    let opts = start_options(args, RunMode::Supervised);
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
-    Ok(json!({ "run_id": run_id }))
+    Ok(super::budget::with_start_blocks(
+        root,
+        json!({ "run_id": run_id }),
+    ))
 }
 
 /// Stops a run and reports what that took: signaling a live driver (whose
@@ -753,7 +836,10 @@ pub fn run_answer(
     Ok(json!({ "posted_seq": seq }))
 }
 
-/// A human_review node decision: writes a command into the run's reviews.jsonl channel.
+/// A gate decision: writes a command into the run's reviews.jsonl channel.
+/// For a `publish` node, `nonce` is the nonce of the plan the person saw
+/// (`pending_review.publish.nonce`); the engine refuses a stale or missing
+/// one for `publish`, and stamps a `skip` without one with the open plan's.
 /// A regular run tool (not supervised): takes run_id directly.
 pub fn review_decide(
     root: &Path,
@@ -761,21 +847,17 @@ pub fn review_decide(
     node: &str,
     decision: &str,
     note: &str,
+    nonce: Option<&str>,
 ) -> Result<Value, ToolError> {
-    if !is_safe_segment(run_id) {
-        return Err(ToolError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(ToolError::NotFound(run_id.to_string()));
-    }
-    let seq = apb_engine::post_review(
+    let run_dir = resolve_run_dir(root, run_id)?;
+    let seq = apb_engine::review::post_decision(
         &run_dir,
         apb_engine::ReviewCommand {
             node: node.to_string(),
             decision: decision.to_string(),
             note: note.to_string(),
         },
+        nonce.map(str::to_string),
     )?;
     Ok(json!({ "posted_seq": seq }))
 }
@@ -919,6 +1001,43 @@ mod progress_tests {
         assert_eq!(criteria[0]["status"], "pending");
     }
 
+    /// The report carries the human outcome, run_status the notes block, and
+    /// the listing the needs-a-look marker, all from one journaled finding.
+    #[test]
+    fn a_reported_finding_reaches_the_report_the_status_and_the_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1,"type":"node_started","node":"a","attempt":1}"#,
+                "\n",
+                r#"{"seq":2,"ts":2,"type":"attempt_notes","node":"a","attempt":1,"findings":[{"kind":"bug","location":"src/x.rs:3","evidence":"panics on empty input","why_not_fixed":"out of scope"}]}"#,
+                "\n",
+                r#"{"seq":3,"ts":3,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":""}"#,
+                "\n",
+                r#"{"seq":4,"ts":4,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let report = run_report(tmp.path(), "r1").unwrap();
+        let outcome = &report["outcome"];
+        assert_eq!(outcome["findings"][0]["location"], "src/x.rs:3");
+        assert_eq!(outcome["unverified"][0]["kind"], "self_reported_node");
+        assert_eq!(outcome["needs_look"]["reasons"], json!(["findings"]));
+        let status = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(status["notes"]["findings"][0]["kind"], "bug");
+        assert!(status.get("baseline").is_none());
+        let runs = runs_list(tmp.path()).unwrap();
+        assert_eq!(runs[0]["needs_look"]["findings"], 1);
+    }
+
     /// A playbook snapshot with no `goal` block emits no `goal` key at all,
     /// rather than a null or empty placeholder.
     #[test]
@@ -968,6 +1087,49 @@ mod progress_tests {
             .expect("failure_reason must be a string for a failed run with a recorded RunError");
         assert!(reason.contains("no outgoing edge"));
         assert!(reason.contains("node `a`"));
+    }
+
+    /// Each isolated attempt reaches `run_status` with its level, backend,
+    /// network and limits; a run without one carries no `isolation` key.
+    #[test]
+    fn run_status_lists_each_isolated_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1,"type":"attempt_started","node":"a","attempt":1,"agent":"claude","isolation":{"level":"full","backend":"bwrap","bwrap_version":"0.11.0","network":"none","holds":["network.none"],"limits":["user.host_uid"],"view":[{"path":"~/.claude.json","access":"read_write"}]}}"#,
+                "\n",
+                r#"{"seq":2,"ts":2,"type":"attempt_started","node":"b","attempt":1,"agent":"claude"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        let rows = out["isolation"].as_array().expect("isolation rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["node"], "a");
+        assert_eq!(rows[0]["isolation"]["backend"], "bwrap");
+        assert_eq!(rows[0]["isolation"]["limits"][0], "user.host_uid");
+        assert_eq!(rows[0]["isolation"]["view"][0]["access"], "read_write");
+
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        assert!(
+            run_status(tmp.path(), "r1")
+                .unwrap()
+                .get("isolation")
+                .is_none()
+        );
     }
 
     /// `failure_reason` stays absent (JSON `null`) for a run that is not

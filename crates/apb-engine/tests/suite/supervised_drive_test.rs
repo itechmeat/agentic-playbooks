@@ -186,6 +186,7 @@ fn supervised_wake_without_command_then_abort() {
         &run_dir,
         Control::Abort {
             reason: "test abort".into(),
+            by: None,
         },
     )
     .unwrap();
@@ -1093,6 +1094,7 @@ fn a_doomed_join_is_failed_and_woken_on_instead_of_being_batch_executed() {
         &run_dir,
         Control::Abort {
             reason: "join is unrecoverable".into(),
+            by: None,
         },
     )
     .unwrap();
@@ -1233,6 +1235,7 @@ fn abort_control_ends_autonomous_drive_as_aborted() {
         &run_dir,
         Control::Abort {
             reason: "pre-seeded abort".into(),
+            by: None,
         },
     )
     .unwrap();
@@ -1247,7 +1250,7 @@ fn abort_control_ends_autonomous_drive_as_aborted() {
     );
 
     let events = read_all(&run_dir).unwrap();
-    assert!(events.iter().any(|e| matches!(&e.payload, EventPayload::RunAborted { reason } if reason == "pre-seeded abort")),
+    assert!(events.iter().any(|e| matches!(&e.payload, EventPayload::RunAborted { reason, .. } if reason == "pre-seeded abort")),
         "expected a RunAborted event carrying the posted reason");
 }
 
@@ -1302,6 +1305,7 @@ fn resumed_agent_supervised_run_still_parks_for_its_supervisor() {
         &run_dir,
         Control::Abort {
             reason: "test done".into(),
+            by: None,
         },
     )
     .unwrap();

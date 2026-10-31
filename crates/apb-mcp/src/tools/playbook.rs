@@ -63,16 +63,12 @@ pub fn playbook_list(root: &Path) -> Result<Value, ToolError> {
 /// `playbook_list` - this is a separate surface.
 pub fn playbook_catalog(
     root: &Path,
-    workspace_id: Option<&str>,
-    revision: Option<&str>,
-    limit: Option<usize>,
+    req: &crate::catalog::CatalogRequest<'_>,
 ) -> Result<Value, ToolError> {
     let view = apb_core::dismiss::active(root);
     Ok(crate::catalog::build(
         root,
-        workspace_id,
-        revision,
-        limit,
+        req,
         view.records,
         view.diagnostics,
     ))

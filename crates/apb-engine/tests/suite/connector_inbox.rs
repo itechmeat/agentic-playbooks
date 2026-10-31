@@ -96,6 +96,7 @@ fn seed_run(run_dir: &Path, functions: &[&str], max_calls: Option<u32>) {
             accounts: vec!["main".to_string()],
             functions: functions.iter().map(|s| s.to_string()).collect(),
             max_calls,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();
@@ -317,6 +318,88 @@ fn every_reached_inbox_call_logs_one_connectorcall_event_without_a_body() {
     assert!(
         !raw.contains("\"n\":1") && !raw.contains("m1"),
         "an inbound body or provider id leaked into the run log: {raw}"
+    );
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
+/// Retention that dropped events the consumer never acknowledged shows up on
+/// the read: `gap` at the top level of the result, where the function's
+/// `response_pick` cannot remove it, and one `inbox_gap` in the run journal
+/// however often the same gap is read. Events the consumer acked before they
+/// were dropped are no loss.
+#[test]
+fn a_read_reports_unread_events_retention_dropped_once_per_run() {
+    use apb_core::connector::inbox::Retention;
+    let _lock = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join(".apb/runs/r1");
+    std::fs::create_dir_all(&run).unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    seed_inbox(cfg.path());
+    seed_run(&run, &["inbox_read", "inbox_ack"], None);
+    let store = Inbox::at(&cfg.path().join("connector-inbox"), CONNECTOR, "main").unwrap();
+    store.ack("acker", 3).unwrap();
+    store.ack("worker", 1).unwrap();
+    // The size cap keeps only the newest delivery: seqs 2 and 3 are gone
+    // before `worker` read them; `acker` had already acknowledged them.
+    let tiny = Retention {
+        max_bytes: 1,
+        max_age_ms: u64::MAX,
+    };
+    store
+        .append_with("m4", &serde_json::json!({ "n": 4 }), &tiny)
+        .unwrap();
+
+    for _ in 0..2 {
+        let out = call(
+            &run,
+            root.path(),
+            "inbox_read",
+            serde_json::json!({"consumer": "worker"}),
+        );
+        assert_eq!(out["ok"], true, "the inbox read succeeds");
+        assert_eq!(out["gap"], serde_json::json!({ "from": 2, "through": 3 }));
+        assert!(out["body"].get("gap").is_none(), "the gap is not body data");
+        assert_eq!(out["body"]["events"][0]["seq"], 4);
+    }
+    let acked = call(
+        &run,
+        root.path(),
+        "inbox_read",
+        serde_json::json!({"consumer": "acker"}),
+    );
+    assert!(acked.get("gap").is_none(), "acked then dropped is no loss");
+
+    let gaps: Vec<_> = read_all(&run)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::InboxGap {
+                node_id,
+                connector,
+                account,
+                from,
+                through,
+            } => Some((node_id, connector, account, from, through)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        [(
+            NODE.to_string(),
+            CONNECTOR.to_string(),
+            "main".to_string(),
+            2,
+            3
+        )],
+        "one journal entry for the gap, not one per read"
     );
 
     unsafe {

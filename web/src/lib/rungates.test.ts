@@ -25,6 +25,7 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   version: '1.0.0',
   run_status: status,
   failure_reason: null,
+  outcome: { headline: 'Run running', done: [], verified: [], unverified: [], findings: [], warnings: [] },
   driver_alive: null,
   nodes: {},
   outputs: {},
@@ -186,5 +187,32 @@ describe('deadlineNote', () => {
     expect(deadlineNote(30_000, 0)).toBe('in 30s')
     expect(deadlineNote(600_000, 0)).toBe('in 10m')
     expect(deadlineNote(1_000, 5_000)).toBe('overdue')
+  })
+})
+
+describe('publish gates', () => {
+  const plan = {
+    url: 'file:///srv/r.git',
+    branch: 'apb/out',
+    after: 'b'.repeat(40),
+    commits: [{ sha: 'b'.repeat(40), subject: 'work', this_run: true }],
+    omitted: 0,
+    this_run: 1,
+    outside_push_suspected: false,
+    plan_digest: 'sha256:x',
+    nonce: 'publish-0123',
+  }
+  const review = { node: 'gate', options: ['approve', 'reject'], instruction: 'i', how_to_decide: 'h' }
+  const publish = { node: 'ship', options: ['publish', 'skip'], instruction: 'p', how_to_decide: 'h', publish: plan, prompt: 'Check the subjects.' }
+
+  it('routes a review carrying a plan to the publish panel, never the review card', () => {
+    const d = detail([], progress({ pending_reviews: [review, publish] }), 'running')
+    const gates = runGates(d)
+    expect(gates.reviews.map((r) => r.node)).toEqual(['gate'])
+    expect(gates.publishes).toEqual([{ node: 'ship', plan, prompt: 'Check the subjects.' }])
+  })
+
+  it('is empty without progress', () => {
+    expect(runGates(detail([], null as unknown as ProgressSummary, 'running')).publishes).toEqual([])
   })
 })

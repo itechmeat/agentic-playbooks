@@ -4,11 +4,18 @@
   import '@xyflow/svelte/dist/style.css'
   import {
     ApiError,
+    decideKnownProblem,
+    fetchCandidate,
+    fetchFit,
+    fetchKnownProblem,
+    fetchKnownProblems,
     fetchPlaybook,
     fetchProfiles,
     fetchProjects,
     fetchStats,
     fetchVersions,
+    keepCurrentCandidate,
+    promoteCandidate,
     promoteVersion,
     runPlaybook,
     setFrozen,
@@ -25,16 +32,28 @@
   import { slowRefresh, subscribeChanges } from '../lib/ws'
   import { shortModel } from '../lib/format'
   import { onEscape } from '../lib/hooks/escape.svelte'
-  import { provenanceLabel, trialBadge } from '../lib/versioninfo'
+  import { approvalBadge, approvalHint, provenanceLabel, trialBadge } from '../lib/versioninfo'
   import type {
     PlaybookDetail,
     PlaybookEdge as PlaybookEdgeType,
+    PlaybookParam,
     VersionInfo,
     PlaybookNode as PlaybookNodeType,
   } from '../lib/types'
+  import type { CandidateQualityView, FitReport, ProblemsView, QualityRecord } from '../lib/api.gen'
+  import type { ProblemAction, ProblemDecision } from '../lib/api'
+  import FitCard from '../lib/FitCard.svelte'
+  import CandidateQualityCard from '../lib/CandidateQualityCard.svelte'
+  import KnownProblemsCard from '../lib/KnownProblemsCard.svelte'
+  import { groupProblems, recheckResult } from '../lib/knownproblems'
+  import Bug from '@lucide/svelte/icons/bug'
+  import { verdictText } from '../lib/quality'
+  import ListChecks from '@lucide/svelte/icons/list-checks'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
+  import RunStartDialog from '../lib/RunStartDialog.svelte'
+  import type { RunBudget, RunInput } from '../lib/api'
   import { consentStep } from '../lib/irreversibleconsent'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
@@ -54,6 +73,7 @@
   // --- 0.23.0 stats (C3) ---
   import ChartColumn from '@lucide/svelte/icons/chart-column'
   import PlaybookStatsCard from '../lib/PlaybookStatsCard.svelte'
+  import { previousVersion } from '../lib/playbookstats'
   // --- end of 0.23.0 stats ---
   import X from '@lucide/svelte/icons/x'
 
@@ -67,6 +87,10 @@
     { code: string; severity: string; message: string; node?: string | null }[]
   >([])
   let versions = $state<VersionInfo[]>([])
+  // The candidate on trial and how it compares with current, read with the
+  // version list; a person's decision on it in flight.
+  let candidate = $state<CandidateQualityView | null>(null)
+  let deciding = $state(false)
   let activating = $state<string | null>(null)
   let frozen = $state<boolean>(false)
   let freezing = $state<boolean>(false)
@@ -90,7 +114,17 @@
     statsLoading = true
     statsError = null
     try {
-      const r = await fetchStats(id, workspace)
+      // With two versions or more, compare the newest with the one before
+      // it, so the card shows how quality moved.
+      let r = await fetchStats(id, workspace)
+      const base = previousVersion(r)
+      if (base) {
+        try {
+          r = await fetchStats(id, workspace, /* since */ '', base)
+        } catch {
+          // The comparison is an extra: the plain report stays.
+        }
+      }
       if (key === `${workspace}/${id}`) stats = r
     } catch (e) {
       statsError = String(e)
@@ -103,7 +137,106 @@
     showStats = !showStats
     if (showStats) loadStats()
   }
+
+  // "Will it fit here?": read each time the panel opens, since profiles,
+  // connectors and trust change outside this page.
+  let showFit = $state(false)
+  let fit = $state<FitReport | null>(null)
+  let fitLoading = $state(false)
+  let fitError = $state<string | null>(null)
+
+  // Each load bumps the token; a response for an older load (another
+  // playbook, or a toggle since) writes nothing.
+  let fitToken = 0
+  async function loadFit() {
+    const token = ++fitToken
+    fitLoading = true
+    fitError = null
+    try {
+      const r = await fetchFit(id, workspace)
+      if (token === fitToken) fit = r
+    } catch (e) {
+      if (token === fitToken) fitError = String(e)
+    } finally {
+      if (token === fitToken) fitLoading = false
+    }
+  }
+
+  function toggleFit() {
+    showFit = !showFit
+    if (showFit) loadFit()
+  }
   // --- end of 0.23.0 stats ---
+
+  // Known problems: read with the playbook (the toolbar counts the ones a
+  // person should look at), shown in a side panel; a person's action on one
+  // in flight. A response for another playbook writes nothing.
+  let showProblems = $state(false)
+  let problems = $state<ProblemsView | null>(null)
+  let problemsError = $state<string | null>(null)
+  // The problems whose action is in flight: each is disabled on its own.
+  let problemsBusy = $state<ReadonlySet<string>>(new Set())
+  const problemsToLook = $derived(problems ? groupProblems(problems.problems).look.length : 0)
+  let problemsToken = 0
+  async function loadProblems() {
+    const token = ++problemsToken
+    try {
+      const v = await fetchKnownProblems(id, workspace)
+      if (token !== problemsToken) return
+      problems = v
+      problemsError = null
+    } catch (e) {
+      if (token === problemsToken) problemsError = String(e)
+    }
+  }
+
+  const ACTION_DONE: Record<ProblemAction, string> = {
+    confirm: 'Problem confirmed: shown to runs',
+    dismiss: 'Problem dismissed',
+    reopen: 'Problem reopened',
+    close: 'Problem closed',
+    recheck: 'Problem rechecked',
+  }
+
+  /** Acts on one problem; resolves to null when it was done, else why not
+   * (the close form keeps itself open and shows it). */
+  async function actOnProblem(
+    problem: string,
+    action: ProblemAction,
+    body: ProblemDecision,
+  ): Promise<string | null> {
+    const on = `${workspace}\u0000${id}`
+    const stillHere = () => on === `${workspace}\u0000${id}`
+    problemsBusy = new Set([...problemsBusy, problem])
+    try {
+      const result = await decideKnownProblem(id, problem, action, body, workspace)
+      if (!stillHere()) return null
+      if (action === 'recheck' && body.verdict === 'holds') {
+        toast.success('Recorded: the problem still holds')
+      } else if (action === 'recheck' && 'verdict' in result) {
+        const r = recheckResult(result)
+        toast[r.tone](r.text)
+      } else {
+        toast.success(ACTION_DONE[action])
+      }
+      await loadProblems()
+      return null
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      // A refused close is shown in its form, where the quote can be fixed.
+      if (stillHere() && action !== 'close') {
+        toast.error('The known-problem action failed', { description: message })
+      }
+      return message
+    } finally {
+      if (stillHere()) problemsBusy = new Set([...problemsBusy].filter((p) => p !== problem))
+    }
+  }
+
+  async function problemPassages(problem: string) {
+    return (await fetchKnownProblem(id, problem, workspace)).changed_passages
+  }
+
   // The playbook's own nodes (not the flow nodes): clicking a node opens the
   // same form the editor uses, read-only, so a prompt can be read here without
   // switching to edit mode.
@@ -112,6 +245,7 @@
   // The rest of the definition the side boxes show (description, effects,
   // requires, trigger, defaults); the server sends the whole parsed playbook.
   let meta = $state.raw<PlaybookMeta>({})
+  let publishOnly = $state(false)
   let selectedNodeId = $state<string | null>(null)
   const selectedNode = $derived(
     selectedNodeId ? (playbookNodes.find((n) => n.id === selectedNodeId) ?? null) : null,
@@ -226,6 +360,10 @@
       showHistory = false
     } else if (showStats) {
       showStats = false
+    } else if (showFit) {
+      showFit = false
+    } else if (showProblems) {
+      showProblems = false
     }
   })
 
@@ -259,6 +397,43 @@
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load versions', { description: String(e) })
     }
+    try {
+      const c = await fetchCandidate(id, workspace)
+      if (token === loadToken) candidate = c.candidate
+    } catch (e) {
+      // `candidate: null` is how "none on trial" reads; a failure says so
+      // instead of looking the same.
+      if (token === loadToken) {
+        candidate = null
+        toast.error('Failed to load the candidate', { description: String(e) })
+      }
+    }
+  }
+
+  // Promote or keep current: the decision is recorded on the candidate's
+  // trial record as made in the dashboard, then the history reloads. A
+  // decision answers for the playbook it was made on: once the page moved
+  // to another playbook, it neither reloads nor reports here, and a reload
+  // that fails is not a failed decision.
+  async function decideCandidate(decide: () => Promise<QualityRecord>) {
+    const decidedOn = `${workspace}\u0000${id}`
+    const stillHere = () => decidedOn === `${workspace}\u0000${id}`
+    deciding = true
+    let rec: QualityRecord
+    try {
+      rec = await decide()
+    } catch (e) {
+      // Another playbook's card is not this decision's to unlock.
+      if (stillHere()) {
+        toast.error('The decision failed', { description: String(e) })
+        deciding = false
+      }
+      return
+    }
+    if (!stillHere()) return
+    deciding = false
+    toast.success(`Candidate: ${verdictText(rec.verdict)}`)
+    await reload()
   }
 
   async function load(token: number) {
@@ -273,14 +448,18 @@
       playbookNodes = detail.playbook.nodes
       playbookEdges = detail.playbook.edges
       meta = metaOf(detail.playbook)
+      publishOnly = detail.playbook.publish_only === true
       yamlText = detail.yaml
       name = detail.playbook.name || detail.id
       version = detail.version
       validation = detail.validation
       frozen = detail.frozen
+      budgetBlock = detail.playbook.budget ?? null
+      runParams = detail.playbook.params ?? []
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load playbook', { description: String(e) })
     }
+    void loadProblems()
     await loadVersions(token)
   }
 
@@ -351,11 +530,44 @@
   let irreversibleOpen = $state(false)
   let irreversibleSources = $state<string[]>([])
   let irreversibleNonce = $state('')
+  // The Run dialog (estimate and budget) opens first; the budget it returns
+  // rides every retry of the same start, the consent one included.
+  let startOpen = $state(false)
+  let budgetBlock = $state<PlaybookDetail['playbook']['budget']>(null)
+  let startBudget = $state<RunBudget | undefined>(undefined)
+  // The params and instruction the dialog collected, and whether to keep
+  // them for this project; they ride every retry of the same start.
+  let runParams = $state<PlaybookParam[]>([])
+  let startInput = $state<RunInput>({})
+  // The dialog reopened after a `budget_needs_decision` refusal: it keeps
+  // the typed values and shows the pause or continue choice.
+  let startRetry = $state(false)
+
+  function openStart() {
+    startRetry = false
+    startOpen = true
+  }
+
+  function startWith(budget: RunBudget | undefined, input: RunInput) {
+    startBudget = budget
+    startInput = input
+    void run()
+  }
 
   async function run(consentNonce?: string) {
     starting = true
     try {
-      const { run_id } = await runPlaybook(id, workspace, consentNonce)
+      const started = await runPlaybook(id, workspace, {
+        consentNonce,
+        budget: startBudget,
+        input: startInput,
+      })
+      const { run_id, warnings } = started
+      for (const w of warnings ?? []) toast.warning(w)
+      for (const r of started.not_remembered ?? []) {
+        toast.warning(`Not remembered: ${r.name} (${r.reason.replace(/_/g, ' ')})`)
+      }
+      if (started.memory_error) toast.warning('The input was not remembered', { description: started.memory_error })
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
       starting = false
@@ -368,6 +580,15 @@
         irreversibleSources = step.sources
         irreversibleNonce = step.nonce
         irreversibleOpen = true
+        return
+      }
+      if (e instanceof ApiError && e.code === 'budget_needs_decision') {
+        // Show the dialog again, the typed values kept and the choice shown.
+        toast.error('The budget needs a decision', {
+          description: 'Some nodes have no estimate: choose pause or continue.',
+        })
+        startRetry = true
+        startOpen = true
         return
       }
       toast.error('Failed to start run', { description: String(e) })
@@ -423,9 +644,12 @@
     playbookEdges = []
     meta = {}
     runsCount = null
+    publishOnly = false
     selectedNodeId = null
     showForm = false
     versions = []
+    candidate = null
+    deciding = false
     validation = []
     stats = null
     showStats = false
@@ -434,6 +658,16 @@
     void loadRouteSide(route)
     const runsLane = slowRefresh(() => void loadRunsCount(route), 30_000)
     runsLane.request()
+    fit = null
+    fitError = null
+    fitLoading = false
+    fitToken++
+    showFit = false
+    showProblems = false
+    problems = null
+    problemsError = null
+    problemsBusy = new Set()
+    problemsToken++
     reload()
     const unsubscribe = subscribeChanges(() => {
       reload()
@@ -492,6 +726,17 @@
               frozen
             </span>
           {/if}
+          {#if candidate}
+            <button
+              type="button"
+              class="tag candidate-chip"
+              title="A candidate version is on trial: open the history to compare and decide"
+              data-testid="candidate-chip"
+              onclick={() => (showHistory = true)}
+            >
+              candidate {candidate.version}
+            </button>
+          {/if}
         </div>
         <h1 class="mt-0.5 mb-2 font-semibold">{name}</h1>
         {#each descriptionParas as para, i (i)}
@@ -501,7 +746,7 @@
           <Button
             size="sm"
             class="h-7"
-            onclick={() => run()}
+            onclick={openStart}
             disabled={starting}
             title="Start a run of this playbook"
           >
@@ -546,6 +791,31 @@
           >
             <ChartColumn data-icon="inline-start" />
             Stats
+          </Button>
+          <Button
+            variant={showFit ? 'default' : 'outline'}
+            size="sm"
+            class="h-7"
+            onclick={toggleFit}
+            title="Will this playbook run in this project: compatibility, setup, trust and consent"
+            data-testid="fit-toggle"
+          >
+            <ListChecks data-icon="inline-start" />
+            Fit
+          </Button>
+          <Button
+            variant={showProblems ? 'default' : 'outline'}
+            size="sm"
+            class="h-7"
+            onclick={() => (showProblems = !showProblems)}
+            title="Known problems: trouble with this playbook's tools that earlier runs reported"
+            data-testid="known-problems-toggle"
+          >
+            <Bug data-icon="inline-start" />
+            Problems
+            {#if problemsToLook > 0}
+              <span class="pv-count" title="Known problems that need a look">{problemsToLook}</span>
+            {/if}
           </Button>
           <Button
             variant="outline"
@@ -671,7 +941,7 @@
           </div>
           <div class="min-h-0 flex-1 overflow-auto">
             <div class="mx-auto w-full max-w-5xl pb-6">
-              <NodePanel {id} node={selectedNode} {workspace} nodes={playbookNodes} readonly />
+              <NodePanel {id} node={selectedNode} {workspace} nodes={playbookNodes} {publishOnly} readonly />
             </div>
           </div>
         </div>
@@ -710,6 +980,42 @@
         </section>
       {/if}
 
+      {#if showFit}
+        <section class="box px-4 pt-3.5 pb-3.5" data-testid="fit-panel">
+          <span class="box-cap">will it fit here?</span>
+          <div class="mb-1 flex justify-end">
+            <Button variant="ghost" size="icon-xs" title="Hide the fit report" onclick={() => (showFit = false)}>
+              <X />
+            </Button>
+          </div>
+          <FitCard report={fit} loading={fitLoading} error={fitError} />
+        </section>
+      {/if}
+
+      {#if showProblems}
+        <section class="box px-4 pt-3.5 pb-3.5" data-testid="known-problems-panel">
+          <span class="box-cap">known problems</span>
+          <div class="mb-1 flex justify-end">
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title="Hide the known problems"
+              onclick={() => (showProblems = false)}
+            >
+              <X />
+            </Button>
+          </div>
+          <KnownProblemsCard
+            view={problems}
+            loading={problems === null && !problemsError}
+            error={problemsError}
+            busy={problemsBusy}
+            onAct={actOnProblem}
+            loadPassages={problemPassages}
+          />
+        </section>
+      {/if}
+
       {#if showHistory}
         <section class="box px-4 pt-3.5 pb-3.5">
           <span class="box-cap">version history</span>
@@ -723,6 +1029,17 @@
               <X />
             </Button>
           </div>
+          {#if candidate}
+            <div class="candidate-slot">
+              <CandidateQualityCard
+                {candidate}
+                {frozen}
+                busy={deciding}
+                onPromote={() => decideCandidate(() => promoteCandidate(id, workspace))}
+                onKeepCurrent={(reason) => decideCandidate(() => keepCurrentCandidate(id, reason, workspace))}
+              />
+            </div>
+          {/if}
           {#if versions.length === 0}
             <p class="text-xs text-muted-foreground">no versions</p>
           {:else}
@@ -737,6 +1054,16 @@
                     {#if trialBadge(v)}
                       <Badge variant="outline" class="text-[10px]" title={v.provenance?.trial?.reason ?? ''}>
                         {trialBadge(v)}
+                      </Badge>
+                    {/if}
+                    {#if approvalBadge(v)}
+                      <Badge
+                        variant="outline"
+                        class="text-[10px]"
+                        title={approvalHint(id, v.version)}
+                        data-testid="version-awaiting-approval"
+                      >
+                        {approvalBadge(v)}
                       </Badge>
                     {/if}
                     <!-- Any stored version can become the current one, which is
@@ -791,6 +1118,17 @@
 
 <StatusBar items={statusItems} />
 
+<RunStartDialog
+  bind:open={startOpen}
+  playbookId={id}
+  {workspace}
+  block={budgetBlock}
+  params={runParams}
+  busy={starting}
+  retry={startRetry}
+  onrun={startWith}
+/>
+
 <!-- 0.24.0 irreversible consent -->
 <IrreversibleRunDialog
   bind:open={irreversibleOpen}
@@ -798,3 +1136,31 @@
   sources={irreversibleSources}
   onconfirm={confirmIrreversibleRun}
 />
+
+<style>
+  /* Plain CSS over the app's variables. */
+  .candidate-slot {
+    margin-bottom: 12px;
+  }
+  .candidate-chip {
+    margin-left: 4px;
+    background: transparent;
+    color: var(--warning);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .candidate-chip:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .pv-count {
+    min-width: 1.1rem;
+    padding: 0 0.3rem;
+    background: var(--warning);
+    color: var(--warning-foreground);
+    font-size: 11px;
+    line-height: 1.1rem;
+    text-align: center;
+  }
+</style>

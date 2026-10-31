@@ -21,7 +21,6 @@ uuid = { version = "1.23.4", features = ["v4"] }
 # HTTP client (redirects disabled, per-call timeout) and args-schema validation.
 ureq.workspace = true
 jsonschema.workspace = true
-percent-encoding.workspace = true
 # Native SMTP execution for the `smtp` connector function kind (spec 4.2):
 # blocking low-level SmtpConnection client, STARTTLS via rustls (TLS 1.2+ by
 # default), MIME/multipart built by the library.
@@ -48,7 +47,7 @@ libc = "0.2"
 ts-rs = { version = "12", optional = true }
 
 [features]
-ts = ["dep:ts-rs"]
+ts = ["dep:ts-rs", "apb-core/ts"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

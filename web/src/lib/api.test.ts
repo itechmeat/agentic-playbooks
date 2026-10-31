@@ -5,11 +5,24 @@ import {
   deletePlaybook,
   fetchDiff,
   fetchModelCatalog,
-  fetchInputDraft,
+  clearMemory,
+  fetchCandidate,
+  fetchFit,
+  fetchMemory,
+  fetchRunGrades,
+  gradeRun,
+  decideKnownProblem,
+  fetchKnownProblem,
+  fetchKnownProblems,
+  keepCurrentCandidate,
+  reopenRunGrading,
+  promoteCandidate,
   fetchPlaybook,
   postAnswer,
+  postRunNotify,
   runPlaybook,
-  saveInputDraft,
+  runReportHtmlUrl,
+  saveMemory,
   saveLayout,
   updatePlaybook,
 } from './api'
@@ -172,34 +185,123 @@ describe('saveLayout', () => {
   })
 })
 
-describe('input draft', () => {
-  it('GETs and PUTs /api/playbooks/{id}/input-draft', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'x' }))
-    const got = await fetchInputDraft('p')
-    expect(got).toEqual({ instruction: 'x' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', { headers: H })
+describe('remembered input', () => {
+  it('reads, remembers and forgets through /api/playbooks/{id}/memory', async () => {
+    const recall = { id: 'p', scope: 'project', version: '1.0.0', instruction: 'x', values: [] }
+    fetchMock.mockResolvedValueOnce(jsonResponse(recall))
+    await expect(fetchMemory('p')).resolves.toEqual(recall)
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/memory', { headers: H })
 
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'hi' }))
-    const saved = await saveInputDraft('p', 'hi')
-    expect(saved).toEqual({ instruction: 'hi' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', scope: 'project', stored: ['instruction'], refused: [] }))
+    const saved = await saveMemory('p', { instruction: 'hi', params: { channel: 'beta' } })
+    expect(saved.stored).toEqual(['instruction'])
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/memory', {
       method: 'PUT',
       headers: JSON_H,
-      body: JSON.stringify({ instruction: 'hi' }),
+      body: JSON.stringify({ instruction: 'hi', params: { channel: 'beta' } }),
+    })
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', scope: 'project', cleared: 'params' }))
+    await clearMemory('p', 'params')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/memory?what=params', {
+      method: 'DELETE',
+      headers: H,
     })
   })
 
-  it('adds ?workspace= to select a project on the global dashboard', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
-    await fetchInputDraft('p', 'ws-abc')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', { headers: H })
+  it('selects the project and the definition scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}))
+    await fetchMemory('p', 'ws-abc', { scope: 'global', version: '2.0.0' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/playbooks/p/memory?workspace=ws-abc&scope=global&version=2.0.0',
+      { headers: H },
+    )
+  })
+})
 
-    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
-    await saveInputDraft('p', 'hi', 'ws-abc')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', {
-      method: 'PUT',
+describe('fetchFit', () => {
+  it('GETs the fit report of a run in the selected project', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', ready: true }))
+    await expect(fetchFit('p', 'ws-abc')).resolves.toMatchObject({ ready: true })
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/fit?workspace=ws-abc', { headers: H })
+  })
+})
+
+describe('run quality', () => {
+  it('reads and grades a run through /api/runs/{id}/grades', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', grades: [] }))
+    await fetchRunGrades('r1', 'w1')
+    expect(fetchMock).toHaveBeenCalledWith('/api/runs/r1/grades?workspace=w1', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ grader: 'rules', grade: {} }))
+    await gradeRun('r1', 'rules')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades', {
+      method: 'POST',
       headers: JSON_H,
-      body: JSON.stringify({ instruction: 'hi' }),
+      body: JSON.stringify({ grader: 'rules' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ grader: 'model', skipped: 'off' }))
+    await expect(gradeRun('r1', 'model', 'w1')).resolves.toMatchObject({ skipped: 'off' })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades?workspace=w1', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ grader: 'model' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', reopened: true }))
+    await reopenRunGrading('r1', 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/grades/reopen?workspace=w1', {
+      method: 'POST',
+      headers: H,
+    })
+  })
+
+  it('reads and decides the candidate through /api/playbooks/{id}/candidate', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'p', candidate: null }))
+    await fetchCandidate('p')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/candidate', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'promote' }))
+    await promoteCandidate('p', 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/promote?workspace=w1', {
+      method: 'POST',
+      headers: H,
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'keep_current' }))
+    await keepCurrentCandidate('p', '  reads better ')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/keep-current', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ reason: 'reads better' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'keep_current' }))
+    await keepCurrentCandidate('p', ' ')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/keep-current', {
+      method: 'POST',
+      headers: JSON_H,
+      body: '{}',
+    })
+  })
+})
+
+describe('known problems', () => {
+  it('reads and decides through /api/playbooks/{id}/known-problems', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ playbook: 'p', scope: 'project', signed: true, problems: [] }))
+    await fetchKnownProblems('p', 'w1')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/known-problems?workspace=w1', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ problem: {}, changed_passages: [] }))
+    await fetchKnownProblem('p', 'kp-1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/known-problems/kp-1', { headers: H })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'kp-1', status: 'closed' }))
+    await decideKnownProblem('p', 'kp-1', 'close', { quote: 'fixed line' }, 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/known-problems/kp-1/close?workspace=w1', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ quote: 'fixed line' }),
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'holds' }))
+    await decideKnownProblem('p', 'kp-1', 'recheck', { verdict: 'holds' })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/known-problems/kp-1/recheck', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ verdict: 'holds' }),
     })
   })
 })
@@ -325,9 +427,67 @@ describe('runPlaybook', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({})
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-1' }))
-    await expect(runPlaybook('p', '', 'consent-0123')).resolves.toEqual({ run_id: 'p-1' })
+    await expect(runPlaybook('p', '', { consentNonce: 'consent-0123' })).resolves.toEqual({
+      run_id: 'p-1',
+    })
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
       confirm_irreversible: 'consent-0123',
     })
+  })
+
+  // The run budget rides the start, and a start the budget needs a decision
+  // for comes back with its structured body (the estimate, the nodes).
+  it('sends the budget and surfaces budget_needs_decision with its body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: 'budget_needs_decision', unestimated: ['a'], options: ['pause', 'continue'] }, 409),
+    )
+    const err = runPlaybook('p', '', { budget: { tokens: 300000 } }).catch((e: unknown) => e)
+    await expect(err).resolves.toMatchObject({
+      status: 409,
+      code: 'budget_needs_decision',
+      body: { unestimated: ['a'] },
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      budget: { tokens: 300000 },
+    })
+  })
+
+  it('sends the run input and remember only when given', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-1', remembered: ['channel'], not_remembered: [] }))
+    await runPlaybook('p', '', {
+      input: { params: { channel: 'beta' }, instruction: 'go', remember: true },
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      params: { channel: 'beta' },
+      instruction: 'go',
+      remember: true,
+    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-2' }))
+    await runPlaybook('p', '', { input: { params: {} } })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({})
+  })
+})
+
+describe('notify', () => {
+  it('sends the start choice only when the dialog made one', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ run_id: 'p-1' }))
+    await runPlaybook('p', '', { input: { notify: false } })
+    await runPlaybook('p', '', { input: {} })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ notify: false })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({})
+  })
+
+  it('posts a live change and surfaces notify_unavailable', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: 'notify_unavailable', detail: 'connector `telegram` is not approved' }, 409),
+    )
+    const err = postRunNotify('r 1', true, 'ws').catch((e: unknown) => e)
+    await expect(err).resolves.toMatchObject({ status: 409, code: 'notify_unavailable' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/runs/r%201/notify?workspace=ws')
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ notify: true })
+  })
+
+  it('links the report page of a run', () => {
+    expect(runReportHtmlUrl('r 1', 'ws')).toBe('/api/runs/r%201/report.html?workspace=ws')
   })
 })

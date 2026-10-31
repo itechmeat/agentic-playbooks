@@ -15,10 +15,13 @@ impl PauseInfo {
         if self.pausing { "pausing" } else { "paused" }
     }
 
-    /// The parts after the reason, in a fixed order: who, how (only for a
-    /// `pausing` run), since, until, a kept lock.
+    /// The parts after the reason, in a fixed order: who, the engine's
+    /// cause, how (only for a `pausing` run), since, until, a kept lock.
     pub fn details(&self) -> Vec<String> {
         let mut parts = vec![format!("by {}", self.by.as_str())];
+        if let Some(cause) = self.cause {
+            parts.push(format!("cause {}", cause.as_str()));
+        }
         if self.pausing {
             parts.push(format!("mode {}", self.mode.as_str()));
         }

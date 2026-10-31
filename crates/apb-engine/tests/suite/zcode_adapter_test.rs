@@ -1,6 +1,7 @@
 //! zcode (Z.ai's ZCode headless CLI) through the generic headless adapter:
 //! argv with an explicit permission mode, `--json` unwrapping, session
-//! capture, and error/quota classification.
+//! capture, the plan fallback and the desktop history sync. The error and
+//! quota scenarios run in the agent contract suite (`agent_contract`).
 //!
 //! Fixture provenance (`tests/fixtures/zcode/`):
 //! - `error_no_model.stderr` is a REAL capture from zcode-agent 0.16.9 on a
@@ -17,12 +18,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use apb_engine::adapter::{
-    AgentAdapter, AgentFailure, AgentTask, ClaudeAdapter, ConnectorEnvPolicy, ErrorClass,
-    capture_session,
-};
+use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, SpawnEnv, capture_session};
 use apb_engine::event::{EventPayload, read_all};
-use apb_engine::failure_class::{FailureKind, classify};
 use apb_engine::invocation::builtin;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::{NodeStatus, RunStatus};
@@ -62,7 +59,7 @@ fn recorded_argv(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-fn task<'a>(dir: &'a Path, policy: &'a ConnectorEnvPolicy, grant_autonomy: bool) -> AgentTask<'a> {
+fn task<'a>(dir: &'a Path, policy: &'a SpawnEnv, grant_autonomy: bool) -> AgentTask<'a> {
     AgentTask {
         prompt: "reply PONG",
         // Empty: no plan selection, so the test does not depend on a ZCode
@@ -73,7 +70,7 @@ fn task<'a>(dir: &'a Path, policy: &'a ConnectorEnvPolicy, grant_autonomy: bool)
         stream_log: None,
         soul: Some("You are terse."),
         grant_autonomy,
-        connector_policy: policy,
+        spawn_env: policy,
         interactive: false,
         report_contract: true,
         node: "n",
@@ -82,6 +79,7 @@ fn task<'a>(dir: &'a Path, policy: &'a ConnectorEnvPolicy, grant_autonomy: bool)
         status_file: None,
         hermetic_settings: None,
         transcript_dir: None,
+        output_limits: Default::default(),
     }
 }
 
@@ -101,7 +99,7 @@ fn zcode_json_output_is_unwrapped_and_its_session_captured() {
         spec: builtin("zcode").unwrap(),
     };
     let report = ad
-        .run(&task(dir.path(), &ConnectorEnvPolicy::default(), false))
+        .run(&task(dir.path(), &SpawnEnv::default(), false))
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
     // The node output is the reply inside `response`, report block stripped,
@@ -134,7 +132,7 @@ fn zcode_autonomy_switches_the_mode_to_yolo_last() {
         program: stub_zcode(dir.path(), &format!("cat '{}'", json.display())),
         spec: builtin("zcode").unwrap(),
     };
-    ad.run(&task(dir.path(), &ConnectorEnvPolicy::default(), true))
+    ad.run(&task(dir.path(), &SpawnEnv::default(), true))
         .unwrap();
     let argv = recorded_argv(dir.path());
     // Both modes appear; zcode's parser keeps the LAST, so yolo must follow.
@@ -144,48 +142,6 @@ fn zcode_autonomy_switches_the_mode_to_yolo_last() {
         .map(|w| w[1].as_str())
         .collect();
     assert_eq!(modes, vec!["build", "yolo"]);
-}
-
-#[test]
-fn zcode_error_exit_is_process_exit_with_the_cli_message() {
-    let dir = tempfile::tempdir().unwrap();
-    let err_file = Path::new(FIXTURES).join("error_no_model.stderr");
-    let ad = ClaudeAdapter {
-        program: stub_zcode(
-            dir.path(),
-            &format!("cat '{}' >&2\nexit 1", err_file.display()),
-        ),
-        spec: builtin("zcode").unwrap(),
-    };
-    let AgentFailure {
-        class,
-        message: msg,
-        ..
-    } = ad
-        .run(&task(dir.path(), &ConnectorEnvPolicy::default(), false))
-        .unwrap_err();
-    assert_eq!(class, ErrorClass::ProcessExit);
-    assert!(msg.contains("Model creation failed"), "{msg}");
-}
-
-/// A Z.ai quota stop must read as a budget failure, so the engine skips the
-/// rest of that plan (and only that plan) in the fallback chain.
-#[test]
-fn zcode_quota_stop_classifies_as_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let err_file = Path::new(FIXTURES).join("error_quota.stderr");
-    let ad = ClaudeAdapter {
-        program: stub_zcode(
-            dir.path(),
-            &format!("cat '{}' >&2\nexit 1", err_file.display()),
-        ),
-        spec: builtin("zcode").unwrap(),
-    };
-    let msg = ad
-        .run(&task(dir.path(), &ConnectorEnvPolicy::default(), false))
-        .unwrap_err()
-        .message;
-    assert_eq!(classify(&msg), FailureKind::Budget, "{msg}");
 }
 
 #[test]

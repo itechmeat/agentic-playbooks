@@ -277,9 +277,10 @@ On conflict, higher-priority sources override lower ones: supervisor notes overr
 
 /// Assembles the trailing instruction-source blocks appended to an agent
 /// attempt prompt after the rendered template (issue #56 finding 4): the run
-/// instruction, then the applied supervisor notes, then the precedence frame
-/// naming the on-conflict order (supervisor notes > run instruction > node
-/// template). Shared by `execute_node` and `execute_finish_answer` so the two
+/// instruction, then the known problems shown to `node`
+/// ([`crate::known_problems::prompt::section`]), then the applied supervisor
+/// notes, then the precedence frame naming the on-conflict order
+/// (supervisor notes > run instruction > node template). Shared by `execute_node` and `execute_finish_answer` so the two
 /// assembly sites cannot drift. The run instruction and supervisor notes are
 /// appended as explicit trailing sections (not placeholder substitutions), so a
 /// node template that references neither `{{run.context}}` nor
@@ -289,6 +290,7 @@ On conflict, higher-priority sources override lower ones: supervisor notes overr
 pub fn assemble_agent_prompt(
     template: &str,
     instruction: Option<&str>,
+    node: &str,
     events: &[Event],
 ) -> String {
     // A template that places `{{run.context}}` already carries the instruction:
@@ -303,6 +305,7 @@ pub fn assemble_agent_prompt(
     } else {
         with_run_instruction(template, instruction)
     };
+    text.push_str(&crate::known_problems::prompt::section(events, node));
     text = with_supervisor_notes(&text, events);
     text.push_str(&precedence_frame(instruction, events));
     text
@@ -367,11 +370,16 @@ const RECORDED_CONTEXT_HEADING: &str = "\n\n## recorded run context\n\n";
 /// a prompt that does place the context itself keeps today's byte-identical
 /// assembly. A blank context adds no section. The section goes last but one, so
 /// the deliverable statement stays the final word and "above" is literally true.
+///
+/// `for_people` adds apb's writing brief ([`crate::people::brief`]) right
+/// before the deliverable statement: the closing answer is read by a person
+/// unless the finish node says `audience: agents`.
 pub fn assemble_finish_answer_prompt(
     template: &str,
     instruction: Option<&str>,
     events: &[Event],
     recorded_context: Option<&str>,
+    for_people: bool,
 ) -> String {
     let mut text = with_supervisor_notes(template, events);
     text.push_str(&finish_answer_reference(instruction));
@@ -379,6 +387,9 @@ pub fn assemble_finish_answer_prompt(
         text.push_str(RECORDED_CONTEXT_HEADING);
         text.push_str(recorded);
         text.push('\n');
+    }
+    if for_people {
+        crate::people::brief::append_to(&mut text);
     }
     text.push_str(FINISH_ANSWER_DELIVERABLE);
     text
@@ -1025,7 +1036,7 @@ mod tests {
     fn assemble_agent_prompt_delivers_instruction_without_placeholder() {
         let template = "Follow your SOUL and lock the branch scope.";
         let instruction = "Exclude the docs/reviews artifacts from the branch and the PR.";
-        let assembled = assemble_agent_prompt(template, Some(instruction), &[]);
+        let assembled = assemble_agent_prompt(template, Some(instruction), "n", &[]);
 
         assert!(assembled.starts_with(template), "template stays first");
         assert!(
@@ -1060,7 +1071,7 @@ mod tests {
                 detail: "prefer approach B".into(),
             },
         )];
-        let assembled = assemble_agent_prompt(template, Some("stay within budget"), &events);
+        let assembled = assemble_agent_prompt(template, Some("stay within budget"), "n", &events);
 
         let tmpl = assembled.find("TEMPLATE BODY").expect("template");
         let instr = assembled.find("## run instruction").expect("instruction");
@@ -1081,7 +1092,7 @@ mod tests {
         let template = "exact template body, no placeholders";
         // No instruction, no notes: assembly must be a pure no-op so cache keys
         // and byte-for-byte prompt expectations do not shift.
-        assert_eq!(assemble_agent_prompt(template, None, &[]), template);
+        assert_eq!(assemble_agent_prompt(template, None, "n", &[]), template);
         let events = vec![ev(
             0,
             EventPayload::NodeFinished {
@@ -1092,9 +1103,12 @@ mod tests {
                 artifacts: Vec::new(),
             },
         )];
-        assert_eq!(assemble_agent_prompt(template, None, &events), template);
         assert_eq!(
-            assemble_agent_prompt(template, Some("  "), &events),
+            assemble_agent_prompt(template, None, "n", &events),
+            template
+        );
+        assert_eq!(
+            assemble_agent_prompt(template, Some("  "), "n", &events),
             template
         );
     }
@@ -1112,6 +1126,7 @@ mod tests {
             Some("Ship the dashboard feature and open a PR"),
             &[],
             None,
+            false,
         );
         // The node template still leads the prompt.
         assert!(
@@ -1181,6 +1196,7 @@ mod tests {
             None,
             &[],
             Some("## a (succeeded, attempt 1)\n\nshipped it\n\n"),
+            false,
         );
         assert!(
             assembled.contains("shipped it"),
@@ -1198,18 +1214,18 @@ mod tests {
     fn finish_answer_prompt_is_byte_identical_without_an_auto_context() {
         // A prompt that reads context itself (auto context None) and an empty
         // recorded context must both leave the assembly exactly as it was.
-        let baseline = assemble_finish_answer_prompt("BODY", None, &[], None);
+        let baseline = assemble_finish_answer_prompt("BODY", None, &[], None, false);
         assert!(
             !baseline.contains("## recorded run context"),
             "no section without an auto context:\n{baseline}"
         );
         assert_eq!(
-            assemble_finish_answer_prompt("BODY", None, &[], Some("")),
+            assemble_finish_answer_prompt("BODY", None, &[], Some(""), false),
             baseline,
             "an empty context must not add an empty section"
         );
         assert_eq!(
-            assemble_finish_answer_prompt("BODY", None, &[], Some("  \n ")),
+            assemble_finish_answer_prompt("BODY", None, &[], Some("  \n "), false),
             baseline,
             "a blank context must not add an empty section"
         );
@@ -1219,7 +1235,7 @@ mod tests {
     fn finish_answer_prompt_states_deliverable_without_instruction() {
         // With no run instruction there is no reference block, but the composer is
         // still told its whole reply is the closing message.
-        let assembled = assemble_finish_answer_prompt("BODY", None, &[], None);
+        let assembled = assemble_finish_answer_prompt("BODY", None, &[], None, false);
         assert!(
             !assembled.contains("## reference"),
             "no reference block:\n{assembled}"

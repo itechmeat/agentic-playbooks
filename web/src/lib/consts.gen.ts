@@ -6,17 +6,53 @@
 export const CURRENT_SCHEMA = 2
 
 /** Every node `type` tag. */
-export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook', 'judge'] as const
+export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook', 'judge', 'publish'] as const
 export type NodeType = (typeof NODE_TYPES)[number]
 
 /** The decisions a human_review gate without options offers. */
 export const DEFAULT_REVIEW_OPTIONS = ['approve', 'reject'] as const
+
+/** Every run transition a person can be notified about, in report order. */
+export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished'] as const
 
 /** The dashboard's default port (the dev server proxies to it). */
 export const DEFAULT_PORT = 7321
 
 /** Legacy agent ids and the built-in agent each stands for. */
 export const AGENT_ALIASES: Readonly<Record<string, string>> = { 'claude-code': 'claude' }
+
+/** What checked a piece of evidence, in words. */
+export const EVIDENCE_SOURCE_LABELS = { goal: "goal", success_check: "success check", baseline: "baseline", item_check: "item check" } as const
+
+/** Why something is not verified, in words. */
+export const GAP_LABELS = { manual_criterion: "to confirm by hand", self_reported_node: "self-reported", goal_not_checked: "goal not checked", unknown_call: "call outcome unknown", incomplete_response: "response cut short", inbox_gap: "inbox gap", output_truncated: "output cut", baseline_unknown: "baseline unknown", item_needs_look: "item needs a look", self_reported_items: "items self-reported" } as const
+
+/** The shortest and the longest quote a known problem's close may rest on. */
+export const QUOTE_MIN = 12
+export const QUOTE_MAX = 400
+
+/** The sentence of every isolation hold and limit code. */
+export const ISOLATION_CODE_TEXTS = { "user.namespaces": "Own PID, IPC and UTS namespaces: no operator process is visible, signalable or traceable.", "user.no_privileges": "No capabilities and no new privileges.", "user.new_session": "A new session with no controlling terminal.", "files.declared_view": "Only the declared view of the filesystem; the home directory is hidden except declared paths.", "files.git_control_read_only": "The repository's config, hooks and info are read-only.", "files.apb_masked": "The project's .apb directory is masked except the attempt's own paths.", "credentials.env_allowlist": "The environment is an allowlist, even when the profile says inherit; connector variables are withheld.", "credentials.sockets_dropped": "The ssh agent, session bus and display variables are dropped.", "credentials.git_config_replaced": "The operator's git config is replaced by one holding only the user name and email.", "network.none": "Own network namespace: loopback only.", "network.scoped": "Host abstract unix sockets and signals outside the sandbox are closed (Landlock scope).", "no_sandbox": "No sandbox: the agent runs as the operator in a scratch directory.", "user.host_uid": "The host uid is unchanged: created files belong to the operator, and the operator's groups still apply.", "user.not_separated": "Operator processes are visible to the agent.", "files.system_readable": "/usr, /etc, /opt and /sys are readable.", "files.not_separated": "The agent can read and write everything the operator can.", "credentials.agent_login_readable": "The agent's own provider login is readable by everything in the sandbox, including code the agent runs.", "credentials.home_readable": "The operator's home directory, with its credentials, stays readable.", "network.open_any_host": "The network reaches any host, including services on the host's loopback.", "network.abstract_sockets_open": "Host abstract unix sockets (X11, session bus) stay reachable: the kernel offers no Landlock scope.", "network.not_separated": "The network is the operator's own.", "kernel.escapes": "Kernel escapes are outside the contract.", "scripts.outside": "Script nodes, goal scripts, project checks and baseline reads run outside the sandbox." } as const
+
+/** The limit naming a credential-shaped variable the allowlist passes (`<prefix><NAME>`), and its sentence. */
+export const ISOLATION_ENV_PASSED_PREFIX = "credentials.env_passed:"
+export const ISOLATION_ENV_PASSED_TEXT = "A credential-shaped variable the allowlist names is passed to the agent."
+
+/** Why a full node is refused, or a best_effort one runs without a sandbox. */
+export const ISOLATION_REASON_TEXTS = { os_unsupported: "The sandbox needs Linux with bubblewrap; this system is not supported.", bwrap_missing: "Bubblewrap (bwrap) is not installed.", bwrap_setuid: "The bwrap binary is setuid root; apb uses unprivileged bwrap only.", userns_denied: "This machine refuses unprivileged user namespaces to bwrap.", scope_unavailable: "Network open under full needs the Landlock scope, which this kernel does not offer.", agent_needs_unknown: "An agent of the node's executor chain declares no sandbox needs.", host_mode: "A host-mode step runs in the host agent, outside any sandbox apb starts.", disabled: "The sandbox is turned off on this machine (APB_SANDBOX=off).", sandbox_setup: "The sandbox of this attempt could not be set up (a declared path, the git directory, the home or bwrap itself).", credentials_passed: "Under publish_only, a credential-shaped variable the allowlist names would reach the agent." } as const
+
+/** The refusal code of a full node this machine cannot isolate. */
+export const ISOLATION_UNAVAILABLE = "isolation_unavailable"
+
+/** The decisions of a publish gate. */
+export const PUBLISH_OPTIONS = ['publish', 'skip'] as const
+
+/** The push timeout of a publish node: the default and the most allowed, in seconds. */
+export const PUBLISH_DEFAULT_TIMEOUT_SECONDS = 300
+export const PUBLISH_MAX_TIMEOUT_SECONDS = 3600
+
+/** Why a publish plan cannot be offered, in words. */
+export const PUBLISH_REFUSAL_TEXTS = { no_pin: "The remote was not pinned before agents ran, so the target cannot be trusted.", not_a_repository: "The working tree is not a git repository apb runs git in.", remote_missing: "The repository has no such remote.", url_refused: "The remote URL is refused: only https, ssh and file URLs without credentials are pushed to.", remote_changed: "The remote URL changed after it was pinned.", repository_changed: "The working tree belongs to another repository than the one pinned.", head_moved: "HEAD is not the commit the source node recorded.", branch_moved: "HEAD is no longer on the branch the source node committed on.", branch_invalid: "The branch is not a valid branch name.", untracked_commits: "HEAD has commits no node of this run recorded; publish from a node that commits.", not_fast_forward: "The remote branch has commits this tree does not have; integrate them first.", remote_unreachable: "The remote could not be listed.", url_rewritten: "The git configuration rewrites the remote URL to another address.", remote_writable: "The file remote lies inside the working tree or a path a node may write, so its hooks are not the operator's.", history_unreadable: "The commits the push would carry could not be read from the tree.", unrecognized: "The run recorded a refusal this apb does not know." } as const
 
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

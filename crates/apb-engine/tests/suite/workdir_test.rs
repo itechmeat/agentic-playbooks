@@ -20,6 +20,8 @@ fn run_config_round_trips() {
         continued_from: None,
         superseded_by: None,
         depth: 0,
+        publish_only: false,
+        parent_acted: false,
         expected_children: None,
         expected_connectors: Default::default(),
         expected_connector_accounts: Default::default(),
@@ -28,6 +30,10 @@ fn run_config_round_trips() {
         max_parallel: Some(2),
         workdir_queue_wait_ms: Some(60_000),
         eval: None,
+        output_limits: Some(apb_core::output_limits::OutputLimits {
+            tail_bytes: 4096,
+            ..Default::default()
+        }),
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();
@@ -42,6 +48,8 @@ fn run_config_round_trips() {
     // no other way to learn that its wait is about another run finishing, not
     // about a sub-millisecond lock handover.
     assert_eq!(back.workdir_queue_wait_ms, Some(60_000));
+    // And for the output limits: a re-drive keeps the ones the run started with.
+    assert_eq!(back.output_limits().tail_bytes, 4096);
 }
 
 #[test]

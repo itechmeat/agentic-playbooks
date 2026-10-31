@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConnectorError, validate_snake_name};
+use super::idempotency::{FunctionKind, FunctionView, Idempotency, IdentitySpec};
+use super::text_mode::{TextMode, validate_text_args};
 
 /// How the connector authenticates outgoing requests. The tag `kind`
 /// selects the variant; each variant only accepts the fields it needs, so
@@ -320,6 +322,11 @@ pub struct FunctionSpec {
     pub body_form: BTreeMap<String, String>,
     #[serde(default)]
     pub args_schema: Option<serde_json::Value>,
+    /// How named string args are prepared before they are substituted into
+    /// `body` or `body_form` (see `super::text_mode`). Only valid on HTTP
+    /// functions; every key must be a string property of `args_schema`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub text_args: BTreeMap<String, TextMode>,
     #[serde(default)]
     pub examples: Vec<ExampleSpec>,
     #[serde(default)]
@@ -334,6 +341,13 @@ pub struct FunctionSpec {
     pub imap: Option<ImapSpec>,
     #[serde(default)]
     pub inbox: Option<InboxSpec>,
+    /// How a repeat of this send is kept from acting twice (see
+    /// `super::idempotency`). Only on functions that change something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency: Option<Idempotency>,
+    /// The args people read and the recipient (see `super::people`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub people: Option<super::people::PeopleArgs>,
 }
 
 impl FunctionSpec {
@@ -360,6 +374,41 @@ impl FunctionSpec {
     /// returning a mock, sending mail, or opening a mailbox.
     pub fn is_inbox(&self) -> bool {
         self.inbox.is_some()
+    }
+
+    /// Whether the function can carry a run notification (see
+    /// `super::people::notice_capable`).
+    pub fn carries_notices(&self) -> bool {
+        super::people::notice_capable(
+            self.people.as_ref(),
+            self.idempotency.is_some(),
+            self.args_schema.as_ref(),
+        )
+    }
+
+    /// The parts of this function the send-once rules read.
+    fn idempotency_view(&self) -> FunctionView<'_> {
+        let kind = if self.method.is_some() || self.url.is_some() {
+            FunctionKind::Http
+        } else if self.is_mock() {
+            FunctionKind::Mock
+        } else if self.is_smtp() {
+            FunctionKind::Smtp
+        } else if self.is_imap() {
+            FunctionKind::Imap
+        } else {
+            FunctionKind::Other
+        };
+        FunctionView {
+            name: &self.name,
+            kind,
+            read_only: self.read_only,
+            idempotency: self.idempotency.as_ref(),
+            args_schema: self.args_schema.as_ref(),
+            body: self.body.as_ref(),
+            headers: &self.headers,
+            text_args: &self.text_args,
+        }
     }
 }
 
@@ -405,6 +454,10 @@ pub struct ConnectorDoc {
     pub account_fields: Vec<AccountField>,
     #[serde(default)]
     pub functions: Vec<FunctionSpec>,
+    /// How the connector reads its own verified account, for finding its
+    /// own earlier sends again (`idempotency: { mode: marker }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentitySpec>,
 }
 
 impl ConnectorDoc {
@@ -426,6 +479,12 @@ impl ConnectorDoc {
     ///    to HTTP responses; the spec's "warn" on the no-HTTP case is a hard
     ///    error here because the validator has no warning channel and the
     ///    combination has no legitimate use).
+    /// 8. `text_args` sits only on HTTP functions and names string
+    ///    properties of `args_schema`; an unknown mode fails the parse.
+    /// 9. `idempotency` and `identity` follow the send-once rules
+    ///    (`super::idempotency::validate`).
+    /// 10. `people` sits only on a function that sends, and names string
+    ///     properties of `args_schema` (`super::people::validate`).
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -500,6 +559,28 @@ impl ConnectorDoc {
                         f.name
                     )));
                 }
+            }
+
+            let outside = f
+                .url
+                .iter()
+                .chain(f.query.values())
+                .chain(f.headers.values())
+                .map(String::as_str);
+            validate_text_args(
+                &f.name,
+                &f.text_args,
+                f.args_schema.as_ref(),
+                is_http,
+                outside,
+            )?;
+            if let Some(people) = &f.people {
+                super::people::validate(
+                    &f.name,
+                    people,
+                    !(f.read_only || is_inbox || is_imap),
+                    f.args_schema.as_ref(),
+                )?;
             }
 
             // response_pick projects a JSON document (spec 4.5). An HTTP
@@ -588,6 +669,12 @@ impl ConnectorDoc {
 
         validate_templates(&doc)?;
         validate_examples(&doc)?;
+        let views: Vec<FunctionView<'_>> = doc
+            .functions
+            .iter()
+            .map(FunctionSpec::idempotency_view)
+            .collect();
+        super::idempotency::validate(doc.identity.as_ref(), &views)?;
 
         Ok(doc)
     }
@@ -1444,6 +1531,82 @@ functions:
     fn response_pick_on_http_is_accepted() {
         let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n    response_pick: [number, user.login]\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
+    }
+
+    fn text_args_doc(text_args: &str, body_type: &str) -> Result<ConnectorDoc, ConnectorError> {
+        let y = format!(
+            "name: x\nversion: 0.1.0\nfunctions:\n  - name: post\n    description: d\n    method: POST\n    url: http://a\n    body: {{ body: \"{{{{args.body}}}}\" }}\n    text_args: {text_args}\n    args_schema: {{ type: object, properties: {{ body: {{ type: {body_type} }} }} }}\n"
+        );
+        ConnectorDoc::from_yaml(&y, "x")
+    }
+
+    #[test]
+    fn text_args_load_with_every_known_mode_on_string_args() {
+        for mode in [
+            TextMode::Markdown,
+            TextMode::MarkdownNoCommands,
+            TextMode::Literal,
+        ] {
+            let doc = text_args_doc(&format!("{{ body: {} }}", mode.as_str()), "string").unwrap();
+            assert_eq!(
+                doc.function("post").unwrap().text_args.get("body"),
+                Some(&mode)
+            );
+        }
+    }
+
+    #[test]
+    fn text_args_with_a_bad_mode_or_key_fail_to_load() {
+        let unknown = text_args_doc("{ body: rich }", "string")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unknown.contains("unknown text mode `rich`")
+                && unknown.contains("markdown_no_commands"),
+            "was: {unknown}"
+        );
+        for (text_args, body_type, key) in [
+            ("{ body: literal }", "integer", "body"),
+            ("{ title: literal }", "string", "title"),
+        ] {
+            let err = text_args_doc(text_args, body_type).unwrap_err().to_string();
+            assert!(
+                err.contains("function `post`")
+                    && err.contains(&format!("`{key}` is not a string property")),
+                "was: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_arg_used_outside_the_body_fails_to_load() {
+        for (place, part) in [
+            ("url", "url: \"http://a/{{args.body}}\""),
+            (
+                "query",
+                "url: http://a\n    query: { q: \"{{args.body}}\" }",
+            ),
+            (
+                "headers",
+                "url: http://a\n    headers: { X-Note: \"{{args.body}}\" }",
+            ),
+        ] {
+            let y = format!(
+                "name: x\nversion: 0.1.0\nfunctions:\n  - name: post\n    description: d\n    method: POST\n    {part}\n    body: {{ body: \"{{{{args.body}}}}\" }}\n    text_args: {{ body: literal }}\n    args_schema: {{ type: object, properties: {{ body: {{ type: string }} }} }}\n"
+            );
+            let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+            assert!(
+                err.contains("`text_args.body`") && err.contains("url, query or headers"),
+                "{place}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_args_on_a_non_http_function_fail_to_load() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    mock: { status: 200, body: {} }\n    text_args: { body: markdown }\n    args_schema: { type: object, properties: { body: { type: string } } }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("not an HTTP function"), "was: {err}");
     }
 
     #[test]

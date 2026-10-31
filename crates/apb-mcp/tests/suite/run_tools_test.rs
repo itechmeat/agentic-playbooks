@@ -63,18 +63,10 @@ fn run_then_inspect() {
         dir.path(),
         "noagent",
         None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(run["outcome"], "succeeded");
@@ -111,18 +103,9 @@ fn playbook_run_workdir_busy_is_conflict() {
         dir.path(),
         "scripted",
         None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(
@@ -141,18 +124,10 @@ fn runs_list_and_status_expose_lineage_fields() {
         dir.path(),
         "noagent",
         None,
-        params.clone(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params: params.clone(),
+            ..Default::default()
+        },
     )
     .unwrap();
     let first_id = first["run_id"].as_str().unwrap().to_string();
@@ -161,18 +136,11 @@ fn runs_list_and_status_expose_lineage_fields() {
         dir.path(),
         "noagent",
         None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        Some(first_id.clone()),
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params,
+            continued_from: Some(first_id.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let second_id = second["run_id"].as_str().unwrap().to_string();
@@ -210,7 +178,7 @@ fn status_unknown_run_is_error() {
 fn resume_unknown_run_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let err = apb_mcp::tools::run_resume(dir.path(), "ghost-1", None, false).unwrap_err();
+    let err = apb_mcp::tools::run_resume(dir.path(), "ghost-1", None, false, None).unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::NotFound(_)),
         "expected NotFound, got {err:?}"
@@ -459,18 +427,10 @@ fn run_status_carries_answer_key() {
         dir.path(),
         "noagent",
         None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params,
+            ..Default::default()
+        },
     )
     .unwrap();
     let run_id = started["run_id"].as_str().unwrap();
@@ -492,18 +452,10 @@ fn run_status_children_empty_for_childless_run() {
         dir.path(),
         "noagent",
         None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params,
+            ..Default::default()
+        },
     )
     .unwrap();
     let status = run_status(dir.path(), started["run_id"].as_str().unwrap()).unwrap();
@@ -710,6 +662,45 @@ impl Drop for Sleeper {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// A child running `sleep 30` under the program name `tag`, so its
+/// argument list carries `tag`.
+#[cfg(unix)]
+fn tagged_sleeper(tag: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("sleep")
+        .arg0(tag)
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("`sleep` must be available")
+}
+
+/// The driver reaper kills the process `driver.pid` names only while that
+/// process still names the run: a reused pid survives.
+#[cfg(unix)]
+#[test]
+fn the_driver_reaper_kills_only_the_runs_own_driver() {
+    let dir = tempfile::tempdir().unwrap();
+    for (tag, killed) in [("r-reap", true), ("r-other", false)] {
+        let run_dir = bare_run_dir(dir.path(), "r-reap");
+        let mut child = tagged_sleeper(tag);
+        fs::write(run_dir.join("driver.pid"), child.id().to_string()).unwrap();
+        drop(crate::driver_reaper::DriverReaper::new(
+            dir.path(),
+            "r-reap",
+        ));
+        let exited = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            child.try_wait().unwrap().is_some()
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(exited, killed, "{tag}");
     }
 }
 
@@ -1031,7 +1022,8 @@ mod drift_resume {
 
         // Without the override the tool must return the drift error itself,
         // NOT an Ok ack with `detached: true` for a run that would never move.
-        let err = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), false).unwrap_err();
+        let err =
+            apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), false, None).unwrap_err();
         assert!(
             err.to_string().contains("environment drift"),
             "run_resume must surface the drift error inline, got: {err:?}"
@@ -1043,13 +1035,15 @@ mod drift_resume {
         let _l = lock();
         let _g = EnvGuard;
         let (proj, _home, _cfg, _bin, run_id) = run_then_drift();
+        // Reaps the short-lived detached child so it does not linger.
+        let _reaper = crate::driver_reaper::DriverReaper::new(proj.path(), &run_id);
 
         // With the override the preflight passes and the tool acks detached.
         // The detached child re-execs this test binary (no `__drive-run`
         // subcommand) and exits fast, but that is AFTER the in-process preflight
         // returned Ok - which is exactly what this asserts: the override reaches
         // the engine path and is reflected back in the ack.
-        let ack = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), true)
+        let ack = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), true, None)
             .expect("override must pass the preflight and ack");
         assert_eq!(ack["detached"], serde_json::json!(true));
         assert!(
@@ -1058,15 +1052,6 @@ mod drift_resume {
                 .is_some_and(|n| n.contains("environment drift override accepted")),
             "override ack must carry the drift-override note, got: {ack}"
         );
-
-        // Reap the short-lived detached child so it does not linger.
-        if let Some(pid) =
-            apb_engine::driver::read_driver_pid(&proj.path().join(".apb/runs").join(&run_id))
-        {
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
-        }
     }
 }
 
@@ -1142,6 +1127,7 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
         instruction: String::new(),
         prompt: None,
         recommendation: None,
+        plan_digest: None,
     })
     .unwrap();
 
@@ -1160,6 +1146,7 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
         node: "gate".into(),
         decision: "approved".into(),
         note: String::new(),
+        plan_digest: None,
     })
     .unwrap();
 
@@ -1221,18 +1208,10 @@ fn a_run_over_its_own_worktree_is_not_blocked_by_the_root_and_reports_it() {
             dir.path(),
             "scripted",
             None,
-            BTreeMap::new(),
-            None,
-            None,
-            None,
-            None,
-            Default::default(),
-            Default::default(),
-            None,
-            worktree.map(str::to_string),
-            Default::default(),
-            None,
-            None,
+            apb_mcp::tools::StartArgs {
+                worktree: worktree.map(str::to_string),
+                ..Default::default()
+            },
         )
     };
     assert!(start(None).is_err(), "the root is held");
@@ -1302,18 +1281,10 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
         dir.path(),
         "noagent",
         None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params,
+            ..Default::default()
+        },
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
@@ -1325,7 +1296,8 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
 /// The goal criteria results (C1) and the commits (C7) a journal carries:
 /// `run_status` and `run_report` show both, read with the goal from the
 /// run's playbook snapshot; a run of a playbook without a goal and without
-/// commits carries neither key.
+/// commits carries neither key. The same for the inbox gaps the journal
+/// records.
 #[test]
 fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
     let dir = tempfile::tempdir().unwrap();
@@ -1349,7 +1321,8 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
             r#"{"seq":3,"ts":4,"type":"goal_checked","index":0,"description":"says hi","check":"marker","status":"passed"}"#,
             r#"{"seq":4,"ts":5,"type":"goal_checked","index":1,"description":"a person smiles","check":"manual","status":"manual"}"#,
             r#"{"seq":5,"ts":6,"type":"node_finished","node":"done","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#,
-            r#"{"seq":6,"ts":7,"type":"run_finished","outcome":"succeeded"}"#,
+            r#"{"seq":6,"ts":7,"type":"inbox_gap","node_id":"note","connector":"echo-hooks","account":"main","from":3,"through":6}"#,
+            r#"{"seq":7,"ts":8,"type":"run_finished","outcome":"succeeded"}"#,
             "",
         ]
         .join("\n"),
@@ -1359,6 +1332,11 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
         run_status(dir.path(), "r-goal").unwrap(),
         apb_mcp::tools::run_report(dir.path(), "r-goal").unwrap(),
     ] {
+        // The inbox was not seen whole: the report says which events were lost.
+        assert_eq!(
+            out["inbox_gaps"],
+            serde_json::json!([{"node": "note", "connector": "echo-hooks", "account": "main", "from": 3, "through": 6}])
+        );
         assert_eq!(out["goal"]["statement"], "greet");
         assert_eq!(out["goal"]["checked"], true);
         assert_eq!(out["goal"]["criteria"][0]["status"], "passed");
@@ -1371,23 +1349,62 @@ fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
         dir.path(),
         "noagent",
         None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            params,
+            ..Default::default()
+        },
     )
     .unwrap();
     let plain = run_status(dir.path(), res["run_id"].as_str().unwrap()).unwrap();
     assert!(plain.get("goal").is_none());
     assert!(plain.get("commits").is_none());
+    assert!(plain.get("inbox_gaps").is_none());
+}
+
+/// `run_status` and `run_report` list each attempt that lost part of its
+/// output, and leave `output_truncated` out for a run where none did.
+#[test]
+fn run_views_list_output_losses_only_when_an_attempt_lost_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join(".apb/runs/r1");
+    fs::create_dir_all(&run_dir).unwrap();
+    let lines = [
+        r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":1,"type":"attempt_finished","node":"w","attempt":1,"status":"failed","output_truncated":[{"stream":"stdout","kept_bytes":5120,"dropped_bytes_at_least":14980}],"transcript_incomplete":true}"#,
+        r#"{"seq":2,"ts":2,"type":"attempt_finished","node":"w","attempt":2,"status":"succeeded"}"#,
+        r#"{"seq":3,"ts":3,"type":"run_finished","outcome":"succeeded"}"#,
+    ];
+    fs::write(run_dir.join("events.jsonl"), lines.join("\n") + "\n").unwrap();
+    let expected = serde_json::json!([{
+        "node": "w",
+        "attempt": 1,
+        "truncated": [{"stream": "stdout", "kept_bytes": 5120, "dropped_bytes_at_least": 14980}],
+        "transcript_incomplete": true
+    }]);
+    assert_eq!(
+        run_status(dir.path(), "r1").unwrap()["output_truncated"],
+        expected
+    );
+    assert_eq!(
+        apb_mcp::tools::run_report(dir.path(), "r1").unwrap()["output_truncated"],
+        expected
+    );
+
+    let plain = dir.path().join(".apb/runs/r2");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("events.jsonl"), format!("{}\n", lines[0])).unwrap();
+    assert!(
+        run_status(dir.path(), "r2")
+            .unwrap()
+            .get("output_truncated")
+            .is_none()
+    );
+    assert!(
+        apb_mcp::tools::run_report(dir.path(), "r2")
+            .unwrap()
+            .get("output_truncated")
+            .is_none()
+    );
 }
 
 /// Issue #195: `run_status` lists what a fork's branch-failure policy did and
@@ -1484,7 +1501,7 @@ fn run_resume_refuses_a_busy_workdir() {
         std::process::id().to_string(),
     )
     .unwrap();
-    let err = apb_mcp::tools::run_resume(root, "busy-1", None, false).unwrap_err();
+    let err = apb_mcp::tools::run_resume(root, "busy-1", None, false, None).unwrap_err();
     assert!(
         matches!(&err, apb_mcp::tools::ToolError::Conflict(m) if m.contains("another write-run holds the workdir")),
         "expected the busy-lock conflict, got {err:?}"

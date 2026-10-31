@@ -1,6 +1,8 @@
 import { decisionNote } from './rundecisions'
 import { outcomeEventNote } from './runoutcome'
+import { attemptOutputNote } from './outputloss'
 import { attemptUsageNote } from './runusage'
+import { notifyEventNote, notifySetNote } from './notify'
 import type { WfEvent } from './types'
 
 // An intervention journal entry: a supervisor wake-up or its action.
@@ -58,6 +60,36 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
   return events.map((e) => ({ seq: e.seq, type: e.type, node: e.node ?? null, note: eventNote(e) }))
 }
 
+// A profile's `process_env: allowlist` on one attempt: how many operator
+// variables the agent kept, which it did not get (the first few by name)
+// and which allowed names the operator does not set. Names only.
+export function agentEnvNote(r: Record<string, unknown>): string {
+  const withheld = Array.isArray(r.withheld) ? r.withheld.map(String) : []
+  const more = typeof r.withheld_more === 'number' ? r.withheld_more : 0
+  const total = withheld.length + more
+  const shown = withheld.slice(0, 5)
+  const names = shown.length ? ` (${shown.join(', ')}${total > shown.length ? ', ...' : ''})` : ''
+  const absent = Array.isArray(r.absent) && r.absent.length ? `, not set: ${listOf(r.absent)}` : ''
+  const agent = typeof r.agent === 'string' && r.agent ? ` (${r.agent})` : ''
+  return `env allowlist${agent}: kept ${String(r.kept ?? 0)}, withheld ${total}${names}${absent}`
+}
+
+/**
+ * The note of a `tool_exposure_mismatch`: what the agent did not see of what
+ * apb handed it, and the servers it saw beyond a strict MCP config.
+ */
+export function toolExposureNote(r: Record<string, unknown>): string {
+  const parts = [
+    ['missing tools', r.missing_tools],
+    ['servers not connected', r.missing_servers],
+    ['unexpected servers', r.unexpected_servers],
+  ]
+    .filter(([, v]) => Array.isArray(v) && v.length > 0)
+    .map(([label, v]) => `${String(label)}: ${listOf(v)}`)
+  const agent = typeof r.agent === 'string' && r.agent ? ` (${r.agent})` : ''
+  return `tool exposure${agent}: ${parts.join('; ')}`
+}
+
 /** A list of node ids as `a, b`, for a note line. */
 function listOf(v: unknown): string {
   return Array.isArray(v) ? v.map(String).join(', ') : ''
@@ -65,13 +97,21 @@ function listOf(v: unknown): string {
 
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
-// attempt's transcript is, the tokens an attempt reported (issue #167),
-// which working tree the run moved into, what a decision model answered
+// attempt's transcript is, the tokens an attempt reported (issue #167) and
+// what it lost of its output, which working tree the run moved into, what a decision model answered
 // (issue #165), and what a fork's branch-failure policy or a refusing join did
 // (issue #195), or which inputs a join wrote off and a re-run revived
-// (issue #203), and what a re-run revives. Every other kind has none.
+// (issue #203), and what a re-run revives, the baseline check's snapshots
+// and comparisons, the notes an attempt reported, and what a process_env
+// allowlist withheld from an attempt, which tools an agent did not see of
+// what apb handed it, and the run's notifications (who
+// changed them, and each notification sent). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
+  // A notification's send rides the send ledger and the connector call
+  // events under the engine site `@notify`.
+  const notification = notifyEventNote(e.type, r)
+  if (notification) return notification
   switch (e.type) {
     case 'session_handoff':
       return r.warm
@@ -81,13 +121,24 @@ function eventNote(e: WfEvent): string | undefined {
     case 'artifacts_committed':
     case 'goal_checked':
     case 'protected_paths_modified':
+    case 'inbox_gap':
+    case 'baseline_observed':
+    case 'baseline_compared':
+    case 'attempt_notes':
       return outcomeEventNote(e)
     case 'output_fields_missing':
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
     case 'attempt_started':
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
-    case 'attempt_finished':
-      return attemptUsageNote(r.usage)
+    case 'agent_env_applied':
+      return agentEnvNote(r)
+    case 'tool_exposure_mismatch':
+      return toolExposureNote(r)
+    case 'attempt_finished': {
+      const notes = [attemptUsageNote(r.usage), attemptOutputNote(r.output_truncated, r.transcript_incomplete)]
+      const line = notes.filter(Boolean).join(' · ')
+      return line || undefined
+    }
     case 'decision_made':
       return decisionNote(e)
     case 'wake_raised':
@@ -133,6 +184,8 @@ function eventNote(e: WfEvent): string | undefined {
       if (!list) return undefined
       return r.from_node ? `re-run of ${String(r.from_node)} revives ${list}` : `a re-run revives ${list}`
     }
+    case 'notify_set':
+      return notifySetNote(r)
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

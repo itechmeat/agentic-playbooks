@@ -82,6 +82,17 @@ cases:
       body_contains:
         text: "Looks good to me."
 
+  # add_comment is declared `markdown`: YouTrack runs commands only through
+  # apply_command, so comment text is sent exactly as written.
+  - function: add_comment
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { id: "DEMO-42", text: "/close\n  **Fixed** in #12 by @user" }
+    expect:
+      method: POST
+      url: "https://example.youtrack.cloud/api/issues/DEMO-42/comments?fields=id,text,author(login),created"
+      body_contains:
+        text: "/close\n  **Fixed** in #12 by @user"
+
   - function: apply_command
     account: { api_base: https://example.youtrack.cloud/api }
     args: { query: "state Fixed", issues: [{idReadable: "DEMO-1"}, {idReadable: "DEMO-2"}] }

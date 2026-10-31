@@ -43,7 +43,68 @@ pub struct TestCase {
     pub account: BTreeMap<String, String>,
     #[serde(default)]
     pub args: Value,
+    /// Renders the case as a send of this intent: a `key` function gets the
+    /// nonce in its header or field, a `marker` function the marker built
+    /// from these fields. Without it a case renders as a plain call.
+    #[serde(default)]
+    pub intent: Option<IntentCase>,
     pub expect: Expectation,
+}
+
+/// The intent a case renders: the fields the marker carries and the nonce.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntentCase {
+    pub run: String,
+    pub node: String,
+    #[serde(default)]
+    pub attempt: Option<u32>,
+    pub nonce: String,
+}
+
+impl IntentCase {
+    /// The marker fields this intent stamps.
+    pub fn marker_fields(&self) -> super::marker::MarkerFields {
+        super::marker::MarkerFields {
+            run: self.run.clone(),
+            node: self.node.clone(),
+            attempt: self.attempt,
+            nonce: self.nonce.clone(),
+        }
+    }
+}
+
+/// A reconciliation a case checks offline: what the identity function and
+/// the reconcile listing answered, and whether the case's intent is found
+/// among the listed items.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileExpect {
+    /// The identity function's raw response.
+    pub identity: Value,
+    /// The reconcile function's raw response.
+    pub response: Value,
+    /// Whether the listing said a further page exists.
+    #[serde(default)]
+    pub next_page: bool,
+    /// What the lookup must conclude.
+    pub outcome: ReconcileOutcome,
+    /// The reference the found item must carry.
+    #[serde(default)]
+    pub item_ref: Option<String>,
+}
+
+/// What a reconciliation case expects the lookup to conclude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileOutcome {
+    /// The intent's item is in the listing.
+    Found,
+    /// The whole listing was read and the item is not in it.
+    Absent,
+    /// The listing cannot settle it (no item list where the connector says
+    /// it is, or more pages exist).
+    Inconclusive,
 }
 
 /// The expected rendered result. Shape-discriminated by `resolve`: exactly one
@@ -75,6 +136,8 @@ pub struct Expectation {
     pub imap: Option<ImapExpect>,
     #[serde(default)]
     pub inbox: Option<InboxExpect>,
+    #[serde(default)]
+    pub reconcile: Option<ReconcileExpect>,
 }
 
 /// The smtp envelope a case asserts. Every field is optional (cross-slice
@@ -147,6 +210,8 @@ pub struct InboxExpect {
 }
 
 /// The resolved, shape-typed view of an `Expectation`, borrowed from it.
+/// `reconcile` wins the discrimination: such a case checks a listing, not a
+/// rendered request.
 pub enum ExpectKind<'a> {
     Http {
         method: &'a str,
@@ -162,6 +227,7 @@ pub enum ExpectKind<'a> {
     },
     Imap(&'a ImapExpect),
     Inbox(&'a InboxExpect),
+    Reconcile(&'a ReconcileExpect),
 }
 
 impl Expectation {
@@ -170,6 +236,9 @@ impl Expectation {
     /// `method` and `url`). An incomplete shape is an error naming what is
     /// missing.
     pub fn resolve(&self) -> Result<ExpectKind<'_>, String> {
+        if let Some(reconcile) = &self.reconcile {
+            return Ok(ExpectKind::Reconcile(reconcile));
+        }
         if let Some(inbox) = &self.inbox {
             return Ok(ExpectKind::Inbox(inbox));
         }
@@ -270,6 +339,35 @@ cases:
             }
             _ => panic!("empty envelope must resolve to smtp"),
         }
+    }
+
+    #[test]
+    fn intent_and_reconcile_cases_parse() {
+        let yaml = r#"
+cases:
+  - function: comment_issue
+    args: { owner: a, repo: b, number: 1, body: hi }
+    intent: { run: r1, node: triage, attempt: 2, nonce: n1 }
+    expect:
+      reconcile:
+        identity: { login: bot }
+        response: []
+        outcome: absent
+"#;
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        let case = &doc.cases[0];
+        assert_eq!(
+            case.intent.as_ref().unwrap().marker_fields().attempt,
+            Some(2)
+        );
+        match case.expect.resolve().unwrap() {
+            ExpectKind::Reconcile(r) => {
+                assert!(r.outcome == ReconcileOutcome::Absent && !r.next_page)
+            }
+            _ => panic!("a reconcile expectation must resolve to reconcile"),
+        }
+        let bad = "cases:\n  - function: f\n    intent: { run: r, node: n, nonce: x, bogus: 1 }\n    expect: { status: 200, body: {} }\n";
+        assert!(TestsDoc::from_yaml(bad).is_err());
     }
 
     #[test]

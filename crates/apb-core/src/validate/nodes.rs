@@ -152,32 +152,6 @@ pub(crate) fn check_protect(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
-/// V16: isolation is declared. The engine materializes skills as copies into
-/// an isolated per-node workdir (skills_mode: materialized), but does not yet
-/// enforce full sandboxing (project tree, process) (spec 8.3). A warning so the
-/// enforcement boundary is stated honestly rather than implied.
-pub(crate) fn check_isolation(playbook: &Playbook, r: &mut ValidationReport) {
-    for n in &playbook.nodes {
-        if let NodeKind::AgentTask {
-            isolation: Some(iso),
-            ..
-        } = &n.kind
-            && !matches!(iso, Isolation::None)
-        {
-            let name = match iso {
-                Isolation::Full => "full",
-                Isolation::BestEffort => "best_effort",
-                Isolation::None => "none",
-            };
-            r.warn(
-                "V16",
-                Some(&n.id),
-                format!("isolation `{name}` materializes skill copies into an isolated node workdir, but full sandbox isolation (project tree, process) is not yet enforced; see spec 8.3"),
-            );
-        }
-    }
-}
-
 /// V19 (warning): an agent_task or script node without `expected_duration`
 /// (nudges authors; never blocks). V20 (error): an `expected_duration` value
 /// that cannot be parsed to seconds.
@@ -230,6 +204,48 @@ pub(crate) fn check_finish(playbook: &Playbook, r: &mut ValidationReport) {
                 ),
             );
         }
+    }
+}
+
+/// V101 (warning): `audience` on a finish node without a `prompt`. Such a
+/// finish composes no answer, so there is no text the setting could shape.
+pub(crate) fn check_audience(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        if let NodeKind::Finish {
+            prompt: None,
+            audience: Some(_),
+            ..
+        } = &n.kind
+        {
+            r.warn(
+                "V101",
+                Some(&n.id),
+                format!(
+                    "finish node `{}` sets `audience` but has no prompt; it composes no answer, so the setting has no effect",
+                    n.id
+                ),
+            );
+        }
+    }
+}
+
+/// V68 (error): a node id that starts with `@`. Those ids name the sites the
+/// engine calls connectors from itself (`@baseline`, `@notify`), so a node
+/// taking one would borrow the engine's grants.
+pub(crate) fn check_engine_ids(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in playbook
+        .nodes
+        .iter()
+        .filter(|n| crate::connector::sites::is_engine_site(&n.id))
+    {
+        r.error(
+            "V68",
+            Some(&n.id),
+            format!(
+                "node id `{}` is not allowed: ids that start with `@` are reserved for the engine",
+                n.id
+            ),
+        );
     }
 }
 

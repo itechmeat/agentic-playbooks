@@ -53,6 +53,7 @@ use std::time::Duration;
 use crate::control::{Control, post_control, read_control_after, write_control_cursor};
 use crate::error::EngineError;
 use crate::event::{EventLog, EventPayload, read_all_for_stop};
+use crate::pause::kind::PauseBy;
 use crate::state::{RunState, RunStatus};
 
 /// The reason recorded for an abort that came through `stop_run`, so an
@@ -116,6 +117,13 @@ fn is_terminal(status: RunStatus) -> bool {
 /// but by then the abort has been posted and propagated to children - see the
 /// variant's own documentation.
 pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
+    stop_run_by(root, run_id, PauseBy::Operator)
+}
+
+/// [`stop_run`] journaled as made `by` someone other than a person: the
+/// engine stopping an eval repetition past its limit. A stop a person did
+/// not make is news to whoever is notified about the run's end.
+pub fn stop_run_by(root: &Path, run_id: &str, by: PauseBy) -> Result<StopOutcome, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -139,11 +147,12 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
         &run_dir,
         Control::Abort {
             reason: STOP_REASON.into(),
+            by: Some(by),
         },
     )?;
     // An operator stop of a parent must reach the children that are blocking
     // it, exactly as `run_cancel` does.
-    abort_children(root, run_id)?;
+    abort_children(root, run_id, by)?;
 
     // The same drive-claim answer every status surface reports: a sub-playbook
     // child is driven in-process by its parent and owns no `driver.pid`, so a
@@ -179,7 +188,9 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     let mut log = EventLog::open_for_stop(&run_dir)?;
     log.append(EventPayload::RunAborted {
         reason: STOP_REASON.into(),
+        by: Some(by),
     })?;
+    crate::known_problems::observe_ended(&run_dir);
     // A run paused with `--keep-lock` (issue #200) gives its lock back.
     crate::workdir::release_paused(root, run_id);
     Ok(StopOutcome::FinalizedDeadRun)
@@ -190,8 +201,10 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
 /// This is how an operator abort of the parent reaches a child that is blocking
 /// the parent (e.g. a child paused on human_review): the child's own drive loop
 /// scans its control.jsonl at every iteration boundary and returns Aborted, which
-/// the parent maps to a failed node.
-pub(crate) fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
+/// the parent maps to a failed node. Each child's abort is journaled as made
+/// `by` whoever stopped the parent, so a person's stop is not news to them
+/// in the children either.
+pub(crate) fn abort_children(root: &Path, run_id: &str, by: PauseBy) -> Result<(), EngineError> {
     let run_dir = root.join(".apb/runs").join(run_id);
     let events = read_all_for_stop(&run_dir, false)?;
     for e in &events {
@@ -210,11 +223,12 @@ pub(crate) fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineErro
                     &child_dir,
                     Control::Abort {
                         reason: "parent aborted".into(),
+                        by: Some(by),
                     },
                 ) {
                     eprintln!("apb: warning: failed to post abort to child run `{child}`: {e}");
                 }
-                abort_children(root, child)?;
+                abort_children(root, child, by)?;
             }
         }
     }

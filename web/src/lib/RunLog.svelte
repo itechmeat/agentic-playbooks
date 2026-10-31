@@ -4,8 +4,9 @@
 
   // The run log: one line per journal event (time, actor, message), newest at
   // the bottom. It follows new lines while the reader is at the bottom and
-  // stays put once they scroll up to read.
-  let { lines }: { lines: LogLine[] } = $props()
+  // stays put once they scroll up to read. `cited` marks the event a grade's
+  // citation opened (each line carries its journal seq for that jump).
+  let { lines, cited = null }: { lines: LogLine[]; cited?: number | null } = $props()
 
   let el = $state<HTMLElement | null>(null)
   let follow = true
@@ -28,7 +29,11 @@
   {#if lines.length}
     <ol class="m-0 list-none p-0">
       {#each lines as l (l.seq)}
-        <li class="grid grid-cols-[64px_minmax(0,110px)_minmax(0,1fr)] gap-3 py-px text-xs sm:grid-cols-[72px_130px_minmax(0,1fr)]">
+        <li
+          class:cited={cited === l.seq}
+          data-event-seq={l.seq}
+          class="grid grid-cols-[64px_minmax(0,110px)_minmax(0,1fr)] gap-3 py-px text-xs sm:grid-cols-[72px_130px_minmax(0,1fr)]"
+        >
           <span class="text-muted-foreground tabular-nums">{l.time}</span>
           <span class="truncate" style:color={l.color}>{l.actor}</span>
           <span class="min-w-0 truncate text-fg-2" title={l.message}>{l.message}</span>
@@ -39,3 +44,10 @@
     <p class="m-0 text-xs text-muted-foreground">no events yet</p>
   {/if}
 </div>
+
+<style>
+  .cited {
+    outline: 1px solid var(--c-violet);
+    background: color-mix(in oklab, var(--c-violet) 15%, transparent);
+  }
+</style>

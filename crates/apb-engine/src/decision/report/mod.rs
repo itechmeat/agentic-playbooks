@@ -214,6 +214,28 @@ pub fn run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The newest `cap` run directories under `roots` that apb created on this
+/// machine, newest first by the time their journal was last written: what a
+/// scan bounded on a long history reads. Unverified directories never take
+/// a place under the cap; the scan stops at the `cap`-th verified one.
+pub fn newest_run_dirs(roots: &[PathBuf], cap: usize) -> Vec<PathBuf> {
+    let written = |d: &PathBuf| {
+        std::fs::metadata(d.join("events.jsonl"))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    let mut dirs: Vec<(Option<std::time::SystemTime>, PathBuf)> = candidate_run_dirs(roots)
+        .into_iter()
+        .map(|d| (written(&d), d))
+        .collect();
+    dirs.sort_by_key(|a| std::cmp::Reverse(a.0));
+    dirs.into_iter()
+        .map(|(_, d)| d)
+        .filter(|d| created_here(d))
+        .take(cap)
+        .collect()
+}
+
 /// How many run directories under `roots` [`run_dirs`] leaves out because
 /// apb did not create them on this machine.
 pub fn unverified_run_dirs(roots: &[PathBuf]) -> usize {
@@ -223,7 +245,7 @@ pub fn unverified_run_dirs(roots: &[PathBuf]) -> usize {
         .count()
 }
 
-fn created_here(run_dir: &Path) -> bool {
+pub(crate) fn created_here(run_dir: &Path) -> bool {
     run_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -231,7 +253,7 @@ fn created_here(run_dir: &Path) -> bool {
 }
 
 /// Every directory under the given project roots' `.apb/runs`.
-fn candidate_run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn candidate_run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
         // `.apb` and `.apb/runs` must be real directories: a link would

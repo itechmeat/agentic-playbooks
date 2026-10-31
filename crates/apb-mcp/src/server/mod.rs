@@ -8,7 +8,7 @@
 //! operator's `run_pause` (any run, by: operator) and `run_resume` pause and
 //! continue a run without ending it.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -23,8 +23,11 @@ mod args;
 pub use args::*;
 
 mod decision;
+mod discover;
 mod playbook;
+mod problems;
 mod profile;
+mod quality;
 mod run;
 mod supervisor;
 
@@ -144,26 +147,44 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
 /// What a started host-mode run tells its caller to do next.
 pub(crate) const HOST_MODE_NEXT: &str = "host execution mode: apb spawns no agent CLI, and neither do you (each task's execution_note is the contract). Call run_wait: it returns pending_tasks; for each one use your own subagent tool, telling it to read role_path as its system context and prompt_path as its task (or pass role_prompt and prompt inline), load skills, work in workdir with env set, then submit its final reply verbatim with run_task_submit and call run_wait again";
 
-/// Adds the resolved execution of a run start to a successful response: the
-/// mode, whether the host fallback is on, and in host mode what to do next.
-/// What a run start reports about the playbook's candidate (issue #192):
-/// the candidate version the start runs as a trial, or why it was left out.
+/// What a run start reports beside the run: the playbook's candidate
+/// (issue #192), the candidate version the start runs as a trial or why it
+/// was left out, the input it took from memory, and what it remembered for
+/// the project.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct StartCandidate {
+pub(crate) struct StartNotes {
     pub(crate) trial: Option<String>,
     pub(crate) skipped: Option<String>,
+    /// The execution root the run directory lives under (the project).
+    pub(crate) runs_root: std::path::PathBuf,
+    /// The input to remember once the start succeeded (`remember: true`).
+    pub(crate) remember: Option<RememberAtStart>,
 }
 
-impl StartCandidate {
-    pub(crate) fn of(permit: &apb_engine::gate::RunPermit) -> Self {
-        StartCandidate {
+/// What a start with `remember: true` keeps for the project: the resolved
+/// playbook, and the params and instruction the caller passed.
+#[derive(Debug, Clone)]
+pub(crate) struct RememberAtStart {
+    pub(crate) resolved: apb_core::store::ResolvedPlaybook,
+    pub(crate) params: std::collections::BTreeMap<String, String>,
+    pub(crate) instruction: Option<String>,
+}
+
+impl StartNotes {
+    pub(crate) fn of(permit: &apb_engine::gate::RunPermit, runs_root: &std::path::Path) -> Self {
+        StartNotes {
             trial: permit.candidate.clone(),
             skipped: permit.candidate_skipped.clone(),
+            runs_root: runs_root.to_path_buf(),
+            remember: None,
         }
     }
 
     /// Adds `candidate_trial` (the version) or `candidate_skipped` (the
-    /// reason) to a start response.
+    /// reason) to a start response, and for a start that produced a run:
+    /// `recalled` (the params and instruction taken from memory) and what
+    /// was remembered. Memory is written only here, after the start
+    /// succeeded, so a refused or failed start never changes it.
     fn annotate(&self, obj: &mut serde_json::Map<String, Value>) {
         if let Some(v) = &self.trial {
             obj.insert("candidate_trial".into(), json!(v));
@@ -171,14 +192,41 @@ impl StartCandidate {
         if let Some(why) = &self.skipped {
             obj.insert("candidate_skipped".into(), json!(why));
         }
+        let Some(run_id) = obj.get("run_id").and_then(Value::as_str) else {
+            return;
+        };
+        let run_dir = self.runs_root.join(".apb/runs").join(run_id);
+        let recalled = apb_engine::run_view::recalled_input(&run_dir);
+        if !recalled.is_empty() {
+            obj.insert("recalled".into(), json!(recalled));
+        }
+        let Some(r) = &self.remember else {
+            return;
+        };
+        match tools::memory::remember_at_start(&r.resolved, &r.params, r.instruction.as_deref()) {
+            Ok(Value::Object(memory)) => obj.extend(memory),
+            Ok(_) => {}
+            Err(e) => {
+                let warning = json!(format!("the run input was not remembered: {e}"));
+                match obj.get_mut("warnings").and_then(Value::as_array_mut) {
+                    Some(list) => list.push(warning),
+                    None => {
+                        obj.insert("warnings".into(), json!([warning]));
+                    }
+                }
+            }
+        }
     }
 }
 
+/// Adds the resolved execution of a run start to a successful response:
+/// the mode, whether the host fallback is on, and in host mode what to do
+/// next; then the [`StartNotes`].
 fn with_execution(
     result: CallToolResult,
     resolved: &apb_core::execution::ResolvedExecution,
     deprecation: Option<&str>,
-    candidate: &StartCandidate,
+    notes: &StartNotes,
 ) -> CallToolResult {
     let result = with_deprecation(result, deprecation);
     if result.is_error == Some(true) {
@@ -187,7 +235,7 @@ fn with_execution(
     let mut result = result;
     if let Some(Value::Object(obj)) = result.structured_content.as_mut() {
         annotate_execution(obj, resolved);
-        candidate.annotate(obj);
+        notes.annotate(obj);
         return result;
     }
     if let Some(block) = result.content.first_mut()
@@ -196,7 +244,7 @@ fn with_execution(
         && obj.contains_key("run_id")
     {
         annotate_execution(&mut obj, resolved);
-        candidate.annotate(&mut obj);
+        notes.annotate(&mut obj);
         if let Ok(new) = ContentBlock::json(Value::Object(obj)) {
             *block = new;
         }
@@ -367,9 +415,9 @@ impl WfMcp {
     /// The server a background supervisor agent connects to. A supervisor's
     /// authority is its capability set on the token-bearing `supervisor_*`
     /// tools, so this server offers only those and the read-only tools: the
-    /// operator's run control (`run_stop`, `run_pause`, `run_resume`, `review_decide`),
-    /// authoring and run starts take no token and would bypass the
-    /// capabilities. `run_answer` stays for its token path (answered by the
+    /// operator's run control (`run_stop`, `run_pause`, `run_resume`,
+    /// `review_decide`, `run_intent_resolve`), authoring and run starts take
+    /// no token and would bypass the capabilities. `run_answer` stays for its token path (answered by the
     /// supervisor); its `run_id` path, which answers as the human, is refused.
     pub fn for_supervisor(root: PathBuf) -> Self {
         let mut server = Self::new(root);
@@ -400,14 +448,18 @@ impl WfMcp {
     /// to this process's in-memory session table. If the run directory does
     /// not exist yet at minting time, the write is simply skipped - the
     /// in-memory path still works for this same process.
-    fn mint_token(&self, run_id: String, capabilities: Vec<String>) -> Result<String, ToolError> {
+    fn mint_token(
+        &self,
+        run_id: String,
+        capabilities: Vec<String>,
+    ) -> Result<apb_core::secret::Secret, ToolError> {
         let token = apb_engine::mint_supervisor_token()
             .map_err(|e| ToolError::Engine(format!("cannot mint a supervisor token: {e}")))?;
         // best-effort: if the run directory does not exist yet, the write fails - fine,
         // the in-memory path still resolves the token for this same process.
         let _ = apb_engine::write_supervisor_session(&self.root, &run_id, &token, &capabilities);
         self.sessions.lock().unwrap().insert(
-            apb_engine::supervisor_token_fingerprint(&token),
+            apb_engine::supervisor_token_fingerprint(token.expose_secret()),
             SupervisorSession {
                 run_id,
                 capabilities,
@@ -430,7 +482,16 @@ impl WfMcp {
     fn resolve_session(&self, token: &str, tool_name: &str) -> Result<String, ToolError> {
         {
             let sessions = self.sessions.lock().unwrap();
-            if let Some(session) = sessions.get(&apb_engine::supervisor_token_fingerprint(token)) {
+            // Every stored fingerprint is compared, in constant time, so the
+            // lookup's duration says nothing about the presented token.
+            let presented = apb_engine::supervisor_token_fingerprint(token);
+            let mut found = None;
+            for (fingerprint, session) in sessions.iter() {
+                if apb_core::secret::ct_eq_str(fingerprint, &presented) {
+                    found = Some(session);
+                }
+            }
+            if let Some(session) = found {
                 let cap = capability_for_tool(tool_name);
                 if !session.capabilities.iter().any(|c| c == cap) {
                     return Err(ToolError::Engine(format!("capability `{cap}` not granted")));
@@ -474,49 +535,19 @@ impl WfMcp {
     /// The `playbook_run` branch for `supervise: "self"`: starts the
     /// playbook in the background, computes capabilities from the
     /// supervisor policy, and mints a token for the calling session.
-    #[allow(clippy::too_many_arguments)]
     fn run_supervised_self(
         &self,
         id: String,
         version: Option<String>,
-        params: BTreeMap<String, String>,
-        instruction: Option<String>,
-        expected_digest: String,
-        expected_bundles: BTreeMap<String, String>,
-        expected_children: BTreeMap<String, apb_engine::run_config::ChildExpectation>,
-        expected_connectors: BTreeMap<String, String>,
-        expected_connector_accounts: BTreeMap<String, String>,
-        continued_from: Option<String>,
-        worktree: Option<String>,
+        start: tools::StartArgs,
         warnings: Vec<String>,
-        execution: apb_core::execution::ExecutionRequest,
-        // 0.24.0: the irreversible consent.
-        consent: Option<apb_engine::consent::RunConsent>,
-        // Issue #192: the permit's `candidate_skipped`.
-        candidate_skipped: Option<String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
             Ok(caps) => caps,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        let started = tools::playbook_run_supervised(
-            &self.root,
-            &id,
-            version.as_deref(),
-            params,
-            instruction,
-            Some(expected_digest),
-            Some(expected_bundles),
-            Some(expected_children),
-            expected_connectors,
-            expected_connector_accounts,
-            continued_from,
-            worktree,
-            execution,
-            consent,
-            candidate_skipped,
-        );
+        let started = tools::playbook_run_supervised(&self.root, &id, version.as_deref(), start);
         let value = match started {
             Ok(v) => v,
             Err(e) => return to_call_tool_result(Err(e)),
@@ -533,18 +564,18 @@ impl WfMcp {
             Ok(t) => t,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        to_call_tool_result(with_warnings(
-            Ok(json!({
-                "run_id": run_id,
-                "supervisor_token": token,
-                "capabilities": capabilities,
-            })),
-            &warnings,
-        ))
+        let mut out = json!({
+            "run_id": run_id,
+            "supervisor_token": token.expose_secret(),
+            "capabilities": capabilities,
+        });
+        tools::budget::carry_blocks(&value, &mut out);
+        to_call_tool_result(with_warnings(Ok(out), &warnings))
     }
 
     /// Combined tool router: the per-domain routers (defined in the
-    /// `playbook` / `run` / `profile` / `supervisor` submodules) merged into
+    /// `playbook` / `run` / `profile` / `supervisor` / `decision` /
+    /// `quality` / `problems` submodules) merged into
     /// one. `#[tool_handler]` on the `ServerHandler` impl calls this.
     fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         Self::playbook_router()
@@ -552,6 +583,9 @@ impl WfMcp {
             + Self::profile_router()
             + Self::supervisor_router()
             + Self::decision_router()
+            + Self::quality_router()
+            + Self::problems_router()
+            + Self::discover_router()
     }
 }
 

@@ -64,6 +64,9 @@ functions:
     url: "{{account.api_base}}/channels/{{args.channel_id}}/messages"
     body:
       content: "{{args.content}}"
+      enforce_nonce: true
+      allowed_mentions: { parse: [] }
+    idempotency: { mode: key, field: nonce, window_sec: 120, result_ref: id }
     args_schema:
       type: object
       properties:
@@ -82,6 +85,9 @@ functions:
       content: "{{args.content}}"
       message_reference:
         message_id: "{{args.message_id}}"
+      enforce_nonce: true
+      allowed_mentions: { parse: [] }
+    idempotency: { mode: key, field: nonce, window_sec: 120, result_ref: id }
     args_schema:
       type: object
       properties:

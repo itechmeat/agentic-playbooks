@@ -48,9 +48,69 @@ pub fn validate_snake_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `name` is a string property of a function's `args_schema`: the
+/// args a text mode prepares and the args people read must be text.
+pub fn is_string_arg(args_schema: Option<&serde_json::Value>, name: &str) -> bool {
+    args_schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|properties| properties.get(name))
+        .and_then(|property| property.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("string")
+}
+
+/// Resolves a dot path over objects and numeric array indices (`entry.0.id`).
+/// The empty path is the value itself. `None` when a segment is missing, an
+/// index does not parse or is out of range, or a scalar sits midway.
+///
+/// Deliberately not the engine's `response_pick` walker, which is maps-only by
+/// documented design: the paths here (a webhook dedupe id, a send's effect
+/// reference, a reconcile listing) name real provider shapes, where list
+/// indices are common.
+pub fn value_at_path<'a>(body: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    if path.is_empty() {
+        return Some(body);
+    }
+    let mut cursor = body;
+    for segment in path.split('.') {
+        cursor = match cursor {
+            serde_json::Value::Object(map) => map.get(segment)?,
+            serde_json::Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(cursor)
+}
+
+/// [`value_at_path`] narrowed to a non-empty scalar rendered as text: a
+/// string as is, a number or a bool in its JSON form. Objects, arrays, null
+/// and the empty string are not ids.
+pub fn scalar_at_path(body: &serde_json::Value, path: &str) -> Option<String> {
+    match value_at_path(body, path)? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_walk_objects_and_array_indices() {
+        let body = serde_json::json!({ "messages": [{ "id": "w1" }], "n": 7, "e": "" });
+        assert_eq!(
+            scalar_at_path(&body, "messages.0.id").as_deref(),
+            Some("w1")
+        );
+        assert_eq!(scalar_at_path(&body, "n").as_deref(), Some("7"));
+        assert_eq!(scalar_at_path(&body, "e"), None);
+        assert_eq!(scalar_at_path(&body, "messages"), None);
+        assert_eq!(scalar_at_path(&body, "messages.1.id"), None);
+        assert_eq!(value_at_path(&body, ""), Some(&body));
+    }
 
     #[test]
     fn validate_snake_name_accepts_snake_case() {

@@ -1,47 +1,34 @@
-use apb_core::detect::canonical_agent_id;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
-
+use apb_core::agents::claude::settings::{HERMETIC_FLAGS, HERMETIC_SETTINGS_JSON};
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 use serde::Deserialize;
 
+mod command;
+mod failure;
+mod output;
+mod spawn_env;
+mod stop;
+
+pub use failure::{AgentFailure, ErrorClass};
+pub use spawn_env::{ATTEMPT_TOKEN_ENV, ITEM_ID_ENV, SpawnEnv};
+
+use output::{headless_capture, incomplete_failure, pipes_failure, stream_capture};
+
+use crate::capture::{CappedFile, LineCapture, OutputCapture, Pipes, STREAM_LOG, STREAM_STDOUT};
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
 // Shared with `run_capture` rather than duplicated: the signal-target
 // validation it performs is the difference between killing one process group
 // and killing every process the user owns, so it must live in exactly one
 // place.
-use crate::proc::kill_process_group;
+use crate::proc::{StopMode, kill_process_group, stop_process_tree};
 use crate::progress::pending_interval_ms;
 use crate::state::NodeStatus;
-
-/// Spawns the agent in its own process group so that cancellation/timeout can
-/// tear down the whole tree, not just the direct child (a real agent spawns
-/// node, MCP servers, tool subprocesses). On Unix - process_group(0) (pgid ==
-/// leader pid); on other platforms - no-op (fallback to child.kill()).
-fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
-    #[cfg(unix)]
-    cmd.process_group(0);
-    // ETXTBSY (errno 26) can transiently occur on Linux right after the
-    // executable was written. Retry briefly before surfacing the error.
-    for _ in 0..20 {
-        match cmd.spawn() {
-            Ok(child) => return Ok(child),
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    cmd.spawn()
-}
 
 /// How long the pipe collection gets once the agent process itself is gone.
 ///
@@ -53,13 +40,13 @@ fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
 /// that worked for hours - cannot reach it, because by then it is gone and its
 /// fds are closed. Tests override it via `APB_AGENT_DRAIN_BUDGET_MS`.
 fn drain_budget() -> Duration {
-    env_duration_ms("APB_AGENT_DRAIN_BUDGET_MS").unwrap_or(Duration::from_secs(10))
+    crate::env_duration::millis("APB_AGENT_DRAIN_BUDGET_MS").unwrap_or(Duration::from_secs(10))
 }
 
 /// How long an agent may keep running AFTER it has closed its stdout.
 ///
 /// Also not a limit on working time. An agent's actual work is governed by the
-/// node's own `timeout_seconds` through `check_cancel_timeout`, inside the
+/// node's own `timeout_seconds` through `stop::check`, inside the
 /// streaming loop; this clock does not start until that loop has already ended
 /// because stdout reached EOF. An agent that streams for six hours never comes
 /// near it. Reaching it means the agent stopped talking to us and then did not
@@ -68,14 +55,7 @@ fn drain_budget() -> Duration {
 /// forever. Deliberately generous: its job is to make an infinite wait finite,
 /// not to enforce promptness. Tests override it via `APB_AGENT_EXIT_GRACE_MS`.
 fn exit_after_eof_budget() -> Duration {
-    env_duration_ms("APB_AGENT_EXIT_GRACE_MS").unwrap_or(Duration::from_secs(300))
-}
-
-fn env_duration_ms(key: &str) -> Option<Duration> {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
+    crate::env_duration::millis("APB_AGENT_EXIT_GRACE_MS").unwrap_or(Duration::from_secs(300))
 }
 
 /// What a process that died says for itself, for the failure message that
@@ -124,29 +104,6 @@ fn active_elapsed(started: Instant, pending_ms: u128) -> Duration {
     started.elapsed().saturating_sub(pending)
 }
 
-/// Terminates the agent's whole process tree and reaps the leader.
-///
-/// Shared by the cancel path and the node-timeout path (`check_cancel_timeout`
-/// and every other early tear-down): both must kill the process GROUP, not only
-/// the direct child, so grandchildren (MCP servers, tool subprocesses, codex
-/// workers) cannot outlive a timed-out or cancelled attempt (issue 45 finding
-/// 11). Shape matches `proc::run_capture`: group kill first, then the leader
-/// through the handle (covers the case where `process_group(0)` did not take),
-/// then a wait to reap. Platform guards match `kill_process_group` (unix group
-/// form; non-unix falls back to `child.kill()` only).
-fn kill_process_tree(child: &mut Child) {
-    #[cfg(unix)]
-    kill_process_group(child.id());
-    // Also the leader through the handle: on non-unix there is no group form,
-    // and on unix this covers a spawn where `process_group(0)` did not take so
-    // the group kill above missed the leader. A second kill on an already-dead
-    // process is a harmless error we ignore.
-    let _ = child.kill();
-    // Bounded: the leader has just been SIGKILLed, which no process can catch
-    // or ignore, so this reaps a pid that is already dead or dying.
-    let _ = child.wait();
-}
-
 /// `child.wait()` with a deadline. `None` means the process was still running
 /// when `budget` ran out; the caller decides what to do about it.
 fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<ExitStatus>> {
@@ -165,262 +122,32 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
     }
 }
 
-/// A spawned agent's stdout and stderr, read to EOF on their own threads from
-/// the moment it is spawned. Reading only after the process exits deadlocked
-/// any agent that wrote more than a pipe buffer (64 KiB on Linux) to either
-/// stream: the write blocked, so the process never exited and the attempt ran
-/// into its deadline (or forever without one).
-struct PipeCollector {
-    stdout: mpsc::Receiver<Vec<u8>>,
-    stderr: mpsc::Receiver<Vec<u8>>,
+/// The variable that names the file holding a list item's JSON.
+pub const ITEM_FILE_ENV: &str = "APB_ITEM_FILE";
+
+/// The env a list item's script step and its item check both get: its id
+/// and the file holding its JSON. A file path that is not valid UTF-8 is
+/// refused rather than passed on with replaced bytes, which would name a
+/// file that does not exist.
+pub fn item_env(id: &str, file: &std::path::Path) -> Result<Vec<(&'static str, String)>, String> {
+    let file = file
+        .to_str()
+        .ok_or_else(|| "the item file path is not valid UTF-8".to_string())?;
+    Ok(vec![
+        (ITEM_ID_ENV, id.to_string()),
+        (ITEM_FILE_ENV, file.to_string()),
+    ])
 }
 
-impl PipeCollector {
-    /// Takes the child's piped stdout and stderr and starts draining them.
-    /// With `tee`, every chunk is also appended to `<tee>/stdout.log` and
-    /// `<tee>/stderr.log` as it arrives (issue #67 item 10), so the files hold
-    /// what the agent printed even when the attempt is killed. A file that
-    /// cannot be written only loses the copy, never the attempt.
-    fn start(child: &mut Child, tee: Option<&Path>) -> Self {
-        fn drain(
-            pipe: Option<impl std::io::Read + Send + 'static>,
-            tee: Option<std::path::PathBuf>,
-        ) -> mpsc::Receiver<Vec<u8>> {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let mut file = tee.and_then(|p| std::fs::File::create(p).ok());
-                if let Some(mut p) = pipe {
-                    let mut chunk = [0u8; 8192];
-                    loop {
-                        match p.read(&mut chunk) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                buf.extend_from_slice(&chunk[..n]);
-                                if let Some(f) = file.as_mut()
-                                    && f.write_all(&chunk[..n]).is_err()
-                                {
-                                    file = None;
-                                }
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(_) => break,
-                        }
-                    }
-                }
-                let _ = tx.send(buf);
-            });
-            rx
-        }
-        PipeCollector {
-            stdout: drain(child.stdout.take(), tee.map(|d| d.join("stdout.log"))),
-            stderr: drain(child.stderr.take(), tee.map(|d| d.join("stderr.log"))),
-        }
+/// What [`spawn_env::prepare`] needs of an attempt.
+fn spawn_target<'a>(task: &'a AgentTask) -> spawn_env::SpawnTarget<'a> {
+    spawn_env::SpawnTarget {
+        env: task.spawn_env,
+        agent: task.agent,
+        model: task.model,
+        node: task.node,
+        status_file: task.status_file.as_deref(),
     }
-
-    /// The collected streams once both reached EOF, within `budget`, so a
-    /// grandchild holding the pipes open cannot stall the drive. The reading
-    /// threads are abandoned on a timeout rather than joined: they own nothing
-    /// the caller needs.
-    fn finish(
-        self,
-        mut child: Child,
-        budget: Duration,
-        program: &str,
-    ) -> Result<std::process::Output, (ErrorClass, String)> {
-        let deadline = Instant::now() + budget;
-        let held_open = || {
-            (
-                ErrorClass::Timeout,
-                format!(
-                    "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
-                     so its output could not be collected: a descendant that outlived it inherited \
-                     the pipes"
-                ),
-            )
-        };
-        let stdout = self
-            .stdout
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| held_open())?;
-        let stderr = self
-            .stderr
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| held_open())?;
-        let status = child.wait().map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("collect `{program}` output failed: {e}"),
-            )
-        })?;
-        Ok(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorClass {
-    Transport,
-    ProcessExit,
-    StructuredOutputMissing,
-    AgentReportedFailure,
-    Timeout,
-}
-
-/// Why an agent attempt failed, and the token usage its output reported
-/// anyway.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentFailure {
-    pub class: ErrorClass,
-    pub message: String,
-    /// The usage the agent's machine output carried although the attempt
-    /// failed: claude prints its errored result, usage included, and exits
-    /// non-zero. `None` when the failed output reported none. The drive loop
-    /// writes it into the failed `AttemptFinished.usage`.
-    pub usage: Option<apb_core::agent_output::AgentUsage>,
-    /// Whether the failed attempt shows a model turn: it reported token
-    /// usage, or printed a reply that is not an error result. The host
-    /// fallback treats an auth-looking failure as "cannot start" only
-    /// without one, so text such as a `git push` 403 printed after real work
-    /// never re-runs the step as a host task.
-    pub model_turn: bool,
-}
-
-impl AgentFailure {
-    pub fn new(class: ErrorClass, message: impl Into<String>) -> Self {
-        Self {
-            class,
-            message: message.into(),
-            usage: None,
-            model_turn: false,
-        }
-    }
-
-    /// The same failure, marked as having had a model turn.
-    #[must_use]
-    pub fn after_model_turn(mut self, turn: bool) -> Self {
-        self.model_turn = turn;
-        self
-    }
-
-    /// The same failure, with the usage the output reported.
-    #[must_use]
-    pub fn with_usage(mut self, usage: Option<apb_core::agent_output::AgentUsage>) -> Self {
-        self.usage = usage;
-        self
-    }
-}
-
-impl From<(ErrorClass, String)> for AgentFailure {
-    fn from((class, message): (ErrorClass, String)) -> Self {
-        Self::new(class, message)
-    }
-}
-
-/// Connector isolation applied to every spawned agent process (spec 4.3).
-/// `scrub` is the union of env var names referenced by ANY installed connector
-/// config (both scopes), removed from the child so a connector token can never
-/// be inherited by an agent. `run_dir`/`node_id`, when set, become the
-/// `APB_RUN_DIR`/`APB_NODE_ID` context env that `apb connector call` (a child
-/// of the agent) reads to locate the run manifest and check its grants, plus
-/// `APB_RUN_ID` (the run directory's name) for provenance. The
-/// default is empty: no scrub and no context env, so non-connector spawn paths
-/// are untouched.
-#[derive(Debug, Clone, Default)]
-pub struct ConnectorEnvPolicy {
-    pub scrub: Vec<String>,
-    pub run_dir: Option<PathBuf>,
-    pub node_id: Option<String>,
-    /// An eval run's env overlay (`RunConfig::spawn_env`), set after the
-    /// scrub and the run-context env. Empty for every other run.
-    pub overlay: Vec<(String, String)>,
-}
-
-impl ConnectorEnvPolicy {
-    /// Removes every scrubbed var from `cmd`'s environment and, when set,
-    /// injects the run-context env. Called at every agent spawn site.
-    fn apply(&self, cmd: &mut Command) {
-        for name in &self.scrub {
-            cmd.env_remove(name);
-        }
-        if let Some(dir) = &self.run_dir {
-            cmd.env("APB_RUN_DIR", dir);
-            // The run id (C7), for an `Apb-Run:` commit trailer or a tracker
-            // record: the run directory's name is the id.
-            if let Some(id) = dir.file_name() {
-                cmd.env("APB_RUN_ID", id);
-            }
-        }
-        if let Some(node) = &self.node_id {
-            cmd.env("APB_NODE_ID", node);
-        }
-        // Spawned agents are headless; force a pass-through pager so CLI
-        // porcelain (notably `gh issue view`) cannot exit 0 with empty stdout
-        // when a TTY-like pager path is engaged (see issue #42 finding 12).
-        cmd.env("GH_PAGER", "cat");
-        cmd.env("PAGER", "cat");
-        for (k, v) in &self.overlay {
-            cmd.env(k, v);
-        }
-    }
-}
-
-/// Run-scoped agent config isolation (spec 2026-07-21 run-reliability), applied
-/// at every node-agent spawn right after the connector env scrub. For an agent
-/// with an isolation strategy (codex today) it prepares a private config home
-/// under the run dir and points the spawned process at it via that agent's
-/// config-root env var, so the agent can never inherit the user's interactive
-/// MCP configuration. A no-op for every other agent and for spawn paths that
-/// carry no run dir (internal, connector-less calls such as compaction).
-fn apply_agent_home(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
-    let Some(run_dir) = task.connector_policy.run_dir.as_deref() else {
-        return Ok(());
-    };
-    match crate::agent_home::env_for_agent(task.agent, run_dir, task.node) {
-        Ok(Some((name, home))) => {
-            cmd.env(name, home);
-            Ok(())
-        }
-        Ok(None) => Ok(()),
-        Err(e) => Err((
-            ErrorClass::ProcessExit,
-            format!(
-                "prepare isolated agent home for `{}` failed: {e}",
-                task.agent
-            ),
-        )),
-    }
-}
-
-/// Sets the environment a spawned zcode needs (see
-/// `apb_core::zcode::spawn_env`): the built-in provider config location, and a
-/// run-scoped personal provider config carrying the attempt's model selection
-/// as ZCode's default selection. zcode has no `--model` flag, so this IS
-/// its model passing. The scoped copy lives in the run's agent home
-/// (`agent-home/zcode/<node>`) when the attempt belongs to a run. A no-op for
-/// every other agent.
-fn apply_zcode_env(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
-    if task.agent != apb_core::zcode::AGENT_ID {
-        return Ok(());
-    }
-    let scoped = task
-        .connector_policy
-        .run_dir
-        .as_deref()
-        .map(|d| d.join("agent-home").join("zcode").join(task.node));
-    let env = apb_core::zcode::spawn_env(task.model, scoped.as_deref()).map_err(|e| {
-        (
-            ErrorClass::ProcessExit,
-            format!("prepare zcode provider config failed: {e}"),
-        )
-    })?;
-    for (name, value) in env {
-        cmd.env(name, value);
-    }
-    Ok(())
 }
 
 /// The reply of an attempt's stdout and whether the CLI itself marked the
@@ -458,10 +185,11 @@ pub struct AgentTask<'a> {
     /// the file-writes and network access the run already declared; kept false
     /// for internal, side-effect-free calls (e.g. context compaction).
     pub grant_autonomy: bool,
-    /// Connector env isolation (spec 4.3): scrubbed var names + optional run
-    /// context env, applied at spawn. Defaults to empty for spawn paths that
-    /// carry no connector exposure.
-    pub connector_policy: &'a ConnectorEnvPolicy,
+    /// The process environment (see [`SpawnEnv`]): the profile's
+    /// `process_env` plan, the connector scrub and the run context, applied
+    /// at spawn. Defaults to empty for spawn paths that carry no connector
+    /// exposure.
+    pub spawn_env: &'a SpawnEnv,
     /// Whether this attempt runs an interactive node (spec 2026-07-20). Only
     /// then does the adapter scan stdout for the question marker; on a
     /// non-interactive node the marker line is ordinary output. Internal,
@@ -512,12 +240,16 @@ pub struct AgentTask<'a> {
     /// timed-out attempt still leaves what it printed. `None` for internal
     /// calls (compaction, finish answers) and in tests that do not care.
     pub transcript_dir: Option<&'a Path>,
+    /// How much of the attempt's output is kept, in memory and on disk
+    /// (see `apb_core::output_limits`).
+    pub output_limits: apb_core::output_limits::OutputLimits,
 }
 
 /// What a claude step launched with the minimal environment gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HermeticEnv {
-    /// apb's own settings file ([`HERMETIC_SETTINGS_JSON`]), via `--settings`.
+    /// apb's own settings file (`HERMETIC_SETTINGS_JSON` of claude's module),
+    /// via `--settings`.
     pub settings: std::path::PathBuf,
     /// A directory whose `.claude/skills` holds the profile's declared skills,
     /// via `--add-dir`: the user setting source that would otherwise provide
@@ -527,35 +259,17 @@ pub struct HermeticEnv {
 }
 
 /// Whether an agent exposes a settings-isolation mechanism apb can drive for
-/// the minimal environment. Only claude/claude-code do; every other agent runs
-/// as it is configured (codex already gets a run-scoped home, see
-/// `agent_home`).
+/// the minimal environment (its module's `hermetic_settings` capability).
+/// Only claude/claude-code do; every other agent runs as it is configured
+/// (codex already gets a run-scoped home, see its module).
 pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
-    canonical_agent_id(agent) == "claude"
+    capabilities(agent).is_some_and(|c| c.hermetic_settings)
 }
 
-/// The apb-owned minimal claude settings written for a hermetic run. It is the
-/// highest-precedence settings source handed to claude via `--settings`, and it
-/// disables the user-scope surfaces that would otherwise leak into the run:
-/// - `hooks: {}` - no user Stop/PreToolUse/etc. hooks fire;
-/// - `enabledPlugins: {}` - no user plugins load;
-/// - `enableAllProjectMcpServers: false` - project MCP servers are not
-///   auto-enabled.
-///
-/// Kept intentionally small and apb-owned; extend deliberately. The user
-/// settings file itself is not loaded at all (see [`inject_hermetic_settings`]).
-pub(crate) const HERMETIC_SETTINGS_JSON: &str =
-    "{\n  \"hooks\": {},\n  \"enabledPlugins\": {},\n  \"enableAllProjectMcpServers\": false\n}\n";
-
-/// claude's flags for the minimal environment, after `--settings <file>`:
-/// only the project and local setting sources (the user's settings, CLAUDE.md,
-/// skills and agents stay out) and only the MCP servers passed with
-/// `--mcp-config` (apb's own ask-server on a live node). Checked with
-/// `claude -p /context`, which reports the loaded context without a model
-/// call: about 24k tokens of harness context before, 18k with these flags, on
-/// one development setup (2026-09-25).
-pub(crate) const HERMETIC_FLAGS: &[&str] =
-    &["--setting-sources", "project,local", "--strict-mcp-config"];
+/// The capabilities of a built-in agent, `None` for any other id.
+fn capabilities(agent: &str) -> Option<apb_core::agents::Capabilities> {
+    apb_core::agents::lookup(agent).map(|a| a.descriptor().capabilities)
+}
 
 /// The run-dir path of the apb-owned hermetic settings file for `node`. One
 /// file per node, not per run: parallel branches write theirs at the same
@@ -709,6 +423,11 @@ pub struct ControlHooks<'a> {
     pub interrupt: &'a AtomicBool,
 }
 
+/// The name apb's ask-server goes by in a live attempt's MCP config.
+pub const ASK_SERVER_NAME: &str = "apb";
+/// The one tool apb's ask-server offers.
+pub const ASK_TOOL: &str = "ask_user";
+
 /// Builds the `--mcp-config` JSON injected into claude for a live interactive
 /// node (spec 2026-07-20, Transport: live). Points claude at the hidden
 /// `apb __ask-server --run <id> --node <node> --attempt <n>` sidecar with a
@@ -724,7 +443,7 @@ pub fn ask_server_mcp_config(
 ) -> String {
     serde_json::json!({
         "mcpServers": {
-            "apb": {
+            ASK_SERVER_NAME: {
                 "command": exe.to_string_lossy(),
                 "args": [
                     "__ask-server",
@@ -835,12 +554,26 @@ pub struct AgentReport {
     /// `apb_core::agent_output::usage`); `None` when the output reports none.
     /// The drive loop writes it into `AttemptFinished.usage`.
     pub usage: Option<apb_core::agent_output::AgentUsage>,
+    /// What the attempt lost of its output (bounded agent output); the drive
+    /// loop writes it into `AttemptFinished.output_truncated`.
+    pub capture: OutputCapture,
+    /// The tools and MCP servers the agent reported at start (stream
+    /// transport only, `apb_core::agents::OutputFormat::exposed_tools`);
+    /// `None` when its output named none. The drive loop compares them with
+    /// what the attempt was handed (`tool_exposure_mismatch`).
+    pub exposure: Option<apb_core::agents::ExposedTools>,
+    /// Findings and warnings a host submission dropped as malformed, and
+    /// why (host mode; empty otherwise): the attempt's `attempt_notes`
+    /// counts them with the status file's own. They travel here, never
+    /// through the status file the subagent can write.
+    pub host_notes_dropped: apb_core::run_notes::DroppedNotes,
 }
 
 /// Captures an agent session id from a finished attempt's raw output, for the
-/// `resume` transport (spec 2026-07-20, Task 7). Dispatches on `agent_id`;
-/// returns `None` when the output carries no session id, which forces the
-/// runtime downgrade from `resume` to `reprompt`.
+/// `resume` transport (spec 2026-07-20, Task 7), with the agent module's
+/// output reader (`apb_core::agents`); returns `None` when the output carries
+/// no session id, which forces the runtime downgrade from `resume` to
+/// `reprompt`.
 ///
 /// Reality per agent under the built-in invocation forms: claude's JSON
 /// result (`--output-format json` headless, `stream-json` on the `acp`
@@ -848,13 +581,16 @@ pub struct AgentReport {
 /// `thread.started` event carrying `thread_id`, and every opencode
 /// `--format json` event carries `sessionID`; hermes/grok/cursor one-shot
 /// output is plain final-answer text with no session id, so they yield
-/// `None` here and rely on the downgrade path. The per-agent field lists
-/// below are wired so that when those agents' resumable one-shot output
-/// lands, only the field name changes here (spec Transport: resume). No
-/// parser is invented for an output shape we do not produce today: a
-/// plain-text line simply never matches.
+/// `None` here and rely on the downgrade path. Each plain-text module names
+/// the fields an id would be printed under, so that when those agents'
+/// resumable one-shot output lands, only the field name changes (spec
+/// Transport: resume). No parser is invented for an output shape we do not
+/// produce today: a plain-text line simply never matches.
 pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
-    capture_session_any(agent_id, raw).filter(|id| is_plausible_session_id(id))
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .session_id(raw)
+        .filter(|id| is_plausible_session_id(id))
 }
 
 /// A session id goes back to the agent as one argv element of its resume
@@ -870,63 +606,23 @@ fn is_plausible_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
 }
 
-fn capture_session_any(agent_id: &str, raw: &str) -> Option<String> {
-    match canonical_agent_id(agent_id) {
-        "claude" => capture_json_string_field(raw, &["session_id"]),
-        "codex" => capture_json_string_field(raw, &["thread_id", "session_id", "conversation_id"]),
-        "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
-        "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
-        "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
-        "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
-        "qoder" => capture_json_string_field(raw, &["session_id"]),
-        // zcode's `--json` prints one PRETTY-printed object, so the per-line
-        // scan above cannot see it; the zcode parser reads the whole document
-        // (and the stream-json `result` line as well).
-        "zcode" => apb_core::zcode::session_id(raw),
-        _ => None,
-    }
-}
-
 /// Captures a session id an agent prints in a human-readable header on stderr
 /// rather than in its output: `codex exec` opens with a block that holds a
 /// `session id: <uuid>` line (checked against the 0.157 binary). `None` for
 /// every other agent and when no such line is present.
 pub fn capture_session_header(agent_id: &str, stderr: &str) -> Option<String> {
-    if canonical_agent_id(agent_id) != "codex" {
-        return None;
-    }
-    stderr.lines().find_map(|line| {
-        let id = line.trim().strip_prefix("session id:")?.trim();
-        (!id.is_empty() && !id.contains(char::is_whitespace)).then(|| id.to_string())
-    })
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .stderr_session(stderr)
 }
 
-/// Scans each line of `raw` as a top-level JSON object and returns the LAST
-/// non-empty string value found under any name in `fields` (the terminal event
-/// wins, matching how the stream's final `result` event carries the id).
-/// `None` when no line parses to such an object with such a field - the plain-
-/// text one-shot case.
-fn capture_json_string_field(raw: &str, fields: &[&str]) -> Option<String> {
-    let mut found: Option<String> = None;
-    for line in raw.lines() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        for f in fields {
-            if let Some(s) = val
-                .get(*f)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                found = Some(s.to_string());
-            }
-        }
-    }
-    found
+/// The tools and MCP servers an agent reported at start in its streaming
+/// output (`apb_core::agents::OutputFormat::exposed_tools`); `None` for an
+/// agent or an output that names none.
+pub fn exposed_tools(agent_id: &str, raw: &str) -> Option<apb_core::agents::ExposedTools> {
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .exposed_tools(raw)
 }
 
 pub trait AgentAdapter {
@@ -940,7 +636,7 @@ pub trait AgentAdapter {
     /// `on_spawn`, when set, is invoked exactly once immediately after the agent
     /// process is successfully spawned, carrying the child pid (`child.id()`)
     /// and the wall-clock milliseconds the spawn itself took, measured around
-    /// `spawn_in_group`. The attempt-journaling path uses it to append
+    /// `command::spawn_agent`. The attempt-journaling path uses it to append
     /// `attempt_started` at spawn time so a crash mid-attempt leaves an open
     /// attempt on disk, and so an OS-level first-exec stall is visible
     /// separately from the agent's own work. It never fires if the spawn
@@ -986,7 +682,7 @@ pub trait AgentAdapter {
         _model: &str,
         _workdir: &Path,
         _soul: Option<&str>,
-        _policy: &ConnectorEnvPolicy,
+        _policy: &SpawnEnv,
     ) -> Result<(), (ErrorClass, String)> {
         Ok(())
     }
@@ -1120,7 +816,7 @@ fn drop_option(argv: &mut Vec<String>, flag: &str) {
 /// configured servers.
 fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&LiveHooks>) {
     if let Some(lh) = live
-        && canonical_agent_id(task.agent) == "claude"
+        && capabilities(task.agent).is_some_and(|c| c.live_ask_mcp)
     {
         argv.push("--mcp-config".to_string());
         argv.push(ask_server_mcp_config(
@@ -1332,52 +1028,12 @@ fn collect_assistant_text(lines: &[String]) -> String {
 
 impl ClaudeAdapter {
     pub fn from_env() -> Self {
-        let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| "claude".to_string());
+        let claude = apb_core::agents::claude::ID;
+        let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| claude.to_string());
         Self {
             program,
-            spec: crate::invocation::builtin("claude").expect("builtin claude spec"),
+            spec: crate::invocation::builtin(claude).expect("builtin claude spec"),
         }
-    }
-
-    /// `pending_ms` (spec 2026-07-20, Task 5): milliseconds of pending-
-    /// question time excluded from the elapsed clock, from
-    /// `pending_question_ms` below. A node's `timeout_seconds` budgets the
-    /// agent's own work, not a human/supervisor's answer time - a node that
-    /// budgets 300s of agent work must not be killed because a question sat
-    /// unanswered for an hour. `0` for the reprompt transport (a park always
-    /// spans a fresh attempt boundary, so no completed question interval ever
-    /// falls inside one attempt's own `started..now` window). For the live
-    /// `ask_user` transport (Task 11), whose single long-lived attempt DOES
-    /// span the pending question, it is recomputed each poll tick and includes
-    /// the still-open window.
-    fn check_cancel_timeout(
-        child: &mut Child,
-        cancel: &AtomicBool,
-        started: Instant,
-        timeout: Option<Duration>,
-        pending_ms: u128,
-    ) -> Option<(ErrorClass, String)> {
-        if cancel.load(Ordering::Relaxed) {
-            // A `--now` pause (issue #200) gives the agent SIGTERM and a
-            // grace period first; a stop kills at once.
-            if crate::pause::interrupt::is_graceful(cancel) {
-                crate::proc::terminate_process_group(child, crate::pause::interrupt::grace());
-            } else {
-                kill_process_tree(child);
-            }
-            return Some((ErrorClass::Transport, "cancelled".to_string()));
-        }
-        if let Some(limit) = timeout {
-            let pending = Duration::from_millis(u64::try_from(pending_ms).unwrap_or(u64::MAX));
-            if started.elapsed().saturating_sub(pending) >= limit {
-                kill_process_tree(child);
-                return Some((
-                    ErrorClass::Timeout,
-                    format!("agent timed out after {}s", limit.as_secs()),
-                ));
-            }
-        }
-        None
     }
 
     /// Sums `pending_interval_ms` (spec 2026-07-20, Task 5) over the run's
@@ -1392,8 +1048,8 @@ impl ClaudeAdapter {
             return 0;
         }
         let (Some(run_dir), Some(node_id)) = (
-            task.connector_policy.run_dir.as_deref(),
-            task.connector_policy.node_id.as_deref(),
+            task.spawn_env.run_dir.as_deref(),
+            task.spawn_env.node_id.as_deref(),
         ) else {
             return 0;
         };
@@ -1435,43 +1091,21 @@ impl ClaudeAdapter {
         inject_ask_server(&mut built.argv, task, live);
         inject_hermetic_settings(&mut built.argv, task);
         let (argv, stdin_payload) = built.into_parts();
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&argv)
-            .current_dir(task.workdir)
-            .stdin(if stdin_payload.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Connector env isolation (spec 4.3): scrub inherited connector tokens
-        // and inject the run-context env before spawning the agent.
-        task.connector_policy.apply(&mut cmd);
-        // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
-        // spawned codex cannot inherit the user's interactive MCP config.
-        apply_agent_home(&mut cmd, task)?;
-        // zcode's provider config and model selection (no `--model` flag).
-        apply_zcode_env(&mut cmd, task)?;
-        // Per-attempt status file (subtask S2): the agent may write its final
-        // verdict as JSON here, which the engine reads before the textual report.
-        if let Some(sf) = &task.status_file {
-            cmd.env("APB_STATUS_FILE", sf);
-        }
-        let started = std::time::Instant::now();
-        let mut child = spawn_in_group(&mut cmd).map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("spawn `{}` failed: {e}", self.program),
-            )
-        })?;
-        // Attempt journaling (spawn-time): the process exists, so record it now
-        // (pid = child.id()) before any of its work runs.
-        if let Some(cb) = on_spawn {
-            cb(child.id(), started.elapsed().as_millis() as u64);
-        }
-        // Drain both streams from the start (see `PipeCollector`).
-        let pipes = PipeCollector::start(&mut child, task.transcript_dir);
+        let stdin = if stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        let mut child = command::spawn_agent(
+            &self.program,
+            &argv,
+            stdin,
+            task.workdir,
+            &spawn_target(task),
+            on_spawn,
+        )?;
+        // Drain both streams from the start (see `crate::capture::Pipes`).
+        let pipes = Pipes::start(&mut child, task.transcript_dir, &task.output_limits);
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -1497,7 +1131,7 @@ impl ClaudeAdapter {
                 // down the blocked agent's process group so drive can fail the
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
@@ -1518,17 +1152,31 @@ impl ClaudeAdapter {
             if let Some(ch) = control {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
                     ));
                 }
             }
-            if let Some(err) =
-                Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
+            if let Some(stopped) =
+                stop::check(&mut child, cancel, started, task.timeout, pending_ms)
             {
-                return Err(err.into());
+                // A graceful stop let the agent print its last record: read
+                // what it left (the group is already gone, so this is quick).
+                let collected = stopped
+                    .is_graceful()
+                    .then(|| pipes.finish(child, drain_budget()).ok())
+                    .flatten();
+                let capture = collected
+                    .as_ref()
+                    .map(|c| headless_capture(task.agent, &c.stdout, &c.stderr))
+                    .unwrap_or_default();
+                return Err(stopped.failure(
+                    task.agent,
+                    collected.as_ref().map(|c| &c.stdout),
+                    capture,
+                ));
             }
             match child.try_wait() {
                 Ok(Some(_)) => break,
@@ -1549,9 +1197,13 @@ impl ClaudeAdapter {
         // block for the lifetime of that daemon. Tearing the group down first
         // is what makes EOF actually arrive.
         kill_process_group(child.id());
-        let output = pipes.finish(child, drain_budget(), &self.program)?;
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let budget = drain_budget();
+        let output = pipes
+            .finish(child, budget)
+            .map_err(|e| pipes_failure(&self.program, budget, e))?;
+        let capture = headless_capture(task.agent, &output.stdout, &output.stderr);
+        let stdout = output.stdout.text().trim().to_string();
+        let stderr = output.stderr.text().trim().to_string();
         // A failure quotes what the agent said: the reply inside its machine
         // output when there is one (claude prints its errored JSON result and
         // exits non-zero), else stdout as printed, so an empty reply never
@@ -1574,7 +1226,8 @@ impl ClaudeAdapter {
                     "agent terminated by signal {sig}: {}",
                     exit_detail(&stderr, &said())
                 ),
-            ));
+            )
+            .with_capture(capture));
         }
         if !output.status.success() {
             // The tokens were spent either way: claude prints its errored
@@ -1597,7 +1250,11 @@ impl ClaudeAdapter {
                 ),
             )
             .with_usage(usage)
-            .after_model_turn(spent || replied));
+            .after_model_turn(spent || replied)
+            .with_capture(capture));
+        }
+        if capture.transcript_incomplete {
+            return Err(incomplete_failure(capture));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
@@ -1640,6 +1297,9 @@ impl ClaudeAdapter {
             question,
             session,
             usage,
+            capture,
+            exposure: None,
+            host_notes_dropped: Default::default(),
         })
     }
 
@@ -1688,88 +1348,51 @@ impl ClaudeAdapter {
         built.argv.push("stream-json".to_string());
         built.argv.push("--verbose".to_string());
         let (argv, _stdin) = built.into_parts();
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&argv)
-            .current_dir(task.workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Connector env isolation (spec 4.3): scrub inherited connector tokens
-        // and inject the run-context env before spawning the agent.
-        task.connector_policy.apply(&mut cmd);
-        // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
-        // spawned codex cannot inherit the user's interactive MCP config.
-        apply_agent_home(&mut cmd, task)?;
-        // zcode's provider config and model selection (no `--model` flag).
-        apply_zcode_env(&mut cmd, task)?;
-        // Per-attempt status file (subtask S2): the agent may write its final
-        // verdict as JSON here, which the engine reads before the textual report.
-        if let Some(sf) = &task.status_file {
-            cmd.env("APB_STATUS_FILE", sf);
-        }
-        let started = std::time::Instant::now();
-        let mut child = spawn_in_group(&mut cmd).map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("spawn `{}` failed: {e}", self.program),
-            )
-        })?;
-        // Attempt journaling (spawn-time): record the process (pid = child.id())
-        // now, before its streaming work runs.
-        if let Some(cb) = on_spawn {
-            cb(child.id(), started.elapsed().as_millis() as u64);
-        }
+        let mut child = command::spawn_agent(
+            &self.program,
+            &argv,
+            Stdio::null(),
+            task.workdir,
+            &spawn_target(task),
+            on_spawn,
+        )?;
 
-        // Read stdout on a background thread: BufReader::lines() blocks
-        // line by line, but we also need to poll cancel/timeout concurrently.
-        // Lines go into a channel.
-        let stdout = child.stdout.take().expect("stdout piped");
-        let (tx, rx) = mpsc::channel::<String>();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+        // Stdout is read line by line on a background thread (we also poll
+        // cancel/timeout here), teed raw into the stream log as it arrives,
+        // and kept bounded (see `crate::capture::LineCapture`).
+        let log = match task.stream_log {
+            Some(p) => {
+                // `<run_dir>/agent-stream/<file>`: created under the run
+                // directory, never re-creating a deleted run.
+                if let Some(parent) = p.parent()
+                    && let Some(run_dir) = parent.parent()
+                {
+                    let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
                 }
+                CappedFile::append(p, task.output_limits.stream_log_bytes)
             }
-        });
-
-        // Drain stderr on a separate thread, otherwise heavy stderr output
-        // would fill its pipe and block the agent on write (we only read
-        // stdout).
-        // Delivered over a channel rather than through `JoinHandle::join`:
-        // there is no timed join in std, and stderr's EOF is decided by
-        // whatever still holds the write end - possibly a daemonized
-        // grandchild rather than the agent. See the bounded receive below.
-        let stderr_pipe = child.stderr.take();
-        let (err_tx, err_rx) = mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            use std::io::Read as _;
-            let mut s = String::new();
-            if let Some(mut e) = stderr_pipe {
-                let _ = e.read_to_string(&mut s);
-            }
-            let _ = err_tx.send(s);
-        });
-
-        let mut sink = task.stream_log.and_then(|p| {
-            // `<run_dir>/agent-stream/<file>`: created under the run
-            // directory, never re-creating a deleted run.
-            if let Some(parent) = p.parent()
-                && let Some(run_dir) = parent.parent()
-            {
-                let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
-            }
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-        });
+            None => CappedFile::none(),
+        };
+        let mut lines = LineCapture::start(
+            child.stdout.take().expect("stdout piped"),
+            &task.output_limits,
+            log,
+        );
+        // Stderr is drained on its own thread, otherwise heavy stderr output
+        // would fill its pipe and block the agent on write. Delivered over a
+        // channel because stderr's EOF is decided by whatever still holds
+        // the write end - possibly a daemonized grandchild rather than the
+        // agent. See the bounded receive below.
+        let err_rx = crate::capture::drain_stream(
+            child.stderr.take(),
+            &task.output_limits,
+            CappedFile::none(),
+        );
+        let stdout_name = if task.stream_log.is_some() {
+            STREAM_LOG
+        } else {
+            STREAM_STDOUT
+        };
 
         let started = Instant::now();
         // Pending-question exclusion: once for a non-live attempt, recomputed
@@ -1780,7 +1403,6 @@ impl ClaudeAdapter {
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
         let pid = child.id();
-        let mut raw_lines: Vec<String> = Vec::new();
         // Set once the agent process itself has exited: the deadline for
         // draining whatever is still buffered in the pipe afterwards.
         let mut drain_deadline: Option<Instant> = None;
@@ -1815,7 +1437,7 @@ impl ClaudeAdapter {
                 // Task 11 fix): tear down the blocked agent so drive can fail the
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
@@ -1839,7 +1461,7 @@ impl ClaudeAdapter {
             {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
-                    kill_process_tree(&mut child);
+                    stop_process_tree(&mut child, StopMode::Kill);
                     return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
@@ -1847,15 +1469,29 @@ impl ClaudeAdapter {
                 }
             }
             if drain_deadline.is_none()
-                && let Some(err) = Self::check_cancel_timeout(
-                    &mut child,
-                    cancel,
-                    started,
-                    task.timeout,
-                    pending_ms,
-                )
+                && let Some(stopped) =
+                    stop::check(&mut child, cancel, started, task.timeout, pending_ms)
             {
-                return Err(err.into());
+                // As on the headless transport: after a graceful stop, read
+                // what the agent printed on its way out.
+                // stderr gets what is left of the same window: its reader
+                // hands over its copy at EOF, which the dead group gives
+                // quickly.
+                let stderr = if stopped.is_graceful() {
+                    let deadline = Instant::now() + drain_budget();
+                    lines.drain_until(deadline);
+                    err_rx
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .ok()
+                } else {
+                    err_rx.try_recv().ok()
+                };
+                let stream = lines.finish();
+                let capture = stream_capture(task.agent, &stream, stdout_name, stderr.as_ref());
+                let drained = stopped.is_graceful().then_some(&stream);
+                return Err(stopped
+                    .failure(task.agent, drained, capture)
+                    .with_exposure(exposed_tools(task.agent, &stream.text())));
             }
             // This loop used to end ONLY on stdout EOF - but EOF is not the
             // agent's to give. A grandchild that inherited the pipe (a real
@@ -1869,17 +1505,10 @@ impl ClaudeAdapter {
                 kill_process_group(pid);
                 drain_deadline = Some(Instant::now() + drain_budget());
             }
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(line) => {
-                    if let Some(f) = sink.as_mut() {
-                        let _ = writeln!(f, "{line}");
-                    }
-                    raw_lines.push(line);
-                }
-                // The reader thread closed the channel: stdout reached EOF
-                // (the process finished its output) - exit and assemble the result.
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // The reader thread ended: stdout reached EOF (the process
+            // finished its output) - exit and assemble the result.
+            if lines.pump(Duration::from_millis(50)).is_err() {
+                break;
             }
             // Backstop for the one case the group kill above cannot reach: a
             // descendant that left the process group while holding the pipe.
@@ -1895,14 +1524,18 @@ impl ClaudeAdapter {
         // agent overstays it, tear down the tree and report a timeout rather
         // than hang.
         //
-        // `reader` is deliberately NOT joined. On the normal path it has
-        // already finished (the loop broke because it dropped its sender), so
-        // a join would be a no-op; on the backstop path it is still blocked on
-        // a pipe held by a descendant that escaped the group, and joining it
-        // is precisely the unbounded wait being avoided. It owns nothing the
+        // The line reader thread is deliberately NOT joined. On the normal
+        // path it has already finished (the loop broke because it dropped
+        // its sender); on the backstop path it is still blocked on a pipe
+        // held by a descendant that escaped the group, and joining it is
+        // precisely the unbounded wait being avoided. It owns nothing the
         // caller needs - every line reached us through the channel - so it is
         // abandoned and dies with the process.
-        drop(reader);
+        let stream = lines.finish();
+        let raw_lines: Vec<String> = stream.text().lines().map(str::to_string).collect();
+        // What the agent reported it sees, read only for a failure below (a
+        // report reads its own, see `parse_stream_result`).
+        let exposure = || exposed_tools(task.agent, &raw_lines.join("\n"));
         let grace = exit_after_eof_budget();
         let status = match wait_bounded(&mut child, grace) {
             Some(Ok(status)) => status,
@@ -1910,7 +1543,8 @@ impl ClaudeAdapter {
                 return Err(AgentFailure::new(
                     ErrorClass::ProcessExit,
                     format!("wait `{}` failed: {e}", self.program),
-                ));
+                )
+                .with_exposure(exposure()));
             }
             None => {
                 // The agent will not exit. Tear the tree down either way, but
@@ -1924,8 +1558,12 @@ impl ClaudeAdapter {
                 // process is noise. `Timeout` is reserved for the case where
                 // no result was ever seen, which is a genuinely unfinished
                 // node.
-                kill_process_tree(&mut child);
-                return match parse_stream_result(&raw_lines, task) {
+                stop_process_tree(&mut child, StopMode::Kill);
+                let capture = stream_capture(task.agent, &stream, stdout_name, None);
+                if capture.transcript_incomplete {
+                    return Err(incomplete_failure(capture).with_exposure(exposure()));
+                }
+                return match parse_stream_result(&raw_lines, task, &capture) {
                     Ok(report) => Ok(report),
                     // A malformed-marker Transport error names the node and must
                     // survive the grace teardown (spec 2026-07-20, Task 6): the
@@ -1934,7 +1572,7 @@ impl ClaudeAdapter {
                     // event" Timeout would hide the real, node-named cause. Only a
                     // genuinely-missing result becomes the grace Timeout.
                     Err((ErrorClass::Transport, msg)) => {
-                        Err(AgentFailure::new(ErrorClass::Transport, msg))
+                        Err(AgentFailure::new(ErrorClass::Transport, msg).with_exposure(exposure()))
                     }
                     Err(_) => Err(AgentFailure::new(
                         ErrorClass::Timeout,
@@ -1943,14 +1581,17 @@ impl ClaudeAdapter {
                              running {grace:?} later; killed its process group",
                             self.program
                         ),
-                    )),
+                    )
+                    .with_exposure(exposure())),
                 };
             }
         };
         // The leader is reaped; anything left in its group would still be
         // holding stderr, so clear the group before collecting.
         kill_process_group(pid);
-        let stderr = err_rx.recv_timeout(drain_budget()).unwrap_or_default();
+        let stderr_capture = err_rx.recv_timeout(drain_budget()).ok();
+        let capture = stream_capture(task.agent, &stream, stdout_name, stderr_capture.as_ref());
+        let stderr = stderr_capture.map(|c| c.text()).unwrap_or_default();
         // Signal termination is a failure even if a terminal result event was
         // streamed (issue #42, finding 6): a killed agent that a wrapper exited
         // `0` (or that lost stdout) must not be journaled as success.
@@ -1958,7 +1599,9 @@ impl ClaudeAdapter {
             return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!("agent terminated by signal {sig}: {}", stderr.trim()),
-            ));
+            )
+            .with_capture(capture)
+            .with_exposure(exposure()));
         }
         if !status.success() {
             // As on the headless transport: the errored result still reports
@@ -1970,10 +1613,18 @@ impl ClaudeAdapter {
             .with_usage(apb_core::agent_output::usage(
                 task.agent,
                 &raw_lines.join("\n"),
-            )));
+            ))
+            .with_capture(capture)
+            .with_exposure(exposure()));
         }
-
-        parse_stream_result(&raw_lines, task).map_err(AgentFailure::from)
+        if capture.transcript_incomplete {
+            return Err(incomplete_failure(capture).with_exposure(exposure()));
+        }
+        parse_stream_result(&raw_lines, task, &capture).map_err(|e| {
+            AgentFailure::from(e)
+                .with_capture(capture)
+                .with_exposure(exposure())
+        })
     }
 }
 
@@ -1983,6 +1634,7 @@ impl ClaudeAdapter {
 fn parse_stream_result(
     lines: &[String],
     task: &AgentTask,
+    capture: &OutputCapture,
 ) -> Result<AgentReport, (ErrorClass, String)> {
     let raw = lines.join("\n");
     for line in lines.iter().rev() {
@@ -2034,6 +1686,7 @@ fn parse_stream_result(
         // scans `raw` (every event line), not just the terminal result text.
         let session = capture_session(task.agent, &raw);
         let usage = apb_core::agent_output::usage(task.agent, &raw);
+        let exposure = exposed_tools(task.agent, &raw);
         return Ok(AgentReport {
             status,
             output,
@@ -2042,6 +1695,9 @@ fn parse_stream_result(
             question,
             session,
             usage,
+            capture: capture.clone(),
+            exposure,
+            host_notes_dropped: Default::default(),
         });
     }
     Err((
@@ -2086,7 +1742,7 @@ impl AgentAdapter for ClaudeAdapter {
         model: &str,
         workdir: &Path,
         soul: Option<&str>,
-        policy: &ConnectorEnvPolicy,
+        policy: &SpawnEnv,
     ) -> Result<(), (ErrorClass, String)> {
         // Goes through build_command using the invocation form (not hardcoded
         // -p/--model), otherwise codex/opencode/custom argv and stdin
@@ -2107,15 +1763,15 @@ impl AgentAdapter for ClaudeAdapter {
             })
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // Connector env isolation (spec 4.3): the supervisor is a spawned agent
-        // too, so its inherited connector tokens are scrubbed before spawn.
+        // The supervisor is a spawned agent too: its process env, connector
+        // scrub and run context, as for a node attempt.
         policy.apply(&mut cmd);
         // Let a Claude Code supervisor block in `supervisor_wait_event` for as
         // long as the server allows (30 min) instead of returning to the model
         // every few seconds: each return is a paid turn. The variable is
         // Claude Code's MCP tool-call timeout; other agents ignore it. A value
-        // the operator set explicitly wins.
-        if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+        // the operator set explicitly wins when it reaches the process.
+        if !policy.passes("MCP_TOOL_TIMEOUT") {
             cmd.env(
                 "MCP_TOOL_TIMEOUT",
                 SUPERVISOR_MCP_TOOL_TIMEOUT_MS.to_string(),
@@ -2146,7 +1802,8 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
     // the highest priority and the headless claude form: the config-free path
     // stays unchanged.
     if let Ok(program) = std::env::var("APB_AGENT_CMD") {
-        let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
+        let spec =
+            crate::invocation::builtin(apb_core::agents::claude::ID).expect("builtin claude spec");
         return Ok(Box::new(ClaudeAdapter { program, spec }));
     }
     // Agent invocation form: config overrides the built-in default. An
@@ -2271,7 +1928,7 @@ mod tests {
     }
 
     fn hermetic_task<'a>(
-        policy: &'a ConnectorEnvPolicy,
+        policy: &'a SpawnEnv,
         agent: &'a str,
         settings: Option<HermeticEnv>,
     ) -> AgentTask<'a> {
@@ -2283,7 +1940,7 @@ mod tests {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
-            connector_policy: policy,
+            spawn_env: policy,
             interactive: false,
             report_contract: true,
             node: "test",
@@ -2292,12 +1949,13 @@ mod tests {
             status_file: None,
             hermetic_settings: settings,
             transcript_dir: None,
+            output_limits: Default::default(),
         }
     }
 
     #[test]
     fn hermetic_settings_flag_injected_for_claude_and_absent_otherwise() {
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
         let path = std::path::PathBuf::from("/run/agent-settings/n.json");
         let env = HermeticEnv {
             settings: path.clone(),
@@ -2452,56 +2110,7 @@ mod tests {
         assert_eq!(interpret_report(two).status, NodeStatus::Succeeded);
     }
 
-    #[test]
-    fn connector_env_policy_forces_pass_through_pager() {
-        // No network: spawn `env` under the default policy and assert the
-        // pager vars land on the child. This is the only defense against gh
-        // porcelain swallowing stdout under a TTY-like pager path.
-        let policy = ConnectorEnvPolicy::default();
-        let mut cmd = Command::new("env");
-        policy.apply(&mut cmd);
-        let out = cmd.output().expect("spawn env");
-        assert!(
-            out.status.success(),
-            "env exited {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.lines().any(|l| l == "GH_PAGER=cat"),
-            "GH_PAGER=cat missing from child env:\n{stdout}"
-        );
-        assert!(
-            stdout.lines().any(|l| l == "PAGER=cat"),
-            "PAGER=cat missing from child env:\n{stdout}"
-        );
-    }
-
-    /// An eval run's env overlay lands on the spawned agent after the
-    /// connector scrub: a scrubbed name the overlay sets keeps the overlay's
-    /// value, and the overlay's own variables arrive.
-    #[test]
-    fn the_eval_overlay_is_applied_after_the_scrub() {
-        let policy = ConnectorEnvPolicy {
-            scrub: vec!["PATH_PROBE_TOKEN".into()],
-            overlay: vec![
-                ("PATH_PROBE_TOKEN".into(), String::new()),
-                ("EVAL_PROBE".into(), "1".into()),
-            ],
-            ..Default::default()
-        };
-        let mut cmd = Command::new("env");
-        cmd.env("PATH_PROBE_TOKEN", "secret");
-        policy.apply(&mut cmd);
-        let out = cmd.output().expect("spawn env");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = stdout.lines().collect();
-        assert!(lines.contains(&"PATH_PROBE_TOKEN="), "{stdout}");
-        assert!(lines.contains(&"EVAL_PROBE=1"), "{stdout}");
-    }
-
-    fn stream_task<'a>(policy: &'a ConnectorEnvPolicy, extract: Option<&'a str>) -> AgentTask<'a> {
+    fn stream_task<'a>(policy: &'a SpawnEnv, extract: Option<&'a str>) -> AgentTask<'a> {
         AgentTask {
             prompt: "go",
             model: "haiku",
@@ -2510,7 +2119,7 @@ mod tests {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
-            connector_policy: policy,
+            spawn_env: policy,
             interactive: false,
             report_contract: true,
             node: "test",
@@ -2519,12 +2128,13 @@ mod tests {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: Default::default(),
         }
     }
 
     #[test]
     fn transport_prompt_gates_report_contract() {
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
         // With the report contract on, the spec 6.2 status/summary block is
         // appended.
         let mut t = stream_task(&policy, None);
@@ -2600,10 +2210,14 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Nothing to log."}]},"session_id":"s1"}"#.to_string(),
             r#"{"type":"result","subtype":"success","is_error":false,"result":"Nothing to log.","session_id":"s1"}"#.to_string(),
         ];
-        let policy = ConnectorEnvPolicy::default();
+        let policy = SpawnEnv::default();
 
-        let with_extract = parse_stream_result(&lines, &stream_task(&policy, Some("node_output")))
-            .expect("a result event");
+        let with_extract = parse_stream_result(
+            &lines,
+            &stream_task(&policy, Some("node_output")),
+            &OutputCapture::default(),
+        )
+        .expect("a result event");
         assert_eq!(
             with_extract.output, "the real summary",
             "the marker content from the early turn must win over the hook message"
@@ -2612,8 +2226,12 @@ mod tests {
 
         // Without the contract, today's behavior stands: the terminal result
         // text (the hook message) is the output.
-        let without_extract =
-            parse_stream_result(&lines, &stream_task(&policy, None)).expect("a result event");
+        let without_extract = parse_stream_result(
+            &lines,
+            &stream_task(&policy, None),
+            &OutputCapture::default(),
+        )
+        .expect("a result event");
         assert_eq!(without_extract.output, "Nothing to log.");
     }
 
@@ -2627,9 +2245,13 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"final answer"}"#
                 .to_string(),
         ];
-        let policy = ConnectorEnvPolicy::default();
-        let report = parse_stream_result(&lines, &stream_task(&policy, Some("node_output")))
-            .expect("a result event");
+        let policy = SpawnEnv::default();
+        let report = parse_stream_result(
+            &lines,
+            &stream_task(&policy, Some("node_output")),
+            &OutputCapture::default(),
+        )
+        .expect("a result event");
         assert_eq!(report.output, "final answer");
     }
 

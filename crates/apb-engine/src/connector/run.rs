@@ -179,6 +179,7 @@ pub fn snapshot_connectors(
                 accounts: g.accounts.iter().map(|a| a.name.clone()).collect(),
                 functions: g.functions.clone(),
                 max_calls: g.max_calls,
+                on_unknown: g.on_unknown,
             })
             .collect();
         grants.insert(node_id.clone(), mapped);

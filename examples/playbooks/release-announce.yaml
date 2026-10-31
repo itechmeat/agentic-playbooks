@@ -30,28 +30,39 @@ nodes:
     prompt: >-
       Create a GitHub release in {{params.github_owner}}/{{params.github_repo}}
       tagged {{params.release_tag}} with body {{params.release_notes}}, using
-      the github connector's create_release function. End with a line
+      the github connector's create_release function with
+      `--intent create-release`. End with a line
       `RELEASE URL: <html_url of the created release>`.
     connectors:
       - { name: github, accounts: [default], functions: [create_release], max_calls: 3 }
   - id: announce_email
     type: agent_task
+    audience: people
     prompt: >-
       Send an email to {{params.announce_email}} announcing release
       {{params.release_tag}}, using the smtp connector's send_email
-      function. Use {{params.release_notes}} as the body, and include
-      the release link from {{nodes.create_release.output}}.
+      function with `--intent announce-email`. Use {{params.release_notes}}
+      as the body, and include the release link from
+      {{nodes.create_release.output}}.
     connectors:
       - { name: smtp, accounts: [default], functions: [send_email], max_calls: 3 }
   - id: announce_telegram
     type: agent_task
+    audience: people
     prompt: >-
       Post a short announcement of release {{params.release_tag}} to
       Telegram chat {{params.telegram_chat_id}}, using the telegram
-      connector's send_message function.
+      connector's send_message function with `--intent announce-telegram`.
     connectors:
       - { name: telegram, accounts: [default], functions: [send_message], max_calls: 3 }
-  - { id: finish, type: finish, outcome: success }
+  - id: finish
+    type: finish
+    outcome: success
+    audience: people
+    prompt: >-
+      Tell the release manager in three lines: the release link, whether
+      the email and the Telegram post went out, and anything they still
+      have to do by hand.
 edges:
   - { from: start, to: create_release }
   - { from: create_release, to: announce_email }

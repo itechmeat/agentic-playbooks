@@ -21,6 +21,9 @@ mod advisory_cli_test;
 mod answer_cli_test;
 #[path = "suite/ask_server_cli_test.rs"]
 mod ask_server_cli_test;
+#[cfg(unix)]
+#[path = "suite/budget_cli_test.rs"]
+mod budget_cli_test;
 #[path = "suite/cache_cli.rs"]
 mod cache_cli;
 #[path = "suite/cli_test.rs"]
@@ -36,17 +39,31 @@ mod demo_playbooks_test;
 mod decisions_cli_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
+#[path = "suite/discover_cli_test.rs"]
+mod discover_cli_test;
+#[cfg(unix)]
+#[path = "suite/doctor_agents_cli_test.rs"]
+mod doctor_agents_cli_test;
+#[path = "suite/grade_cli_test.rs"]
+mod grade_cli_test;
 #[cfg(unix)]
 #[path = "suite/host_mode_cli_test.rs"]
 mod host_mode_cli_test;
 #[path = "suite/ingest_cli_test.rs"]
 mod ingest_cli_test;
+#[path = "suite/intent_cli_test.rs"]
+mod intent_cli_test;
+#[cfg(unix)]
+#[path = "suite/list_send_cli_test.rs"]
+mod list_send_cli_test;
 #[path = "suite/live_smoke_test.rs"]
 mod live_smoke_test;
 #[path = "suite/mcp_cli_test.rs"]
 mod mcp_cli_test;
 #[path = "suite/mcp_supervise_test.rs"]
 mod mcp_supervise_test;
+#[path = "suite/notify_cli_test.rs"]
+mod notify_cli_test;
 #[path = "suite/official_connectors_gate.rs"]
 mod official_connectors_gate;
 #[cfg(unix)]
@@ -56,10 +73,16 @@ mod pause_cli_test;
 mod pause_waker_cli_test;
 #[path = "suite/phase9_cli_test.rs"]
 mod phase9_cli_test;
+#[path = "suite/problems_cli_test.rs"]
+mod problems_cli_test;
 #[path = "suite/profile_cli_test.rs"]
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]
 mod projects_cli_test;
+// Unix-only: a shell script stands in for git on PATH.
+#[cfg(unix)]
+#[path = "suite/publish_cli_test.rs"]
+mod publish_cli_test;
 #[cfg(unix)]
 #[path = "suite/quota_pause_cli_test.rs"]
 mod quota_pause_cli_test;
@@ -75,6 +98,8 @@ mod run_doctor_cli_test;
 mod run_wait_cli_test;
 #[path = "suite/runs_detail_cli_test.rs"]
 mod runs_detail_cli_test;
+#[path = "suite/sandbox_exec_test.rs"]
+mod sandbox_exec_test;
 #[path = "suite/server_key_cli_test.rs"]
 mod server_key_cli_test;
 #[path = "suite/stats_cli_test.rs"]

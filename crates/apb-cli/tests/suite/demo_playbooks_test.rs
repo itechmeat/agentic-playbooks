@@ -75,7 +75,7 @@ fn install_and_approve(dir: &Path, name: &str, account_yaml: &str) {
     apb_ok(dir, &["connector", "approve", name, "--account", "default"]);
 }
 
-/// Seeds a minimal project-scope profile `main`, referenced by both demo
+/// Seeds a minimal project-scope profile `main`, referenced by the demo
 /// playbooks' `defaults.profile`.
 fn seed_profile_main(dir: &Path) {
     let pdir = dir.join(".apb/profiles/main");
@@ -153,14 +153,19 @@ fn setup(dir: &Path) -> std::path::PathBuf {
         "whatsapp",
         "accounts:\n  - name: default\n    base_url: https://graph.facebook.com\n    graph_version: v23.0\n    phone_number_id: \"100000000000000\"\n    waba_id: \"200000000000000\"\n    access_token: \"{{env.DEMO_WHATSAPP_ACCESS_TOKEN}}\"\n    app_secret: \"{{env.DEMO_WHATSAPP_APP_SECRET}}\"\n    verify_token: \"{{env.DEMO_WHATSAPP_VERIFY_TOKEN}}\"\n",
     );
+    install_and_approve(
+        &root,
+        "twenty",
+        "accounts:\n  - name: default\n    base_url: https://api.twenty.com\n    api_key: \"{{env.DEMO_TWENTY_API_KEY}}\"\n",
+    );
 
     seed_profile_main(&root);
     root
 }
 
-/// Every example playbook that binds the repository connectors validates
-/// cleanly against them, in one project with one connector setup.
-/// `review-triage.yaml` binds none; the judge validator tests cover it.
+/// Every runnable example playbook validates cleanly, the ones that bind the
+/// repository connectors against them, in one project with one connector
+/// setup. A new example is covered once its id is added here.
 #[test]
 fn the_demo_playbooks_validate() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,6 +177,12 @@ fn the_demo_playbooks_validate() {
         "inbox-triage",
         "whatsapp-inbox",
         "ci-failure-triage",
+        "dependency-security-fix",
+        "bulk-reminders",
+        "crm-cleanup",
+        "review-triage",
+        "review-panel",
+        "review-panel-list",
     ];
     for id in ids {
         register_playbook(

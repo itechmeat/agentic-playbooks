@@ -16,7 +16,7 @@ pub fn spawn_supervisor_agent(
     root: &Path,
     run_id: &str,
     playbook: &Playbook,
-) -> Result<Option<String>, EngineError> {
+) -> Result<Option<apb_core::secret::Secret>, EngineError> {
     let run_dir = root.join(".apb/runs").join(run_id);
     let Some(manifest) = crate::manifest::read(&run_dir)? else {
         return Ok(None);
@@ -67,14 +67,15 @@ pub fn spawn_supervisor_agent(
     // Connector env isolation (spec 4.3): the supervisor is a spawned agent, so
     // scrub the union of installed connector tokens and hand it the run-context
     // env (its node id in the manifest is `supervisor`).
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
-        scrub: apb_core::connector::resolve::all_referenced_env_names(root),
-        run_dir: Some(run_dir.clone()),
-        node_id: Some("supervisor".to_string()),
-        overlay: crate::run_config::read_run_config(&run_dir)
+    let scrub = apb_core::connector::resolve::all_referenced_env_names(root);
+    let spawn_env = crate::adapter::SpawnEnv::for_node(
+        scrub.clone(),
+        &run_dir,
+        "supervisor",
+        crate::run_config::read_run_config(&run_dir)
             .map(|c| c.spawn_env())
             .unwrap_or_default(),
-    };
+    );
     let mut last_err: Option<String> = None;
     for inv in &entry.chain {
         let adapter = crate::adapter::ClaudeAdapter {
@@ -84,16 +85,20 @@ pub fn spawn_supervisor_agent(
         let mut brief = supervisor_brief(
             run_id,
             playbook,
-            &token,
+            token.expose_secret(),
             supervisor_wait_ms(&inv.agent_id),
             &skills_line,
         );
-        // Only when the run's wakes can carry an advisory triage (issue #165
-        // Part 10): the brief is otherwise byte-identical.
-        if triage_advised(&manifest) {
-            brief.push_str(crate::decision::supervisor_triage::BRIEF_LINE);
-        }
-        match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &connector_policy) {
+        brief.push_str(&brief_lines(&manifest, playbook));
+        // The supervisor profile's `process_env`, for this chain element's
+        // agent. Not journaled: a supervisor spawn is no attempt.
+        let step_env = spawn_env.with_process(crate::agent_env::plan_for_entry(
+            entry.process_env.as_ref(),
+            &inv.agent_id,
+            &inv.model,
+            &scrub,
+        ));
+        match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &step_env) {
             Ok(()) => {
                 apb_core::fsutil::atomic_write_under(
                     &run_dir,
@@ -118,7 +123,9 @@ pub fn spawn_supervisor_agent(
 /// `ClaudeAdapter::spawn_supervisor`), so it can block for the server maximum;
 /// other agents keep under the ~60 s default of the strictest hosts (Codex).
 pub(crate) fn supervisor_wait_ms(agent_id: &str) -> u64 {
-    if apb_core::detect::canonical_agent_id(agent_id) == "claude" {
+    if apb_core::agents::lookup(agent_id)
+        .is_some_and(|a| a.descriptor().capabilities.long_tool_wait)
+    {
         crate::run_wait::RUN_WAIT_MAX_MS
     } else {
         crate::run_wait::RUN_WAIT_DEFAULT_MS
@@ -613,8 +620,8 @@ pub(crate) fn park_for_supervisor(
                 write_control_cursor(run_dir, seq)?;
                 return Ok(WakeOutcome::Terminal(RunStatus::Paused));
             }
-            Control::Abort { reason } => {
-                log.append(EventPayload::RunAborted { reason })?;
+            Control::Abort { reason, by } => {
+                log.append(EventPayload::RunAborted { reason, by })?;
                 write_control_cursor(run_dir, seq)?;
                 return Ok(WakeOutcome::Terminal(RunStatus::Aborted));
             }
@@ -955,6 +962,21 @@ fn park_triage(
     ))
 }
 
+/// The lines a run's features add to the supervisor brief; empty (the
+/// brief stays byte-identical) for a run with none of them: the advisory
+/// triage line when the run's wakes can carry one (issue #165 Part 10), the
+/// known-problems line for a playbook that shows known problems.
+fn brief_lines(manifest: &crate::manifest::RunExecutionManifest, playbook: &Playbook) -> String {
+    let mut out = String::new();
+    if triage_advised(manifest) {
+        out.push_str(crate::decision::supervisor_triage::BRIEF_LINE);
+    }
+    if playbook.known_problems.as_ref().is_some_and(|b| b.shows()) {
+        out.push_str(crate::known_problems::prompt::BRIEF_LINE);
+    }
+    out
+}
+
 /// Whether `supervisor_triage` is in advise or enforce for this run (its
 /// manifest snapshot, and not switched off since).
 fn triage_advised(manifest: &crate::manifest::RunExecutionManifest) -> bool {
@@ -996,5 +1018,24 @@ mod triage_brief_tests {
         uses.get_mut("supervisor_triage").unwrap().mode = apb_core::decisions::DecisionMode::Advise;
         m.decisions = Some(eff(uses));
         assert!(triage_advised(&m));
+    }
+
+    #[test]
+    fn the_known_problems_line_reaches_the_brief_only_when_the_block_shows() {
+        let m = crate::manifest::RunExecutionManifest::default();
+        let with = |block: &str| {
+            Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: P\nversion: 1.0.0\n{block}nodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+            ))
+            .unwrap()
+        };
+        assert_eq!(brief_lines(&m, &with("")), "");
+        assert_eq!(
+            brief_lines(&m, &with("known_problems: { show: off }\n")),
+            ""
+        );
+        let line = brief_lines(&m, &with("known_problems: {}\n"));
+        assert_eq!(line, crate::known_problems::prompt::BRIEF_LINE);
+        assert!(line.contains("never close or dismiss"));
     }
 }

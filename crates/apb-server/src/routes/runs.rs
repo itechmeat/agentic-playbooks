@@ -68,17 +68,72 @@ pub struct RunDetail {
     )]
     pub commits: Vec<apb_engine::run_outcome::NodeCommits>,
     // --- end of the 0.23.0 blocks ---
+    /// Each publish node: the pinned target, the latest plan, whether a
+    /// consent is awaited, the push's ledger state and the result; empty
+    /// for a run without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_outcome::RunPublish>>", optional)
+    )]
+    pub publish: Vec<apb_engine::run_outcome::RunPublish>,
+    /// Unread events the run's connector inbox reads found lost to inbox
+    /// retention, one per distinct gap; empty when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_outcome::RunInboxGap>>", optional)
+    )]
+    pub inbox_gaps: Vec<apb_engine::run_outcome::RunInboxGap>,
+    /// The human outcome: what the run did, what the engine checked, what
+    /// nobody checked, and what the attempts reported.
+    pub outcome: apb_engine::run_outcome::OutcomeSummary,
+    /// The baseline check, each observation before and after; absent for a
+    /// playbook without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub baseline: Option<apb_engine::run_outcome::RunBaseline>,
+    /// The findings and warnings the attempts reported; absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub notes: Option<apb_engine::run_outcome::RunNotes>,
+    /// Each list node's visit with its items; empty for a run without a
+    /// list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(test, ts(as = "Option<Vec<apb_engine::list::RunList>>", optional))]
+    pub lists: Vec<apb_engine::list::RunList>,
     /// The candidate trial this run was (issue #192), with its verdict;
     /// absent for every other run.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub candidate_trial: Option<apb_engine::candidate::CandidateTrial>,
+    /// The known problems the run showed its agents and the ones it hid;
+    /// absent for a run whose playbook shows none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub known_problems: Option<apb_engine::known_problems::RunKnownProblems>,
     /// The run's pause (issue #200): who paused it, why, since and until
     /// when, and `pausing` while a live driver drains toward a queued
     /// pause. Absent for a run that is neither paused nor pausing.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub pause: Option<apb_engine::pause::PauseInfo>,
+    /// The run's budget: limits, spent and left per dimension, and the node
+    /// a budget pause holds it before. Absent for a run without a budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub budget: Option<apb_engine::budget::BudgetStatus>,
+    /// The run's notifications: whether they are on, where they go, about
+    /// what, what was sent, and why a subscription could not be used.
+    /// Absent for a run that never had a subscription.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub notify: Option<apb_engine::notify::RunNotify>,
+    /// The estimate the run started with (time, tokens, cost from comparable
+    /// runs). Absent for a run started before estimates, or a sub-run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
     /// The model each attempt actually ran on, against the profile's primary
     /// model (issue #193); empty before the first attempt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -87,6 +142,17 @@ pub struct RunDetail {
         ts(as = "Option<Vec<apb_engine::attempt_models::AttemptModel>>", optional)
     )]
     pub attempt_models: Vec<apb_engine::attempt_models::AttemptModel>,
+    /// What each isolated attempt's isolation held and did not (level,
+    /// backend, network, limits); empty for a run without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(
+            as = "Option<Vec<apb_engine::run_view::AttemptIsolationRow>>",
+            optional
+        )
+    )]
+    pub isolation: Vec<apb_engine::run_view::AttemptIsolationRow>,
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -196,20 +262,34 @@ pub(crate) async fn get_run_handler(
         .and_then(|loaded| loaded.layout);
 
     // The run's hooks as map key -> relative path of the signal endpoint.
-    let hooks: std::collections::BTreeMap<String, String> = apb_engine::read_hooks(&run_dir)
+    let hooks = apb_engine::read_hooks(&run_dir)
         .unwrap_or_default()
-        .into_iter()
-        .map(|(k, secret)| (k, apb_engine::hook_path(&id, &secret)))
-        .collect();
+        .paths(&id);
 
     let children = view.children(&run_dir);
     let failure_reason = view.failure_reason();
     let usage = view.usage();
     let decisions = view.decisions();
     let commits = view.commits();
+    let publish = view.publish();
+    let inbox_gaps = view.inbox_gaps();
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
-    let goal = view.goal(&run_dir);
+    let isolation = view.isolation();
+    // The goal, the baseline and the outcome are read against the one
+    // playbook snapshot parsed above.
+    let readout = view.readout_of(loaded_pb);
+    let outcome = apb_engine::run_outcome::OutcomeSummary::from_readout(
+        &view,
+        &run_dir,
+        &readout,
+        answer.clone(),
+    );
+    let goal = readout.goal;
+    let baseline = readout.baseline;
+    let notes = Some(readout.notes).filter(|n| !n.is_empty());
+    let lists = readout.lists;
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
+    let known_problems = apb_mcp::tools::problems::run_block(&view.events);
     let pause = view.pause().cloned();
     let nodes = view.nodes();
     let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
@@ -220,6 +300,9 @@ pub(crate) async fn get_run_handler(
         .as_str()
         .to_string();
     let execution_fallback = manifest.as_ref().is_some_and(|m| m.falls_back_to_host());
+    let budget = view.budget(&run_dir);
+    let estimate = apb_engine::run_estimate::snapshot::read(&run_dir);
+    let notify = apb_mcp::tools::notify::run_block(&run_dir, &view.events);
     Json(RunDetail {
         run_id: id,
         playbook: playbook_id,
@@ -237,10 +320,21 @@ pub(crate) async fn get_run_handler(
         hooks,
         children,
         commits,
+        publish,
+        inbox_gaps,
+        outcome,
+        baseline,
+        notes,
+        lists,
         attempt_models,
+        isolation,
         goal,
         candidate_trial,
+        known_problems,
         pause,
+        budget,
+        notify,
+        estimate,
         usage,
         decisions,
         unknown_events: view.unknown.len(),
@@ -259,6 +353,28 @@ pub(crate) struct ReviewBody {
     decision: String,
     #[serde(default)]
     note: String,
+    /// A publish gate only: the nonce of the plan the person saw.
+    #[serde(default)]
+    nonce: Option<String>,
+}
+
+/// A publish consent is a person's (decision record 0010). A dashboard
+/// without keys takes any request that reaches its loopback port, and under
+/// `network: open` a sandboxed agent shares that loopback: it could read the
+/// open plan's nonce and consent to its own push. So a keyless dashboard
+/// never takes a `publish` decision; a `skip` pushes nothing and stays open.
+/// The person approves with the CLI, or issues a dashboard key first.
+fn keyless_publish_refusal(
+    auth: &crate::auth::AuthState,
+    run_id: &str,
+    body: &ReviewBody,
+) -> Option<String> {
+    (!auth.enabled() && body.decision == apb_core::publish::OPTION_PUBLISH).then(|| {
+        format!(
+            "a dashboard without keys does not take a publish consent, since anything on this machine can reach it; approve with `apb publish approve {run_id} --node {} --nonce <nonce>`, or issue a key with `apb server key issue` and sign in",
+            body.node
+        )
+    })
 }
 
 pub(crate) async fn post_review_handler(
@@ -278,24 +394,32 @@ pub(crate) async fn post_review_handler(
     if !run_dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
     }
+    if let Some(why) = keyless_publish_refusal(&state.auth, &id, &body) {
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
     let cmd = apb_engine::ReviewCommand {
         node: body.node,
         decision: body.decision,
         note: body.note,
     };
-    // The engine owns the node check (issue #103.1), so MCP `review_decide`
-    // and the `apb review` CLI inherit it; this maps its two client-fault
-    // verdicts the way `run_playbook_handler` maps its own. Neither is a
-    // server fault: `NotFound` means the decided node is not a `human_review`
-    // node of this run's playbook, `Conflict` means no decision is pending
-    // on it.
-    match apb_engine::post_review(&run_dir, cmd) {
+    // The engine owns the node check (issue #103.1) and the publish nonce
+    // check, so MCP `review_decide` and the `apb review` CLI inherit them;
+    // this maps its client-fault verdicts the way `run_playbook_handler`
+    // maps its own. None is a server fault: `NotFound` means the decided
+    // node is not a gate of this run's playbook, `Conflict` means no
+    // decision is pending on it or the nonce answers an older plan (the
+    // message names the current one), `Invalid` means a decision the gate
+    // does not offer or a `publish` without the plan's nonce.
+    match apb_engine::review::post_decision(&run_dir, cmd, body.nonce) {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()
         }
         Err(apb_engine::EngineError::Conflict(what)) => {
             (StatusCode::CONFLICT, what).into_response()
+        }
+        Err(apb_engine::EngineError::Invalid(what)) => {
+            (StatusCode::BAD_REQUEST, what).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -428,6 +552,11 @@ pub(crate) struct ResumeBody {
     /// an older apb started): the same confirmation MCP `run_resume` takes.
     #[serde(default)]
     confirm_irreversible: Option<apb_engine::consent::Confirmation>,
+    /// The budget change a run its budget paused needs (raise or set a
+    /// limit, another `on_no_estimate`, or `once`); a plain resume of such a
+    /// run is refused (409 `budget_paused`, with the run's budget).
+    #[serde(default)]
+    budget: Option<super::estimate::ResumeBudgetBody>,
 }
 
 /// POST /api/runs/{id}/resume: the dashboard's Resume button, for a paused,
@@ -470,6 +599,10 @@ pub(crate) async fn post_resume_handler(
         Ok(note) => note,
         Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
     };
+    let budget = match super::estimate::resume_budget(body.budget.as_ref()) {
+        Ok(b) => b,
+        Err(refusal) => return refusal.into_response(),
+    };
     let from_node = body.from_node.as_deref();
     // Computed before the drive so the answer says where the run resumes, and
     // so a finished run is refused here (the argument-free plan would).
@@ -482,13 +615,13 @@ pub(crate) async fn post_resume_handler(
         .ok()
         .and_then(|v| v.pause().filter(|p| !p.pausing).and_then(|p| p.until))
         .filter(|u| *u > apb_core::clock::now_ms_u64());
-    match apb_engine::resume_detached_by(
-        &root,
-        &id,
+    let req = apb_engine::ResumeRequest {
         from_node,
-        body.allow_environment_drift,
-        apb_engine::pause::PauseBy::Operator,
-    ) {
+        allow_environment_drift: body.allow_environment_drift,
+        budget: budget.as_ref(),
+        ..apb_engine::ResumeRequest::operator()
+    };
+    match apb_engine::resume_detached_req(&root, &id, &req) {
         Ok(_) => {
             let mut answer = serde_json::json!({
                 "run_id": id,
@@ -504,6 +637,11 @@ pub(crate) async fn post_resume_handler(
                 answer["deprecation"] = serde_json::json!(note);
             }
             Json(answer).into_response()
+        }
+        Err(apb_engine::EngineError::Conflict(detail))
+            if let Some(refusal) = super::estimate::resume_refusal(&root, &id, &detail) =>
+        {
+            refusal
         }
         Err(e) => resume_error(e),
     }
@@ -547,23 +685,17 @@ pub(crate) async fn post_hook_handler(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     // The secret must match one of this run's hooks (otherwise 404 - a
-    // foreign or incorrect secret must not accept the signal). Only the
-    // comparison changes: a plain `==` leaks a live secret's bytes through
-    // response timing, so each candidate is compared in constant time. The
-    // first-match semantics of the previous `find` are preserved exactly,
-    // including the break, so a run whose hooks somehow share a secret still
-    // signals the same key it always did.
-    let mut matched: Option<&String> = None;
-    for (key, candidate) in hooks.iter() {
-        if apb_core::server_auth::ct_eq_str(candidate, &secret) {
-            matched = Some(key);
-            break;
-        }
-    }
-    let Some(key) = matched else {
+    // foreign or incorrect secret must not accept the signal), compared in
+    // constant time by `RunHooks::key_for`.
+    let Some(key) = hooks.key_for(&secret) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    match apb_engine::post_signal(&run_dir, apb_engine::SignalCommand { key: key.clone() }) {
+    match apb_engine::post_signal(
+        &run_dir,
+        apb_engine::SignalCommand {
+            key: key.to_string(),
+        },
+    ) {
         Ok(seq) => Json(serde_json::json!({ "signalled": key, "posted_seq": seq })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -586,6 +718,54 @@ pub(crate) async fn get_run_report_handler(
         Err(apb_engine::EngineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/runs/{id}/report.html: the run report as one self-contained
+/// page to save (the dashboard's "Save report"), the same page `apb runs
+/// <id> --html` writes. Served as a download with its own Content Security
+/// Policy (nothing loads, nothing runs, only its pinned stylesheet applies)
+/// and `nosniff`, so it is never rendered as part of the dashboard.
+pub(crate) async fn get_run_report_html_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WorkspaceQuery>,
+) -> impl IntoResponse {
+    use axum::http::header;
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let run_dir = root.join(".apb/runs").join(&id);
+    if !run_dir.is_dir() {
+        return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
+    }
+    let page =
+        tokio::task::spawn_blocking(move || apb_engine::report_html::render(&root, &run_dir)).await;
+    match page {
+        Ok(Ok(html)) => {
+            let csp = apb_engine::report_html::markup::csp(apb_engine::report_html::STYLESHEET);
+            let disposition = format!("attachment; filename=\"apb-run-{id}.html\"");
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+                    (header::CONTENT_SECURITY_POLICY, csp),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                    (header::CONTENT_DISPOSITION, disposition),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                ],
+                html,
+            )
+                .into_response()
+        }
+        Ok(Err(apb_engine::EngineError::NotFound(what))) => {
+            (StatusCode::NOT_FOUND, what).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

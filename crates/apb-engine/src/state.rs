@@ -240,6 +240,22 @@ pub struct RunState {
     /// revival of the delivering node makes it stale. A pair leaves the set
     /// when its target runs again or its revival ends.
     pub delivered_since_revival: BTreeSet<(String, String)>,
+    /// Where each node's latest execution sits in the journal: the seq of
+    /// its latest `node_started` and `node_finished`, and of the latest
+    /// `edge_traversed` of each hop. Routing reads a node's latest
+    /// execution only ([`RunState::hop_of_latest_run`]), and a join inside a
+    /// loop does not count a delivery it already consumed
+    /// ([`RunState::join_consumed`]): the earlier rounds' results stay in
+    /// `nodes` and `journaled_hops`.
+    pub seqs: NodeSeqs,
+}
+
+/// The journal positions behind [`RunState::seqs`].
+#[derive(Debug, Default, Clone)]
+pub struct NodeSeqs {
+    pub started: BTreeMap<String, u64>,
+    pub finished: BTreeMap<String, u64>,
+    pub hops: BTreeMap<(String, String), u64>,
 }
 
 /// One revival in force (see [`RunState::revivals`]).
@@ -299,6 +315,36 @@ impl RunState {
             && self
                 .journaled_hops
                 .contains(&(from.to_string(), to.to_string()))
+    }
+
+    /// Whether the journaled hop `from -> to` was taken by `from`'s latest
+    /// execution: recorded after `from` last started. A hop of an earlier
+    /// loop round is history, not where the node goes now. With no position
+    /// on record (a state built by hand) the hop counts.
+    pub fn hop_of_latest_run(&self, from: &str, to: &str) -> bool {
+        let hop = self.seqs.hops.get(&(from.to_string(), to.to_string()));
+        match (hop, self.seqs.started.get(from)) {
+            (Some(hop), Some(start)) => hop > start,
+            _ => true,
+        }
+    }
+
+    /// Whether `join` already consumed `source`'s latest finish: the join's
+    /// latest execution finished after it, and the join has neither started
+    /// again nor been revived since. Inside a loop such a finish belongs to
+    /// the round before (`parallel::arrival` asks only for a source in the
+    /// join's own cycle). A join still running (a crash or a pause while it
+    /// ran, then a resume) or one a re-run revived has consumed nothing.
+    pub fn join_consumed(&self, source: &str, join: &str) -> bool {
+        let Some(done) = self.seqs.finished.get(source) else {
+            return false;
+        };
+        let Some(join_done) = self.seqs.finished.get(join) else {
+            return false;
+        };
+        join_done > done
+            && self.seqs.started.get(join).is_none_or(|s| s < join_done)
+            && !self.revived.contains(join)
     }
 
     /// Applies a revival without a start of its own (tests, mostly): see
@@ -380,8 +426,9 @@ impl RunState {
 
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
-        // Open attempts: node -> attempt. Closed by attempt_finished/node_finished.
-        let mut open: BTreeSet<String> = BTreeSet::new();
+        // Open attempts by (node, item). Closed by attempt_finished, and every
+        // attempt of a node by its node_finished.
+        let mut open: BTreeSet<(String, Option<String>)> = BTreeSet::new();
         // The run status came from the old resume's `run_paused { reason:
         // "resume from X" }` marker, which never meant a pause.
         let mut legacy_marker = false;
@@ -390,15 +437,24 @@ impl RunState {
                 EventPayload::RunStarted { .. } => s.run_status = RunStatus::Running,
                 EventPayload::RunProvenance { .. } => {}
                 EventPayload::NodeStarted { node, .. } => {
+                    s.seqs.started.insert(node.clone(), e.seq);
                     s.nodes.insert(node.clone(), NodeStatus::Running);
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
                     s.ran_again(node);
                 }
-                EventPayload::AttemptStarted { node, attempt, .. } => {
+                EventPayload::AttemptStarted {
+                    node,
+                    attempt,
+                    item,
+                    ..
+                } => {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
-                    s.attempts.insert(node.clone(), *attempt);
-                    open.insert(node.clone());
+                    // A list item's attempt numbers are its own.
+                    if item.is_none() {
+                        s.attempts.insert(node.clone(), *attempt);
+                    }
+                    open.insert((node.clone(), item.clone()));
                 }
                 // The attempt stays open until its `attempt_finished`: an exit
                 // the drive never finished is a crash to an offline reader.
@@ -407,10 +463,14 @@ impl RunState {
                 EventPayload::AttemptFinished {
                     node,
                     rejected_output,
+                    item,
                     ..
                 } => {
-                    open.remove(node);
-                    if let Some(text) = rejected_output {
+                    open.remove(&(node.clone(), item.clone()));
+                    // A list item's rejection is its own, not the node's.
+                    if item.is_none()
+                        && let Some(text) = rejected_output
+                    {
                         s.rejected_outputs.insert(node.clone(), text.clone());
                     }
                 }
@@ -420,7 +480,8 @@ impl RunState {
                     output,
                     ..
                 } => {
-                    open.remove(node);
+                    open.retain(|(n, _)| n != node);
+                    s.seqs.finished.insert(node.clone(), e.seq);
                     s.ran_again(node);
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
@@ -469,7 +530,9 @@ impl RunState {
                 | EventPayload::RunMigrated { .. }
                 | EventPayload::VersionPromoted { .. }
                 | EventPayload::CandidatePromoted { .. }
-                | EventPayload::CandidateRejected { .. } => {}
+                | EventPayload::CandidateRejected { .. }
+                | EventPayload::CandidateHeld { .. }
+                | EventPayload::RunGraded { .. } => {}
                 EventPayload::WaitStarted { .. }
                 | EventPayload::WaitSignalled { .. }
                 | EventPayload::WaitTimeout { .. } => {}
@@ -512,6 +575,15 @@ impl RunState {
                 // A connector call is an audit record (spec 6.2); it does not
                 // change run state.
                 EventPayload::ConnectorCall { .. } => {}
+                // An inbox gap is a reporting record; the run surfaces read it straight
+                // from the journal, the state fold carries no inbox cursor.
+                EventPayload::InboxGap { .. } => {}
+                // The send ledger is folded by `connector::intent::ledger`;
+                // it carries no run-state effect.
+                EventPayload::SendIntentRecorded { .. } | EventPayload::SendIntentSettled { .. } => {}
+                // A publish node's pin and plan are read by `crate::publish`
+                // and the run surfaces; the node's own events carry its state.
+                EventPayload::PublishTargetPinned { .. } | EventPayload::PublishPlanned { .. } => {}
                 // Node-cache events (spec 2026-07-19) are audit records: a hit
                 // is reported alongside the node's own NodeStarted/NodeFinished
                 // (which carry the run-state effect), and miss/stored/rejected
@@ -563,6 +635,26 @@ impl RunState {
                 EventPayload::ArtifactsCommitted { .. }
                 | EventPayload::GoalChecked { .. }
                 | EventPayload::ProtectedPathsModified { .. } => {}
+                // The baseline snapshots, their comparisons and an attempt's
+                // notes are reports; `crate::baseline::BaselineState` folds
+                // the baseline for the drive.
+                EventPayload::BaselineObserved { .. }
+                | EventPayload::BaselineCompared { .. }
+                | EventPayload::AttemptNotes { .. }
+                | EventPayload::AgentEnvApplied { .. }
+                | EventPayload::ToolExposureMismatch { .. } => {}
+                // A list visit's records; `crate::list::ListFold` folds them.
+                EventPayload::ListStarted { .. }
+                | EventPayload::ListBatchStarted { .. }
+                | EventPayload::ListItemSettled { .. } => {}
+                // The budget and its gate; `crate::budget::BudgetFold` folds
+                // them.
+                EventPayload::BudgetSet { .. }
+                | EventPayload::BudgetGate { .. }
+                | EventPayload::KnownProblemsShown { .. } => {}
+                // The notification subscription; `crate::notify::NotifyState`
+                // folds it.
+                EventPayload::NotifySet { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a
@@ -577,6 +669,7 @@ impl RunState {
                     uncounted,
                 } => {
                     s.journaled_hops.insert((from.clone(), to.clone()));
+                    s.seqs.hops.insert((from.clone(), to.clone()), e.seq);
                     if s.revived.contains(to) && !s.revived.contains(from) {
                         s.delivered_since_revival
                             .insert((from.clone(), to.clone()));
@@ -600,6 +693,7 @@ impl RunState {
                     node,
                     decision,
                     note,
+                    ..
                 } => {
                     s.reviews.insert(
                         node.clone(),
@@ -613,7 +707,7 @@ impl RunState {
         }
         // Attempts still open after the last event: interrupted.
         if !open.is_empty() {
-            for node in &open {
+            for (node, _) in &open {
                 s.nodes.insert(node.clone(), NodeStatus::Interrupted);
             }
             // `Aborted` belongs in this exempt list next to the other explicit

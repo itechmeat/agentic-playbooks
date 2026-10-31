@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use apb_core::connector::def::{SmtpMessage, SmtpSpec};
 use apb_core::connector::template::{Namespace, RenderCtx, placeholders, render_raw};
+use apb_core::secret::{Redaction, Secret};
 use lettre::Address;
 use lettre::message::{Mailbox, Message, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
@@ -34,33 +35,20 @@ pub enum SmtpBuild {
 /// A rendered, ready-to-send smtp call. Holds resolved connection parameters
 /// (including the secret password, never logged), the built envelope, and the
 /// formatted message bytes. `verify` calls carry no message.
+#[derive(Debug)]
 pub struct SmtpCall {
     host: String,
     port: u16,
     use_tls: bool,
     username: Option<String>,
-    password: Option<String>,
+    /// Sealed, exposed only at the AUTH call in `send`.
+    password: Option<Secret>,
     timeout_sec: u64,
     /// `Some` for send, `None` for verify.
     message: Option<BuiltMessage>,
-    /// (resolved secret value, redaction label) pairs; every error message is
+    /// The resolved secrets with their labels; every error message is
     /// scrubbed against these before it leaves the process.
-    redactions: Vec<(String, String)>,
-}
-
-/// Manual, secret-free: see the note on `ImapCall`'s `Debug`.
-impl std::fmt::Debug for SmtpCall {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SmtpCall")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("use_tls", &self.use_tls)
-            .field("username", &self.username)
-            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
-            .field("timeout_sec", &self.timeout_sec)
-            .field("message", &self.message)
-            .finish_non_exhaustive()
-    }
+    redactions: Vec<Redaction>,
 }
 
 /// The built email: the from address string, the subject, the per-list
@@ -87,6 +75,11 @@ enum Stage {
 }
 
 impl SmtpCall {
+    /// Lowers the timeout to at most `secs`.
+    pub(crate) fn cap_timeout(&mut self, secs: u64) {
+        self.timeout_sec = self.timeout_sec.min(secs);
+    }
+
     /// The event-log endpoint: `smtp://host:port`, no credentials.
     pub(crate) fn endpoint(&self) -> String {
         format!("smtp://{}:{}", self.host, self.port)
@@ -150,7 +143,7 @@ impl SmtpCall {
         }
 
         if let (Some(user), Some(pass)) = (self.username.as_ref(), self.password.as_ref()) {
-            let creds = Credentials::new(user.clone(), pass.clone());
+            let creds = Credentials::new(user.clone(), pass.expose_secret().to_string());
             conn.auth(&[Mechanism::Plain, Mechanism::Login], &creds)
                 .map_err(|e| self.map_err(Stage::Auth, e))?;
         }
@@ -176,9 +169,9 @@ impl SmtpCall {
     }
 
     /// Maps a lettre smtp error into the call taxonomy (spec 4.2): a timeout is
-    /// `timeout`; a connect/DNS failure is `network`; an AUTH rejection is
-    /// `auth`; any other protocol rejection is `service` with the SMTP reply
-    /// carried in the message. Every message is scrubbed through the interim
+    /// `timeout`; a connect/DNS failure, or a send cut off without a reply,
+    /// is `network`; an AUTH rejection is `auth`; any other protocol
+    /// rejection is `service` with the SMTP reply carried in the message. Every message is scrubbed through the interim
     /// literal redaction so a resolved password can never leak.
     fn map_err(&self, stage: Stage, err: lettre::transport::smtp::Error) -> CallError {
         if err.is_timeout() {
@@ -187,11 +180,16 @@ impl SmtpCall {
                 "smtp operation timed out",
             ));
         }
+        // At the send stage only the server's own reply (a 4xx or 5xx code)
+        // says the message was refused; a connection lost meanwhile, after
+        // DATA perhaps, leaves it unknown whether the server took it.
+        let replied = err.is_transient() || err.is_permanent();
         let (code, prefix) = match stage {
             Stage::Connect => (CallErrorCode::Network, "smtp connection failed"),
             Stage::Auth => (CallErrorCode::Auth, "smtp authentication rejected"),
             Stage::Starttls => (CallErrorCode::Service, "smtp STARTTLS failed"),
-            Stage::Send => (CallErrorCode::Service, "smtp send rejected"),
+            Stage::Send if replied => (CallErrorCode::Service, "smtp send rejected"),
+            Stage::Send => (CallErrorCode::Network, "smtp send interrupted"),
         };
         self.redact(CallError::new(code, format!("{prefix}: {err}")))
     }
@@ -210,8 +208,8 @@ pub fn build(
     spec: &SmtpSpec,
     account: &BTreeMap<String, String>,
     args: &Value,
-    secrets: &BTreeMap<String, String>,
-    redactions: Vec<(String, String)>,
+    secrets: &BTreeMap<String, Secret>,
+    redactions: Vec<Redaction>,
     dry_run: bool,
     timeout_sec: u64,
 ) -> Result<SmtpBuild, CallError> {
@@ -252,7 +250,7 @@ struct Connection {
     port: u16,
     use_tls: bool,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Secret>,
 }
 
 /// Builds a config-kind render error naming the smtp field.
@@ -453,7 +451,7 @@ fn render_connection(spec: &SmtpSpec, ctx: &RenderCtx) -> Result<Connection, Cal
         )
     })?;
     let username = render_conn_opt(c.username.as_deref(), ctx, "username")?;
-    let password = render_conn_opt(c.password.as_deref(), ctx, "password")?;
+    let password = render_conn_opt(c.password.as_deref(), ctx, "password")?.map(Secret::new);
     Ok(Connection {
         host,
         port,
@@ -535,6 +533,28 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    /// The derived `Debug` of a ready call masks its password and its
+    /// redaction values: a `{:?}` in a log never carries the credential.
+    #[test]
+    fn debug_masks_the_password_and_the_redactions() {
+        let call = SmtpCall {
+            host: "smtp.example.test".into(),
+            port: 587,
+            use_tls: true,
+            username: Some("bot".into()),
+            password: Some(Secret::new("pw-canary-value")),
+            timeout_sec: 5,
+            message: None,
+            redactions: vec![Redaction::new(Secret::new("pw-canary-value"), "SMTP_PASS")],
+        };
+        let shown = format!("{call:?}");
+        assert!(
+            !shown.contains("pw-canary-value"),
+            "the password leaked through Debug"
+        );
+        assert!(shown.contains("smtp.example.test"));
+    }
 
     fn spec_send() -> SmtpSpec {
         yaml_serde::from_str(

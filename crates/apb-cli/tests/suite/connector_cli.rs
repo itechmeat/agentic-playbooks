@@ -146,6 +146,68 @@ fn call_without_run_context_prints_config_error_json_and_exits_nonzero() {
     );
 }
 
+/// A site id starting with `@` belongs to the engine's own calls (the
+/// baseline check reads under `@baseline`): a process that sets one in
+/// APB_NODE_ID is refused before anything resolves.
+#[test]
+fn call_refuses_a_node_id_reserved_for_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    let run_dir = dir.path().join(".apb/runs/r-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    let out = playbook_env(
+        dir.path(),
+        &["connector", "call", "widget", "ping"],
+        &[
+            ("APB_RUN_DIR", run_dir.to_str().unwrap()),
+            ("APB_NODE_ID", "@baseline"),
+        ],
+    );
+    assert!(!out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["error"]["code"], serde_json::json!("config"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reserved for calls the engine makes itself")
+    );
+}
+
+/// A send's `--intent` label is checked before anything else, so a bad name
+/// never reaches the ledger; a good one passes on to the call.
+#[test]
+fn call_refuses_an_intent_label_outside_the_slug_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_INTENT_TOKEN_UNSET");
+    let call = |label: &str| {
+        playbook(
+            dir.path(),
+            &[
+                "connector",
+                "call",
+                "widget",
+                "get_item",
+                "--args",
+                r#"{"id":"42"}"#,
+                "--dry-run",
+                "--intent",
+                label,
+            ],
+        )
+    };
+    let bad = call("Weekly Report");
+    assert!(!bad.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&bad.stdout).trim()).unwrap();
+    assert_eq!(v["error"]["code"], serde_json::json!("invalid_args"));
+    assert!(call("weekly-report.2026-10").status.success());
+}
+
 // --- env ------------------------------------------------------------------
 
 /// `--dry-run` renders a call without executing it or resolving secrets, so
@@ -722,6 +784,57 @@ fn run_proceeds_past_the_connector_gate_once_approved() {
         "an approved connector-binding playbook should run its node to completion: \
          stdout={stdout} stderr={stderr}"
     );
+}
+
+/// Under `process_env: allowlist` the agent's own `apb connector call` still
+/// works: the run context and `APB_CONFIG_DIR` reach it, so the call finds
+/// its run, its grant and the approved account and renders the request (a
+/// dry run: no secret is resolved and nothing is sent).
+#[cfg(unix)]
+#[test]
+fn an_allowlisted_agent_still_reaches_its_connector() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    setup_run_fixture(dir.path());
+    let profile = dir.path().join(".apb/profiles/main/profile.yaml");
+    let mut yaml = fs::read_to_string(&profile).unwrap();
+    yaml.push_str("process_env:\n  policy: allowlist\n");
+    fs::write(&profile, yaml).unwrap();
+    let secrets = dir.path().join(".apb/secrets.env");
+    fs::write(&secrets, "WIDGET_TOKEN=shh-secret-value\n").unwrap();
+    fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600)).unwrap();
+    apb_ok(dir.path(), &["connector", "approve", "widget"]);
+    apb_ok(
+        dir.path(),
+        &["connector", "approve", "widget", "--account", "default"],
+    );
+    let reply = dir.path().join("call.json");
+    let stub = dir.path().join("calling-agent.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n'{}' connector call widget get_item --args '{{\"id\":\"42\"}}' --dry-run > '{}'\necho done\n",
+            crate::common::apb_bin().display(),
+            reply.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = playbook_env(
+        dir.path(),
+        &["run", RUN_PLAYBOOK_ID],
+        &[("APB_AGENT_CMD", stub.to_str().unwrap())],
+    );
+    assert!(
+        out.status.success(),
+        "the run must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&reply).unwrap().trim()).expect("JSON reply");
+    assert_eq!(v["dry_run"], serde_json::json!(true), "{v}");
+    assert_eq!(v["url"], serde_json::json!("https://example.com/items/42"));
 }
 
 #[test]

@@ -12,7 +12,7 @@
   import { parseBinding, serializeBinding, toggleListEntry, type ConnectorBinding } from './connectorbinding'
   import { trustBadge, type ConnectorCard, type ConnectorDetail } from './connectors'
   import { NODE_FIELDS, type NodeFieldKey } from './nodefields'
-  import { fetchInputDraft, saveInputDraft, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
+  import { fetchMemory, saveMemory, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
   import FieldInfo from '$lib/components/FieldInfo.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -24,6 +24,17 @@
   import Trash2 from '@lucide/svelte/icons/trash-2'
   import { fieldsToField, fieldToOutputs, sessionSources } from './nodeio'
   import { fromYamlField, questionSummary, toYamlField } from './judgefields'
+  import { publishSources, type SourceNode } from './publish'
+  import { PUBLISH_DEFAULT_TIMEOUT_SECONDS, PUBLISH_MAX_TIMEOUT_SECONDS } from './consts.gen'
+  import {
+    ISOLATION_LEVELS,
+    ISOLATION_NETWORKS,
+    isIsolatedLevel,
+    isolationForm,
+    isolationValue,
+    type IsolationLevel,
+    type IsolationNetwork,
+  } from './playbookedit'
 
   let {
     id,
@@ -33,6 +44,7 @@
     workspace = '',
     readonly = false,
     nodes = [],
+    publishOnly = false,
   }: {
     id: string
     node: PlaybookNode
@@ -44,20 +56,34 @@
     /// scrollbars and their selection (a prompt has to stay readable), the
     /// controls that only exist to change something are disabled or gone.
     readonly?: boolean
-    /// Every node of the playbook, for the continue_session picker.
-    nodes?: { id: string; type: string }[]
+    /// Every node of the playbook, for the continue_session and publish
+    /// source pickers.
+    nodes?: SourceNode[]
+    /// The playbook's top-level `publish_only`, shown read-only.
+    publishOnly?: boolean
   } = $props()
 
   const sessionOptions = $derived(sessionSources(nodes, node.id))
+  const publishFromOptions = $derived(publishSources(nodes, node.id))
+  const publishFromLabel = $derived.by(() => {
+    if (f.from === '') return '(choose a node)'
+    if (publishFromOptions.includes(f.from)) return f.from
+    return `${f.from} (not a source)`
+  })
 
   const kind = $derived(node.type)
 
-  const ISOLATION = [
-    { value: '', label: '(default: none)' },
-    { value: 'none', label: 'none' },
-    { value: 'best_effort', label: 'best_effort' },
-    { value: 'full', label: 'full' },
-  ]
+  const ISOLATION_LABELS: Record<IsolationLevel, string> = {
+    '': '(default: none)',
+    none: 'none',
+    best_effort: 'best_effort',
+    full: 'full',
+  }
+  const NETWORK_LABELS: Record<IsolationNetwork, string> = {
+    '': '(default: open)',
+    open: 'open',
+    none: 'none',
+  }
 
   // Available profiles from /api/profiles (for the node executor selector).
   let profiles = $state<{ name: string; scope: string; trusted: boolean }[]>([])
@@ -164,7 +190,6 @@
         max_retries: num(n.max_retries),
         max_loops: num(n.max_loops),
         timeout_seconds: num(n.timeout_seconds),
-        isolation: str(n.isolation),
         success_check: sc.value,
         playbook: playbookRefToField(n.playbook),
         instruction: str(n.instruction),
@@ -175,10 +200,24 @@
         judge_questions: toYamlField(n.questions),
         judge_thresholds: toYamlField(n.thresholds),
         on_unavailable: toYamlField(n.on_unavailable),
+        from: str(n.from),
+        remote: str(n.remote),
+        branch: str(n.branch),
       }
+      iso = isolationForm(n.isolation)
       yamlErrors = {}
     })
   })
+
+  // `isolation` is the shorthand or the long map: the form edits the level
+  // and the network and keeps the extra paths (shown read-only) and any
+  // other key as they are.
+  let iso = $state(isolationForm(undefined))
+  function setIsolation(change: { level?: IsolationLevel; network?: IsolationNetwork }) {
+    const value = isolationValue(node.isolation, change)
+    iso = isolationForm(value)
+    onChange?.({ isolation: value })
+  }
 
   // Judge node snippets (state, questions, thresholds, on_unavailable): a
   // snippet that does not parse is shown as an error and writes nothing.
@@ -299,8 +338,9 @@
     muted: '',
   } as const
 
-  // Start-node "input prompt" run draft: a per-run seed the operator can edit
-  // before running, stored server-side outside the playbook YAML/version.
+  // Start-node "input prompt" run draft: the instruction this project
+  // remembers for the playbook (`/memory`), stored outside the playbook
+  // YAML/version and git-ignored. A committed legacy draft only seeds it.
   const DRAFT_AUTOSAVE_DEBOUNCE_MS = 500
   let draft = $state('')
   // Quiet inline status for the last load/save attempt (review I9 frontend
@@ -309,11 +349,15 @@
   // successful save/load; null renders nothing.
   let draftError = $state<string | null>(null)
   let draftTimer: ReturnType<typeof setTimeout> | undefined
+  // Bumped by every node switch and every save: a save answer that lands
+  // after either says nothing about what is on screen now.
+  let draftSeq = 0
   $effect(() => {
     void node.id
+    draftSeq++
     if (node.type !== 'start') return
     let cancelled = false
-    fetchInputDraft(id, workspace)
+    fetchMemory(id, workspace)
       .then((r) => {
         if (cancelled) return
         draft = r.instruction ?? ''
@@ -340,12 +384,18 @@
     const saveId = id
     const saveWs = workspace
     draftTimer = setTimeout(() => {
-      saveInputDraft(saveId, v, saveWs)
-        .then(() => {
-          draftError = null
+      const seq = ++draftSeq
+      saveMemory(saveId, { instruction: v }, saveWs)
+        .then((r) => {
+          if (seq !== draftSeq) return
+          // A text that looks like a credential is refused, never stored:
+          // the instruction remembered before stays the one a start uses.
+          draftError = r.refused.length
+            ? 'draft not saved: it looks like a secret; a start still uses the instruction remembered before'
+            : null
         })
         .catch(() => {
-          draftError = 'draft not saved'
+          if (seq === draftSeq) draftError = 'draft not saved'
         })
     }, DRAFT_AUTOSAVE_DEBOUNCE_MS)
   }
@@ -378,6 +428,18 @@
     f.output_fields = raw
     onChange?.({ outputs: fieldToOutputs(raw, node.outputs) })
   }
+  // A publish timeout is a whole number of seconds in 1..max (V117); any
+  // other entry stays in the box and is never written into the playbook.
+  function setPublishTimeout(raw: string) {
+    f.timeout_seconds = raw
+    if (raw === '') {
+      onChange?.({ timeout_seconds: undefined })
+      return
+    }
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < 1 || n > PUBLISH_MAX_TIMEOUT_SECONDS) return
+    onChange?.({ timeout_seconds: n })
+  }
   function setNum(key: string, raw: string) {
     f[key] = raw
     if (raw === '') {
@@ -388,9 +450,6 @@
     onChange?.(Number.isNaN(n) ? { [key]: undefined } : { [key]: n })
   }
 
-  const isolationLabel = $derived(
-    ISOLATION.find((o) => o.value === (f.isolation ?? ''))?.label ?? '(default: none)',
-  )
   const successModeLabel = $derived(
     successMode === 'marker' ? 'completion marker' : 'script path',
   )
@@ -453,13 +512,13 @@
         <Textarea
           id="np-input"
           rows={4}
-          class="prose-text max-h-[300px] overflow-auto"
+          class="prose-text draft-input"
           {readonly}
           value={draft}
           oninput={(e) => onDraftInput(e.currentTarget.value)}
         />
         {#if draftError}
-          <p class="text-xs text-muted-foreground">{draftError}</p>
+          <p class="draft-status">{draftError}</p>
         {/if}
       </Field.Field>
     {/if}
@@ -492,19 +551,48 @@
         <Select.Root
           type="single"
           disabled={readonly}
-          value={f.isolation}
-          onValueChange={(v) => setStr('isolation', v ?? '')}
+          value={iso.level}
+          onValueChange={(v) => setIsolation({ level: (v ?? '') as IsolationLevel })}
         >
-          <Select.Trigger class="w-full">{isolationLabel}</Select.Trigger>
+          <Select.Trigger class="np-select" data-testid="np-isolation">{iso.rawLevel ? `${iso.rawLevel} (unknown)` : ISOLATION_LABELS[iso.level]}</Select.Trigger>
           <Select.Content>
             <Select.Group>
-              {#each ISOLATION as o (o.value)}
-                <Select.Item value={o.value} label={o.label}>{o.label}</Select.Item>
+              {#each ISOLATION_LEVELS as v (v)}
+                <Select.Item value={v} label={ISOLATION_LABELS[v]}>{ISOLATION_LABELS[v]}</Select.Item>
               {/each}
             </Select.Group>
           </Select.Content>
         </Select.Root>
       </Field.Field>
+      {#if isIsolatedLevel(iso.level)}
+        <Field.Field>
+          {@render fieldHead('isolation_network')}
+          <Select.Root
+            type="single"
+            disabled={readonly}
+            value={iso.network}
+            onValueChange={(v) => setIsolation({ network: (v ?? '') as IsolationNetwork })}
+          >
+            <Select.Trigger class="np-select" data-testid="np-isolation-network">{iso.rawNetwork ? `${iso.rawNetwork} (unknown)` : NETWORK_LABELS[iso.network]}</Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                {#each ISOLATION_NETWORKS as v (v)}
+                  <Select.Item value={v} label={NETWORK_LABELS[v]}>{NETWORK_LABELS[v]}</Select.Item>
+                {/each}
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        </Field.Field>
+      {/if}
+      {#if iso.readOnly.length || iso.writable.length}
+        <Field.Field>
+          {@render fieldHead('isolation_paths')}
+          <ul class="iso-paths" data-testid="np-isolation-paths">
+            {#each iso.readOnly as p (`r:${p}`)}<li><span class="iso-path">{p}</span> read-only</li>{/each}
+            {#each iso.writable as p (`w:${p}`)}<li><span class="iso-path">{p}</span> writable</li>{/each}
+          </ul>
+        </Field.Field>
+      {/if}
       <Field.Field>
         {@render fieldHead('max_retries', 'np-retries')}
         <Input
@@ -827,6 +915,79 @@
           oninput={(e) => setProfile(e.currentTarget.value)}
         />
       </Field.Field>
+    {:else if kind === 'publish'}
+      <Field.Field>
+        {@render fieldHead('publish_from')}
+        <Select.Root
+          type="single"
+          disabled={readonly}
+          value={f.from}
+          onValueChange={(v) => setStr('from', v ?? '')}
+        >
+          <Select.Trigger class="np-select" data-testid="np-publish-from">
+            {publishFromLabel}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              {#each publishFromOptions as v (v)}
+                <Select.Item value={v} label={v}>{v}</Select.Item>
+              {/each}
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('remote', 'np-publish-remote')}
+        <Input
+          id="np-publish-remote"
+          placeholder="origin"
+          {readonly}
+          value={f.remote}
+          oninput={(e) => setStr('remote', e.currentTarget.value.trim())}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('branch', 'np-publish-branch')}
+        <Input
+          id="np-publish-branch"
+          placeholder="(the branch the source committed on)"
+          {readonly}
+          value={f.branch}
+          oninput={(e) => setStr('branch', e.currentTarget.value.trim())}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('publish_timeout', 'np-publish-timeout')}
+        <Input
+          id="np-publish-timeout"
+          type="number"
+          min="1"
+          max={PUBLISH_MAX_TIMEOUT_SECONDS}
+          placeholder={String(PUBLISH_DEFAULT_TIMEOUT_SECONDS)}
+          {readonly}
+          value={f.timeout_seconds}
+          oninput={(e) => setPublishTimeout(e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field class="np-wide">
+        {@render fieldHead('publish_prompt', 'np-publish-prompt')}
+        <Textarea
+          id="np-publish-prompt"
+          rows={3}
+          class="prose-text draft-input"
+          {readonly}
+          value={f.prompt}
+          oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('publish_only')}
+        <p class="publish-only" data-testid="np-publish-only">
+          {publishOnly
+            ? 'true: every agent node runs with isolation full'
+            : 'false: agent nodes without isolation full can push by themselves'}
+        </p>
+      </Field.Field>
     {:else if kind === 'playbook'}
       <Field.Field>
         {@render fieldHead('playbook', 'np-pb-ref')}
@@ -853,3 +1014,40 @@
     {/if}
   </Field.FieldGroup>
 </div>
+
+<style>
+  /* Plain CSS over the app's variables. */
+  :global(textarea.draft-input) {
+    max-height: 300px;
+    overflow: auto;
+  }
+  /* The trigger is a child component, so its width is set globally. */
+  :global(.np-select) {
+    width: 100%;
+  }
+  .iso-paths {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+    overflow-wrap: anywhere;
+  }
+  .iso-path {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    color: var(--foreground);
+  }
+  /* A field that takes the whole row of the form grid. */
+  :global(.np-wide) {
+    grid-column: 1 / -1;
+  }
+  .publish-only {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted-foreground);
+  }
+  .draft-status {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted-foreground);
+  }
+</style>

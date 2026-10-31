@@ -78,50 +78,33 @@ pub(crate) fn execute(
     let fallback = on_unavailable.as_ref();
     let parts = render_state(playbook, run_dir, run_id, state, cfg, node_id, fields)?;
     let wire = node_questions(questions);
-    let enforce =
-        decisions.is_some_and(|r| r.mode_for(UseSite::JudgeNode) == DecisionMode::Enforce);
 
     // 1. The node's own question, to the decision models proper.
-    let reason: String = match decisions {
-        None => "not_configured".into(),
-        Some(runner) if runner.mode_for(UseSite::JudgeNode) == DecisionMode::Off => "off".into(),
-        Some(runner) => {
-            let judge = |answers: &BTreeMap<String, crate::event::DecisionAnswer>| {
-                let derived = output_from_answers(questions, thresholds, answers, "").ok();
-                Judgement {
-                    applied: enforce && derived.is_some(),
-                    would_change: match (&derived, enforce) {
-                        (_, true) => None,
-                        (Some(d), false) => {
-                            differs_from_fallback(d, fallback, questions, thresholds)
-                        }
-                        (None, false) => None,
-                    },
+    let judge = |answers: &BTreeMap<String, crate::event::DecisionAnswer>, enforce: bool| {
+        let derived = output_from_answers(questions, thresholds, answers, "").ok();
+        Judgement {
+            applied: enforce && derived.is_some(),
+            would_change: match (&derived, enforce) {
+                (_, true) => None,
+                (Some(d), false) => differs_from_fallback(d, fallback, questions, thresholds),
+                (None, false) => None,
+            },
+        }
+    };
+    let reason: String = match ask(decisions, journal, node_id, &parts, &wire, &judge) {
+        Asked::Answered { answers, by } => {
+            match output_from_answers(questions, thresholds, &answers, &by) {
+                Ok(out) => {
+                    return Ok(finished(
+                        NodeStatus::Succeeded,
+                        render_output(&out),
+                        Vec::new(),
+                    ));
                 }
-            };
-            let (outcome, source) =
-                runner.decide_routed(journal, call(node_id, &parts, &wire, &judge), Route::Native);
-            match outcome {
-                DecisionOutcome::Answered { answers, .. } if enforce => {
-                    let by = source
-                        .as_ref()
-                        .map_or_else(|| "unknown".to_string(), decided_by);
-                    match output_from_answers(questions, thresholds, &answers, &by) {
-                        Ok(out) => {
-                            return Ok(finished(
-                                NodeStatus::Succeeded,
-                                render_output(&out),
-                                Vec::new(),
-                            ));
-                        }
-                        Err(_) => "invalid".into(),
-                    }
-                }
-                DecisionOutcome::Answered { .. } => "mode".into(),
-                DecisionOutcome::Skipped { reason } => reason.into(),
-                DecisionOutcome::Failed { error_kind } => error_kind,
+                Err(_) => "invalid".into(),
             }
         }
+        Asked::Unavailable(reason) => reason,
     };
 
     // 2. The declared fallback.
@@ -206,8 +189,12 @@ pub(crate) fn execute(
         cancel,
         env_scrub,
         overlay: cfg.spawn_env(),
+        output_limits: cfg.output_limits(),
         journal,
-        attempt: std::cell::Cell::new(attempt_started_count(&read_all(run_dir)?, node_id) as u32),
+        attempt: std::cell::Cell::new(attempt_started_count(
+            &read_all(run_dir)?,
+            crate::exec_key::ExecKey::node(node_id),
+        ) as u32),
     };
     let Some((id, model)) = agent.binding()? else {
         return Ok(finished(
@@ -246,6 +233,55 @@ pub(crate) fn execute(
             ),
             Vec::new(),
         )),
+    }
+}
+
+/// What asking a judge's questions came to.
+pub(super) enum Asked {
+    /// Answered with the `judge_node` use at enforce; `by` names who
+    /// answered (`<provider>/<model>`).
+    Answered {
+        answers: BTreeMap<String, crate::event::DecisionAnswer>,
+        by: String,
+    },
+    /// No usable answer, and why: `not_configured`, `off`, `mode` (below
+    /// enforce), a skip reason or an error kind.
+    Unavailable(String),
+}
+
+/// Asks a judge's questions over `parts` through the run's decision runner
+/// (journal first, replay on resume): the one path a judge node and a list
+/// item's judge check share. `judge` tells the runner whether the answers
+/// would act, given whether the use is at enforce.
+pub(super) fn ask(
+    decisions: Option<&DecisionRunner>,
+    journal: &Journal,
+    node_id: &str,
+    parts: &StateParts,
+    wire: &BTreeMap<String, Question>,
+    judge: &dyn Fn(&BTreeMap<String, crate::event::DecisionAnswer>, bool) -> Judgement,
+) -> Asked {
+    let Some(runner) = decisions else {
+        return Asked::Unavailable("not_configured".into());
+    };
+    let mode = runner.mode_for(UseSite::JudgeNode);
+    if mode == DecisionMode::Off {
+        return Asked::Unavailable("off".into());
+    }
+    let enforce = mode == DecisionMode::Enforce;
+    let judged = |answers: &BTreeMap<String, crate::event::DecisionAnswer>| judge(answers, enforce);
+    let (outcome, source) =
+        runner.decide_routed(journal, call(node_id, parts, wire, &judged), Route::Native);
+    match outcome {
+        DecisionOutcome::Answered { answers, .. } if enforce => Asked::Answered {
+            answers,
+            by: source
+                .as_ref()
+                .map_or_else(|| "unknown".to_string(), decided_by),
+        },
+        DecisionOutcome::Answered { .. } => Asked::Unavailable("mode".into()),
+        DecisionOutcome::Skipped { reason } => Asked::Unavailable(reason.into()),
+        DecisionOutcome::Failed { error_kind } => Asked::Unavailable(error_kind),
     }
 }
 
@@ -306,19 +342,25 @@ fn render_state(
         let reads_output = apb_core::template::refs(template)
             .iter()
             .any(|r| r.starts_with("nodes.") || r == "run.context");
-        parts.fields.push(StateField {
-            name: intern(name),
-            class: if reads_output {
-                FieldClass::Output
-            } else {
-                FieldClass::Prompt
-            },
-            text,
-            head: FIELD_HEAD,
-            tail: FIELD_TAIL,
-        });
+        parts.fields.push(state_field(name, text, reads_output));
     }
     Ok(parts)
+}
+
+/// One rendered state field: `output` material when it carries what a node
+/// produced, `prompt` otherwise.
+pub(super) fn state_field(name: &str, text: String, reads_output: bool) -> StateField {
+    StateField {
+        name: intern(name),
+        class: if reads_output {
+            FieldClass::Output
+        } else {
+            FieldClass::Prompt
+        },
+        text,
+        head: FIELD_HEAD,
+        tail: FIELD_TAIL,
+    }
 }
 
 /// The profile backend of the LLM emulation: one agent attempt on the
@@ -333,6 +375,8 @@ struct ProfileEmulation<'a, 'j> {
     env_scrub: &'a [String],
     /// The eval env overlay (`RunConfig::spawn_env`).
     overlay: Vec<(String, String)>,
+    /// The run's output limits (`RunConfig::output_limits`).
+    output_limits: apb_core::output_limits::OutputLimits,
     journal: &'a Journal<'j>,
     attempt: std::cell::Cell<u32>,
 }
@@ -409,12 +453,19 @@ impl ProfileEmulation<'_, '_> {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };
-        let connector_policy = crate::adapter::ConnectorEnvPolicy {
-            scrub: self.env_scrub.to_vec(),
-            run_dir: Some(self.run_dir.to_path_buf()),
-            node_id: Some(self.node_id.to_string()),
-            overlay: self.overlay.clone(),
-        };
+        let spawn_env = crate::adapter::SpawnEnv::for_node(
+            self.env_scrub.to_vec(),
+            self.run_dir,
+            self.node_id,
+            self.overlay.clone(),
+        )
+        .with_attempt(attempt)
+        .with_process(crate::agent_env::plan_for_entry(
+            entry.process_env.as_ref(),
+            &ri.agent_id,
+            &ri.model,
+            self.env_scrub,
+        ));
         let stream_log = self
             .run_dir
             .join("agent-stream")
@@ -432,7 +483,7 @@ impl ProfileEmulation<'_, '_> {
             soul: Some(entry.soul.as_str()),
             // An emulated decision reads and answers; it is granted nothing.
             grant_autonomy: false,
-            connector_policy: &connector_policy,
+            spawn_env: &spawn_env,
             interactive: false,
             // The reply IS the JSON answer: no status-verdict protocol.
             report_contract: false,
@@ -442,10 +493,12 @@ impl ProfileEmulation<'_, '_> {
             status_file: None,
             hermetic_settings: None,
             transcript_dir: None,
+            output_limits: self.output_limits,
         };
         let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
         let started = |pid: Option<u32>, spawn_ms: Option<u64>| EventPayload::AttemptStarted {
+            item: None,
             node: self.node_id.to_string(),
             attempt,
             agent: ri.agent_id.clone(),
@@ -456,6 +509,8 @@ impl ProfileEmulation<'_, '_> {
             model: None,
             workdir: None,
             transcript: None,
+            token: spawn_env.attempt_token.clone(),
+            isolation: None,
         };
         let on_spawn = |pid: u32, spawn_ms: u64| {
             spawn_at.set(Some(std::time::Instant::now()));
@@ -463,6 +518,14 @@ impl ProfileEmulation<'_, '_> {
                 *spawn_err.borrow_mut() = Some(e);
             }
         };
+        if let Some(plan) = &spawn_env.process {
+            self.journal.append(crate::agent_env::applied_event(
+                plan,
+                self.node_id,
+                attempt,
+                &ri.agent_id,
+            ))?;
+        }
         let outcome =
             adapter.run_cancellable(&task, self.cancel, Some(&on_spawn), None, None, None);
         if let Some(e) = spawn_err.borrow_mut().take() {
@@ -472,14 +535,20 @@ impl ProfileEmulation<'_, '_> {
             self.journal.append(started(None, None))?;
         }
         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
-        let (status, output, session, usage) = match outcome {
+        let (status, output, session, usage, capture) = match outcome {
             Ok(report) => (
                 report.status,
                 Some(report.output),
                 report.session,
                 report.usage,
+                report.capture,
             ),
-            Err(crate::adapter::AgentFailure { class, usage, .. }) => (
+            Err(crate::adapter::AgentFailure {
+                class,
+                usage,
+                capture,
+                ..
+            }) => (
                 if class == ErrorClass::Timeout {
                     NodeStatus::TimedOut
                 } else {
@@ -487,10 +556,14 @@ impl ProfileEmulation<'_, '_> {
                 },
                 None,
                 None,
-                usage,
+                usage.map(|u| *u),
+                capture,
             ),
         };
         self.journal.append(EventPayload::AttemptFinished {
+            item: None,
+            output_truncated: capture.truncated,
+            transcript_incomplete: capture.transcript_incomplete,
             node: self.node_id.into(),
             attempt,
             status: status.as_str().into(),

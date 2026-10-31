@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre'
 import type { PlaybookDetail, WfLayout } from './types'
 import { profileToField, type ProfileScope } from './profileref'
+import { listBadge } from './listprogress'
 
 /**
  * What a graph card (PlaybookNode.svelte) shows. `toFlow` fills the playbook
@@ -18,6 +19,8 @@ export type FlowNodeData = {
   cached?: boolean
   failure?: FailureEffect | null
   exits?: NodeExits | null
+  /** `12/43` on a list node of a run, `list` in the editor (`listBadge`). */
+  list?: string | null
   // --- playbook fields, filled by `toFlow` / `withProfileModels` ---
   /** Executor profile name: the node's own, else the playbook default (agent tasks). */
   profile?: string
@@ -299,7 +302,9 @@ export function nodeExits(playbook: PlaybookModel, nodeId: string): NodeExits | 
 // the policy does handle its failure. Closing that needs the edge `join` field,
 // which the editor's client-side parse does not carry today.
 // A `judge` fails when no answer comes back and its on_unavailable is `fail`.
-const FAILABLE_KINDS = new Set(['agent_task', 'script', 'playbook', 'wait', 'judge'])
+// A `publish` fails on a refused plan, a push not sent or one whose result
+// is unknown.
+const FAILABLE_KINDS = new Set(['agent_task', 'script', 'playbook', 'wait', 'judge', 'publish'])
 
 /** What the playbook's failure policy does for one node, when it applies. */
 export type FailureEffect = { kind: 'stop' } | { kind: 'route'; node: string }
@@ -507,6 +512,7 @@ export function toFlow(
   statuses?: Record<string, string>,
   cachedIds?: Set<string>,
   forceAuto?: boolean,
+  listProgress?: Record<string, { processed: number; total: number }>,
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   // `forceAuto` is the topbar "Re-layout" button: it ignores any stored
   // arrangement (manual or otherwise) and recomputes from scratch, so the
@@ -550,6 +556,7 @@ export function toFlow(
         ...(ref?.scope ? { profileScope: ref.scope } : {}),
         ...(expectedText(n.expected_duration) ? { expected: expectedText(n.expected_duration) } : {}),
         ...(sub ? { subPlaybook: sub } : {}),
+        list: listBadge(n, listProgress?.[n.id]),
       },
     }
   })

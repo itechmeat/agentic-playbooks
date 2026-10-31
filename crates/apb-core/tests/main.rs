@@ -26,6 +26,12 @@ mod agent_output_test;
 #[path = "suite/common.rs"]
 mod common;
 
+#[path = "suite/agent_actions_test.rs"]
+mod agent_actions_test;
+#[path = "suite/agent_check_test.rs"]
+mod agent_check_test;
+#[path = "suite/agents_test.rs"]
+mod agents_test;
 #[path = "suite/bundle_test.rs"]
 mod bundle_test;
 #[path = "suite/config_test.rs"]
@@ -35,38 +41,68 @@ mod content_snapshot_test;
 #[cfg(unix)]
 #[path = "suite/detect_test.rs"]
 mod detect_test;
+#[path = "suite/discover_test.rs"]
+mod discover_test;
+#[path = "suite/discover_walk_test.rs"]
+mod discover_walk_test;
 #[path = "suite/doctor_test.rs"]
 mod doctor_test;
 #[path = "suite/fsutil_test.rs"]
 mod fsutil_test;
+#[path = "suite/history_fixture.rs"]
+mod history_fixture;
 #[path = "suite/inbox_store_test.rs"]
 mod inbox_store_test;
 #[path = "suite/instruction_draft_test.rs"]
 mod instruction_draft_test;
 #[path = "suite/interactive_howto_example_test.rs"]
 mod interactive_howto_example_test;
+#[path = "suite/isolation_contract_test.rs"]
+mod isolation_contract_test;
+#[path = "suite/known_problems_test.rs"]
+mod known_problems_test;
+#[path = "suite/list_schema_test.rs"]
+mod list_schema_test;
 #[path = "suite/migration_test.rs"]
 mod migration_test;
 #[path = "suite/models_table_test.rs"]
 mod models_table_test;
+#[path = "suite/notify_config_test.rs"]
+mod notify_config_test;
 #[path = "suite/overrides_test.rs"]
 mod overrides_test;
+#[path = "suite/process_env_test.rs"]
+mod process_env_test;
 #[path = "suite/profile_resolve_test.rs"]
 mod profile_resolve_test;
 #[path = "suite/promotion_test.rs"]
 mod promotion_test;
 #[path = "suite/provenance_test.rs"]
 mod provenance_test;
+#[path = "suite/quality_test.rs"]
+mod quality_test;
 #[path = "suite/registry_test.rs"]
 mod registry_test;
+#[path = "suite/run_memory_test.rs"]
+mod run_memory_test;
 #[path = "suite/schema_migrate_config_test.rs"]
 mod schema_migrate_config_test;
 #[path = "suite/schema_migrate_test.rs"]
 mod schema_migrate_test;
 #[path = "suite/schema_test.rs"]
 mod schema_test;
+#[path = "suite/scope_move_test.rs"]
+mod scope_move_test;
+#[path = "suite/send_policy_validate_test.rs"]
+mod send_policy_validate_test;
 #[path = "suite/server_auth_test.rs"]
 mod server_auth_test;
+#[path = "suite/validate_audience_test.rs"]
+mod validate_audience_test;
+#[path = "suite/validate_baseline_test.rs"]
+mod validate_baseline_test;
+#[path = "suite/validate_budget_test.rs"]
+mod validate_budget_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
 #[path = "suite/validate_fork_test.rs"]
@@ -75,12 +111,22 @@ mod validate_fork_test;
 mod validate_goal_test;
 #[path = "suite/validate_inbox_test.rs"]
 mod validate_inbox_test;
+#[path = "suite/validate_isolation_test.rs"]
+mod validate_isolation_test;
+#[path = "suite/validate_known_problems_test.rs"]
+mod validate_known_problems_test;
 #[path = "suite/validate_node_io_test.rs"]
 mod validate_node_io_test;
+#[path = "suite/validate_params_test.rs"]
+mod validate_params_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_protect_test.rs"]
 mod validate_protect_test;
+#[path = "suite/validate_publish_test.rs"]
+mod validate_publish_test;
+#[path = "suite/validate_quality_test.rs"]
+mod validate_quality_test;
 #[path = "suite/validate_references_test.rs"]
 mod validate_references_test;
 #[path = "suite/validate_semantics_test.rs"]

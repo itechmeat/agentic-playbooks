@@ -76,6 +76,11 @@ functions:
     method: GET
     url: "{{account.base_url}}/pick"
     response_pick: [number, user.login, labels.name]
+  - name: pick_write
+    description: a write with a projection
+    method: POST
+    url: "{{account.base_url}}/pick"
+    response_pick: [items]
   - name: submit_form
     description: Send a form-encoded body
     method: POST
@@ -156,6 +161,7 @@ fn seed_run_yaml(
             accounts: granted_accounts.iter().map(|s| s.to_string()).collect(),
             functions: functions.iter().map(|s| s.to_string()).collect(),
             max_calls,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();
@@ -246,6 +252,7 @@ fn seed_cmd_run(run_dir: &Path, account: ManifestAccount) {
             accounts: vec!["acct1".to_string()],
             functions: vec!["echo".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();
@@ -328,7 +335,8 @@ fn ok_json_roundtrip_injects_auth_header() {
         "auth header missing/wrong in request:\n{req}"
     );
 
-    // An `ok` ConnectorCall event was appended, with the pre-auth URL.
+    // An `ok` ConnectorCall event was appended, with the pre-auth URL and the
+    // completeness of the body read.
     let events = read_all(run.path()).unwrap();
     let call_events: Vec<_> = events
         .iter()
@@ -338,8 +346,15 @@ fn ok_json_roundtrip_injects_auth_header() {
                 url,
                 http_status,
                 account,
+                response_complete,
                 ..
-            } => Some((outcome.clone(), url.clone(), *http_status, account.clone())),
+            } => Some((
+                outcome.clone(),
+                url.clone(),
+                *http_status,
+                account.clone(),
+                *response_complete,
+            )),
             _ => None,
         })
         .collect();
@@ -352,6 +367,8 @@ fn ok_json_roundtrip_injects_auth_header() {
     );
     assert_eq!(call_events[0].2, Some(200));
     assert_eq!(call_events[0].3, "acct1");
+    // A whole body read reports completeness to the journal.
+    assert_eq!(call_events[0].4, Some(true));
 }
 
 #[test]
@@ -459,13 +476,67 @@ fn redirect_maps_to_service_with_message() {
 }
 
 #[test]
-fn oversized_body_is_truncated() {
+fn oversized_body_on_a_non_read_only_call_stays_a_success_marked_incomplete() {
     let _lock = common::env_lock();
     let run = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     seed_secret(root.path());
 
     // A body just over the 1 MiB cap, plain text so it round-trips as a string.
+    // `echo` is not read-only: the call happened and may have changed the
+    // world, so it stays a success, returns the partial body, and carries the
+    // incompleteness on the result (never retried by apb).
+    let big = "a".repeat(1024 * 1024 + 100);
+    let server = common::spawn_http(200, "OK", &[("Content-Type", "text/plain")], big);
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["echo"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "echo",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "a write call with a cut body stays a success");
+    assert_eq!(value["truncated"], serde_json::json!(true));
+    assert_eq!(value["body"].as_str().unwrap().len(), 1024 * 1024);
+    assert_eq!(value["effect"], serde_json::json!("committed"));
+    assert_eq!(value["response_complete"], serde_json::json!(false));
+    assert_eq!(value["reason"], serde_json::json!("body_cap"));
+
+    // The journal keeps the ok outcome and the incompleteness marker.
+    let events = read_all(run.path()).unwrap();
+    let event = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ConnectorCall {
+                outcome,
+                response_complete,
+                ..
+            } => Some((outcome.clone(), *response_complete)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(event.0, "ok");
+    assert_eq!(event.1, Some(false));
+}
+
+#[test]
+fn read_only_oversized_body_fails_as_incomplete_response() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // The same cut, on a read-only function: the honest answer is the
+    // dedicated error and no partial body passed as data.
     let big = "a".repeat(1024 * 1024 + 100);
     let server = common::spawn_http(200, "OK", &[("Content-Type", "text/plain")], big);
     seed_run(
@@ -484,9 +555,207 @@ fn oversized_body_is_truncated() {
         serde_json::json!({}),
         false,
     );
-    assert!(ok, "expected ok: {value}");
-    assert_eq!(value["truncated"], serde_json::json!(true));
-    assert_eq!(value["body"].as_str().unwrap().len(), 1024 * 1024);
+    assert!(!ok, "a read-only call must not pass a cut body as data");
+    assert_eq!(
+        value["error"]["code"],
+        serde_json::json!("incomplete_response")
+    );
+    assert_eq!(value["error"]["http_status"], serde_json::json!(200));
+    assert_eq!(value["error"]["reason"], serde_json::json!("body_cap"));
+    assert_eq!(
+        value["error"]["body_cap_bytes"],
+        serde_json::json!(1024 * 1024)
+    );
+    assert!(value.get("body").is_none(), "no partial body on the error");
+    let msg = value["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("narrow"),
+        "the message must tell the caller to narrow the request: {msg}"
+    );
+
+    // The journal records the dedicated outcome and the incompleteness.
+    let events = read_all(run.path()).unwrap();
+    let event = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ConnectorCall {
+                outcome,
+                http_status,
+                response_complete,
+                ..
+            } => Some((outcome.clone(), *http_status, *response_complete)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(event.0, "incomplete_response");
+    assert_eq!(event.1, Some(200));
+    assert_eq!(event.2, Some(false));
+}
+
+/// A one-shot HTTP server that promises `promised` body bytes but writes only
+/// `written`, then closes the connection: the client's body read fails
+/// partway through. Returns the base URL to point an account at and the
+/// server thread to join after the call.
+fn spawn_short_body_server(
+    promised: usize,
+    written: usize,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        // Drain the request (a GET carries no body) so the close is clean.
+        let mut buf = [0u8; 8192];
+        let _ = stream.read(&mut buf);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {promised}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(&vec![b'a'; written]);
+        let _ = stream.flush();
+        // Dropping the stream closes it with the promised bytes still missing.
+    });
+    (base_url, handle)
+}
+
+#[test]
+fn partial_body_read_error_fails_read_only_call_as_incomplete() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // The server promises far more than it writes and closes: the read fails
+    // partway through, well below the cap, so the reason is the read itself.
+    let (base_url, server) = spawn_short_body_server(64 * 1024, 1024);
+    seed_run(
+        run.path(),
+        vec![account(&base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    server.join().unwrap();
+    assert!(!ok, "a failed body read must not pass as success");
+    assert_eq!(
+        value["error"]["code"],
+        serde_json::json!("incomplete_response")
+    );
+    assert_eq!(value["error"]["reason"], serde_json::json!("read_error"));
+    assert_eq!(value["error"]["http_status"], serde_json::json!(200));
+    assert!(
+        value["error"]["io_error_kind"].is_string(),
+        "the io error KIND is surfaced"
+    );
+    assert!(
+        value["error"].get("body_cap_bytes").is_none(),
+        "the cap was not the reason"
+    );
+    assert!(value.get("body").is_none(), "no partial body on the error");
+    let msg = value["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("narrow"),
+        "the message must tell the caller to narrow the request: {msg}"
+    );
+}
+
+#[test]
+fn partial_body_read_error_on_a_non_read_only_call_stays_a_success_marked_incomplete() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // The same short read on a function that is not read-only: success (the
+    // effect happened), the partial body as read, incompleteness on the result.
+    let (base_url, server) = spawn_short_body_server(64 * 1024, 1024);
+    seed_run(
+        run.path(),
+        vec![account(&base_url)],
+        &["acct1"],
+        &["echo"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "echo",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    server.join().unwrap();
+    assert!(ok, "a write call with a failed read stays a success");
+    assert_eq!(value["effect"], serde_json::json!("committed"));
+    assert_eq!(value["response_complete"], serde_json::json!(false));
+    assert_eq!(value["reason"], serde_json::json!("read_error"));
+    // Not a cap cut, so `truncated` keeps its cap meaning.
+    assert_eq!(value["truncated"], serde_json::json!(false));
+    // The body that was read comes back as is.
+    assert_eq!(value["body"].as_str().unwrap().len(), 1024);
+}
+
+#[test]
+fn response_pick_keeps_completeness_keys_at_the_top_level() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // A cut JSON body that still parses: a complete JSON value followed by
+    // padding that pushes it over the cap, so the truncated read parses and
+    // the `response_pick` projection has something to project. The
+    // completeness keys must survive at the TOP level, outside `body`.
+    let raw = format!(
+        r#"{{"items":[{{"name":"a"}}]}}{}"#,
+        " ".repeat(1024 * 1024 + 100)
+    );
+    let server = common::spawn_http(200, "OK", &[], raw);
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["pick_write"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "pick_write",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "a write call with a cut body stays a success");
+    assert_eq!(value["picked"], serde_json::json!(true));
+    assert_eq!(
+        value["body"],
+        serde_json::json!({ "items": [{ "name": "a" }] })
+    );
+    assert_eq!(value["effect"], serde_json::json!("committed"));
+    assert_eq!(value["response_complete"], serde_json::json!(false));
+    assert_eq!(value["reason"], serde_json::json!("body_cap"));
+    // The projection must not have swallowed the completeness keys.
+    assert!(
+        value["body"].get("response_complete").is_none()
+            && value["body"].get("effect").is_none()
+            && value["body"].get("reason").is_none(),
+        "completeness keys belong at the top level, not inside body"
+    );
 }
 
 #[test]
@@ -515,13 +784,19 @@ fn mock_function_needs_no_server() {
     assert_eq!(value["status"], serde_json::json!(200));
     assert_eq!(value["body"], serde_json::json!({"ok": true}));
 
-    // A mock records an event with an empty pre-auth URL.
+    // A mock records an event with an empty pre-auth URL, and completeness
+    // does not apply (no body was ever read).
     let events = read_all(run.path()).unwrap();
-    let url = events.iter().find_map(|e| match &e.payload {
-        EventPayload::ConnectorCall { url, outcome, .. } if outcome == "ok" => Some(url.clone()),
+    let found = events.iter().find_map(|e| match &e.payload {
+        EventPayload::ConnectorCall {
+            url,
+            outcome,
+            response_complete,
+            ..
+        } if outcome == "ok" => Some((url.clone(), *response_complete)),
         _ => None,
     });
-    assert_eq!(url, Some(String::new()));
+    assert_eq!(found, Some((String::new(), None)));
 }
 
 #[test]
@@ -866,6 +1141,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: vec!["list_items".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run.path(), &m).unwrap();
@@ -940,12 +1216,14 @@ functions:
                 accounts: vec!["acct1".to_string()],
                 functions: vec!["ping".to_string()],
                 max_calls: Some(1),
+                on_unknown: None,
             },
             ManifestConnectorGrant {
                 connector: "other".to_string(),
                 accounts: vec!["a".to_string()],
                 functions: vec!["ping".to_string()],
                 max_calls: Some(1),
+                on_unknown: None,
             },
         ],
     );
@@ -1004,6 +1282,7 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
     // first attempt and every later one.
     let mut log = apb_engine::event::EventLog::open(run_dir).unwrap();
     log.append(EventPayload::AttemptStarted {
+        item: None,
         node: NODE.to_string(),
         attempt,
         agent: "test-agent".to_string(),
@@ -1014,6 +1293,8 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
         model: None,
         workdir: None,
         transcript: None,
+        token: None,
+        isolation: None,
     })
     .unwrap();
 }
@@ -1228,6 +1509,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: vec!["get_me".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run.path(), &m).unwrap();
@@ -1324,6 +1606,7 @@ functions:
             accounts: vec!["acct1".to_string()],
             functions: vec!["get_me".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run.path(), &m).unwrap();
@@ -1774,6 +2057,7 @@ fn seed_smtp_run(run_dir: &Path) {
             accounts: vec!["acct1".to_string()],
             functions: vec!["send_email".to_string()],
             max_calls: None,
+            on_unknown: None,
         }],
     );
     manifest::write(run_dir, &m).unwrap();

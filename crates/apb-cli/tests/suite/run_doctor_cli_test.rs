@@ -227,6 +227,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
             ephemeral: false,
             hermetic: false,
             zcode_mode: None,
+            process_env: None,
             tiers: Vec::new(),
             routed_tier: None,
             cascade: 0,
@@ -242,6 +243,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         consent: None,
         candidate_trial: false,
         candidate_skipped: None,
+        task_type: None,
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 
@@ -274,4 +276,35 @@ fn bare_doctor_still_checks_the_environment() {
         .current_dir(dir.path())
         .assert()
         .stdout(predicate::str::contains("[ok]"));
+}
+
+/// A node attempt that failed under `process_env: allowlist`: the doctor
+/// names what the agent did not get, as a warning that does not fail.
+#[test]
+fn doctor_run_names_what_an_allowlist_withheld_from_a_failed_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    let rd = run_dir(dir.path(), "env-1");
+    fs::write(
+        rd.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":1000,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":2000,\"type\":\"agent_env_applied\",\"node\":\"build\",\"attempt\":1,\"agent\":\"codex\",\"kept\":20,\"withheld\":[\"AWS_PROFILE\"],\"absent\":[\"NPM_TOKEN\"]}\n\
+         {\"seq\":2,\"ts\":3000,\"type\":\"attempt_finished\",\"node\":\"build\",\"attempt\":1,\"status\":\"failed\"}\n\
+         {\"seq\":3,\"ts\":4000,\"type\":\"run_finished\",\"outcome\":\"failed\"}\n",
+    )
+    .unwrap();
+    let out = apb()
+        .arg("doctor")
+        .arg("--run")
+        .arg("env-1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains(
+            "[warn] process env: node `build` attempt 1 (codex) failed under process_env allowlist; withheld: AWS_PROFILE; not set in the operator environment: NPM_TOKEN"
+        ),
+        "{stdout}"
+    );
 }

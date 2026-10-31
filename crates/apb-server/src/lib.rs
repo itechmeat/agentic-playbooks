@@ -53,6 +53,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/playbooks/{id}/diff", get(routes::playbooks::get_diff))
         .route(
+            "/api/playbooks/{id}/estimate",
+            get(routes::estimate::get_estimate_handler),
+        )
+        .route(
             "/api/playbooks/{id}/versions",
             get(routes::playbooks::list_versions_handler),
         )
@@ -65,9 +69,35 @@ pub fn build_router(state: AppState) -> Router {
             put(routes::playbooks::set_frozen_handler),
         )
         .route(
-            "/api/playbooks/{id}/input-draft",
-            get(routes::playbooks::get_input_draft_handler)
-                .put(routes::playbooks::put_input_draft_handler),
+            "/api/playbooks/{id}/memory",
+            get(routes::memory::get_memory_handler)
+                .put(routes::memory::put_memory_handler)
+                .delete(routes::memory::delete_memory_handler),
+        )
+        .route("/api/playbooks/{id}/fit", get(routes::fit::get_fit_handler))
+        .route(
+            "/api/playbooks/{id}/candidate",
+            get(routes::quality::get_candidate_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/known-problems",
+            get(routes::problems::get_problems_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/known-problems/{problem}",
+            get(routes::problems::get_problem_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/known-problems/{problem}/{action}",
+            post(routes::problems::post_problem_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/candidate/promote",
+            post(routes::quality::post_promote_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/candidate/keep-current",
+            post(routes::quality::post_keep_current_handler),
         )
         .route(
             "/api/playbooks/{id}/run",
@@ -146,12 +176,31 @@ pub fn build_router(state: AppState) -> Router {
             "/api/suggestions/{pattern}",
             axum::routing::delete(routes::suggestions::delete_suggestion_handler),
         )
+        // History discovery, behind its own local-only route layer.
+        .merge(routes::discover::router())
         .route("/api/runs", get(routes::runs::list_runs_handler))
         .route("/api/runs/{id}", get(routes::runs::get_run_handler))
         .route(
             "/api/runs/{id}/report",
             get(routes::runs::get_run_report_handler),
         )
+        .route(
+            "/api/runs/{id}/report.html",
+            get(routes::runs::get_run_report_html_handler),
+        )
+        .route(
+            "/api/runs/{id}/grades",
+            get(routes::quality::get_grades_handler).post(routes::quality::post_grades_handler),
+        )
+        .route(
+            "/api/runs/{id}/grades/reopen",
+            post(routes::quality::post_reopen_handler),
+        )
+        .route(
+            "/api/runs/{id}/notify",
+            post(routes::notify::post_run_notify_handler),
+        )
+        .route("/api/notify", get(routes::notify::get_notify_handler))
         .route(
             "/api/runs/{id}/review",
             post(routes::runs::post_review_handler),

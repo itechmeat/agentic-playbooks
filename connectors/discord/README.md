@@ -30,6 +30,8 @@ It cannot send direct messages, cannot manage channels, roles, or members, canno
 
 Two things worth knowing before you grant it. A message posted to a channel is seen by everyone in it and cannot be recalled. And Discord's rate limits are aggressive and applied per route, so a playbook that polls a channel in a tight loop will start getting throttled: give the grant a `max_calls` cap.
 
+Posting and replying are sent at most once even when a step is retried. Every message carries a nonce Discord is told to enforce, so when an earlier attempt's answer was lost, a retry within two minutes sends the same nonce and Discord returns the one message instead of posting a second. After that window a send whose answer was lost stays unknown until a person decides. Messages are also posted with mentions turned off, so an `@everyone` or a role mention in the text never pings anyone.
+
 ## Doing it by hand
 
 If you would rather not involve an agent, `PUBLIC.md` in this folder has the account fields and a config example, and `docs/CONNECTORS.md` in the apb repository covers accounts, secrets, and trust in general. `INSTALL.md` is written for an agent but the steps read fine as a checklist.

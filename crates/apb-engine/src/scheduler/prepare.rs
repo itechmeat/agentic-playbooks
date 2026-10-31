@@ -50,6 +50,73 @@ fn stringify_param_default(v: &yaml_serde::Value) -> String {
     }
 }
 
+/// What this project remembers for playbook `id` of origin `origin_label`,
+/// checked against `params`, with the definition's legacy draft as the
+/// instruction fallback. The draft is read only when the start passes no
+/// instruction. A sub-playbook child (`opts.parent_run`) takes nothing from
+/// memory or the draft: the parent's consent and pins cover the declared
+/// defaults and the instruction the parent passes, not what someone last
+/// typed for the child.
+fn recall_input(
+    root: &Path,
+    origin_label: &str,
+    id: &str,
+    reg: &Registry,
+    params: &[apb_core::schema::Param],
+    opts: &RunOptions,
+) -> Result<apb_core::run_memory::Recall, EngineError> {
+    use apb_core::run_memory::{MemoryError, MemoryKey, recall};
+    let to_engine = |e: MemoryError| match e {
+        MemoryError::Io(e) => EngineError::Io(e),
+        other => EngineError::Invalid(other.to_string()),
+    };
+    let key = MemoryKey::for_label(origin_label, id).map_err(to_engine)?;
+    let child = opts.parent_run.is_some();
+    let legacy = match (&opts.instruction, child) {
+        (None, false) => reg.read_instruction_draft(id)?,
+        _ => None,
+    };
+    let mut recalled = recall(root, &key, params, legacy).map_err(to_engine)?;
+    if child {
+        recalled.values.clear();
+        recalled.instruction = None;
+        recalled.instruction_source = apb_core::run_memory::InstructionSource::None;
+    }
+    Ok(recalled)
+}
+
+/// The run's task type: `quality.task_type` over the start's params (V104
+/// keeps it to `params.*`), [`DEFAULT_TASK_TYPE`] when absent or empty.
+///
+/// [`DEFAULT_TASK_TYPE`]: apb_core::quality::criteria::DEFAULT_TASK_TYPE
+fn task_type_at_start(
+    quality: &apb_core::quality::QualityBlock,
+    root: &Path,
+    params: &BTreeMap<String, String>,
+) -> String {
+    let rendered = quality.task_type.as_deref().map(|t| {
+        render(
+            t,
+            params,
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "",
+            &crate::context::OutputClip {
+                run_dir: root,
+                max_bytes: 0,
+                retro: None,
+            },
+        )
+    });
+    rendered
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| apb_core::quality::criteria::DEFAULT_TASK_TYPE.to_string())
+}
+
 /// Best-effort: a prepare failure that happens after the run directory (and
 /// its event log) already exist would otherwise leave that directory with no
 /// explanation - an empty or `RunStarted`-only journal that never reaches
@@ -222,16 +289,24 @@ pub(crate) fn snapshot_loaded_profile(
     let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
     // Executor tiers (issue #165 Part 12), resolved like the chain so an
     // unknown agent fails the run start the same way. An ephemeral executor
-    // replaces the chain, so its entry is never routed.
+    // replaces the chain, so its entry is never routed and only the
+    // profile's other problems (its `process_env`, which applies to an
+    // ephemeral executor too) refuse the start.
     let mut tiers = Vec::new();
+    let problems: Vec<String> = loaded
+        .doc
+        .problems()
+        .iter()
+        .filter(|p| eph.is_none() || p.code != apb_core::profile::PROFILE_TIERS_INVALID)
+        .map(ToString::to_string)
+        .collect();
+    if !problems.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "profile `{key}`: {}",
+            problems.join("; ")
+        )));
+    }
     if eph.is_none() {
-        let problems = loaded.doc.tiers.problems();
-        if !problems.is_empty() {
-            return Err(EngineError::Invalid(format!(
-                "profile `{key}`: {}",
-                problems.join("; ")
-            )));
-        }
         for (name, t) in loaded.doc.tiers.iter() {
             let invocation = match t.executor() {
                 Some((agent, model)) => {
@@ -271,6 +346,11 @@ pub(crate) fn snapshot_loaded_profile(
         // run's value, not the live profile (issue #136 item 4).
         hermetic: loaded.doc.environment() == apb_core::profile::AgentEnvironment::Minimal,
         zcode_mode: loaded.doc.zcode_mode,
+        // Snapshotted so a resume runs under the policy the run started
+        // with, whatever the live profile says by then.
+        process_env: apb_core::process_env::ProcessEnvPolicy::stored(
+            loaded.doc.process_env.clone(),
+        ),
         tiers,
         routed_tier: None,
         cascade: 0,
@@ -330,11 +410,7 @@ pub(crate) fn build_run_manifest(
     // `expected_connectors` means the run did not go through the gate, which
     // is refused (mirrors the profile-bundle invariant - the CLI/MCP callers
     // must always pass the gate result).
-    let binds_connectors = playbook
-        .nodes
-        .iter()
-        .any(|n| !n.kind.connector_bindings().is_empty());
-    if binds_connectors {
+    if playbook.binds_connectors() {
         if expected_connectors.is_empty() {
             return Err(EngineError::Invalid(
                 "connector bindings present but no connector permit".into(),
@@ -495,11 +571,29 @@ pub(crate) fn prepare_run_target(
             "playbook `{id}` changed since it was checked (digest mismatch)"
         )));
     }
+    // The import approval rule holds for every start, gated or not (a
+    // trial, a sub-playbook child): the gate's own check, so the rule has
+    // one copy.
+    let playbook_dir = t.definition_parent.join("playbooks").join(id);
+    crate::gate::check_import_approval(&playbook_dir, id, &loaded.version, &digest).map_err(
+        |refusal| {
+            EngineError::Invalid(format!(
+                "playbook `{id}` {}: {} (digest {digest})",
+                loaded.version,
+                refusal["detail"].as_str().unwrap_or_default()
+            ))
+        },
+    )?;
     let mut playbook = loaded.playbook.clone();
 
     // The global config is needed to resolve profile invocations (agents, program).
     // A broken config is a start-up error, not a silent default.
     let global = GlobalConfig::load().map_err(EngineError::Invalid)?;
+    // Output limits: resolved once and kept in the run config, so every
+    // attempt of the run (and a re-drive) applies the same ones.
+    let output_limits = global
+        .output_limits_for(root)
+        .map_err(EngineError::Invalid)?;
     // Host execution mode (0.23.0): resolved once, before anything is
     // written, so a refusal leaves no run behind. The manifest keeps it.
     let execution =
@@ -509,6 +603,16 @@ pub(crate) fn prepare_run_target(
     {
         return Err(EngineError::Invalid(
             "host execution mode spawns no agent CLI, so it cannot start a background supervisor agent: supervise the run from the host session (supervise: self) instead".into(),
+        ));
+    }
+
+    // List nodes run on the CLI only in this release (their items are
+    // agent attempts the engine spawns itself).
+    if execution.mode == apb_core::execution::ExecutionMode::Host
+        && playbook.nodes.iter().any(|n| n.list().is_some())
+    {
+        return Err(EngineError::Invalid(
+            "list nodes need execution: cli in this release".into(),
         ));
     }
 
@@ -542,6 +646,37 @@ pub(crate) fn prepare_run_target(
             errors.join("; ")
         )));
     }
+    // A child of a run held to `publish_only` is held to it too (decision
+    // record 0010): its playbook's own flag cannot lift it.
+    if opts.publish_only {
+        let open: Vec<String> = apb_core::validate::publish_only_violations(&playbook)
+            .iter()
+            .map(|o| format!("`{}` ({})", o.node, o.fix))
+            .collect();
+        if !open.is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "playbook `{id}` runs under a parent held to `publish_only`, and node(s) {} run an agent without `isolation: full`",
+                open.join(", ")
+            )));
+        }
+    }
+    // Isolation, with the run's real execution mode: the gate's check again,
+    // so no start path (a trial, a child, a resume of a fresh start) runs a
+    // `full` node this machine cannot isolate. Nothing is written yet.
+    let contracts = crate::gate::isolation::node_contracts(
+        root,
+        &playbook,
+        origin,
+        execution.mode == apb_core::execution::ExecutionMode::Host,
+    );
+    let refused = crate::gate::isolation::refused(&contracts);
+    if !refused.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "{}: {}",
+            apb_core::isolation::contract::UNAVAILABLE,
+            crate::gate::isolation::text(&refused)
+        )));
+    }
 
     // --- 0.24.0 irreversible consent ---
     // Checked on the effective playbook before anything is written, so a
@@ -559,6 +694,24 @@ pub(crate) fn prepare_run_target(
         opts.consent.as_ref(),
     )?;
     // --- end 0.24.0 irreversible consent ---
+
+    // The notification subscription: a child inherits its parent's, a
+    // top-level run checks its own request against the configs and pins the
+    // target. A person's request that cannot be honoured refuses the start
+    // before anything is written; the run journals the subscription below.
+    let notify_set = match &opts.parent_run {
+        Some(parent) => crate::notify::start::inherited(&root.join(".apb/runs").join(parent)),
+        None => {
+            let check = crate::notify::check(root, opts.notify.as_ref());
+            if let Some(why) = check.refusal {
+                return Err(EngineError::Invalid(format!(
+                    "{}: {why}",
+                    crate::notify::REFUSED_START
+                )));
+            }
+            check.event()
+        }
+    };
 
     let start_node = playbook
         .nodes
@@ -590,7 +743,16 @@ pub(crate) fn prepare_run_target(
     // alike - so a playbook that relies on a param default renders the default
     // instead of the empty string the template renderer substitutes for a
     // missing param.
-    let mut params = opts.params.clone();
+    //
+    // Before the defaults, remembered run input (`run_memory`): a value the
+    // caller did not pass comes from this project's memory of the playbook
+    // when it still fits the params (not for a child); the instruction
+    // likewise, then the definition's legacy draft. A real IO error fails the start rather than
+    // starting with different input; nothing has been written yet.
+    let recall = recall_input(root, t.origin_label, id, &reg, &playbook.params, &opts)?;
+    let applied = apb_core::run_memory::apply(&opts.params, opts.instruction.clone(), &recall);
+    let remembered = applied.remembered;
+    let mut params = applied.params;
     for p in &playbook.params {
         if let Some(default) = &p.default
             && !params.contains_key(&p.name)
@@ -678,19 +840,31 @@ pub(crate) fn prepare_run_target(
     let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
         .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
     let copied = prep_try_unstarted(&mut log, &unstarted, copied)?;
-    // Pinned only for a playbook with goal `script` criteria, the one
-    // reader of the pin, so every other run's `run_provenance` stays as it
-    // was in 0.22.
+    // Pinned only for a playbook with goal `script` criteria, baseline
+    // `script` checks or list item `script` checks, the readers of the pin, so every other run's
+    // `run_provenance` stays as it was in 0.22.
     let has_goal_scripts = playbook.goal.as_ref().is_some_and(|g| {
         g.criteria
             .iter()
             .any(|c| matches!(c.check, apb_core::schema::GoalCheck::Script { .. }))
     });
-    let scripts_digest = if has_goal_scripts {
+    let has_baseline_scripts = playbook.baseline_checks().iter().any(|c| {
+        matches!(
+            c.source(),
+            Some(apb_core::baseline::BaselineSource::Script(_))
+        )
+    });
+    // A list item check script reads the pin the same way.
+    let has_item_check_scripts = playbook.nodes.iter().any(|n| {
+        n.list()
+            .and_then(|l| l.check.as_ref())
+            .is_some_and(|c| c.script.is_some())
+    });
+    let scripts_digest = if has_goal_scripts || has_baseline_scripts || has_item_check_scripts {
         Some(prep_try_unstarted(
             &mut log,
             &unstarted,
-            super::goal::scripts_digest(&run_dir),
+            crate::run_scripts::digest(&run_dir),
         )?)
     } else {
         None
@@ -711,21 +885,10 @@ pub(crate) fn prepare_run_target(
         crate::hooks::generate_hooks(&run_dir, &playbook),
     )?;
 
-    // Run input precedence (spec A): an explicitly passed instruction wins;
-    // otherwise the playbook's autosaved draft, read at start time; otherwise
-    // None. Resolved once here so every surface (MCP, CLI, server, and a Part C
-    // sub-playbook child) shares the rule. A blank draft is treated as absent.
-    //
-    // Honest errors (review I7/R1-I9): a real IO error reading the draft
-    // (unreadable file, permission fault) must fail the run start, not silently
-    // start with different input. `read_instruction_draft` already returns
-    // Ok(None) for an absent draft, so only a genuine fault propagates through
-    // `?`; the old `.ok().flatten()` swallowed both cases alike.
-    let instruction = match opts.instruction.clone() {
-        Some(i) => Some(i),
-        None => prep_try_unstarted(&mut log, &unstarted, reg.read_instruction_draft(id))?
-            .filter(|s| !s.trim().is_empty()),
-    };
+    // Run input precedence (spec A): resolved with the params above, so
+    // every surface (MCP, CLI, server, and a sub-playbook child) shares the
+    // rule.
+    let instruction = applied.instruction;
 
     let cfg = RunConfig {
         params,
@@ -738,6 +901,8 @@ pub(crate) fn prepare_run_target(
         continued_from: opts.continued_from.clone(),
         superseded_by: None,
         depth: opts.depth,
+        publish_only: playbook.publish_only || opts.publish_only,
+        parent_acted: opts.parent_acted,
         expected_children: opts.expected_children.clone(),
         expected_connectors: opts.expected_connectors.clone(),
         expected_connector_accounts: opts.expected_connector_accounts.clone(),
@@ -755,6 +920,7 @@ pub(crate) fn prepare_run_target(
             .workdir_queue_wait
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
         eval: opts.eval.clone(),
+        output_limits: Some(output_limits),
     };
     prep_try_unstarted(&mut log, &unstarted, write_run_config(&run_dir, &cfg))?;
 
@@ -814,6 +980,10 @@ pub(crate) fn prepare_run_target(
             &t.definition_parent.join("playbooks").join(id),
             &loaded.version,
         );
+    manifest.task_type = playbook
+        .quality
+        .as_ref()
+        .map(|q| task_type_at_start(q, root, &cfg.params));
     if !manifest.is_empty() {
         prep_try_unstarted(
             &mut log,
@@ -843,7 +1013,38 @@ pub(crate) fn prepare_run_target(
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
         scripts_digest,
         profiles: profiles_prov,
+        remembered,
     })?;
+    // The known problems this run shows its agents, rechecked where their
+    // source changed, journaled once (only for a playbook whose
+    // `known_problems:` block shows anything).
+    if let Some(shown) = crate::known_problems::at_start(
+        root,
+        apb_core::scope::Scope::parse(t.origin_label).unwrap_or(apb_core::scope::Scope::Project),
+        &playbook,
+        &manifest,
+    ) {
+        log.append(shown)?;
+    }
+    // The estimate snapshot and the budget in force (not for a child).
+    if opts.parent_run.is_none() && opts.depth == 0 {
+        let recorded = budget_gate::record_start(
+            &mut log,
+            &budget_gate::StartRecord {
+                run_dir: &run_dir,
+                root,
+                playbook: &playbook,
+                manifest: &manifest,
+                budget: opts.budget.as_ref(),
+                shown: opts.estimate.as_ref(),
+                overridden: has_overrides,
+            },
+        );
+        prep_try(&mut log, recorded)?;
+    }
+    if let Some(set) = notify_set {
+        log.append(set)?;
+    }
     // Right after provenance, so a reader of the journal alone can tell an
     // admitted-but-waiting run from one whose first node is simply slow.
     if queued_workdir.is_some() {

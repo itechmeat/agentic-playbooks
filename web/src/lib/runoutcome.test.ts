@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { runEventJournal } from './journal'
-import { commitLines, goalBadge, goalSummary, omittedCommits } from './runoutcome'
+import { commitLines, goalSummary, goalTone, inboxGapLine, observationText, omittedCommits, trailerNote } from './runoutcome'
 import type { NodeCommits, RunGoal } from './api.gen'
 import type { WfEvent } from './types'
 
@@ -26,6 +26,31 @@ describe('commitLines', () => {
     expect(omittedCommits(commits)).toBe(3)
   })
 
+  it('notes a commit whose Apb-Run trailer does not name the run', () => {
+    const tagged: NodeCommits[] = [
+      {
+        node: 'impl',
+        before: 'aaa',
+        after: '111111111111aaaa',
+        commits: [
+          { sha: '111111111111aaaa', subject: 'ours', apb_run: ['r1'] },
+          { sha: '222222222222aaaa', subject: 'bare', apb_run: [] },
+          { sha: '333333333333aaaa', subject: 'theirs', apb_run: ['r0', 'r9'] },
+          { sha: '444444444444aaaa', subject: 'not read' },
+        ],
+        omitted: 0,
+      },
+    ]
+    expect(commitLines(tagged, 'r1').map((l) => l.trailer)).toEqual([
+      undefined,
+      'no Apb-Run trailer',
+      'Apb-Run names r0, r9',
+      undefined,
+    ])
+    // Without the run id nothing is claimed.
+    expect(trailerNote(tagged[0].commits[1], undefined)).toBeUndefined()
+  })
+
   it('is empty for a run without commits (the block stays hidden)', () => {
     expect(commitLines(undefined)).toEqual([])
     expect(omittedCommits(undefined)).toBe(0)
@@ -49,8 +74,13 @@ describe('RunOutcomePanel', () => {
     expect(shown).toContain('data-testid="run-commits"')
     expect(shown).toContain('fix the parser')
     expect(shown).toContain('and 3 more')
+    expect(shown).not.toContain('run-commit-trailer')
     const hidden = render(Panel, { props: { commits: undefined } }).body
     expect(hidden).not.toContain('run-commits')
+    const bare: NodeCommits[] = [{ ...commits[0], commits: [{ sha: 'abc', subject: 'bare', apb_run: [] }] }]
+    const flagged = render(Panel, { props: { commits: bare, runId: 'r1' } }).body
+    expect(flagged).toContain('data-testid="run-commit-trailer"')
+    expect(flagged).toContain('no Apb-Run trailer')
   })
 })
 
@@ -82,12 +112,12 @@ describe('goal', () => {
     expect(goalSummary(pending)).toBe('not checked yet · 3 criteria')
     // A statement-only goal is never pending.
     expect(goalSummary({ ...pending, criteria: [] })).toBe('no criteria to check')
-    expect(['passed', 'failed', 'error', 'manual', 'pending'].map(goalBadge)).toEqual([
-      'default',
-      'destructive',
-      'destructive',
-      'outline',
-      'secondary',
+    expect(['passed', 'failed', 'error', 'manual', 'pending'].map(goalTone)).toEqual([
+      'pass',
+      'fail',
+      'fail',
+      'neutral',
+      'neutral',
     ])
   })
 
@@ -137,5 +167,49 @@ describe('protected_paths_modified in the event journal', () => {
       'protected: modified tests/a.rs, added tests/b.rs',
       'protected: deleted x; not restored: x (copies kept in /r/protect/fix/2)',
     ])
+  })
+})
+
+describe('inboxGapLine', () => {
+  it('names one lost event or a range of them', () => {
+    const gap = { node: 'watch', connector: 'echo-hooks', account: 'main', from: 4, through: 4 }
+    expect(inboxGapLine(gap)).toBe(
+      'echo-hooks/main: unread event 4 was dropped by inbox retention before it was read (found by watch)',
+    )
+  })
+
+  it('notes inbox_gap in the event journal with the same words', () => {
+    const events: WfEvent[] = [
+      { seq: 1, ts: 1, type: 'inbox_gap', node_id: 'watch', connector: 'echo-hooks', account: 'main', from: 3, through: 6 },
+    ]
+    expect(runEventJournal(events).map((e) => e.note)).toEqual([
+      'echo-hooks/main: unread events 3-6 were dropped by inbox retention before they were read (found by watch)',
+    ])
+  })
+})
+
+describe('baseline and notes events in the event journal', () => {
+  const num = (n: number) => ({ state: 'value', value: { type: 'number', value: n } })
+  it('notes a snapshot, a comparison and an attempt\'s notes', () => {
+    const events: WfEvent[] = [
+      { seq: 1, ts: 1, type: 'baseline_observed', check: 'unowned', phase: 'before', status: 'observed', observations: { count: num(37) } },
+      { seq: 2, ts: 2, type: 'baseline_observed', check: 'tests', phase: 'after', status: 'unknown', reason: 'the check changed the working tree' },
+      { seq: 3, ts: 3, type: 'baseline_compared', check: 'unowned', observation: 'count', rule: 'equals 0', before: num(37), after: num(40), verdict: 'not_met', regressed: true },
+      { seq: 4, ts: 4, type: 'attempt_notes', node: 'fix', attempt: 1, findings: [{}], warnings: [{}, {}], dropped: 1 },
+      { seq: 5, ts: 5, type: 'baseline_compared', check: 'tests', observation: 'npm_test', rule: 'no_new_failures', verdict: 'unknown', detail: 'after: the check changed the working tree' },
+    ]
+    expect(runEventJournal(events).map((e) => e.note)).toEqual([
+      'unowned before: observed (count 37)',
+      'tests after: unknown (the check changed the working tree)',
+      'unowned/count: 37 -> 40, equals 0: not met, worse than before',
+      '1 finding, 2 warnings, 1 dropped as malformed',
+      'tests/npm_test: unknown -> unknown, no_new_failures: unknown (after: the check changed the working tree)',
+    ])
+  })
+
+  it('reads an unknown or a list observation without guessing a value', () => {
+    expect(observationText({ state: 'unknown', reason: 'cut short' })).toBe('unknown')
+    expect(observationText({ state: 'value', value: { type: 'list', value: ['a', 'b'] } })).toBe('2 items')
+    expect(observationText(undefined)).toBe('unknown')
   })
 })

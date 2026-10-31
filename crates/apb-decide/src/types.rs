@@ -21,6 +21,11 @@ pub enum UseSite {
     /// A bounded decision a host task (or a script) asked through `apb
     /// decide` or the MCP tool `decision_ask` (issue #193).
     HostTask,
+    /// The decision-model grader: a finished run's level per criterion and
+    /// the record it rests on.
+    Grade,
+    /// Whether a known problem still holds after its source changed.
+    ProblemRecheck,
 }
 
 impl UseSite {
@@ -36,6 +41,8 @@ impl UseSite {
             UseSite::Routing => "routing",
             UseSite::CatalogRank => "catalog_rank",
             UseSite::HostTask => "host_task",
+            UseSite::Grade => "grade",
+            UseSite::ProblemRecheck => "problem_recheck",
         }
     }
 }

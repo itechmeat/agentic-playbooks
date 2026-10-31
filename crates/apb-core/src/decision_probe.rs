@@ -18,13 +18,15 @@
 
 use std::time::{Duration, Instant};
 
+use crate::secret::Secret;
+
 /// The free request for one provider: `GET <url>` with an optional bearer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ProbeRequest {
     pub url: String,
     /// The path shown in the report (the URL without the base).
     pub label: String,
-    pub bearer: Option<String>,
+    pub bearer: Option<Secret>,
 }
 
 /// What the probe found for one provider.
@@ -68,12 +70,12 @@ impl ProbeResult {
 }
 
 /// The key a probe may send.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ProbeKey {
     /// The provider needs none.
     None,
     /// The resolved key value.
-    Value(String),
+    Value(Secret),
     /// A key only a run can produce, or one that does not resolve: the
     /// doctor falls back to a connect.
     Unavailable,
@@ -113,7 +115,7 @@ pub fn send(req: &ProbeRequest, timeout: Duration) -> ProbeResult {
     let agent = ureq::Agent::new_with_config(config);
     let mut request = agent.get(&req.url).header("accept", "application/json");
     if let Some(key) = &req.bearer {
-        request = request.header("authorization", format!("Bearer {key}"));
+        request = request.header("authorization", format!("Bearer {}", key.expose_secret()));
     }
     let started = Instant::now();
     let label = req.label.clone();
@@ -154,18 +156,18 @@ mod tests {
         let req = probe_request(
             Some("http://127.0.0.1:8080/v1/"),
             Some("/models"),
-            ProbeKey::Value("secret".into()),
+            ProbeKey::Value(Secret::new("secret")),
         )
         .unwrap();
         assert_eq!(req.url, "http://127.0.0.1:8080/v1/models");
-        assert_eq!(req.bearer.as_deref(), Some("secret"));
+        assert!(req.bearer.is_some_and(|k| k.ct_eq("secret")));
         assert!(probe_request(Some("http://x"), None, ProbeKey::None).is_none());
         assert!(probe_request(None, Some("/v1/models"), ProbeKey::None).is_none());
         assert!(
             probe_request(Some("http://x"), Some("/v1/models"), ProbeKey::Unavailable).is_none()
         );
         let keyless = probe_request(Some("http://x"), Some("/v1/models"), ProbeKey::None);
-        assert_eq!(keyless.unwrap().bearer, None);
+        assert!(keyless.unwrap().bearer.is_none());
     }
 
     /// A one-shot server on the loopback that records the request head and
@@ -211,7 +213,7 @@ mod tests {
         let req = probe_request(
             Some(&base),
             Some("/v1/models"),
-            ProbeKey::Value("secret".into()),
+            ProbeKey::Value(Secret::new("secret")),
         )
         .unwrap();
         let out = send(&req, Duration::from_secs(5));

@@ -65,7 +65,7 @@ pub(crate) fn scan_control(
     let pending_control = read_control_after(run_dir, *control_cursor)?;
     for entry in pending_control.iter().cloned() {
         match entry.cmd {
-            Control::Abort { reason } => {
+            Control::Abort { reason, by } => {
                 // Effect first, cursor persisted last: if `log.append` errs
                 // (ordinary I/O failure), the entry must NOT be marked
                 // applied - it has to resurface on the next drive rather
@@ -74,7 +74,7 @@ pub(crate) fn scan_control(
                 // drive never sees this same terminal entry again (Task 4
                 // completion-plan defect 1 - a stale stop command re-firing
                 // on resume).
-                log.append(EventPayload::RunAborted { reason })?;
+                log.append(EventPayload::RunAborted { reason, by })?;
                 write_control_cursor(run_dir, entry.seq)?;
                 return Ok(ControlScan::Terminal(RunStatus::Aborted));
             }
@@ -230,16 +230,24 @@ pub(crate) fn scan_control(
     // real entry in hand.
     if let Some(blocked_node) = blocked_by.as_ref() {
         let salvage = pending_control.iter().find_map(|e| match &e.cmd {
-            Control::Abort { reason } => Some((e.seq, RunStatus::Aborted, reason.clone(), None)),
+            Control::Abort { reason, by } => Some((
+                e.seq,
+                RunStatus::Aborted,
+                reason.clone(),
+                EventPayload::RunAborted {
+                    reason: reason.clone(),
+                    by: *by,
+                },
+            )),
             Control::Pause(req) => Some((
                 e.seq,
                 RunStatus::Paused,
                 req.journal_reason(),
-                Some(req.clone()),
+                req.to_event(),
             )),
             _ => None,
         });
-        if let Some((terminal_seq, status, reason, pause)) = salvage
+        if let Some((terminal_seq, status, reason, terminal)) = salvage
             && (status != RunStatus::Aborted || run_cancel.load(Ordering::SeqCst))
         {
             log.append(EventPayload::SupervisorAction {
@@ -249,11 +257,7 @@ pub(crate) fn scan_control(
                     "a pending stop was applied before this command could be consumed, so it was discarded: {reason}"
                 ),
             })?;
-            match status {
-                RunStatus::Aborted => log.append(EventPayload::RunAborted { reason })?,
-                RunStatus::Paused => log.append(pause.unwrap_or_default().to_event())?,
-                _ => unreachable!("salvage only ever produces Aborted or Paused"),
-            };
+            log.append(terminal)?;
             write_control_cursor(run_dir, terminal_seq)?;
             return Ok(ControlScan::Terminal(status));
         }

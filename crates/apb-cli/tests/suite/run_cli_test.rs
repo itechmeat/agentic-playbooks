@@ -56,6 +56,53 @@ fn run_succeeds_and_writes_events() {
     assert_eq!(count, 1);
 }
 
+/// `apb run --remember` keeps the given input for this project; the next
+/// start without `--param` uses it, and a credential-shaped value is refused
+/// by name without being stored or echoed.
+#[test]
+fn run_remember_keeps_the_input_for_the_next_start() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=world", "--remember"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("remembered for this project: who"));
+    playbook()
+        .args(["run", "noagent"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("succeeded"))
+        .stderr(predicate::str::contains("used remembered input: who"));
+    let stored: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.path().join(".apb/memory/project/noagent.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["params"], serde_json::json!({ "who": "world" }));
+
+    let token = format!("ghp_{}", "a".repeat(36));
+    let out = playbook()
+        .args(["run", "noagent", "--remember", "--param"])
+        .arg(format!("who={token}"))
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    // The messages never print the output: it would carry the token if the
+    // refusal broke.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not remembered: who (value_looks_secret)"),
+        "the refusal is named"
+    );
+    assert!(!stderr.contains(&token), "a refused value is never echoed");
+    let memory = fs::read_to_string(dir.path().join(".apb/memory/project/noagent.json")).unwrap();
+    assert!(
+        memory.contains("world") && !memory.contains(&token),
+        "the stored value stays, the refused one is not stored"
+    );
+}
+
 #[test]
 fn runs_command_lists_the_run() {
     let dir = seeded();

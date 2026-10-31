@@ -10,6 +10,7 @@ use apb_core::schema::{NodeKind, Playbook};
 use serde::Serialize;
 
 use crate::event::{Event, EventPayload};
+use crate::people::instruction;
 use crate::state::{NodeStatus, RunState, RunStatus};
 
 /// The kind of node a run is waiting on. Serializes to the same strings the web
@@ -96,6 +97,42 @@ pub struct PendingReview {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub recommendation: Option<crate::event::ReviewRecommendation>,
+    /// For a publish gate: the exact plan the person consents to, with the
+    /// nonce a consent must carry. `None` for a `human_review` gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub publish: Option<crate::publish::view::PlanView>,
+}
+
+/// The pending block of an open publish gate: the request's own
+/// instruction (it names the plan and its nonce) and the plan.
+fn pending_publish(
+    events: &[crate::event::Event],
+    node: &apb_core::schema::Node,
+) -> Option<PendingReview> {
+    let plan = crate::publish::view::plan_of(events, &node.id)?;
+    let instruction = events.iter().rev().find_map(|e| match &e.payload {
+        crate::event::EventPayload::ReviewRequested {
+            node: n,
+            instruction,
+            ..
+        } if *n == node.id => Some(instruction.clone()),
+        _ => None,
+    })?;
+    let prompt = match &node.kind {
+        NodeKind::Publish { prompt, .. } => prompt.clone(),
+        _ => None,
+    };
+    Some(PendingReview {
+        node: node.id.clone(),
+        title: node.title.clone(),
+        instruction,
+        options: apb_core::publish::OPTIONS.map(str::to_string).to_vec(),
+        how_to_decide: instruction::publish_how_to_decide(&node.id, &plan.nonce),
+        prompt,
+        recommendation: None,
+        publish: Some(plan),
+    })
 }
 
 /// The recommendation carried by a gate's latest `review_requested`.
@@ -113,50 +150,6 @@ fn open_recommendation(
     })?
 }
 
-/// The decision mechanics for a human-review gate: how an owner (or an agent
-/// relaying on their behalf) actually records a decision. Single source of the
-/// how-to wording, composed into the full `review_instruction` and also
-/// surfaced on its own in `PendingReview::how_to_decide`.
-pub fn review_how_to_decide(node_id: &str) -> String {
-    format!(
-        "To decide, run `apb review <run-id> {node_id} --decision <option>` \
-         or call the review_decide MCP tool with the same node and decision."
-    )
-}
-
-/// The owner-facing pending instruction for a human-review gate (issue #42
-/// finding 4): one self-contained line naming the gate, listing the available
-/// decisions, and appending `review_how_to_decide`. Shared by the
-/// `ReviewRequested` event and the `run_status` `pending_review` block so the
-/// two never drift.
-///
-/// `prompt` is the node's optional `prompt:` field (issue #102.9): free-form
-/// author guidance for the reviewer, surfaced verbatim ahead of the options.
-/// Template placeholders inside `prompt` are NOT rendered here - they are
-/// carried through as literal text, exactly like the option strings.
-pub fn review_instruction(
-    node_id: &str,
-    title: Option<&str>,
-    options: &[String],
-    prompt: Option<&str>,
-) -> String {
-    let label = title
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .unwrap_or(node_id);
-    let opts = apb_core::schema::effective_review_options(options).join(", ");
-    let guidance = prompt
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| format!(" {p}"))
-        .unwrap_or_default();
-    format!(
-        "The run is paused at the human-review gate \"{label}\" and needs your decision.{guidance} \
-         Available decisions: {opts}. {}",
-        review_how_to_decide(node_id)
-    )
-}
-
 /// Assembles the `PendingReview` block for a gate node from its id, title,
 /// options, and optional prompt (issue #102.9), reusing `review_instruction`
 /// so the instruction matches the event.
@@ -172,49 +165,16 @@ pub fn pending_review(
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(str::to_string),
-        instruction: review_instruction(node_id, title, options, prompt),
+        instruction: instruction::review_instruction(node_id, title, options, prompt),
         options: apb_core::schema::effective_review_options(options),
-        how_to_decide: review_how_to_decide(node_id),
+        how_to_decide: instruction::review_how_to_decide(node_id),
         prompt: prompt
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .map(str::to_string),
         recommendation: None,
+        publish: None,
     }
-}
-
-/// Supervisor options available after a node failure/timeout wake (issue #45
-/// finding 4). Shared by the progress block and doctor so the lists never drift.
-pub fn supervisor_decision_options() -> Vec<String> {
-    vec![
-        "retry".to_string(),
-        "continue_from".to_string(),
-        "abort".to_string(),
-    ]
-}
-
-/// Decision mechanics for a supervised failure/timeout wake: how a supervisor
-/// (or an operator) actually posts a command. Single source of the how-to
-/// wording.
-pub fn supervisor_how_to_decide(node_id: &str) -> String {
-    format!(
-        "To decide, use the supervisor tools: node_retry (re-run node `{node_id}`), \
-         run_continue_from (advance from a chosen node), or run_abort."
-    )
-}
-
-/// Owner/supervisor-facing pending instruction for a failure/timeout wake.
-pub fn supervisor_instruction(node_id: &str, trigger: &str) -> String {
-    let what = match trigger {
-        "node_timeout" => "timed out",
-        _ => "failed",
-    };
-    let opts = supervisor_decision_options().join(", ");
-    format!(
-        "The supervised run is waiting for a supervisor decision after node `{node_id}` {what}. \
-         Available options: {opts}. {}",
-        supervisor_how_to_decide(node_id)
-    )
 }
 
 /// The pending supervisor decision for a run whose `waiting_kind` is
@@ -303,9 +263,9 @@ pub fn pending_supervisor_decision(events: &[Event]) -> Option<PendingSupervisor
         }
     }
     pending.map(|(node, trigger)| PendingSupervisor {
-        instruction: supervisor_instruction(&node, trigger),
-        how_to_decide: supervisor_how_to_decide(&node),
-        options: supervisor_decision_options(),
+        instruction: instruction::supervisor_instruction(&node, trigger),
+        how_to_decide: instruction::supervisor_how_to_decide(&node),
+        options: instruction::supervisor_decision_options(),
         node,
         trigger: trigger.to_string(),
     })
@@ -359,6 +319,14 @@ pub struct ProgressSummary {
         ts(as = "Option<Vec<crate::host_task::PendingHostTask>>", optional)
     )]
     pub pending_tasks: Vec<crate::host_task::PendingHostTask>,
+    /// The counts of every list node that started a visit, in playbook
+    /// order. Absent when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::list::ListProgress>>", optional)
+    )]
+    pub lists: Vec<crate::list::ListProgress>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -556,7 +524,7 @@ fn pending_question_for_node(
 ///
 /// Pure and bounded (spec 2026-07-20, Task 5): no I/O, just one scan of the
 /// given slice. Consumed by the node-timeout exclusion wired into
-/// `check_cancel_timeout` (a no-op for the reprompt path within a single
+/// `adapter::stop::check` (a no-op for the reprompt path within a single
 /// attempt - a park always spans a fresh attempt boundary, so no completed
 /// interval ever falls inside one attempt's own clock) and, later, the live
 /// `ask_user` transport (Task 11), whose single long-lived attempt DOES span
@@ -732,7 +700,10 @@ impl GroupContext {
                 label: lbl,
             } = &e.payload
             {
-                if let Some(&gi) = group_of.get(node_id.as_str()) {
+                // A list node's report counts its items, not a cycle's
+                // iterations.
+                let is_list = playbook.node(node_id).is_some_and(|n| n.list().is_some());
+                if !is_list && let Some(&gi) = group_of.get(node_id.as_str()) {
                     let total_c = if *total == 0 { 1 } else { *total };
                     let done_c = (*done).min(total_c);
                     report_of.insert(gi, (done_c, total_c));
@@ -817,12 +788,27 @@ fn weighted_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> (u
                 total += w;
                 if status(id) == NodeStatus::Succeeded {
                     done += w;
+                } else if n.list().is_some() {
+                    done += list_credit(events, id, w);
                 }
             }
         }
     }
 
     (done, total)
+}
+
+/// The credit a running list node earns: its weight times the share of its
+/// items processed so far.
+fn list_credit(events: &[Event], node: &str, weight: u128) -> u128 {
+    let Some(fold) = crate::list::ListFold::of(events, node).filter(|f| f.is_open()) else {
+        return 0;
+    };
+    let c = fold.counts();
+    match c.total {
+        0 => 0,
+        total => weight * u128::from(c.processed.min(total)) / u128::from(total),
+    }
 }
 
 /// Computes the progress summary from events + the run's playbook version.
@@ -868,7 +854,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         .nodes
         .iter()
         .filter_map(|n| match &n.kind {
-            NodeKind::HumanReview { .. } if review_pending(&n.id) => {
+            NodeKind::HumanReview { .. } | NodeKind::Publish { .. } if review_pending(&n.id) => {
                 Some((n, WaitingKind::HumanReview))
             }
             NodeKind::Wait { .. } if status(&n.id) == NodeStatus::Running => {
@@ -889,6 +875,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
                 }
                 Some(pr)
             }
+            NodeKind::Publish { .. } => pending_publish(events, n),
             _ => None,
         })
         .collect();
@@ -953,6 +940,13 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         pending_tasks: Vec::new(),
         pending_waits,
         plan_key,
+        lists: playbook
+            .nodes
+            .iter()
+            .filter(|n| n.list().is_some())
+            .filter_map(|n| crate::list::ListFold::of(events, &n.id))
+            .map(|f| crate::list::ListProgress::of(&f))
+            .collect(),
     }
 }
 
@@ -993,6 +987,37 @@ pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
         .flatten()
         .filter(|out| !out.is_empty())
         .cloned()
+}
+
+/// One node's expected and measured duration, for calibration (spec 5):
+/// the expected from the playbook version bound to the run, the measured
+/// from its journal. The JSON report and the HTML report share it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DurationRow {
+    pub node: String,
+    pub kind: &'static str,
+    pub expected_seconds: u64,
+    pub measured_seconds: Option<u64>,
+}
+
+/// The duration table of `playbook`, every node in playbook order, with
+/// `measured` seconds by node (see [`node_durations_seconds`]). The
+/// maintaining agent uses it to update estimates; the engine never
+/// rewrites the playbook.
+pub fn build_duration_table_from(
+    playbook: &Playbook,
+    measured: &BTreeMap<String, u64>,
+) -> Vec<DurationRow> {
+    playbook
+        .nodes
+        .iter()
+        .map(|n| DurationRow {
+            node: n.id.clone(),
+            kind: n.kind.type_str(),
+            expected_seconds: n.expected_seconds(),
+            measured_seconds: measured.get(&n.id).copied(),
+        })
+        .collect()
 }
 
 /// Measured time per node in whole seconds, from NodeStarted to
@@ -1308,6 +1333,7 @@ edges:
                     instruction: String::new(),
                     prompt: Some("Check the changelog first.".into()),
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
         ];
@@ -1354,6 +1380,7 @@ edges:
                         instruction: String::new(),
                         prompt: None,
                         recommendation: None,
+                        plan_digest: None,
                     },
                 ),
             ];
@@ -1388,6 +1415,7 @@ edges:
             instruction: String::new(),
             prompt: None,
             recommendation: None,
+            plan_digest: None,
         };
         let events: Vec<Event> = [
             EventPayload::RunStarted {
@@ -1446,6 +1474,7 @@ edges:
                     instruction: String::new(),
                     prompt: None,
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
         ];
@@ -1474,6 +1503,7 @@ edges:
                     instruction: String::new(),
                     prompt: None,
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
             ev(
@@ -1489,6 +1519,7 @@ edges:
                     node: "r".into(),
                     decision: "approve".into(),
                     note: String::new(),
+                    plan_digest: None,
                 },
             ),
         ];
@@ -1611,6 +1642,7 @@ edges:
                     instruction: String::new(),
                     prompt: None,
                     recommendation: None,
+                    plan_digest: None,
                 },
             ),
         ];

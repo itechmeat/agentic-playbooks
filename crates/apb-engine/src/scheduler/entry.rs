@@ -52,6 +52,14 @@ pub struct RunOptions {
     pub continued_from: Option<String>,
     /// Sub-playbook nesting depth of THIS run (0 for a top-level run).
     pub depth: usize,
+    /// Held to `publish_only` by a parent run (decision record 0010): the
+    /// run refuses to start unless every agent node is `isolation: full`,
+    /// and its attempts refuse a passed credential, whatever its own
+    /// playbook says.
+    pub publish_only: bool,
+    /// A parent run already started a node that can act before this child,
+    /// so the child's publish nodes pin nothing and refuse `no_pin`.
+    pub parent_acted: bool,
     /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
     pub expected_children: Option<BTreeMap<String, crate::run_config::ChildExpectation>>,
     /// Node-cache policy for the run (spec 2026-07-19). `Auto` by default via
@@ -104,6 +112,23 @@ pub struct RunOptions {
     /// (issue #192, [`crate::gate::RunPermit::candidate_skipped`]); the
     /// manifest records it so `run_status` reports it.
     pub candidate_skipped: Option<String>,
+    /// The run's budget argument; each field it sets overrides the
+    /// playbook's `budget:` block (see `apb_core::budget`). Ignored for a
+    /// sub-playbook child.
+    pub budget: Option<apb_core::budget::BudgetRequest>,
+    /// The estimate a launch surface showed the person before the start
+    /// (its pre-start check), kept as the run's snapshot instead of
+    /// computing it again. Without it, only a run with a budget computes
+    /// one; a run with neither has no snapshot. Ignored for a sub-playbook
+    /// child.
+    pub estimate: Option<crate::run_estimate::RunEstimate>,
+    /// The run's notification request (see [`crate::notify`]); `None` asks
+    /// for nothing, so the machine default and the project apply. A
+    /// launch surface runs [`crate::notify::check`] first and refuses a
+    /// request it cannot honour; the start checks it again and pins the
+    /// target. Ignored for a sub-playbook child, which inherits its
+    /// parent's reviews and questions.
+    pub notify: Option<apb_core::notify::NotifyRequest>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -185,9 +210,10 @@ impl Prepared {
         if already_decided {
             return;
         }
-        if matches!(crate::control::pending_stop_seq(run_dir), Ok(Some(_))) {
+        if let Ok(Some((_, by))) = crate::control::pending_stop(run_dir) {
             let _ = self.log.append(EventPayload::RunAborted {
                 reason: e.to_string(),
+                by,
             });
             return;
         }
@@ -565,18 +591,17 @@ pub(crate) fn hand_to_detached_driver(
     prepared: PreparedRun,
 ) -> Result<String, EngineError> {
     let run_id = prepared.run_id().to_string();
-    let pid =
-        match crate::driver::spawn_detached_driver(root, &run_id, None, false, false, None, None) {
-            Ok(pid) => pid,
-            Err(e) => {
-                // No driver was started, so nothing will ever move this run. Close
-                // it out rather than leaving it stuck in `running`.
-                prepared.abandon();
-                return Err(EngineError::Invalid(format!(
-                    "cannot start the detached run driver: {e}"
-                )));
-            }
-        };
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, &Default::default()) {
+        Ok(pid) => pid,
+        Err(e) => {
+            // No driver was started, so nothing will ever move this run. Close
+            // it out rather than leaving it stuck in `running`.
+            prepared.abandon();
+            return Err(EngineError::Invalid(format!(
+                "cannot start the detached run driver: {e}"
+            )));
+        }
+    };
     // Publish the driver BEFORE returning, for the same reason the lock is
     // handed over by pid here: until `driver.pid` names the child, this run
     // reads as having no driver at all, and a stop landing in that window
@@ -641,16 +666,24 @@ pub(super) fn reap_dead_attempts(
     let journal = Journal::new(log);
     let mut reaped = Vec::with_capacity(dead.len());
     for a in dead {
-        journal_interrupted_attempt(&journal, &a.node, a.attempt, None, None, "", None)?;
+        journal_interrupted_attempt(
+            &journal.for_item(a.item.as_deref()),
+            super::node::InterruptedAttempt {
+                node_id: &a.node,
+                attempt: a.attempt,
+                ..Default::default()
+            },
+        )?;
         reaped.push(a.node);
     }
     Ok(reaped)
 }
 
 /// Posts a cancel command to control.jsonl of an already-running (or already
-/// finished) run. Does not wait for an actual stop - `drive` will see the Abort at
-/// the nearest iteration boundary. Idempotent: a repeated call just appends
-/// another Abort, which is harmless.
+/// finished) run: the supervisor's abort, journaled as `by: supervisor`. Does
+/// not wait for an actual stop - `drive` will see the Abort at the nearest
+/// iteration boundary. Idempotent: a repeated call just appends another Abort,
+/// which is harmless.
 pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -663,12 +696,13 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
         &run_dir,
         Control::Abort {
             reason: "run_cancel".into(),
+            by: Some(crate::pause::kind::PauseBy::Supervisor),
         },
     )?;
     // Propagate the abort into any non-terminal sub-playbook children (spec C):
-    // an operator abort of the parent must reach a child that is blocking the
-    // parent (e.g. a child paused on human_review).
-    crate::stop::abort_children(root, run_id)?;
+    // an abort of the parent must reach a child that is blocking the parent
+    // (e.g. a child paused on human_review).
+    crate::stop::abort_children(root, run_id, crate::pause::kind::PauseBy::Supervisor)?;
     Ok(())
 }
 

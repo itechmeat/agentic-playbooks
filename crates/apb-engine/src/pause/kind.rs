@@ -57,3 +57,24 @@ impl PauseMode {
         }
     }
 }
+
+/// Why the engine paused a run, read back from the pause's reason: never
+/// journaled, derived by [`crate::pause::cause_of`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseCause {
+    /// A provider quota or rate limit (see `pause::quota`).
+    Quota,
+    /// The run's budget (see `pause::budget`).
+    Budget,
+}
+
+impl PauseCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PauseCause::Quota => "quota",
+            PauseCause::Budget => "budget",
+        }
+    }
+}

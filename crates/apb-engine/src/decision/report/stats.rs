@@ -1,17 +1,9 @@
 //! The figures the decisions report prints: accuracy, Brier, expected
 //! calibration error, Wilson intervals. Plain functions over (probability,
-//! outcome) pairs, so each can be checked by hand.
+//! outcome) pairs, so each can be checked by hand. The shared rates, the
+//! median and the Wilson interval live in [`apb_core::stats`].
 
-/// Rounds to four decimals, so the JSON report reads cleanly and a snapshot
-/// does not depend on float noise.
-pub fn round4(x: f64) -> f64 {
-    (x * 10_000.0).round() / 10_000.0
-}
-
-/// `hits / n`, `None` when `n` is zero.
-pub fn rate(hits: usize, n: usize) -> Option<f64> {
-    (n > 0).then(|| round4(hits as f64 / n as f64))
-}
+pub use apb_core::stats::{median, rate, round4, wilson95};
 
 /// Mean squared error of the probabilities against the outcomes (1 = the
 /// event happened). `None` without items.
@@ -55,31 +47,14 @@ pub fn ece(items: &[(f64, bool)], bins: usize) -> Option<f64> {
     Some(round4(total))
 }
 
-/// The Wilson score interval at 95 % for `hits` of `n`, as (low, high).
-pub fn wilson95(hits: usize, n: usize) -> Option<(f64, f64)> {
-    if n == 0 {
-        return None;
-    }
-    let z = 1.96_f64;
-    let n_f = n as f64;
-    let p = hits as f64 / n_f;
-    let z2 = z * z;
-    let denom = 1.0 + z2 / n_f;
-    let center = (p + z2 / (2.0 * n_f)) / denom;
-    let half = z * (p * (1.0 - p) / n_f + z2 / (4.0 * n_f * n_f)).sqrt() / denom;
-    Some((
-        round4((center - half).max(0.0)),
-        round4((center + half).min(1.0)),
-    ))
-}
-
-/// The median of `values` (the lower middle for an even count).
-pub fn median(values: &mut [u64]) -> Option<u64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_unstable();
-    Some(values[(values.len() - 1) / 2])
+/// The `q` quantile (0 to 1) of already sorted values, linearly
+/// interpolated between the two nearest ranks; `None` for no values.
+pub fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
+    let last = sorted.len().checked_sub(1)?;
+    let pos = q.clamp(0.0, 1.0) * last as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    let (a, b) = (sorted[lo], sorted[hi]);
+    Some(a + (b - a) * (pos - lo as f64))
 }
 
 #[cfg(test)]
@@ -109,20 +84,5 @@ mod tests {
         // p = 1.0 falls in the last bin.
         assert_eq!(ece(&[(1.0, true)], 10), Some(0.0));
         assert_eq!(brier(&[]), None);
-    }
-
-    #[test]
-    fn wilson_matches_the_published_interval() {
-        // 1 of 20: 0.0089 to 0.2361 (the standard Wilson score interval).
-        assert_eq!(wilson95(1, 20), Some((0.0089, 0.2361)));
-        assert_eq!(wilson95(0, 10).map(|w| w.0), Some(0.0));
-        assert_eq!(wilson95(0, 0), None);
-    }
-
-    #[test]
-    fn median_takes_the_lower_middle() {
-        assert_eq!(median(&mut [30, 10, 20]), Some(20));
-        assert_eq!(median(&mut [40, 10, 30, 20]), Some(20));
-        assert_eq!(median(&mut []), None);
     }
 }

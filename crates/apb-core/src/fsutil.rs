@@ -143,6 +143,57 @@ pub fn ensure_no_symlink_below(anchor: &Path, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Opens the regular file at `path` for reading without following a
+/// symbolic link at its last component (`O_NOFOLLOW` on unix; elsewhere the
+/// entry is checked first). A link, a directory, a fifo or a device is
+/// refused: reading one could block or leave the tree the caller meant.
+pub fn open_regular_no_follow(path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", path.display()),
+            ));
+        }
+        File::open(path)?
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+/// Reads at most `cap` bytes of `reader`. Returns them and whether more was
+/// left unread. The reader is left right after the bytes returned (the one
+/// byte read to tell whether more is left is given back), so a second call
+/// continues where this one stopped.
+pub fn read_prefix_capped<R: io::Read + io::Seek>(
+    reader: &mut R,
+    cap: u64,
+) -> io::Result<(Vec<u8>, bool)> {
+    let mut out = Vec::new();
+    let mut limited = io::Read::take(&mut *reader, cap.saturating_add(1));
+    io::Read::read_to_end(&mut limited, &mut out)?;
+    let cut = out.len() as u64 > cap;
+    if cut {
+        out.truncate(cap as usize);
+        reader.seek(io::SeekFrom::Current(-1))?;
+    }
+    Ok((out, cut))
+}
+
 /// [`copy_tree`] into `dst` under `anchor` that never writes through a
 /// symlink already at the destination: `dst` and every existing path
 /// component below `anchor` are checked first, and every entry is checked
@@ -276,18 +327,51 @@ pub fn create_dir_under(anchor: &Path, dir: &Path) -> io::Result<()> {
 
 /// Temp + fsync + rename inside `dir`, which must exist.
 fn write_into_existing_dir(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = dir.join(format!(
-        ".tmp-{}-{}",
+    write_via_temp(dir, path, bytes, |tmp| File::create(tmp))
+}
+
+/// A temp name in `dir` for writing `path`, unique per write: the pid and
+/// a per-process counter keep two threads of one process apart (the items
+/// of a list node writing the same file never rename each other's temp
+/// away), and a random part keeps processes apart, so a reused pid (a
+/// container's fixed pid) never meets the temp a killed earlier process
+/// left behind.
+fn unique_temp(dir: &Path, path: &Path) -> PathBuf {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    dir.join(format!(
+        ".tmp-{}-{n}-{}-{}",
         std::process::id(),
+        &random[..12],
         path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    {
-        let mut f = File::create(&tmp)?;
+    ))
+}
+
+/// The one atomic write: `bytes` into a [`unique_temp`] that `create`
+/// opens, fsync, then rename onto `path`. A write that fails removes its
+/// temp. A process killed between the create and the rename leaves its
+/// `.tmp-<pid>-<n>-<random>-<name>` behind: nothing reads such a file and
+/// no later write reuses its name, but in a long-lived directory (the
+/// trust and project state, an agent home) it stays until removed by hand.
+fn write_via_temp(
+    dir: &Path,
+    path: &Path,
+    bytes: &[u8],
+    create: impl FnOnce(&Path) -> io::Result<File>,
+) -> io::Result<()> {
+    let tmp = unique_temp(dir, path);
+    let res = (|| {
+        let mut f = create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, path)
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    res
 }
 
 /// Like `atomic_write`, but the resulting file gets 0600 permissions (owner
@@ -299,32 +383,23 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
     fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(
-        ".tmp-{}-{}",
-        std::process::id(),
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    // Remove a possible leftover stale tmp of our own so create_new doesn't fail.
-    let _ = fs::remove_file(&tmp);
-    {
-        // The file is created with 0600 permissions right away (on unix) - no window
-        // with default permissions before a later chmod.
+    // The file is created with 0600 permissions right away (on unix): no
+    // window with default permissions before a later chmod.
+    write_via_temp(dir, path, bytes, |tmp| {
         #[cfg(unix)]
-        let mut f = {
+        {
             use std::os::unix::fs::OpenOptionsExt;
             fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(&tmp)?
-        };
+                .open(tmp)
+        }
         #[cfg(not(unix))]
-        let mut f = File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    Ok(())
+        {
+            File::create(tmp)
+        }
+    })
 }
 
 /// RAII lock for a state directory (`<dir>/<lock_name>`), tagged with a unique
@@ -466,7 +541,7 @@ fn lock_is_stale(path: &Path, stale_ms: u128) -> bool {
 }
 
 #[cfg(all(test, unix))]
-mod no_follow_tests {
+mod unix_tests {
     use super::*;
 
     /// An overlay whose directory name matches a symlink already in the
@@ -497,6 +572,43 @@ mod no_follow_tests {
                 .unwrap()
                 .file_type()
                 .is_symlink()
+        );
+    }
+
+    /// Threads writing the same file at once each land a whole file, none
+    /// fails on another's temp, and no temp is left behind; the private
+    /// write keeps 0600.
+    #[test]
+    fn concurrent_atomic_writes_of_one_file_all_land_whole() {
+        let t = tempfile::tempdir().unwrap();
+        let (plain, private) = (t.path().join("f.json"), t.path().join("p.json"));
+        std::thread::scope(|s| {
+            for i in 0..8u8 {
+                let (plain, private) = (&plain, &private);
+                s.spawn(move || {
+                    let body = vec![b'a' + i; 4096];
+                    for _ in 0..20 {
+                        atomic_write(plain, &body).unwrap();
+                        atomic_write_private(private, &body).unwrap();
+                    }
+                });
+            }
+        });
+        for f in [&plain, &private] {
+            let got = fs::read(f).unwrap();
+            assert_eq!(got.len(), 4096);
+            assert!(got.iter().all(|b| *b == got[0]), "one writer's whole body");
+        }
+        let left: Vec<_> = fs::read_dir(t.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(left.is_empty(), "no temp is left behind");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 }

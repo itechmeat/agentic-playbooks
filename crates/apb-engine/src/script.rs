@@ -11,6 +11,7 @@ use crate::state::NodeStatus;
 pub struct ScriptResult {
     pub status: NodeStatus,
     pub stdout: String,
+    pub stderr: String,
 }
 
 /// List of candidate runtimes for a runner key. First the global config
@@ -124,6 +125,24 @@ pub fn run_script_with_env_removed(
     env: &[(&str, String)],
     remove: &[&str],
 ) -> Result<ScriptResult, EngineError> {
+    let (program, script_path) = resolve(version_dir, script_rel, runner)?;
+    let mut cmd = command_for_runtime(&program, &script_path);
+    cmd.current_dir(workdir);
+    for k in remove {
+        cmd.env_remove(k);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    result(run_capture(cmd, timeout, cancel)?)
+}
+
+/// The script's path and the runtime that runs it.
+fn resolve(
+    version_dir: &Path,
+    script_rel: &str,
+    runner: &str,
+) -> Result<(String, std::path::PathBuf), EngineError> {
     let script_path = version_dir.join(script_rel);
     if !script_path.is_file() {
         return Err(EngineError::Script(format!(
@@ -137,15 +156,10 @@ pub fn run_script_with_env_removed(
             candidates.join(", ")
         ))
     })?;
-    let mut cmd = command_for_runtime(program, &script_path);
-    cmd.current_dir(workdir);
-    for k in remove {
-        cmd.env_remove(k);
-    }
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    let captured = run_capture(cmd, timeout, cancel)?;
+    Ok((program.clone(), script_path))
+}
+
+fn result(captured: crate::proc::Captured) -> Result<ScriptResult, EngineError> {
     let status = match captured.status {
         // Cancellation (another join:any branch won) - neither a failure nor a timeout.
         None if captured.cancelled => NodeStatus::Cancelled,
@@ -156,5 +170,37 @@ pub fn run_script_with_env_removed(
     Ok(ScriptResult {
         status,
         stdout: captured.stdout,
+        stderr: captured.stderr,
     })
+}
+
+/// A node's `success_check` (an `sh` script under `version_dir`), run in
+/// `workdir`. When the attempt ran in a sandbox, the check runs inside the
+/// same sandbox (`wrap`), with the script itself bound read-only: it judges
+/// a tree the agent wrote, and may run code the agent wrote.
+pub fn run_check(
+    version_dir: &Path,
+    workdir: &Path,
+    script_rel: &str,
+    wrap: Option<&crate::sandbox::SandboxPlan>,
+) -> Result<ScriptResult, EngineError> {
+    let Some(plan) = wrap else {
+        return run_script(version_dir, workdir, script_rel, "sh", None, None);
+    };
+    let (program, script_path) = resolve(version_dir, script_rel, "sh")?;
+    let mut plan = plan.clone();
+    plan.mounts.push(crate::sandbox::view::Mount::ReadOnly(
+        script_path.clone(),
+        script_path.clone(),
+    ));
+    let mut cmd = plan.command(program.as_ref(), &[script_path.into_os_string()]);
+    // Only the base variables reach the sandbox, never apb's credentials.
+    cmd.env_clear();
+    for name in apb_core::process_env::base_set() {
+        if let Some(v) = std::env::var_os(name) {
+            cmd.env(name, v);
+        }
+    }
+    plan.overlay(&mut cmd);
+    result(crate::proc::run_capture_in(cmd, None, None, true)?)
 }

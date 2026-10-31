@@ -102,6 +102,9 @@ pub(crate) fn apply_patch(
     if let Some(reason) = uncovered_consent_sources(root, run_dir, playbook, &loaded.playbook) {
         return append_patch_rejected(log, reason);
     }
+    if let Some(reason) = super::baseline::patch_refusal(playbook, &loaded.playbook, &events) {
+        return append_patch_rejected(log, reason);
+    }
 
     let from_version = playbook.version.clone();
     let base = playbook.clone();
@@ -221,12 +224,10 @@ pub(crate) fn promote_applied_patch(
     applied: &AppliedPatch,
 ) -> Result<(), EngineError> {
     let state = RunState::fold(&read_all(run_dir)?);
-    // prior_successes is hardcoded to 0: there is no cross-run version success
-    // counter yet in 6a. The default OnSuccess policy (and Always) do not depend
-    // on it; AfterNSuccesses(n>1) therefore does not promote - the counter will be
-    // added in Phase 6b.
-    if should_promote(
-        promote_policy(playbook),
+    // An in-run patch is judged by this run alone: no earlier success counts
+    // for it (`prior_successes` 0), so `after_n_successes` above 1 and a
+    // quality policy never promote it here; a forward patch's trials do.
+    if promote_policy(playbook).should_promote(
         &applied.classification,
         true,
         changed_nodes_succeeded(applied, playbook, &state),

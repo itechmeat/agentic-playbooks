@@ -22,6 +22,8 @@ The token is written to a local file with owner-only permissions, and the accoun
 
 It covers issue work: searching issues with YouTrack's own query syntax, reading one, creating and updating them, listing projects, reading and adding comments, and applying YouTrack commands.
 
+Comment and description text is sent exactly as written: YouTrack does not run commands found in that text, only through `apply_command`.
+
 That last one deserves attention. `apply_command` runs YouTrack's native command syntax, which is deliberately powerful: one command can change state, tags, assignee, priority, and custom fields at once. It is the single function here that is worth being deliberate about granting.
 
 It does not manage workflows, agile boards, users, or project configuration, and it cannot delete an issue.

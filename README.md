@@ -33,7 +33,22 @@ log behind.
   as MCP tools, so an agent can create, run, and supervise playbooks itself.
 - **Self-improving playbooks.** A supervisor agent can watch a run, retry or
   reroute nodes, patch the playbook mid-run; successful patches are promoted
-  into a new version.
+  into a new version. Runs are graded on quality criteria (built-in ones by
+  rules, the playbook's own by your agent or an opt-in decision model, every
+  level citing what it read),
+  and with `promote_supervisor_patches: { when: quality }` apb promotes a
+  candidate version on its own only when it is shown not worse (a person
+  can still promote it or keep the current one).
+- **Known problems.** Trouble a playbook's runs keep meeting with their
+  tools (a rate-limited connector function, a misleading script or skill)
+  is collected across runs and shown to later runs' agents as facts to
+  check. A problem whose source changed is rechecked first, and it closes
+  only on a quote of the new source that shows the fix.
+- **Repeats in your session history.** `apb discover` reads the Claude Code
+  and Codex history of the projects you name, finds the step sequences your
+  sessions keep repeating (code work, mail or CRM routines alike) and offers
+  each as a playbook draft with its sources. No model, no network, no tool
+  arguments kept.
 - **Local-first.** No cloud, no accounts. State lives in `.apb/` next to your
   code; versions are immutable and diffable.
 
@@ -183,10 +198,14 @@ apb subscriptions   view or declare the agent subscriptions you pay for
 apb connector       list / show / call / approve / doctor / env / init / install / test - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
-apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
-apb export/import   move a playbook as a single bundle file
+apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> one run's health, --agents every installed agent, --probe-agent <id> one paid format check)
+apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
 apb suggestions     list / allow / reset save-as-playbook suggestion declines
+apb discover        find step sequences your past agent sessions repeat; list / show / save / dismiss
 apb stats           cross-run metrics per playbook version and node (read-only)
+apb grade <run>     grade an ended run by rules (--model: by the decision model); --backfill <id> grades earlier runs
+apb candidate <id>  a candidate version compared with current by quality; --promote, --keep-current
+apb problems <id>   a playbook's known problems; confirm / dismiss / reopen / close --quote / recheck / scan
 apb eval <id>       run a playbook's eval cases in scratch repositories (opt-in, paid)
 apb cache           status / inspect / prune / clear the node result cache
 apb decide          ask the configured decision models a bounded question
@@ -235,12 +254,14 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Released on the `0.x` line (the latest release is `0.26.0`); each tagged
-release has its notes in [docs/release-notes/](docs/release-notes/) and on
-the GitHub releases page. The engine, web editor, versioning, MCP surface, and
-supervisor are implemented and tested; until `1.0` the schema and CLI may
-still change between minor releases. Design specs live in
-[docs/superpowers/specs/](docs/superpowers/specs/).
+The current release is the `1.0.0-beta.1` pre-release (the latest stable
+release is `0.25.0`); each tagged release has its notes in
+[docs/release-notes/](docs/release-notes/) and on the GitHub releases page.
+The engine, web editor, versioning, MCP surface, and supervisor are
+implemented and tested. In the beta, the playbook schema and the CLI are the
+ones 1.0 intends to keep, but they may still change before `1.0.0` where
+feedback shows a problem. Installing the beta: [docs/INSTALL.md](docs/INSTALL.md).
+Design specs live in [docs/superpowers/specs/](docs/superpowers/specs/).
 
 ## Documentation
 
@@ -253,8 +274,13 @@ still change between minor releases. Design specs live in
 - [Playbook interview](docs/HOWTO-interview.md): capturing a process as a playbook by interviewing the user
 - [Connectors](docs/CONNECTORS.md): calling external services from playbooks
 - [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce
+- [Isolation](docs/ISOLATION.md): running an agent in a sandbox on Linux, and what each level guarantees
 - [Decision models](docs/DECISIONS.md): optional small models for checks, judges and ranking
+- [Reference scenarios](docs/scenarios/README.md): realistic code and routine situations features are checked against, with the gaps they name
 - [Run stats](docs/STATS.md) and [evals](docs/EVALS.md): measuring playbooks across runs
+- [Run quality](docs/QUALITY.md): grading runs on quality criteria and promoting a candidate by quality
+- [Repeats in session history](docs/DISCOVER.md): step sequences past agent sessions repeat, offered as playbook drafts
+- [Known problems](docs/KNOWN-PROBLEMS.md): what earlier runs met with a playbook's tools, shown to later runs and rechecked when the source changes
 - [CI](docs/CI.md) and [deployment](docs/DEPLOYMENT.md): running apb in pipelines and on a server
 
 ## Development

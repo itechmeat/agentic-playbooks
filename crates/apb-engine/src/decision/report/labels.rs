@@ -383,6 +383,7 @@ fn gate_visit_decision<'a>(
                 node: n,
                 decision,
                 note,
+                ..
             } if n == node && open => return Ok((decision.as_str(), note.as_str())),
             _ => {}
         }
@@ -618,6 +619,14 @@ impl PendingLabeller {
             "host_task" => (
                 "host_task",
                 "none: the host task that asked acts on the answer itself (counts, latency and cost only)",
+            ),
+            "grade" => (
+                "grade",
+                "pending: a host or a person grading the same run on the same criterion",
+            ),
+            "problem_recheck" => (
+                "problem_recheck",
+                "pending: the problem reported again after the recheck, or a person's decision on it",
             ),
             _ => ("unknown", "no labeller for this use"),
         };
@@ -894,6 +903,7 @@ mod tests {
                 node: node.into(),
                 decision: decision.into(),
                 note: note.into(),
+                plan_digest: None,
             },
         )
     }

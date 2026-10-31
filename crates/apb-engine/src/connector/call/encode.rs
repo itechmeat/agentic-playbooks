@@ -71,39 +71,14 @@ pub(crate) fn project_value(source: &Value, paths: &[&[&str]]) -> Value {
 /// pchar rules, keeping ':' literal (Telegram tokens embed a colon, spec 4.3).
 /// pchar = unreserved / sub-delims / ':' / '@'.
 pub(crate) fn encode_path_segment(s: &str) -> String {
-    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-    const PCHAR: &AsciiSet = &NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~')
-        .remove(b'!')
-        .remove(b'$')
-        .remove(b'&')
-        .remove(b'\'')
-        .remove(b'(')
-        .remove(b')')
-        .remove(b'*')
-        .remove(b'+')
-        .remove(b',')
-        .remove(b';')
-        .remove(b'=')
-        .remove(b':')
-        .remove(b'@');
-    utf8_percent_encode(s, PCHAR).to_string()
+    apb_core::url_component::encode_path_segment(s)
 }
 
 /// Percent-encodes a whole string as a single URL component (same set the
 /// renderer uses for substituted values). Applied to literal query keys and
 /// auth param names so a stray reserved byte cannot restructure the URL.
 pub(crate) fn encode_component(s: &str) -> String {
-    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-    const SET: &AsciiSet = &NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~');
-    utf8_percent_encode(s, SET).to_string()
+    apb_core::url_component::encode(s)
 }
 
 /// Encodes DECODED form pairs into the `application/x-www-form-urlencoded`
@@ -143,4 +118,14 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
         }
     }
     out
+}
+
+/// Appends an already-encoded query string to a base URL, choosing `?` or `&`
+/// depending on whether the base already carries a query.
+pub(crate) fn assemble_url(base: &str, query: &str) -> String {
+    if query.is_empty() {
+        return base.to_string();
+    }
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}{query}")
 }

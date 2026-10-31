@@ -77,6 +77,22 @@ fn one_node(extra: &str) -> String {
     )
 }
 
+/// A host reply with no usage, note, model or notes.
+fn request(task_id: &str, status: SubmitStatus, output: &str) -> SubmitRequest {
+    SubmitRequest {
+        task_id: task_id.into(),
+        status,
+        output: output.into(),
+        usage: None,
+        note: None,
+        submitted_by: "host".into(),
+        client: Some("test-host".into()),
+        model: None,
+        findings: None,
+        warnings: None,
+    }
+}
+
 impl Host {
     /// A project with playbook `h`, profile `main` (claude-code + haiku, the
     /// given fallbacks, a role prompt) and an agent CLI that must never run in
@@ -164,40 +180,29 @@ impl Host {
         output: &str,
         usage: Option<SubmittedUsage>,
     ) {
-        host_task::submit_to_run(
-            self.root.path(),
+        self.submit_request(
             run_id,
             SubmitRequest {
-                task_id: task_id.into(),
-                status,
-                output: output.into(),
                 usage,
-                note: None,
-                submitted_by: "host".into(),
-                client: Some("test-host".into()),
-                model: None,
+                ..request(task_id, status, output)
             },
-        )
-        .unwrap();
+        );
+    }
+
+    /// Submits `req` for a task of `run_id`.
+    fn submit_request(&self, run_id: &str, req: SubmitRequest) -> host_task::SubmitReceipt {
+        host_task::submit_to_run(self.root.path(), run_id, req).unwrap()
     }
 
     /// A `succeeded` reply that names the model the host ran it on.
     fn submit_on_model(&self, run_id: &str, task_id: &str, output: &str, model: &str) {
-        host_task::submit_to_run(
-            self.root.path(),
+        self.submit_request(
             run_id,
             SubmitRequest {
-                task_id: task_id.into(),
-                status: SubmitStatus::Succeeded,
-                output: output.into(),
-                usage: None,
-                note: None,
-                submitted_by: "host".into(),
-                client: Some("test-host".into()),
                 model: Some(model.into()),
+                ..request(task_id, SubmitStatus::Succeeded, output)
             },
-        )
-        .unwrap();
+        );
     }
 
     fn finish(&self, run_id: &str) -> (RunStatus, Vec<Event>) {
@@ -392,6 +397,15 @@ fn a_failure_report_block_fails_the_attempt_and_a_retry_is_a_new_task() {
             .find(|t| t.task_id != first.task_id)
     });
     assert_eq!(second.attempt, 2);
+    // The retry task carries the retry briefing; the first one none.
+    let header = "## What earlier attempts of this step did (apb's record)";
+    assert!(!first.prompt.contains(header));
+    assert!(second.prompt.contains(header), "{}", second.prompt);
+    assert!(
+        second
+            .prompt
+            .contains("Attempts with no connector writes recorded: attempt 1.")
+    );
     h.submit(&run_id, &second.task_id, SubmitStatus::Succeeded, "done");
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
@@ -443,6 +457,10 @@ fn assert_labelled(t: &PendingHostTask) {
     assert_eq!(t.hint_note, note);
     // Every task a host reads carries how to execute it.
     assert_eq!(t.execution_note, host_task::EXECUTION_CONTRACT);
+    // A connector call the subagent makes binds to this attempt by its
+    // number and, once a resumed drive adopts the task, by the task id.
+    assert_eq!(t.env.get("APB_HOST_TASK"), Some(&t.task_id));
+    assert_eq!(t.env.get("APB_ATTEMPT"), Some(&t.attempt.to_string()));
     let dir = t.env.get("APB_RUN_DIR").expect("APB_RUN_DIR");
     let events = read_all(Path::new(dir)).unwrap();
     assert_eq!(
@@ -686,6 +704,75 @@ fn require_verdict_takes_the_submission_as_the_verdict_and_a_written_status_file
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(attempt_statuses(&events, "w"), vec!["succeeded"]);
     assert_eq!(node_output(&events, "v"), r#"{"url":"https://x"}"#);
+}
+
+/// Notes a host submits join the attempt's status file, the receipt counts
+/// the malformed ones and says why, the attempt journals them with the
+/// drops counted, without changing the verdict the submission gives; the
+/// subagent's leftover outputs without a verdict do not override the
+/// submission, and drop counts the subagent writes into the file are not
+/// counted.
+#[test]
+fn submitted_notes_merge_into_the_status_file_and_are_journaled() {
+    let h = Host::new(&one_node(""), &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let w = h.task(&run_id, "w");
+    let status_file = w.env.get("APB_STATUS_FILE").unwrap().clone();
+    // The subagent wrote one warning of its own and no verdict, and tried
+    // to plant drop counts of its own: the host's counts never come from
+    // the file.
+    fs::write(
+        &status_file,
+        r#"{"warnings":[{"subject":"migration","reason":"not run on staging"}],"outputs":{"url":"stale"},"notes_dropped":9,"notes_dropped_reasons":["forged"]}"#,
+    )
+    .unwrap();
+    let receipt = h.submit_request(
+        &run_id,
+        SubmitRequest {
+            findings: Some(serde_json::json!([
+                {"kind": "bug", "location": "src/pay.rs:40", "evidence": "rounds down", "why_not_fixed": "out of scope"},
+                {"kind": "bug"}
+            ])),
+            warnings: Some(serde_json::json!([{"subject": "deploy", "reason": "not verified"}])),
+            ..request(&w.task_id, SubmitStatus::Succeeded, "did it")
+        },
+    );
+    assert_eq!(receipt.notes_dropped, 1);
+    assert_eq!(
+        receipt.notes_dropped_reasons,
+        ["findings: `location` is missing"]
+    );
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&status_file).unwrap()).unwrap();
+    assert_eq!(doc["status"], "success", "{doc}");
+    assert_eq!(doc["warnings"].as_array().unwrap().len(), 2, "{doc}");
+    assert!(doc.get("outputs").is_none(), "{doc}");
+    let (findings, warnings, dropped, reasons) = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptNotes {
+                node,
+                findings,
+                warnings,
+                dropped,
+                dropped_reasons,
+                ..
+            } if node == "w" => Some((
+                findings.len(),
+                warnings.len(),
+                *dropped,
+                dropped_reasons.clone(),
+            )),
+            _ => None,
+        })
+        .expect("the attempt journals its notes");
+    assert_eq!((findings, warnings, dropped), (1, 2, 1));
+    assert_eq!(reasons, ["findings: `location` is missing"]);
+    assert_eq!(attempt_statuses(&events, "w"), vec!["succeeded"]);
 }
 
 #[test]
@@ -1052,6 +1139,71 @@ fn a_missing_agent_binary_falls_back_to_a_host_task() {
     assert_eq!(node_output(&events, "w"), "done by host");
 }
 
+/// A `full` node never falls back to the host agent, which runs outside any
+/// sandbox apb starts: an agent that is not logged in fails the node
+/// instead. The twin is `a_logged_out_agent_falls_back_to_a_host_task`.
+#[test]
+fn a_full_node_never_falls_back_to_a_host_task() {
+    let h = Host::new(
+        &one_node(", isolation: { level: full, network: none }"),
+        &[],
+    );
+    h.agent("echo 'Error: Not logged in. Please run /login' >&2\nexit 1");
+    let _lock = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _env = h.env();
+    let _home = Env::set(&[("HOME", &home.path().to_string_lossy())]);
+    let run_id = h.start(CLI_SESSION);
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Failed);
+    assert!(fallback_events(&events).is_empty(), "no host fallback");
+    assert!(h.pending(&run_id).is_empty());
+}
+
+/// A `best_effort` node's host fallback runs without a sandbox and its
+/// attempt record says so, with the reason.
+#[test]
+fn a_best_effort_host_fallback_is_recorded_without_a_sandbox() {
+    let h = Host::new(&one_node(", isolation: best_effort"), &[]);
+    h.agent("echo 'Error: Not logged in. Please run /login' >&2\nexit 1");
+    let _lock = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _env = h.env();
+    let _home = Env::set(&[("HOME", &home.path().to_string_lossy())]);
+    let run_id = h.start(CLI_SESSION);
+    let task = h.task(&run_id, "w");
+    h.submit(
+        &run_id,
+        &task.task_id,
+        SubmitStatus::Succeeded,
+        "done by host",
+    );
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    let records: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AttemptStarted {
+                isolation: Some(i), ..
+            } => Some(i.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.first().map(|r| r.backend.as_str()), Some("bwrap"));
+    let host = records.last().unwrap();
+    assert_eq!(host.backend, "none");
+    assert!(
+        host.fallbacks.iter().any(|f| f.starts_with("host_mode")),
+        "{host:?}"
+    );
+}
+
 #[test]
 fn an_interactive_fallback_task_asks_the_host_way_and_parks_on_blocked() {
     let h = Host::new(&one_node(", interactive: true"), &[]);
@@ -1393,21 +1545,14 @@ fn a_host_task_asks_a_decision_journaled_in_the_run_and_reports_its_model() {
     assert!(a.cost_usd.is_some_and(|c| c > 0.0), "{a:?}");
     assert_eq!(stub.count(), 1);
 
-    host_task::submit_to_run(
-        h.root.path(),
+    h.submit_request(
         &run_id,
         SubmitRequest {
-            task_id: task.task_id.clone(),
-            status: SubmitStatus::Succeeded,
-            output: "done".into(),
-            usage: None,
-            note: None,
-            submitted_by: "host".into(),
             client: None,
             model: Some("GLM-5.3-Flash".into()),
+            ..request(&task.task_id, SubmitStatus::Succeeded, "done")
         },
-    )
-    .unwrap();
+    );
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
     let decision = events
@@ -1641,4 +1786,37 @@ fn a_cli_attempt_shows_the_model_it_ran_on() {
     assert_eq!(models[0].executed_by, "cli");
     assert_eq!(models[0].model.as_deref(), Some("haiku"));
     assert!(!models[0].mismatch);
+}
+
+/// A profile's `process_env: allowlist` does not reach a host task (the
+/// host's subagent runs in the host process): no `agent_env_applied` is
+/// journaled, and `apb doctor --run` says the allowlist was not applied.
+#[test]
+fn an_allowlist_profile_in_host_mode_journals_nothing_and_doctor_warns() {
+    let h = Host::new(&one_node(""), &[]);
+    let profile = h.path(".apb/profiles/main/profile.yaml");
+    let mut yaml = fs::read_to_string(&profile).unwrap();
+    yaml.push_str("process_env:\n  policy: allowlist\n");
+    fs::write(&profile, yaml).unwrap();
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(
+        count(&events, |p| matches!(
+            p,
+            EventPayload::AgentEnvApplied { .. }
+        )),
+        0
+    );
+    let checks = apb_engine::run_doctor::diagnose_run(h.root.path(), &run_id).unwrap();
+    assert!(
+        checks.iter().any(|c| c.subject == "process env"
+            && c.status == apb_engine::run_doctor::WARN
+            && c.detail.contains("host tasks")),
+        "{checks:?}"
+    );
 }

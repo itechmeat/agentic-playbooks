@@ -20,6 +20,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::Sha256;
 
+use crate::secret::Secret;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Query parameter names of the `meta_hub` challenge dialect.
@@ -87,15 +89,15 @@ pub fn signature_is_well_formed(presented: &str, prefix: &str) -> bool {
 /// providers send uppercase; the comparison itself still leaks nothing about
 /// which byte differed. A header that does not carry the prefix, or carries
 /// a value of the wrong length, is refused without hashing anything further.
-pub fn verify_signature_hex(secret: &str, body: &[u8], presented: &str, prefix: &str) -> bool {
+pub fn verify_signature_hex(secret: &Secret, body: &[u8], presented: &str, prefix: &str) -> bool {
     if secret.is_empty() {
         return false;
     }
     let Some(hex) = well_formed_digest(presented, prefix) else {
         return false;
     };
-    let expected = hmac_sha256_hex(secret.as_bytes(), body);
-    crate::server_auth::ct_eq_str(&expected, &hex)
+    let expected = hmac_sha256_hex(secret.expose_secret().as_bytes(), body);
+    crate::secret::ct_eq_str(&expected, &hex)
 }
 
 /// The `meta_hub` challenge: echo `hub.challenge` when `hub.mode` is
@@ -103,7 +105,7 @@ pub fn verify_signature_hex(secret: &str, body: &[u8], presented: &str, prefix: 
 /// token comparison is constant time; an empty configured token never
 /// verifies, so a connector with the block but no configured secret cannot
 /// be subscribed by anyone.
-pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &str) -> Challenge {
+pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &Secret) -> Challenge {
     if verify_token.is_empty() {
         return Challenge::Reject;
     }
@@ -113,7 +115,7 @@ pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &str)
     let Some(presented) = params.get(HUB_TOKEN) else {
         return Challenge::Reject;
     };
-    if !crate::server_auth::ct_eq_str(presented, verify_token) {
+    if !verify_token.ct_eq(presented) {
         return Challenge::Reject;
     }
     match params.get(HUB_CHALLENGE) {
@@ -131,38 +133,9 @@ pub fn meta_hub_challenge(params: &BTreeMap<String, String>, verify_token: &str)
 /// shape a duplicate of the first.
 pub fn dedupe_id(body: &Value, raw: &[u8], path: Option<&str>) -> String {
     if let Some(path) = path
-        && let Some(found) = lookup(body, path)
+        && let Some(found) = super::common::scalar_at_path(body, path)
     {
         return found;
     }
     crate::content::sha256_hex(raw)
-}
-
-/// Resolves a dot path over objects and numeric array indices, returning the
-/// scalar at the end as a string. Objects and arrays are not ids.
-///
-/// Deliberately not the engine's `connector::call::response::lookup_path`,
-/// and deliberately not shared with it. That walker is maps-only by
-/// documented design because it implements `response_pick`, whose semantics
-/// must not change for connectors already relying on them; this one needs
-/// numeric array indices, because `entry.0.id` is the shape real providers
-/// deliver. `apb-core` also cannot depend on `apb-engine`, so sharing would
-/// mean moving `response_pick`'s walker down a crate and widening it. The two
-/// notations stay distinct on purpose (spec 2026-08-16-webhook-ingest-design,
-/// webhook block).
-fn lookup(body: &Value, path: &str) -> Option<String> {
-    let mut cursor = body;
-    for segment in path.split('.') {
-        cursor = match cursor {
-            Value::Object(map) => map.get(segment)?,
-            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
-            _ => return None,
-        };
-    }
-    match cursor {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
 }

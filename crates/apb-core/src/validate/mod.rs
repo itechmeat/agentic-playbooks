@@ -7,13 +7,21 @@
 //! new rule lands next to the rules it is related to instead of at the end of
 //! one long file.
 
+mod baseline;
+mod budget;
 mod connectors;
 mod decisions;
 mod forks;
 mod graph;
+mod isolation;
 mod judge;
+mod known_problems;
+mod list;
 mod node_io;
-mod nodes;
+pub(crate) mod nodes;
+mod params;
+mod publish;
+mod quality;
 mod templates;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -21,8 +29,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
-    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, Isolation,
-    NodeKind, Playbook, SuccessCheck,
+    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, NodeKind,
+    Playbook, SuccessCheck,
 };
 
 use connectors::check_connectors;
@@ -41,18 +49,21 @@ use node_io::{
     check_cache_key, check_declared_fields, check_session_handoff, check_workdir, check_worktree,
 };
 use nodes::{
-    check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
-    check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
+    check_audience, check_cache, check_engine_ids, check_expected_duration, check_finish,
+    check_goal, check_interactive, check_playbook_ref, check_scripts, check_success_check,
+    check_trigger,
 };
+pub use publish::{OpenAgent, publish_only_violations};
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
     Warning,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Issue {
     pub code: &'static str,
     pub severity: Severity,
@@ -153,10 +164,13 @@ impl ValidationContext {
 pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
     let mut r = ValidationReport::default();
     check_unique_ids(playbook, &mut r); // V01, V02
+    check_engine_ids(playbook, &mut r); // V68
     check_expected_duration(playbook, &mut r); // V19, V20
     check_finish(playbook, &mut r); // V21
+    check_audience(playbook, &mut r); // V101
     check_playbook_ref(playbook, &mut r); // V22
-    check_connectors(playbook, ctx, &mut r); // V23, V24, V25, V26, V42, V43
+    check_connectors(playbook, ctx, &mut r); // V23-V26, V42, V43, V69, V84
+    baseline::check_baseline(playbook, ctx, &mut r); // V62-V67
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32
@@ -169,6 +183,12 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_judge_edges(playbook, &mut r); // V59, V60 (issue #165 Part 7)
     check_decision_opt_ins(playbook, ctx, &mut r); // V70, V71, V72, V73, V74
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
+    list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
+    budget::check_budget(playbook, &mut r); // V96-V98
+    params::check_params(playbook, &mut r); // V99, V100
+    quality::check_quality(playbook, &mut r); // V102-V107
+    known_problems::check_known_problems(playbook, &mut r); // V108-V111
+    publish::check_publish(playbook, &mut r); // V116-V120
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10
@@ -180,7 +200,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_templates(playbook, &mut r); // V13
         check_cross_branch_reads(playbook, &mut r); // V38
         check_refs(playbook, ctx, &mut r); // V14, V15
-        check_isolation(playbook, &mut r); // V16
+        // V16 is retired (isolation is enforced now); its number stays reserved.
+        isolation::check_isolation(playbook, &mut r); // V112-V115
         check_trigger(playbook, &mut r); // V17
         check_goal(playbook, &mut r); // V41
         check_session_handoff(playbook, &mut r); // V44, V45

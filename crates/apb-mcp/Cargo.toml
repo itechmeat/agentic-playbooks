@@ -15,11 +15,18 @@ yaml_serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 anyhow = "1.0"
-rmcp = { version = "=3.5.0", features = ["transport-io"] }
+rmcp = { version = "=3.7.0", features = ["transport-io"] }
 schemars = "1.2.1"
 hmac.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+# The TypeScript derives of the shapes the HTTP API returns as they are
+# (grades, the candidate decision after a grade); only under the `ts`
+# feature, which apb-server's contract test turns on.
+ts-rs = { version = "12", optional = true }
+
+[features]
+ts = ["dep:ts-rs", "apb-engine/ts", "apb-core/ts"]
 
 [dev-dependencies]
 apb-decide = { path = "../apb-decide", features = ["testing"] }

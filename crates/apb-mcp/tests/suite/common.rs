@@ -36,16 +36,34 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
 /// developer's real `~/.config/apb`.
 pub struct ConfigSandbox {
     _dir: tempfile::TempDir,
-    prev: Option<std::ffi::OsString>,
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
     _lock: MutexGuard<'static, ()>,
 }
 
 pub fn config_sandbox() -> ConfigSandbox {
+    sandbox(&[])
+}
+
+/// A [`config_sandbox`] in which project registration works even on CI:
+/// `CI` and `APB_NO_REGISTRY` are cleared for the test and restored on drop.
+pub fn registry_sandbox() -> ConfigSandbox {
+    sandbox(&["CI", "APB_NO_REGISTRY"])
+}
+
+fn sandbox(cleared: &[&'static str]) -> ConfigSandbox {
     let lock = env_lock();
     let dir = tempfile::tempdir().unwrap();
-    let prev = std::env::var_os("APB_CONFIG_DIR");
+    let prev = std::iter::once("APB_CONFIG_DIR")
+        .chain(cleared.iter().copied())
+        .map(|name| (name, std::env::var_os(name)))
+        .collect();
     // SAFETY: env mutation is serialized by ENV_LOCK, held until drop.
-    unsafe { std::env::set_var("APB_CONFIG_DIR", dir.path()) };
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", dir.path());
+        for name in cleared {
+            std::env::remove_var(name);
+        }
+    }
     ConfigSandbox {
         _dir: dir,
         prev,
@@ -57,9 +75,11 @@ impl Drop for ConfigSandbox {
     fn drop(&mut self) {
         // SAFETY: still under ENV_LOCK (the guard drops after this body).
         unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
-                None => std::env::remove_var("APB_CONFIG_DIR"),
+            for (name, value) in &self.prev {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
             }
         }
     }

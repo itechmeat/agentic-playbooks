@@ -269,3 +269,148 @@ fn runs_with_an_id_lists_branch_failures() {
             "  branch_cancelled b: fork `start`: cancelled after `a` failed\n",
         ));
 }
+
+// --- the human run outcome ---
+
+/// A run whose attempt reported a finding.
+fn project_with_a_finding() -> tempfile::TempDir {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/noted-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1790000000100,"type":"run_started","playbook":"noted","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":1790000000101,"type":"node_started","node":"w","attempt":1}"#,
+            "\n",
+            r#"{"seq":2,"ts":1790000000102,"type":"attempt_notes","node":"w","attempt":1,"findings":[{"kind":"security","location":"src/auth.rs:12","evidence":"token compared with ==","why_not_fixed":"needs a design decision"}]}"#,
+            "\n",
+            r#"{"seq":3,"ts":1790000000103,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
+            "\n",
+            r#"{"seq":4,"ts":1790000000104,"type":"run_finished","outcome":"succeeded"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn the_runs_table_marks_a_run_that_needs_a_look() {
+    let dir = project_with_a_finding();
+    apb()
+        .arg("runs")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "noted-1\tnoted\tsucceeded\tneeds a look: 1 finding",
+        ))
+        .stdout(
+            predicate::str::contains("demo-1\tdemo\tsucceeded\t1 unknown")
+                .and(predicate::str::contains("demo-1\tdemo\tsucceeded\tneeds a look").not()),
+        );
+}
+
+#[test]
+fn runs_with_an_id_prints_the_outcome_with_its_findings() {
+    let dir = project_with_a_finding();
+    apb()
+        .args(["runs", "noted-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  outcome: Run succeeded; nothing checked by the engine; needs a look (1 finding)",
+        ))
+        .stdout(predicate::str::contains("    Findings:"))
+        .stdout(predicate::str::contains(
+            "      security at src/auth.rs:12: token compared with == (not fixed: needs a design decision; reported by w attempt 1)",
+        ));
+}
+
+const LISTED: &str = "schema: 2\nid: listed\nname: listed\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: start, type: start }\n  - id: rows\n    type: agent_task\n    prompt: Check the row in the item section.\n    list:\n      items: { inline: [ { id: a }, { id: b } ] }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: rows }\n  - { from: rows, to: done }\n";
+
+const LIST_JOURNAL: &str = concat!(
+    r#"{"seq":0,"ts":1,"type":"run_started","playbook":"listed","version":"1.0.0"}"#,
+    "\n",
+    r#"{"seq":1,"ts":2,"type":"list_started","node":"rows","total":2,"items_digest":"d","batch_size":2,"parallel":1}"#,
+    "\n",
+    r#"{"seq":2,"ts":3,"type":"list_item_settled","node":"rows","item":"a","state":"passed","verdict":"accept","round":0}"#,
+    "\n",
+    r#"{"seq":3,"ts":4,"type":"list_item_settled","node":"rows","item":"b","state":"needs_look","reason":"failed","round":1}"#,
+    "\n",
+);
+
+#[test]
+fn runs_items_prints_one_line_per_item_in_the_state_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let run = dir.path().join(".apb/runs/listed-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("playbook.yaml"), LISTED).unwrap();
+    fs::write(run.join("events.jsonl"), LIST_JOURNAL).unwrap();
+    apb()
+        .args(["runs", "listed-1", "--items", "--state", "needs_look"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "rows: 2 of 2 processed, 1 passed, 1 need a look\n  b\tneeds_look\tround 1\tfailed\n",
+        ))
+        .stdout(predicate::str::contains("  a\t").not());
+    apb()
+        .args(["runs", "listed-1", "--items", "--node", "other"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("no list node `other`"));
+    apb()
+        .args(["runs", "listed-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "List rows: 2 processed, 1 passed, 1 needs a look",
+        ));
+}
+
+// --- isolation: one line per isolated attempt ---
+
+#[test]
+fn runs_with_an_id_prints_one_isolation_line_per_isolated_attempt() {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/iso-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":1790000000001,"type":"attempt_started","node":"w","attempt":1,"agent":"claude","isolation":{"level":"full","backend":"bwrap","network":"none","limits":["user.host_uid","kernel.escapes"]}}"#,
+            "\n",
+            r#"{"seq":2,"ts":1790000000002,"type":"attempt_started","node":"b","attempt":1,"agent":"claude","isolation":{"level":"best_effort","backend":"none","network":"open","limits":["no_sandbox"],"fallbacks":["disabled (APB_SANDBOX=off)"]}}"#,
+            "\n",
+            r#"{"seq":3,"ts":1790000000003,"type":"attempt_started","node":"plain","attempt":1,"agent":"claude"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let out = apb()
+        .args(["runs", "iso-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  isolation node `w` attempt 1: full on bwrap, network none; limits: user.host_uid, kernel.escapes",
+        ))
+        .stdout(predicate::str::contains(
+            "  isolation node `b` attempt 1: best_effort on none, network open; limits: no_sandbox; no sandbox: disabled (APB_SANDBOX=off)",
+        ))
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.matches("  isolation ").count(), 2, "{text}");
+}

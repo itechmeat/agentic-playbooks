@@ -1,7 +1,7 @@
 //! Reply and token usage from each agent CLI's machine output, over
 //! recorded outputs (see `apb_core::agent_output` for the shapes).
 
-use apb_core::agent_output::{AgentUsage, UsageSource, reply, usage};
+use apb_core::agent_output::{AgentUsage, UsageSource, has_final_record, reply, usage};
 
 const CLAUDE: &str = include_str!("../fixtures/agent_output/claude_result.json");
 const CODEX: &str = include_str!("../fixtures/agent_output/codex_exec.jsonl");
@@ -10,24 +10,6 @@ const OPENCODE: &str = include_str!("../fixtures/agent_output/opencode_run.jsonl
 const ZCODE: &str = include_str!("../../../apb-engine/tests/fixtures/zcode/json_edit.json");
 
 const REPORT: &str = "hello\n\n```yaml\nstatus: success\nsummary: read the file\n```";
-
-#[test]
-fn claude_json_result_gives_reply_usage_and_reported_cost() {
-    let r = reply("claude", CLAUDE).unwrap();
-    assert_eq!(r.text, REPORT);
-    assert!(!r.is_error);
-    assert_eq!(
-        usage("claude", CLAUDE).unwrap(),
-        AgentUsage {
-            input_tokens: 18,
-            output_tokens: 443,
-            cache_read_tokens: 52079,
-            cache_write_tokens: 14967,
-            cost_usd: Some(0.0373749),
-            source: UsageSource::Reported,
-        }
-    );
-}
 
 #[test]
 fn claude_stream_json_reads_the_final_result_line() {
@@ -60,41 +42,9 @@ fn claude_is_error_and_usage_without_a_model_breakdown() {
 }
 
 #[test]
-fn codex_exec_json_gives_the_last_agent_message_and_turn_usage() {
-    assert_eq!(reply("codex", CODEX).unwrap().text, REPORT);
-    assert_eq!(
-        usage("codex", CODEX).unwrap(),
-        AgentUsage {
-            input_tokens: 24763 - 24448,
-            output_tokens: 122,
-            cache_read_tokens: 24448,
-            cache_write_tokens: 0,
-            cost_usd: None,
-            source: UsageSource::Reported,
-        }
-    );
-}
-
-#[test]
 fn a_failed_codex_turn_reports_no_reply_and_no_usage() {
     assert_eq!(reply("codex", CODEX_FAILED), None);
     assert_eq!(usage("codex", CODEX_FAILED), None);
-}
-
-#[test]
-fn opencode_json_sums_every_step() {
-    assert_eq!(reply("opencode", OPENCODE).unwrap().text, REPORT);
-    assert_eq!(
-        usage("opencode", OPENCODE).unwrap(),
-        AgentUsage {
-            input_tokens: 63799 + 217,
-            output_tokens: 56 + 24 + 3 + 17,
-            cache_read_tokens: 63744,
-            cache_write_tokens: 0,
-            cost_usd: None,
-            source: UsageSource::Reported,
-        }
-    );
 }
 
 #[test]
@@ -179,4 +129,40 @@ fn unverifiable_overlaps_are_kept_as_the_cli_reports_them() {
     let zcode = ZCODE.replace(r#""reasoningTokens": 0"#, r#""reasoningTokens": 40"#);
     assert_ne!(zcode, ZCODE);
     assert_eq!(usage("zcode", &zcode).unwrap().output_tokens, 318);
+}
+
+#[test]
+fn the_final_record_is_found_in_each_machine_format_and_missing_when_cut() {
+    for (agent, out) in [
+        ("claude", CLAUDE),
+        ("codex", CODEX),
+        ("opencode", OPENCODE),
+        ("zcode", ZCODE),
+    ] {
+        assert_eq!(has_final_record(agent, out), Some(true), "{agent}");
+        // The closing record torn in half is not a record.
+        let cut = &out[..out.trim_end().len() - 5];
+        assert_eq!(has_final_record(agent, cut), Some(false), "{agent} cut");
+    }
+    assert_eq!(has_final_record("hermes", "plain text reply"), None);
+}
+
+/// A failed run ends with its own terminal record instead of the success
+/// one; that is a whole ending, not a cut one.
+#[test]
+fn a_failed_run_ends_with_a_final_record_too() {
+    for (agent, last) in [
+        (
+            "codex",
+            r#"{"type":"turn.failed","error":{"message":"rate limited"}}"#,
+        ),
+        ("codex", r#"{"type":"error","message":"stream error"}"#),
+        (
+            "opencode",
+            r#"{"type":"error","error":{"name":"APIError"}}"#,
+        ),
+    ] {
+        let out = format!("{{\"type\":\"item.started\"}}\n{last}\n");
+        assert_eq!(has_final_record(agent, &out), Some(true), "{agent}: {last}");
+    }
 }

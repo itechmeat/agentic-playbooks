@@ -150,15 +150,54 @@ pub struct ProfileWrite {
     /// creates a new profile.
     pub expected_digest: Option<String>,
     pub soul_requirement: SoulRequirement,
+    /// The optional settings a surface may leave out (see
+    /// [`ProfileOptions`]).
+    pub options: ProfileOptions,
+}
+
+/// The optional profile settings. Each `None` keeps the stored profile's
+/// value on an update (absent for a new profile), so a surface that cannot
+/// express a setting never strips it.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ProfileOptions {
     /// The agent environment (`minimal`, the default, or `full`, the opt-in
-    /// to the operator's whole personal setup). `None` keeps the stored
-    /// profile's value on an update (absent, so minimal, for a new profile),
-    /// so a surface that cannot express it never strips an opt-in.
+    /// to the operator's whole personal setup).
     pub environment: Option<apb_core::profile::AgentEnvironment>,
     /// The ZCode mode for the profile's zcode steps in an autonomous run.
-    /// `None` keeps the stored value on an update (absent for a new profile),
-    /// like `environment`.
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    /// Which operator variables the agent process inherits. `Some` with
+    /// `inherit` clears a stored allowlist.
+    pub process_env: Option<apb_core::process_env::ProcessEnvPolicy>,
+}
+
+impl ProfileOptions {
+    /// Fills every setting left out from `stored`, the profile the update
+    /// replaces (read under the lock, from the exact content the CAS
+    /// matched).
+    pub fn keep_stored(&mut self, stored: Option<&ProfileDoc>) {
+        let Some(stored) = stored else {
+            return;
+        };
+        if self.environment.is_none() {
+            self.environment = stored.environment;
+        }
+        if self.zcode_mode.is_none() {
+            self.zcode_mode = stored.zcode_mode;
+        }
+        if self.process_env.is_none() {
+            self.process_env = stored.process_env.clone();
+        }
+    }
+
+    /// Writes the settings into `doc`, each default as the absence of its
+    /// key (`minimal`, `inherit`).
+    fn apply(self, doc: &mut ProfileDoc) {
+        doc.environment = self
+            .environment
+            .filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal);
+        doc.zcode_mode = self.zcode_mode;
+        doc.process_env = apb_core::process_env::ProcessEnvPolicy::stored(self.process_env);
+    }
 }
 
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
@@ -172,31 +211,30 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         executor,
         expected_digest,
         soul_requirement,
-        environment,
-        zcode_mode,
+        mut options,
     } = req;
     apb_core::profile::validate_profile_name(&name).map_err(ToolError::Engine)?;
     let scope_enum = parse_scope(&scope)?;
     let parent = scope_dir(root, scope_enum)?;
     std::fs::create_dir_all(&parent).map_err(|e| ToolError::Engine(e.to_string()))?;
 
-    // zcode models: stored in the canonical bare spelling (the legacy
-    // `zai-individual/` prefix is accepted and dropped) and refused outside
-    // apb's allowlist, for the primary and every fallback.
-    let zcode_model = |agent: &str, model: String| -> Result<String, ToolError> {
-        if agent != apb_core::zcode::AGENT_ID {
-            return Ok(model);
+    // Each model is stored in the spelling its agent's module gives it, or
+    // refused, for the primary and every fallback (zcode: the canonical bare
+    // spelling, the legacy `zai-individual/` prefix dropped, nothing outside
+    // apb's allowlist).
+    let stored_model = |agent: &str, model: String| -> Result<String, ToolError> {
+        match apb_core::agents::lookup(agent) {
+            Some(a) => a
+                .models()
+                .canonical_model(&model)
+                .map_err(ToolError::Engine),
+            None => Ok(model),
         }
-        let family = apb_core::zcode::home_dir()
-            .map(|h| apb_core::zcode::account_family(&h))
-            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
-        apb_core::zcode::check_model_allowed(&model, &family).map_err(ToolError::Engine)?;
-        Ok(apb_core::zcode::canonical_model(&model, &family))
     };
-    let primary_model = zcode_model(&executor.agent, executor.model)?;
+    let primary_model = stored_model(&executor.agent, executor.model)?;
     let mut fallbacks = Vec::with_capacity(executor.fallbacks.len());
     for (agent, model) in executor.fallbacks {
-        let model = zcode_model(&agent, model)?;
+        let model = stored_model(&agent, model)?;
         fallbacks.push(ProfileFallback { agent, model });
     }
     let mut doc = ProfileDoc {
@@ -209,11 +247,11 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         },
         soul: soul_requirement,
         skills,
-        // `minimal` is the default and is written as the absence of the key.
-        environment: environment.filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal),
+        environment: None,
         hermetic: None,
-        zcode_mode,
+        zcode_mode: None,
         tiers: Default::default(),
+        process_env: None,
     };
 
     // Validation: the agent is known (builtin or config) - both the primary and EVERY
@@ -269,22 +307,24 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
                     "expected_digest does not match current".into(),
                 ));
             }
-            // An update that does not state `environment` keeps the stored
-            // value (read under the lock, from the exact content the CAS
-            // matched).
-            let stored = ProfileDoc::from_yaml(&cur_yaml).ok();
-            if environment.is_none() {
-                doc.environment = stored.as_ref().and_then(|d| d.environment);
-            }
-            // Likewise `zcode_mode`.
-            if zcode_mode.is_none() {
-                doc.zcode_mode = stored.as_ref().and_then(|d| d.zcode_mode);
-            }
+            // A stored profile that does not parse is refused, not treated
+            // as empty: an update that leaves a setting out would otherwise
+            // drop it silently (an allowlist would become `inherit`).
+            let stored = ProfileDoc::from_yaml(&cur_yaml).map_err(|e| {
+                ToolError::Engine(format!(
+                    "the stored profile.yaml does not parse ({e}); fix it before updating"
+                ))
+            })?;
+            options.keep_stored(Some(&stored));
             // No write surface edits tiers yet (issue #165 Part 12): an
             // update keeps the stored ones.
-            doc.tiers = stored.map(|d| d.tiers).unwrap_or_default();
+            doc.tiers = stored.tiers;
         }
     }
+    options.apply(&mut doc);
+    // The structural checks a run start makes, refused here before anything
+    // is written.
+    doc.check().map_err(ToolError::Engine)?;
     let yaml = yaml_serde::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
     // The bundle as it stands before this write (old profile, live skills),
     // read under the lock: whether its skill content was approved decides
@@ -387,6 +427,93 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     Ok(out)
 }
 
+/// Why a profile could not be copied to another scope.
+#[derive(Debug, thiserror::Error)]
+pub enum CopyProfileError {
+    #[error("profile `{0}` not found")]
+    NotFound(String),
+    /// A profile copied to the global scope may not use project skills.
+    #[error(
+        "profile references project skill `{0}`; move it, drop it, or keep the profile in project scope"
+    )]
+    ProjectSkill(String),
+    #[error("target scope already has this profile")]
+    Exists,
+    /// The name is not a profile name, or the scopes are not two distinct
+    /// concrete ones.
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Io(String),
+}
+
+/// Copies profile `name` from scope `from` to scope `to` under both
+/// per-profile locks (taken in a fixed order, so two copies cannot
+/// deadlock, and held for the whole read, check and copy so the source
+/// cannot change under it). The source stays. Refuses a profile with
+/// project skills when copying to the global scope, a name the target
+/// already has, an unsafe name, and anything but two distinct concrete
+/// scopes, before it touches the filesystem.
+pub fn copy_profile_locked(
+    root: &Path,
+    name: &str,
+    from: ProfileScope,
+    to: ProfileScope,
+) -> Result<(), CopyProfileError> {
+    apb_core::profile::validate_profile_name(name).map_err(CopyProfileError::Invalid)?;
+    if from == to || from == ProfileScope::Auto || to == ProfileScope::Auto {
+        return Err(CopyProfileError::Invalid(
+            "from and to must be two distinct scopes, project or global".into(),
+        ));
+    }
+    let io = |e: std::io::Error| CopyProfileError::Io(e.to_string());
+    let src_parent = scope_dir(root, from).map_err(|e| CopyProfileError::Io(e.to_string()))?;
+    let dst_parent = scope_dir(root, to).map_err(|e| CopyProfileError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&dst_parent).map_err(io)?;
+    let lock_name = format!("{name}.lock");
+    let (first, second) = if src_parent <= dst_parent {
+        (&src_parent, &dst_parent)
+    } else {
+        (&dst_parent, &src_parent)
+    };
+    let _l1 = apb_core::fsutil::lock_dir(first, &lock_name).map_err(io)?;
+    let _l2 = apb_core::fsutil::lock_dir(second, &lock_name).map_err(io)?;
+
+    let src = src_parent.join(name);
+    if !src.join("profile.yaml").is_file() {
+        return Err(CopyProfileError::NotFound(name.to_string()));
+    }
+    if to == ProfileScope::Global
+        && let Some(skill) = project_skill(&src)?
+    {
+        return Err(CopyProfileError::ProjectSkill(skill));
+    }
+    let dst = dst_parent.join(name);
+    if dst.exists() {
+        return Err(CopyProfileError::Exists);
+    }
+    // A copy that fails part way leaves nothing: a half profile would read
+    // as an existing one to the next attempt.
+    apb_core::fsutil::copy_tree(&src, &dst).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dst);
+        io(e)
+    })
+}
+
+/// The first project skill the profile in `profile_dir` uses, if any. A
+/// profile that does not parse is an error, never "no project skills".
+pub fn project_skill(profile_dir: &Path) -> Result<Option<String>, CopyProfileError> {
+    let yaml = std::fs::read_to_string(profile_dir.join("profile.yaml"))
+        .map_err(|e| CopyProfileError::Io(e.to_string()))?;
+    let doc = ProfileDoc::from_yaml(&yaml)
+        .map_err(|e| CopyProfileError::Invalid(format!("profile.yaml does not parse: {e}")))?;
+    Ok(doc
+        .skills
+        .iter()
+        .find(|s| s.scope == ProfileScope::Project)
+        .map(|s| s.name.clone()))
+}
+
 /// Moving a profile between scopes: copy semantics (spec 4.2). The source
 /// remains; deletion is a separate `profile_delete`.
 pub fn profile_move(root: &Path, name: &str, from: &str, to: &str) -> Result<Value, ToolError> {
@@ -396,52 +523,17 @@ pub fn profile_move(root: &Path, name: &str, from: &str, to: &str) -> Result<Val
     if from_s == to_s {
         return Err(ToolError::Engine("from and to scopes are the same".into()));
     }
-    let src_parent = scope_dir(root, from_s)?;
-    let dst_parent = scope_dir(root, to_s)?;
-    std::fs::create_dir_all(&dst_parent).map_err(|e| ToolError::Engine(e.to_string()))?;
-
-    // Both per-profile locks in a deterministic order (by parent path) -
-    // a concurrent move cannot deadlock. We hold both for the whole duration of
-    // read/validate/conflict/copy so the source cannot change under us.
-    let lock_name = format!("{name}.lock");
-    let (first, second) = if src_parent <= dst_parent {
-        (&src_parent, &dst_parent)
-    } else {
-        (&dst_parent, &src_parent)
-    };
-    let _l1 = apb_core::fsutil::lock_dir(first, &lock_name)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
-    let _l2 = apb_core::fsutil::lock_dir(second, &lock_name)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
-
-    let src = src_parent.join(name);
-    if !src.join("profile.yaml").is_file() {
-        return Err(ToolError::NotFound(format!("profile `{name}` in `{from}`")));
-    }
-    let dst = dst_parent.join(name);
-    // A move from project -> global with references to project skills is forbidden.
-    if to_s == ProfileScope::Global {
-        let yaml = std::fs::read_to_string(src.join("profile.yaml"))
-            .map_err(|e| ToolError::Engine(e.to_string()))?;
-        if let Ok(doc) = ProfileDoc::from_yaml(&yaml) {
-            for s in &doc.skills {
-                if s.scope == ProfileScope::Project {
-                    return Err(ToolError::Engine(format!(
-                        "profile references project skill `{}`; move it, drop it, or keep the profile in project scope",
-                        s.name
-                    )));
-                }
-            }
+    match copy_profile_locked(root, name, from_s, to_s) {
+        Ok(()) => Ok(json!({ "name": name, "from": from, "to": to, "copied": true })),
+        Err(CopyProfileError::NotFound(_)) => {
+            Err(ToolError::NotFound(format!("profile `{name}` in `{from}`")))
         }
-    }
-    if dst.exists() {
-        return Err(ToolError::Engine(
+        Err(CopyProfileError::Exists) => Err(ToolError::Engine(
             json!({ "error": "conflict", "detail": "target scope already has this profile" })
                 .to_string(),
-        ));
+        )),
+        Err(e) => Err(ToolError::Engine(e.to_string())),
     }
-    apb_core::fsutil::copy_tree(&src, &dst).map_err(|e| ToolError::Engine(e.to_string()))?;
-    Ok(json!({ "name": name, "from": from, "to": to, "copied": true }))
 }
 
 /// Deleting a profile with a scan of playbook references (spec 4.2).

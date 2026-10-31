@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseDocument, type Document } from 'yaml'
 import {
+  EDITOR_NODE_KINDS,
   addEdge,
   addNode,
   removeEdge,
@@ -8,6 +9,8 @@ import {
   saveNotice,
   suggestNodeId,
   updateNode,
+  isolationForm,
+  isolationValue,
 } from './playbookedit'
 
 // A workflow with all top-level fields (schema, version, params, executors,
@@ -92,6 +95,38 @@ describe('addNode', () => {
     const before = doc.toString()
     addNode(doc, 'script', 'lint')
     expect(doc.toString()).toBe(before)
+  })
+
+  it('starts a publish node from the last node that commits and origin', () => {
+    const next = addNode(docOf(FULL_YAML), 'publish', 'ship')
+    const ship = items(next, 'nodes').find((n) => n.get('id') === 'ship')!
+    expect(ship.get('type')).toBe('publish')
+    expect(ship.get('from')).toBe('plan')
+    expect(ship.get('remote')).toBe('origin')
+    expect(EDITOR_NODE_KINDS).toContain('publish')
+  })
+
+  it('starts a publish node from the last plain source, past list nodes', () => {
+    const yaml = [
+      'id: demo',
+      'nodes:',
+      '  - { id: start, type: start }',
+      '  - { id: impl, type: agent_task, prompt: x }',
+      '  - { id: build, type: script, script: b.sh }',
+      '  - { id: each, type: agent_task, prompt: y, list: { items: { inline: [] } } }',
+      '  - just a string',
+      '',
+    ].join('\n')
+    const ship = items(addNode(docOf(yaml), 'publish', 'ship'), 'nodes').find((n) => n.get?.('id') === 'ship')!
+    expect(ship.get('from')).toBe('build')
+  })
+
+  it('starts a publish node with only the remote when nothing can commit', () => {
+    const ship = items(addNode(docOf('id: demo\nnodes:\n  - { id: start, type: start }\n'), 'publish', 'ship'), 'nodes').find(
+      (n) => n.get?.('id') === 'ship',
+    )!
+    expect(ship.get('from')).toBeUndefined()
+    expect(ship.get('remote')).toBe('origin')
   })
 
   it('creates nodes array if missing', () => {
@@ -350,3 +385,82 @@ describe('adding a judge node', () => {
   })
 })
 
+
+describe('isolation', () => {
+  it('reads the shorthand and the long map', () => {
+    expect(isolationForm('full')).toEqual({ level: 'full', network: '', readOnly: [], writable: [] })
+    expect(isolationForm(undefined).level).toBe('')
+    expect(isolationForm('strict').level).toBe('')
+    expect(
+      isolationForm({ level: 'best_effort', network: 'none', read_only: ['~/.rustup'], writable: ['~/.cargo/registry'] }),
+    ).toEqual({ level: 'best_effort', network: 'none', readOnly: ['~/.rustup'], writable: ['~/.cargo/registry'] })
+  })
+
+  it('writes a level alone as the shorthand and removes an empty one', () => {
+    expect(isolationValue(undefined, { level: 'full' })).toBe('full')
+    expect(isolationValue('full', { level: '' })).toBeUndefined()
+    expect(isolationValue({ level: 'full', network: 'open' }, { network: '' })).toBe('full')
+  })
+
+  it('keeps the extra paths and unknown keys of the long map', () => {
+    const current = { level: 'full', network: 'none', read_only: ['~/.rustup'], writable: ['~/.cargo/registry'], future: 1 }
+    expect(isolationValue(current, { level: 'best_effort' })).toEqual({
+      level: 'best_effort',
+      network: 'none',
+      read_only: ['~/.rustup'],
+      writable: ['~/.cargo/registry'],
+      future: 1,
+    })
+    expect(isolationValue(current, { network: 'open' })).toMatchObject({ network: 'open', read_only: ['~/.rustup'] })
+  })
+
+  it('drops the network and the paths with a level that does not isolate', () => {
+    expect(isolationValue({ level: 'full', network: 'none' }, { level: 'none' })).toBe('none')
+    expect(isolationValue({ level: 'full', network: 'none', read_only: ['/opt/sdk'] }, { level: '' })).toBeUndefined()
+    expect(
+      isolationValue({ level: 'full', read_only: ['/a'], writable: ['/b'], future: 1 }, { level: 'none' }),
+    ).toEqual({ level: 'none', future: 1 })
+  })
+
+  it('keeps an unknown level or network as written for display', () => {
+    expect(isolationForm('fulll')).toMatchObject({ level: '', rawLevel: 'fulll' })
+    expect(isolationForm({ level: 'full', network: 'half' })).toMatchObject({ level: 'full', rawNetwork: 'half' })
+    expect(isolationForm('full').rawLevel).toBeUndefined()
+    expect(isolationForm(undefined).rawLevel).toBeUndefined()
+  })
+
+  it('leaves a non-isolating value as written when no level is picked', () => {
+    const current = { level: 'none', network: 'none', read_only: ['/a'] }
+    expect(isolationValue(current, { network: 'open' })).toBe(current)
+  })
+
+  it('never rewrites an unknown level unless a level is picked', () => {
+    const current = { level: 'fulll', read_only: ['/a'] }
+    expect(isolationValue(current, { network: 'none' })).toBe(current)
+    expect(isolationValue(current, { level: 'full' })).toEqual({ level: 'full', read_only: ['/a'] })
+  })
+
+  it('upgrades the shorthand to the map when a network is chosen', () => {
+    expect(isolationValue('full', { network: 'none' })).toEqual({ level: 'full', network: 'none' })
+  })
+
+  it('round-trips through updateNode without touching other node keys', () => {
+    const doc = docOf(`nodes:
+  - id: w
+    type: agent_task
+    prompt: go
+    isolation:
+      level: full
+      read_only: [~/.rustup]
+`)
+    const node = (doc.toJS() as { nodes: Record<string, unknown>[] }).nodes[0]
+    const next = updateNode(doc, 'w', { isolation: isolationValue(node.isolation, { network: 'none' }) })
+    const out = (next.toJS() as { nodes: Record<string, unknown>[] }).nodes[0]
+    expect(out).toEqual({
+      id: 'w',
+      type: 'agent_task',
+      prompt: 'go',
+      isolation: { level: 'full', read_only: ['~/.rustup'], network: 'none' },
+    })
+  })
+})

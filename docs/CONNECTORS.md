@@ -87,6 +87,29 @@ so changing it requires re-approval. Secret values never appear in the run
 manifest, the event log, CLI output, or generated prompts, and the connector
 env names are scrubbed from every spawned agent's environment.
 
+Inside `apb` a resolved value is a sealed type: it prints as `***` in any log,
+error or debug output, cannot be written to a state file, and is compared in
+constant time. The value is read out only where it must leave the process: the
+rendered auth of the outgoing request, the SMTP or IMAP login, and the webhook
+signature check. Text that comes back from a call (a response body, an error
+message) has every resolved value replaced with `[redacted:<VAR>]`, or
+`[redacted:cmd:<field>]` for a command-sourced one: as resolved and in its
+percent-encoded forms (a query or form value, a path segment). A Basic
+credential echoed back as the base64 of `user:password` becomes
+`[redacted:basic]`. Other transformations (a hash, a different encoding) are
+not recognized.
+
+A connector call from a node runs as a child of the node's agent, so it
+inherits the agent's environment. Under a profile's `process_env: allowlist`
+(PROFILES.md "Process environment") that environment holds only the allowed
+names. `{{env.VAR}}` secrets are unaffected (the connector names are scrubbed
+from every agent anyway, and the dotenv files are read by `apb` itself), and
+`APB_CONFIG_DIR` and the run context always arrive. A `{{cmd:...}}` helper,
+however, runs with that same environment: a password manager or keyring helper
+that needs `PASSWORD_STORE_DIR`, `GNUPGHOME`, `OP_SESSION_*` or
+`DBUS_SESSION_BUS_ADDRESS` gets them only when the profile's `allow` names them.
+`apb doctor --run <id>` points at this when such a node fails.
+
 List the variables an account still needs (names only, never values) with:
 
 ```sh
@@ -139,6 +162,7 @@ pattern as `skills`:
       accounts: [team-bot]            # optional allowlist; absent = all
       functions: [send_message]       # optional allowlist; absent = all
       max_calls: 50                   # optional call budget, per executor attempt
+      on_unknown: refuse              # optional: refuse (default) or resend, see "Sending once"
     - name: github
       functions: read_only            # shorthand: every read_only function
 ```
@@ -177,6 +201,49 @@ call fails at account selection. The connectors block in the agent's prompt
 marks such a binding as not callable (no accounts configured, calls will fail
 until an account is added, use the fallback path) while still listing its
 functions, so the agent routes around it instead of retrying doomed calls.
+
+### Baseline reads (the `@baseline` site)
+
+A playbook's `baseline_check` may read a connector without any node binding
+it (see "baseline_check" in `docs/HOWTO-authoring.md`):
+
+```yaml
+baseline_check:
+  checks:
+    - id: unowned
+      connector: { name: twenty, account: default, function: list_opportunities,
+                   args: { filter: "ownerId[is]:NULL", limit: 1 } }
+      observe:
+        - { id: count, type: number, path: totalCount, expect: { equals: 0 } }
+```
+
+Each such check becomes a grant for the reserved site `@baseline` (a node
+may not use an id that starts with `@`, V68): exactly that function, on that account, frozen in
+the run manifest like a node's grant and covered by the playbook digest.
+The function must be `read_only` and must not be an inbox function: the
+validator refuses anything else when it can see the installed connector
+(V63), and the run start refuses it again when it resolves the grants. The
+engine calls it itself, in process, before the first node that can act and
+at the finish; each call is journaled as an ordinary `connector_call` with
+`node_id: "@baseline"`. A call that fails, a response not read whole, or
+one that does not satisfy the check's `complete_when` reads unknown, never
+as an empty or zero result. The call is bounded by the smaller of the
+check's `timeout_seconds` and the function's `timeout_sec`. Only the engine
+calls under `@baseline`: `apb connector call` refuses an `APB_NODE_ID` that
+starts with `@`.
+
+### Notifications (the `@notify` site)
+
+A run that notifies a person about its transitions (see `docs/NOTIFY.md`)
+sends through the person's own target, not through a node's grant: one
+function of one approved account, checked when the subscription is set and
+again at every send against the connector and account digests pinned then.
+Each notification is journaled as an ordinary `connector_call` with
+`node_id: "@notify"` and `origin: "notify"`, and goes through the send ledger
+under the site `@notify` with the label `notify:<transition>.<seq>`. The run
+outcome leaves those sends out of the run's own sends; `apb intent list`
+shows them. Like `@baseline`, the site is reserved for the engine: a node may
+not use an id that starts with `@` (V68).
 
 ## Receiving events (webhooks and the inbox)
 
@@ -240,6 +307,18 @@ executing. A per-account cap of 50 MB or 30 days, whichever hits first, keeps
 the store bounded; acknowledged events are dropped first, and only the size
 cap ever drops an unacknowledged one.
 
+When the size cap drops events a consumer has not acknowledged yet, its next
+read says so. The result carries `gap: {from, through}`, the inclusive range
+of sequence numbers that were stored and lost before this consumer saw them,
+at the top level next to `ok` (outside `body`, so a `response_pick`
+projection cannot remove it; a read without a loss has no `gap` key). The run
+journal records the loss once per distinct gap as an `inbox_gap` event, and
+`run_report`, `run_status`, `apb runs <id>` and the dashboard run page list
+it, so a run never reads as having processed its inbox completely when it did
+not. Events a consumer acknowledged before they were dropped are not a loss
+for that consumer. A consumer that starts reading late sees the events
+dropped before its first read as a gap too, since it never saw them.
+
 An inbound delivery never starts a run. A playbook consumes the inbox by
 polling it, an `inbox_read` call inside a loop or behind a wait node, and
 acknowledging what it processed.
@@ -278,12 +357,262 @@ To run the listener, see docs/DEPLOYMENT.md. `apb connector doctor` prints
 the exact callback URL per account, the pending depth, and whether the local
 listener answers.
 
+## What a call returns
+
+A call answers with one JSON document. On success it carries `ok: true`, the
+HTTP `status`, and the `body` (parsed when the service sent JSON, a string
+otherwise). A body over the 1 MiB read cap fails a `read_only` function as
+`incomplete_response` (see below); on any other function the body is cut at
+the cap, `truncated` is `true`, and the result says the response was not
+complete. When the function declares a `response_pick` projection, `picked`
+is `true` and `body` holds only the projected fields; `--full` skips the
+projection and returns the raw body. A paging `Link` header from the service
+surfaces verbatim as `link`.
+
+On failure it carries `ok: false` and an `error` object with a `code`, a
+human-readable `message`, and, when they apply, `http_status` and
+`retry_after_sec`. The codes: `config` (a broken or drifted connector setup),
+`permission` (no grant, no account, or the `max_calls` budget spent),
+`invalid_args`, `auth` (the service rejected the credentials), `not_found`,
+`rate_limited` (with `retry_after_sec` when the service gave one), `service`
+(any other non-2xx, a redirect, or an `error_when` reclassification inside a
+2xx), `network`, `timeout`, and `incomplete_response`. A function that is sent
+once (see [Sending once](#sending-once)) adds two refusals: `unknown_effect`
+and `in_flight`. Any call refuses with `attempt_closed` when it does not
+belong to the node's current attempt: that attempt has ended, or the call
+carries another attempt's `APB_ATTEMPT_TOKEN` (an agent left behind by an
+earlier attempt). A send also needs the token itself: a call that names no
+attempt may read and write, but not send once in an attempt's name.
+
+Besides an `error_when` reclassification, `incomplete_response` is the
+failure a 2xx can produce on a `read_only` function. A response body that was cut at the read cap, or whose
+read failed partway through, must not pass as complete data: the call fails
+with `reason` set to `body_cap` or `read_error` (plus `body_cap_bytes` and
+the `io_error_kind` where they apply: `unexpected_eof`, `connection_reset`,
+`connection_aborted`, `broken_pipe`, `timed_out`, `invalid_data`,
+`interrupted` or `other`), no partial body is returned, and the
+run journal records the outcome as `incomplete_response` with
+`response_complete: false`. The fix is to narrow the request (page, filter,
+or use a smaller page size) and call again; nothing retries such a call
+automatically.
+
+For a function that is not read-only the call stays a success, because its
+effect already happened. The result then returns the body that was read and
+carries `effect: "committed"` and `response_complete: false` (plus the
+`reason`) at the top level of the result JSON, where a `response_pick`
+projection cannot remove them; a complete response carries no such keys. A
+cut body is not always `truncated`: one whose read failed partway is
+`truncated: false` with `response_complete: false`, so check
+`response_complete`. The run journal records `response_complete` for every
+HTTP call that answered 2xx (and for an `incomplete_response` failure), so a
+playbook report can tell a whole response from a cut one.
+
+## Sending once
+
+A step that sends a message, posts a comment or opens an issue can be run
+again: a retry after a failure, an infrastructure retry after a network
+error, a fallback step, a deadline continuation, a resume after a pause or a
+crash, a supervisor retry. When the earlier attempt's send went out but its
+answer was lost, a plain repeat sends a second copy. A function that declares
+`idempotency` is protected against that: apb records every send of it in the
+run journal before the request leaves, settles what became of it afterwards,
+and answers a repeat of the same send from that record.
+
+### What makes two sends the same send
+
+A send is identified by the node, the connector function, the account and a
+label. The label is the `--intent` name the agent passes:
+
+```text
+apb connector call telegram send_message --intent release-1.4 --args '{"chat_id":"-100","text":"1.4 is out"}'
+```
+
+An intent name is 1 to 64 characters of `a-z`, `0-9`, `.`, `_` and `-`,
+starting with a letter or a digit. Without `--intent` the label is a hash of
+the arguments, so a repeat that is word for word the same is still
+recognised, but a reworded one is not: tell agents to pass a stable name and
+the same name on every attempt. A list item's send without `--intent` is
+the exception: its label is the fixed `item:send`, so one item sends a
+function once (see "Sending once in list mode" below). The connector block of the agent's prompt
+marks such functions `send-once` and says so.
+
+What counts is the node's effect scope: everything since the node last
+succeeded. Every kind of repeat listed above falls inside it, also across a
+failure route back into the same node. A loop visit after a success starts a
+new scope, so a send that belongs to each iteration is allowed again. A new
+run (`continue_from`, a fresh start) has its own journal and does not see the
+earlier run's sends.
+
+### What a repeat gets
+
+| The earlier send | A repeat with the same intent |
+| --- | --- |
+| went through (`confirmed`) | `{ok: true, already_sent: true, intent, sent_in_attempt, ref}`, with no request and no `max_calls` charge, also once the budget is spent |
+| did not go out (`not_sent`: refused by the service, or recorded and never sent) | a new send |
+| is being sent right now by another call | the `in_flight` refusal |
+| may or may not have gone out (`unknown`: a timeout, a cut connection, a 5xx, a sender that died) | depends on the mode, below |
+
+Whether an unknown send can be repeated safely depends on what the service
+offers, declared per function:
+
+```yaml
+  - name: send_message
+    method: POST
+    url: "{{account.api_base}}/channels/{{args.channel_id}}/messages"
+    body: { content: "{{args.content}}", enforce_nonce: true }
+    idempotency:
+      mode: key                 # key | marker | none
+      field: nonce              # or `header: Idempotency-Key`, exactly one
+      window_sec: 120           # how long the service honours the key
+      result_ref: id            # optional: the created item's id or link
+```
+
+- `key`: the service deduplicates by a key apb puts into a header or a
+  top-level body field. Within `window_sec` of the first send (the repeat's
+  own `timeout_sec` included, so its answer still comes inside it), a repeat sends
+  again with the same key and the service answers with the one item it
+  already has (settled `confirmed` by `key_replay`). After the window the
+  send is treated like `none`.
+- `marker`: apb appends a hidden marker to a text argument
+  (`format: html_comment`, an HTML comment invisible in rendered Markdown)
+  and, on a repeat, looks for it among the account's own recent items before
+  deciding. Found means the earlier send went through: the repeat gets its
+  reference and nothing is sent. Not found, or a lookup that cannot see the
+  whole list, leaves the send unknown, and a `marker` send is never resent
+  automatically. The lookup is declared with `reconcile` (a `read_only`
+  function of the same connector, the arguments copied from the send, a
+  `since_arg` filled with the intent's time minus 300 s, and the dot paths of
+  the list, the text, the author and the item reference) plus a
+  connector-level `identity` (a `read_only` function and the dot path of the
+  account's own name), so a marker another account posted never counts.
+- `none`: the service offers no way to tell. A repeat of an unknown send is
+  refused with `unknown_effect` until a person decides, unless the binding
+  says `on_unknown: resend`.
+
+`idempotency` is allowed only on HTTP, mock, smtp and imap functions that
+are not `read_only` (an smtp or imap function may declare only `mode:
+none`, since neither protocol has a key or a marker to reconcile with), and
+the
+manifest is refused at load time when a `key` field is empty, is also an
+argument, or sits in a body that does not always render as a JSON object
+(an object, or `{{args}}` with an object `args_schema`), a header collides, a
+`marker` argument is not a string used in the body or has the `literal` text
+mode, the `reconcile` function is missing, not a `read_only` HTTP function,
+or not given its required arguments, or `identity` is missing, not
+`read_only` or takes required arguments. The JSON and form body of every
+HTTP write has the word `apb-intent` rewritten, so no marker apb looks for
+(it reads only the items' text) can be forged through apb. An agent
+posting directly under the same account, outside apb, could still plant one;
+agents get connector tokens scrubbed from their environment, which makes
+that unlikely but is not a guarantee.
+
+`--dry-run` never carries a real key or marker: the preview shows
+`(set at send)` for a key and `[apb adds a hidden send marker here]` for a
+marker.
+
+### `on_unknown`: a binding's choice for unknown sends
+
+```yaml
+connectors:
+  - { name: telegram, functions: [send_message], on_unknown: resend }
+```
+
+`refuse` (the default) keeps an unknown send refused until a person decides.
+`resend` lets a repeat send it again, recorded as a resend of the earlier
+intent, for a message where a rare duplicate is better than a missing one.
+That includes a send that is still under way but whose sender stopped
+answering: a pending intent reads as unknown once its call's timeout plus
+30 s has passed (or its process is gone), so a slow request that is still
+in flight past that deadline can be resent, and both may arrive. It
+applies to `none` sends and to `key` sends after their window, never to
+`marker` sends. The validator refuses `on_unknown` on a binding none of whose
+functions declares `none` or `key` (V69), and `resend` on a binding that
+grants an `irreversible` function (V84).
+
+### Sending once in list mode
+
+A list node (`list:`, HOWTO-authoring "List processing") runs its step once
+per item and repeats items by design, so every write function it is granted
+must declare `idempotency` (V88). The send ledger keys each item's sends by
+the node and the item, so one item's send never answers another's. Without
+`--intent` an item's send carries the fixed label `item:send`: one send per
+function per item, also when a rerun words the payload differently. An item
+that sends one function more than once names each send with its own
+`--intent`. A call that names an item with no running attempt of its own
+is refused, so a made-up `APB_ITEM_ID` can neither send nor reset a spent
+`max_calls`. When an
+item's step fails with a send of unknown outcome, a `key` or `marker` send
+gets one free reconcile run of that item; a `none` send leaves the item
+needing a look (`unknown_send`), and no retry runs it again until a person
+resolves the send, also under `on_unknown: resend` (once the item has
+settled, no later round, visit or retry runs it again on its own while that
+send's outcome is unknown).
+The declarations on `asana.create_task` and
+`imap.mark_read` exist so those functions can be used in list steps, but
+they apply to every binding: outside a list too, a repeat of a send whose
+outcome is unknown is refused unless the binding says `on_unknown: resend`.
+
+### A person's decision
+
+An unknown send is listed in the run outcome as a gap
+(`call outcome unknown`) that names the intent and the command, and the run
+reads as needing a look (`unknown sends`). A replay repeats a send with its
+nonce, so a replay that went out settles it, and one that did not go out
+does not, so the send stays listed. A resend is a separate send: each
+unknown one stays listed on its own, also after a later resend went out,
+since both may have acted. Check the service, then record what you
+found, naming the intent by its `si-...` id (not the `--intent` label):
+
+```text
+apb intent list <run>                          # each send's id (si-...), label and state
+apb intent resolve <run> <si-id> --sent        # it went out: a repeat answers already_sent
+apb intent resolve <run> <si-id> --not-sent    # it did not: a repeat sends it again
+```
+
+`--note` keeps what you checked with the decision. Over MCP the same is
+`run_intent_resolve`; an agent asks the user first and passes on only their
+answer. The CLI refuses a decision from inside a run (`APB_RUN_ID` or
+`APB_HOST_TASK` set in its environment). The MCP tool cannot tell a
+person's session from a host subagent that shares the same server, so there
+the rule is an instruction, as for `review_decide`: a subagent never calls
+it and reports the send as a finding instead, and a person resolves it. A send whose outcome is already known, or that is still in flight, is
+not decided again. A send confirmed by apb's lookup or by a person is listed
+under the run's done lines.
+
+### Contract tests
+
+A `tests.yaml` case can render as a send of an intent and check a lookup
+offline:
+
+```yaml
+  - function: comment_issue
+    args: { owner: acme, repo: site, number: 42, body: "Looking into this." }
+    intent: { run: r-1, node: triage, attempt: 2, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      reconcile:
+        identity: { login: triage-bot }       # the identity function's raw answer
+        response:                             # the reconcile function's raw answer
+          - user: { login: triage-bot }
+            html_url: "https://github.com/acme/site/issues/42#issuecomment-2"
+            body: "Looking into this.\n\n<!-- apb-intent v1 run=r-1 node=triage attempt=2 nonce=abcdefghijklmnopqrstuvwx -->"
+        outcome: found                        # found | absent | inconclusive
+        item_ref: "https://github.com/acme/site/issues/42#issuecomment-2"
+```
+
+`intent` makes the case render with the key or the marker that intent
+carries, so `body_contains` and `headers` can check it. `expect.reconcile`
+runs the lookup's matching against the given answers (`next_page: true`
+says the listing had a further page) and checks its conclusion, `outcome`:
+the item is `found`, `absent` from a listing read whole, or the lookup is
+`inconclusive` (no item list where the connector says it is, or a further
+page), and the found item's reference.
+
 ## The `apb connector` CLI
 
 ```text
 apb connector list              installed connectors, trust and config status
 apb connector show <name>       manifest summary and per-account status
-apb connector call <name> <fn>  the agent-facing call channel (--account, --args, --dry-run)
+apb connector call <name> <fn>  the agent-facing call channel (--account, --args, --dry-run, --intent)
 apb connector approve <name>    approve a connector or (--account) an account digest
 apb connector doctor            check every connector: manifest, config, env, trust, healthcheck
 apb connector env [<name>]      unresolved env var names as ready-to-paste KEY= lines
@@ -296,6 +625,87 @@ call without executing it, against the live connector and account config (no
 secret is resolved, so no approval is needed); probe an account with the
 dashboard healthcheck.
 `--args -` reads the JSON arguments from stdin.
+
+## Agent-written text (`text_args`)
+
+The text a connector sends is usually written by an agent, and some services
+act on text, not only show it: a line that starts with a slash command can
+close or merge something, and a reference or mention in a title can link or
+ping people. A function declares how each such string argument is prepared,
+with the optional `text_args` map from argument name to mode:
+
+```yaml
+  - name: comment_issue
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/issues/{{args.iid}}/notes"
+    body:
+      body: "{{args.body}}"
+    text_args:
+      body: markdown_no_commands
+    args_schema:
+      type: object
+      properties:
+        body: { type: string }
+```
+
+The engine applies the mode to the argument's value before it is placed into
+`body` or `body_form`, so no template can send the raw value around it. An
+argument with a mode may appear only in the body: one also used in `url`,
+`query` or `headers`, where no mode is applied, fails the manifest at load
+time. There are three modes:
+
+| Mode | Use it for | What is sent |
+| --- | --- | --- |
+| `markdown` | Text where formatting and commands are intended, such as a comment on a service that runs commands only through a separate function | The value exactly as given. Declaring it documents the intent. |
+| `markdown_no_commands` | Multi-line Markdown on a service that runs slash commands found in the text (comments, descriptions) | The value as written, except that a `/` at the start of any line (after optional spaces or tabs; a lone carriage return ends a line too) followed by a letter, digit or underscore gets a backslash, so the service shows the command as text. A `/` in the middle of a line is unchanged. Lines inside fenced code blocks are escaped too, since a fence is not a documented guarantee that a command there is ignored. |
+| `literal` | A one-line value from untrusted text, such as a title | One line: whitespace runs collapse to one space and the ends are trimmed. Every Markdown-significant character gets a backslash escape (never an HTML entity): `` \ ` * _ [ ] < > \| ~ # & @ ! $ % ``. At the start of the value a `-`, `+`, `=`, an ordered-list marker (`1.`, `2)`) or a slash command is escaped too. Bare `http://` and `https://` URLs are kept as typed, so they still link. |
+
+Only HTTP functions may declare `text_args`, and every key must be a string
+property of `args_schema`; an unknown mode or any other key fails the manifest
+at load time. Arguments without a declared mode are sent as given, as before.
+Pick `markdown_no_commands` for comment and description bodies of a service
+that executes commands from text, `literal` for titles and other single-line
+fields that the service renders as Markdown, and `markdown` where commands are
+meant to work. A field the service shows as plain text, or stores as given and
+shows with its backslashes, needs no mode: an escape there would only show up
+as a stray backslash, and a value read back and sent again would gain one more
+each time.
+
+## Text people read (`people:`)
+
+A function that sends something a person reads (a message, a mail, a pull
+request description) declares which of its string arguments those are:
+
+```yaml
+  - name: send_message
+    people: { to: chat_id, text: text }
+    idempotency: { mode: none, result_ref: result.message_id }
+```
+
+`text` is required and names the body; `subject` (a mail subject, a chat
+topic, a pull request title) and `to` (the recipient) are optional. Each must
+name a string property of `args_schema`, no argument may fill two roles,
+and the block is refused on a function that sends nothing (`read_only`, an
+inbox or an imap read).
+
+The block does two things:
+
+- A node granted such a function gets apb's writing brief for people in its
+  prompt (lead with the conclusion, say who acts next, state facts and mark
+  what is not verified, no internal terms), and its connector block names
+  the arguments people read, one line per function. See "Writing for people"
+  in `docs/HOWTO-authoring.md`.
+- A function whose block names `to`, that declares `idempotency`, and whose
+  `args_schema` requires no argument the block does not name can carry run
+  notifications (`docs/NOTIFY.md`): apb fills `to` with the person's
+  recipient, `text` with the notice and `subject` with its subject line, and
+  nothing else. A `text` argument with the `literal` text mode gets the
+  notice as one line.
+
+The official connectors declare it on `telegram.send_message`,
+`slack.send_message` (`reply_in_thread` has `text` only), `smtp.send_email`,
+`zulip.send_stream_message`, `zulip.send_direct_message` and
+`github.create_pull` (`subject` and `text` only).
 
 ## Official connectors
 
@@ -317,7 +727,13 @@ base) and `token` (secret). Prefer `token: "{{cmd:gh auth token}}"` when
 personal access token: classic PATs need `repo` (or `public_repo` for
 public repositories); fine-grained PATs need repository access with
 Actions write permission for `dispatch_workflow`. Healthcheck:
-`get_rate_limit`.
+`get_rate_limit`. `create_issue` and `comment_issue` are sent once in
+`marker` mode: the lookup reads the token's account (`get_authenticated_user`,
+`GET /user`) and the recent issues (`list_recent_issues`) or comments
+(`list_issue_comments`). A GitHub App installation token cannot read `/user`,
+so with one an unknown send stays unknown until a person decides.
+`create_release` declares `none`: a duplicate tag is refused by GitHub, but
+nothing reads back which intent created a release.
 
 ### telegram
 
@@ -325,7 +741,9 @@ Account fields: `api_base` (`https://api.telegram.org`, overridable for
 a self-hosted Bot API server) and `token` (secret) - the token
 [@BotFather](https://t.me/BotFather) gives you for a new bot. The bot
 must already be a member of a chat before `send_message` reaches it.
-Healthcheck: `get_me`.
+Healthcheck: `get_me`. `send_message` declares `idempotency: none`: the Bot
+API has no idempotency key and a bot cannot read chat history, so an unknown
+send is refused until a person decides, or resent under `on_unknown: resend`.
 
 ### smtp
 
@@ -334,6 +752,9 @@ Account fields: `host`, `port`, `from_email` (all required), and
 Set `use_tls` explicitly (there is no engine-level default for account
 fields): `true` for STARTTLS on port 587, the common case. Healthcheck:
 `verify` (connects, negotiates STARTTLS, authenticates, sends nothing).
+`send_email` declares `idempotency: none`: SMTP has no idempotency key, so an
+email whose answer was lost is refused on a repeat until a person decides, or
+resent under `on_unknown: resend`.
 
 ### sentry
 
@@ -360,7 +781,11 @@ result's `next_page.offset` field and pass it back on the following
 call, omitting it on the first call. `search_tasks` is a fuzzy typeahead
 match against task names, not a full-text search; use `list_tasks` with
 a project filter when a complete, predictable result set matters more.
-Healthcheck: `get_me`.
+`create_task` declares `idempotency: { mode: none, result_ref: data.gid }`:
+Asana takes no idempotency key, so a task whose answer was lost is refused
+on a repeat until a person decides (the task may exist), or created again
+under `on_unknown: resend`; a confirmed send keeps the created task's gid
+as its reference. Healthcheck: `get_me`.
 
 ### imap
 
@@ -372,7 +797,11 @@ differ. `search_messages` and `get_message` open the folder read-only
 with `EXAMINE` and fetch content with `BODY.PEEK[]`, so reading a
 message never marks it seen; only `mark_read` and `mark_unread` change
 anything on the server, and each is a separate, independently grantable
-function. `use_tls` defaults to `true` when omitted; only set it to
+function. `mark_read` declares `idempotency: { mode: none }` (`mark_unread`
+declares no `idempotency`), so a list step may be granted it (V88); a `mark_read`
+whose answer was lost is refused on a repeat until a person decides, or
+sent again under `on_unknown: resend`, which suits it since marking a
+message read twice does no harm. `use_tls` defaults to `true` when omitted; only set it to
 `false` for a local plaintext test fixture, never for a real provider.
 Gmail (`imap.gmail.com`, port `993`) needs 2-Step Verification enabled
 before an app password can be generated; a Google Workspace account
@@ -405,7 +834,12 @@ so never pre-encode the slash yourself. List functions follow GitLab
 page pagination via optional `page` and `per_page` (max 100)
 arguments; omit both for the first page. Label edits go through
 `update_issue` (`labels` replaces the full set, `add_labels` and
-`remove_labels` are comma-separated deltas). `trigger_pipeline`
+`remove_labels` are comma-separated deltas). Agent-written issue and merge
+request comment bodies and descriptions are sent as `markdown_no_commands`
+(see `text_args` above), so that text can never run a quick action. Titles
+and release names and descriptions are sent as written: GitLab runs no quick
+action from them, and it stores a title as given, so a `literal` escape would
+stay in it as a visible backslash. `trigger_pipeline`
 starts CI on a branch or tag (optional `variables` is an array of
 `{key, value}` objects); grant it only when a playbook is meant to
 start pipelines, not just observe them. Healthcheck: `get_user`.
@@ -424,7 +858,8 @@ functions bake a literal `fields=` projection matching their
 argument (`state: Fixed`, `project: DEMO`, `for: me #Unresolved`)
 and pages with optional `$skip` and `$top` arguments. `create_issue`
 takes the project database id (for example `0-0`), not the short
-name; find it with `list_projects`. `apply_command` runs YouTrack's
+name; find it with `list_projects`. Comment and description text is declared `markdown` and sent as
+written, since YouTrack runs no command from it; `apply_command` runs YouTrack's
 command syntax, which can change almost anything on an issue (state,
 tags, assignment, priority, custom fields), so restrict it in grant
 allowlists accordingly. Healthcheck: `get_me`.
@@ -447,7 +882,10 @@ no separate reply function. `get_messages` takes optional `anchor`
 (a numeric message id to page around; omit for newest), `num_before`,
 and `narrow` (Zulip's filter, passed verbatim as a string whose
 content is a JSON array of operator/operand objects). Healthcheck:
-`get_me`.
+`get_me`. `send_stream_message` and `send_direct_message` declare
+`idempotency: none`: Zulip takes no idempotency key, so a send whose outcome
+is not known is refused on a repeat until a person decides, or resent under
+`on_unknown: resend`. Before, such a send was simply sent again.
 
 ### discord
 
@@ -468,7 +906,11 @@ id) arguments. `send_message` and `reply_to_message` are separate
 functions so a grant can allow thread replies without allowing new
 top-level posts. Discord rate limits are aggressive and per-route:
 avoid tight polling loops and bound calls with `max_calls` grants.
-Healthcheck: `get_me`.
+Healthcheck: `get_me`. `send_message` and `reply_to_message` are sent once in
+`key` mode: every message carries a `nonce` with `enforce_nonce: true`, and
+within 120 s a repeat sends the same nonce, so Discord returns the one
+message. Both post with `allowed_mentions: { parse: [] }`, so an
+`@everyone` or a role mention in agent-written text never pings anyone.
 
 ### slack
 
@@ -492,6 +934,10 @@ list and history functions page with a body-carried cursor (pass
 `reply_in_thread` are separate functions so a grant can allow thread
 replies without allowing new top-level posts. Healthcheck:
 `auth_test` (a POST by Slack API convention, mutates nothing).
+`send_message` declares `idempotency: none`: Slack takes no idempotency key,
+so a send whose outcome is not known is refused on a repeat until a person
+decides, or resent under `on_unknown: resend`. Before, such a send was simply
+sent again.
 
 ### atrip
 
@@ -585,7 +1031,10 @@ media object's JSON key varies with the message type), so a grant of it can
 in practice send any message type, not only media. Uploading binary media
 is out of scope: Meta's upload endpoint is multipart/form-data with a
 binary file part, which this connector's schema cannot express, so media is
-sent by a hosted `link` or by a media `id` obtained out of band. The
+sent by a hosted `link` or by a media `id` obtained out of band.
+`send_text` and `send_template` declare `idempotency: none`: the Cloud API
+takes no idempotency key, so an unknown send is refused on a repeat until a
+person decides, or resent under `on_unknown: resend`. The
 `healthcheck` is `get_phone_number`, which takes no arguments (its `fields`
 query is a fixed literal so the no-arg probe stays self-sufficient) and
 proves the token is valid and that `phone_number_id` belongs to it.

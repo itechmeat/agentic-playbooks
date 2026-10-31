@@ -144,7 +144,7 @@ fn adopt_report_emits_expected_codes() {
     let playbook = "schema: 1\nid: wf1\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: goodp }\n  - { id: b, type: agent_task, prompt: \"do\", profile: ghost }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n";
     seed_playbook(&c.root, "wf1", playbook);
 
-    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wf1")).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wf1"), None).unwrap();
     let findings = report["playbooks"][0]["findings"].as_array().unwrap();
     let codes: Vec<&str> = findings.iter().filter_map(|f| f["code"].as_str()).collect();
     assert!(
@@ -170,7 +170,7 @@ fn adopt_report_names_a_shared_profile_once() {
     seed_profile(&c.root, "shared", "customx", "");
     let playbook = "schema: 1\nid: wfs\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: b, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: c, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: c }\n  - { from: c, to: done }\n";
     seed_playbook(&c.root, "wfs", playbook);
-    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfs")).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfs"), None).unwrap();
     let findings = report["playbooks"][0]["findings"].as_array().unwrap();
     for code in ["untrusted", "model_unverifiable"] {
         let n = findings.iter().filter(|f| f["code"] == code).count();
@@ -201,7 +201,7 @@ fn adopt_report_flags_a_model_the_config_policy_forbids() {
     std::fs::write(dir.join("SOUL.md"), "").unwrap();
     let playbook = "schema: 1\nid: wfp\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: zfull }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: done }\n";
     seed_playbook(&c.root, "wfp", playbook);
-    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfp")).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfp"), None).unwrap();
     let findings = report["playbooks"][0]["findings"].as_array().unwrap();
     let hit = findings
         .iter()
@@ -235,7 +235,7 @@ fn adopt_report_flags_a_zcode_model_off_the_allowlist() {
     std::fs::write(dir.join("SOUL.md"), "").unwrap();
     let playbook = "schema: 1\nid: wfz\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: zbad }\n  - { id: b, type: agent_task, prompt: \"do\", profile: zok }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n";
     seed_playbook(&c.root, "wfz", playbook);
-    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfz")).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfz"), None).unwrap();
     let findings = report["playbooks"][0]["findings"].as_array().unwrap();
     let not_allowed: Vec<&serde_json::Value> = findings
         .iter()
@@ -255,7 +255,7 @@ fn adopt_report_flags_missing_skill() {
     seed_profile(&c.root, "p2", "claude", "skills:\n  - nope\n");
     let playbook = "schema: 1\nid: wf2\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: p2 }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: done }\n";
     seed_playbook(&c.root, "wf2", playbook);
-    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wf2")).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wf2"), None).unwrap();
     let codes: Vec<String> = report["playbooks"][0]["findings"]
         .as_array()
         .unwrap()
@@ -275,7 +275,7 @@ fn adopt_report_explicit_missing_id_is_error_finding() {
     // The registry must exist (Registry::open requires .apb); the playbook does not.
     std::fs::create_dir_all(c.root.join(".apb/playbooks")).unwrap();
     // An explicit id for a nonexistent playbook - NOT an empty report, but a diagnostic.
-    let report = advisory_tools::playbook_adopt_report(&c.root, Some("ghostwf")).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("ghostwf"), None).unwrap();
     let w = &report["playbooks"][0];
     assert_eq!(w["id"], serde_json::json!("ghostwf"));
     let codes: Vec<&str> = w["findings"]
@@ -296,7 +296,7 @@ fn adopt_report_all_mode_flags_unloadable_playbook() {
     let c = setup();
     // A broken playbook.yaml in all-mode -> a diagnostic on its id, not a silent skip.
     seed_playbook(&c.root, "broke", "this: is: not: valid: yaml: ][");
-    let report = advisory_tools::playbook_adopt_report(&c.root, None).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, None, None).unwrap();
     let found = report["playbooks"].as_array().unwrap().iter().any(|w| {
         w["id"] == serde_json::json!("broke")
             && w["findings"]
@@ -318,14 +318,24 @@ fn catalog_revision_independent_of_profile_count() {
     let playbook = "schema: 1\nid: wf1\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
     seed_playbook(&c.root, "wf1", playbook);
 
-    let before = apb_mcp::catalog::build(&c.root, None, None, None, Vec::new(), Vec::new());
+    let before = apb_mcp::catalog::build(
+        &c.root,
+        &apb_mcp::catalog::CatalogRequest::default(),
+        Vec::new(),
+        Vec::new(),
+    );
     let rev_before = before["catalog_revision"].as_str().unwrap().to_string();
     assert_eq!(before["profiles_hint"]["count"], serde_json::json!(0));
 
     // Add a profile - the catalog revision does not change, the hint grows.
     seed_skill(&c.root, "s1");
     seed_profile(&c.root, "goodp", "claude", "skills:\n  - s1\n");
-    let after = apb_mcp::catalog::build(&c.root, None, None, None, Vec::new(), Vec::new());
+    let after = apb_mcp::catalog::build(
+        &c.root,
+        &apb_mcp::catalog::CatalogRequest::default(),
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(
         after["catalog_revision"].as_str().unwrap(),
         rev_before,
@@ -341,7 +351,7 @@ fn adopt_report_states_the_execution_mode() {
     let _l = lock();
     let c = setup();
     apb_core::registry::init_project(&c.root).unwrap();
-    let report = advisory_tools::playbook_adopt_report(&c.root, None).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, None, None).unwrap();
     assert_eq!(report["execution"]["default"], "cli");
     let detail = report["execution"]["detail"].as_str().unwrap();
     assert!(
@@ -354,4 +364,126 @@ fn adopt_report_states_the_execution_mode() {
             .unwrap()
             .contains("ignored")
     );
+}
+
+/// A global playbook is assessed from the global store: its `auto` profile
+/// resolves to the global one (the project's same-named profile does not
+/// count for it), and the report carries the four-section fit.
+#[test]
+fn adopt_report_with_scope_global_resolves_global_profiles() {
+    let _l = lock();
+    let c = setup();
+    let cfg = c._cfg.path();
+    let gdir = cfg.join("profiles/gp");
+    std::fs::create_dir_all(&gdir).unwrap();
+    std::fs::write(
+        gdir.join("profile.yaml"),
+        "name: gp\ndescription: d\nexecutor:\n  agent: customx\n  model: m1\n",
+    )
+    .unwrap();
+    std::fs::write(gdir.join("SOUL.md"), "").unwrap();
+    seed_profile(&c.root, "local-only", "customx", "");
+    let playbook = |id: &str, profile: &str| {
+        format!(
+            "schema: 2\nid: {id}\nname: W\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: a, type: agent_task, prompt: \"do\", profile: {profile} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: a }}\n  - {{ from: a, to: done }}\n"
+        )
+    };
+    let gpb = cfg.join("playbooks/gwf/1.0.0");
+    std::fs::create_dir_all(&gpb).unwrap();
+    std::fs::write(gpb.join("playbook.yaml"), playbook("gwf", "gp")).unwrap();
+    std::fs::write(cfg.join("playbooks/gwf/current"), "1.0.0").unwrap();
+    let gpb = cfg.join("playbooks/gmiss/1.0.0");
+    std::fs::create_dir_all(&gpb).unwrap();
+    std::fs::write(gpb.join("playbook.yaml"), playbook("gmiss", "local-only")).unwrap();
+    std::fs::write(cfg.join("playbooks/gmiss/current"), "1.0.0").unwrap();
+
+    let report =
+        advisory_tools::playbook_adopt_report(&c.root, Some("gwf"), Some("global")).unwrap();
+    let one = &report["playbooks"][0];
+    assert_eq!(one["scope"], "global");
+    let refs: Vec<&str> = one["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["ref"].as_str())
+        .collect();
+    assert!(refs.iter().all(|r| *r == "global/gp"), "{refs:?}");
+    assert_eq!(one["fit"]["scope"], "global");
+    for section in ["compatibility", "setup", "trust"] {
+        assert!(one["fit"][section].is_array(), "{section}");
+    }
+
+    // A project profile does not serve a global playbook.
+    let report =
+        advisory_tools::playbook_adopt_report(&c.root, Some("gmiss"), Some("global")).unwrap();
+    let codes: Vec<&str> = report["playbooks"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"profile_missing"), "{codes:?}");
+}
+
+/// Without an id the report covers the project and the global playbooks;
+/// a scope narrows it to one store.
+#[test]
+fn adopt_report_without_id_covers_both_scopes() {
+    let _l = lock();
+    let c = setup();
+    let pb = |id: &str| {
+        format!(
+            "schema: 2\nid: {id}\nname: W\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+        )
+    };
+    seed_playbook(&c.root, "local", &pb("local"));
+    let cfg = c._cfg.path();
+    std::fs::create_dir_all(cfg.join("playbooks/shared/1.0.0")).unwrap();
+    std::fs::write(
+        cfg.join("playbooks/shared/1.0.0/playbook.yaml"),
+        pb("shared"),
+    )
+    .unwrap();
+    std::fs::write(cfg.join("playbooks/shared/current"), "1.0.0").unwrap();
+
+    let scopes = |scope: Option<&str>| -> Vec<(String, String)> {
+        advisory_tools::playbook_adopt_report(&c.root, None, scope).unwrap()["playbooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["scope"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        scopes(None),
+        vec![
+            ("local".to_string(), "project".to_string()),
+            ("shared".to_string(), "global".to_string())
+        ]
+    );
+    assert_eq!(scopes(Some("global")).len(), 1);
+}
+
+/// A store that does not exist is said, never a silently empty report: no
+/// project here, or a scope asked for that this machine lacks.
+#[test]
+fn adopt_report_says_which_store_is_missing() {
+    let _l = lock();
+    let c = setup();
+    // A directory with no `.apb`: there is no project store.
+    let bare = tempfile::tempdir().unwrap();
+    let report = advisory_tools::playbook_adopt_report(bare.path(), None, None).unwrap();
+    let codes: Vec<(&str, &str)> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["code"].as_str().unwrap(), d["scope"].as_str().unwrap()))
+        .collect();
+    assert_eq!(codes, vec![("playbook_store_missing", "project")]);
+    drop(c);
 }

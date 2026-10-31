@@ -925,6 +925,8 @@ fn write_connector_call_event(
 ) {
     let mut log = apb_engine::event::EventLog::create(run_dir).unwrap();
     log.append(apb_engine::event::EventPayload::ConnectorCall {
+        item: None,
+        response_complete: None,
         node_id: "a".into(),
         connector: connector.into(),
         function: function.into(),
@@ -935,6 +937,10 @@ fn write_connector_call_event(
         duration_ms,
         smtp_subject: None,
         smtp_recipients: None,
+        attempt: None,
+        attempt_seq: None,
+        intent: None,
+        origin: None,
     })
     .unwrap();
 }

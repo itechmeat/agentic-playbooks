@@ -4,7 +4,13 @@
 
 import type { PlaybookEdge, PlaybookNode, WfEvent, WfLayout } from './types'
 
-export type CommittedArtifact = { sha: string, subject: string, };
+export type CommittedArtifact = { sha: string, subject: string, 
+/**
+ * The values of the commit's `Apb-Run` trailers: `None` when they were
+ * not read (an old event, or a git too old to read trailers),
+ * `Some([])` for a commit without one. Additive.
+ */
+apb_run?: Array<string>, };
 
 export type NodeCommits = { node: string, 
 /**
@@ -24,9 +30,23 @@ commits: Array<CommittedArtifact>,
  */
 omitted: number, };
 
+export type RunInboxGap = { 
+/**
+ * The node whose connector call made the read.
+ */
+node: string, connector: string, account: string, 
+/**
+ * First lost sequence number (the consumer's cursor plus one).
+ */
+from: number, 
+/**
+ * Last lost sequence number, inclusive.
+ */
+through: number, };
+
 export type GoalCriterionResult = { index: number, description: string, 
 /**
- * `script`, `marker` or `manual`.
+ * `script`, `marker`, `list` or `manual`.
  */
 check: string, 
 /**
@@ -45,6 +65,146 @@ enforce: boolean,
  * Whether the criteria were checked (the run reached a finish node).
  */
 checked: boolean, criteria: Array<GoalCriterionResult>, passed: number, failed: number, manual: number, };
+
+export type ObservedValue = { "type": "number", "value": number } | { "type": "list", "value": Array<string> } | { "type": "text", "value": string } | { "type": "bool", "value": boolean };
+
+export type Observation = { "state": "value", value: ObservedValue, } | { "state": "unknown", reason: string, };
+
+export type ObservationView = { id: string, 
+/**
+ * The rule as journaled (`equals 0`, `change no_new`,
+ * `no_new_failures`).
+ */
+rule: string, before?: Observation, after?: Observation, 
+/**
+ * `37 -> 0`, the change as people read it.
+ */
+change: string, 
+/**
+ * `met`, `not_met`, `unknown`, or `pending` before the finish.
+ */
+verdict: string, 
+/**
+ * The after value is strictly worse than the before one; absent when
+ * either is unknown or not compared yet.
+ */
+regressed?: boolean, detail?: string, };
+
+export type BaselineCheckView = { id: string, description: string, 
+/**
+ * `connector`, `script` or `project_checks`.
+ */
+source: string, 
+/**
+ * `observed`, `unknown` or `missed`; absent before it was taken.
+ */
+before_status?: string, 
+/**
+ * Why the before snapshot could not be read.
+ */
+before_reason?: string, 
+/**
+ * The run a continued run took its before snapshot from.
+ */
+inherited_from?: string, 
+/**
+ * Absent until the finish took the after snapshot.
+ */
+after_status?: string, observations: Array<ObservationView>, };
+
+export type RunBaseline = { 
+/**
+ * `baseline_check.enforce`: anything but met fails the run.
+ */
+enforce: boolean, checks: Array<BaselineCheckView>, met: number, not_met: number, unknown: number, 
+/**
+ * Observations whose after value is worse than the before one.
+ */
+regressions: number, };
+
+export type Finding = { kind: string, location: string, evidence: string, why_not_fixed: string, 
+/**
+ * How the attempt got around the problem, when it did.
+ */
+workaround?: string, };
+
+export type NoteWarning = { subject: string, reason: string, };
+
+export type RunFinding = { node: string, attempt: number, kind: string, location: string, evidence: string, why_not_fixed: string, 
+/**
+ * How the attempt got around the problem, when it did.
+ */
+workaround?: string, };
+
+export type RunWarning = { node: string, attempt: number, subject: string, reason: string, };
+
+export type RunNotes = { findings: Array<RunFinding>, warnings: Array<RunWarning>, 
+/**
+ * Malformed entries the attempts sent, dropped when they were
+ * journaled.
+ */
+dropped: number, };
+
+export type EvidenceSource = "goal" | "success_check" | "baseline" | "item_check";
+
+export type Evidence = { source: EvidenceSource, subject: string, 
+/**
+ * `passed`, `failed`, `error`, `met` or `not_met`.
+ */
+result: string, detail?: string, };
+
+export type GapKind = "manual_criterion" | "self_reported_node" | "goal_not_checked" | "unknown_call" | "incomplete_response" | "inbox_gap" | "output_truncated" | "baseline_unknown" | "item_needs_look" | "self_reported_items";
+
+export type Gap = { kind: GapKind, subject: string, detail?: string, };
+
+export type BaselineOutcome = { problem: Array<string>, change: Array<string>, 
+/**
+ * From the goal criteria only: every checked criterion passed and no
+ * manual one waits. Absent when that is not known.
+ */
+goal_reached?: boolean, };
+
+export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends" | "list_items";
+
+export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, 
+/**
+ * Sends whose outcome is not known and that no replay settled.
+ */
+unknown_sends?: number, 
+/**
+ * List items that need a look.
+ */
+list_items?: number, };
+
+export type ListOutcome = { node: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, 
+/**
+ * How each item was checked (`connector asana.get_task`); absent when
+ * the items passed on the agent's own report.
+ */
+check?: string, };
+
+export type OutcomeSummary = { headline: string, needs_look?: NeedsLook, 
+/**
+ * What the run did: the steps that succeeded, its commits, the
+ * connector writes that went through.
+ */
+done: Array<string>, 
+/**
+ * What the engine checked.
+ */
+verified: Array<Evidence>, 
+/**
+ * What nobody checked.
+ */
+unverified: Array<Gap>, findings: Array<RunFinding>, warnings: Array<RunWarning>, baseline?: BaselineOutcome, 
+/**
+ * Each list node's counts; empty for a run without a list.
+ */
+lists?: Array<ListOutcome>, 
+/**
+ * The finish node's answer: the agent's own account, not checked.
+ */
+agent_summary?: string, };
 
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
@@ -163,6 +323,44 @@ option: string, p: number, confidence: number, provider: string, model: string, 
  */
 applied?: boolean, };
 
+export type PublishCommit = { this_run: boolean, sha: string, subject: string, 
+/**
+ * The values of the commit's `Apb-Run` trailers: `None` when they were
+ * not read (an old event, or a git too old to read trailers),
+ * `Some([])` for a commit without one. Additive.
+ */
+apb_run?: Array<string>, };
+
+export type PlanView = { url: string, branch: string, after: string, remote_before?: string, commits: Array<PublishCommit>, omitted: number, 
+/**
+ * How many of the commits the push carries this run made, listed or
+ * omitted.
+ */
+this_run: number, outside_push_suspected: boolean, plan_digest: string, nonce: string, };
+
+export type PushState = "pending" | "confirmed" | "not_sent" | "unknown";
+
+export type PushView = { intent: string, state: PushState, 
+/**
+ * The plan this push carried: what it sent where. It may be an
+ * earlier visit's plan than [`PublishView::plan`].
+ */
+after: string, branch: string, url: string, remote_before?: string, plan_digest: string, detail?: string, effect_ref?: string, };
+
+export type PublishView = { node: string, remote: string, url?: string, 
+/**
+ * The pin's refusal code, when the target could not be pinned.
+ */
+pin_refusal?: string, plan?: PlanView, 
+/**
+ * A consent to the latest plan is awaited.
+ */
+awaiting_consent: boolean, push?: PushView, 
+/**
+ * The output the node last finished with.
+ */
+result?: string, };
+
 export type PendingReview = { node: string, 
 /**
  * The gate node's title from the playbook, when it has one.
@@ -195,7 +393,12 @@ prompt?: string,
  * #165 Part 11), from the open `review_requested`; already appended to
  * `instruction` as one sentence. Never preselected.
  */
-recommendation?: ReviewRecommendation, };
+recommendation?: ReviewRecommendation, 
+/**
+ * For a publish gate: the exact plan the person consents to, with the
+ * nonce a consent must carry. `None` for a `human_review` gate.
+ */
+publish?: PlanView, };
 
 export type PendingSupervisor = { node: string, 
 /**
@@ -207,6 +410,28 @@ trigger: string,
  * how to decide.
  */
 instruction: string, options: Array<string>, how_to_decide: string, };
+
+export type ListProgress = { node: string, total: number, processed: number, passed: number, needs_look: number, running: number, };
+
+export type RunListItem = { id: string, 
+/**
+ * `pending`, `running`, `passed` or `needs_look`.
+ */
+state: string, round: number, verdict?: string, note?: string, 
+/**
+ * Why it needs a look.
+ */
+reason?: string, attempts: number, };
+
+export type RunList = { node: string, title?: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, pending: number, running: number, 
+/**
+ * The batch running or last run (from 1).
+ */
+batch: number, 
+/**
+ * How many batches the visit needs at its batch size.
+ */
+batches: number, items: Array<RunListItem>, };
 
 export type ProgressSummary = { percent: number, label: string | null, waiting_on: string | null, 
 /**
@@ -261,6 +486,11 @@ pending_waits: Array<string>,
  * Absent when empty, so a run without host tasks serializes as before.
  */
 pending_tasks?: Array<PendingHostTask>, 
+/**
+ * The counts of every list node that started a visit, in playbook
+ * order. Absent when empty.
+ */
+lists?: Array<ListProgress>, 
 /**
  * Deterministic identity of the work plan behind this percent (spec
  * section 3): the playbook version bound to the run plus the latest
@@ -337,7 +567,11 @@ applied: number,
  */
 shadow_would_change: number, };
 
-export type AttemptModel = { node: string, attempt: number, 
+export type AttemptModel = { node: string, 
+/**
+ * The list item the attempt ran, for an item of a list node.
+ */
+item?: string, attempt: number, 
 /**
  * [`EXECUTED_BY_CLI`] or [`EXECUTED_BY_HOST`].
  */
@@ -359,6 +593,46 @@ expected: string | null,
  * Both models are known and differ.
  */
 mismatch: boolean, };
+
+export type IsolationViewEntry = { path: string, 
+/**
+ * `read_only`, `read_write` or `hidden`.
+ */
+access: string, };
+
+export type AttemptIsolation = { 
+/**
+ * `full` or `best_effort`.
+ */
+level: string, 
+/**
+ * `bwrap`, or `none` when the attempt ran without a sandbox.
+ */
+backend: string, bwrap_version?: string, 
+/**
+ * `open` or `none`.
+ */
+network: string, holds: Array<string>, 
+/**
+ * Including `credentials.env_passed:<NAME>` for each credential-shaped
+ * variable the allowlist still passes (a name, never a value).
+ */
+limits: Array<string>, 
+/**
+ * Why no sandbox was used, under `best_effort` (`code (detail)`).
+ */
+fallbacks?: Array<string>, 
+/**
+ * The bound paths (`~/...` under the home) and their access, at most
+ * [`ISOLATION_VIEW_CAP`].
+ */
+view: Array<IsolationViewEntry>, };
+
+export type AttemptIsolationRow = { node: string, 
+/**
+ * The list item the attempt ran, for an item of a list node.
+ */
+item?: string, attempt: number, isolation: AttemptIsolation, };
 
 export type Rate = { count: number, of: number, rate?: number, };
 
@@ -384,7 +658,12 @@ tokens: PerRun,
 /**
  * Runs that reported a cost.
  */
-runs_with_cost: number, cost_usd: number, cost_per_run_usd?: number, };
+runs_with_cost: number, 
+/**
+ * Finished attempts that reported a cost, over every finished attempt:
+ * how much of the spend the cost figures cover.
+ */
+cost_known: Rate, cost_usd: number, cost_per_run_usd?: number, };
 
 export type ModelUse = { 
 /**
@@ -411,6 +690,80 @@ checked: number, passed: Rate, failed: number,
  */
 errors: number, manual: number, };
 
+export type QualityStats = { criterion: string, source: CriterionSource, 
+/**
+ * `<kind>/<version>`.
+ */
+grader: string, task_type: string, 
+/**
+ * The criterion definition's digest the levels were given under.
+ */
+digest: string, 
+/**
+ * Runs whose latest grade of the grader has the criterion.
+ */
+graded_runs: number, tally: Tally, 
+/**
+ * Good over determinate levels (good, partial, poor).
+ */
+good: Rate, 
+/**
+ * Poor over determinate levels.
+ */
+poor: Rate, };
+
+export type QualityDelta = { criterion: string, grader: string, task_type: string, 
+/**
+ * The criterion definition's digest both versions graded under: a
+ * criterion whose definition changed has one delta per digest.
+ */
+digest: string, good_delta?: number, poor_delta?: number, };
+
+export type KindCount = { kind: string, occurrences: number, runs: number, };
+
+export type FindingGroup = { kind: string, location: string, runs: number, occurrences: number, 
+/**
+ * The latest run that reported it.
+ */
+last_run: string, };
+
+export type FindingStats = { by_kind: Array<KindCount>, 
+/**
+ * The most widespread groups, by runs, at most [`TOP_GROUPS`].
+ */
+top: Array<FindingGroup>, runs_with_warnings: Rate, };
+
+export type BaselineStats = { check: string, observation: string, 
+/**
+ * Runs that compared it.
+ */
+compared: number, met: Rate, regressed: number, unknown: number, };
+
+export type DigestStats = { 
+/**
+ * The profile digest, shortened.
+ */
+profile: string, 
+/**
+ * The bundle digest (profile plus skills), shortened.
+ */
+bundle: string, 
+/**
+ * Runs the node ran in under this executor.
+ */
+runs: number, 
+/**
+ * Runs where the node passed on its one visit and first attempt,
+ * without a fallback.
+ */
+first_pass: Rate, duration: Waits, 
+/**
+ * The median tokens of a visit that reported usage on every attempt.
+ */
+tokens_per_visit?: number, };
+
+export type ExecutorChange = { node: string, base_profile: string, against_profile: string, base_bundle: string, against_bundle: string, };
+
 export type NodeStats = { node: string, 
 /**
  * Runs the node started in.
@@ -433,6 +786,11 @@ expected_s?: number,
  * Finished executions that took longer than `expected_s`.
  */
 over_expected?: Rate, deliverable_missing: number, output_fields_missing: number, 
+/**
+ * Its figures per executor digest, when the runs of the version bound
+ * it to more than one ([`digests`]).
+ */
+digests?: Array<DigestStats>, 
 /**
  * Attempts per model actually used ([`UNREPORTED`] when a host said
  * nothing).
@@ -460,7 +818,21 @@ duration: Waits, spend: Spend, deliverable_missing: number, output_fields_missin
 /**
  * Empty when the runs checked no goal.
  */
-goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, 
+goal: Array<GoalStats>, 
+/**
+ * The findings and warnings the runs' attempts reported.
+ */
+findings: FindingStats, 
+/**
+ * Each baseline observation over the runs that compared it; empty
+ * when the runs had no baseline check.
+ */
+baseline: Array<BaselineStats>, 
+/**
+ * The levels its runs' signed grades gave each criterion, one row per
+ * comparable key ([`quality`]); empty when no run was graded.
+ */
+quality?: Array<QualityStats>, nodes: Array<NodeStats>, note?: string, 
 /**
  * Runs of this version that were candidate trials (issue #192): the
  * version was a forward patch on trial when they ran.
@@ -480,7 +852,17 @@ export type Comparison = { playbook: string, base: string,
 /**
  * `None` when no other version of the playbook has runs.
  */
-against?: string, success_delta?: number, first_pass_delta?: number, retries_per_run_delta?: number, loops_per_run_delta?: number, median_duration_delta_ms?: number, cost_per_run_delta_usd?: number, };
+against?: string, success_delta?: number, first_pass_delta?: number, retries_per_run_delta?: number, loops_per_run_delta?: number, median_duration_delta_ms?: number, cost_per_run_delta_usd?: number, 
+/**
+ * Nodes whose latest executor (profile or bundle digest) differs
+ * between the two versions.
+ */
+executor_changes?: Array<ExecutorChange>, 
+/**
+ * How each criterion both versions graded under the same definition
+ * moved.
+ */
+quality?: Array<QualityDelta>, };
 
 export type StatsReport = { runs: number, 
 /**
@@ -515,7 +897,10 @@ export type CandidateTrial = {
  */
 version: string, 
 /**
- * `running`; `promoted` or `rejected` once the run decided it; `passed`
+ * `running`; `promoted` or `rejected` once the run decided it; `wait`
+ * or `needs_person` for a quality comparison it left open (or, once
+ * that comparison was decided after the run, what the candidate's
+ * trial record says now); `passed`
  * for a success that did not promote yet (`after_n_successes`,
  * `manual`); `undecided` for an end that judges nothing (a stop, a
  * replaced candidate).
@@ -525,6 +910,8 @@ verdict: string, reason?: string, };
 export type PauseBy = "operator" | "supervisor" | "engine";
 
 export type PauseMode = "drain" | "now";
+
+export type PauseCause = "quota" | "budget";
 
 export type PauseInfo = { reason: string, by: PauseBy, mode: PauseMode, 
 /**
@@ -540,7 +927,217 @@ until?: number, keep_lock?: boolean,
  * The run still reads `running`: a pause is queued and a live driver is
  * draining toward it. A view overlay, never a journal status.
  */
-pausing?: boolean, };
+pausing?: boolean, 
+/**
+ * Why the engine paused the run (a quota, the budget), derived from
+ * the reason; absent for every other pause.
+ */
+cause?: PauseCause, };
+
+export type OnNoEstimate = "ask" | "pause" | "continue";
+
+export type BudgetLimit = { tokens?: number, usd?: number, };
+
+export type BudgetSource = "playbook" | "run" | "resume";
+
+export type BudgetAmount = { tokens?: number, usd?: number, };
+
+export type SpentDim = { 
+/**
+ * The sum the attempts (and the sub-playbook runs) reported.
+ */
+known: number, 
+/**
+ * Attempts that reported nothing in this dimension: unknown, never
+ * zero.
+ */
+unknown_attempts: number, 
+/**
+ * The estimate for the unknown attempts (their node's median per
+ * attempt), `None` when any of them has no estimate: the spent amount
+ * is then unknown.
+ */
+imputed?: number, };
+
+export type BudgetSpent = { tokens?: SpentDim, usd?: SpentDim, };
+
+export type GateDecision = "paused" | "continued" | "waived" | "admitted_waived" | "unknown";
+
+export type GateBasis = "median" | "exhausted" | "no_estimate" | "unknown_spend" | "operator" | "unknown";
+
+export type DimStatus = { 
+/**
+ * What the attempts reported.
+ */
+spent: number, 
+/**
+ * Attempts that reported nothing in this dimension.
+ */
+unknown_attempts: number, 
+/**
+ * The estimate for those attempts; absent when one has none.
+ */
+imputed?: number, 
+/**
+ * The limit minus the spent and imputed amounts; absent when unknown.
+ */
+remaining?: number, };
+
+export type PausedAt = { node: string, 
+/**
+ * The list batch, for a list node.
+ */
+batch?: number, basis: GateBasis, need?: BudgetAmount, remaining?: BudgetAmount, };
+
+export type BudgetStatus = { limit: BudgetLimit, on_no_estimate: OnNoEstimate, source?: BudgetSource, tokens?: DimStatus, usd?: DimStatus, 
+/**
+ * How often the budget was set (at start and at resumes).
+ */
+sets: number, 
+/**
+ * The gate pause holding the run, while it does.
+ */
+paused?: PausedAt, 
+/**
+ * A node a person let run once over the budget, until it does.
+ */
+waiver?: string, };
+
+export type Spread<T> = { 
+/**
+ * How many samples; 0 for a declared figure.
+ */
+n: number, p50: T, low: T, high: T, kind: SpreadKind, };
+
+export type SpreadKind = "iqr" | "min_max" | "single";
+
+export type EstimateBasis = "history" | "declared" | "none";
+
+export type Comparable = { 
+/**
+ * Runs of the same version and execution mode within the window.
+ */
+runs: number, succeeded: number, window: number, 
+/**
+ * Runs whose attempts reported no usage at all.
+ */
+runs_without_usage: number, attempts_without_usage: number, attempts_without_cost: number, 
+/**
+ * Per node, the comparable runs that bound it to another profile.
+ */
+profile_mismatch?: { [key in string]: number }, };
+
+export type TimeEstimate = { basis: EstimateBasis, spread?: Spread<number>, 
+/**
+ * The median time succeeded runs waited for people (gates and
+ * questions), included in the spread.
+ */
+human_wait_p50_ms?: number, };
+
+export type SpendEstimate<T> = { basis: EstimateBasis, spread: Spread<T>, };
+
+export type NodeSpread = { tokens?: Spread<number>, cost_usd?: Spread<number>, ms?: Spread<number>, };
+
+export type AttemptMedian = { tokens?: number, cost_usd?: number, };
+
+export type ItemsBasis = "inline" | "history" | "unknown";
+
+export type ListEstimate = { 
+/**
+ * One item's spend over all its attempts (rounds and checks).
+ */
+per_item: NodeSpread, items?: number, items_basis: ItemsBasis, batch_ms_p50?: number, batch_size: number, };
+
+export type NodeEstimate = { node: string, 
+/**
+ * The median number of visits per run.
+ */
+visits_p50: number, 
+/**
+ * One visit: what the budget gate weighs before the node.
+ */
+per_visit: NodeSpread, 
+/**
+ * All visits of a run: loops and retries as they happened.
+ */
+per_run: NodeSpread, per_attempt_p50: AttemptMedian, list?: ListEstimate, };
+
+export type RunEstimate = { playbook: string, version: string, 
+/**
+ * `cli` or `host`.
+ */
+execution: string, comparable: Comparable, time: TimeEstimate, 
+/**
+ * Tokens over the estimated nodes; `None` when no node is estimated.
+ */
+tokens: SpendEstimate<number> | null, 
+/**
+ * Reported cost over the estimated nodes; `None` when no comparable
+ * attempt reported a cost.
+ */
+cost_usd: SpendEstimate<number> | null, nodes: Array<NodeEstimate>, 
+/**
+ * Gated nodes with no spend sample: the run figures leave them out.
+ */
+unestimated: Array<string>, 
+/**
+ * Gated nodes the gate has no token figure for (those of
+ * `unestimated` and those with cost samples only): a token limit
+ * cannot weigh them, and the run's tokens leave them out.
+ */
+unestimated_tokens: Array<string>, 
+/**
+ * Gated nodes the gate has no cost figure for: a dollar limit cannot
+ * weigh them, and the run's cost leaves them out.
+ */
+unestimated_cost: Array<string>, note?: string, };
+
+export type Transition = "review" | "question" | "paused" | "finished";
+
+export type NotifyTarget = { connector: string, account: string, function: string, to: string, };
+
+export type NotifySent = { 
+/**
+ * `<kind>.<seq>`, e.g. `review.12`.
+ */
+transition: string, 
+/**
+ * `pending`, `confirmed`, `not_sent` or `unknown`.
+ */
+state: string, 
+/**
+ * When its latest try was recorded, epoch milliseconds.
+ */
+at: number, };
+
+export type RunNotify = { active: boolean, target?: NotifyTarget, on: Array<Transition>, 
+/**
+ * Where the subscription in force came from.
+ */
+source?: string, 
+/**
+ * Each transition notified, with what became of its latest try.
+ */
+sent: Array<NotifySent>, problems: Array<string>, };
+
+export type MachineNotify = { 
+/**
+ * The machine's target; absent when none is configured.
+ */
+target?: NotifyTarget, 
+/**
+ * The transitions a run notifies about by default.
+ */
+on: Array<Transition>, 
+/**
+ * Whether a run of this workspace notifies without being asked (the
+ * machine default, unless the project turned it off).
+ */
+default_on: boolean, 
+/**
+ * Why the machine or the project notify settings do not read.
+ */
+problem?: string, };
 
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
@@ -568,7 +1165,12 @@ candidate_trial?: CandidateTrial,
  * when, and `pausing` while a live driver drains toward a queued pause.
  * Absent for a run that is neither paused nor pausing.
  */
-pause?: PauseInfo, };
+pause?: PauseInfo, 
+/**
+ * Why the run needs a person's look: a baseline regression, or
+ * findings or warnings its attempts reported. Absent when none.
+ */
+needs_look?: NeedsLook, };
 
 export type RunListEntry = { 
 /**
@@ -600,7 +1202,12 @@ candidate_trial?: CandidateTrial,
  * when, and `pausing` while a live driver drains toward a queued pause.
  * Absent for a run that is neither paused nor pausing.
  */
-pause?: PauseInfo, };
+pause?: PauseInfo, 
+/**
+ * Why the run needs a person's look: a baseline regression, or
+ * findings or warnings its attempts reported. Absent when none.
+ */
+needs_look?: NeedsLook, };
 
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
@@ -638,10 +1245,45 @@ goal?: RunGoal,
  */
 commits?: Array<NodeCommits>, 
 /**
+ * Each publish node: the pinned target, the latest plan, whether a
+ * consent is awaited, the push's ledger state and the result; empty
+ * for a run without one.
+ */
+publish?: Array<PublishView>, 
+/**
+ * Unread events the run's connector inbox reads found lost to inbox
+ * retention, one per distinct gap; empty when none.
+ */
+inbox_gaps?: Array<RunInboxGap>, 
+/**
+ * The human outcome: what the run did, what the engine checked, what
+ * nobody checked, and what the attempts reported.
+ */
+outcome: OutcomeSummary, 
+/**
+ * The baseline check, each observation before and after; absent for a
+ * playbook without one.
+ */
+baseline?: RunBaseline, 
+/**
+ * The findings and warnings the attempts reported; absent when none.
+ */
+notes?: RunNotes, 
+/**
+ * Each list node's visit with its items; empty for a run without a
+ * list.
+ */
+lists?: Array<RunList>, 
+/**
  * The candidate trial this run was (issue #192), with its verdict;
  * absent for every other run.
  */
 candidate_trial?: CandidateTrial, 
+/**
+ * The known problems the run showed its agents and the ones it hid;
+ * absent for a run whose playbook shows none.
+ */
+known_problems?: RunKnownProblems, 
 /**
  * The run's pause (issue #200): who paused it, why, since and until
  * when, and `pausing` while a live driver drains toward a queued
@@ -649,10 +1291,31 @@ candidate_trial?: CandidateTrial,
  */
 pause?: PauseInfo, 
 /**
+ * The run's budget: limits, spent and left per dimension, and the node
+ * a budget pause holds it before. Absent for a run without a budget.
+ */
+budget?: BudgetStatus, 
+/**
+ * The run's notifications: whether they are on, where they go, about
+ * what, what was sent, and why a subscription could not be used.
+ * Absent for a run that never had a subscription.
+ */
+notify?: RunNotify, 
+/**
+ * The estimate the run started with (time, tokens, cost from comparable
+ * runs). Absent for a run started before estimates, or a sub-run.
+ */
+estimate?: RunEstimate, 
+/**
  * The model each attempt actually ran on, against the profile's primary
  * model (issue #193); empty before the first attempt.
  */
 attempt_models?: Array<AttemptModel>, 
+/**
+ * What each isolated attempt's isolation held and did not (level,
+ * backend, network, limits); empty for a run without one.
+ */
+isolation?: Array<AttemptIsolationRow>, 
 /**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.
@@ -773,3 +1436,652 @@ id: string, kind: TrustKind, origin_kind: OriginKind,
 approved_at_ms: number, };
 
 export type TrustRevoked = { revoked: Array<TrustEntry>, };
+
+export type FitSeverity = "blocking" | "note";
+
+export type FitItem = { code: string, 
+/**
+ * What it is about: a profile, a param, a connector, a node.
+ */
+subject: string | null, detail: string, severity: FitSeverity, };
+
+export type TrustItem = { 
+/**
+ * `playbook`, `imported_scripts`, `profile_bundle`, `connector`,
+ * `connector_account` or `sub_playbook`.
+ */
+kind: string, subject: string, digest: string | null, approved: boolean, 
+/**
+ * Whether an acknowledge at start stands in for the approval.
+ */
+acknowledge_covers: boolean, };
+
+export type ConsentView = { 
+/**
+ * The consent sources (`playbook`, `node <id>`, a connector function,
+ * `sub-playbook node <id>`); empty when no consent is needed.
+ */
+irreversible: Array<string>, 
+/**
+ * The effects of the whole tree.
+ */
+effects: Array<string>, };
+
+export type FitReport = { id: string, 
+/**
+ * `project` or `global`.
+ */
+scope: string, version: string, 
+/**
+ * No blocking compatibility or setup item. Not the same as a start
+ * going through unasked: see `trusted` and `needs_consent`.
+ */
+ready: boolean, 
+/**
+ * Every trust item is approved.
+ */
+trusted: boolean, needs_consent: boolean, compatibility: Array<FitItem>, setup: Array<FitItem>, trust: Array<TrustItem>, consent: ConsentView, };
+
+export type FitSummary = { ready: boolean, 
+/**
+ * No blocking compatibility item.
+ */
+compatible: boolean, 
+/**
+ * How many setup items there are.
+ */
+setup: number, trusted: boolean, needs_consent: boolean, };
+
+export type Incompat = "removed" | "type_changed" | "option_gone" | "now_secret";
+
+export type InstructionSource = "memory" | "legacy_draft" | "none";
+
+export type ValueStatus = { "status": "compatible" } | { "status": "incompatible", reason: Incompat, };
+
+export type RecalledValue = { name: string, 
+/**
+ * The value; `None` when the param became a secret (the old value is
+ * never shown).
+ */
+value: string | null, status: ValueStatus, };
+
+export type Recall = { 
+/**
+ * The instruction a start without one would use (a blank one counts as
+ * none).
+ */
+instruction: string | null, instruction_source: InstructionSource, values: Array<RecalledValue>, 
+/**
+ * Params with neither a compatible remembered value nor a default: a
+ * start must pass them.
+ */
+missing: Array<string>, 
+/**
+ * The params changed since the values were saved.
+ */
+schema_changed: boolean, diagnostics: Array<string>, };
+
+export type Refused = { name: string, reason: string, };
+
+export type Remembered = { stored: Array<string>, refused: Array<Refused>, 
+/**
+ * The earlier memory could not be used (corrupt, or not saved on this
+ * machine) and was replaced.
+ */
+diagnostics?: Array<string>, };
+
+export type BundleOrigin = { 
+/**
+ * The exporter's trust digest of the version (YAML plus scripts).
+ */
+digest: string, 
+/**
+ * `project` or `global`.
+ */
+scope: string, apb_version: string, exported_at_ms: number, };
+
+export type ScriptEntry = { 
+/**
+ * Path relative to `scripts/`.
+ */
+path: string, 
+/**
+ * `sha256:<hex>` of the file bytes.
+ */
+sha256: string, bytes: number, executable: boolean, };
+
+export type ImportProvenance = { 
+/**
+ * `sha256:<hex>` of the bundle file as read.
+ */
+bundle_digest: string, 
+/**
+ * The base name of the bundle file, sanitized, when it was a file.
+ */
+file_name?: string, 
+/**
+ * The id and version the bundle declared.
+ */
+source_id: string, source_version: string, 
+/**
+ * The exporter's own view, when the bundle carried one. Informational:
+ * nothing local vouches for it.
+ */
+source?: BundleOrigin, imported_at_ms: number, 
+/**
+ * The scripts the import wrote (empty when it carried none).
+ */
+scripts?: Array<ScriptEntry>, 
+/**
+ * The trust digest of the version the import wrote: what an approval
+ * of the import must name.
+ */
+digest: string, };
+
+export type ComparableKey = { criterion: string, digest: string, 
+/**
+ * `<kind>/<version>`.
+ */
+grader: string, task_type: string, };
+
+export type Tally = { good: number, partial: number, poor: number, not_applicable: number, not_enough_data: number, };
+
+export type CriterionResult = "worse" | "better" | "same" | "inconclusive" | "insufficient" | "not_applicable";
+
+export type CriterionComparison = { key: ComparableKey, candidate: Tally, current: Tally, result: CriterionResult, };
+
+export type Verdict = "promote" | "keep_current" | "wait" | "needs_person";
+
+export type QualityRecord = { verdict: Verdict, reason: string, compared?: Array<CriterionComparison>, 
+/**
+ * Unix milliseconds.
+ */
+decided_at: number, 
+/**
+ * `apb` for a decision the rule made, else the surface a person used.
+ */
+decided_by: string, };
+
+export type CriterionSource = "builtin" | "playbook";
+
+export type Level = "good" | "partial" | "poor" | "not_applicable" | "not_enough_data";
+
+export type Cite = { ref: string, span?: [number, number], };
+
+export type ViewEnd = { view: string, complete: boolean, ended: boolean, };
+
+export type CriterionGrade = { id: string, source: CriterionSource, 
+/**
+ * The criterion definition's digest at grading time.
+ */
+digest: string, 
+/**
+ * `run` or `node:<id>`.
+ */
+subject: string, level: Level, 
+/**
+ * A short machine slug for why (`run_failed`, `no_signal`, ...).
+ */
+reason_code: string, 
+/**
+ * One sentence for a person; never source text.
+ */
+why: string, cites?: Array<Cite>, absence_basis?: Array<ViewEnd>, 
+/**
+ * Whether the level counts in a promotion decision.
+ */
+counts_for_promotion: boolean, };
+
+export type ReadOp = { op: string, ref: string, chars: number, };
+
+export type ViewRead = { view: string, 
+/**
+ * The view holds everything the run produced (nothing was cut).
+ */
+complete: boolean, 
+/**
+ * Every record of the view was read in full.
+ */
+ended: boolean, 
+/**
+ * The share of its records read in full, 0 to 1.
+ */
+read_share: number, };
+
+export type ReadTrace = { budget_chars: number, read_chars: number, ops?: Array<ReadOp>, views?: Array<ViewRead>, };
+
+export type GraderKind = "rules" | "host" | "model";
+
+export type GraderId = { kind: GraderKind, version: number, };
+
+export type SkillReadState = "yes" | "no" | "unknown";
+
+export type SkillRead = { node: string, profile: string, skill: string, bundle_digest: string, read: SkillReadState, 
+/**
+ * The record that shows the read.
+ */
+at?: string, };
+
+export type Grade = { schema: number, grade_id: string, run_id: string, playbook: string, version: string, task_type: string, grader: GraderId, 
+/**
+ * Unix milliseconds.
+ */
+created_at: number, criteria: Array<CriterionGrade>, reading: ReadTrace, skills?: Array<SkillRead>, 
+/**
+ * The installation's MAC over the rest of the grade: only a grade apb
+ * stored on this machine counts in a promotion. Absent when the
+ * installation has no key.
+ */
+mac?: string, };
+
+export type CompareMode = "not_worse" | "better";
+
+export type QualityGate = { compare: CompareMode, 
+/**
+ * Determinate grades needed per side and per criterion.
+ */
+min_runs: number, 
+/**
+ * Trials after which an undecided comparison goes to a person.
+ */
+max_trials: number, 
+/**
+ * How many of current's latest graded runs are compared with.
+ */
+window: number, 
+/**
+ * The non-inferiority margin, 0 to 1: a criterion is not worse only
+ * when the candidate's upper bound for poor is at most current's poor
+ * rate plus this.
+ */
+margin: number, };
+
+export type QualityDecision = { verdict: Verdict, per_criterion: Array<CriterionComparison>, reason: string, };
+
+export type CandidateQualityView = { version: string, current: string, 
+/**
+ * The candidate's ended trial runs.
+ */
+trials: number, 
+/**
+ * The gate under a quality policy; absent under the others.
+ */
+gate?: QualityGate, 
+/**
+ * The comparison as it stands now (quality policy only).
+ */
+decision?: QualityDecision, 
+/**
+ * The latest decision recorded on the candidate's trial record.
+ */
+recorded?: QualityRecord, };
+
+export type Graded = { 
+/**
+ * `rules` or `model`.
+ */
+grader: string, grade?: Grade, 
+/**
+ * Why nothing was stored: `off`, `no_criteria`, `budget`, `send`,
+ * `busy`, `state_too_large`.
+ */
+skipped?: string, candidate?: QualityRecord, candidate_error?: string, };
+
+export type RunGrades = { run_id: string, grades: Array<Grade>, };
+
+export type PlaybookCandidate = { id: string, candidate: CandidateQualityView | null, };
+
+export type ScopeKind = "connector" | "mcp_tool" | "cli" | "skill" | "path" | "node" | "other";
+
+export type ProblemScope = { kind: ScopeKind, name: string, };
+
+export type ProblemOrigin = { "type": "finding", kind: string, } | { "type": "connector_failures", outcome: string, http_status?: number, };
+
+export type EvidenceRef = { run_id: string, seq: number, node?: string, };
+
+export type SourceKind = "connector_def" | "skill" | "project_file" | "playbook_node";
+
+export type ProblemSource = { kind: SourceKind, name: string, digest: string, excerpt?: string, };
+
+export type ProblemStatus = "open" | "closed" | "dismissed";
+
+export type Decided = { by: string, at_ms: number, reason?: string, };
+
+export type RecheckVerdict = "holds" | "closed" | "closed_proposed" | "undetermined";
+
+export type RecheckBasis = "unchanged" | "model" | "host" | "person";
+
+export type Quote = { text: string, lines: [number, number], };
+
+export type RecheckRecord = { 
+/**
+ * The source digest it was checked against.
+ */
+digest: string, verdict: RecheckVerdict, basis: RecheckBasis, quote?: Quote, 
+/**
+ * A short slug for why (`holds`, `quote_not_found`, ...).
+ */
+reason_code: string, 
+/**
+ * The decision mode a model's answer was taken in.
+ */
+mode?: string, at_ms: number, by: string, };
+
+export type KnownProblem = { id: string, scope: ProblemScope, 
+/**
+ * The leading wording of [`KnownProblem::symptoms`].
+ */
+symptom: string, 
+/**
+ * The leading wording of [`KnownProblem::workarounds`].
+ */
+workaround?: string, 
+/**
+ * The distinct symptom wordings runs reported, at most [`TEXTS_KEPT`].
+ */
+symptoms?: Array<ReportedText>, 
+/**
+ * The distinct workaround wordings runs reported, at most
+ * [`TEXTS_KEPT`].
+ */
+workarounds?: Array<ReportedText>, origin: ProblemOrigin, 
+/**
+ * The latest [`EVIDENCE_KEPT`] sightings.
+ */
+evidence: Array<EvidenceRef>, 
+/**
+ * Distinct runs that reported it.
+ */
+runs: number, first_seen_ms: number, last_seen_ms: number, source?: ProblemSource, status: ProblemStatus, confirmed?: Decided, 
+/**
+ * A person's latest status decision (dismiss, reopen, close).
+ */
+decided?: Decided, 
+/**
+ * The latest recheck.
+ */
+check?: RecheckRecord, 
+/**
+ * The latest [`CHECKS_KEPT`] rechecks, oldest first.
+ */
+checks?: Array<RecheckRecord>, };
+
+export type ReportedText = { text: string, runs: number, last_seen_ms: number, };
+
+export type ShownProblem = { id: string, scope: string, symptom: string, workaround?: string, 
+/**
+ * Empty: every agent node (a problem scoped to nodes none of which
+ * matches is hidden, never shown to all).
+ */
+nodes?: Array<string>, 
+/**
+ * `unchanged`, `model`, `host` or `person`.
+ */
+basis: string, };
+
+export type HiddenProblem = { id: string, 
+/**
+ * `source_changed_unchecked`, `undetermined`, `closed_proposed`,
+ * `over_limit`, `source_unreadable` or `no_matching_node`.
+ */
+reason: string, };
+
+export type SourceNow = "unchanged" | "changed" | "unreadable";
+
+export type ProblemView = { 
+/**
+ * Shown to a run that starts now (before any recheck), under the
+ * playbook's block or the default one.
+ */
+significant: boolean, 
+/**
+ * A person should look at it: it is open and its latest recheck could
+ * not settle it or proposes a close, or it is significant and its
+ * source changed since it was checked or cannot be read now.
+ */
+needs_look: boolean, 
+/**
+ * Its source now, for a problem that has one (`cli:`, `mcp:` and
+ * `other` problems have none and are never rechecked).
+ */
+source_now?: SourceNow, id: string, scope: ProblemScope, 
+/**
+ * The leading wording of [`KnownProblem::symptoms`].
+ */
+symptom: string, 
+/**
+ * The leading wording of [`KnownProblem::workarounds`].
+ */
+workaround?: string, 
+/**
+ * The distinct symptom wordings runs reported, at most [`TEXTS_KEPT`].
+ */
+symptoms?: Array<ReportedText>, 
+/**
+ * The distinct workaround wordings runs reported, at most
+ * [`TEXTS_KEPT`].
+ */
+workarounds?: Array<ReportedText>, origin: ProblemOrigin, 
+/**
+ * The latest [`EVIDENCE_KEPT`] sightings.
+ */
+evidence: Array<EvidenceRef>, 
+/**
+ * Distinct runs that reported it.
+ */
+runs: number, first_seen_ms: number, last_seen_ms: number, source?: ProblemSource, status: ProblemStatus, confirmed?: Decided, 
+/**
+ * A person's latest status decision (dismiss, reopen, close).
+ */
+decided?: Decided, 
+/**
+ * The latest recheck.
+ */
+check?: RecheckRecord, 
+/**
+ * The latest [`CHECKS_KEPT`] rechecks, oldest first.
+ */
+checks?: Array<RecheckRecord>, };
+
+export type ProblemsView = { playbook: string, scope: string, 
+/**
+ * Whether this installation wrote the file. An unsigned file's
+ * problems are never shown nor listed, only counted.
+ */
+signed: boolean, 
+/**
+ * How many problems an unsigned file holds.
+ */
+unsigned_problems: number, problems: Array<ProblemView>, };
+
+export type RunKnownProblems = { shown: Array<ShownProblem>, hidden: Array<HiddenProblem>, 
+/**
+ * Problems of a file this installation did not write: never shown,
+ * and only counted.
+ */
+unsigned: number, };
+
+export type ChangedPassage = { index: number, 
+/**
+ * 1-based, inclusive, in the current text.
+ */
+lines: [number, number], text: string, };
+
+export type ScanReport = { 
+/**
+ * Ended runs looked at.
+ */
+runs: number, 
+/**
+ * Sightings they had (a run observed before adds nothing again).
+ */
+sightings: number, };
+
+export type ProblemDetail = { problem: ProblemView, changed_passages: Array<ChangedPassage>, };
+
+export type ProjectSeen = { workspace_id: string, name: string, };
+
+export type SourceSpan = { root: string, file: string, workspace_id: string, lines: [number, number], };
+
+export type Example = { text: string, source: SourceSpan, };
+
+export type Support = { sessions: number, days: number, 
+/**
+ * The projects, in the order of the request.
+ */
+projects: Array<ProjectSeen>, };
+
+export type SuggestionStatus = { "state": "new" } | { "state": "saved", playbook: string, version: string, scope: string, } | { "state": "dismissed" };
+
+export type Suggestion = { 
+/**
+ * `seq-` and 10 hex characters of the steps.
+ */
+slug: string, steps: Array<string>, support: Support, score: number, title: string, 
+/**
+ * The synopsis `playbook_capture` takes.
+ */
+synopsis: unknown, yaml: string, effects: Array<string>, examples: Array<Example>, sources: Array<SourceSpan>, 
+/**
+ * Things to settle before saving (`needs_profile`).
+ */
+notes?: Array<string>, status: SuggestionStatus, };
+
+export type RootReport = { name: string, agent: string, files_seen: number, files_read: number, bytes_read: number, 
+/**
+ * Files left unread, by why: `symlink`, `not_regular`, `too_old`,
+ * `other_project`, `file_cap`, `byte_cap`, `step_cap`, `unreadable`,
+ * and lines skipped as `line_too_long`.
+ */
+skipped: { [key in string]: number }, 
+/**
+ * Files read by their prefix only.
+ */
+cut_files: number, };
+
+export type ReadReport = { roots: Array<RootReport>, 
+/**
+ * Sessions with at least one step.
+ */
+sessions: number, };
+
+export type RequestEcho = { roots: Array<string>, projects: Array<ProjectSeen>, since_days: number, };
+
+export type SuppressedSlug = { slug: string, scope: string, kind: string, };
+
+export type DiscoverResult = { schema: number, 
+/**
+ * `disc-` and 10 hex characters.
+ */
+id: string, 
+/**
+ * Unix milliseconds.
+ */
+created_at: number, reader: string, miner: string, request: RequestEcho, read: ReadReport, suggestions: Array<Suggestion>, suppressed: Array<SuppressedSlug>, 
+/**
+ * Drafts dropped because their text still looked like it held a
+ * secret.
+ */
+dropped_drafts: number, 
+/**
+ * The installation's MAC over the rest (see `store`).
+ */
+mac?: string, };
+
+export type RootInfo = { name: string, agent: string, 
+/**
+ * Whether it is a real directory here now.
+ */
+available: boolean, };
+
+export type ResultView = { signed: boolean, stored: boolean, suppressed_suggestions: Array<{ pattern: string, synopsis: string, kind: string, scope: string, declines: number, snoozed_until: string }>, schema: number, 
+/**
+ * `disc-` and 10 hex characters.
+ */
+id: string, 
+/**
+ * Unix milliseconds.
+ */
+created_at: number, reader: string, miner: string, request: RequestEcho, read: ReadReport, suggestions: Array<Suggestion>, suppressed: Array<SuppressedSlug>, 
+/**
+ * Drafts dropped because their text still looked like it held a
+ * secret.
+ */
+dropped_drafts: number, 
+/**
+ * The installation's MAC over the rest (see `store`).
+ */
+mac?: string, };
+
+export type ResultSummary = { id: string, created_at: number, request: RequestEcho, sessions: number, suggestions: number, saved: number, dismissed: number, signed: boolean, };
+
+export type TrialRecord = { 
+/**
+ * Trial runs that succeeded with every goal criterion holding.
+ */
+successes: number, 
+/**
+ * `promoted`, `rejected` or `superseded`; absent while it is still on
+ * trial.
+ */
+outcome?: string, 
+/**
+ * The trial run that decided the outcome (for `superseded`: the run
+ * whose forward patch replaced it).
+ */
+run_id?: string, 
+/**
+ * Why it was rejected, or the version that superseded it.
+ */
+reason?: string, 
+/**
+ * The latest quality decision under `promote_supervisor_patches:
+ * { when: quality }`; absent under every other policy.
+ */
+quality?: QualityRecord, };
+
+export type VersionProvenance = { created_by: string, run_id: string | null, classification: string | null, 
+/**
+ * `next_runs` for a forward patch (a candidate for the next runs);
+ * absent for a patch the run migrated onto (`current_run`).
+ */
+scope?: string, 
+/**
+ * The version the patch was made from: the lineage of a candidate that
+ * replaced an earlier one.
+ */
+base_version?: string, 
+/**
+ * Why the supervisor made the forward patch.
+ */
+rationale?: string, 
+/**
+ * What the rationale rests on: journal seqs, node ids, durations.
+ */
+evidence?: Array<string>, 
+/**
+ * How the candidate fared in its trials; absent until a trial run ends.
+ */
+trial?: TrialRecord, 
+/**
+ * Where an imported version came from (`created_by: import`).
+ */
+imported?: ImportProvenance, };
+
+export type VersionInfo = { version: string, 
+/**
+ * Whether `current` points at this version: the one source for "in use"
+ * (promoted) and the only one the listings report.
+ */
+is_current: boolean, 
+/**
+ * Whether the `candidate` pointer names this version: a forward patch
+ * on trial in the next runs (issue #192, see `crate::candidate`).
+ */
+is_candidate?: boolean, 
+/**
+ * An import wrote this version with scripts and its content is not
+ * approved: it runs only after an approval naming its digest
+ * ([`approval`]).
+ */
+awaiting_approval?: boolean, provenance: VersionProvenance | null, };

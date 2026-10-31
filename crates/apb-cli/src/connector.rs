@@ -52,6 +52,12 @@ pub(crate) enum ConnectorAction {
         /// response_pick projection (spec 4.5 debugging escape)
         #[arg(long)]
         full: bool,
+        /// A stable name for this send (`[a-z0-9][a-z0-9._-]{0,63}`), the
+        /// same on every attempt: a repeat of a send that already went out
+        /// returns the earlier result instead of sending again. Without it a
+        /// send is identified by its arguments.
+        #[arg(long)]
+        intent: Option<String>,
     },
     /// Approve trust for a connector or one of its accounts. With no flag,
     /// approves the connector's current tree digest; with --account, approves
@@ -120,7 +126,19 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             args,
             dry_run,
             full,
-        } => call_cmd(root, &name, &function, account, args, dry_run, full),
+            intent,
+        } => call_cmd(
+            root,
+            &CallTarget {
+                name: &name,
+                function: &function,
+                account: account.as_deref(),
+                intent: intent.as_deref(),
+            },
+            args,
+            dry_run,
+            full,
+        ),
         ConnectorAction::Approve { name, account } => approve_cmd(root, &name, account.as_deref()),
         ConnectorAction::Doctor => doctor_cmd(root),
         ConnectorAction::Env { name, write } => env_cmd(root, name, write),
@@ -362,15 +380,34 @@ fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
 
 // --- call -------------------------------------------------------------
 
+/// What `apb connector call` addresses: the connector, its function, the
+/// account, and the send's intent label.
+struct CallTarget<'a> {
+    name: &'a str,
+    function: &'a str,
+    account: Option<&'a str>,
+    intent: Option<&'a str>,
+}
+
 fn call_cmd(
     root: &Path,
-    name: &str,
-    function: &str,
-    account: Option<String>,
+    target: &CallTarget<'_>,
     args: Option<String>,
     dry_run: bool,
     full: bool,
 ) -> ExitCode {
+    let &CallTarget {
+        name,
+        function,
+        account,
+        intent,
+    } = target;
+    if let Some(label) = intent
+        && let Err(message) = apb_engine::connector::intent::validate_label(label)
+    {
+        print_call_result(&call_error_json("invalid_args", &message));
+        return ExitCode::FAILURE;
+    }
     let args_str = match args.as_deref() {
         None => "{}".to_string(),
         Some("-") => {
@@ -408,7 +445,7 @@ fn call_cmd(
             let (value, ok) = apb_engine::connector::call::play_call(
                 root,
                 name,
-                account.as_deref(),
+                account,
                 function,
                 &parsed_args,
                 true,
@@ -435,18 +472,36 @@ fn call_cmd(
         }
     };
 
+    // An engine site (`@baseline`, `@notify`) is reserved for the engine's
+    // own calls; no node can carry one (validator V68), so a caller naming
+    // one is borrowing its grant.
+    if apb_core::connector::sites::is_engine_site(&node_id) {
+        print_call_result(&call_error_json(
+            "config",
+            &format!(
+                "APB_NODE_ID `{node_id}` is reserved for calls the engine makes itself; \
+                 apb connector call runs only for a node of the run"
+            ),
+        ));
+        return ExitCode::FAILURE;
+    }
+
     let req = apb_engine::connector::call::CallRequest {
         run_dir: Path::new(&run_dir),
         root,
         node_id: &node_id,
         connector: name,
         function,
-        account: account.as_deref(),
+        account,
         args: parsed_args,
         dry_run,
         full,
     };
-    let (value, ok) = apb_engine::connector::call::execute(req);
+    let ctx = apb_engine::connector::call::CallContext::node(
+        intent,
+        apb_engine::connector::call::AttemptClaim::from_env(),
+    );
+    let (value, ok) = apb_engine::connector::call::execute_with(req, ctx);
     print_call_result(&value);
     if ok {
         ExitCode::SUCCESS

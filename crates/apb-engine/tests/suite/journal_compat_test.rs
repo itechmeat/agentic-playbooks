@@ -239,6 +239,40 @@ fn an_attempt_usage_block_of_a_newer_shape_does_not_break_the_journal() {
     apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
 }
 
+/// The same for the output loss list: an entry shape this binary cannot
+/// decode reads as no recorded loss, and the attempt still reads.
+#[test]
+fn an_output_loss_list_of_a_newer_shape_does_not_break_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = |seq: u64, body: &str| format!(r#"{{"seq":{seq},"ts":1,{body}}}"#);
+    let journal = [
+        line(0, r#""type":"run_started","playbook":"p","version":"1.0.0""#),
+        line(
+            1,
+            r#""type":"attempt_finished","node":"w","attempt":1,"status":"failed","output_truncated":{"streams":[{"stream":"stdout","kept_bytes":"1 MiB"}]},"transcript_incomplete":true"#,
+        ),
+        line(
+            2,
+            r#""type":"node_finished","node":"w","status":"failed","attempt":1,"output":"""#,
+        ),
+    ]
+    .join("\n");
+    std::fs::write(dir.path().join("events.jsonl"), journal + "\n").unwrap();
+
+    let read = apb_engine::event::read_journal(dir.path()).expect("journal reads");
+    assert!(read.unknown.is_empty());
+    let attempt = read.events.iter().find_map(|e| match &e.payload {
+        apb_engine::event::EventPayload::AttemptFinished {
+            output_truncated,
+            transcript_incomplete,
+            ..
+        } => Some((output_truncated.len(), *transcript_incomplete)),
+        _ => None,
+    });
+    assert_eq!(attempt, Some((0, true)));
+    apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
+}
+
 /// Stopping never re-drives a run and only appends `run_aborted`, itself a
 /// checkpoint, so an older apb can stop a run whose journal holds an unknown
 /// event after the last checkpoint. Resuming the same journal still refuses.
@@ -316,4 +350,385 @@ fn new_pause_fields_round_trip() {
     let line = r#"{"seq":4,"ts":20,"type":"run_resumed","from_node":"a","by":"engine"}"#;
     let e: Event = serde_json::from_str(line).unwrap();
     assert_eq!(serde_json::to_string(&e).unwrap(), line);
+}
+
+/// The completeness fields added to known events read as absent from old
+/// lines and write the old shape back when unset, so a journal without them
+/// is byte-for-byte what it was.
+#[test]
+fn old_connector_call_and_attempt_lines_keep_their_shape() {
+    let lines = [
+        r#"{"seq":5,"ts":9,"type":"connector_call","node_id":"n","connector":"c","function":"f","account":"a","url":"u","outcome":"ok","http_status":200,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}"#,
+        r#"{"seq":6,"ts":10,"type":"attempt_finished","node":"n","attempt":1,"status":"succeeded","duration_ms":null,"session":null,"summary":null}"#,
+    ];
+    for line in lines {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let call: Event = serde_json::from_str(lines[0]).unwrap();
+    assert!(matches!(
+        call.payload,
+        EventPayload::ConnectorCall {
+            response_complete: None,
+            ..
+        }
+    ));
+    let cut = lines[0].replace("}", r#","response_complete":false}"#);
+    let e: Event = serde_json::from_str(&cut).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ConnectorCall {
+            response_complete: Some(false),
+            ..
+        }
+    ));
+}
+
+/// `inbox_gap` is a reporting record: it round trips, changes no run state,
+/// and a binary that does not know it skips it because the node that made the
+/// read still ends with its own `node_finished` checkpoint.
+#[test]
+fn inbox_gap_round_trips_and_is_skippable_before_a_checkpoint() {
+    let line = r#"{"seq":2,"ts":3,"type":"inbox_gap","node_id":"a","connector":"c","account":"main","from":3,"through":6}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+
+    // The same journal as an older binary sees it: the type is unknown, and a
+    // checkpoint follows it, so the engine read still succeeds.
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        line.replace("inbox_gap", "inbox_gap_from_the_future"),
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
+}
+
+/// The send ledger's two records round trip, change no run state, and an
+/// older binary that does not know them skips them while a checkpoint
+/// follows, and refuses to drive on when none does (the general rule).
+#[test]
+fn send_intent_records_round_trip_and_are_skippable_before_a_checkpoint() {
+    let recorded = r#"{"seq":2,"ts":3,"type":"send_intent_recorded","intent":"si-1","nonce":"n","node":"a","attempt":1,"attempt_seq":1,"connector":"c","function":"f","account":"main","mode":"key","label":"x","pid":7,"deadline_ms":9,"replay_of":"si-0"}"#;
+    let settled = r#"{"seq":3,"ts":4,"type":"send_intent_settled","intent":"si-1","outcome":"confirmed","source":"key_replay","effect_ref":"m-1"}"#;
+    for line in [recorded, settled] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    let head = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        recorded.replace("send_intent_recorded", "send_intent_from_the_future"),
+    ];
+    let finished = r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let settled_run = [&head[..], &[finished.to_string(), String::new()]].concat();
+    let dir = write_run(tmp.path(), "r1", &settled_run.join("\n"));
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
+
+    let open_run = [&head[..], &[String::new()]].concat();
+    let dir = write_run(tmp.path(), "r2", &open_run.join("\n"));
+    assert!(
+        read_all(&dir).is_err(),
+        "an unsettled unknown event refuses"
+    );
+}
+
+/// The attempt and intent fields of a connector call read as absent from an
+/// old line and stay off the wire when unset.
+#[test]
+fn a_connector_call_carries_its_attempt_and_intent_only_when_set() {
+    let old = r#"{"seq":5,"ts":9,"type":"connector_call","node_id":"n","connector":"c","function":"f","account":"a","url":"u","outcome":"ok","http_status":200,"duration_ms":3,"smtp_subject":null,"smtp_recipients":null}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ConnectorCall {
+            attempt: None,
+            attempt_seq: None,
+            intent: None,
+            origin: None,
+            ..
+        }
+    ));
+    let new = old.replace(
+        "}",
+        r#","attempt":2,"attempt_seq":11,"intent":"si-1","origin":"reconcile"}"#,
+    );
+    let e: Event = serde_json::from_str(&new).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), new);
+}
+
+/// A person's decision lands after the run paused: past the last
+/// checkpoint. An older binary that does not know the event refuses to
+/// drive the run on, while a reading surface still shows every event.
+#[test]
+fn a_settlement_after_a_pause_is_past_the_last_checkpoint() {
+    let lines = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":2,"type":"run_paused","reason":"lunch","by":"operator","mode":"drain"}"#,
+        r#"{"seq":2,"ts":3,"type":"send_intent_settled","intent":"si-1","outcome":"not_sent","source":"person","by":"ana"}"#,
+    ];
+    let tmp = tempfile::tempdir().unwrap();
+    let paused = write_run(tmp.path(), "r1", &(lines.join("\n") + "\n"));
+    let events = read_all(&paused).unwrap();
+    assert!(
+        events[1].payload.is_checkpoint(),
+        "the pause is the checkpoint"
+    );
+    assert!(matches!(
+        events[2].payload,
+        EventPayload::SendIntentSettled { .. }
+    ));
+
+    let older = lines.map(|l| l.replace("send_intent_settled", "send_intent_from_the_future"));
+    let dir = write_run(tmp.path(), "r2", &(older.join("\n") + "\n"));
+    assert!(read_all(&dir).is_err(), "an older apb does not drive on");
+    assert_eq!(
+        apb_engine::event::read_all_lossy_tail(&dir).unwrap().len(),
+        2,
+        "a reading surface skips it"
+    );
+}
+
+/// `notify_set` round trips, changes no run state, and an older binary that
+/// does not know it skips it while a checkpoint follows: such a binary then
+/// simply sends no notifications.
+#[test]
+fn notify_set_round_trips_and_is_skippable_before_a_checkpoint() {
+    let line = r#"{"seq":1,"ts":2,"type":"notify_set","target":{"connector":"telegram","account":"me","function":"send_message","to":"42","connector_digest":"sha256:c","account_digest":"sha256:a"},"on":["review","finished"],"source":"run"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+    // A shape a newer apb wrote reads leniently instead of failing.
+    let newer = r#"{"seq":1,"ts":2,"type":"notify_set","target":"elsewhere","on":["review","stalled"],"source":"run","by":"robot"}"#;
+    assert!(matches!(
+        serde_json::from_str::<Event>(newer).unwrap().payload,
+        EventPayload::NotifySet {
+            target: None,
+            by: None,
+            ..
+        }
+    ));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        line.replace("notify_set", "notify_set_from_the_future"),
+        r#"{"seq":2,"ts":3,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 2, 3]);
+}
+
+/// Who stopped a run reads as absent from an old `run_aborted` line and
+/// stays off the wire when unset.
+#[test]
+fn run_aborted_carries_who_stopped_it_only_when_known() {
+    let old = r#"{"seq":4,"ts":5,"type":"run_aborted","reason":"stop requested"}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::RunAborted { by: None, .. }
+    ));
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+    let new = r#"{"seq":4,"ts":5,"type":"run_aborted","reason":"stop requested","by":"operator"}"#;
+    let e: Event = serde_json::from_str(new).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), new);
+}
+
+/// The run quality events round-trip, are no checkpoints, and an older
+/// binary that does not know them skips them: each is followed by
+/// `run_finished`. `candidate_promoted` reads without its `basis`.
+#[test]
+fn quality_events_round_trip_and_are_skippable_before_run_finished() {
+    let graded = r#"{"seq":3,"ts":4,"type":"run_graded","grade_id":"rules-1-4-abcd1234","grader":"rules/1","levels":{"loops":"good","outcome":"good"}}"#;
+    let held = r#"{"seq":4,"ts":5,"type":"candidate_held","version":"1.0.1","run_id":"r1","verdict":"wait","reason":"not enough comparable grades yet"}"#;
+    for line in [graded, held] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    let old = r#"{"seq":4,"ts":5,"type":"candidate_promoted","version":"1.0.1","run_id":"r1","successes":2}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::CandidatePromoted { basis: None, .. }
+    ));
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        r#"{"seq":2,"ts":3,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        graded.replace("run_graded", "run_graded_from_the_future"),
+        held.replace("candidate_held", "candidate_held_from_the_future"),
+        r#"{"seq":5,"ts":6,"type":"run_finished","outcome":"succeeded"}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        [0, 1, 2, 5]
+    );
+}
+
+/// `tool_exposure_mismatch` round trips, reads with every field absent, is
+/// not a checkpoint, and an older binary skips it while a checkpoint follows.
+#[test]
+fn tool_exposure_mismatch_round_trips_and_is_skippable_before_a_checkpoint() {
+    let line = r#"{"seq":2,"ts":3,"type":"tool_exposure_mismatch","node":"a","attempt":1,"agent":"claude","missing_tools":["Bash"],"missing_servers":["apb (failed)"],"unexpected_servers":["other"],"item":"i"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+    let bare = r#"{"seq":2,"ts":3,"type":"tool_exposure_mismatch"}"#;
+    assert!(matches!(
+        serde_json::from_str::<Event>(bare).unwrap().payload,
+        EventPayload::ToolExposureMismatch { ref node, attempt: 0, ref missing_tools, item: None, .. }
+            if node.is_empty() && missing_tools.is_empty()
+    ));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+        line.replace("tool_exposure_mismatch", "tool_exposure_mismatch_from_the_future"),
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 3]);
+}
+
+/// The isolation fields: `attempt_started.isolation` and
+/// `agent_env_applied.forced_by` read as absent from old lines and write the
+/// old shape back when unset; a set record round trips; an isolation block
+/// of a newer shape reads as absent instead of failing the journal.
+#[test]
+fn isolation_fields_keep_old_lines_and_decode_leniently() {
+    let old = [
+        r#"{"seq":1,"ts":2,"type":"attempt_started","node":"w","attempt":1,"agent":"claude","pid":7,"spawn_ms":1}"#,
+        r#"{"seq":2,"ts":3,"type":"agent_env_applied","node":"w","attempt":1,"agent":"claude","kept":3,"withheld":["A"],"withheld_more":0,"absent":[]}"#,
+    ];
+    for line in old {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let e: Event = serde_json::from_str(old[0]).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::AttemptStarted {
+            isolation: None,
+            ..
+        }
+    ));
+    let set = old[0].replace(
+        r#""spawn_ms":1}"#,
+        r#""spawn_ms":1,"isolation":{"level":"full","backend":"bwrap","bwrap_version":"0.11.1","network":"none","holds":["network.none"],"limits":["user.host_uid","credentials.env_passed:GH_TOKEN"],"view":[{"path":"~/.rustup","access":"read_only"}]}}"#,
+    );
+    let e: Event = serde_json::from_str(&set).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), set);
+    let EventPayload::AttemptStarted {
+        isolation: Some(iso),
+        ..
+    } = &e.payload
+    else {
+        panic!("isolation decoded");
+    };
+    assert_eq!(iso.backend, "bwrap");
+    assert_eq!(iso.view[0].path, "~/.rustup");
+    let newer = old[0].replace(
+        r#""spawn_ms":1}"#,
+        r#""spawn_ms":1,"isolation":{"level":7}}"#,
+    );
+    let e: Event = serde_json::from_str(&newer).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::AttemptStarted {
+            isolation: None,
+            ..
+        }
+    ));
+    let forced = old[1].replace(r#""absent":[]}"#, r#""absent":[],"forced_by":"isolation"}"#);
+    let e: Event = serde_json::from_str(&forced).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), forced);
+    assert!(matches!(
+        e.payload,
+        EventPayload::AgentEnvApplied {
+            forced_by: Some(ref f),
+            ..
+        } if f == "isolation"
+    ));
+}
+
+/// The publish step's two records round trip, are no checkpoint, and an
+/// older binary that does not know them skips them while a checkpoint
+/// follows. The fields added to known events read as absent from old lines
+/// and stay off the wire when unset.
+#[test]
+fn publish_events_round_trip_and_are_skippable_before_a_checkpoint() {
+    let pinned = r#"{"seq":2,"ts":3,"type":"publish_target_pinned","node":"pub","remote":"origin","url":"file:///r.git","scheme":"file","common_dir":"/t/.git"}"#;
+    let refused = r#"{"seq":2,"ts":3,"type":"publish_target_pinned","node":"pub","remote":"origin","common_dir":"/t/.git","refusal":"url_refused"}"#;
+    let planned = r#"{"seq":3,"ts":4,"type":"publish_planned","node":"pub","from":"work","from_seq":2,"branch":"apb/x","local_branch":"refs/heads/main","after":"bb","remote_before":"aa","url":"file:///r.git","commits":[{"sha":"bb","subject":"s","apb_run":["r1"],"this_run":true}],"outside_push_suspected":true,"plan_digest":"sha256:d","nonce":"publish-n"}"#;
+    for line in [pinned, refused, planned] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+        pinned.replace("seq\":2", "seq\":1").replace("publish_target_pinned", "publish_target_from_the_future"),
+        r#"{"seq":2,"ts":2,"type":"node_started","node":"pub","attempt":1}"#.to_string(),
+        planned.replace("publish_planned", "publish_plan_from_the_future"),
+        r#"{"seq":4,"ts":5,"type":"node_finished","node":"pub","status":"succeeded","attempt":1,"output":"skipped","artifacts":[]}"#.to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let dir = write_run(tmp.path(), "r1", &journal);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 2, 4]);
+}
+
+#[test]
+fn review_and_commit_lines_keep_their_shape_with_the_publish_fields() {
+    let old = [
+        r#"{"seq":1,"ts":2,"type":"review_requested","node":"g","options":["approve"],"instruction":"i"}"#,
+        r#"{"seq":2,"ts":3,"type":"review_decided","node":"g","decision":"approve","note":""}"#,
+        r#"{"seq":3,"ts":4,"type":"artifacts_committed","node":"w","before":"a","after":"b","commits":[]}"#,
+    ];
+    for line in old {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let new = [
+        r#"{"seq":1,"ts":2,"type":"review_requested","node":"pub","options":["publish","skip"],"instruction":"i","plan_digest":"sha256:d"}"#,
+        r#"{"seq":2,"ts":3,"type":"review_decided","node":"pub","decision":"publish","note":"","plan_digest":"sha256:d"}"#,
+        r#"{"seq":3,"ts":4,"type":"artifacts_committed","node":"w","before":"a","after":"b","commits":[],"branch":"refs/heads/main"}"#,
+    ];
+    for line in new {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let e: Event = serde_json::from_str(new[1]).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewDecided { plan_digest: Some(ref d), .. } if d == "sha256:d"
+    ));
 }

@@ -1035,6 +1035,7 @@ fn a_continue_from_keeps_a_failed_delivery_failing_its_join() {
         &run_dir,
         Control::Abort {
             reason: "test".into(),
+            by: None,
         },
     )
     .unwrap();

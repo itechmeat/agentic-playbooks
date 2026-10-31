@@ -8,6 +8,7 @@ import { Document, YAMLSeq } from 'yaml'
 
 import type { NodeType } from './consts.gen'
 import { judgeSkeleton } from './judgefields'
+import { publishSkeleton, type SourceNode } from './publish'
 
 // The node kinds the editor can add, in the order a graph is usually built,
 // with the node that ends a run last. A subset of the schema's node types
@@ -20,6 +21,7 @@ export const EDITOR_NODE_KINDS = [
   'condition',
   'judge',
   'playbook',
+  'publish',
   'finish',
 ] as const satisfies readonly NodeType[]
 export type NodeKind = (typeof EDITOR_NODE_KINDS)[number]
@@ -52,13 +54,32 @@ function nodeById(nodes: YAMLSeq, id: string): ReturnType<YAMLSeq['get']> | unde
   return nodes.items.find((n) => (n as { get: (k: string) => unknown }).get('id') === id)
 }
 
+/** The plain nodes of a nodes seq, for the skeletons that look at them. A
+ * half-edited item that is not a map with a string id and type is left out. */
+function nodesOf(nodes: YAMLSeq): SourceNode[] {
+  const plain = nodes.toJSON() as unknown
+  if (!Array.isArray(plain)) return []
+  return plain.filter(
+    (n): n is SourceNode =>
+      typeof n === 'object' && n !== null && typeof n.id === 'string' && typeof n.type === 'string',
+  )
+}
+
+/** The fields a new node of `kind` starts with. A judge node starts with a
+ * question skeleton (a bare `type: judge` asks nothing and does not
+ * validate); a publish node starts from the last node that can commit and
+ * the remote `origin`. */
+function skeletonFor(kind: string, nodes: YAMLSeq): Record<string, unknown> {
+  if (kind === 'judge') return judgeSkeleton()
+  if (kind === 'publish') return publishSkeleton(nodesOf(nodes))
+  return {}
+}
+
 /** Adds a node with the given type and id. Returns a new document. */
 export function addNode(doc: Document, kind: string, id: string): Document {
   const next = doc.clone()
   const nodes = ensureNodes(next)
-  // A judge node starts with a question skeleton: a bare `type: judge` asks
-  // nothing and does not validate.
-  const extra = kind === 'judge' ? judgeSkeleton() : {}
+  const extra = skeletonFor(kind, nodes)
   const node = next.createNode({ id, type: kind, title: defaultTitle(kind, id), ...extra })
   nodes.add(node)
   return next
@@ -173,4 +194,108 @@ export function saveNotice(
   }
   if (isNew) return { kind: 'success', title: `Created "${result.id}"` }
   return { kind: 'success', title: `Saved "${result.id}" as ${result.version}` }
+}
+
+/** The isolation levels the node form offers; '' leaves the key out (none). */
+export const ISOLATION_LEVELS = ['', 'none', 'best_effort', 'full'] as const
+export type IsolationLevel = (typeof ISOLATION_LEVELS)[number]
+/** The networks an isolated node may declare; '' leaves it implicit (open). */
+export const ISOLATION_NETWORKS = ['', 'open', 'none'] as const
+export type IsolationNetwork = (typeof ISOLATION_NETWORKS)[number]
+
+/** A node's `isolation` as the form shows it, from either YAML form. */
+export interface IsolationForm {
+  level: IsolationLevel
+  network: IsolationNetwork
+  /** The level as written when it is not one the form offers (a typo, a newer apb); undefined when it parsed. */
+  rawLevel?: string
+  /** The network as written when it is not one the form offers; undefined when it parsed. */
+  rawNetwork?: string
+  /** Extra read-only paths; the form shows them, it does not edit them. */
+  readOnly: string[]
+  /** Extra writable paths; shown read-only as well. */
+  writable: string[]
+}
+
+function oneOf<T extends string>(allowed: readonly T[], v: unknown): T {
+  return (allowed as readonly unknown[]).includes(v) ? (v as T) : allowed[0]
+}
+
+function rawUnknown(allowed: readonly string[], v: unknown): string | undefined {
+  if (v === undefined || v === null || allowed.includes(v as string)) return undefined
+  return typeof v === 'string' ? v : JSON.stringify(v)
+}
+
+function stringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+}
+
+function isMap(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+/**
+ * Reads `isolation` in the shorthand (`full`) or the long map
+ * (`{ level, network, read_only, writable }`).
+ */
+export function isolationForm(raw: unknown): IsolationForm {
+  if (isMap(raw)) {
+    return {
+      level: oneOf(ISOLATION_LEVELS, raw.level),
+      network: oneOf(ISOLATION_NETWORKS, raw.network),
+      ...unknownFields(raw.level, raw.network),
+      readOnly: stringList(raw.read_only),
+      writable: stringList(raw.writable),
+    }
+  }
+  return { level: oneOf(ISOLATION_LEVELS, raw), network: '', ...unknownFields(raw, undefined), readOnly: [], writable: [] }
+}
+
+function unknownFields(level: unknown, network: unknown): Pick<IsolationForm, 'rawLevel' | 'rawNetwork'> {
+  const out: Pick<IsolationForm, 'rawLevel' | 'rawNetwork'> = {}
+  const l = rawUnknown(ISOLATION_LEVELS, level)
+  const n = rawUnknown(ISOLATION_NETWORKS, network)
+  if (l !== undefined) out.rawLevel = l
+  if (n !== undefined) out.rawNetwork = n
+  return out
+}
+
+/** Whether the level isolates the node at all, so a network may be declared. */
+export function isIsolatedLevel(level: IsolationLevel): boolean {
+  return level === 'full' || level === 'best_effort'
+}
+
+/**
+ * The new `isolation` value after the form changed the level or the network,
+ * built on the current value so nothing the form does not edit is lost: the
+ * extra paths and any other key of a long map stay as they are. Picking a
+ * level that does not isolate drops the network and the extra paths (the
+ * validator refuses them there). A change that picks no level leaves a value
+ * whose level does not isolate, or is unknown to the form (a typo, a newer
+ * apb), exactly as written. A value with only a level is written as the
+ * shorthand; `undefined` removes the key.
+ */
+export function isolationValue(
+  current: unknown,
+  change: { level?: IsolationLevel; network?: IsolationNetwork },
+): unknown {
+  const form = isolationForm(current)
+  if (change.level === undefined && (form.rawLevel !== undefined || !isIsolatedLevel(form.level))) {
+    return current
+  }
+  const level = change.level ?? form.level
+  const network = isIsolatedLevel(level) ? (change.network ?? form.network) : ''
+  const map: Record<string, unknown> = isMap(current) ? { ...current } : {}
+  delete map.level
+  delete map.network
+  if (!isIsolatedLevel(level)) {
+    delete map.read_only
+    delete map.writable
+  }
+  const rest = Object.keys(map).length > 0
+  if (!rest && network === '') return level === '' ? undefined : level
+  const out: Record<string, unknown> = {}
+  if (level !== '') out.level = level
+  if (network !== '') out.network = network
+  return { ...out, ...map }
 }

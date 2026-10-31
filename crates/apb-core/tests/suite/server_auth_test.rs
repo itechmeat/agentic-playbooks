@@ -3,6 +3,7 @@
 //! tempdir, so none of them touches process env and none needs the shared
 //! env lock.
 
+use apb_core::secret::Secret;
 use apb_core::server_auth::{self, KEY_PREFIX, MAX_KEYS};
 
 fn key_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
@@ -15,13 +16,13 @@ fn issue_then_verify_round_trip() {
     let path = key_path(&dir);
     let (plain, record) = server_auth::issue_into(&path).unwrap();
     assert!(
-        plain.starts_with(KEY_PREFIX),
-        "key carries the prefix: {plain}"
+        plain.expose_secret().starts_with(KEY_PREFIX),
+        "key carries the prefix"
     );
     assert_eq!(
         plain.len(),
         KEY_PREFIX.len() + 43,
-        "32 CSPRNG bytes in unpadded base64url are 43 chars: {plain}"
+        "32 CSPRNG bytes in unpadded base64url are 43 chars"
     );
     assert_eq!(record.sha256.len(), 64, "the stored hash is bare hex");
     assert_eq!(record.id, record.sha256[..8], "the id is the hash prefix");
@@ -36,9 +37,12 @@ fn issue_then_verify_round_trip() {
         server_auth::verify(&file.keys, &plain).as_deref(),
         Some(record.id.as_str())
     );
-    assert_eq!(server_auth::verify(&file.keys, "apb_wrong"), None);
     assert_eq!(
-        server_auth::verify(&file.keys, &record.sha256),
+        server_auth::verify(&file.keys, &Secret::new("apb_wrong")),
+        None
+    );
+    assert_eq!(
+        server_auth::verify(&file.keys, &Secret::new(record.sha256.clone())),
         None,
         "the stored hash is not itself a usable credential"
     );
@@ -46,7 +50,7 @@ fn issue_then_verify_round_trip() {
     // The plaintext key is never persisted.
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(
-        !raw.contains(&plain),
+        !raw.contains(plain.expose_secret()),
         "the key must not be stored in plain text"
     );
 }
@@ -57,7 +61,10 @@ fn two_keys_are_allowed_and_a_third_is_refused() {
     let path = key_path(&dir);
     let (first, _) = server_auth::issue_into(&path).unwrap();
     let (second, _) = server_auth::issue_into(&path).unwrap();
-    assert_ne!(first, second, "each issue mints fresh randomness");
+    assert!(
+        !first.ct_eq(second.expose_secret()),
+        "each issue mints fresh randomness"
+    );
 
     let file = server_auth::load_from(&path).unwrap();
     assert_eq!(file.keys.len(), MAX_KEYS);
@@ -151,12 +158,4 @@ fn an_absent_file_is_an_empty_key_set() {
     let dir = tempfile::tempdir().unwrap();
     let file = server_auth::load_from(&key_path(&dir)).unwrap();
     assert!(file.keys.is_empty(), "no file means auth is simply off");
-}
-
-#[test]
-fn ct_eq_str_matches_plain_equality() {
-    assert!(server_auth::ct_eq_str("abc", "abc"));
-    assert!(!server_auth::ct_eq_str("abc", "abd"));
-    assert!(!server_auth::ct_eq_str("abc", "abcd"));
-    assert!(server_auth::ct_eq_str("", ""));
 }

@@ -1,8 +1,21 @@
 <script lang="ts">
   import type { StatsReport } from './api.gen'
-  import { Badge } from '$lib/components/ui/badge'
   import { Spinner } from '$lib/components/ui/spinner'
-  import { modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
+  import {
+    costKnownText,
+    executorGroups,
+    modelsText,
+    perRunText,
+    qualityDeltaText,
+    qualityDeltas,
+    qualityKey,
+    qualityLabels,
+    qualityText,
+    rateText,
+    spendText,
+    versionsNewestFirst,
+    waitsText,
+  } from './playbookstats'
 
   // Cross-run metrics of one playbook (C3), per version, newest first, from
   // `GET /api/stats`. The page loads the report; this card only shows it and
@@ -14,56 +27,98 @@
   }: { report?: StatsReport | null; loading?: boolean; error?: string | null } = $props()
 
   const versions = $derived(versionsNewestFirst(report))
+  const deltas = $derived(qualityDeltas(report?.compare))
+  const deltaLabels = $derived(qualityLabels(deltas))
 </script>
 
-<div class="flex flex-col gap-3 text-xs" data-testid="playbook-stats">
+<div class="stats" data-testid="playbook-stats">
   {#if error}
-    <p class="text-red" data-testid="playbook-stats-error">Could not load the stats: {error}</p>
+    <p class="error" data-testid="playbook-stats-error">Could not load the stats: {error}</p>
   {:else if loading && !report}
-    <p class="flex items-center gap-2 text-muted-foreground" data-testid="playbook-stats-loading">
+    <p class="muted loading" data-testid="playbook-stats-loading">
       <Spinner /> loading
     </p>
   {:else if !report || report.runs === 0}
-    <p class="text-muted-foreground" data-testid="playbook-stats-empty">No runs of this playbook yet.</p>
+    <p class="muted" data-testid="playbook-stats-empty">No runs of this playbook yet.</p>
   {:else}
-    {#each versions as v (v.version)}
-      <section class="flex flex-col gap-1 border-b border-line pb-3 last:border-b-0" data-testid="playbook-stats-version">
-        <div class="flex items-center gap-2">
-          <span class="text-sm font-semibold text-orange">{v.version}</span>
-          <Badge variant="secondary">{v.runs} {v.runs === 1 ? 'run' : 'runs'}</Badge>
+    {#if deltas.length && report.compare?.against}
+      <section class="version" data-testid="playbook-stats-quality-deltas">
+        <div class="version-head">
+          <span class="muted">quality, {report.compare.against} against {report.compare.base}</span>
         </div>
-        {#if v.note}<p class="prose-text text-muted-foreground">{v.note}</p>{/if}
+        <dl>
+          {#each deltas as d, i (qualityKey(d))}
+            <dt>{deltaLabels[i]}</dt>
+            <dd>{qualityDeltaText(d)}</dd>
+          {/each}
+        </dl>
+      </section>
+    {/if}
+    {#each versions as v (v.version)}
+      {@const executors = executorGroups(v)}
+      <section class="version" data-testid="playbook-stats-version">
+        <div class="version-head">
+          <span class="version-name">{v.version}</span>
+          <span class="runs">{v.runs} {v.runs === 1 ? 'run' : 'runs'}</span>
+        </div>
+        {#if v.note}<p class="muted prose-text">{v.note}</p>{/if}
         <dl class="kv">
-          <dt class="text-muted-foreground">succeeded</dt>
+          <dt>succeeded</dt>
           <dd>{rateText(v.success)}</dd>
-          <dt class="text-muted-foreground">first pass</dt>
+          <dt>first pass</dt>
           <dd>{rateText(v.first_pass)}</dd>
-          <dt class="text-muted-foreground">retries</dt>
+          <dt>retries</dt>
           <dd>{perRunText(v.retries)}</dd>
-          <dt class="text-muted-foreground">fallbacks</dt>
+          <dt>fallbacks</dt>
           <dd>{perRunText(v.fallbacks)}</dd>
-          <dt class="text-muted-foreground">loops</dt>
+          <dt>loops</dt>
           <dd>{perRunText(v.loop_traversals)}</dd>
-          <dt class="text-muted-foreground">gate wait</dt>
+          <dt>gate wait</dt>
           <dd>{waitsText(v.gate_wait)}</dd>
-          <dt class="text-muted-foreground">run time</dt>
+          <dt>run time</dt>
           <dd>{waitsText(v.duration)}</dd>
           {#if spendText(v)}
-            <dt class="text-muted-foreground">spend</dt>
+            <dt>spend</dt>
             <dd>{spendText(v)}</dd>
           {/if}
+          {#if costKnownText(v)}
+            <dt>cost known</dt>
+            <dd data-testid="playbook-stats-cost-known">{costKnownText(v)}</dd>
+          {/if}
           {#if modelsText(v)}
-            <dt class="text-muted-foreground">models</dt>
-            <dd class="break-words" data-testid="playbook-stats-models">{modelsText(v)}</dd>
+            <dt>models</dt>
+            <dd data-testid="playbook-stats-models">{modelsText(v)}</dd>
           {/if}
         </dl>
+        {#if executors.length}
+          <ul class="executors" data-testid="playbook-stats-executors">
+            {#each executors as n (n.node)}
+              <li>
+                <span class="muted">{n.node}, per executor:</span>
+                <!-- Two executors may print alike (shortened digests): key by position. -->
+                {#each n.groups as g, i (i)}<div class="group">{g}</div>{/each}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if v.quality?.length}
+          {@const labels = qualityLabels(v.quality)}
+          <ul class="quality" data-testid="playbook-stats-quality">
+            {#each v.quality as q, i (qualityKey(q))}
+              <li>
+                <span class="muted">quality {labels[i]}:</span>
+                {qualityText(q)}
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#if v.goal.length}
-          <ul class="mt-1 flex flex-col gap-0.5" data-testid="playbook-stats-goal">
+          <ul class="goal" data-testid="playbook-stats-goal">
             {#each v.goal as g (g.index)}
-              <li class="prose-text break-words">
-                <span class="text-muted-foreground">goal {g.index + 1}:</span>
+              <li class="prose-text">
+                <span class="muted">goal {g.index + 1}:</span>
                 {g.description}
-                <span class="text-muted-foreground">
+                <span class="muted">
                   · {g.check === 'manual' ? `manual in ${g.manual}` : `passed ${rateText(g.passed)}`}
                 </span>
               </li>
@@ -74,3 +129,74 @@
     {/each}
   {/if}
 </div>
+
+<style>
+  .stats {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+  }
+  .version {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--c-line);
+  }
+  .version:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+  .version-head,
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .version-name {
+    color: var(--c-orange);
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+  .runs {
+    padding: 0 0.5rem;
+    border: 1px solid var(--c-line-2);
+    color: var(--c-fg-2);
+    line-height: 1.25rem;
+  }
+  dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.125rem 0.75rem;
+  }
+  dt,
+  .muted {
+    color: var(--muted-foreground);
+  }
+  dd {
+    overflow-wrap: anywhere;
+  }
+  .error {
+    color: var(--c-red);
+  }
+  .executors {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+    overflow-wrap: anywhere;
+  }
+  .group {
+    padding-left: 0.75rem;
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .goal,
+  .quality {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    margin-top: 0.25rem;
+    overflow-wrap: anywhere;
+  }
+</style>

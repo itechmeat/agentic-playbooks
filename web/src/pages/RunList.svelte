@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fetchRuns } from '../lib/api'
   import { filterByProject, projectFilter } from '../lib/projectfilter'
-  import { groupRunsByParent } from '../lib/runlist'
+  import { groupRunsByParent, needsLookLabel } from '../lib/runlist'
   import { unknownEventsNote } from '../lib/runusage'
   import { formatAge } from '../lib/runview'
   import { formatDuration } from '../lib/format'
@@ -111,6 +111,7 @@
         {#each filtered as r (`${r.workspace_id}/${r.run_id}`)}
           {@const terminal = isTerminalRunStatus(r.status)}
           {@const live = r.status === 'running' && r.started_ts > 0}
+          {@const look = needsLookLabel(r.needs_look)}
           <div
             class="box relative flex flex-col gap-2 px-3.5 py-2.5 transition-colors hover:border-violet {cols}"
             role="row"
@@ -144,6 +145,9 @@
                 <span class="tag text-warning" title={pauseLine(r.pause)} data-testid="run-pause-marker">
                   {pauseMarker(r.pause)}
                 </span>
+              {/if}
+              {#if look}
+                <span class="tag needs-look" title={look.title} data-testid="run-needs-look">{look.label}</span>
               {/if}
               {#if showsDriverDead(r.status, r.driver_dead)}
                 <span class="tag text-warning">needs resume</span>
@@ -194,3 +198,9 @@
 </PageScroll>
 
 <StatusBar items={statusItems} />
+
+<style>
+  .needs-look {
+    color: var(--warning);
+  }
+</style>

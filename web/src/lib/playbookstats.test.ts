@@ -1,8 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import { render } from 'svelte/server'
 import PlaybookStatsCard from './PlaybookStatsCard.svelte'
-import { modelsText, perRunText, rateText, spendText, versionsNewestFirst, waitsText } from './playbookstats'
-import type { StatsReport, VersionStats } from './api.gen'
+import {
+  costKnownText,
+  digestText,
+  executorGroups,
+  modelsText,
+  perRunText,
+  previousVersion,
+  qualityDeltaText,
+  qualityDeltas,
+  qualityLabel,
+  qualityLabels,
+  qualityText,
+  rateText,
+  spendText,
+  versionsNewestFirst,
+  waitsText,
+} from './playbookstats'
+import type { QualityStats, StatsReport, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
   playbook: 'p',
@@ -17,10 +33,12 @@ const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => 
   gate_wait: { count: 1, median_ms: 60_000, max_ms: 60_000 },
   question_wait: { count: 0 },
   duration: { count: 3, median_ms: 5_000, max_ms: 82_000 },
-  spend: { runs_with_usage: 0, tokens: { total: 0, runs: 0 }, runs_with_cost: 0, cost_usd: 0 },
+  spend: { runs_with_usage: 0, tokens: { total: 0, runs: 0 }, runs_with_cost: 0, cost_known: { count: 0, of: 0 }, cost_usd: 0 },
   deliverable_missing: 0,
   output_fields_missing: 0,
   goal: [],
+  findings: { by_kind: [], top: [], runs_with_warnings: { count: 0, of: 3 } },
+  baseline: [],
   models: {},
   model_mismatch: 0,
   nodes: [],
@@ -38,7 +56,7 @@ const report: StatsReport = {
         { index: 0, description: 'tests pass', check: 'script', checked: 1, passed: { count: 1, of: 1, rate: 1 }, failed: 0, errors: 0, manual: 0 },
         { index: 1, description: 'a person reads it', check: 'manual', checked: 1, passed: { count: 0, of: 0 }, failed: 0, errors: 0, manual: 1 },
       ],
-      spend: { runs_with_usage: 1, tokens: { total: 1500, runs: 1, per_run: 1500 }, runs_with_cost: 1, cost_usd: 0.02, cost_per_run_usd: 0.02 },
+      spend: { runs_with_usage: 1, tokens: { total: 1500, runs: 1, per_run: 1500 }, runs_with_cost: 1, cost_known: { count: 1, of: 1, rate: 1 }, cost_usd: 0.02, cost_per_run_usd: 0.02 },
     }),
   ],
 }
@@ -73,6 +91,7 @@ describe('PlaybookStatsCard', () => {
     expect(body.match(/data-testid="playbook-stats-goal"/g)?.length).toBe(1)
     expect(body).toContain('$0.0200 per run reported by 1 of 4 runs')
     expect(body).toContain('0.33 per run (1 over 3 runs)')
+    expect(body).toContain('cost known')
   })
 
   it('has a loading, an error and an empty state', () => {
@@ -91,5 +110,146 @@ describe('modelsText', () => {
     expect(modelsText({ models: { opus: 1, 'glm-5.3-flash': 5 }, model_mismatch: 5 })).toBe(
       'glm-5.3-flash x5, opus x1 (5 differ from the profile)',
     )
+  })
+})
+
+describe('costKnownText', () => {
+  it('gives the share of attempts that reported a cost, and nothing before any attempt', () => {
+    const spend = report.versions[1].spend
+    expect(costKnownText({ spend: { ...spend, cost_known: { count: 3, of: 4, rate: 0.75 } } })).toBe('3/4 (75%) attempts')
+    expect(costKnownText({ spend: { ...spend, cost_known: { count: 0, of: 0 } } })).toBeNull()
+  })
+})
+
+describe('executor digests', () => {
+  const group = (profile: string, runs: number, tokens?: number) => ({
+    profile,
+    bundle: `${profile}b`,
+    runs,
+    first_pass: { count: runs, of: runs, rate: 1 },
+    duration: { count: runs, median_ms: 60_000, max_ms: 60_000 },
+    tokens_per_visit: tokens,
+  })
+  const node = (name: string, digests: ReturnType<typeof group>[]) => ({
+    node: name,
+    runs: 2,
+    first_pass: { count: 2, of: 2, rate: 1 },
+    retries: 0,
+    fallbacks: 0,
+    reentries: 0,
+    duration: { count: 2, median_ms: 60_000, max_ms: 60_000 },
+    deliverable_missing: 0,
+    output_fields_missing: 0,
+    digests,
+    models: {},
+    model_mismatch: 0,
+  })
+
+  it('prints a group as apb stats does and lists only nodes with more than one executor', () => {
+    expect(digestText(group('1a2b3c4d5e6f', 2, 200))).toBe(
+      'profile 1a2b3c4d5e6f (bundle 1a2b3c4d5e6fb): 2 runs, first pass 2/2 (100%), median 1.0 min, 200 tokens per visit',
+    )
+    expect(digestText(group('aaa', 1))).toBe('profile aaa (bundle aaab): 1 run, first pass 1/1 (100%), median 1.0 min')
+    const v = { nodes: [node('a', [group('aaa', 1), group('bbb', 1)]), node('b', [group('ccc', 2)])] }
+    expect(executorGroups(v)).toEqual([
+      { node: 'a', groups: [digestText(group('aaa', 1)), digestText(group('bbb', 1))] },
+    ])
+    expect(executorGroups({ nodes: [] })).toEqual([])
+  })
+
+  it('shows the groups in the card', () => {
+    const v = version('1.0.0', { nodes: [node('a', [group('aaa', 1), group('bbb', 1)])] })
+    const body = render(PlaybookStatsCard, {
+      props: { report: { runs: 2, versions: [v] } as StatsReport },
+    }).body
+    expect(body).toContain('playbook-stats-executors')
+    expect(body).toContain('profile bbb (bundle bbbb)')
+  })
+})
+
+describe('quality in the stats', () => {
+  const row = (extra: Partial<QualityStats> = {}): QualityStats => ({
+    criterion: 'outcome',
+    source: 'builtin',
+    grader: 'rules/1',
+    task_type: 'default',
+    digest: 'sha256:aa',
+    graded_runs: 3,
+    tally: { good: 2, partial: 0, poor: 1, not_applicable: 0, not_enough_data: 0 },
+    good: { count: 2, of: 3, rate: 0.6667 },
+    poor: { count: 1, of: 3, rate: 0.3333 },
+    ...extra,
+  })
+
+  it('names a row by its key and prints it as apb stats does', () => {
+    expect(qualityLabel(row())).toBe('outcome (rules/1, default)')
+    expect(qualityText(row())).toBe('good 2/3 (67%), poor 1/3 (33%) over 3 graded runs')
+    const one = row({
+      graded_runs: 1,
+      tally: { good: 0, partial: 0, poor: 0, not_applicable: 1, not_enough_data: 0 },
+      good: { count: 0, of: 0 },
+      poor: { count: 0, of: 0 },
+    })
+    expect(qualityText(one)).toBe('good 0/0, poor 0/0 over 1 graded run, 1 not applicable')
+  })
+
+  it('prints a delta in points and picks the version to compare with', () => {
+    expect(qualityDeltaText({ criterion: 'outcome', grader: 'rules/1', task_type: 'default', digest: 'sha256:aa', good_delta: -0.5, poor_delta: 0.5 })).toBe(
+      'good -50 points, poor +50 points',
+    )
+    expect(qualityDeltaText({ criterion: 'outcome', grader: 'rules/1', task_type: 'default', digest: 'sha256:aa' })).toBe(
+      'good n/a, poor n/a',
+    )
+    // The sign follows the rounded points.
+    const tiny = (good_delta: number) => ({ criterion: 'outcome', grader: 'rules/1', task_type: 'default', digest: 'sha256:aa', good_delta })
+    expect(qualityDeltaText(tiny(-0.004))).toBe('good +0 points, poor n/a')
+    expect(qualityDeltaText(tiny(0.004))).toBe('good +0 points, poor n/a')
+    expect(qualityDeltaText(tiny(-0.006))).toBe('good -1 points, poor n/a')
+    expect(previousVersion(report)).toBe('1.0.0')
+    expect(previousVersion({ runs: 1, versions: [version('1.0.0')] })).toBe('')
+    expect(previousVersion(null)).toBe('')
+    expect(qualityDeltas(undefined)).toEqual([])
+    const moved = { criterion: 'outcome', grader: 'rules/1', task_type: 'default', digest: 'sha256:aa', good_delta: 0 }
+    const none = { criterion: 'consent', grader: 'rules/1', task_type: 'default', digest: 'sha256:aa' }
+    expect(qualityDeltas({ playbook: 'p', base: '1.0.0', quality: [moved, none] })).toEqual([moved])
+  })
+
+  it('shows the rows per version and the deltas of a comparison in the card', () => {
+    const graded: StatsReport = {
+      runs: 6,
+      versions: [version('1.0.0', { quality: [row()] }), version('1.1.0', { quality: [row({ good: { count: 3, of: 3, rate: 1 } })] })],
+      compare: {
+        playbook: 'p',
+        base: '1.0.0',
+        against: '1.1.0',
+        quality: [{ criterion: 'outcome', grader: 'rules/1', task_type: 'default', digest: 'sha256:aa', good_delta: 0.33, poor_delta: -0.33 }],
+      },
+    }
+    const body = render(PlaybookStatsCard, { props: { report: graded } }).body
+    expect(body.match(/data-testid="playbook-stats-quality"/g)?.length).toBe(2)
+    expect(body).toContain('quality outcome (rules/1, default):')
+    expect(body).toContain('good 3/3 (100%)')
+    expect(body).toContain('playbook-stats-quality-deltas')
+    expect(body).toContain('quality, 1.1.0 against 1.0.0')
+    expect(body).toContain('good +33 points, poor -33 points')
+    // Nothing graded: no quality rows and no deltas.
+    const plain = render(PlaybookStatsCard, { props: { report } }).body
+    expect(plain).not.toContain('playbook-stats-quality')
+  })
+
+  it('tells apart one criterion graded under two definitions', () => {
+    const delta = (digest: string) => ({ criterion: 'outcome', grader: 'rules/1', task_type: 'default', digest, good_delta: 0.1 })
+    const twins: StatsReport = {
+      runs: 6,
+      versions: [
+        version('1.0.0', { quality: [row(), row({ digest: 'sha256:bbbbbbbbbbbb' })] }),
+        version('1.1.0', { quality: [row()] }),
+      ],
+      compare: { playbook: 'p', base: '1.0.0', against: '1.1.0', quality: [delta('sha256:aa'), delta('sha256:bbbbbbbbbbbb')] },
+    }
+    const body = render(PlaybookStatsCard, { props: { report: twins } }).body
+    expect(body).toContain('outcome (rules/1, default), definition aa')
+    expect(body).toContain('outcome (rules/1, default), definition bbbbbbbb')
+    expect(qualityLabels([row()])).toEqual(['outcome (rules/1, default)'])
   })
 })

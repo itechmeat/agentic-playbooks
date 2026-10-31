@@ -60,7 +60,7 @@ fn assert_grandchild_dead(work: &Path) {
 fn agent_task<'a>(
     work: &'a Path,
     timeout: Option<Duration>,
-    policy: &'a apb_engine::adapter::ConnectorEnvPolicy,
+    policy: &'a apb_engine::adapter::SpawnEnv,
 ) -> AgentTask<'a> {
     AgentTask {
         prompt: "go",
@@ -70,7 +70,7 @@ fn agent_task<'a>(
         stream_log: None,
         soul: None,
         grant_autonomy: false,
-        connector_policy: policy,
+        spawn_env: policy,
         interactive: false,
         report_contract: true,
         node: "test",
@@ -79,6 +79,7 @@ fn agent_task<'a>(
         status_file: None,
         hermetic_settings: None,
         transcript_dir: None,
+        output_limits: Default::default(),
     }
 }
 
@@ -104,7 +105,7 @@ fn timeout_kills_whole_process_tree() {
     assert_grandchild_dead(work.path());
 }
 
-/// Issue 45 finding 11: cancel and timeout share `kill_process_tree`. A
+/// Issue 45 finding 11: cancel and timeout share `proc::stop_process_tree`. A
 /// mid-run cancel flag must tear down the whole attempt process group the same
 /// way a node timeout does, so no grandchild of the cancelled attempt survives.
 #[test]

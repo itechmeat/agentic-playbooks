@@ -13,8 +13,9 @@ use crate::host_task::{self, SubmitStatus, TaskRecord};
 const HOST_POLL: Duration = Duration::from_millis(100);
 
 /// The agent id journaled for a host-task attempt (`attempt_started.agent`,
-/// fallback events): the host executes it, not the profile's CLI.
-pub(crate) const HOST_AGENT: &str = "host";
+/// fallback events): the host executes it, not the profile's CLI. One
+/// constant with the readers of that field.
+pub(crate) use crate::attempt_models::HOST_AGENT;
 
 /// `session_handoff.reason` of a `continue_session` node in host mode.
 pub(crate) const HOST_MODE_REASON: &str = "host_mode";
@@ -114,11 +115,14 @@ fn failure(e: EngineError) -> AgentFailure {
     AgentFailure::new(ErrorClass::Transport, format!("host task: {e}"))
 }
 
+/// The variable that names the host task a subagent works on.
+const HOST_TASK_ENV: &str = "APB_HOST_TASK";
+
 /// The environment a CLI attempt of this task would have had, which the host
 /// sets for its subagent.
 fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
-    if let Some(run_dir) = &task.connector_policy.run_dir {
+    if let Some(run_dir) = &task.spawn_env.run_dir {
         env.insert(
             "APB_RUN_DIR".to_string(),
             run_dir.to_string_lossy().into_owned(),
@@ -129,8 +133,16 @@ fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
             env.insert("APB_RUN_ID".to_string(), id.to_string_lossy().into_owned());
         }
     }
-    if let Some(node) = &task.connector_policy.node_id {
+    if let Some(node) = &task.spawn_env.node_id {
         env.insert("APB_NODE_ID".to_string(), node.clone());
+    }
+    // The attempt a connector call binds to; the task id joins it once the
+    // task is opened (`HostAdapter::request`).
+    if let Some(attempt) = task.spawn_env.attempt {
+        env.insert("APB_ATTEMPT".to_string(), attempt.to_string());
+    }
+    if let Some(token) = &task.spawn_env.attempt_token {
+        env.insert(crate::adapter::ATTEMPT_TOKEN_ENV.to_string(), token.clone());
     }
     if let Some(sf) = &task.status_file {
         env.insert(
@@ -246,6 +258,10 @@ impl HostAdapter<'_, '_> {
                     .map(|t| now_ms.saturating_add(t.as_millis() as u64)),
             ),
         };
+        // The task id binds the subagent's connector calls to this attempt
+        // even when a later drive adopts the task under another number.
+        let mut env = env.clone();
+        env.insert(HOST_TASK_ENV.to_string(), task_id.clone());
         let record = TaskRecord {
             task_id: task_id.clone(),
             node: task.node.to_string(),
@@ -257,7 +273,7 @@ impl HostAdapter<'_, '_> {
             model_hint: self.model_hint.clone(),
             hint_source: self.hint_source.clone(),
             fallback_of: self.fallback_of.clone(),
-            env: env.clone(),
+            env,
             requested_ts,
         };
         host_task::write_task(self.run_dir, &record, prompt, task.soul)?;
@@ -318,6 +334,7 @@ impl HostAdapter<'_, '_> {
         cancel: &AtomicBool,
         control: Option<&ControlHooks>,
     ) -> Result<String, AgentFailure> {
+        let notifier = crate::notify::send::Notifier::of_run_dir(self.run_dir);
         loop {
             if cancel.load(Ordering::Relaxed) {
                 self.mark("cancelled");
@@ -342,6 +359,7 @@ impl HostAdapter<'_, '_> {
                 self.journal,
                 self.question_timeout,
                 self.default_answer.as_deref(),
+                notifier.as_ref(),
             )
             .map_err(failure)?
             {
@@ -384,18 +402,23 @@ impl HostAdapter<'_, '_> {
         }
         // The submission is the host's explicit completion signal, so it is
         // the attempt's verdict unless the subagent wrote its own status file
-        // (which may carry named outputs and then wins).
-        if let Some(sf) = &task.status_file
-            && !sf.exists()
-        {
+        // with a verdict (which may carry named outputs and then wins); the
+        // submitted findings and warnings join the file's own.
+        if let Some(sf) = &task.status_file {
             let verdict = match status {
                 NodeStatus::Succeeded => "success",
                 _ => "failure",
             };
-            let _ = apb_core::fsutil::atomic_write_private(
-                sf,
-                format!("{{\"status\":\"{verdict}\"}}").as_bytes(),
-            );
+            let notes = super::status_file::HostNotes {
+                findings: &sub.findings,
+                warnings: &sub.warnings,
+            };
+            if let Err(e) = super::status_file::record_host_submission(sf, verdict, &notes) {
+                eprintln!(
+                    "apb: warning: host task `{}` for node `{}`: the submission could not be recorded in the status file: {e}",
+                    sub.task_id, task.node
+                );
+            }
         }
         AgentReport {
             status,
@@ -405,6 +428,12 @@ impl HostAdapter<'_, '_> {
             question: None,
             session: None,
             usage: sub.usage.as_ref().map(|u| u.to_agent_usage()),
+            capture: crate::capture::OutputCapture::default(),
+            exposure: None,
+            host_notes_dropped: apb_core::run_notes::DroppedNotes {
+                count: sub.notes_dropped,
+                reasons: sub.notes_dropped_reasons.clone(),
+            },
         }
     }
 }
@@ -604,6 +633,7 @@ mod tests {
             ephemeral: false,
             hermetic: false,
             zcode_mode: None,
+            process_env: None,
             tiers: vec![
                 tier("light", Some("l")),
                 tier("mid", Some("m")),

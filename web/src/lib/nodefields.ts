@@ -7,12 +7,14 @@
  * never shows a raw schema key as a label. The hints are rendered in the
  * field's info popover and are the closest thing the editor has to inline
  * docs, so they state real engine behavior - including where a field is
- * declared but not yet enforced.
+ * declared but not yet enforced, and the limits of what is.
  *
  * Keys are form fields, not schema fields: `prompt` and `finish_prompt` are
  * the same YAML key on two node kinds that mean different things, and
  * `input_draft` is not part of the playbook at all.
  */
+import { PUBLISH_DEFAULT_TIMEOUT_SECONDS, PUBLISH_MAX_TIMEOUT_SECONDS } from './consts.gen'
+
 export interface NodeFieldInfo {
   /** Label shown above the control. */
   label: string
@@ -39,7 +41,15 @@ export const NODE_FIELDS = {
   },
   isolation: {
     label: 'Isolation',
-    hint: 'How far the node should run apart from the working copy: none is the shared directory, best_effort asks the adapter for as much isolation as it supports, full demands a fully isolated sandbox. Declarative for now - the engine records the requirement and the validator warns, but it does not yet enforce it.',
+    hint: 'How far the agent runs apart from the operator. none (the default) runs it as before. full runs it in a sandbox on Linux with bubblewrap: own process namespaces, only the node tree and declared paths visible, the git config and hooks read-only, the environment cut to an allowlist; where that is impossible the node refuses to start. best_effort uses the sandbox when it can and otherwise runs in a scratch directory, listing on every attempt what it could not enforce. See docs/ISOLATION.md.',
+  },
+  isolation_network: {
+    label: 'Network',
+    hint: 'The network of an isolated node. open (the default) is the host network, which any agent with a hosted model needs; it reaches any host, including services on this machine. none gives the agent loopback only. full with an implicit network gets a validator warning.',
+  },
+  isolation_paths: {
+    label: 'Extra paths',
+    hint: 'Paths outside the tree the sandbox binds in, read-only or writable, declared in the YAML under read_only and writable. Shown here as written; edit them in the YAML, where the validator refuses relative paths and credential locations.',
   },
   max_retries: {
     label: 'Max retries',
@@ -120,6 +130,30 @@ export const NODE_FIELDS = {
   judge_profile: {
     label: 'Emulation profile',
     hint: 'The profile whose agent answers the questions when on_unavailable is emulate and no emulation provider is configured. Its answers are uncalibrated and cost an agent turn. Empty falls back to the playbook default profile.',
+  },
+  publish_from: {
+    label: 'Publish from',
+    hint: 'The agent task or script whose commits this node pushes: the latest commit it recorded in this run. It must run before this node, and a list node cannot be a source. The node fails when HEAD moved past that commit or the tree changed branch since.',
+  },
+  remote: {
+    label: 'Remote',
+    hint: 'A remote of the repository, for example origin. Its push URL is pinned before the first node that acts runs; a URL that changes later, carries credentials or uses a scheme other than https, ssh or file is refused.',
+  },
+  branch: {
+    label: 'Branch',
+    hint: 'The remote branch to push to, a template that reads params, run.id and node outputs, for example apb/{{ run.id }}. Empty pushes to the branch the source node committed on. Only a fast-forward is pushed, under an exact lease.',
+  },
+  publish_timeout: {
+    label: 'Push timeout, seconds',
+    hint: `How long the push may take, 1 to ${PUBLISH_MAX_TIMEOUT_SECONDS}; empty means ${PUBLISH_DEFAULT_TIMEOUT_SECONDS}. A push that runs out of time is recorded as unknown and never repeated on its own: a person checks the remote and resolves it.`,
+  },
+  publish_prompt: {
+    label: 'Guidance for the person',
+    hint: 'Optional text shown literally above the plan, for example what to check in the commit list before consenting. The person always sees the exact URL, branch, remote state and commits.',
+  },
+  publish_only: {
+    label: 'Publish only',
+    hint: 'Set at the top of the playbook YAML. When true, every node that runs an agent must use isolation full, so the publish step is the only way a push leaves the run. Shown here, edited in the YAML.',
   },
 } as const satisfies Record<string, NodeFieldInfo>
 

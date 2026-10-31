@@ -20,6 +20,26 @@ pub enum Scope {
     Global,
 }
 
+impl Scope {
+    /// The `project`/`global` label, as the origin labels and every
+    /// surface's `scope` argument spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Project => "project",
+            Scope::Global => "global",
+        }
+    }
+
+    /// Parses a `project`/`global` label.
+    pub fn parse(label: &str) -> Option<Scope> {
+        match label {
+            "project" => Some(Scope::Project),
+            "global" => Some(Scope::Global),
+            _ => None,
+        }
+    }
+}
+
 /// Origin of a definition. `Project { workspace_id: None }` means "the
 /// caller's current workspace" - the id is filled in by calling code via the
 /// registry (spec 3, 7).

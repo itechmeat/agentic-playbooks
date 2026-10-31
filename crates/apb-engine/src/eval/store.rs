@@ -191,7 +191,7 @@ impl CaseResult {
             case_digest: case_digest.to_string(),
             passes,
             of,
-            wilson95: crate::decision::report::stats::wilson95(passes as usize, of as usize),
+            wilson95: apb_core::stats::wilson95(passes as usize, of as usize),
             repetitions,
         }
     }
@@ -382,10 +382,6 @@ fn rate(p: u32, of: u32) -> f64 {
     if of == 0 { 0.0 } else { p as f64 / of as f64 }
 }
 
-fn round4(x: f64) -> f64 {
-    (x * 10_000.0).round() / 10_000.0
-}
-
 /// Compares `candidate` with `baseline` over the cases present on both
 /// sides with an unchanged case digest.
 pub fn compare(baseline: &EvalResult, candidate: &EvalResult) -> Comparison {
@@ -434,7 +430,7 @@ pub fn compare(baseline: &EvalResult, candidate: &EvalResult) -> Comparison {
             case: name.to_string(),
             baseline: format!("{}/{}", b.passes, b.of),
             candidate: format!("{}/{}", c.passes, c.of),
-            delta: round4(rate(c.passes, c.of) - rate(b.passes, b.of)),
+            delta: apb_core::stats::round4(rate(c.passes, c.of) - rate(b.passes, b.of)),
             most_failed_check: failing_kinds(c.repetitions.iter().map(|r| r.checks.as_slice()))
                 .into_iter()
                 .next()

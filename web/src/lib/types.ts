@@ -1,3 +1,8 @@
+import type { BudgetLimit, OnNoEstimate } from './api.gen'
+
+// A run's budget argument: the generated limit plus the policy.
+export type RunBudget = BudgetLimit & { on_no_estimate?: OnNoEstimate }
+
 export interface Project {
   workspace_id: string
   name: string
@@ -26,6 +31,9 @@ export interface PlaybookNode {
   id: string
   type: string
   title?: string | null
+  // A `list:` block: the node runs its step once per item. Only its
+  // presence matters to the graph.
+  list?: Record<string, unknown> | null
   [key: string]: unknown
 }
 
@@ -45,6 +53,17 @@ export interface LayoutNode { id: string; x: number; y: number }
 // backend change.
 export interface WfLayout { nodes?: LayoutNode[]; userArranged?: boolean }
 
+// One run input of a playbook (`params:`). A secret param is asked at every
+// start and never remembered or prefilled.
+export interface PlaybookParam {
+  name: string
+  type: string
+  label?: string | null
+  options?: string[] | null
+  default?: unknown
+  secret?: boolean
+}
+
 export interface PlaybookDetail {
   id: string
   version: string
@@ -58,6 +77,12 @@ export interface PlaybookDetail {
     // `route`, `stop`, or the id of the node it goes to. Absent (and on any
     // playbook written before the policy existed) means `route`.
     defaults?: { on_failure?: string } | null
+    // The playbook's run budget, the Run dialog's defaults.
+    budget?: RunBudget | null
+    // The run inputs the Run dialog asks for.
+    params?: PlaybookParam[]
+    // Every agent node must run with isolation full (shown read-only).
+    publish_only?: boolean
   }
   layout: WfLayout | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
@@ -68,8 +93,11 @@ export interface PlaybookDetail {
 // from the Rust types the server serializes, so the two cannot drift. See
 // crates/apb-server/src/ts_contract.rs.
 export type {
+  BudgetStatus,
   ChildRun,
   NodeStatus,
+  OnNoEstimate,
+  RunEstimate,
   PauseBy,
   PauseInfo,
   PauseMode,
@@ -114,33 +142,10 @@ export interface WriteResult {
   unchanged?: boolean
 }
 
-export interface VersionProvenance {
-  created_by: string
-  run_id: string | null
-  classification: string | null
-  /** `next_runs` for a forward patch (issue #192). */
-  scope?: string
-  base_version?: string
-  rationale?: string
-  evidence?: string[]
-  trial?: TrialRecord
-}
-
-/** How a candidate fared in its trial runs (issue #192). */
-export interface TrialRecord {
-  successes: number
-  /** `promoted`, `rejected` or `superseded`; absent while on trial. */
-  outcome?: string
-  run_id?: string
-  reason?: string
-}
-
-// Versions come from the API oldest first in semver order.
-export interface VersionInfo {
-  version: string
-  /** `current` points here: the one source for the version in use. */
-  is_current: boolean
-  /** The `candidate` pointer names it: a forward patch on trial. */
-  is_candidate?: boolean
-  provenance: VersionProvenance | null
-}
+// Version history: generated from the Rust types the server serializes.
+export type {
+  ImportProvenance,
+  TrialRecord,
+  VersionInfo,
+  VersionProvenance,
+} from './api.gen'

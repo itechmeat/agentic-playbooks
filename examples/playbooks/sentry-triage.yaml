@@ -47,7 +47,9 @@ nodes:
     prompt: >-
       For each issue selected in {{nodes.triage.output}}, create a GitHub
       issue in {{params.github_owner}}/{{params.github_repo}} using the
-      github connector's create_issue function. End with a line
+      github connector's create_issue function. Pass
+      `--intent sentry-<Sentry shortId in lowercase>` on every call, the
+      same name on every attempt. End with a line
       `ISSUES FILED: <comma-separated issue numbers, or none>`.
     connectors:
       - { name: github, accounts: [default], functions: [create_issue], max_calls: 10 }

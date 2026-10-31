@@ -1,49 +1,78 @@
 //! What a run produced beyond its node outputs, for the read-only run
 //! surfaces (`run_report`, `run_status`, `apb runs <id>`, the dashboard run
-//! page): its goal criteria and their results (C1) and the commits its
-//! nodes made on a git tree (C7). Every block is
+//! page): its goal criteria and their results (C1), the commits its
+//! nodes made on a git tree (C7), and the inbox gaps its connector reads
+//! journaled. Every block is
 //! absent when the run journaled nothing for it, so a run without them reads
 //! exactly as before.
+//!
+//! Submodules: `claims` (evidence and gaps), `baseline` (the baseline check's view), `notes` (findings and
+//! warnings), `calls` (connector calls by what they say about the outcome),
+//! `commits` (the commits and their `Apb-Run` trailers), `intents` (the send
+//! intents of the send ledger), `publish` (the publish nodes), `lists` (the list nodes' counts, item checks
+//! and items that need a look) and `summary` (the human outcome every
+//! surface shows, and the cheap "needs a look" marker of a run listing).
 
 use std::path::Path;
 
+pub mod baseline;
+pub mod calls;
+pub mod claims;
+pub mod commits;
+pub mod intents;
+pub mod lists;
+pub mod notes;
+pub mod publish;
+pub mod summary;
+
+pub use baseline::{RunBaseline, baseline_from};
+pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
+pub use intents::{RunIntent, intents_from, outcome_intents};
+pub use lists::ListOutcome;
+pub use notes::RunNotes;
+pub use publish::{RunPublish, publish_from};
+pub use summary::{AGENT_SUMMARY_TITLE, NeedsLook, OutcomeSummary};
+
 use serde::Serialize;
 
-use crate::event::{CommittedArtifact, Event, EventPayload};
+use crate::event::{Event, EventPayload};
 use crate::run_view::RunView;
 
-/// The commits one node execution made (one `artifacts_committed`).
+/// One inbox gap a run's connector read journaled (one `inbox_gap`): unread
+/// events a connector inbox read found lost to inbox retention. A run with
+/// any of these did not see its inbox whole.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct NodeCommits {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunInboxGap {
+    /// The node whose connector call made the read.
     pub node: String,
-    /// `HEAD` before the node ran.
-    pub before: String,
-    /// `HEAD` after it.
-    pub after: String,
-    /// Newest first, at most 50.
-    pub commits: Vec<CommittedArtifact>,
-    /// Commits past the listed ones.
-    pub omitted: usize,
+    pub connector: String,
+    pub account: String,
+    /// First lost sequence number (the consumer's cursor plus one).
+    pub from: u64,
+    /// Last lost sequence number, inclusive.
+    pub through: u64,
 }
 
-/// Every `artifacts_committed` of `events`, in journal order.
-pub fn commits_from_events(events: &[Event]) -> Vec<NodeCommits> {
+/// Every `inbox_gap` of `events`, in journal order. The call path appends at
+/// most one event per distinct gap, so no dedup happens here: the journal is
+/// already one-per-gap.
+pub fn inbox_gaps_from(events: &[Event]) -> Vec<RunInboxGap> {
     events
         .iter()
         .filter_map(|e| match &e.payload {
-            EventPayload::ArtifactsCommitted {
-                node,
-                before,
-                after,
-                commits,
-                omitted,
-            } => Some(NodeCommits {
-                node: node.clone(),
-                before: before.clone(),
-                after: after.clone(),
-                commits: commits.clone(),
-                omitted: *omitted,
+            EventPayload::InboxGap {
+                node_id,
+                connector,
+                account,
+                from,
+                through,
+            } => Some(RunInboxGap {
+                node: node_id.clone(),
+                connector: connector.clone(),
+                account: account.clone(),
+                from: *from,
+                through: *through,
             }),
             _ => None,
         })
@@ -56,6 +85,67 @@ impl RunView {
     pub fn commits(&self) -> Vec<NodeCommits> {
         commits_from_events(&self.events)
     }
+
+    /// The run's publish nodes: target, plan, consent, push and result.
+    pub fn publish(&self) -> Vec<RunPublish> {
+        publish_from(&self.events, apb_core::clock::now_ms_u64())
+    }
+
+    /// The inbox gaps the run's connector reads journaled, empty when none:
+    /// retention dropped unread events, so the inbox was not seen whole.
+    pub fn inbox_gaps(&self) -> Vec<RunInboxGap> {
+        inbox_gaps_from(&self.events)
+    }
+}
+
+impl RunView {
+    /// The run's baseline check with what the journal recorded; `None`
+    /// when the playbook declares none.
+    pub fn baseline(&self, run_dir: &Path) -> Option<RunBaseline> {
+        let playbook = crate::legacy_snapshot::load_run_playbook(run_dir);
+        baseline_from(playbook.as_ref(), &self.events)
+    }
+
+    /// The findings and warnings the run's attempts reported.
+    pub fn notes(&self) -> RunNotes {
+        RunNotes::from_events(&self.events)
+    }
+
+    /// The human outcome of the run (see [`OutcomeSummary`]).
+    pub fn outcome(&self, run_dir: &Path) -> OutcomeSummary {
+        OutcomeSummary::build(self, run_dir)
+    }
+
+    /// The run's playbook snapshot and the blocks read against it, parsed
+    /// once, for a surface that shows them next to the outcome.
+    pub fn readout(&self, run_dir: &Path) -> RunReadout {
+        self.readout_of(crate::legacy_snapshot::load_run_playbook(run_dir))
+    }
+
+    /// [`RunView::readout`] over a playbook snapshot the caller already
+    /// parsed.
+    pub fn readout_of(&self, playbook: Option<apb_core::schema::Playbook>) -> RunReadout {
+        RunReadout {
+            goal: goal_from(playbook.as_ref(), &self.events),
+            lists: crate::list::run_lists(playbook.as_ref(), &self.events),
+            baseline: baseline_from(playbook.as_ref(), &self.events),
+            notes: self.notes(),
+            playbook,
+        }
+    }
+}
+
+/// What [`RunView::readout`] read: one parse of the playbook snapshot, so
+/// the goal, the baseline, the notes and the outcome a surface shows side
+/// by side come from the same reading.
+#[derive(Debug, Clone)]
+pub struct RunReadout {
+    pub playbook: Option<apb_core::schema::Playbook>,
+    pub goal: Option<RunGoal>,
+    pub baseline: Option<RunBaseline>,
+    pub notes: RunNotes,
+    /// Every list node that started a visit, with its items.
+    pub lists: Vec<crate::list::RunList>,
 }
 
 // --- goal criteria (C1) -------------------------------------------------------
@@ -66,7 +156,7 @@ impl RunView {
 pub struct GoalCriterionResult {
     pub index: usize,
     pub description: String,
-    /// `script`, `marker` or `manual`.
+    /// `script`, `marker`, `list` or `manual`.
     pub check: String,
     /// `passed`, `failed`, `error`, `manual` (a person confirms it), or
     /// `pending` while the run has not reached a finish node.
@@ -123,16 +213,25 @@ pub fn goal_from(
                 GoalCheck::Manual => ("manual", "manual"),
                 GoalCheck::Marker { .. } => ("marker", "pending"),
                 GoalCheck::Script { .. } => ("script", "pending"),
+                GoalCheck::List { .. } => ("list", "pending"),
             };
             // The last result for this criterion (a resumed run may check
             // twice).
             let found = checked.iter().rev().find(|(idx, _, _)| *idx == i);
+            // A list criterion not checked yet says where its list stands.
+            let live = || match &c.check {
+                GoalCheck::List { node } => Some(crate::list::list_criterion(events, node).1),
+                _ => None,
+            };
             GoalCriterionResult {
                 index: i,
                 description: c.description.clone(),
                 check: check.to_string(),
                 status: found.map_or(fallback, |(_, s, _)| s).to_string(),
-                detail: found.and_then(|(_, _, d)| (*d).clone()),
+                detail: match found {
+                    Some((_, _, d)) => (*d).clone(),
+                    None => live(),
+                },
             }
         })
         .collect();
@@ -186,19 +285,30 @@ impl RunGoal {
 
 // --- end of goal criteria -------------------------------------------------------
 
-/// `abc1234 subject` lines for a terminal: one per commit, the node first.
-pub fn commit_lines(commits: &[NodeCommits]) -> Vec<String> {
-    let mut out = Vec::new();
-    for c in commits {
-        for a in &c.commits {
-            let short: String = a.sha.chars().take(12).collect();
-            out.push(format!("{}: {short} {}", c.node, a.subject));
-        }
-        if c.omitted > 0 {
-            out.push(format!("{}: and {} more", c.node, c.omitted));
-        }
-    }
-    out
+/// One plain line per inbox gap, for a terminal or a report: which inbox
+/// lost which unread events, and which node's read found it.
+pub fn inbox_gap_lines(gaps: &[RunInboxGap]) -> Vec<String> {
+    gaps.iter()
+        .map(|g| {
+            // The consumer's cursor may predate this run, so the line says
+            // the events were never read, not that this run missed them.
+            let lost = if g.from == g.through {
+                format!(
+                    "unread event {} was dropped by inbox retention before it was read",
+                    g.from
+                )
+            } else {
+                format!(
+                    "unread events {}-{} were dropped by inbox retention before they were read",
+                    g.from, g.through
+                )
+            };
+            format!(
+                "{}/{}: {lost} (found by {})",
+                g.connector, g.account, g.node
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -275,39 +385,45 @@ edges:
     }
 
     #[test]
-    fn commits_are_read_in_journal_order_and_printed_per_node() {
-        let ev = |seq: u64, node: &str, sha: &str, omitted: usize| Event {
+    fn inbox_gaps_are_read_in_journal_order_and_serialized_flat() {
+        let ev = |seq: u64, node: &str, from: u64, through: u64| Event {
             seq,
             ts: 0,
-            payload: EventPayload::ArtifactsCommitted {
-                node: node.into(),
-                before: "b".into(),
-                after: sha.into(),
-                commits: vec![CommittedArtifact {
-                    sha: sha.into(),
-                    subject: format!("change {node}"),
-                }],
-                omitted,
+            payload: EventPayload::InboxGap {
+                node_id: node.into(),
+                connector: "echo-hooks".into(),
+                account: "main".into(),
+                from,
+                through,
             },
         };
-        let events = [
-            ev(1, "impl", "0123456789abcdef", 0),
-            ev(2, "docs", "fedcba9876543210", 2),
-        ];
-        let commits = commits_from_events(&events);
-        assert_eq!(commits.len(), 2);
+        let events = [ev(1, "watch", 3, 6), ev(2, "watch", 1, 6)];
+        let gaps = inbox_gaps_from(&events);
+        assert_eq!(gaps.len(), 2, "one entry per journaled gap");
+        assert_eq!(gaps[0].from, 3);
+        assert_eq!(gaps[1].from, 1, "journal order, not sorted order");
+        assert!(inbox_gaps_from(&[]).is_empty());
         assert_eq!(
-            commit_lines(&commits),
+            inbox_gap_lines(&gaps[..1]),
             [
-                "impl: 0123456789ab change impl",
-                "docs: fedcba987654 change docs",
-                "docs: and 2 more",
+                "echo-hooks/main: unread events 3-6 were dropped by inbox retention before they were read (found by watch)"
+            ]
+        );
+        let one = RunInboxGap {
+            from: 4,
+            through: 4,
+            ..gaps[0].clone()
+        };
+        assert_eq!(
+            inbox_gap_lines(&[one]),
+            [
+                "echo-hooks/main: unread event 4 was dropped by inbox retention before it was read (found by watch)"
             ]
         );
         // The wire shape the surfaces serialize.
         assert_eq!(
-            serde_json::to_string(&commits[0]).unwrap(),
-            r#"{"node":"impl","before":"b","after":"0123456789abcdef","commits":[{"sha":"0123456789abcdef","subject":"change impl"}],"omitted":0}"#
+            serde_json::to_string(&gaps[0]).unwrap(),
+            r#"{"node":"watch","connector":"echo-hooks","account":"main","from":3,"through":6}"#
         );
     }
 }

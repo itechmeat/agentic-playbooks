@@ -22,15 +22,6 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
             _ => None,
         }
     };
-    let isolated = |kind: &NodeKind| {
-        matches!(
-            kind,
-            NodeKind::AgentTask {
-                isolation: Some(Isolation::Full | Isolation::BestEffort),
-                ..
-            }
-        )
-    };
     for node in &playbook.nodes {
         let NodeKind::AgentTask {
             continue_session: Some(source_id),
@@ -62,7 +53,7 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
         if profile_of(&source.kind) != profile_of(&node.kind) {
             cold.push("the two nodes bind different profiles");
         }
-        if isolated(&source.kind) || isolated(&node.kind) {
+        if source.kind.is_isolated() || node.kind.is_isolated() {
             cold.push("an isolated node runs in its own directory");
         }
         if source.kind.workdir_template() != node.kind.workdir_template() {
@@ -104,13 +95,25 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
         .iter()
         .filter_map(|n| super::judge::judge_output_fields(n).map(|f| (n.id.as_str(), f)))
         .collect();
+    // A list node publishes its counts and items whatever it declares.
+    let list_fields: HashMap<&str, Vec<String>> = playbook
+        .nodes
+        .iter()
+        .filter(|n| n.list().is_some())
+        .map(|n| {
+            let fields = crate::list::LIST_OUTPUT_FIELDS.map(String::from).to_vec();
+            (n.id.as_str(), fields)
+        })
+        .collect();
     let declared = |id: &str| -> Option<&Vec<String>> {
-        playbook
-            .node(id)
-            .and_then(|n| n.outputs.as_ref())
-            .map(|o| &o.fields)
-            .filter(|f| !f.is_empty())
-            .or_else(|| judge_fields.get(id))
+        list_fields.get(id).or_else(|| {
+            playbook
+                .node(id)
+                .and_then(|n| n.outputs.as_ref())
+                .map(|o| &o.fields)
+                .filter(|f| !f.is_empty())
+                .or_else(|| judge_fields.get(id))
+        })
     };
     let report = |owner: Option<&str>, source: &str, field: &str, r: &mut ValidationReport| {
         if let Some(fields) = declared(source)
@@ -150,14 +153,18 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
     }
 }
 
-/// Whether a template reference names a plain value a path or a key can be
-/// built from: `params.<declared>`, `run.instruction`, a node's output (or
-/// one field of it), report or review decision, of a node that exists. The
-/// set `workdir` (V47) and `cache.key` (V49) templates may read.
-fn value_ref_ok(playbook: &Playbook, cap: &str) -> bool {
+/// The `run.*` value a `workdir` (V47) or `cache.key` (V49) may read.
+pub(super) const PATH_RUN_VALUES: [&str; 1] = ["instruction"];
+
+/// Whether a template reference names a plain value a path, a key or a
+/// branch can be built from: `params.<declared>`, one of `run_values`
+/// (`run.<name>`), a node's output (or one field of it), report or review
+/// decision, of a node that exists. `workdir` (V47) and `cache.key` (V49)
+/// pass [`PATH_RUN_VALUES`]; a publish `branch` (V117) passes `id`.
+pub(super) fn value_ref_ok(playbook: &Playbook, cap: &str, run_values: &[&str]) -> bool {
     match cap.split('.').collect::<Vec<&str>>().as_slice() {
         ["params", p] => playbook.params.iter().any(|d| d.name == *p),
-        ["run", "instruction"] => true,
+        ["run", v] => run_values.contains(v),
         ["nodes", id, "output" | "report" | "review_decision"] => playbook.node(id).is_some(),
         ["nodes", id, "output" | "report", field] => {
             playbook.node(id).is_some() && !field.trim().is_empty()
@@ -173,7 +180,7 @@ fn value_ref_ok(playbook: &Playbook, cap: &str) -> bool {
 pub(crate) fn check_workdir(playbook: &Playbook, r: &mut ValidationReport) {
     for (owner, text) in workdir_texts(playbook) {
         for cap in template_refs(text) {
-            if !value_ref_ok(playbook, &cap) {
+            if !value_ref_ok(playbook, &cap, &PATH_RUN_VALUES) {
                 r.error(
                     "V47",
                     Some(owner),
@@ -185,12 +192,7 @@ pub(crate) fn check_workdir(playbook: &Playbook, r: &mut ValidationReport) {
         }
     }
     for node in &playbook.nodes {
-        if let NodeKind::AgentTask {
-            isolation: Some(Isolation::Full | Isolation::BestEffort),
-            ..
-        } = &node.kind
-            && node.kind.workdir_template().is_some()
-        {
+        if node.kind.is_isolated() && node.kind.workdir_template().is_some() {
             r.error(
                 "V47",
                 Some(&node.id),
@@ -264,7 +266,7 @@ pub(crate) fn check_cache_key(playbook: &Playbook, r: &mut ValidationReport) {
         };
         let refs = template_refs(key);
         for cap in &refs {
-            if !value_ref_ok(playbook, cap) {
+            if !value_ref_ok(playbook, cap, &PATH_RUN_VALUES) {
                 r.error(
                     "V49",
                     Some(&node.id),

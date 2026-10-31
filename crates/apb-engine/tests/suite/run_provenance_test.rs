@@ -101,16 +101,27 @@ fn a_committing_node_on_a_git_tree_journals_its_commits_and_the_run_id() {
         after,
         commits,
         omitted,
+        branch,
     } = found[0]
     else {
         unreachable!()
     };
     assert_eq!(node, "commit");
+    // The branch the node committed on is journaled with the commits.
+    assert!(
+        branch
+            .as_deref()
+            .is_some_and(|b| b.starts_with("refs/heads/")),
+        "{branch:?}"
+    );
     assert_ne!(before, after);
     assert_eq!(*omitted, 0);
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].sha, *after);
     assert_eq!(commits[0].subject, "record the run id");
+    // The trailer is read back: the commit names this run, so nothing is
+    // flagged.
+    assert_eq!(commits[0].apb_run, Some(vec![run_id.clone()]));
     // The trailer carries the id from APB_RUN_ID.
     let msg = Command::new("git")
         .arg("-C")
@@ -143,6 +154,11 @@ fn a_committing_node_on_a_git_tree_journals_its_commits_and_the_run_id() {
     let view = apb_engine::run_view::RunView::load(&root.join(".apb/runs").join(&run_id), &run_id)
         .unwrap();
     assert_eq!(view.commits().len(), 1);
+    let lines = apb_engine::run_outcome::commit_lines(&view.commits(), &run_id);
+    assert_eq!(
+        lines,
+        [format!("commit: {} record the run id", &after[..12])]
+    );
 }
 
 /// Outside git the run journals no provenance record at all: the same event

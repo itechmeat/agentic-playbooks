@@ -465,15 +465,18 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
     if crate::effects::effective(playbook).contains(&Effect::Irreversible) {
         why.push("the playbook's effects contain `irreversible`".to_string());
     }
+    for (site, bindings) in playbook.connector_sites() {
+        let site: &str = &site;
+        if !bindings.is_empty() {
+            why.push(format!(
+                "{} binds a connector; eval runs never call real connectors and mocks are not supported yet",
+                crate::connector::sites::site_label(site)
+            ));
+        }
+    }
     for n in &playbook.nodes {
         if let Some(reason) = crate::validate::node_shipping_reason(n) {
             why.push(reason);
-        }
-        if !n.kind.connector_bindings().is_empty() {
-            why.push(format!(
-                "node `{}` binds a connector; eval runs never call real connectors and mocks are not supported yet",
-                n.id
-            ));
         }
         if matches!(n.kind, NodeKind::Playbook { .. }) {
             why.push(format!(
@@ -671,7 +674,7 @@ fn case_problems(
         });
         if criteria == 0 {
             p.push(format!(
-                "checks.goal is `required` but version {} has no script or marker goal criterion",
+                "checks.goal is `required` but version {} has no script, marker or list goal criterion",
                 playbook.version
             ));
         }
@@ -1219,7 +1222,7 @@ mod tests {
             .collect();
         assert_eq!(
             v80,
-            [&"eval case `explicit`: checks.goal is `required` but version 1.2.0 has no script or marker goal criterion".to_string()]
+            [&"eval case `explicit`: checks.goal is `required` but version 1.2.0 has no script, marker or list goal criterion".to_string()]
         );
         let with_goal = PB.replace(
             "nodes:",

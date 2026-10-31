@@ -24,7 +24,10 @@ fn authed_with(root: std::path::PathBuf, cfg: ServerConfig) -> (String, AppState
     let (key, _record) = server_auth::issue_into(&path).unwrap();
     let file = server_auth::load_from(&path).unwrap();
     let auth = Arc::new(AuthState::new(None, file.keys, &cfg).unwrap());
-    (key, AppState::new(root).with_auth(auth))
+    (
+        key.expose_secret().to_string(),
+        AppState::new(root).with_auth(auth),
+    )
 }
 
 async fn send(

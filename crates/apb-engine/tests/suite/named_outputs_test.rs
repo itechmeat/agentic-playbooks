@@ -91,7 +91,7 @@ fn declared_fields_are_asked_for_in_the_prompt() {
     assert!(probe.contains("`working_tree`"), "{probe}");
     let work = inv.iter().find(|i| i.node == "work").unwrap().prompt();
     assert!(
-        !work.contains("APB_STATUS_FILE"),
+        !work.contains("to decide this step's status"),
         "a node declaring nothing keeps the report-only contract: {work}"
     );
 }

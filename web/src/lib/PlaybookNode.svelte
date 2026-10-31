@@ -161,6 +161,11 @@
     <div class="flex items-baseline justify-between gap-2">
       <b class="min-w-0 truncate font-semibold">{id}</b>
       <span class="flex shrink-0 items-baseline gap-1.5 text-[11px] text-muted-foreground">
+        {#if data.list}
+          <span class="list-badge" title="Runs once per item: items processed of the list" data-testid="node-list-badge">
+            {data.list}
+          </span>
+        {/if}
         {#if modeBadge}
           <!-- Several lines leaving one node mean two opposite things - all of
                them run, or exactly one does - and the graph alone cannot say
@@ -242,3 +247,13 @@
     {#if hasSource}<Handle type="source" position={Position.Bottom} />{/if}
   </div>
 {/if}
+
+<style>
+  .list-badge {
+    padding: 0 4px;
+    border: 1px solid var(--c-line-2);
+    color: var(--c-fg-2);
+    font-size: 10px;
+    line-height: 14px;
+  }
+</style>

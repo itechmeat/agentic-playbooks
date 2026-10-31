@@ -1,10 +1,25 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchProfiles, fetchProjects, fetchRun, fetchRunReport, postAnswer, postReview } from '../lib/api'
+  import { tick } from 'svelte'
+  import {
+    fetchProfiles,
+    fetchProjects,
+    fetchRun,
+    fetchRunGrades,
+    fetchRunReport,
+    gradeRun,
+    postAnswer,
+    postReview,
+    reopenRunGrading,
+    runReportHtmlUrl,
+    type GraderChoice,
+  } from '../lib/api'
+  import type { Grade } from '../lib/api.gen'
   import { profileModelMap, toFlow, withProfileModels, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
+  import { listProgressByNode } from '../lib/listprogress'
   import { runGates } from '../lib/rungates'
   import { formatCost, formatTokens, runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import {
@@ -27,13 +42,23 @@
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
   import FitTop from '../lib/FitTop.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
+  import PublishPanel from '../lib/PublishPanel.svelte'
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
+  import RunVerdictPanel from '../lib/RunVerdictPanel.svelte'
   import RunPauseControls from '../lib/RunPauseControls.svelte'
+  import RunNotifyControl from '../lib/RunNotifyControl.svelte'
   import AttemptModelsPanel, { type CurrentAttempt } from '../lib/AttemptModelsPanel.svelte'
   import RunLegend from '../lib/RunLegend.svelte'
   import RunLog from '../lib/RunLog.svelte'
+  import AttemptIsolationPanel from '../lib/AttemptIsolationPanel.svelte'
+  import RunBudgetPanel from '../lib/RunBudgetPanel.svelte'
+  import QualityPanel from '../lib/QualityPanel.svelte'
+  import RunKnownProblemsCard from '../lib/RunKnownProblemsCard.svelte'
+  import { hasRunProblems } from '../lib/knownproblems'
+  import { gradeSkippedText, verdictText } from '../lib/quality'
+  import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -64,6 +89,11 @@
   let projectName = $state('')
   let now = $state(Date.now())
   let logBox = $state<HTMLElement | null>(null)
+  // Run quality: the stored grades, a rules grade in flight, and the journal
+  // event a grade's citation opened in the events list.
+  let grades = $state<Grade[]>([])
+  let grading = $state(false)
+  let citedSeq = $state<number | null>(null)
 
   const nodeTypes = { playbookNode: PlaybookNode }
   const edgeTypes = { default: PlaybookEdge }
@@ -73,6 +103,7 @@
   // same view `apb wait` and MCP run_wait decide on.
   const gates = $derived(detail ? runGates(detail) : null)
   const pending = $derived(gates?.reviews ?? [])
+  const publishes = $derived(gates?.publishes ?? [])
   const questions = $derived(gates?.questions ?? [])
   const waiting = $derived(gates?.waits ?? [])
   const supervisor = $derived(gates?.supervisor ?? null)
@@ -214,13 +245,19 @@
     return () => clearInterval(t)
   })
 
-  async function decide(node: string, decision: string) {
+  // `nonce` answers a publish gate: the nonce of the plan shown.
+  async function decide(node: string, decision: string, nonce?: string) {
     deciding = `${node}:${decision}`
     try {
-      await postReview(id, node, decision, '', workspace)
+      await postReview(id, node, decision, '', workspace, nonce)
       await load()
     } catch (e) {
-      toast.error('Review failed', { description: String(e) })
+      // A publish decision fails when the plan moved on (a stale nonce): load
+      // the run again so the panel shows the current plan and its nonce.
+      toast.error(nonce ? 'Publish decision failed' : 'Review failed', {
+        description: String(e),
+      })
+      if (nonce) await load().catch(() => {})
     } finally {
       deciding = null
     }
@@ -238,6 +275,66 @@
     }
   }
 
+  // A grading request answers for the run it was made on: once the page
+  // moved to another run it neither reports nor unlocks that run's buttons
+  // (the route effect resets `grading`).
+  // A model grade that stored nothing (`skipped`) says why as a warning.
+  async function gradeRequest(
+    work: () => Promise<{ done: string; warning?: string; skipped?: boolean }>,
+    failed: string,
+  ) {
+    const target = loadTarget()
+    const stillHere = () => target === loadTarget()
+    grading = true
+    try {
+      const { done, warning, skipped } = await work()
+      if (!stillHere()) return
+      if (skipped) {
+        toast.warning(done, { description: warning })
+        return
+      }
+      toast.success(done)
+      if (warning) toast.warning('The candidate was not re-decided', { description: warning })
+      await load()
+    } catch (e) {
+      if (stillHere()) toast.error(failed, { description: String(e) })
+    } finally {
+      if (stillHere()) grading = false
+    }
+  }
+
+  function grade(grader: GraderChoice) {
+    return gradeRequest(async () => {
+      const graded = await gradeRun(id, grader, workspace)
+      const by = grader === 'model' ? 'the decision model' : 'rules'
+      if (graded.skipped) {
+        return { done: `Not graded by ${by}`, warning: gradeSkippedText(graded.skipped), skipped: true }
+      }
+      const after = graded.candidate ? `; candidate: ${verdictText(graded.candidate.verdict)}` : ''
+      return { done: `Graded by ${by}${after}`, warning: graded.candidate_error }
+    }, 'Grading failed')
+  }
+
+  // A run takes one host grade: a person lets a host grade it once more.
+  function reopenGrading() {
+    return gradeRequest(async () => {
+      await reopenRunGrading(id, workspace)
+      return { done: 'A host may grade this run once more' }
+    }, 'Could not reopen the grading')
+  }
+
+  // A citation opens its journal event in the events list.
+  async function showCite(seq: number) {
+    tab = 'events'
+    citedSeq = seq
+    await tick()
+    document.querySelector(`[data-event-seq="${seq}"]`)?.scrollIntoView({ block: 'center' })
+  }
+
+  // The run a load was started for: an answer that comes back after the
+  // page moved to another run (back/forward, a change notice) is dropped.
+  const loadTarget = () => `${workspace}\u0000${id}`
+
   // Bumped on every route change: a response for the previous run is dropped.
   let routeSeq = 0
 
@@ -250,7 +347,14 @@
       loadError = null
       now = Date.now()
       if (d.model) {
-        const flow = toFlow(d.model, d.layout, d.nodes, cachedNodeIds(d.events))
+        const flow = toFlow(
+          d.model,
+          d.layout,
+          d.nodes,
+          cachedNodeIds(d.events),
+          false,
+          listProgressByNode(d.lists),
+        )
         flowNodes = flow.nodes
         flowEdges = flow.edges
       }
@@ -267,6 +371,12 @@
       if (seq === routeSeq) report = r.report
     } catch {
       if (seq === routeSeq) report = null
+    }
+    try {
+      const g = (await fetchRunGrades(id, workspace)).grades
+      if (seq === routeSeq) grades = g
+    } catch {
+      if (seq === routeSeq) grades = []
     }
   }
 
@@ -293,6 +403,9 @@
     report = null
     flowNodes = []
     flowEdges = []
+    grades = []
+    grading = false
+    citedSeq = null
     load()
     return subscribeChanges(load)
   })
@@ -483,10 +596,29 @@
             {workspace}
             status={detail.run_status}
             pause={detail.pause ?? null}
+            budget={detail.budget ?? null}
             driverDead={detail.driver_alive === false}
             playbookId={detail.playbook}
             onchange={load}
           />
+          <!-- Who hears about the run, and the report as one page to keep. -->
+          <RunNotifyControl
+            {id}
+            {workspace}
+            status={detail.run_status}
+            notify={detail.notify ?? null}
+            onchange={load}
+          >
+            {#snippet actions()}
+              <a
+                class="save-report"
+                href={runReportHtmlUrl(id, workspace)}
+                download
+                data-testid="run-save-report"
+                title="The run report as one self-contained HTML page: no script, no network">Save report</a
+              >
+            {/snippet}
+          </RunNotifyControl>
           <div class="flex gap-1.5">
             <Button variant="outline" size="sm" onclick={showReport} data-testid="run-report-button">Report</Button>
           </div>
@@ -517,6 +649,8 @@
       {#each questions as q (q.node)}
         <QuestionPanel question={q} posting={answering} onAnswer={answer} />
       {/each}
+
+      <PublishPanel runId={id} views={detail.publish} gates={publishes} posting={deciding} onDecide={decide} />
 
       {#if pending.length}
         <section class="box glow flex flex-col gap-3 px-4 pt-4 pb-3" style:--k="var(--c-amber)">
@@ -582,9 +716,27 @@
         </section>
       {/if}
 
+      <RunVerdictPanel outcome={detail.outcome} />
+      {#key `${workspace}/${id}`}
+        <ListProgressPanel lists={detail.lists} />
+      {/key}
       <DecisionsPanel decisions={detail.decisions} events={detail.events} />
       <AttemptModelsPanel models={detail.attempt_models} {current} />
-      <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
+      <AttemptIsolationPanel rows={detail.isolation} />
+      <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
+      <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
+      <QualityPanel
+        {grades}
+        events={detail.events}
+        ended={isTerminalRunStatus(detail.run_status)}
+        {grading}
+        onGrade={grade}
+        onReopen={reopenGrading}
+        onCite={showCite}
+      />
+      {#if hasRunProblems(detail.known_problems)}
+        <RunKnownProblemsCard problems={detail.known_problems} {workspace} playbook={detail.playbook} />
+      {/if}
 
       {#if children.length}
         <section class="box flex flex-col gap-1.5 px-4 pt-4 pb-3">
@@ -650,7 +802,7 @@
         </Tabs.List>
 
         <Tabs.Content value="events" class="min-h-0 flex-1">
-          <RunLog lines={logLines} />
+          <RunLog lines={logLines} cited={citedSeq} />
         </Tabs.Content>
 
         <Tabs.Content value="journal" class="min-h-0 flex-1 overflow-auto">
@@ -764,5 +916,25 @@
   .steps li.fail::before {
     content: '\2715';
     color: var(--c-red);
+  }
+  /* The report as one page to keep: a link styled like an outline button. */
+  .save-report {
+    display: inline-flex;
+    align-items: center;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--c-line-2);
+    color: var(--foreground);
+    font-size: 12px;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .save-report:hover {
+    background: var(--c-panel-2);
+  }
+  .save-report:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
 </style>

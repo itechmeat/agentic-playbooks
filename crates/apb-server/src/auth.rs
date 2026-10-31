@@ -29,7 +29,7 @@
 //!
 //! One deliberate exception to the "no plain comparison on anything
 //! secret-derived" rule: API keys are verified by a linear scan using
-//! `server_auth::ct_eq_str`, but session tokens are looked up by their
+//! `apb_core::secret::ct_eq_str`, but session tokens are looked up by their
 //! SHA-256 hex in a `HashMap`, which is an ordinary hash-and-compare and not
 //! constant time. That is intentional and safe here: the value being looked
 //! up is already a one-way hash of a 256-bit CSPRNG token, so a timing signal
@@ -41,6 +41,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use apb_core::secret::Secret;
 use apb_core::server_auth::{self, KeyRecord};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
@@ -592,7 +593,7 @@ impl AuthState {
     }
 
     /// The id of the key `presented` is, or `None`.
-    pub fn verify_key(&self, presented: &str) -> Option<String> {
+    pub fn verify_key(&self, presented: &Secret) -> Option<String> {
         let set = self.key_set();
         server_auth::verify(&set.keys, presented)
     }
@@ -613,7 +614,7 @@ impl AuthState {
     /// the content actually changed. That is what makes issuing a first key
     /// or revoking a compromised one take effect on the very next request
     /// rather than on the next restart, or up to a minute later.
-    pub fn verify_key_with_reload(&self, presented: &str, now_ms: u128) -> Option<String> {
+    pub fn verify_key_with_reload(&self, presented: &Secret, now_ms: u128) -> Option<String> {
         self.maybe_reload(now_ms, true);
         self.verify_key(presented)
     }
@@ -638,6 +639,9 @@ impl AuthState {
 pub struct ClientCtx {
     pub ip: IpAddr,
     pub https: bool,
+    /// The socket peer is a configured trusted proxy: the request was
+    /// forwarded, whatever headers it carries.
+    pub via_proxy: bool,
 }
 
 /// Derives [`ClientCtx`]. `peer` is `None` when the router is driven in
@@ -673,6 +677,7 @@ pub fn client_ctx(auth: &AuthState, headers: &HeaderMap, peer: Option<IpAddr>) -
     ClientCtx {
         ip,
         https: forwarded_https || auth.public_https,
+        via_proxy: trusted,
     }
 }
 
@@ -698,8 +703,8 @@ pub fn evaluate(auth: &AuthState, headers: &HeaderMap, now_ms: u128) -> Credenti
     {
         return Credential::Bearer;
     }
-    if let Some(token) = cookie_value(headers, SESSION_COOKIE) {
-        let hash = server_auth::hash_hex(&token);
+    if let Some(token) = session_token(headers) {
+        let hash = session_hash(&token);
         let key_id = {
             let mut sessions = auth.sessions();
             sessions.touch(&hash, now_ms)
@@ -728,13 +733,23 @@ pub fn evaluate(auth: &AuthState, headers: &HeaderMap, now_ms: u128) -> Credenti
     Credential::None
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
+fn bearer_token(headers: &HeaderMap) -> Option<Secret> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let rest = raw
         .strip_prefix("Bearer ")
         .or_else(|| raw.strip_prefix("bearer "))?;
     let token = rest.trim();
-    (!token.is_empty()).then(|| token.to_string())
+    (!token.is_empty()).then(|| Secret::new(token))
+}
+
+/// The session token the request's `apb_session` cookie carries.
+pub fn session_token(headers: &HeaderMap) -> Option<Secret> {
+    cookie_value(headers, SESSION_COOKIE).map(Secret::new)
+}
+
+/// The key a session is stored under: the SHA-256 of its token.
+pub fn session_hash(token: &Secret) -> String {
+    server_auth::hash_hex(token.expose_secret())
 }
 
 /// One named value out of the raw `Cookie` header. No cookie crate: the header
@@ -1217,7 +1232,7 @@ mod tests {
     /// that has nothing to do with what these tests are about, so the ids are
     /// pinned to the unquoted form instead of the same-length precondition
     /// being left to a coin flip.
-    fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
+    fn issue_unquoted_id(path: &std::path::Path) -> (Secret, apb_core::server_auth::KeyRecord) {
         loop {
             let (key, record) = server_auth::issue_into(path).unwrap();
             if yaml_serde::to_string(&record.id).unwrap().trim_end() == record.id {

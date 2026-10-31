@@ -32,8 +32,8 @@ pub(crate) enum ProbeRun {
 /// Runs the probe for node `node` of the run at `run_dir`, on the chain step
 /// whose agent and model are `agent` and `model`.
 pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &str) -> ProbeRun {
-    let ri = match probe_invocation(run_dir, node, agent, model) {
-        Ok(Some(ri)) => ri,
+    let (ri, process_env) = match probe_invocation(run_dir, node, agent, model) {
+        Ok(Some(found)) => found,
         Ok(None) => {
             return ProbeRun::Unavailable(format!(
                 "node `{node}` has no `{agent}/{model}` step in its executor chain"
@@ -49,16 +49,26 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent);
-    let connector_policy = crate::adapter::ConnectorEnvPolicy {
-        // The probe calls no connector, so it carries none of their tokens.
-        scrub: root
-            .map(apb_core::connector::resolve::all_referenced_env_names)
-            .unwrap_or_default(),
-        run_dir: None,
-        node_id: None,
-        overlay: crate::run_config::read_run_config(run_dir)
+    let run_config = crate::run_config::read_run_config(run_dir);
+    // The probe calls no connector, so it carries none of their tokens.
+    let scrub = root
+        .map(apb_core::connector::resolve::all_referenced_env_names)
+        .unwrap_or_default();
+    // The probe sees the environment the real attempt would: the entry's
+    // `process_env` for this step's agent. Not journaled (no attempt).
+    let spawn_env = crate::adapter::SpawnEnv {
+        process: crate::agent_env::plan_for_entry(
+            process_env.as_ref(),
+            &ri.agent_id,
+            &ri.model,
+            &scrub,
+        ),
+        scrub,
+        overlay: run_config
+            .as_ref()
             .map(|c| c.spawn_env())
             .unwrap_or_default(),
+        ..Default::default()
     };
     let task = AgentTask {
         prompt: PROBE_PROMPT,
@@ -68,7 +78,7 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         stream_log: None,
         soul: None,
         grant_autonomy: false,
-        connector_policy: &connector_policy,
+        spawn_env: &spawn_env,
         interactive: false,
         report_contract: false,
         node: "__quota_probe",
@@ -77,6 +87,11 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         status_file: None,
         hermetic_settings: None,
         transcript_dir: None,
+        // The limits the run resolved at its start, as every attempt of it.
+        output_limits: run_config
+            .as_ref()
+            .map(crate::run_config::RunConfig::output_limits)
+            .unwrap_or_default(),
     };
     let adapter = crate::adapter::ClaudeAdapter {
         program: ri.canonical_executable.to_string_lossy().into_owned(),
@@ -88,15 +103,22 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
     }
 }
 
-/// The chain step of node `node` that runs `agent`/`model`, from the run's
-/// effective binding (manifest plus rebind overlay). `None` in a host-mode
-/// run: a host task is no provider call, so there is nothing to probe.
+/// A probed chain step and its entry's `process_env`.
+type ProbeStep = (
+    crate::invocation::ResolvedInvocation,
+    Option<apb_core::process_env::ProcessEnvPolicy>,
+);
+
+/// The chain step of node `node` that runs `agent`/`model`, with the
+/// entry's `process_env`, from the run's effective binding (manifest plus
+/// rebind overlay). `None` in a host-mode run: a host task is no provider
+/// call, so there is nothing to probe.
 fn probe_invocation(
     run_dir: &Path,
     node: &str,
     agent: &str,
     model: &str,
-) -> Result<Option<crate::invocation::ResolvedInvocation>, EngineError> {
+) -> Result<Option<ProbeStep>, EngineError> {
     let Some(manifest) = crate::manifest::read(run_dir)? else {
         return Ok(None);
     };
@@ -105,10 +127,12 @@ fn probe_invocation(
     }
     Ok(
         effective_for_node(run_dir, &manifest, node)?.and_then(|entry| {
+            let process_env = entry.process_env;
             entry
                 .chain
                 .into_iter()
                 .find(|ri| ri.agent_id == agent && ri.model == model)
+                .map(|ri| (ri, process_env))
         }),
     )
 }

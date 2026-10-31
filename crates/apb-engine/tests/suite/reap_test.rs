@@ -223,6 +223,7 @@ fn node_started(node: &str) -> EventPayload {
 
 fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
     EventPayload::AttemptStarted {
+        item: None,
         node: node.into(),
         attempt: 1,
         agent: "claude-code".into(),
@@ -233,6 +234,8 @@ fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
         model: None,
         workdir: None,
         transcript: None,
+        token: None,
+        isolation: None,
     }
 }
 
@@ -488,8 +491,8 @@ fn a_reaped_plain_node_gets_no_interruption_note() {
         "a plain node must not be handed a note that closes on the status-file contract, got:\n{prompt}"
     );
     assert!(
-        !prompt.contains("APB_STATUS_FILE"),
-        "the premise of the gate: a plain node is never told the status-file contract, got:\n{prompt}"
+        !prompt.contains("to decide this step's status"),
+        "the premise of the gate: a plain node is never told the status-file verdict contract, got:\n{prompt}"
     );
 }
 

@@ -6,13 +6,27 @@
   // a reason, an optional until and keeping the busy lock). Resume of a run
   // that has no consent recorded for its irreversible effects is refused by
   // the server; the same consent dialog the Run button uses asks, and its
-  // confirmation sends the refusal's nonce.
+  // confirmation sends the refusal's nonce. A run its budget paused resumes
+  // only with a budget change, so its Resume opens a small form instead: raise
+  // or set the token or dollar limit, choose what happens before a node with
+  // no estimate, or let the paused node run once.
   import { toast } from 'svelte-sonner'
   import { ApiError, pauseRun, resumeRun } from './api'
   import { consentStep } from './irreversibleconsent'
   import IrreversibleRunDialog from './IrreversibleRunDialog.svelte'
-  import { canPause, canResume, pauseBody, pauseDetails, pauseWord, type PauseForm } from './pause'
-  import type { PauseInfo } from './types'
+  import {
+    canPause,
+    canResume,
+    isBudgetPause,
+    pauseBody,
+    pauseCauseLabel,
+    pauseDetails,
+    pauseWord,
+    type PauseForm,
+  } from './pause'
+  import { emptyResumeForm, pausedText, resumeBudgetBody, type BudgetResumeForm } from './runbudget'
+  import type { BudgetStatus, PauseInfo } from './types'
+  import type { ResumeBudget } from './api'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
 
@@ -21,6 +35,7 @@
     workspace = '',
     status,
     pause = null,
+    budget = null,
     driverDead = false,
     playbookId = '',
     onchange = () => {},
@@ -29,6 +44,7 @@
     workspace?: string
     status: string
     pause?: PauseInfo | null
+    budget?: BudgetStatus | null
     driverDead?: boolean
     playbookId?: string
     onchange?: () => void
@@ -45,6 +61,33 @@
   const showPause = $derived(canPause(status, pause))
   const showResume = $derived(canResume(status, driverDead))
   const word = $derived(pauseWord(pause))
+  const cause = $derived(pauseCauseLabel(pause))
+  const budgetPause = $derived(isBudgetPause(pause))
+  const budgetPaused = $derived(budget ? pausedText(budget) : null)
+  let budgetFormOpen = $state(false)
+  let budgetForm = $state<BudgetResumeForm>(emptyResumeForm())
+  let budgetError = $state<string | null>(null)
+
+  // Closing the form drops what was typed and its error, so the next budget
+  // pause starts clean; so does the run leaving the pause another way.
+  function closeBudgetForm() {
+    budgetFormOpen = false
+    budgetError = null
+    budgetForm = emptyResumeForm()
+  }
+  $effect(() => {
+    if (!showResume && budgetFormOpen) closeBudgetForm()
+  })
+
+  function submitBudgetResume() {
+    const { budget: change, error } = resumeBudgetBody(budgetForm)
+    if (error) {
+      budgetError = error
+      return
+    }
+    budgetError = null
+    void resume(undefined, change)
+  }
   const details = $derived(pause ? pauseDetails(pause) : [])
 
   async function submitPause() {
@@ -65,14 +108,22 @@
     }
   }
 
-  async function resume(consentNonce?: string) {
+  // The budget change of a resume the consent dialog holds, for its retry
+  // only: any other outcome drops it, so a later plain Resume never carries
+  // an old change.
+  let lastBudget: ResumeBudget | undefined
+
+  async function resume(consentNonce?: string, change?: ResumeBudget) {
     busy = true
+    lastBudget = undefined
     try {
-      const res = await resumeRun(id, workspace, consentNonce)
+      const res = await resumeRun(id, workspace, { consentNonce, budget: change })
+      closeBudgetForm()
       toast.success(res.resumed_early ? 'Resumed before its until time' : 'Run resumed')
       onchange()
     } catch (e) {
       if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
+        lastBudget = change
         const step = consentStep(e.body, consentNonce)
         if (step.kind === 'stop') {
           toast.error('Resume refused', { description: step.message })
@@ -81,6 +132,11 @@
           irreversibleNonce = step.nonce
           irreversibleOpen = true
         }
+      } else if (e instanceof ApiError && e.code === 'budget_paused') {
+        // The budget still holds the run: the form asks for a change.
+        budgetFormOpen = true
+        budgetError =
+          'the budget paused this run: raise or set a limit, choose what happens before a node with no estimate, or let the paused node run once'
       } else if (e instanceof ApiError && e.code === 'workdir_busy') {
         // Another run holds the busy lock of this run's tree: nothing was
         // started and the run stays paused.
@@ -101,6 +157,7 @@
     {#if pause && word}
       <div class="pause-text" data-testid="run-pause-info">
         <span class="pause-word">{word}</span>
+        {#if cause}<span class="pause-cause" data-testid="run-pause-cause">{cause}</span>{/if}
         <span class="pause-reason">{pause.reason}</span>
         <span class="pause-details">{details.join(', ')}</span>
       </div>
@@ -123,13 +180,87 @@
           size="sm"
           data-testid="run-resume-button"
           disabled={busy}
-          onclick={() => resume()}
+          onclick={() => {
+            // An open budget form (a budget pause, or a refusal that opened
+            // it on another pause) is toggled closed first.
+            if (budgetFormOpen) closeBudgetForm()
+            else if (!budgetPause) void resume()
+            else budgetFormOpen = true
+          }}
         >
           Resume
         </Button>
       {/if}
     </div>
   </div>
+  {#if budgetFormOpen && showResume}
+    <form
+      class="pause-form"
+      data-testid="run-budget-resume-form"
+      onsubmit={(e) => {
+        e.preventDefault()
+        submitBudgetResume()
+      }}
+    >
+      {#if budgetPaused}<p class="budget-paused">{budgetPaused}</p>{/if}
+      <label class="pause-field">
+        Raise the token limit by
+        <Input data-testid="run-budget-raise-tokens" bind:value={budgetForm.raiseTokens} placeholder="such as 50k" />
+      </label>
+      <label class="pause-field">
+        Raise the dollar limit by
+        <Input data-testid="run-budget-raise-usd" bind:value={budgetForm.raiseUsd} placeholder="such as 2.50" />
+      </label>
+      <label class="pause-field">
+        Or set a new token limit
+        <Input data-testid="run-budget-set-tokens" bind:value={budgetForm.setTokens} placeholder="such as 500k" />
+      </label>
+      <label class="pause-field">
+        Or set a new dollar limit
+        <Input data-testid="run-budget-set-usd" bind:value={budgetForm.setUsd} placeholder="such as 5" />
+      </label>
+      <fieldset class="pause-modes">
+        <legend>Before a node with no estimate</legend>
+        <label>
+          <input type="radio" name="run-budget-policy" value="" bind:group={budgetForm.policy} />
+          Keep as it is
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="run-budget-policy"
+            value="pause"
+            data-testid="run-budget-policy-pause"
+            bind:group={budgetForm.policy}
+          />
+          Pause the run
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="run-budget-policy"
+            value="continue"
+            data-testid="run-budget-policy-continue"
+            bind:group={budgetForm.policy}
+          />
+          Run it anyway
+        </label>
+      </fieldset>
+      <label class="pause-check">
+        <input type="checkbox" data-testid="run-budget-once" bind:checked={budgetForm.once} />
+        Let the paused node run once over the budget
+      </label>
+      {#if budgetError}<p class="budget-error" data-testid="run-budget-error">{budgetError}</p>{/if}
+      <div class="pause-form-actions">
+        <Button type="submit" size="sm" data-testid="run-budget-resume-submit" disabled={busy}>
+          Resume run
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onclick={closeBudgetForm}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  {/if}
   {#if formOpen && showPause}
     <form
       class="pause-form"
@@ -183,7 +314,7 @@
   {playbookId}
   sources={irreversibleSources}
   action="resume"
-  onconfirm={() => resume(irreversibleNonce)}
+  onconfirm={() => resume(irreversibleNonce, lastBudget)}
 />
 
 <style>
@@ -210,6 +341,17 @@
     color: var(--c-amber);
     letter-spacing: 0.08em;
     text-transform: uppercase;
+  }
+  .pause-cause {
+    color: var(--muted-foreground);
+  }
+  .budget-paused {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .budget-error {
+    margin: 0;
+    color: var(--destructive);
   }
   .pause-reason {
     overflow-wrap: anywhere;

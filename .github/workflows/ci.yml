@@ -80,7 +80,7 @@ jobs:
       # save (10 to 30 seconds per job) would only be read by later pushes to
       # the same pull request.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -137,7 +137,7 @@ jobs:
       # The shared key lets the release test gate (test-gate.yml), which runs
       # the same tests on the same OS, restore what main saved here.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: linux-test
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -153,7 +153,19 @@ jobs:
       # own process, which is what makes the per-test timeout in
       # .config/nextest.toml enforceable - a hang becomes a named failing test
       # instead of a dead job. The ci profile also sets the worker count.
+      # The isolation sandbox (docs/ISOLATION.md) is unprivileged bubblewrap.
+      # sudo installs it and nothing else: the tests run as the normal user,
+      # and APB_SANDBOX_TESTS=require turns a missing sandbox capability into
+      # a failure instead of a skip, so this leg proves the enforcement tests
+      # ran. macOS runs their refusal twins.
+      - name: Install bubblewrap (isolation sandbox)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+
       - name: Test
+        env:
+          APB_SANDBOX_TESTS: require
         run: cargo nextest run --profile ci --workspace
 
       # nextest does not run doctests; `cargo test --workspace` did. Kept so
@@ -215,7 +227,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 

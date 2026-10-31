@@ -75,8 +75,8 @@ pub(crate) fn detect_cmd(refresh: bool) -> ExitCode {
     }
 }
 
-pub(crate) fn adopt_cmd(root: &Path, id: Option<&str>) -> ExitCode {
-    match apb_mcp::advisory_tools::playbook_adopt_report(root, id) {
+pub(crate) fn adopt_cmd(root: &Path, id: Option<&str>, scope: Option<&str>) -> ExitCode {
+    match apb_mcp::advisory_tools::playbook_adopt_report(root, id, scope) {
         Ok(v) => {
             print_json(&v);
             offer_onboarding_if_tty();
@@ -251,9 +251,10 @@ pub(crate) fn export_cmd(
         Some(path) => match atomic_write(path, json.as_bytes()) {
             Ok(()) => {
                 println!(
-                    "exported {} @ {} -> {}",
+                    "exported {} @ {} ({} script file(s)) -> {}",
                     bundle.id,
                     bundle.version,
+                    bundle.scripts.len(),
                     path.display()
                 );
                 ExitCode::SUCCESS
@@ -270,7 +271,16 @@ pub(crate) fn export_cmd(
     }
 }
 
-pub(crate) fn import_cmd(root: &Path, file: &Path, make_current: bool) -> ExitCode {
+/// How `apb import` was asked to proceed.
+pub(crate) struct ImportFlags<'a> {
+    pub make_current: bool,
+    /// `--preview`: print the preview and stop.
+    pub preview_only: bool,
+    /// `--accept <bundle_digest>`: accept this exact file.
+    pub accept: Option<&'a str>,
+}
+
+pub(crate) fn import_cmd(root: &Path, file: &Path, flags: &ImportFlags<'_>) -> ExitCode {
     let raw = match std::fs::read_to_string(file) {
         Ok(r) => r,
         Err(e) => {
@@ -285,9 +295,68 @@ pub(crate) fn import_cmd(root: &Path, file: &Path, make_current: bool) -> ExitCo
             return ExitCode::from(2);
         }
     };
-    match apb_core::bundle::import_bundle(root, &bundle, make_current) {
-        Ok(version) => {
-            println!("imported {} as version {version}", bundle.id);
+    let preview = match apb_core::bundle::preview(root, &bundle, raw.as_bytes()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("import refused: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    crate::import_preview::print_preview(&preview);
+    if flags.preview_only {
+        return ExitCode::SUCCESS;
+    }
+    if preview.unchanged {
+        println!("nothing to import");
+        return ExitCode::SUCCESS;
+    }
+    // Nobody is asked to accept an import that would be refused anyway.
+    if !preview.errors.is_empty() || preview.version_taken {
+        eprintln!("import refused: see the preview above; nothing imported");
+        return ExitCode::from(2);
+    }
+    match flags.accept {
+        Some(d) if d == preview.bundle_digest => {}
+        Some(_) => {
+            eprintln!(
+                "import refused: --accept does not name this file's bundle digest; nothing imported"
+            );
+            return ExitCode::from(2);
+        }
+        None => {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "nothing imported: review the preview, then accept this exact file with --accept {}",
+                    preview.bundle_digest
+                );
+                return ExitCode::from(3);
+            }
+            if !crate::import_preview::confirm("import this bundle? [y/N] ") {
+                println!("nothing imported");
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
+    let source = apb_core::bundle::ImportSource {
+        raw: raw.as_bytes(),
+        file_name: file.file_name().and_then(|n| n.to_str()),
+    };
+    match apb_core::bundle::import_bundle(root, &bundle, flags.make_current, Some(source)) {
+        Ok(saved) => {
+            // The id and version come from the bundle file: never print a
+            // control character from it raw.
+            let id = crate::util::sanitize_for_terminal(&bundle.id, 128);
+            let version = crate::util::sanitize_for_terminal(&saved.version, 64);
+            if saved.unchanged {
+                println!("{id} @ {version} already holds this bundle; nothing imported");
+                return ExitCode::SUCCESS;
+            }
+            println!(
+                "imported {id} as version {version} ({} script file(s))",
+                bundle.scripts.len()
+            );
+            crate::import_preview::print_approval_hint(root, &bundle.id, &saved.version);
             ExitCode::SUCCESS
         }
         Err(e) => {

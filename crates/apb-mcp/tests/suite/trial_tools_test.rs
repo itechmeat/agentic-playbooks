@@ -143,6 +143,95 @@ fn trial_of_fs_writing_playbook_runs_in_worktree_and_reports_diff() {
     );
 }
 
+/// A trial never runs a program the tree names (decision record 0009): the
+/// project's config arms an external diff, a textconv and a filter driver
+/// that `.gitattributes` names for every path; the worktree checkout
+/// (smudge), the status (clean) and the diff (external diff, textconv) of
+/// the trial run none of them.
+#[test]
+fn a_trial_never_runs_a_program_the_tree_names() {
+    let _l = lock();
+    if !git_available() {
+        eprintln!("git not available, skipping");
+        return;
+    }
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+    seed(
+        proj.path(),
+        "writer",
+        WRITER,
+        Some(("write.sh", "#!/bin/sh\necho changed >> tracked.txt\n")),
+    );
+    fs::write(proj.path().join("tracked.txt"), "one\n").unwrap();
+    fs::write(
+        proj.path().join(".gitattributes"),
+        "* diff=evil filter=evil\n",
+    )
+    .unwrap();
+    git(proj.path(), &["init", "-q"]);
+    git(proj.path(), &["add", "-A"]);
+    git(
+        proj.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let marker = cfg.path().join("ran");
+    let evil = cfg.path().join("evil.sh");
+    fs::write(
+        &evil,
+        format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&evil, fs::Permissions::from_mode(0o755)).unwrap();
+    let ev = evil.to_string_lossy();
+    for k in [
+        "diff.external",
+        "diff.evil.textconv",
+        "diff.evil.command",
+        "filter.evil.clean",
+        "filter.evil.smudge",
+        "filter.evil.process",
+    ] {
+        git(proj.path(), &["config", k, &ev]);
+    }
+    git(proj.path(), &["config", "filter.evil.required", "true"]);
+
+    let res = playbook_trial(
+        proj.path(),
+        "writer",
+        None,
+        Default::default(),
+        None,
+        "project",
+    )
+    .unwrap();
+    assert_eq!(res["status"], "succeeded", "trial result: {res}");
+    assert!(
+        res["diff"].as_str().unwrap().contains("changed"),
+        "the diff shows the change: {}",
+        res["diff"]
+    );
+    assert!(
+        !marker.exists(),
+        "the trial ran a program the tree names: {}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
+}
+
 #[test]
 fn approve_activates_and_unlocks_run() {
     let _l = lock();
@@ -167,7 +256,7 @@ fn approve_activates_and_unlocks_run() {
         "draft_requires_trial"
     );
 
-    let res = playbook_approve(proj.path(), "p", None, "project").unwrap();
+    let res = playbook_approve(proj.path(), "p", None, "project", None).unwrap();
     assert_eq!(res["lifecycle"], "active");
     assert_eq!(res["trusted"], true);
 
@@ -243,7 +332,7 @@ fn global_draft_can_be_trialed_and_approved() {
     assert_eq!(res["status"], "succeeded", "global trial result: {res}");
 
     // approve of a global draft.
-    let ap = playbook_approve(proj.path(), "g", None, "global").unwrap();
+    let ap = playbook_approve(proj.path(), "g", None, "global", None).unwrap();
     assert_eq!(ap["lifecycle"], "active");
     assert_eq!(ap["trusted"], true);
     assert_eq!(ap["scope"], "global");
@@ -355,4 +444,51 @@ fn trial_instruction_reaches_a_node_prompt_of_run_instruction() {
          and show up in the trial diff: {}",
         res["diff"]
     );
+}
+
+/// A version an import wrote with scripts and nobody approved by digest is
+/// not trialed either: the trial is refused like a run, before anything
+/// starts.
+#[test]
+fn an_unapproved_imported_version_is_not_trialed() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+    let bundle = apb_core::bundle::PlaybookBundle {
+        apb_bundle: 2,
+        id: "imp".to_string(),
+        version: "1.0.0".to_string(),
+        playbook: PLAIN
+            .replace("__ID__", "imp")
+            .replace("schema: 1", "schema: 2"),
+        layout: None,
+        scripts: vec![apb_core::bundle::BundleScript {
+            path: "x.sh".to_string(),
+            content_base64: "ZWNobwo=".to_string(),
+            executable: false,
+        }],
+        origin: None,
+    };
+    apb_core::bundle::import_bundle(proj.path(), &bundle, true, None).unwrap();
+
+    let res = playbook_trial(
+        proj.path(),
+        "imp",
+        None,
+        Default::default(),
+        None,
+        "project",
+    )
+    .unwrap();
+    assert_eq!(
+        res["policy_refusal"]["policy"], "imported_scripts_require_approval",
+        "{res}"
+    );
+    let runs = fs::read_dir(proj.path().join(".apb/runs")).map_or(0, |d| d.count());
+    assert_eq!(runs, 0, "nothing ran");
 }

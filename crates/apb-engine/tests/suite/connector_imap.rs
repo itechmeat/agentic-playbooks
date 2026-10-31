@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use apb_core::connector::def::ImapSpec;
+use apb_core::secret::Secret;
 use apb_engine::connector::call::CallErrorCode;
 use apb_engine::connector::imap::{ImapBuild, build};
 use serde_json::{Value, json};
@@ -280,8 +281,8 @@ fn account(host: &str, port: u16, auth_method: &str) -> BTreeMap<String, String>
     ])
 }
 
-fn secrets(password: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([("password".into(), password.into())])
+fn secrets(password: &str) -> BTreeMap<String, Secret> {
+    BTreeMap::from([("password".into(), Secret::new(password))])
 }
 
 /// Builds a real (non-dry-run) call and unwraps it, or panics.
@@ -289,7 +290,7 @@ fn build_call(
     spec: &ImapSpec,
     account: &BTreeMap<String, String>,
     args: &Value,
-    secrets: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, Secret>,
 ) -> Box<apb_engine::connector::imap::ImapCall> {
     match build(spec, account, args, secrets, Vec::new(), false, 15).unwrap() {
         ImapBuild::Call(c) => c,
@@ -298,6 +299,22 @@ fn build_call(
 }
 
 // -- Tests --
+
+#[test]
+fn a_built_call_never_prints_its_secret() {
+    let spec = spec_yaml("verify", "  {}\n");
+    let call = build_call(
+        &spec,
+        &account("127.0.0.1", 1, "password"),
+        &json!({}),
+        &secrets("imap-pass-not-for-logs"),
+    );
+    let shown = format!("{call:?}");
+    assert!(
+        !shown.contains("imap-pass-not-for-logs"),
+        "Debug of an imap call carried the password"
+    );
+}
 
 #[test]
 fn verify_ok_over_plaintext() {

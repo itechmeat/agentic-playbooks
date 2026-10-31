@@ -9,5 +9,6 @@ pub mod plan;
 /// kept for the MCP tool layer and its tests.
 pub use apb_engine::gate as policy;
 pub mod profile_tools;
+pub mod promote;
 pub mod server;
 pub mod tools;

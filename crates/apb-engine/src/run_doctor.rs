@@ -23,34 +23,17 @@ use crate::event::{Event, EventPayload};
 use crate::liveness;
 use crate::state::{RunState, RunStatus};
 
-/// One diagnosis line. `status` is one of `"ok"`, `"warn"`, `"fail"` - the
-/// same three levels `apb_core::doctor::CheckStatus` uses, as plain strings so
-/// this stays a leaf type with no cross-crate enum to keep in sync.
-#[derive(Debug, Clone)]
-pub struct RunCheck {
-    pub status: &'static str,
-    pub subject: String,
-    pub detail: String,
-}
+mod check;
+mod env;
+mod exposure;
+mod isolation;
 
-pub const OK: &str = "ok";
-pub const WARN: &str = "warn";
-pub const FAIL: &str = "fail";
-
-impl RunCheck {
-    fn new(status: &'static str, subject: impl Into<String>, detail: impl Into<String>) -> Self {
-        RunCheck {
-            status,
-            subject: subject.into(),
-            detail: detail.into(),
-        }
-    }
-}
+pub use check::{FAIL, OK, RunCheck, WARN};
 
 /// Diagnoses run `run_id` under project `root`.
 ///
 /// Returns the checks in a fixed order - run, nodes, attempts, autonomy,
-/// models, driver, workdir lock, control backlog, supervisor actions - so two reports
+/// models, process env, tool exposure, driver, workdir lock, control backlog, supervisor actions - so two reports
 /// of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
@@ -69,6 +52,9 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(attempt_checks(events));
     checks.extend(autonomy_check(&run_dir));
     checks.extend(model_check(&run_dir, events));
+    checks.extend(env::env_checks(&run_dir, events));
+    checks.extend(exposure::exposure_checks(events));
+    checks.extend(isolation::isolation_checks(events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(
         root,
@@ -641,6 +627,7 @@ mod tests {
             &run_dir,
             Control::Abort {
                 reason: "stop requested".into(),
+                by: None,
             },
         )
         .unwrap();
@@ -836,6 +823,7 @@ mod tests {
                 ephemeral: false,
                 hermetic: false,
                 zcode_mode: None,
+                process_env: None,
                 tiers: Vec::new(),
                 routed_tier: None,
                 cascade: 0,
@@ -848,6 +836,7 @@ mod tests {
             consent: None,
             candidate_trial: false,
             candidate_skipped: None,
+            task_type: None,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

@@ -46,6 +46,24 @@ pub(crate) fn write_overlay(run_dir: &Path, overlay: &RebindOverlay) -> Result<(
     Ok(())
 }
 
+/// Whether any profile of the run at `run_dir` restricts its agent's
+/// environment: a manifest entry (node or supervisor) or a rebound one under
+/// `process_env: allowlist`. An unreadable manifest or overlay counts as
+/// restricted, which is the safe side.
+pub(crate) fn run_uses_allowlist(run_dir: &Path) -> bool {
+    let allowlisted = |p: &ManifestProfile| {
+        p.process_env
+            .as_ref()
+            .is_some_and(apb_core::process_env::ProcessEnvPolicy::is_allowlist)
+    };
+    let in_manifest = match crate::manifest::read(run_dir) {
+        Ok(Some(m)) => m.profiles.iter().any(allowlisted),
+        Ok(None) => false,
+        Err(_) => true,
+    };
+    in_manifest || read_overlay(run_dir).map_or(true, |o| o.nodes.values().any(allowlisted))
+}
+
 /// The EFFECTIVE manifest profile for a node: the rebind overlay entry if the
 /// node has been rebound, otherwise the immutable manifest's binding. Every node
 /// execution, cache-key, and interaction-ceiling read goes through here so a

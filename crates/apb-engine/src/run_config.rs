@@ -148,6 +148,14 @@ pub struct RunConfig {
     /// parent depth + 1. Enforced against `MAX_SUBPLAYBOOK_DEPTH`.
     #[serde(default)]
     pub depth: usize,
+    /// The run is held to `publish_only`: its playbook sets it, or a parent
+    /// run held to it started this one (decision record 0010).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub publish_only: bool,
+    /// A parent run started a node that can act before this child run, so
+    /// nothing is pinned for the child's publish nodes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parent_acted: bool,
     /// Verified sub-playbook pins from the policy gate, keyed by this run's
     /// playbook-node id (spec C). `None` when the start path computed no pins
     /// (a playbook with no `type: playbook` node, or a caller that never went
@@ -196,6 +204,12 @@ pub struct RunConfig {
     /// every other run and every config written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval: Option<EvalRunSettings>,
+    /// The output limits the run's agent attempts apply (global config,
+    /// lowered by the project's), resolved once at the start so a re-drive
+    /// keeps them. `None` for every config written before the field existed:
+    /// the defaults apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limits: Option<apb_core::output_limits::OutputLimits>,
 }
 
 /// The settings of an eval repetition's run (`apb eval`).
@@ -214,6 +228,11 @@ pub struct EvalRunSettings {
 }
 
 impl RunConfig {
+    /// The output limits of the run's agent attempts.
+    pub fn output_limits(&self) -> apb_core::output_limits::OutputLimits {
+        self.output_limits.unwrap_or_default()
+    }
+
     /// The env overlay every spawned agent and script gets (empty outside
     /// eval runs).
     pub fn spawn_env(&self) -> Vec<(String, String)> {

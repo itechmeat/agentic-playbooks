@@ -8,10 +8,10 @@ use apb_core::config::{GlobalConfig, Interaction, SoulDelivery};
 use apb_core::migration::validate_migration;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::{Registry, is_safe_segment};
-use apb_core::schema::{FailurePolicy, Isolation, NodeKind, Outcome, Playbook, WaitFor};
+use apb_core::schema::{FailurePolicy, NodeKind, Outcome, Playbook, WaitFor};
 use apb_core::store::ResolvedPlaybook;
 use apb_core::validate::{Severity, ValidationContext, validate};
-use apb_core::versioning::{promote_policy, promote_version, should_promote};
+use apb_core::versioning::{promote_policy, promote_version};
 use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};
@@ -29,7 +29,6 @@ use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
 };
-use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
 use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree};
@@ -40,9 +39,18 @@ use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree}
 /// every caller expects to find it.
 pub use crate::run_config::RunMode;
 
+mod attempt_memory;
+mod attempt_notes;
+mod baseline;
+pub(crate) mod budget_gate;
 mod cache;
+mod continuation;
 mod control_apply;
+mod deadline;
+mod dispatch;
 mod entry;
+mod finish_answer;
+mod finish_hooks;
 mod fork;
 mod goal;
 mod handoff;
@@ -50,20 +58,24 @@ mod handoff;
 mod host;
 mod journal;
 mod judge;
+mod list;
 mod listing;
 mod live;
 mod node;
 mod node_workdir;
+mod outcome;
 mod patch;
 mod pipeline;
 mod prepare;
 mod protect;
-mod provenance;
+pub(crate) mod provenance;
+mod publish;
 mod quota_probe;
 mod rebind;
 mod resume;
 mod review_gate;
 mod revive;
+mod run_ref;
 mod skills_copy;
 mod status_file;
 mod supervisor;
@@ -71,6 +83,8 @@ mod transcript;
 mod worktree;
 
 pub(crate) use control_apply::{ControlScan, scan_control};
+pub use deadline::DEADLINE_REASON;
+use deadline::DeadlineWatch;
 pub(crate) use entry::Prepared;
 use entry::reap_dead_attempts;
 pub use entry::{
@@ -89,6 +103,8 @@ pub use listing::{RunSummary, list_runs};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
 pub(crate) use node::parent_run_origin;
 use node::*;
+pub use outcome::RunResult;
+pub(crate) use outcome::{AttemptOutcome, ExecOptions, LiveContext, NodeCtx, ResumeContext};
 use patch::*;
 use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
 use prepare::*;
@@ -96,14 +112,16 @@ pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
 pub(crate) use resume::resume_detached_pause;
 pub use resume::{
-    PAUSE_SUPERSEDED, RESUME_SUPERSEDED, record_run_error, resume, resume_by, resume_detached,
-    resume_detached_by, resume_detached_with, resume_pause, resume_with,
+    PAUSE_SUPERSEDED, RESUME_SUPERSEDED, ResumeRequest, record_run_error, resume, resume_by,
+    resume_detached, resume_detached_by, resume_detached_req, resume_detached_with, resume_pause,
+    resume_req, resume_with,
 };
 pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
 };
-pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
+pub use resume::{ResumeDecision, ResumeReason, StartMode, lifecycle_seq, plan_resume};
 use revive::{reoffer_revived_joins, restore_revived_frontier};
+pub use run_ref::{run_playbook_ref, run_profile_origin};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -179,7 +197,7 @@ fn stop_on_unhandled_failure(
         reason: failure_detail(output),
     })?;
     if let Some(run_dir) = log.run_dir() {
-        crate::candidate::settle(log, &run_dir, false);
+        finish_hooks::finish_hooks(log, &run_dir, false);
     }
     log.append(EventPayload::RunFinished {
         outcome: "failed".into(),
@@ -233,15 +251,11 @@ fn fallback_finish_answer(node: &str) -> String {
     )
 }
 
-/// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
-/// would exceed this depth fails its parent node.
-pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
+/// See [`apb_core::schema::MAX_SUBPLAYBOOK_DEPTH`].
+pub const MAX_SUBPLAYBOOK_DEPTH: usize = apb_core::schema::MAX_SUBPLAYBOOK_DEPTH;
 
-/// How many batch members the drive loop runs at once when neither the playbook
-/// nor the run declares a cap (spec 2026-08-05 section 1.3). Wide enough that a
-/// fan-out is worth batching, small enough that a fan-out of twenty nodes cannot
-/// spawn twenty agent processes at once.
-pub const DEFAULT_MAX_PARALLEL: usize = 4;
+/// See [`apb_core::schema::DEFAULT_MAX_PARALLEL`].
+pub const DEFAULT_MAX_PARALLEL: usize = apb_core::schema::DEFAULT_MAX_PARALLEL;
 
 /// The concurrency cap in force for this run.
 ///
@@ -261,90 +275,6 @@ fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
         .or(cfg.max_parallel)
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_MAX_PARALLEL)
-}
-
-/// Returns (playbook id, run's active version). The active version is
-/// the latest `RunMigrated.to_version`; if there were no migrations - `RunStarted.version`.
-/// Used by the `playbook_patch` tool to choose the base of the patch version.
-pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), EngineError> {
-    if !is_safe_segment(run_id) {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let events = read_all(&run_dir)?;
-    let mut id: Option<String> = None;
-    let mut version: Option<String> = None;
-    for event in &events {
-        match &event.payload {
-            EventPayload::RunStarted {
-                playbook,
-                version: v,
-            } => {
-                id = Some(playbook.clone());
-                version = Some(v.clone());
-            }
-            EventPayload::RunMigrated { to_version, .. } => {
-                version = Some(to_version.clone());
-            }
-            _ => {}
-        }
-    }
-    match (id, version) {
-        (Some(id), Some(version)) => Ok((id, version)),
-        _ => Err(EngineError::NotFound(format!(
-            "run `{run_id}` has no RunStarted event"
-        ))),
-    }
-}
-
-/// The origin (project vs global) a run was started under, from its provenance.
-/// Used by the MCP rebind gate to resolve and trust-check a new profile the same
-/// way run start resolved the run's node profiles (issue #45 finding 5).
-pub fn run_profile_origin(root: &Path, run_id: &str) -> Result<PlaybookOrigin, EngineError> {
-    if !is_safe_segment(run_id) {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    rebind::run_origin(&run_dir)
-}
-
-#[derive(Debug)]
-pub struct RunResult {
-    pub run_id: String,
-    pub outcome: RunStatus,
-}
-
-/// The outcome of one node execution (`execute_node`). A normal execution
-/// `Finished` with a status, output, and the events drive must write in its
-/// return batch. An interactive `agent_task` that asked a question via the
-/// stdout marker instead of finishing returns `Suspended` (spec 2026-07-20):
-/// the drive loop parks it on the question and re-invokes once an answer
-/// arrives. Consumed by Task 5 (timeout expiry in the park loop), Task 6 (the
-/// marker scan that feeds it), and Task 7 (resume-vs-reprompt re-invocation).
-pub(crate) enum AttemptOutcome {
-    Finished {
-        status: NodeStatus,
-        output: String,
-        events: Vec<EventPayload>,
-    },
-    Suspended {
-        question: String,
-        options: Vec<String>,
-    },
-    /// The node hit a provider quota it cannot wait out (issue #200, design
-    /// 6): the attempt is journaled `interrupted` already, the node gets no
-    /// `node_finished`, and the drive pauses the run with `pause`, so the
-    /// resume runs the node again.
-    QuotaPaused {
-        pause: crate::pause::PauseRequest,
-        events: Vec<EventPayload>,
-    },
 }
 
 /// The shared execution loop: advances the run from `start_node` to a finish node,
@@ -379,10 +309,20 @@ fn drive(
     lock: &mut Option<crate::workdir::WorkdirGuard>,
 ) -> Result<RunResult, EngineError> {
     let run_id_for_failure = run_id.clone();
-    match drive_inner(
+    let result = drive_inner(
         playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode, lock,
-    ) {
+    );
+    // The drive's last word on the run: a pause, its end or its failure is
+    // news to a person who subscribed (see `crate::notify`).
+    let notify_after = || {
+        crate::notify::send::Notifier::new(root, run_dir, &run_id_for_failure).sweep_now();
+    };
+    match result {
         Ok(r) => {
+            // The last sweep runs while this is still the run's one driver:
+            // once the lock is released and the waker armed, a resume may
+            // start another that reads the same journal.
+            notify_after();
             // A paused run holds no driver (issue #200): keep its lock when
             // the pause asked for it, and leave a waker behind for `until`.
             if r.outcome == RunStatus::Paused {
@@ -403,62 +343,15 @@ fn drive(
                 node: None,
                 reason: e.to_string(),
             });
-            crate::candidate::settle(log, run_dir, false);
+            finish_hooks::finish_hooks(log, run_dir, false);
             let _ = log.append(EventPayload::RunFinished {
                 outcome: "failed".into(),
             });
+            notify_after();
             Ok(RunResult {
                 run_id: run_id_for_failure,
                 outcome: RunStatus::Failed,
             })
-        }
-    }
-}
-
-/// Posts an abort to the run it watches once the wall clock passes
-/// `deadline_ms`; dropping it (the drive ended) ends the watch.
-struct DeadlineWatch {
-    done: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-/// The abort reason a run past its eval deadline is stopped with.
-pub const DEADLINE_REASON: &str = "deadline: the run passed its wall-clock limit";
-
-impl DeadlineWatch {
-    fn start(run_dir: &Path, deadline_ms: u64) -> Self {
-        let done = Arc::new(AtomicBool::new(false));
-        let (flag, dir) = (done.clone(), run_dir.to_path_buf());
-        let thread = std::thread::spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
-                let now = apb_core::clock::now_ms();
-                let at = u128::from(deadline_ms);
-                if now >= at {
-                    let _ = crate::control::post_control(
-                        &dir,
-                        Control::Abort {
-                            reason: DEADLINE_REASON.into(),
-                        },
-                    );
-                    return;
-                }
-                let left = (at - now).min(500) as u64;
-                std::thread::park_timeout(Duration::from_millis(left));
-            }
-        });
-        DeadlineWatch {
-            done,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for DeadlineWatch {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            t.thread().unpark();
-            let _ = t.join();
         }
     }
 }
@@ -677,6 +570,12 @@ fn drive_inner(
     // `cancelled` was interrupted by the pause, journals an `interrupted`
     // attempt and no `node_finished`, and runs again on resume.
     let pause_now = Arc::new(AtomicBool::new(false));
+    // The same flags, read by a list node between its items.
+    let exec_stop = crate::stop::StopFlags {
+        cancel: Arc::clone(&run_cancel),
+        halt: Arc::clone(&halt),
+        pause_now: Arc::clone(&pause_now),
+    };
     let watcher = crate::stop::StopWatcher::spawn(
         run_dir,
         control_cursor,
@@ -717,6 +616,12 @@ fn drive_inner(
     // but does NOT count as a step - otherwise a long human wait would exhaust the
     // budget. The limit is checked here, at the start of the iteration.
     let mut steps = 0usize;
+    // Every check's before snapshot is journaled: set once `ensure_before`
+    // returned true, so later acting nodes do not re-read the journal. A
+    // patch cannot change `baseline_check` once an acting node started.
+    let mut baseline_before_done = false;
+    let gate = budget_gate::DriveGate::load(run_dir)?;
+    let notifier = crate::notify::send::Notifier::new(root, run_dir, &run_id);
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
@@ -736,7 +641,12 @@ fn drive_inner(
             &mut last_applied_patch,
             &run_cancel,
         )? {
-            ControlScan::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
+            ControlScan::Terminal(outcome) => {
+                if outcome == RunStatus::Aborted {
+                    crate::known_problems::observe_ended(run_dir);
+                }
+                return Ok(RunResult { run_id, outcome });
+            }
             ControlScan::Migrated => {
                 frontier.clear();
                 continue;
@@ -754,7 +664,11 @@ fn drive_inner(
             )?;
         }
 
-        let mut state = RunState::fold(&read_all(run_dir)?);
+        let events = read_all(run_dir)?;
+        // A transition journaled since the last turn (a review that opened,
+        // a question asked) is news to a person who subscribed.
+        notifier.sweep(&events);
+        let mut state = RunState::fold(&events);
         // A `worktree` template over a node's output resolves as soon as that
         // node has succeeded: the busy lock moves onto the tree first, then
         // the tree is journaled, and every node from here on runs in it.
@@ -778,23 +692,73 @@ fn drive_inner(
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| root.to_path_buf());
-        let node_kind = playbook
+        let current_node = playbook
             .node(&current)
-            .ok_or_else(|| EngineError::NotFound(current.clone()))?
-            .kind
-            .clone();
+            .ok_or_else(|| EngineError::NotFound(current.clone()))?;
+        let node_kind = current_node.kind.clone();
+        // The baseline's before snapshot, ahead of the first node that can
+        // act (a finish with a prompt acts too, and a batch always contains
+        // `current`). An interrupted snapshot journals nothing: the control
+        // scan at the top of the loop applies the pause or the stop first.
+        if !baseline_before_done && apb_core::effects::node_acts(current_node) {
+            // Every publish node's remote is pinned before anything acts
+            // (see `crate::publish::pin`).
+            crate::publish::pin::ensure(&playbook, &events, log, cfg.parent_acted, |from| {
+                publish::resolved_tree(&playbook, from, &workdir, |t| {
+                    render_node_prompt(
+                        run_dir,
+                        &run_id,
+                        &state,
+                        cfg,
+                        t,
+                        &playbook.context_budget(from),
+                    )
+                })
+            })?;
+            let (flag, _guard) = baseline::snapshot_flag(&fanout);
+            let run = baseline::BaselineRun {
+                playbook: &playbook,
+                run_dir,
+                root,
+                workdir: &workdir,
+                cfg,
+                scrub: &env_scrub,
+            };
+            if !baseline::ensure_before(&run, &flag, log)? {
+                steps += 1;
+                continue;
+            }
+            baseline_before_done = true;
+        }
+        // The budget gate before a new visit; a batch reuses `reserved`.
+        let mut reserved = budget_gate::Reservations::default();
+        let admit = gate.admit_node(
+            run_dir,
+            &Journal::new(&mut *log),
+            current_node,
+            &mut reserved,
+        );
+        if let budget_gate::Admission::Pause(p) = admit? {
+            journal::post_engine_pause(run_dir, p)?;
+            continue;
+        }
 
         if let NodeKind::Finish {
-            outcome: o,
-            prompt,
-            profile: _,
+            outcome: o, prompt, ..
         } = &node_kind
         {
             // A finish-with-prompt composes the run answer via an agent (spec
             // B); a finish without a prompt is instant with an empty output
             // (unchanged). NodeStarted + attempt events are written only for the
-            // agent path.
-            let answer_output = if let Some(p) = prompt {
+            // agent path. An answer already composed before an interrupted
+            // after snapshot is reused: the resume continues at the snapshot.
+            let kept_answer = match prompt {
+                Some(_) => finish_answer::kept(run_dir, &current, &read_all(run_dir)?),
+                None => None,
+            };
+            let answer_output = if let Some(kept) = kept_answer {
+                kept
+            } else if let Some(p) = prompt {
                 log.append(EventPayload::NodeStarted {
                     node: current.clone(),
                     attempt: 1,
@@ -821,7 +785,7 @@ fn drive_inner(
                 for ev in evs {
                     log.append(ev)?;
                 }
-                if st != NodeStatus::Succeeded {
+                let answer = if st != NodeStatus::Succeeded {
                     // The CLOSING answer failed to compose. This must NOT flip
                     // the run's real outcome (issue #42 finding 5): reaching a
                     // terminal finish node means every substantive node already
@@ -844,9 +808,42 @@ fn drive_inner(
                     fallback_finish_answer(&current)
                 } else {
                     out
+                };
+                // Best-effort: without the kept answer a resume composes it
+                // again, which costs an agent call but loses nothing.
+                if let Err(e) = finish_answer::keep(run_dir, &current, log.peek_next_seq(), &answer)
+                {
+                    eprintln!(
+                        "warning: run `{run_id}`: the finish answer could not be kept for a resume, so a resume composes it again: {e}"
+                    );
                 }
+                answer
             } else {
                 String::new()
+            };
+            // The baseline's after snapshot and its comparisons: after every
+            // earlier node and the finish answer, before the finish node's
+            // checkpoint. An abort or a `--now` pause interrupts it like any
+            // node work: nothing of it is journaled, and the control scan at
+            // the top of the loop applies the pause or the stop; a resume
+            // takes it again with the answer kept above.
+            let baseline_failure = {
+                let (flag, _guard) = baseline::snapshot_flag(&fanout);
+                let run = baseline::BaselineRun {
+                    playbook: &playbook,
+                    run_dir,
+                    root,
+                    workdir: &workdir,
+                    cfg,
+                    scrub: &env_scrub,
+                };
+                match baseline::after_and_compare(&run, &flag, log)? {
+                    baseline::AfterOutcome::Compared(f) => f,
+                    baseline::AfterOutcome::Interrupted => {
+                        steps += 1;
+                        continue;
+                    }
+                }
             };
             // The declared outcome is honest only if no failure was carried
             // here past every route (issue #106): an unconditional edge moves
@@ -869,8 +866,8 @@ fn drive_inner(
                 (Outcome::Success, None) => RunStatus::Succeeded,
                 _ => RunStatus::Failed,
             };
-            // --- 0.23.0 goal criteria (C1): checked after every earlier node
-            // and the finish answer, before the finish node's checkpoint. ---
+            // The goal criteria (C1): after every earlier node and the
+            // finish answer, before the finish node's checkpoint.
             let goal_failure = goal::check(
                 &playbook,
                 run_dir,
@@ -880,7 +877,7 @@ fn drive_inner(
                 &cfg.spawn_env(),
                 log,
             )?;
-            let outcome = match goal_failure {
+            let outcome = match goal_failure.or(baseline_failure) {
                 Some(reason) if outcome == RunStatus::Succeeded => {
                     log.append(EventPayload::RunError {
                         node: Some(current.clone()),
@@ -890,7 +887,6 @@ fn drive_inner(
                 }
                 _ => outcome,
             };
-            // --- end of goal criteria ---
             let s = match outcome {
                 RunStatus::Succeeded => "succeeded",
                 _ => "failed",
@@ -902,12 +898,13 @@ fn drive_inner(
                 output: answer_output,
                 artifacts: Vec::new(),
             })?;
+            finish_answer::discard(run_dir);
             if outcome == RunStatus::Succeeded
                 && let Some(applied) = last_applied_patch.as_ref()
             {
                 promote_applied_patch(root, run_dir, log, &playbook, applied)?;
             }
-            crate::candidate::settle(log, run_dir, outcome == RunStatus::Succeeded);
+            finish_hooks::finish_hooks(log, run_dir, outcome == RunStatus::Succeeded);
             log.append(EventPayload::RunFinished { outcome: s.into() })?;
             return Ok(RunResult { run_id, outcome });
         }
@@ -1083,6 +1080,9 @@ fn drive_inner(
                                             std::slice::from_ref(&n),
                                         )
                                     })?;
+                                    // `current` was admitted (and reserved)
+                                    // before the batch; it spends nothing now.
+                                    reserved.release(&n);
                                     continue;
                                 }
                                 // A pause: no NEW work, and NOTHING is written
@@ -1092,6 +1092,17 @@ fn drive_inner(
                                 // `pending_heads` skip it forever and the resume
                                 // would drop that branch.
                                 if halt.load(Ordering::SeqCst) {
+                                    queue.clear();
+                                    break;
+                                }
+                                // `current` passed the gate above already.
+                                if n != current
+                                    && let Some(member) = playbook.node(&n)
+                                    && let budget_gate::Admission::Pause(p) =
+                                        gate.admit_node(run_dir, &journal, member, &mut reserved)?
+                                {
+                                    journal::post_engine_pause(run_dir, p)?;
+                                    halt.store(true, Ordering::SeqCst);
                                     queue.clear();
                                     break;
                                 }
@@ -1156,6 +1167,9 @@ fn drive_inner(
                                             NodeStatus::Succeeded,
                                             output,
                                         ));
+                                        // A hit spent nothing: its reservation
+                                        // goes back before the next admission.
+                                        reserved.release(&n);
                                         done.push((n, NodeStatus::Succeeded));
                                     }
                                     cache::CacheProbe::Miss { ctx, events } => {
@@ -1192,28 +1206,31 @@ fn drive_inner(
                                             // never answers and a hung drive.
                                             let res = std::panic::catch_unwind(
                                                 std::panic::AssertUnwindSafe(|| {
-                                                    execute_node(
-                                                        &playbook_c,
-                                                        &rd,
-                                                        &wd,
+                                                    dispatch::execute(
+                                                        &NodeCtx {
+                                                            playbook: &playbook_c,
+                                                            run_dir: &rd,
+                                                            workdir: &wd,
+                                                            run_id: &rid,
+                                                            state: &state_now,
+                                                            cfg: &cfg_c,
+                                                            cancel: &cancel_c,
+                                                            env_scrub: &scrub_c,
+                                                            journal: journal_ref,
+                                                            decisions: decisions_ref,
+                                                        },
                                                         &node,
-                                                        &rid,
-                                                        &state_now,
-                                                        &cfg_c,
-                                                        op,
-                                                        &cancel_c,
-                                                        &scrub_c,
-                                                        journal_ref,
-                                                        decisions_ref,
                                                         // Interactive nodes are
                                                         // excluded from the
                                                         // batch, so neither a
                                                         // resume nor the live
                                                         // sidecar originates
                                                         // here.
-                                                        None,
-                                                        None,
-                                                        alone,
+                                                        ExecOptions {
+                                                            override_prompt: op,
+                                                            track_provenance: alone,
+                                                            ..ExecOptions::default()
+                                                        },
                                                     )
                                                 }),
                                             )
@@ -1240,6 +1257,7 @@ fn drive_inner(
                                     )
                                 })?;
                                 running -= 1;
+                                reserved.release(&node);
                                 if solo.as_deref() == Some(node.as_str()) {
                                     solo = None;
                                 }
@@ -1249,24 +1267,26 @@ fn drive_inner(
                                         output,
                                         events,
                                     } => (status, output, events),
-                                    // Interactive nodes are excluded from the
-                                    // batch above, so a suspension here is
+                                    // Interactive nodes and list nodes are
+                                    // excluded from the batch above, so a
+                                    // suspension or a list halt here is
                                     // impossible; be explicit rather than
                                     // silently mishandle it.
-                                    AttemptOutcome::Suspended { .. } => {
+                                    AttemptOutcome::Suspended { .. }
+                                    | AttemptOutcome::Halted { .. } => {
                                         return Err(EngineError::Invalid(format!(
-                                            "interactive node `{node}` must not run in a concurrent batch"
+                                            "node `{node}` (interactive or list) must not run in a concurrent batch"
                                         )));
                                     }
                                     // A quota pause (issue #200): no
                                     // `node_finished`; the siblings in flight
                                     // finish, no chunk is admitted, and the
                                     // control scan applies the pause.
-                                    AttemptOutcome::QuotaPaused { pause, events } => {
+                                    AttemptOutcome::EnginePaused { pause, events } => {
                                         for ev in events {
                                             journal.append(ev)?;
                                         }
-                                        journal::post_quota_pause(run_dir, pause)?;
+                                        journal::post_engine_pause(run_dir, pause)?;
                                         halt.store(true, Ordering::SeqCst);
                                         continue;
                                     }
@@ -1284,7 +1304,11 @@ fn drive_inner(
                                     && !fork_killed.contains(&node)
                                     && !cancel.load(Ordering::Relaxed)
                                 {
-                                    journal::journal_interrupted(&journal, run_dir, &node)?;
+                                    journal::journal_interrupted(
+                                        &journal,
+                                        run_dir,
+                                        crate::exec_key::ExecKey::node(&node),
+                                    )?;
                                     continue;
                                 }
                                 // Declared-artifact capture and cache admission,
@@ -1658,125 +1682,85 @@ fn drive_inner(
         // hit); every other branch leaves it empty.
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
         let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
-            let events = read_all(run_dir)?;
-            let decided = review_decided_count(&events, &current);
-            let for_current: Vec<_> = read_reviews_after(run_dir, None)?
-                .into_iter()
-                .filter(|e| e.cmd.node == current)
-                .collect();
-            if let Some(entry) = for_current.into_iter().nth(decided) {
-                steps += 1;
-                log.append(EventPayload::NodeStarted {
-                    node: current.clone(),
-                    attempt: 1,
-                })?;
-                log.append(EventPayload::ReviewDecided {
-                    node: current.clone(),
-                    decision: entry.cmd.decision.clone(),
-                    note: entry.cmd.note.clone(),
-                })?;
-                (NodeStatus::Succeeded, entry.cmd.decision.clone())
-            } else {
-                // No decision yet: declare the request once, then wait (poll).
-                // The event carries an owner-facing pending instruction (issue
-                // #42 finding 4) so a supervising agent, or any reader of the
-                // log alone, can tell the owner an action is expected, what the
-                // options are, and how to answer.
-                if review_open_count(&events, &current) == 0 {
-                    let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let mut instruction = crate::progress::review_instruction(
-                        &current,
-                        title.as_deref(),
-                        options,
-                        prompt.as_deref(),
-                    );
-                    // The review recommendation (issue #165 Part 11, 14.4),
-                    // once per visit, before the request is declared.
-                    let rec = match decisions.as_ref() {
-                        Some(runner) => {
-                            let journal = Journal::new(&mut *log);
-                            review_gate::recommend(
-                                root, run_dir, runner, &journal, &playbook, &current, &events,
-                            )
-                        }
-                        None => Default::default(),
-                    };
-                    if let Some(r) = &rec.recommendation {
-                        instruction.push_str(&crate::decision::review_triage::instruction_line(r));
-                    }
-                    log.append(EventPayload::ReviewRequested {
-                        node: current.clone(),
-                        options: apb_core::schema::effective_review_options(options),
-                        title,
-                        instruction,
-                        prompt: prompt.clone(),
-                        recommendation: rec.recommendation.clone(),
-                    })?;
-                    // Enforced: post through the review channel, so it is
-                    // consumed and journaled like a person's decision; a
-                    // decision a person already queued wins (the channel
-                    // refuses a second one), and any failure waits for the
-                    // person (fail-closed).
-                    if let Some((decision, note)) = rec.auto {
-                        let _ = crate::review::post_review(
-                            run_dir,
-                            crate::review::ReviewCommand {
-                                node: current.clone(),
-                                decision,
-                                note,
-                            },
-                        );
-                    }
-                }
-                // A directive that moves the run elsewhere (`node_retry`,
-                // `run_continue_from`) is what a supervisor sends when it sees,
-                // parked on this gate, that an earlier node went wrong. The
-                // top-of-loop scan leaves exactly such a directive at the head
-                // of the pending commands (it answers a wake, and a gate raises
-                // none), so it is applied here: the open request is withdrawn
-                // - no one can decide a gate the run has left - and the run
-                // moves on. Reaching the gate again asks anew.
-                if let Some(entry) = read_control_after(run_dir, control_cursor)?
-                    .into_iter()
-                    .next()
-                    && matches!(
-                        entry.cmd,
-                        Control::Retry { .. } | Control::ContinueFrom { .. }
-                    )
-                {
-                    let reason = match &entry.cmd {
-                        Control::Retry { node, .. } => format!("node_retry `{node}`"),
-                        Control::ContinueFrom { node } => format!("run_continue_from `{node}`"),
-                        _ => String::new(),
-                    };
-                    log.append(EventPayload::ReviewWithdrawn {
-                        node: current.clone(),
-                        reason,
-                    })?;
-                    supervisor::apply_move_directive(
+            let current_id = current.clone();
+            let step = review_gate::await_decision(
+                &mut review_gate::GateDrive {
+                    run_dir,
+                    log: &mut *log,
+                    playbook: &playbook,
+                    current: &mut current,
+                    control_cursor: &mut control_cursor,
+                    prompt_overrides: &mut prompt_overrides,
+                    frontier: &mut frontier,
+                },
+                review_gate::Consume::Nth,
+                |log, events| {
+                    review_gate::human_review_request(
+                        root,
                         run_dir,
                         log,
-                        &mut control_cursor,
-                        &mut prompt_overrides,
-                        &mut current,
-                        entry.cmd,
-                        entry.seq,
-                    )?;
-                    // The directed node runs again: the same revival as a
-                    // batch retry (issue #203), but no head rebuild, the
-                    // frontier is still the drive's own.
-                    revive::revive(
-                        log,
+                        decisions.as_ref(),
                         &playbook,
-                        &read_all(run_dir)?,
-                        std::slice::from_ref(&current),
-                        &mut frontier,
-                        &[],
-                    )?;
+                        &current_id,
+                        options,
+                        prompt.as_deref(),
+                        events,
+                    )
+                },
+            )?;
+            match step {
+                review_gate::GateStep::Decided(entry) => {
+                    steps += 1;
+                    log.append(EventPayload::NodeStarted {
+                        node: current.clone(),
+                        attempt: 1,
+                    })?;
+                    log.append(EventPayload::ReviewDecided {
+                        node: current.clone(),
+                        decision: entry.cmd.decision.clone(),
+                        note: entry.cmd.note.clone(),
+                        plan_digest: None,
+                    })?;
+                    (NodeStatus::Succeeded, entry.cmd.decision)
+                }
+                review_gate::GateStep::Moved => continue,
+                review_gate::GateStep::Waiting => {
+                    std::thread::sleep(AWAIT_CONTROL_POLL);
                     continue;
                 }
-                std::thread::sleep(AWAIT_CONTROL_POLL);
-                continue;
+            }
+        } else if matches!(node_kind, NodeKind::Publish { .. }) {
+            let run = publish::PublishRun {
+                root,
+                run_id: &run_id,
+                workdir: &workdir,
+                state: &state,
+                cfg,
+                scrub: &env_scrub,
+                abort: &run_cancel,
+            };
+            let step = publish::step(
+                &run,
+                &mut review_gate::GateDrive {
+                    run_dir,
+                    log: &mut *log,
+                    playbook: &playbook,
+                    current: &mut current,
+                    control_cursor: &mut control_cursor,
+                    prompt_overrides: &mut prompt_overrides,
+                    frontier: &mut frontier,
+                },
+            )?;
+            match step {
+                publish::PublishStep::Finished(status, output) => {
+                    steps += 1;
+                    (status, output)
+                }
+                publish::PublishStep::Again | publish::PublishStep::Moved => continue,
+                publish::PublishStep::Waiting => {
+                    std::thread::sleep(AWAIT_CONTROL_POLL);
+                    continue;
+                }
             }
         } else if let NodeKind::Wait {
             wait_for,
@@ -1936,7 +1920,8 @@ fn drive_inner(
                 (prim_agent, prim_interaction)
             };
             let live_exe: Option<std::path::PathBuf> = apb_core::fsutil::reexec_exe().ok();
-            let live_claude = apb_core::detect::canonical_agent_id(&prim_agent) == "claude";
+            let live_claude = apb_core::agents::lookup(&prim_agent)
+                .is_some_and(|a| a.descriptor().capabilities.live_ask_mcp);
             let live_injectable =
                 prim_interaction == Interaction::Live && live_claude && live_exe.is_some();
             // Downgrade reason when the ceiling is `Live` but injection is
@@ -2191,39 +2176,41 @@ fn drive_inner(
                 let resume_attempt = resume_ctx.is_some();
                 let outcome = {
                     let journal = Journal::new(&mut *log);
-                    execute_node(
-                        &playbook,
-                        run_dir,
-                        &workdir,
+                    dispatch::execute(
+                        &NodeCtx {
+                            playbook: &playbook,
+                            run_dir,
+                            workdir: &workdir,
+                            run_id: &run_id,
+                            state: &state,
+                            cfg,
+                            cancel: &run_cancel,
+                            env_scrub: &env_scrub,
+                            journal: &journal,
+                            decisions: decisions.as_ref(),
+                        },
                         &current,
-                        &run_id,
-                        &state,
-                        cfg,
-                        override_prompt,
-                        &run_cancel,
-                        &env_scrub,
-                        &journal,
-                        decisions.as_ref(),
-                        // Resume context set by the answer-consumed arm above;
-                        // `None` on the first attempt of a visit and on the
-                        // reprompt path.
-                        resume_ctx.take(),
-                        // Live sidecar (spec 2026-07-20, Task 11): injected only
-                        // when the ceiling is `Live` on claude and the exe
-                        // resolved; a downgrade hands `None` and the marker path
-                        // runs. Rebuilt per attempt so each re-invocation of an
-                        // injectable node points the sidecar at the right exe.
-                        if live_injectable {
-                            Some(crate::scheduler::node::LiveContext {
+                        ExecOptions {
+                            override_prompt,
+                            // Resume context set by the answer-consumed arm
+                            // above; `None` on the first attempt of a visit
+                            // and on the reprompt path.
+                            resume: resume_ctx.take(),
+                            // Live sidecar (spec 2026-07-20, Task 11):
+                            // injected only when the ceiling is `Live` on
+                            // claude and the exe resolved; a downgrade hands
+                            // `None` and the marker path runs. Rebuilt per
+                            // attempt so each re-invocation of an injectable
+                            // node points the sidecar at the right exe.
+                            live: live_injectable.then(|| LiveContext {
                                 exe: live_exe
                                     .clone()
                                     .expect("live_injectable implies a resolved exe"),
                                 timeout_ms: live_timeout_ms,
-                            })
-                        } else {
-                            None
+                            }),
+                            track_provenance: true,
+                            ..ExecOptions::default()
                         },
-                        true,
                     )?
                 };
                 match outcome {
@@ -2310,7 +2297,10 @@ fn drive_inner(
                         if question_asked_count(&events, &current)
                             <= question_answered_count(&events, &current)
                         {
-                            let attempt = attempt_started_count(&events, &current) as u32;
+                            let attempt = attempt_started_count(
+                                &events,
+                                crate::exec_key::ExecKey::node(&current),
+                            ) as u32;
                             // Idempotent channel post: skip if a crash between
                             // a prior post_question and its QuestionAsked
                             // already left an unanswered question for this
@@ -2340,12 +2330,18 @@ fn drive_inner(
                         continue;
                     }
                     // A quota pause (issue #200), as in the sequential arm.
-                    AttemptOutcome::QuotaPaused { pause, events } => {
+                    AttemptOutcome::EnginePaused { pause, events } => {
                         for ev in events {
                             log.append(ev)?;
                         }
-                        journal::post_quota_pause(run_dir, pause)?;
+                        journal::post_engine_pause(run_dir, pause)?;
                         continue;
+                    }
+                    // An interactive node is never a list node (V85).
+                    AttemptOutcome::Halted { .. } => {
+                        return Err(EngineError::Invalid(format!(
+                            "interactive node `{current}` cannot run as a list"
+                        )));
                     }
                 }
             }
@@ -2405,24 +2401,32 @@ fn drive_inner(
                 // that borrow so `log` is free again for the return-batch writes.
                 let outcome = {
                     let journal = Journal::new(&mut *log);
-                    execute_node(
-                        &playbook,
-                        run_dir,
-                        &workdir,
+                    dispatch::execute(
+                        &NodeCtx {
+                            playbook: &playbook,
+                            run_dir,
+                            workdir: &workdir,
+                            run_id: &run_id,
+                            state: &state,
+                            cfg,
+                            cancel: &node_kill,
+                            env_scrub: &env_scrub,
+                            journal: &journal,
+                            decisions: decisions.as_ref(),
+                        },
                         &current,
-                        &run_id,
-                        &state,
-                        cfg,
-                        override_prompt,
-                        &node_kill,
-                        &env_scrub,
-                        &journal,
-                        decisions.as_ref(),
-                        // Non-interactive nodes never resume.
-                        None,
-                        // ...and never run the live sidecar.
-                        None,
-                        true,
+                        // Non-interactive nodes never resume and never run
+                        // the live sidecar; a list node reads the stop flags
+                        // between its items.
+                        ExecOptions {
+                            override_prompt,
+                            track_provenance: true,
+                            stop: Some(&exec_stop),
+                            max_parallel: resolved_max_parallel(&playbook, cfg),
+                            control_after: control_cursor,
+                            budget: Some(&gate),
+                            ..ExecOptions::default()
+                        },
                     )?
                 };
                 let (st, out, evs) = match outcome {
@@ -2440,11 +2444,19 @@ fn drive_inner(
                     }
                     // A quota pause (issue #200): no `node_finished`; the
                     // control scan applies the pause and ends the drive.
-                    AttemptOutcome::QuotaPaused { pause, events } => {
+                    AttemptOutcome::EnginePaused { pause, events } => {
                         for ev in events {
                             log.append(ev)?;
                         }
-                        journal::post_quota_pause(run_dir, pause)?;
+                        journal::post_engine_pause(run_dir, pause)?;
+                        continue;
+                    }
+                    // A list node stopped between items for a pause: no
+                    // `node_finished`; the control scan applies the pause.
+                    AttemptOutcome::Halted { events } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
                         continue;
                     }
                 };
@@ -2459,7 +2471,11 @@ fn drive_inner(
                     && journal::interrupted_by_pause(&pause_now, &run_cancel)
                 {
                     pause_short_circuited = true;
-                    journal::journal_interrupted(&Journal::new(&mut *log), run_dir, &current)?;
+                    journal::journal_interrupted(
+                        &Journal::new(&mut *log),
+                        run_dir,
+                        crate::exec_key::ExecKey::node(&current),
+                    )?;
                     continue;
                 }
                 // Declared-artifact capture and cache admission, the same unit
@@ -2548,7 +2564,12 @@ fn drive_inner(
                 &output,
                 decisions.as_ref(),
             )? {
-                WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
+                WakeOutcome::Terminal(outcome) => {
+                    if outcome == RunStatus::Aborted {
+                        crate::known_problems::observe_ended(run_dir);
+                    }
+                    return Ok(RunResult { run_id, outcome });
+                }
                 // Every directive the park resumes on (a retry, a
                 // continue-from, a patch) runs `current` again: the same
                 // revival as a batch retry (issue #203).
@@ -2606,7 +2627,7 @@ fn drive_inner(
                     None => {
                         // No fallback path - the run fails without waiting for
                         // the hard max_steps limit.
-                        crate::candidate::settle(log, run_dir, false);
+                        finish_hooks::finish_hooks(log, run_dir, false);
                         log.append(EventPayload::RunFinished {
                             outcome: "failed".into(),
                         })?;

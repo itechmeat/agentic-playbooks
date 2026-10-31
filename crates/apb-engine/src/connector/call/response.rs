@@ -3,18 +3,12 @@
 //! reclassification that catches envelope errors hidden inside a 2xx.
 
 use super::*;
+use apb_core::connector::def::ErrorWhen;
 
 /// Recursively redacts secret values in a JSON value's string leaves.
-pub(crate) fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {
+pub(crate) fn redact_value(value: Value, redactions: &[Redaction]) -> Value {
     match value {
-        Value::String(mut s) => {
-            for (secret, var) in redactions {
-                if s.contains(secret.as_str()) {
-                    s = s.replace(secret.as_str(), &format!("[redacted:{var}]"));
-                }
-            }
-            Value::String(s)
-        }
+        Value::String(s) => Value::String(Redaction::apply_all_owned(s, redactions)),
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
@@ -31,22 +25,39 @@ pub(crate) fn redact_value(value: Value, redactions: &[(String, String)]) -> Val
 }
 
 /// Reads a response body up to `BODY_CAP` (+1 to detect overflow), returning
-/// the parsed-or-string body and whether it was truncated. A JSON content type
-/// yields a parsed value; anything else yields a lossy-UTF8 string.
-pub(crate) fn read_body(mut response: ureq::http::Response<ureq::Body>) -> (Value, bool) {
+/// the parsed-or-string body and the explicit read outcome: `None` for a body
+/// read whole, `Some` with the reason (cut at the cap, or a read error after
+/// part of the body) otherwise. A JSON content type yields a parsed value;
+/// anything else yields a lossy-UTF8 string. A read error keeps the bytes
+/// read so far and only the io error KIND, never the raw error text, which
+/// can carry request details (a `query`-kind auth secret among them).
+pub(crate) fn read_body(
+    mut response: ureq::http::Response<ureq::Body>,
+) -> (Value, Option<BodyIncomplete>) {
     let is_json = response.body().mime_type() == Some("application/json");
     let mut buf = Vec::new();
-    // A read error yields whatever was collected so far rather than failing the
-    // whole call after a response was already obtained. `as_reader()` is not
+    // The read outcome is surfaced explicitly instead of dropped: a body that
+    // stopped early must not pass as a complete response. `as_reader()` is not
     // capped by ureq itself, so the `.take(BODY_CAP + 1)` below is what bounds
     // memory (same as before).
-    let _ = response
+    let read = response
         .body_mut()
         .as_reader()
         .take(BODY_CAP as u64 + 1)
         .read_to_end(&mut buf);
-    let truncated = buf.len() > BODY_CAP;
-    if truncated {
+    // An over-cap read (or an error that arrived only after the cap window
+    // filled) is a cut at the cap; the window holds at most BODY_CAP + 1
+    // bytes, so a shorter buffer with an error is a genuine partial read.
+    let incomplete = match read {
+        Err(_) if buf.len() > BODY_CAP => Some(BodyIncomplete::cut_at_cap(BODY_CAP)),
+        Err(e) => Some(BodyIncomplete::read_error(e.kind())),
+        Ok(_) if buf.len() > BODY_CAP => Some(BodyIncomplete::cut_at_cap(BODY_CAP)),
+        Ok(_) => None,
+    };
+    if incomplete
+        .as_ref()
+        .is_some_and(|b| b.reason == IncompleteReason::BodyCap)
+    {
         buf.truncate(BODY_CAP);
     }
     let body = if is_json {
@@ -55,24 +66,34 @@ pub(crate) fn read_body(mut response: ureq::http::Response<ureq::Body>) -> (Valu
     } else {
         Value::String(String::from_utf8_lossy(&buf).into_owned())
     };
-    (body, truncated)
+    (body, incomplete)
 }
 
 /// The HTTP-status -> result mapping (spec section 8). 2xx is success; 3xx is a
 /// `service` error (redirects are not followed); 401/403 -> `auth`; 404 ->
 /// `not_found`; 429 -> `rate_limited` (with `retry_after` when the service
 /// gave a `Retry-After`); every other non-2xx -> `service`.
+///
+/// A 2xx whose body did not read whole is a success only for a function that
+/// is not read-only (the effect already happened, and the result carries the
+/// incompleteness). For a `read_only` function it fails as
+/// `incomplete_response` and no partial body is returned as data; nothing in
+/// apb retries such a call automatically.
 pub(crate) fn map_status(
     status: u16,
     body: Value,
-    truncated: bool,
+    incomplete: Option<BodyIncomplete>,
     retry_after: Option<u64>,
+    read_only: bool,
 ) -> Result<CallOk, CallError> {
     if (200..300).contains(&status) {
+        if read_only && let Some(b) = incomplete {
+            return Err(CallError::incomplete_response(status, b));
+        }
         return Ok(CallOk::Http {
             status,
             body,
-            truncated,
+            incomplete,
             link: None,
             picked: false,
         });

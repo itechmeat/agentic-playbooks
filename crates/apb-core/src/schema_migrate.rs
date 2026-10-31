@@ -158,6 +158,7 @@ fn profile_yaml_for(name: &str, ex: &LegacyExec) -> String {
         hermetic: None,
         zcode_mode: None,
         tiers: Default::default(),
+        process_env: None,
     };
     yaml_serde::to_string(&doc).unwrap_or_default()
 }

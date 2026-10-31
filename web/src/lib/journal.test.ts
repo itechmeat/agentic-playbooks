@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { interventionJournal, runEventJournal } from './journal'
+import { attemptOutputNote } from './outputloss'
 import type { WfEvent } from './types'
 
 const events: WfEvent[] = [
@@ -61,6 +62,7 @@ describe('runEventJournal', () => {
 
 describe('runEventJournal notes', () => {
   it('says how a session handoff started and which declared fields were missing', () => {
+    const loss = [{ stream: 'stdout', kept_bytes: 8, dropped_bytes_at_least: 4 }]
     const entries = runEventJournal([
       { seq: 1, ts: 1, type: 'session_handoff', node: 'b', from_node: 'a', warm: true },
       { seq: 2, ts: 2, type: 'session_handoff', node: 'c', from_node: 'a', warm: false, reason: 'different model' },
@@ -71,6 +73,14 @@ describe('runEventJournal notes', () => {
       { seq: 7, ts: 7, type: 'worktree_resolved', path: '/src/wt', source: 'caller' },
       { seq: 8, ts: 8, type: 'attempt_finished', node: 'a', usage: { input_tokens: 10, output_tokens: 2, source: 'reported' } },
       { seq: 9, ts: 9, type: 'attempt_finished', node: 'a' },
+      {
+        seq: 10,
+        ts: 10,
+        type: 'attempt_finished',
+        node: 'a',
+        usage: { input_tokens: 10, output_tokens: 2, source: 'reported' },
+        output_truncated: loss,
+      },
     ] as never)
     expect(entries.map((e) => e.note)).toEqual([
       'warm: continues the session of a',
@@ -82,6 +92,8 @@ describe('runEventJournal notes', () => {
       'working tree: /src/wt (from caller)',
       'tokens: 10 in, 2 out',
       undefined,
+      // The loss wording is outputloss.ts's; here only that it is attached.
+      `tokens: 10 in, 2 out · ${attemptOutputNote(loss, undefined)}`,
     ])
   })
 
@@ -181,5 +193,94 @@ describe('host execution mode rows', () => {
     expect(rows[1].note).toBe('task plan-1: succeeded by host (claude-code), ran on opus (reported)')
     expect(rows[2].note).toBe('task build-1: expired by engine')
     expect(rows[3].note).toBe('no CLI could start, running as a host task: spawn `claude` failed')
+  })
+})
+
+describe('process env rows', () => {
+  it('counts what an allowlist kept and names what it withheld', () => {
+    const rows = runEventJournal([
+      {
+        seq: 1,
+        ts: 1,
+        type: 'agent_env_applied',
+        node: 'build',
+        attempt: 2,
+        agent: 'codex',
+        kept: 23,
+        withheld: ['AWS_PROFILE', 'GH_TOKEN', 'A', 'B', 'C', 'D'],
+        withheld_more: 35,
+        absent: ['NPM_TOKEN'],
+      },
+      { seq: 2, ts: 2, type: 'agent_env_applied', node: 'build', attempt: 3, agent: 'claude', kept: 4, withheld: [] },
+    ] as unknown as WfEvent[])
+    expect(rows[0]).toMatchObject({
+      node: 'build',
+      note: 'env allowlist (codex): kept 23, withheld 41 (AWS_PROFILE, GH_TOKEN, A, B, C, ...), not set: NPM_TOKEN',
+    })
+    expect(rows[1].note).toBe('env allowlist (claude): kept 4, withheld 0')
+  })
+})
+
+describe('tool exposure rows', () => {
+  it('names the missing tools, the servers not connected and the extra servers', () => {
+    const rows = runEventJournal([
+      {
+        seq: 1,
+        ts: 1,
+        type: 'tool_exposure_mismatch',
+        node: 'ask',
+        attempt: 2,
+        agent: 'claude',
+        missing_tools: ['mcp__apb__ask_user'],
+        missing_servers: ['apb (failed)'],
+        unexpected_servers: ['other'],
+      },
+      { seq: 2, ts: 2, type: 'tool_exposure_mismatch', node: 'build', attempt: 1, agent: 'claude', missing_tools: ['Bash'] },
+    ] as unknown as WfEvent[])
+    expect(rows[0]).toMatchObject({
+      node: 'ask',
+      note: 'tool exposure (claude): missing tools: mcp__apb__ask_user; servers not connected: apb (failed); unexpected servers: other',
+    })
+    expect(rows[1].note).toBe('tool exposure (claude): missing tools: Bash')
+  })
+})
+
+describe('notification rows', () => {
+  it('labels notify_set and the sends of the engine site @notify', () => {
+    const entries = runEventJournal([
+      {
+        seq: 1,
+        ts: 1,
+        type: 'notify_set',
+        target: { connector: 'telegram', account: 'me', function: 'send_message', to: '42' },
+        on: ['review', 'finished'],
+        source: 'run',
+      },
+      { seq: 2, ts: 2, type: 'notify_set', on: [], source: 'person', by: 'operator' },
+      { seq: 3, ts: 3, type: 'notify_set', on: [], source: 'machine', problem: 'connector `telegram` is not approved' },
+      {
+        seq: 4,
+        ts: 4,
+        type: 'send_intent_recorded',
+        node: '@notify',
+        connector: 'telegram',
+        function: 'send_message',
+        label: 'notify:review.12',
+      },
+      { seq: 5, ts: 5, type: 'connector_call', node_id: '@notify', origin: 'notify', connector: 'telegram', function: 'send_message', outcome: 'ok' },
+      { seq: 6, ts: 6, type: 'send_intent_recorded', node: 'post', connector: 'slack', function: 'send_message', label: 'x' },
+      { seq: 7, ts: 7, type: 'connector_call', node_id: '@notify', origin: 'notify', connector: 'telegram', function: 'send_message', outcome: 'rate_limited' },
+      { seq: 8, ts: 8, type: 'connector_call', node_id: '@notify', origin: 'reconcile', connector: 'telegram', function: 'get_updates', outcome: 'ok' },
+    ] as WfEvent[])
+    expect(entries.map((e) => e.note)).toEqual([
+      'notifications on: telegram/me about review, finished (from run)',
+      'notifications off (from person), changed by a person',
+      'notifications off (from machine): connector `telegram` is not approved',
+      'notification review.12: telegram.send_message',
+      'notification sent through telegram.send_message',
+      undefined,
+      'notification through telegram.send_message failed (rate_limited)',
+      undefined,
+    ])
   })
 })

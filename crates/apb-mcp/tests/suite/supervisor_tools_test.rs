@@ -214,18 +214,9 @@ fn playbook_run_supervised_prepares_the_run_and_hands_off_the_drive() {
         dir.path(),
         "noagent_sv",
         None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-        None,
-        None,
-        Default::default(),
-        None,
-        None,
+        apb_mcp::tools::StartArgs {
+            ..Default::default()
+        },
     )
     .unwrap();
     let elapsed = started.elapsed();
@@ -638,7 +629,7 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
     apb_engine::write_supervisor_session(
         dir.path(),
         &run_id,
-        "sv-disk-1",
+        &apb_core::secret::Secret::new("sv-disk-1"),
         &["observe".to_string(), "retry".to_string()],
     )
     .unwrap();
@@ -781,16 +772,26 @@ fn supervisor_wait_event_surfaces_a_host_task_of_the_supervised_run() {
     let submitted = apb_mcp::tools::run_task_submit(
         dir.path(),
         &run_id,
-        tasks[0]["task_id"].as_str().unwrap(),
-        "succeeded",
-        "worked".into(),
-        None,
-        None,
-        "host",
-        Some("test".into()),
-        Some("host-model-x".into()),
+        apb_mcp::tools::TaskReply {
+            task_id: tasks[0]["task_id"].as_str().unwrap().into(),
+            status: "succeeded".into(),
+            output: "worked".into(),
+            usage: None,
+            note: None,
+            submitted_by: "host".into(),
+            client: Some("test".into()),
+            model: Some("host-model-x".into()),
+            findings: Some(serde_json::json!([{"kind": "docs", "location": "README.md", "evidence": "stale link", "why_not_fixed": "out of scope"}])),
+            warnings: Some(serde_json::json!(["not an object"])),
+        },
     )
     .unwrap();
+    assert_eq!(submitted["notes_dropped"], 1, "{submitted}");
+    assert_eq!(
+        submitted["notes_dropped_reasons"],
+        serde_json::json!(["warnings: a warning is not an object"]),
+        "{submitted}"
+    );
     assert_eq!(submitted["node"], "work");
     wait_for_status(dir.path(), &run_id, "succeeded");
     // The `model` argument lands on the submission event as reported.
