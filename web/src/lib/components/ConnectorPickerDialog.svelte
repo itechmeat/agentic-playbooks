@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { AvailableConnector } from '$lib/connectorinstall'
-  import { Badge } from '$lib/components/ui/badge'
   import { Button } from '$lib/components/ui/button'
   import * as Dialog from '$lib/components/ui/dialog'
   import * as Empty from '$lib/components/ui/empty'
@@ -35,7 +34,7 @@
   >
     <Dialog.Header>
       <Dialog.Title>Connect a connector</Dialog.Title>
-      <Dialog.Description>
+      <Dialog.Description class="prose-text text-xs">
         Official connectors that are not installed yet. Open one to review it and connect.
       </Dialog.Description>
     </Dialog.Header>
@@ -46,10 +45,10 @@
           {#each Array(3) as _, i (i)}<Skeleton class="h-16 w-full" />{/each}
         </div>
       {:else if failed}
-        <Empty.Root class="border border-dashed">
+        <Empty.Root class="border border-dashed border-line-2">
           <Empty.Header>
-            <Empty.Media variant="icon"><TriangleAlert /></Empty.Media>
-            <Empty.Title>Could not load available connectors</Empty.Title>
+            <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground"><TriangleAlert /></Empty.Media>
+            <Empty.Title class="text-sm font-semibold">Could not load available connectors</Empty.Title>
             <Empty.Description>
               The list could not be fetched, so there may still be connectors to connect.
             </Empty.Description>
@@ -62,10 +61,10 @@
           </Empty.Content>
         </Empty.Root>
       {:else if available.length === 0}
-        <Empty.Root class="border border-dashed">
+        <Empty.Root class="border border-dashed border-line-2">
           <Empty.Header>
-            <Empty.Media variant="icon"><Plug /></Empty.Media>
-            <Empty.Title>Nothing left to connect</Empty.Title>
+            <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground"><Plug /></Empty.Media>
+            <Empty.Title class="text-sm font-semibold">Nothing left to connect</Empty.Title>
             <Empty.Description>
               Every official connector is already installed.
             </Empty.Description>
@@ -75,17 +74,17 @@
         <ul class="flex flex-col gap-2">
           {#each available as c (c.name)}
             <li
-              class="flex flex-wrap items-start gap-3 rounded-lg border border-border p-3 transition-colors hover:border-ring/40"
+              class="flex flex-wrap items-start gap-3 border border-line-2 bg-panel p-3 transition-colors hover:border-violet"
             >
               <div class="flex min-w-0 flex-1 flex-col gap-1">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="text-sm font-medium">{c.displayName || c.name}</span>
+                  <span class="font-semibold">{c.displayName || c.name}</span>
                   <span class="font-mono text-xs text-muted-foreground">v{c.version}</span>
                   {#each c.tags as tag (tag)}
-                    <Badge variant="secondary">{tag}</Badge>
+                    <span class="tag text-fg-2">{tag}</span>
                   {/each}
                 </div>
-                <p class="text-sm text-muted-foreground">{c.summary}</p>
+                <p class="prose-text text-xs text-muted-foreground">{c.summary}</p>
               </div>
               <Button size="sm" href={href(c.name)} onclick={() => (open = false)}>
                 <Plug data-icon="inline-start" />

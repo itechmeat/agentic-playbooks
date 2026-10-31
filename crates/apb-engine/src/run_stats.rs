@@ -417,7 +417,9 @@ fn run_facts(
     goal: &mut BTreeMap<usize, GoalAcc>,
 ) -> RunFacts {
     let ev = &run.events;
-    let paused = crate::pause::paused_intervals(ev, ev.last().map(|e| e.ts).unwrap_or_default());
+    // Paused time and the spans the run sat ended before a resume are not
+    // run time: the same clock as the run listing and the retro.
+    let paused = crate::pause::inactive_intervals(ev, ev.last().map(|e| e.ts).unwrap_or_default());
     let mut f = RunFacts::default();
     let start = run.started_ms();
     // Per-node facts of this run.

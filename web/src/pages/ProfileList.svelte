@@ -1,13 +1,20 @@
 <script lang="ts">
   import { ApiError, deleteProfile, fetchProfiles, type ProfileSummary } from '../lib/api'
-  import { filterProfilesByProject, projectFilter, projectScopeItems } from '../lib/projectfilter'
+  import {
+    ALL_PROJECTS,
+    filterProfilesByProject,
+    projectFilter,
+    projectScopeItems,
+  } from '../lib/projectfilter'
+  import { profileColor } from '../lib/profilecolor'
+  import { shortModel } from '../lib/format'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
   import ProjectFilter from '$lib/components/ProjectFilter.svelte'
-  import { Button } from '$lib/components/ui/button'
-  import { Badge } from '$lib/components/ui/badge'
-  import * as Card from '$lib/components/ui/card'
+  import PageHead from '$lib/components/PageHead.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
+  import { Button, buttonVariants } from '$lib/components/ui/button'
   import * as Empty from '$lib/components/ui/empty'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { Skeleton } from '$lib/components/ui/skeleton'
@@ -42,6 +49,22 @@
     }
     return [...m.values()].sort((a, b) => a.project.localeCompare(b.project))
   })
+
+  // The filtered project's name, for the heading and the top bar.
+  const projectLabel = $derived(
+    $projectFilter === ALL_PROJECTS
+      ? ''
+      : (projectScopeProfiles.find((p) => p.workspace_id === $projectFilter)?.project ?? ''),
+  )
+  const untrusted = $derived(filtered.filter((p) => !p.trusted).length)
+  const statusItems = $derived.by((): StatusItem[] => [
+    { label: 'profiles', value: filtered.length, tone: 'info' },
+    { label: 'project', value: filtered.filter((p) => p.scope !== 'global').length, tone: 'violet' },
+    { label: 'global', value: filtered.filter((p) => p.scope === 'global').length, tone: 'violet' },
+    { label: 'untrusted', value: untrusted, tone: untrusted ? 'warning' : 'muted' },
+  ])
+
+  const cols = 'lg:grid-cols-[minmax(220px,1.4fr)_minmax(180px,1fr)_minmax(140px,1.2fr)_64px]'
 
   async function load() {
     try {
@@ -98,27 +121,39 @@
   }
 </script>
 
-<Topbar active="profiles">
-  {#snippet actions()}
-    <Button href="#/profile-new" size="sm" class="max-sm:px-2">
-      <Plus data-icon="inline-start" />
-      <span class="max-sm:sr-only">Create</span>
-    </Button>
-  {/snippet}
-</Topbar>
+<Topbar active="profiles" project={projectLabel} />
 
 <PageScroll>
-  <div class="mx-auto w-full max-w-4xl px-4 py-6">
-    <ProjectFilter items={projectScopeProfiles} />
+  <div class="w-full px-4 py-5 sm:px-5">
+    <PageHead title="Profiles">
+      {#snippet meta()}
+        {#if projectLabel}<span>project · {projectLabel}</span>{/if}
+        {#if loaded}
+          <span class="text-muted-foreground">
+            {filtered.length} profile{filtered.length === 1 ? '' : 's'}{#if untrusted}{` · ${untrusted} untrusted`}{/if}
+          </span>
+        {/if}
+      {/snippet}
+      {#snippet actions()}
+        <ProjectFilter items={projectScopeProfiles} class="" />
+        <Button href="#/profile-new" size="sm" class="max-sm:px-2">
+          <Plus data-icon="inline-start" />
+          <span class="max-sm:sr-only">New profile</span>
+        </Button>
+      {/snippet}
+    </PageHead>
+
     {#if !loaded}
-      <div class="flex flex-col gap-3">
-        {#each Array(3) as _, i (i)}<Skeleton class="h-20 w-full" />{/each}
+      <div class="flex flex-col gap-2.5">
+        {#each Array(3) as _, i (i)}<Skeleton class="h-14 w-full" />{/each}
       </div>
     {:else if items.length === 0}
-      <Empty.Root class="border border-dashed">
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon"><UserCog /></Empty.Media>
-          <Empty.Title>No profiles yet</Empty.Title>
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground">
+            <UserCog />
+          </Empty.Media>
+          <Empty.Title class="text-sm font-semibold">No profiles yet</Empty.Title>
           <Empty.Description>
             Profiles bind an executor (agent, model, role prompt, skills) to nodes.
           </Empty.Description>
@@ -131,65 +166,78 @@
         </Empty.Content>
       </Empty.Root>
     {:else}
+      <div
+        class="mb-2 hidden gap-4 px-3.5 text-[11px] tracking-[0.08em] text-muted-foreground uppercase lg:grid {cols}"
+        aria-hidden="true"
+      >
+        <span>profile</span><span>executor</span><span>skills</span><span></span>
+      </div>
       {#each groups as g (g.key)}
-        <section class="mb-8">
-          <h2
-            class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-          >
+        <section class="mb-6">
+          <h2 class="mb-2 px-0.5 text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
             {g.project}
           </h2>
-          <div class="flex flex-col gap-3">
+          <ul class="flex flex-col gap-2.5">
             {#each g.items as p (key(p))}
-              <Card.Root class="transition-colors hover:border-ring/40">
-                <Card.Header>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <Card.Title class="text-base">
-                      <a href={editHref(p)} class="hover:underline">
-                        {p.name}
-                      </a>
-                    </Card.Title>
+              <li
+                class="relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 border border-line-2 bg-panel px-3.5 py-3 transition-colors hover:border-(--k) {cols}"
+                style:--k={profileColor(p.name)}
+              >
+                <div class="min-w-0">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2">
+                    <a
+                      href={editHref(p)}
+                      class="legend-sq truncate font-semibold after:absolute after:inset-0 hover:underline focus-visible:outline-none focus-visible:after:outline focus-visible:after:outline-1 focus-visible:after:outline-violet"
+                    >
+                      {p.name}
+                    </a>
                     {#if !p.trusted}
-                      <Badge variant="outline" class="gap-1 border-warning/30 bg-warning/15 text-warning">
+                      <span class="tag inline-flex items-center gap-1 text-amber">
                         <ShieldAlert class="size-3" />
                         untrusted
-                      </Badge>
+                      </span>
                     {/if}
                   </div>
-                  <Card.Description class="font-mono text-xs">
-                    {p.agent} · {p.model}{p.skills.length
-                      ? ` · skills: ${p.skills.join(', ')}`
-                      : ''}
-                  </Card.Description>
-                  <Card.Action class="flex gap-1">
-                    <Button variant="ghost" size="sm" class="max-sm:px-2" href={editHref(p)}>
-                      <Pencil data-icon="inline-start" />
-                      <span class="max-sm:sr-only">Edit</span>
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      class="max-sm:px-2 text-muted-foreground hover:text-destructive"
-                      onclick={() => askRemove(p)}
-                      disabled={deleting === key(p)}
-                    >
-                      <Trash2 data-icon="inline-start" />
-                      <span class="max-sm:sr-only">Delete</span>
-                    </Button>
-                  </Card.Action>
-                </Card.Header>
-                {#if p.description}
-                  <Card.Content class="text-sm text-muted-foreground">
-                    {p.description}
-                  </Card.Content>
-                {/if}
-              </Card.Root>
+                  {#if p.description}
+                    <p class="prose-text truncate text-xs text-muted-foreground">{p.description}</p>
+                  {/if}
+                </div>
+                <div class="col-span-full min-w-0 truncate text-xs text-fg-2 lg:col-span-1 lg:text-[13px]">
+                  {p.agent} <span class="text-faint" aria-hidden="true">·</span> <span class="relative z-10" title={p.model}>{shortModel(p.model)}</span>
+                </div>
+                <div class="col-span-full flex min-w-0 flex-wrap gap-1 lg:col-span-1">
+                  {#each p.skills as s (s)}
+                    <span class="tag text-fg-2">{s}</span>
+                  {:else}
+                    <span class="text-[11px] text-muted-foreground">no skills</span>
+                  {/each}
+                </div>
+                <div class="relative z-10 col-start-2 row-start-1 flex justify-end gap-0.5 lg:order-last lg:col-start-auto lg:row-start-auto">
+                  <Button variant="ghost" size="icon-sm" href={editHref(p)} title="Edit" aria-label={`Edit ${p.name}`}>
+                    <Pencil />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    class="hover:text-destructive"
+                    onclick={() => askRemove(p)}
+                    disabled={deleting === key(p)}
+                    title="Delete"
+                    aria-label={`Delete ${p.name}`}
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+              </li>
             {/each}
-          </div>
+          </ul>
         </section>
       {/each}
     {/if}
   </div>
 </PageScroll>
+
+<StatusBar items={statusItems} />
 
 <AlertDialog.Root bind:open={confirmOpen}>
   <AlertDialog.Content>
@@ -219,7 +267,7 @@
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action
         onclick={confirmForce}
-        class="bg-destructive text-white hover:bg-destructive/90"
+        class={buttonVariants({ variant: 'destructive' })}
       >
         Force delete
       </AlertDialog.Action>

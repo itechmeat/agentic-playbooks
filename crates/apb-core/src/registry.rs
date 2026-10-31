@@ -92,6 +92,20 @@ pub fn is_frozen_dir(playbook_dir: &Path) -> bool {
     playbook_dir.join(FROZEN_MARKER).is_file()
 }
 
+/// Distinct profile names a playbook's nodes bind, in first-use order, scope
+/// dropped.
+fn bound_profile_names(pb: &Playbook) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for node in &pb.nodes {
+        if let Some(r) = node.kind.effective_profile_ref(&pb.defaults)
+            && !out.contains(&r.name)
+        {
+            out.push(r.name);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Serialize)]
 pub struct PlaybookSummary {
     pub id: String,
@@ -101,6 +115,14 @@ pub struct PlaybookSummary {
     pub versions: Vec<String>,
     /// True when the playbook is frozen (definition changes are refused).
     pub frozen: bool,
+    /// How many nodes the current version has.
+    pub node_count: usize,
+    /// Distinct profile names the current version's nodes run an agent with
+    /// (`NodeKind::effective_profile_ref`: an agent task's or an answering
+    /// finish node's own profile, else `defaults.profile`, and a judge's
+    /// emulation profile), in first-use order. Names only: two refs that
+    /// differ only in scope list once.
+    pub profiles: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -205,6 +227,8 @@ impl Registry {
                 current,
                 versions,
                 frozen: is_frozen_dir(&entry.path()),
+                node_count: loaded.playbook.nodes.len(),
+                profiles: bound_profile_names(&loaded.playbook),
             });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));

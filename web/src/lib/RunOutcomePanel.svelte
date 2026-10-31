@@ -25,7 +25,7 @@
 
 {#if goal}
   <OutcomeSection title="Goal" testid="run-goal">
-    <p>{goal.statement}</p>
+    <p class="prose-text">{goal.statement}</p>
     <p class="mono muted" data-testid="run-goal-summary">{goalSummary(goal)}</p>
     {#if checked.length}
       <ul class="list">
@@ -46,7 +46,7 @@
         <ul class="list">
           {#each manual as c (c.index)}
             <li class="row">
-              <span class="box" aria-hidden="true"></span>
+              <span class="check-box" aria-hidden="true"></span>
               <span>{c.description}</span>
             </li>
           {/each}
@@ -61,7 +61,7 @@
     <div class="list">
       {#each lines as c, i (i)}
         <div data-testid="run-commit-row">
-          <span class="mono" title={c.sha}>{c.short}</span>
+          <span class="sha" title={c.sha}>{c.short}</span>
           <span> {c.subject}</span>
           <span class="muted"> · {c.node}</span>
           {#if c.trailer}<span class="trailer" data-testid="run-commit-trailer">{c.trailer}</span>{/if}
@@ -94,15 +94,14 @@
     flex-direction: column;
     gap: 0.25rem;
     padding-top: 0.5rem;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--c-line);
   }
-  .box {
+  .check-box {
     flex-shrink: 0;
     width: 0.75rem;
     height: 0.75rem;
     margin-top: 0.125rem;
-    border: 1px solid var(--border);
-    border-radius: 0.125rem;
+    border: 1px solid var(--c-line-2);
   }
   .muted {
     color: var(--muted-foreground);
@@ -115,6 +114,9 @@
     color: var(--muted-foreground);
     font-size: 0.6875rem;
     white-space: nowrap;
+  }
+  .sha {
+    color: var(--c-violet);
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

@@ -12,8 +12,9 @@ fn ms(from: u128, to: u128) -> u64 {
 
 /// Like [`ms`], without the time the run spent paused in between (issue
 /// #200): run and node durations measure the run's active time.
-/// `paused` comes from [`crate::pause::paused_intervals`], computed once per
-/// run rather than once per measured span.
+/// `paused` comes from [`crate::pause::paused_intervals`] (or
+/// [`crate::pause::inactive_intervals`]), computed once per run rather than
+/// once per measured span.
 pub(crate) fn active_ms(paused: &[(u128, u128)], from: u128, to: u128) -> u64 {
     ms(from, to).saturating_sub(
         u64::try_from(crate::pause::paused_ms_in(paused, from, to)).unwrap_or(u64::MAX),

@@ -11,9 +11,10 @@
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
   import ConnectorPickerDialog from '$lib/components/ConnectorPickerDialog.svelte'
-  import { Badge } from '$lib/components/ui/badge'
+  import PageHead from '$lib/components/PageHead.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
+  import { profileColor } from '../lib/profilecolor'
   import { Button } from '$lib/components/ui/button'
-  import * as Card from '$lib/components/ui/card'
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import { toast } from 'svelte-sonner'
@@ -24,6 +25,8 @@
 
   let items = $state<ConnectorCard[]>([])
   let loaded = $state(false)
+  // A failed installed fetch: the status bar says unknown, not 0.
+  let installedFailed = $state(false)
   let available = $state<AvailableConnector[]>([])
   let availableLoading = $state(true)
   // A failed /available fetch is tracked separately from an empty list: the
@@ -34,7 +37,9 @@
   async function loadInstalled() {
     try {
       items = await fetchConnectors()
+      installedFailed = false
     } catch (e) {
+      installedFailed = true
       toast.error('Failed to load connectors', { description: String(e) })
     } finally {
       loaded = true
@@ -64,12 +69,34 @@
     return subscribeChanges(loadAll)
   })
 
-  const badgeClass = {
-    ok: 'border-success/30 bg-success/15 text-success',
-    warn: 'border-warning/30 bg-warning/15 text-warning',
-    danger: 'border-destructive/30 bg-destructive/15 text-destructive',
-    muted: '',
+  // Outlined tag color per trust tone.
+  const toneText = {
+    ok: 'text-green',
+    warn: 'text-amber',
+    danger: 'text-red',
+    muted: 'text-muted-foreground',
   } as const
+
+  const statusItems = $derived.by((): StatusItem[] => {
+    const ready = items.reduce((n, c) => n + c.accountsReady, 0)
+    const total = items.reduce((n, c) => n + c.accountsTotal, 0)
+    // Before the first load, or after it failed, the counts are not known.
+    const known = (v: string | number) => (!loaded ? '...' : installedFailed ? 'unknown' : v)
+    return [
+      { label: 'installed', value: known(items.length), tone: installedFailed ? 'warning' : 'info' },
+      {
+        label: 'approved',
+        value: known(items.filter((c) => c.trust === 'approved').length),
+        tone: 'success',
+      },
+      {
+        label: 'available',
+        value: availableLoading ? '...' : availableFailed ? 'unknown' : available.length,
+        tone: availableFailed ? 'warning' : 'violet',
+      },
+      { label: 'accounts ready', value: known(`${ready}/${total}`), tone: ready < total ? 'warning' : 'muted' },
+    ]
+  })
 
   // Connectors are installed machine-wide, so the route is just the name -
   // no workspace segment, unlike #/playbook/<ws>/<id>.
@@ -90,16 +117,44 @@
 <Topbar active="connectors" />
 
 <PageScroll>
-  <div class="mx-auto w-full max-w-4xl px-4 py-6">
+  <div class="mx-auto w-full max-w-6xl px-4 py-5 sm:px-5">
+    <PageHead title="Connectors">
+      {#snippet meta()}
+        <span>installed on this machine</span>
+        {#if loaded}
+          <span class="text-muted-foreground">
+            {items.length} installed{#if !availableLoading && !availableFailed}{` · ${available.length} available`}{/if}
+          </span>
+        {/if}
+      {/snippet}
+      {#snippet actions()}
+        {#if loaded && listState === 'installed'}
+          {#if addState.note}
+            <span class="text-xs text-muted-foreground">{addState.note}</span>
+          {/if}
+          <Button
+            size="sm"
+            class="max-sm:px-2"
+            disabled={addState.disabled}
+            onclick={() => (pickerOpen = true)}
+          >
+            <Plus data-icon="inline-start" />
+            <span class="max-sm:sr-only">Connect a connector</span>
+          </Button>
+        {/if}
+      {/snippet}
+    </PageHead>
     {#if !loaded}
-      <div class="flex flex-col gap-3">
-        {#each Array(3) as _, i (i)}<Skeleton class="h-24 w-full" />{/each}
+      <div class="flex flex-col gap-2.5">
+        {#each Array(3) as _, i (i)}<Skeleton class="h-16 w-full" />{/each}
       </div>
     {:else if listState === 'first-connect'}
-      <Empty.Root class="border border-dashed">
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon"><Plug /></Empty.Media>
-          <Empty.Title>Connect your first connector</Empty.Title>
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground">
+            <Plug />
+          </Empty.Media>
+          <Empty.Title class="text-sm font-semibold">Connect your first connector</Empty.Title>
           <Empty.Description>
             Connectors give playbook nodes call access to external services.
           </Empty.Description>
@@ -112,10 +167,12 @@
         </Empty.Content>
       </Empty.Root>
     {:else if listState === 'available-failed'}
-      <Empty.Root class="border border-dashed">
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon"><TriangleAlert /></Empty.Media>
-          <Empty.Title>Could not load available connectors</Empty.Title>
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-amber">
+            <TriangleAlert />
+          </Empty.Media>
+          <Empty.Title class="text-sm font-semibold">Could not load available connectors</Empty.Title>
           <Empty.Description>
             No connectors are installed, and the list of connectors you could connect could
             not be loaded.
@@ -129,10 +186,12 @@
         </Empty.Content>
       </Empty.Root>
     {:else if listState === 'nothing-available'}
-      <Empty.Root class="border border-dashed">
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon"><Plug /></Empty.Media>
-          <Empty.Title>No connectors installed</Empty.Title>
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground">
+            <Plug />
+          </Empty.Media>
+          <Empty.Title class="text-sm font-semibold">No connectors installed</Empty.Title>
           <Empty.Description>
             There are no connectors available to connect right now. Connectors give playbook
             nodes call access to external services.
@@ -140,54 +199,62 @@
         </Empty.Header>
       </Empty.Root>
     {:else}
-      <div class="flex flex-col gap-4">
-        <div class="flex flex-col items-start gap-1">
-          <Button
-            class="max-sm:px-2"
-            disabled={addState.disabled}
-            onclick={() => (pickerOpen = true)}
+      <ul class="flex flex-col gap-2.5">
+        {#each items as c (c.name)}
+          {@const badge = trustBadge(c.trust)}
+          <li
+            class="relative grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 border border-line-2 bg-panel px-3.5 py-3 transition-colors hover:border-violet lg:grid-cols-[28px_minmax(0,2fr)_minmax(0,1fr)_150px_auto]"
           >
-            <Plus data-icon="inline-start" />
-            <span class="max-sm:sr-only">Connect a connector</span>
-          </Button>
-          {#if addState.note}
-            <span class="text-xs text-muted-foreground">{addState.note}</span>
-          {/if}
-        </div>
-
-        <div class="flex flex-col gap-3">
-          {#each items as c (c.name)}
-            {@const badge = trustBadge(c.trust)}
-            <Card.Root class="transition-colors hover:border-ring/40">
-              <Card.Header>
-                <div class="flex flex-wrap items-center gap-2">
-                  <Card.Title class="text-base">{c.displayName || c.name}</Card.Title>
-                  <span class="font-mono text-xs text-muted-foreground">v{c.version}</span>
-                  <Badge variant="outline" class={badgeClass[badge.tone]}>{badge.label}</Badge>
-                  {#if c.updateAvailable}
-                    <Badge variant="outline" class={badgeClass.warn}>built-in v{c.updateAvailable} available</Badge>
-                  {/if}
-                </div>
-                <Card.Description>{c.summary}</Card.Description>
-                <Card.Action>
-                  <Button size="sm" variant="outline" href={detailHref(c.name)}>View</Button>
-                </Card.Action>
-              </Card.Header>
-              <Card.Content class="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                {#each c.tags as tag (tag)}
-                  <Badge variant="secondary">{tag}</Badge>
-                {/each}
-                <span class="ml-auto">
-                  {c.accountsReady}/{c.accountsTotal} accounts ready
-                </span>
-              </Card.Content>
-            </Card.Root>
-          {/each}
-        </div>
-      </div>
+            <span
+              class="grid size-7 place-items-center border border-(--k) text-(--k)"
+              style:--k={profileColor(c.name)}
+              aria-hidden="true"><Plug class="size-3.5" /></span
+            >
+            <div class="min-w-0">
+              <div class="flex min-w-0 flex-wrap items-center gap-2">
+                <a
+                  href={detailHref(c.name)}
+                  class="truncate font-semibold after:absolute after:inset-0 hover:underline focus-visible:outline-none focus-visible:after:outline focus-visible:after:outline-1 focus-visible:after:outline-violet"
+                >
+                  {c.displayName || c.name}
+                </a>
+                <span class="text-xs text-muted-foreground">v{c.version}</span>
+                <span class="tag {toneText[badge.tone]}">{badge.label}</span>
+                {#if c.updateAvailable}
+                  <span class="tag text-amber">built-in v{c.updateAvailable} available</span>
+                {/if}
+              </div>
+              {#if c.summary}
+                <p class="prose-text truncate text-xs text-muted-foreground">{c.summary}</p>
+              {/if}
+            </div>
+            <div class="col-span-full flex min-w-0 flex-wrap gap-1 lg:col-span-1">
+              {#each c.tags as tag (tag)}
+                <span class="tag text-fg-2">{tag}</span>
+              {/each}
+            </div>
+            <div class="col-span-full text-xs whitespace-nowrap lg:col-span-1">
+              <span class={c.accountsReady < c.accountsTotal ? 'text-amber' : 'text-fg-2'}>
+                {c.accountsReady}/{c.accountsTotal}
+              </span>
+              <span class="text-muted-foreground">accounts ready</span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              href={detailHref(c.name)}
+              class="relative z-10 col-start-3 row-start-1 lg:order-last lg:col-start-auto lg:row-start-auto"
+            >
+              View
+            </Button>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </div>
 </PageScroll>
+
+<StatusBar items={statusItems} />
 
 <ConnectorPickerDialog
   bind:open={pickerOpen}

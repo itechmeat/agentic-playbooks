@@ -318,26 +318,29 @@
 />
 
 <style>
-  /* Plain CSS over the app's variables. */
+  /* Plain CSS over the palette: the pause line and controls sit inside the
+     run rail, so no full-width strip of their own. */
   .pause-bar {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px 16px;
-    padding: 6px 16px;
-    border-bottom: 1px solid var(--border);
+    flex-direction: column;
+    gap: 8px;
     font-size: 12px;
   }
   .pause-text {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    gap: 4px 8px;
+    gap: 2px 8px;
     min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid color-mix(in oklab, var(--c-amber) 55%, transparent);
+    background: color-mix(in oklab, var(--c-amber) 8%, transparent);
   }
   .pause-word {
-    font-weight: 600;
+    font-weight: 700;
+    color: var(--c-amber);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
   .pause-cause {
     color: var(--muted-foreground);
@@ -354,23 +357,26 @@
     overflow-wrap: anywhere;
   }
   .pause-details {
-    color: var(--muted-foreground);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    color: var(--c-muted);
     font-size: 11px;
   }
   .pause-actions {
     display: flex;
-    gap: 8px;
-    margin-left: auto;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .pause-actions:empty {
+    display: none;
   }
   .pause-form {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 8px 16px 12px;
-    border-bottom: 1px solid var(--border);
+    margin-top: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--c-line-2);
+    background: var(--c-panel-2);
     font-size: 12px;
-    max-width: 520px;
   }
   .pause-modes {
     display: flex;
@@ -383,19 +389,27 @@
   .pause-modes legend {
     padding: 0;
     margin-bottom: 4px;
-    font-weight: 600;
+    color: var(--c-muted);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
   .pause-modes label,
   .pause-check {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
+  }
+  .pause-modes input,
+  .pause-check input {
+    margin-top: 3px;
+    accent-color: var(--c-violet);
   }
   .pause-field {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-weight: 600;
+    color: var(--c-muted);
   }
   .pause-form-actions {
     display: flex;

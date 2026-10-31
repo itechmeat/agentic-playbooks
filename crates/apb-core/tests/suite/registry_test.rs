@@ -30,6 +30,30 @@ fn lists_playbooks_with_versions() {
     assert_eq!(list[0].current, "1.0.0");
     assert_eq!(list[0].versions, vec!["1.0.0"]);
     assert_eq!(list[0].name, "Implement Task");
+    assert_eq!(list[0].node_count, 6);
+    // `plan` names the profile, `fix` inherits it from `defaults`: one name.
+    assert_eq!(list[0].profiles, vec!["architect".to_string()]);
+}
+
+/// A node without its own profile takes `defaults.profile`: with a default
+/// other than the explicit one, both names list, in first-use order.
+#[test]
+fn summary_profiles_include_the_inherited_default() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let yaml = VALID.replace(
+        "defaults:\n  profile: architect",
+        "defaults:\n  profile: reviewer",
+    );
+    assert_ne!(yaml, VALID);
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/implement-task/1.0.0/playbook.yaml"),
+        yaml,
+    )
+    .unwrap();
+    let list = Registry::open(dir.path()).unwrap().list().unwrap();
+    assert_eq!(list[0].profiles, vec!["architect", "reviewer"]);
 }
 
 #[test]

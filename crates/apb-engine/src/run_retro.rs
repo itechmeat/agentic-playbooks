@@ -483,8 +483,9 @@ fn run_duration(events: &[Event]) -> Option<u64> {
     let (start, ..) = run_started(events)?;
     let (_, end) = run_end(events);
     let end = end.or_else(|| events.last().map(|e| e.ts))?;
-    // Paused time is not run time (issue #200).
-    let active = crate::pause::active_elapsed_ms(events, start, end, end);
+    // Paused time is not run time (issue #200), nor the span a run sat
+    // ended before a resume.
+    let active = crate::pause::active_run_ms(events, start, end, end);
     Some(u64::try_from(active).unwrap_or(u64::MAX))
 }
 

@@ -17,6 +17,11 @@ export interface PlaybookSummary {
   current: string
   versions: string[]
   frozen: boolean
+  // How many nodes the current version has, and the profile names its agent
+  // nodes bind (own or `defaults.profile`), in first-use order. Optional: an
+  // older server does not send them.
+  node_count?: number
+  profiles?: string[]
   // Owning project (global dashboard). Empty on the pinned-root test server.
   workspace_id: string
   project: string
@@ -79,6 +84,9 @@ export interface PlaybookDetail {
     // Every agent node must run with isolation full (shown read-only).
     publish_only?: boolean
   }
+  // Inferred plus declared (playbook and node) effects, the set the run
+  // policy uses; absent from an older server.
+  effective_effects?: string[]
   layout: WfLayout | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
   frozen: boolean

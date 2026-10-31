@@ -33,14 +33,14 @@
       <AlertDialog.Title>{action === 'resume' ? 'Resume' : 'Run'} a playbook with irreversible effects?</AlertDialog.Title>
       <AlertDialog.Description>
         {#if sources.length}
-          The playbook <code>{playbookId}</code> has irreversible effects:
+          The playbook <code class="text-amber">{playbookId}</code> has irreversible effects:
         {:else}
-          The playbook <code>{playbookId}</code> declares irreversible effects, such as a push, a merge or a deploy.
+          The playbook <code class="text-amber">{playbookId}</code> declares irreversible effects, such as a push, a merge or a deploy.
         {/if}
       </AlertDialog.Description>
     </AlertDialog.Header>
     {#if sources.length}
-      <ul class="list-disc pl-6 text-sm" data-testid="irreversible-sources">
+      <ul class="m-0 list-[square] border border-line bg-field py-2 pr-3 pl-7 text-sm marker:text-amber" data-testid="irreversible-sources">
         {#each sources as source, i (i)}
           <li>{source}</li>
         {/each}

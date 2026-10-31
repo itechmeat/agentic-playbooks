@@ -1,21 +1,79 @@
 import dagre from '@dagrejs/dagre'
 import type { PlaybookDetail, WfLayout } from './types'
+import { profileModelKey, profileToField, usesDefaultProfile, type ProfileScope } from './profileref'
+
+export { profileModelKey }
 import { listBadge } from './listprogress'
+
+/**
+ * What a graph card (PlaybookNode.svelte) shows. `toFlow` fills the playbook
+ * fields; the run fields are optional and left to the run view, which knows
+ * the live attempt. Every field past `kind` is optional and a card renders
+ * whatever subset it gets.
+ */
+export type FlowNodeData = {
+  /** The node's title, or its id when it has none. */
+  title: string
+  /** The node type (`agent_task`, `judge`, `human_review`, `start`, ...). */
+  kind: string
+  /** Node status in a run (`running`, `succeeded`, `failed`, `lost`, ...). */
+  status?: string
+  cached?: boolean
+  failure?: FailureEffect | null
+  exits?: NodeExits | null
+  /** `12/43` on a list node of a run, `list` in the editor (`listBadge`). */
+  list?: string | null
+  // --- playbook fields, filled by `toFlow` / `withProfileModels` ---
+  /** Executor profile name: the node's own, else the playbook default (agent tasks). */
+  profile?: string
+  /** The explicit scope of that profile ref (`{ name, scope }` or `scope/name`); absent for scope auto. */
+  profileScope?: ProfileScope
+  /** The profile's model, e.g. `opus 5.5`; filled by `withProfileModels`. */
+  model?: string
+  /**
+   * Run view: the latest attempt reported no model (`model` is then unset);
+   * the model it was asked for, shown only as a hint.
+   */
+  modelHint?: string
+  /** Expected time of one execution as written, e.g. `30m`. */
+  expected?: string
+  /** Id of the sub-playbook a `playbook` node runs. */
+  subPlaybook?: string
+  // --- run fields, optional, filled by the run view ---
+  /** Progress of the running attempt, 0 to 100; draws the hatched bar. */
+  progress?: number
+  /** Attempt number of the running or last attempt (1 based). */
+  attempt?: number
+  /** Human duration of the finished node, e.g. `3m 12s`. */
+  duration?: string
+  /** Short note after the status, e.g. `#205` or `no · 0.91`. */
+  note?: string
+}
 
 export interface FlowNode {
   id: string
   position: { x: number; y: number }
-  data: {
-    title: string
-    kind: string
-    status?: string
-    cached?: boolean
-    failure?: FailureEffect | null
-    exits?: NodeExits | null
-    // `12/43` on a list node of a run, `list` in the editor (`listBadge`).
-    list?: string | null
-  }
+  data: FlowNodeData
   type: 'playbookNode'
+  /** Set by a page to make the card glow as the selected one. */
+  selected?: boolean
+}
+
+/**
+ * How an edge reads on the canvas: `fail` carries a failure (dashed red),
+ * `else` is a fallback (faint), `cond` has a condition, `plain` is always
+ * taken.
+ */
+export type EdgeTone = 'plain' | 'cond' | 'fail' | 'else'
+
+/**
+ * What the edge component (PlaybookEdge.svelte) reads. `state` is optional
+ * and only set by a run view: `walked` was traversed, `active` leads to the
+ * running node, `idle` was not reached (dimmed). Absent: the plain look.
+ */
+export type FlowEdgeData = {
+  tone: EdgeTone
+  state?: 'walked' | 'active' | 'idle'
 }
 
 export interface FlowEdge {
@@ -25,19 +83,67 @@ export interface FlowEdge {
   label?: string
   /** The named exit this edge leaves from; absent when the node has one exit. */
   sourceHandle?: string
+  data: FlowEdgeData
 }
 
 type PlaybookModel = PlaybookDetail['playbook']
 type PlaybookEdgeModel = PlaybookModel['edges'][number]
 
-const NODE_W = 200
-const NODE_H = 64
+const NODE_W = 210
+const NODE_H = 76
 /** Extra layout height for the row of exit captions, so ranks stay clear of it. */
 const EXIT_ROW_H = 24
+/** Start and finish render as small pills (see PlaybookNode.svelte). */
+const PILL_W = 110
+const PILL_H = 30
+
+/**
+ * Layout box of one card. A node with named exits is taller by its caption
+ * row; laying it out at the plain height would let the next rank sit on top
+ * of the captions. Start and finish without exits are pills.
+ */
+function nodeSize(kind: string, hasExits: boolean): { width: number; height: number } {
+  if ((kind === 'start' || kind === 'finish') && !hasExits) return { width: PILL_W, height: PILL_H }
+  return { width: NODE_W, height: NODE_H + (hasExits ? EXIT_ROW_H : 0) }
+}
+
 /** Captions sit side by side under a 200px node, so they have to stay short. */
 const EXIT_LABEL_MAX = 15
 
-function edgeLabel(e: PlaybookEdgeModel): string | undefined {
+/** The look of one edge, from its fallback flag and condition. */
+export function edgeTone(e: PlaybookEdgeModel): EdgeTone {
+  if (e.fallback) return 'else'
+  const c = e.condition
+  if (!c) return 'plain'
+  if (c.type === 'node_status' && String(c.equals) === 'failure') return 'fail'
+  return 'cond'
+}
+
+/**
+ * A node's `profile` field as name and explicit scope: a bare name (scope
+ * auto), `scope/name`, or `{ name, scope }`.
+ */
+function profileRefOf(v: unknown): { name: string; scope?: ProfileScope } | undefined {
+  const field = profileToField(v)
+  if (!field) return undefined
+  const slash = field.lastIndexOf('/')
+  if (slash < 0) return { name: field }
+  const name = field.slice(slash + 1)
+  const scope = field.slice(0, slash)
+  if (!name) return undefined
+  return scope === 'project' || scope === 'global' ? { name, scope } : { name }
+}
+
+/** `expected_duration` as written: a duration string, or seconds as a number. */
+export function expectedText(v: unknown): string | undefined {
+  if (typeof v === 'string') return v.trim() || undefined
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return undefined
+  if (v % 3600 === 0) return `${v / 3600}h`
+  if (v % 60 === 0) return `${v / 60}m`
+  return `${v}s`
+}
+
+export function edgeLabel(e: PlaybookEdgeModel): string | undefined {
   const c = e.condition
   if (!c) return undefined
   if (c.type === 'node_status') return `${c.node}: ${c.equals}`
@@ -272,6 +378,32 @@ export function isUserArranged(layout: WfLayout | null): boolean {
  */
 function fanoutConstraints(playbook: PlaybookModel): { left: string; right: string }[] {
   const constraints: { left: string; right: string }[] = []
+  // left -> rights already constrained. Two sources can declare the same pair
+  // of successors in opposite order (A exits to x then y, B to y then x); a
+  // cycle in the constraint graph breaks dagre's order phase, which then
+  // stacks two nodes on one spot and throws "Not possible to find
+  // intersection inside of the rectangle". The first declaration wins and a
+  // constraint that would close a cycle is dropped.
+  const after = new Map<string, Set<string>>()
+  const reaches = (from: string, to: string): boolean => {
+    const stack = [from]
+    const visited = new Set<string>()
+    while (stack.length) {
+      const cur = stack.pop()!
+      if (cur === to) return true
+      if (visited.has(cur)) continue
+      visited.add(cur)
+      for (const next of after.get(cur) ?? []) stack.push(next)
+    }
+    return false
+  }
+  const add = (left: string, right: string) => {
+    if (left === right || reaches(right, left)) return
+    if (after.get(left)?.has(right)) return
+    if (!after.has(left)) after.set(left, new Set())
+    after.get(left)!.add(right)
+    constraints.push({ left, right })
+  }
   for (const node of playbook.nodes) {
     const seen = new Set<string>()
     const distinct: string[] = []
@@ -281,11 +413,104 @@ function fanoutConstraints(playbook: PlaybookModel): { left: string; right: stri
       seen.add(e.to)
       distinct.push(e.to)
     }
-    for (let i = 0; i < distinct.length - 1; i++) {
-      constraints.push({ left: distinct[i], right: distinct[i + 1] })
-    }
+    for (let i = 0; i < distinct.length - 1; i++) add(distinct[i], distinct[i + 1])
   }
   return constraints
+}
+
+type Pos = { x: number; y: number }
+
+/** One dagre pass; throws whatever dagre throws. */
+function dagreLayout(
+  playbook: PlaybookModel,
+  exits: Map<string, NodeExits | null>,
+  constraints: { left: string; right: string }[],
+): Map<string, Pos> {
+  const g = new dagre.graphlib.Graph()
+  // TB: the playbook is laid out vertically, top to bottom. Branches are
+  // usually few, and a vertical flow reads better on narrow / mobile screens.
+  g.setGraph({ rankdir: 'TB', nodesep: 30, ranksep: 70 })
+  g.setDefaultEdgeLabel(() => ({}))
+  const ids = new Set(playbook.nodes.map((n) => n.id))
+  for (const n of playbook.nodes) g.setNode(n.id, nodeSize(n.type, !!exits.get(n.id)))
+  // An edge to a node that does not exist (a draft being edited) would make
+  // graphlib invent a node without a size, so it is left out of the layout.
+  for (const e of playbook.edges) if (ids.has(e.from) && ids.has(e.to)) g.setEdge(e.from, e.to)
+  dagre.layout(g, constraints.length ? { constraints } : {})
+  const out = new Map<string, Pos>()
+  for (const n of playbook.nodes) {
+    const pos = g.node(n.id)
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) throw new Error(`no position for ${n.id}`)
+    out.set(n.id, { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 })
+  }
+  return out
+}
+
+/**
+ * Last resort when dagre throws: breadth-first ranks from the nodes nothing
+ * leads to (else the first node), one row per rank in declaration order.
+ * Deterministic and never fails, so the page always draws something.
+ */
+function gridLayout(playbook: PlaybookModel): Map<string, Pos> {
+  const ids = playbook.nodes.map((n) => n.id)
+  const known = new Set(ids)
+  const edges = playbook.edges.filter((e) => known.has(e.from) && known.has(e.to))
+  const hasIncoming = new Set(edges.filter((e) => e.from !== e.to).map((e) => e.to))
+  const rank = new Map<string, number>()
+  const queue: string[] = ids.filter((id) => !hasIncoming.has(id))
+  if (!queue.length && ids.length) queue.push(ids[0])
+  for (const id of queue) rank.set(id, 0)
+  const visit = () => {
+    while (queue.length) {
+      const cur = queue.shift()!
+      for (const e of edges) {
+        if (e.from !== cur || rank.has(e.to)) continue
+        rank.set(e.to, rank.get(cur)! + 1)
+        queue.push(e.to)
+      }
+    }
+  }
+  visit()
+  // Nodes only reachable through a cycle with no entry: start a new rank.
+  for (const id of ids) {
+    if (rank.has(id)) continue
+    rank.set(id, Math.max(-1, ...rank.values()) + 1)
+    queue.push(id)
+    visit()
+  }
+  const rowH = NODE_H + EXIT_ROW_H + 70
+  const colW = NODE_W + 30
+  const used = new Map<number, number>()
+  const out = new Map<string, Pos>()
+  for (const id of ids) {
+    const r = rank.get(id)!
+    const col = used.get(r) ?? 0
+    used.set(r, col + 1)
+    out.set(id, { x: col * colW, y: r * rowH })
+  }
+  return out
+}
+
+/**
+ * Auto positions for every node. Layout must never fail the page: if dagre
+ * throws with the fan-out ordering constraints it is retried without them,
+ * and if it still throws a plain grid is used.
+ */
+function autoLayout(playbook: PlaybookModel, exits: Map<string, NodeExits | null>): Map<string, Pos> {
+  const constraints = fanoutConstraints(playbook)
+  try {
+    return dagreLayout(playbook, exits, constraints)
+  } catch {
+    // fall through
+  }
+  if (constraints.length) {
+    try {
+      return dagreLayout(playbook, exits, [])
+    } catch {
+      // fall through
+    }
+  }
+  return gridLayout(playbook)
 }
 
 export function toFlow(
@@ -311,39 +536,38 @@ export function toFlow(
   const needAuto = forceAuto || playbook.nodes.some((n) => !stored.has(n.id))
   const auto = new Map<string, { x: number; y: number }>()
   if (needAuto) {
-    const g = new dagre.graphlib.Graph()
-    // TB: the playbook is laid out vertically, top to bottom. Branches are
-    // usually few, and a vertical flow reads better on narrow / mobile screens.
-    g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 80 })
-    g.setDefaultEdgeLabel(() => ({}))
-    for (const n of playbook.nodes) {
-      // A node with named exits is taller by its caption row; laying it out at
-      // the plain height would let the next rank sit on top of the captions.
-      g.setNode(n.id, { width: NODE_W, height: NODE_H + (exits.get(n.id) ? EXIT_ROW_H : 0) })
-    }
-    for (const e of playbook.edges) g.setEdge(e.from, e.to)
-    const constraints = fanoutConstraints(playbook)
-    dagre.layout(g, constraints.length ? { constraints } : {})
-    for (const n of playbook.nodes) {
-      const pos = g.node(n.id)
-      auto.set(n.id, { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 })
-    }
+    for (const [id, pos] of autoLayout(playbook, exits)) auto.set(id, pos)
   }
 
-  const nodes: FlowNode[] = playbook.nodes.map((n) => ({
-    id: n.id,
-    type: 'playbookNode',
-    position: stored.get(n.id) ?? auto.get(n.id) ?? { x: 0, y: 0 },
-    data: {
-      title: n.title ?? n.id,
-      kind: n.type,
-      status: statuses?.[n.id],
-      cached: cachedIds?.has(n.id),
-      failure: failureEffect(playbook, n.id),
-      exits: exits.get(n.id) ?? null,
-      list: listBadge(n, listProgress?.[n.id]),
-    },
-  }))
+  // Agent tasks and answering finish nodes without their own profile run on
+  // the playbook default.
+  const defaults = playbook.defaults as { profile?: unknown } | null | undefined
+  const defaultProfile = profileRefOf(defaults?.profile)
+
+  const nodes: FlowNode[] = playbook.nodes.map((n) => {
+    const own = profileRefOf(n.profile)
+    const ref = own ?? (usesDefaultProfile(n) ? defaultProfile : undefined)
+    const profile = ref?.name
+    const sub = n.type === 'playbook' ? playbookId(n.playbook) : undefined
+    return {
+      id: n.id,
+      type: 'playbookNode',
+      position: stored.get(n.id) ?? auto.get(n.id) ?? { x: 0, y: 0 },
+      data: {
+        title: n.title ?? n.id,
+        kind: n.type,
+        status: statuses?.[n.id],
+        cached: cachedIds?.has(n.id),
+        failure: failureEffect(playbook, n.id),
+        exits: exits.get(n.id) ?? null,
+        ...(profile ? { profile } : {}),
+        ...(ref?.scope ? { profileScope: ref.scope } : {}),
+        ...(expectedText(n.expected_duration) ? { expected: expectedText(n.expected_duration) } : {}),
+        ...(sub ? { subPlaybook: sub } : {}),
+        list: listBadge(n, listProgress?.[n.id]),
+      },
+    }
+  })
 
   // Each edge leaves from its own named exit when the node has several, in the
   // same order `nodeExits` numbered them.
@@ -360,8 +584,65 @@ export function toFlow(
       // along the line would only add clutter.
       label: named ? undefined : edgeLabel(e),
       ...(named ? { sourceHandle: named.list[index]?.id } : {}),
+      data: { tone: edgeTone(e) },
     }
   })
 
   return { nodes, edges }
+}
+
+/** The id of a `playbook` node's reference: `{ id, scope }` or `scope/id`. */
+function playbookId(v: unknown): string | undefined {
+  if (typeof v === 'string') return v.slice(v.lastIndexOf('/') + 1) || undefined
+  if (v && typeof v === 'object' && typeof (v as { id?: unknown }).id === 'string')
+    return (v as { id: string }).id || undefined
+  return undefined
+}
+
+/** One profile as the profile listing returns it (only what the graph needs). */
+export interface ProfileModelEntry {
+  name: string
+  model: string
+  scope?: string
+  workspace_id?: string
+}
+
+
+/**
+ * Profile to model, for one workspace. The bare name resolves the way scope
+ * `auto` does (the workspace's own project profile wins over a global one of
+ * the same name); `project:<name>` and `global:<name>` (see
+ * `profileModelKey`) answer a ref with an explicit scope.
+ */
+export function profileModelMap(
+  profiles: ProfileModelEntry[],
+  workspace = '',
+): Map<string, string> {
+  const map = new Map<string, string>()
+  const rank = (p: ProfileModelEntry) =>
+    p.scope === 'project' ? (p.workspace_id === workspace ? 2 : -1) : 1
+  const best = new Map<string, number>()
+  for (const p of profiles) {
+    const r = rank(p)
+    if (r < 0 || !p.model) continue
+    map.set(profileModelKey(p.name, r === 2 ? 'project' : 'global'), p.model)
+    if ((best.get(p.name) ?? 0) >= r) continue
+    best.set(p.name, r)
+    map.set(p.name, p.model)
+  }
+  return map
+}
+
+/**
+ * Sets `data.model` of every node to its profile's model (in its scope), and
+ * clears a model the profile no longer resolves to.
+ */
+export function withProfileModels(nodes: FlowNode[], models: Map<string, string>): FlowNode[] {
+  return nodes.map((n) => {
+    const model = n.data.profile ? models.get(profileModelKey(n.data.profile, n.data.profileScope)) : undefined
+    if (model === n.data.model) return n
+    if (model) return { ...n, data: { ...n.data, model } }
+    const { model: _stale, ...data } = n.data
+    return { ...n, data }
+  })
 }

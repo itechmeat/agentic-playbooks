@@ -157,3 +157,105 @@ fn list_runs_keeps_a_run_whose_last_line_is_still_being_written() {
         .expect("a run with a torn last line must stay listed");
     assert_eq!(run.status, "succeeded");
 }
+
+/// The run list shows how long a finished run took: the listing carries its
+/// active duration from `run_started` to `run_finished`, and none for a run
+/// that has not ended.
+#[test]
+fn list_runs_carries_the_duration_of_a_finished_run_only() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+
+    let done = dir.path().join(".apb/runs/good-1");
+    fs::create_dir_all(&done).unwrap();
+    fs::write(done.join("events.jsonl"), GOOD_EVENTS).unwrap();
+
+    let open = dir.path().join(".apb/runs/open-1");
+    fs::create_dir_all(&open).unwrap();
+    fs::write(open.join("events.jsonl"), RUNNING_EVENTS).unwrap();
+
+    let runs = list_runs(dir.path()).unwrap();
+    let by_id = |id: &str| runs.iter().find(|r| r.run_id == id).expect("listed");
+    assert_eq!(by_id("good-1").duration_ms, Some(3));
+    assert_eq!(by_id("open-1").duration_ms, None);
+}
+
+/// Writes one run journal under `.apb/runs/<id>`.
+fn write_run(root: &std::path::Path, id: &str, events: &str) {
+    let dir = root.join(format!(".apb/runs/{id}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("events.jsonl"), events).unwrap();
+}
+
+/// The duration is active time: a pause inside the run is left out, a run
+/// that ends with `run_aborted` has one too, and a finished run resumed again
+/// is live, so it has none until it ends once more (as `apb stats` counts).
+#[test]
+fn list_runs_duration_leaves_out_pauses_and_follows_a_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    write_run(
+        dir.path(),
+        "paused-1",
+        r#"{"seq":0,"ts":100,"type":"run_started","playbook":"p","version":"1.0.0"}
+{"seq":1,"ts":110,"type":"run_paused","reason":"operator"}
+{"seq":2,"ts":150,"type":"run_resumed","from_node":"start"}
+{"seq":3,"ts":170,"type":"run_finished","outcome":"succeeded"}
+"#,
+    );
+    write_run(
+        dir.path(),
+        "aborted-1",
+        r#"{"seq":0,"ts":100,"type":"run_started","playbook":"p","version":"1.0.0"}
+{"seq":1,"ts":125,"type":"run_aborted","reason":"stop"}
+"#,
+    );
+    let resumed = r#"{"seq":0,"ts":100,"type":"run_started","playbook":"p","version":"1.0.0"}
+{"seq":1,"ts":120,"type":"run_finished","outcome":"failed"}
+{"seq":2,"ts":200,"type":"run_resumed","from_node":"start"}
+"#;
+    write_run(dir.path(), "resumed-1", resumed);
+    write_run(
+        dir.path(),
+        "refinished-1",
+        &format!(
+            "{resumed}{{\"seq\":3,\"ts\":230,\"type\":\"run_finished\",\"outcome\":\"succeeded\"}}\n"
+        ),
+    );
+
+    let runs = list_runs(dir.path()).unwrap();
+    let by_id = |id: &str| runs.iter().find(|r| r.run_id == id).expect("listed");
+    assert_eq!(by_id("paused-1").duration_ms, Some(30));
+    // Once ended, the duration already leaves the pause out.
+    assert_eq!(by_id("paused-1").paused_ms, None);
+    assert_eq!(by_id("aborted-1").duration_ms, Some(25));
+    assert_eq!(by_id("resumed-1").duration_ms, None);
+    // 20 ms to the failure, then 30 ms after the resume: the 80 ms it sat
+    // failed is not run time.
+    assert_eq!(by_id("refinished-1").duration_ms, Some(50));
+    // Live again after a failure: the ended span counts as inactive.
+    assert_eq!(by_id("resumed-1").paused_ms, Some(80));
+}
+
+/// A live run that was paused and resumed carries the paused time so far, so
+/// the run list can count its active time up without the pause.
+#[test]
+fn list_runs_carries_the_paused_time_of_a_live_run() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    write_run(
+        dir.path(),
+        "live-paused",
+        r#"{"seq":0,"ts":100,"type":"run_started","playbook":"p","version":"1.0.0"}
+{"seq":1,"ts":110,"type":"run_paused","reason":"operator"}
+{"seq":2,"ts":150,"type":"run_resumed","from_node":"start"}
+"#,
+    );
+    write_run(dir.path(), "live-plain", RUNNING_EVENTS);
+
+    let runs = list_runs(dir.path()).unwrap();
+    let by_id = |id: &str| runs.iter().find(|r| r.run_id == id).expect("listed");
+    assert_eq!(by_id("live-paused").duration_ms, None);
+    assert_eq!(by_id("live-paused").paused_ms, Some(40));
+    assert_eq!(by_id("live-plain").paused_ms, None);
+}

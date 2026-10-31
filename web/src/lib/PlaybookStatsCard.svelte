@@ -61,8 +61,8 @@
           <span class="version-name">{v.version}</span>
           <span class="runs">{v.runs} {v.runs === 1 ? 'run' : 'runs'}</span>
         </div>
-        {#if v.note}<p class="muted">{v.note}</p>{/if}
-        <dl>
+        {#if v.note}<p class="muted prose-text">{v.note}</p>{/if}
+        <dl class="kv">
           <dt>succeeded</dt>
           <dd>{rateText(v.success)}</dd>
           <dt>first pass</dt>
@@ -115,7 +115,7 @@
         {#if v.goal.length}
           <ul class="goal" data-testid="playbook-stats-goal">
             {#each v.goal as g (g.index)}
-              <li>
+              <li class="prose-text">
                 <span class="muted">goal {g.index + 1}:</span>
                 {g.description}
                 <span class="muted">
@@ -142,7 +142,11 @@
     flex-direction: column;
     gap: 0.25rem;
     padding-bottom: 0.75rem;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--c-line);
+  }
+  .version:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
   }
   .version-head,
   .loading {
@@ -151,14 +155,14 @@
     gap: 0.5rem;
   }
   .version-name {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    color: var(--c-orange);
     font-size: 0.875rem;
     font-weight: 600;
   }
   .runs {
     padding: 0 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
+    border: 1px solid var(--c-line-2);
+    color: var(--c-fg-2);
     line-height: 1.25rem;
   }
   dl {
@@ -170,8 +174,11 @@
   .muted {
     color: var(--muted-foreground);
   }
+  dd {
+    overflow-wrap: anywhere;
+  }
   .error {
-    color: var(--destructive);
+    color: var(--c-red);
   }
   .executors {
     display: flex;

@@ -6,16 +6,27 @@
     createPlaybook,
     fetchPlaybook,
     fetchVersions,
+    fetchProfiles,
     fetchProjects,
     saveLayout,
+    type ProfileSummary,
     updatePlaybook,
   } from '../lib/api'
   import type { Project } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import DiffView from '../lib/DiffView.svelte'
-  import { toFlow, isUserArranged, type FlowEdge, type FlowNode } from '../lib/graph'
+  import {
+    toFlow,
+    isUserArranged,
+    profileModelMap,
+    withProfileModels,
+    type FlowEdge,
+    type FlowNode,
+  } from '../lib/graph'
+  import FitTop from '../lib/FitTop.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
+  import PlaybookEdge from '../lib/PlaybookEdge.svelte'
   import { takeDraftYaml } from '../lib/playbookdupe'
   import {
     addEdge,
@@ -34,6 +45,7 @@
   import type { PlaybookNode as PlaybookNodeType, WfLayout } from '../lib/types'
   import type { Document } from 'yaml'
   import Topbar from '$lib/components/Topbar.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import { Input } from '$lib/components/ui/input'
@@ -107,6 +119,8 @@
   let revision = $state(0)
 
   const nodeTypes = { playbookNode: PlaybookNode }
+  // Edges from `toFlow` and `onconnect` carry no type, so they take this one.
+  const edgeTypes = { default: PlaybookEdge }
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
   let layoutTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -116,6 +130,36 @@
       : null,
   )
   const canEditStruct = $derived(!parseError && !!lastValidModel)
+
+  // Each profile's model, shown on the cards (`profile · model`). Only for
+  // display, so a failed fetch just leaves the model off.
+  let profileList = $state.raw<ProfileSummary[]>([])
+  $effect(() => {
+    let cancelled = false
+    fetchProfiles()
+      .then((list) => {
+        if (!cancelled) profileList = list
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  })
+  const models = $derived(profileModelMap(profileList, isNew ? targetWorkspace : workspace))
+
+  // The bottom line: what is open, whether the yaml parses, how big it is.
+  const statusItems = $derived.by((): StatusItem[] => {
+    const name = isNew ? idInput.trim() || 'new playbook' : id
+    return [
+      { label: 'playbook', value: loadedVersion ? `${name}@${loadedVersion}` : name, tone: 'orange' },
+      parseError
+        ? { label: 'yaml', value: 'parse error', tone: 'warning', title: parseError }
+        : { label: 'yaml', value: 'ok', tone: 'success' },
+      { label: 'nodes', value: lastValidModel?.nodes.length ?? 0, tone: 'info' },
+      { label: 'edges', value: lastValidModel?.edges.length ?? 0, tone: 'info' },
+      { label: 'layout', value: isUserArranged(storedLayout) ? 'manual' : 'auto', tone: 'muted' },
+    ]
+  })
   const projectName = $derived(
     projects.find((p) => p.workspace_id === targetWorkspace)?.name ?? 'select a project',
   )
@@ -132,6 +176,13 @@
     loadFailed = false
     selectedNodeId = null
     selectedEdge = null
+    // Drop the previous route's graph: its positions must not seed the new
+    // layout, and the canvas must fit the new graph, not the old one (the
+    // FitTop key moves with the route before the new nodes arrive).
+    nodes = []
+    edges = []
+    // Rebuilt from the YAML below even when it reads the same as before.
+    debouncedYaml = ''
     if (isNew) {
       const draft = takeDraftYaml()
       yamlText = draft?.yaml ?? NEW_PLAYBOOK_TEMPLATE
@@ -216,11 +267,20 @@
             return { nodes: [...merged.values()] }
           })()
       const flow = toFlow(model, layoutInput)
-      nodes = flow.nodes
+      // Read untracked: a profile list or project change must not rebuild
+      // the graph (and drop a drag); the effect below applies the models.
+      nodes = withProfileModels(flow.nodes, untrack(() => models))
       edges = flow.edges
     } else if (error) {
       parseError = error
     }
+  })
+
+  // The profiles' models arrive (or the project changes) after the graph is
+  // drawn: fill them in place, positions untouched.
+  $effect(() => {
+    const m = models
+    untrack(() => (nodes = withProfileModels(nodes, m)))
   })
 
   function applyMutation(fn: (doc: Document) => Document): boolean {
@@ -318,7 +378,7 @@
   function onRelayout() {
     if (!lastValidModel) return
     const flow = toFlow(lastValidModel, null, undefined, undefined, true)
-    nodes = flow.nodes
+    nodes = withProfileModels(flow.nodes, models)
     edges = flow.edges
     if (isNew || !loadedVersion) return
     clearTimeout(layoutTimer)
@@ -368,7 +428,7 @@
 
 <Topbar active="playbooks">
   {#snippet title()}
-    <span class="truncate text-sm font-semibold">{isNew ? 'New playbook' : id}</span>
+    <span class="truncate text-sm font-semibold text-orange">{isNew ? 'New playbook' : id}</span>
     {#if isNew}
       <Select.Root type="single" bind:value={targetWorkspace}>
         <Select.Trigger class="h-8 w-40">{projectName}</Select.Trigger>
@@ -436,7 +496,7 @@
       <span class="max-sm:sr-only">yaml</span>
     </Button>
     {#if parseError}
-      <Badge variant="outline" class="text-warning" title={parseError}>parse error</Badge>
+      <Badge variant="outline" class="text-amber" title={parseError}>parse error</Badge>
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -447,11 +507,11 @@
   {/snippet}
 </Topbar>
 
-<div class="flex min-h-0 flex-1">
-  <div class="relative min-h-0 min-w-0 flex-1">
+<div class="flex min-h-0 flex-1 p-3 sm:p-4">
+  <div class="relative min-h-0 min-w-0 flex-1 border border-line">
     {#if parseError && lastValidModel}
       <div
-        class="absolute left-2 top-2 z-[5] max-w-[60%] rounded-md border border-warning bg-background px-2 py-1 text-xs text-warning"
+        class="absolute left-2 top-2 z-[5] max-w-[60%] border border-amber bg-background px-2 py-1 text-xs text-amber"
       >
         Showing last valid graph ({parseError})
       </div>
@@ -465,7 +525,7 @@
       <div class="absolute inset-0 z-10 flex flex-col bg-background p-3">
         <div class="mx-auto mb-2 flex w-full max-w-5xl items-center justify-between gap-2">
           <div class="flex min-w-0 items-center gap-2">
-            <strong class="truncate font-mono text-sm">{selectedNode.id}</strong>
+            <strong class="truncate text-sm">{selectedNode.id}</strong>
             <Badge variant="secondary" class="text-[10px]">{selectedNode.type}</Badge>
             <Button
               variant="ghost"
@@ -503,10 +563,10 @@
       </div>
     {:else if selectedEdge && !overlayOpen}
       <div
-        class="absolute right-2 top-2 z-[6] flex w-60 flex-col gap-2 rounded-md border border-border bg-background p-3 text-sm shadow-md"
+        class="box absolute right-2 top-4 z-[6] flex w-60 flex-col gap-2 px-3 pt-4 pb-3 text-sm"
       >
-        <strong>edge</strong>
-        <span class="font-mono text-xs">{selectedEdge.from} → {selectedEdge.to}</span>
+        <span class="box-cap">edge</span>
+        <span class="text-xs">{selectedEdge.from} → {selectedEdge.to}</span>
         <Button
           variant="outline"
           size="sm"
@@ -522,7 +582,7 @@
       <div class="absolute inset-0 z-10 flex flex-col bg-background p-3">
         <div class="mb-2 flex items-center justify-between gap-2">
           <div class="flex items-center gap-2">
-            <strong class="text-sm">yaml</strong>
+            <span class="hd">yaml</span>
             {#if parseError}
               <Badge variant="outline" class="text-warning" title={parseError}>parse error</Badge>
             {/if}
@@ -531,7 +591,7 @@
             <X />
           </Button>
         </div>
-        <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border">
+        <div class="flex min-h-0 flex-1 flex-col overflow-hidden border border-line">
           <CodeEditor value={yamlText} onChange={onYamlChange} />
         </div>
       </div>
@@ -540,7 +600,7 @@
     {#if showDiff && !isNew}
       <div class="absolute inset-0 z-10 flex flex-col bg-background p-3">
         <div class="mb-2 flex items-center justify-between">
-          <strong class="text-sm">diff</strong>
+          <span class="hd">diff</span>
           <Button variant="ghost" size="icon" class="size-7" onclick={() => (showDiff = false)}>
             <X />
           </Button>
@@ -553,7 +613,7 @@
       bind:nodes
       bind:edges
       {nodeTypes}
-      fitView
+      {edgeTypes}
       nodesDraggable={!overlayOpen}
       nodesConnectable={!overlayOpen && canEditStruct}
       elementsSelectable={!overlayOpen}
@@ -565,6 +625,9 @@
     >
       <Background />
       <Controls />
+      <FitTop {nodes} key={isNew ? 'new' : `${workspace}/${id}/${loadedVersion}`} />
     </SvelteFlow>
   </div>
 </div>
+
+<StatusBar items={statusItems} />

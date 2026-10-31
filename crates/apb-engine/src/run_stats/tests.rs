@@ -417,6 +417,30 @@ fn a_two_hour_pause_is_left_out_of_run_and_node_durations() {
     assert_eq!(work.over_expected.unwrap().text(), "0/1 (0%)");
 }
 
+/// A run that failed after 5 s, sat failed for a day, was resumed and
+/// succeeded 3 s later took 8 s: the idle day is not run time, the same as
+/// in the run listing and the retro.
+#[test]
+fn the_day_a_run_sat_failed_before_a_resume_is_left_out() {
+    use serde_json::json;
+    let day: u128 = 24 * 3_600_000;
+    let runs = vec![run(
+        "resumed",
+        "1.0.0",
+        Some(SNAPSHOT),
+        &[
+            (6_000, end("failed")),
+            (
+                6_000 + day,
+                json!({"type": "run_resumed", "from_node": "work"}),
+            ),
+            (9_000 + day, end("succeeded")),
+        ],
+    )];
+    let r = build(&runs, &StatsFilter::default());
+    assert_eq!(r.versions[0].duration.median_ms, Some(8_000));
+}
+
 fn notes(
     node: &str,
     attempt: u32,

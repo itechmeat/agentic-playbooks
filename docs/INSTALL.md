@@ -55,7 +55,7 @@ To pin a specific version instead of the latest release, replace
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playbooks/releases/download/vX.Y.Z/apb-installer.sh | sh
 ```
 
-Pre-releases (such as `v1.0.0-beta.1`) are never `latest` and are not
+Pre-releases (such as `v1.0.0-beta.2`) are never `latest` and are not
 published to Homebrew; install one with its tag in this URL.
 
 ## 2. Homebrew (macOS, Linux)

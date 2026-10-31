@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest'
-import { failureEffect, isUserArranged, nodeExits, toFlow } from './graph'
+import dagre from '@dagrejs/dagre'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  edgeTone,
+  expectedText,
+  failureEffect,
+  isUserArranged,
+  nodeExits,
+  profileModelMap,
+  toFlow,
+  withProfileModels,
+} from './graph'
 
 const playbook = {
   id: 'demo',
@@ -423,6 +433,71 @@ describe('toFlow fan-out ordering', () => {
     expect(x('a')).toBeLessThan(x('b'))
     expect(x('b')).toBeLessThan(x('c'))
   })
+
+  // Reduced from a real run whose page failed with dagre's "Not possible to
+  // find intersection inside of the rectangle": two nodes list the same two
+  // successors in opposite order, so the ordering constraints formed a cycle.
+  it('lays out two sources that order the same successors oppositely', () => {
+    const pb = {
+      id: 'opposite',
+      name: 'Opposite',
+      nodes: [
+        { id: 'a', type: 'agent_task', title: null },
+        { id: 'stop', type: 'finish', title: null },
+        { id: 'fix', type: 'agent_task', title: null },
+        { id: 'b', type: 'script', title: null },
+        { id: 'c', type: 'agent_task', title: null },
+        { id: 'done', type: 'finish', title: null },
+      ],
+      edges: [
+        { from: 'a', to: 'stop', condition: { type: 'node_status', node: 'a', equals: 'failure' } },
+        { from: 'a', to: 'fix', condition: { type: 'output_field', node: 'a', field: 'verdict', equals: 'defects' } },
+        { from: 'b', to: 'fix', condition: { type: 'node_status', node: 'b', equals: 'failure' } },
+        { from: 'b', to: 'stop', fallback: true },
+        { from: 'c', to: 'done', condition: { type: 'node_status', node: 'c', equals: 'success' } },
+      ],
+    } as Parameters<typeof toFlow>[0]
+    const { nodes } = toFlow(pb, null)
+    expect(nodes).toHaveLength(6)
+    for (const n of nodes) {
+      expect(Number.isFinite(n.position.x)).toBe(true)
+      expect(Number.isFinite(n.position.y)).toBe(true)
+    }
+    // The first declaration wins: `a` lists stop before fix.
+    const x = (id: string) => nodes.find((n) => n.id === id)!.position.x
+    expect(x('stop')).toBeLessThan(x('fix'))
+    // No two cards share a spot.
+    const spots = new Set(nodes.map((n) => `${n.position.x},${n.position.y}`))
+    expect(spots.size).toBe(nodes.length)
+  })
+
+  it('falls back to a grid when dagre throws on every attempt', () => {
+    const spy = vi.spyOn(dagre, 'layout').mockImplementation(() => {
+      throw new Error('layout failed')
+    })
+    try {
+      const { nodes } = toFlow(playbook as Parameters<typeof toFlow>[0], null)
+      expect(spy).toHaveBeenCalled()
+      for (const n of nodes) {
+        expect(Number.isFinite(n.position.x)).toBe(true)
+        expect(Number.isFinite(n.position.y)).toBe(true)
+      }
+      const spots = new Set(nodes.map((n) => `${n.position.x},${n.position.y}`))
+      expect(spots.size).toBe(nodes.length)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('still lays out an edge to a node that does not exist', () => {
+    const pb = {
+      ...playbook,
+      edges: [...playbook.edges, { from: 'a', to: 'ghost' }],
+    } as Parameters<typeof toFlow>[0]
+    const { nodes } = toFlow(pb, null)
+    expect(nodes).toHaveLength(3)
+    for (const n of nodes) expect(Number.isFinite(n.position.y)).toBe(true)
+  })
 })
 
 // A layout may be marked `userArranged: true` once the user has dragged nodes
@@ -468,5 +543,136 @@ describe('toFlow forceAuto', () => {
     const x = (id: string) => nodes.find((nd) => nd.id === id)!.position.x
     expect(x('a')).toBeLessThan(x('b'))
     expect(x('b')).toBeLessThan(x('c'))
+  })
+})
+
+describe('card and edge data', () => {
+  const pb = {
+    id: 'cards',
+    name: 'Cards',
+    defaults: { profile: { name: 'developer', scope: 'project' }, on_failure: 'route' },
+    nodes: [
+      { id: 'start', type: 'start' },
+      { id: 'work', type: 'agent_task', expected_duration: '30m' },
+      { id: 'review', type: 'agent_task', profile: { name: 'reviewer', scope: 'global' }, expected_duration: 5400 },
+      { id: 'child', type: 'playbook', playbook: { id: 'sub-flow', scope: 'auto' } },
+      { id: 'gate', type: 'judge' },
+      { id: 'done', type: 'finish' },
+    ],
+    edges: [
+      { from: 'start', to: 'work' },
+      { from: 'work', to: 'review', condition: { type: 'node_status', node: 'work', equals: 'success' } },
+      { from: 'review', to: 'child' },
+      { from: 'child', to: 'gate', condition: { type: 'node_status', node: 'child', equals: 'failure' } },
+      { from: 'gate', to: 'done', fallback: true },
+    ],
+  }
+
+  it('binds agent tasks to their own profile, else the playbook default', () => {
+    const { nodes } = toFlow(pb, null)
+    const data = (id: string) => nodes.find((n) => n.id === id)!.data
+    expect(data('work').profile).toBe('developer')
+    expect(data('review').profile).toBe('reviewer')
+    expect(data('start').profile).toBeUndefined()
+    expect(data('gate').profile).toBeUndefined()
+  })
+
+  it('carries the expected duration and the sub-playbook id', () => {
+    const { nodes } = toFlow(pb, null)
+    const data = (id: string) => nodes.find((n) => n.id === id)!.data
+    expect(data('work').expected).toBe('30m')
+    expect(data('review').expected).toBe('90m')
+    expect(data('child').subPlaybook).toBe('sub-flow')
+  })
+
+  it('gives every edge a tone', () => {
+    const { edges } = toFlow(pb, null)
+    expect(edges.map((e) => e.data.tone)).toEqual(['plain', 'cond', 'plain', 'fail', 'else'])
+  })
+
+  it('resolves models the way scope auto does and fills them in', () => {
+    const models = profileModelMap(
+      [
+        { name: 'developer', model: 'global-model', scope: 'global' },
+        { name: 'developer', model: 'project-model', scope: 'project', workspace_id: 'ws1' },
+        { name: 'reviewer', model: 'other-project', scope: 'project', workspace_id: 'ws2' },
+      ],
+      'ws1',
+    )
+    expect(models.get('developer')).toBe('project-model')
+    expect(models.has('reviewer')).toBe(false)
+    const nodes = withProfileModels(toFlow(pb, null).nodes, models)
+    expect(nodes.find((n) => n.id === 'work')!.data.model).toBe('project-model')
+    expect(nodes.find((n) => n.id === 'review')!.data.model).toBeUndefined()
+  })
+
+  it('binds an answering finish node to the default profile', () => {
+    const answering = {
+      ...pb,
+      nodes: [
+        { id: 'answer', type: 'finish', prompt: 'Sum it up' },
+        { id: 'blank', type: 'finish', prompt: '' },
+        { id: 'done', type: 'finish' },
+      ],
+      edges: [],
+    }
+    const { nodes } = toFlow(answering as never, null)
+    expect(nodes.find((n) => n.id === 'answer')!.data.profile).toBe('developer')
+    // The engine counts any prompt, blank too.
+    expect(nodes.find((n) => n.id === 'blank')!.data.profile).toBe('developer')
+    expect(nodes.find((n) => n.id === 'done')!.data.profile).toBeUndefined()
+  })
+
+  it('clears a model the profile no longer resolves to', () => {
+    const filled = withProfileModels(toFlow(pb, null).nodes, profileModelMap([{ name: 'developer', model: 'old-model', scope: 'project', workspace_id: 'ws1' }], 'ws1'))
+    expect(filled.find((n) => n.id === 'work')!.data.model).toBe('old-model')
+    const cleared = withProfileModels(filled, new Map())
+    expect(cleared.find((n) => n.id === 'work')!.data.model).toBeUndefined()
+  })
+
+  it('respects an explicit profile scope over the auto resolution', () => {
+    const scoped = {
+      ...pb,
+      nodes: [
+        { id: 'a', type: 'agent_task', profile: { name: 'developer', scope: 'global' } },
+        { id: 'b', type: 'agent_task', profile: 'project/developer' },
+        { id: 'c', type: 'agent_task', profile: 'developer' },
+      ],
+      edges: [],
+    }
+    const models = profileModelMap(
+      [
+        { name: 'developer', model: 'global-model', scope: 'global' },
+        { name: 'developer', model: 'project-model', scope: 'project', workspace_id: 'ws1' },
+      ],
+      'ws1',
+    )
+    const nodes = withProfileModels(toFlow(scoped as never, null).nodes, models)
+    const data = (id: string) => nodes.find((n) => n.id === id)!.data
+    expect(data('a')).toMatchObject({ profile: 'developer', profileScope: 'global', model: 'global-model' })
+    expect(data('b')).toMatchObject({ profileScope: 'project', model: 'project-model' })
+    expect(data('c').profileScope).toBeUndefined()
+    expect(data('c').model).toBe('project-model')
+  })
+})
+
+describe('expectedText', () => {
+  it('keeps text and formats seconds', () => {
+    expect(expectedText('4m')).toBe('4m')
+    expect(expectedText(7200)).toBe('2h')
+    expect(expectedText(45)).toBe('45s')
+    expect(expectedText(null)).toBeUndefined()
+    expect(expectedText(0)).toBeUndefined()
+  })
+})
+
+describe('edgeTone', () => {
+  it('reads fallback and failure first', () => {
+    expect(edgeTone({ from: 'a', to: 'b', fallback: true })).toBe('else')
+    expect(
+      edgeTone({ from: 'a', to: 'b', condition: { type: 'node_status', node: 'x', equals: 'failure' } }),
+    ).toBe('fail')
+    expect(edgeTone({ from: 'a', to: 'b', condition: { type: 'output_match', pattern: 'p' } })).toBe('cond')
+    expect(edgeTone({ from: 'a', to: 'b' })).toBe('plain')
   })
 })

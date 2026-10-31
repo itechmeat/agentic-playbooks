@@ -1242,6 +1242,54 @@ async fn lists_runs_filters_by_workspace() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// A finished run journal started at `ts`, written straight to disk.
+fn seed_run_started_at(root: &std::path::Path, run_id: &str, ts: u128) {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        format!(
+            "{{\"seq\":0,\"ts\":{ts},\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n\
+             {{\"seq\":1,\"ts\":{},\"type\":\"run_finished\",\"outcome\":\"succeeded\"}}\n",
+            ts + 1
+        ),
+    )
+    .unwrap();
+}
+
+/// The aggregate listing is one newest-first order across projects, not
+/// each project's runs in a block: project a's oldest and newest runs
+/// bracket project b's run whatever order the projects are read in.
+#[tokio::test]
+async fn lists_runs_newest_first_across_projects() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = set_var("APB_CONFIG_DIR", cfg.path());
+    let _ci = unset_var("CI");
+    let _noreg = unset_var("APB_NO_REGISTRY");
+
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(a.path()).unwrap();
+    apb_core::registry::init_project(b.path()).unwrap();
+    seed_run_started_at(a.path(), "a-old", 100);
+    seed_run_started_at(a.path(), "a-new", 300);
+    seed_run_started_at(b.path(), "b-mid", 200);
+    register_workspace(a.path());
+    register_workspace(b.path());
+
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, "/api/runs").await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["a-new", "b-mid", "a-old"], "listing: {json}");
+}
+
 /// A run dir with one open attempt and the given attempt/driver pids. The pure
 /// fold calls that shape `interrupted`; what it really is depends on whether
 /// those processes are alive, which is precisely what the detail endpoint had

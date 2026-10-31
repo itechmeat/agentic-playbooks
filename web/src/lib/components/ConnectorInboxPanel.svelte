@@ -9,11 +9,9 @@
   } from '../connectorinbox'
   import { Badge } from '$lib/components/ui/badge'
   import { Button } from '$lib/components/ui/button'
-  import * as Card from '$lib/components/ui/card'
   import * as Table from '$lib/components/ui/table'
   import * as Alert from '$lib/components/ui/alert'
   import { Skeleton } from '$lib/components/ui/skeleton'
-  import Inbox from '@lucide/svelte/icons/inbox'
   import Copy from '@lucide/svelte/icons/copy'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
   import { untrack } from 'svelte'
@@ -85,36 +83,36 @@
       toast.error('Could not copy the callback URL', { description: String(e) })
     }
   }
+
+  // Column captions of the tables in this view (terminal look).
+  const TH = 'h-8 text-[11px] font-normal tracking-[0.08em] text-muted-foreground uppercase'
 </script>
 
 {#if panelState !== 'hidden'}
-  <Card.Root>
-    <Card.Header>
-      <div class="flex items-center gap-2">
-        <Inbox class="size-4 text-muted-foreground" />
-        <Card.Title class="text-sm">Inbox</Card.Title>
-      </div>
-      <Card.Description>
+  <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+    <div class="flex flex-col gap-1">
+      <h2 class="box-cap">Inbox</h2>
+      <p class="prose-text text-xs text-muted-foreground">
         Events delivered to this machine for {name}. Read only: the dashboard never acknowledges
         anything, so a playbook's cursor is untouched by looking here.
-      </Card.Description>
-    </Card.Header>
-    <Card.Content>
+      </p>
+    </div>
+    <div>
       {#if panelState === 'loading'}
         <Skeleton class="h-16 w-full" />
       {:else if panelState === 'error'}
-        <p class="text-sm text-muted-foreground">
+        <p class="prose-text text-xs text-muted-foreground">
           The inbox could not be read, so this connector's pending depth is unknown here.
         </p>
       {:else if panelState === 'empty'}
-        <p class="text-sm text-muted-foreground">
+        <p class="prose-text text-xs text-muted-foreground">
           Nothing has been delivered yet. An account inbox appears here after its first accepted
           delivery.
         </p>
       {:else if inbox}
         <div class="flex flex-col gap-3">
           {#if !inbox.publicBaseUrlSet}
-            <p class="text-sm text-muted-foreground">
+            <p class="prose-text text-xs text-muted-foreground">
               Set ingest.public_base_url in the global config to see the exact callback URL to
               register with the provider.
             </p>
@@ -122,13 +120,13 @@
           <Table.Root>
             <Table.Header>
               <Table.Row>
-                <Table.Head>Account</Table.Head>
-                <Table.Head>Pending</Table.Head>
-                <Table.Head>Dropped</Table.Head>
-                <Table.Head>Stored</Table.Head>
-                <Table.Head>Last received</Table.Head>
-                <Table.Head>Callback URL</Table.Head>
-                <Table.Head>Events</Table.Head>
+                <Table.Head class={TH}>Account</Table.Head>
+                <Table.Head class={TH}>Pending</Table.Head>
+                <Table.Head class={TH}>Dropped</Table.Head>
+                <Table.Head class={TH}>Stored</Table.Head>
+                <Table.Head class={TH}>Last received</Table.Head>
+                <Table.Head class={TH}>Callback URL</Table.Head>
+                <Table.Head class={TH}>Events</Table.Head>
               </Table.Row>
             </Table.Header>
             <Table.Body>
@@ -181,20 +179,20 @@
 
           {#if eventsAccount}
             <div class="flex flex-col gap-2">
-              <Alert.Root class="border-warning/40 bg-warning/10 text-warning-foreground">
-                <TriangleAlert class="text-warning" />
+              <Alert.Root class="border-amber/50 text-amber">
+                <TriangleAlert />
                 <Alert.Title>Untrusted content</Alert.Title>
                 <Alert.Description>{UNTRUSTED_NOTICE}</Alert.Description>
               </Alert.Root>
               {#if events.length === 0}
-                <p class="text-sm text-muted-foreground">
+                <p class="prose-text text-xs text-muted-foreground">
                   No unread events for {eventsAccount}. Anything a playbook has already acknowledged
                   is not listed here.
                 </p>
               {:else}
                 <ul class="flex flex-col gap-1">
                   {#each events as e (e.seq)}
-                    <li class="flex flex-col gap-0.5 border-t pt-1">
+                    <li class="flex flex-col gap-0.5 border-t border-line pt-1">
                       <div class="flex items-center gap-2">
                         <span class="font-mono text-xs text-muted-foreground">
                           #{e.seq} {formatReceived(e.receivedAt)}
@@ -208,11 +206,9 @@
                              list: the notice at the top scrolls away by event
                              #18, and an operator must not be able to mistake
                              what a stranger wrote for something apb produced. -->
-                        <div
-                          class="flex flex-col gap-1 rounded-md border border-warning/40 bg-warning/5 p-2"
-                        >
+                        <div class="stranger-text flex flex-col gap-1 border p-2">
                           <span
-                            class="flex items-center gap-1 text-xs font-medium tracking-wide text-warning uppercase"
+                            class="flex items-center gap-1 text-xs font-medium tracking-wide text-amber uppercase"
                           >
                             <TriangleAlert class="size-3" />
                             Untrusted content, sender authored
@@ -230,6 +226,14 @@
           {/if}
         </div>
       {/if}
-    </Card.Content>
-  </Card.Root>
+    </div>
+  </section>
 {/if}
+
+<style>
+  /* Text a stranger wrote: an amber tint unlike apb's own output. */
+  .stranger-text {
+    border-color: color-mix(in oklab, var(--c-amber) 50%, transparent);
+    background: color-mix(in oklab, var(--c-amber) 6%, var(--c-bg));
+  }
+</style>

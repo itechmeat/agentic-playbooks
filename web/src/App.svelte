@@ -187,5 +187,5 @@
      <style> element: this is a client-rendered page, so the head script
      (an SSR flash guard) is not needed, and the transition-disabling <style>
      mode-watcher would inject on a theme change is turned off. -->
-<ModeWatcher disableTransitions={false} disableHeadScriptInjection />
+<ModeWatcher defaultMode="dark" disableTransitions={false} disableHeadScriptInjection />
 <Toaster richColors closeButton position="bottom-right" />

@@ -4,9 +4,10 @@
   import type { TrustEntry, TrustKind } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import PageHead from '$lib/components/PageHead.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
+  import { profileColor } from '../lib/profilecolor'
   import { Button } from '$lib/components/ui/button'
-  import { Badge } from '$lib/components/ui/badge'
-  import * as Card from '$lib/components/ui/card'
   import * as Empty from '$lib/components/ui/empty'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { Skeleton } from '$lib/components/ui/skeleton'
@@ -56,6 +57,24 @@
     repository_provided: 'from the repository',
   }
 
+  // Outlined tag colors per origin: shipped and own approvals read as
+  // settled, an agent's or a repository's as worth a second look.
+  const ORIGIN_TONE: Record<TrustEntry['origin_kind'], string> = {
+    bundled: 'text-muted-foreground',
+    agent_generated: 'text-amber',
+    locally_approved: 'text-green',
+    repository_provided: 'text-blue',
+  }
+
+  const statusItems = $derived.by((): StatusItem[] => [
+    { label: 'approved', value: items.length, tone: 'success' },
+    ...SECTIONS.map((s) => ({
+      label: s.title.toLowerCase(),
+      value: items.filter((e) => e.kind === s.kind).length,
+      tone: 'muted' as const,
+    })),
+  ])
+
   async function load() {
     try {
       items = await fetchTrust()
@@ -96,15 +115,18 @@
   const shortDigest = (d: string) => d.replace(/^sha256:/, '').slice(0, 12)
 </script>
 
-<Topbar active="trust">
-  {#snippet title()}
-    <span class="truncate text-sm font-semibold">Approvals</span>
-  {/snippet}
-</Topbar>
+<Topbar active="trust" />
 
 <PageScroll>
-  <div class="mx-auto w-full max-w-4xl px-4 py-6">
-    <p class="mb-6 text-sm text-muted-foreground">
+  <div class="mx-auto w-full max-w-5xl px-4 py-5 sm:px-5">
+    <PageHead title="Approvals" class="mb-2">
+      {#snippet meta()}
+        {#if loaded}
+          <span class="text-muted-foreground">{items.length} approved</span>
+        {/if}
+      {/snippet}
+    </PageHead>
+    <p class="prose-text mb-7 text-xs text-muted-foreground">
       Everything approved in this machine's trust store. Revoking an approval means that content
       needs a new approval, or a confirmation, before an agent can run it.
     </p>
@@ -113,55 +135,59 @@
         {#each Array(3) as _, i (i)}<Skeleton class="h-16 w-full" />{/each}
       </div>
     {:else if items.length === 0}
-      <Empty.Root class="border border-dashed">
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon"><ShieldCheck /></Empty.Media>
-          <Empty.Title>Nothing is approved</Empty.Title>
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground">
+            <ShieldCheck />
+          </Empty.Media>
+          <Empty.Title class="text-sm font-semibold">Nothing is approved</Empty.Title>
           <Empty.Description>
             Approvals appear here as you save playbooks and profiles, or approve connectors.
           </Empty.Description>
         </Empty.Header>
       </Empty.Root>
     {:else}
-      {#each sections as s (s.kind)}
-        <section class="mb-8">
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {s.title}
-          </h2>
-          <p class="mb-3 text-xs text-muted-foreground">{s.hint}</p>
-          <div class="flex flex-col gap-2">
-            {#each s.items as e (e.digest)}
-              <Card.Root class="py-3">
-                <Card.Header class="px-4">
-                  <div class="flex min-w-0 flex-wrap items-center gap-2">
-                    <Card.Title class="truncate font-mono text-sm">{e.id}</Card.Title>
-                    <Badge variant="outline">{ORIGIN_LABEL[e.origin_kind]}</Badge>
-                  </div>
-                  <Card.Description class="text-xs">
-                    Approved {fmtTime(e.approved_at_ms)} ·
-                    <span class="font-mono" title={e.digest}>{shortDigest(e.digest)}</span>
-                  </Card.Description>
-                  <Card.Action>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      class="max-sm:px-2"
-                      onclick={() => ask(e)}
-                      disabled={revoking === e.digest}
-                    >
-                      <ShieldOff data-icon="inline-start" />
-                      <span class="max-sm:sr-only">Revoke</span>
-                    </Button>
-                  </Card.Action>
-                </Card.Header>
-              </Card.Root>
-            {/each}
-          </div>
-        </section>
-      {/each}
+      <div class="flex flex-col gap-7">
+        {#each sections as s (s.kind)}
+          <section class="box px-4 pt-4 pb-2">
+            <h2 class="box-cap">{s.title} · {s.items.length}</h2>
+            <p class="prose-text mb-2 text-xs text-muted-foreground">{s.hint}</p>
+            <ul class="divide-y divide-line">
+              {#each s.items as e (e.digest)}
+                <li class="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
+                  <span class="min-w-0 flex-1 truncate font-medium" title={e.id}>
+                    {#if s.kind === 'profile_bundle'}
+                      <span class="legend-sq" style:--k={profileColor(e.id)}>{e.id}</span>
+                    {:else}
+                      {e.id}
+                    {/if}
+                  </span>
+                  <span class="sm:w-40 sm:text-right">
+                    <span class="tag {ORIGIN_TONE[e.origin_kind]}">{ORIGIN_LABEL[e.origin_kind]}</span>
+                  </span>
+                  <span class="text-xs text-muted-foreground tabular-nums sm:w-44" title="Approved">{fmtTime(e.approved_at_ms)}</span>
+                  <span class="w-28 text-xs text-muted-foreground" title={e.digest}>{shortDigest(e.digest)}</span>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    class="max-sm:px-2"
+                    onclick={() => ask(e)}
+                    disabled={revoking === e.digest}
+                  >
+                    <ShieldOff data-icon="inline-start" />
+                    <span class="max-sm:sr-only">Revoke</span>
+                  </Button>
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/each}
+      </div>
     {/if}
   </div>
 </PageScroll>
+
+<StatusBar items={statusItems} />
 
 <AlertDialog.Root bind:open={confirmOpen}>
   <AlertDialog.Content>

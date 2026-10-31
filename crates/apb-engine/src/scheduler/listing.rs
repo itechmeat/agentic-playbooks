@@ -10,6 +10,19 @@ pub struct RunSummary {
     pub playbook: String,
     pub status: String,
     pub started_ts: u128,
+    /// Active milliseconds from `run_started` to the run's end (`run_finished`
+    /// or `run_aborted`), paused time left out: the same duration `apb stats`
+    /// counts. Absent while the run has not ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub duration_ms: Option<u128>,
+    /// Milliseconds a run that has not ended was inactive so far (paused,
+    /// or ended before a resume brought it back), so a listing can count its
+    /// active time up from `started_ts` without them. Absent once the run
+    /// ended (see `duration_ms`) and for a run that was never inactive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub paused_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub progress: Option<crate::progress::ProgressSummary>,
@@ -51,6 +64,23 @@ pub struct RunSummary {
     pub needs_look: Option<crate::run_outcome::NeedsLook>,
 }
 
+/// Active time from the start to the last `run_finished` / `run_aborted`, or
+/// `None` for a run that has not ended (or never recorded its start). A
+/// `run_resumed` after the end makes the run live again, as in
+/// `run_retro::run_end`, so it has no duration until it ends once more, and
+/// the span it sat ended before that resume is not run time either.
+fn run_duration_ms(events: &[crate::event::Event], started_ts: u128) -> Option<u128> {
+    if started_ts == 0 {
+        return None;
+    }
+    let end = events.iter().rev().find_map(|e| match e.payload {
+        EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => Some(Some(e.ts)),
+        EventPayload::RunResumed { .. } => Some(None),
+        _ => None,
+    })??;
+    Some(crate::pause::active_run_ms(events, started_ts, end, end))
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -58,6 +88,8 @@ fn is_zero(n: &usize) -> bool {
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
     let runs_dir = root.join(".apb/runs");
     let mut out = Vec::new();
+    // One reference time for the whole listing.
+    let now = apb_core::clock::now_ms();
     if !runs_dir.is_dir() {
         return Ok(out);
     }
@@ -86,6 +118,18 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
                 _ => None,
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
+        let duration_ms = run_duration_ms(&view.events, started_ts);
+        let paused_ms = if duration_ms.is_none() && started_ts > 0 {
+            Some(crate::pause::inactive_ms_between(
+                &view.events,
+                started_ts,
+                now,
+                now,
+            ))
+            .filter(|ms| *ms > 0)
+        } else {
+            None
+        };
         let cfg = crate::run_config::read_run_config(&entry.path()).ok();
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
@@ -104,6 +148,8 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             playbook,
             status,
             started_ts,
+            duration_ms,
+            paused_ms,
             progress,
             parent_run,
             continued_from,

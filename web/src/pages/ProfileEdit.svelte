@@ -27,6 +27,9 @@
   import Trash2 from '@lucide/svelte/icons/trash-2'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import PageHead from '$lib/components/PageHead.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
+  import { profileColor } from '../lib/profilecolor'
   import Combobox from '$lib/components/Combobox.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -252,6 +255,19 @@
     }
   })
 
+  const statusItems = $derived.by((): StatusItem[] => [
+    { label: 'profile', value: nameInput.trim() || 'new', tone: 'violet' },
+    { label: 'scope', value: scopeInput, tone: 'default' },
+    {
+      label: 'executor',
+      value: groups[0]?.agent ? `${groups[0].agent} · ${groups[0].model || '?'}` : '-',
+      tone: 'info',
+    },
+    { label: 'fallbacks', value: groups.length - 1, tone: 'muted' },
+    { label: 'skills', value: skills.length, tone: 'muted' },
+    { label: 'soul', value: `${soul.length} chars`, tone: 'muted' },
+  ])
+
   async function save() {
     const nm = nameInput.trim()
     if (!nm) return toast.error('Name is required')
@@ -323,214 +339,250 @@
 </Topbar>
 
 <PageScroll>
-  <div class="mx-auto w-full max-w-2xl px-4 py-6">
-    <Field.FieldGroup>
-      <Field.Field>
-        <Field.FieldLabel for="pf-name">Name</Field.FieldLabel>
-        <Field.FieldDescription>Lowercase, digits and hyphens. Immutable after creation.</Field.FieldDescription>
-        <Input id="pf-name" bind:value={nameInput} placeholder="profile-name" disabled={!isNew} />
-      </Field.Field>
-
-      <Field.Field>
-        <Field.FieldLabel for="pf-desc">Description</Field.FieldLabel>
-        <Field.FieldDescription>
-          Short summary shown in the profile list. {description.length}/{DESC_MAX}
-        </Field.FieldDescription>
-        <Textarea
-          id="pf-desc"
-          bind:value={description}
-          rows={2}
-          maxlength={DESC_MAX}
-          class="resize-none"
-        />
-      </Field.Field>
-
-      <Field.Field>
-        <Field.FieldLabel for="pf-soul">SOUL (role prompt)</Field.FieldLabel>
-        <Field.FieldDescription>The main field: the role/system prompt for this profile.</Field.FieldDescription>
-        <Textarea
-          id="pf-soul"
-          bind:value={soul}
-          rows={12}
-          class="font-mono text-sm"
-          placeholder="The system prompt that defines this executor's role."
-        />
-      </Field.Field>
-
-      <Field.Field>
-        <Field.FieldLabel>Scope</Field.FieldLabel>
-        <RadioGroup.Root bind:value={scopeInput} class="flex flex-row gap-6" disabled={!isNew}>
-          <div class="flex items-center gap-2">
-            <RadioGroup.Item value="project" id="scope-project" />
-            <Label for="scope-project" class="font-normal">project</Label>
-          </div>
-          <div class="flex items-center gap-2">
-            <RadioGroup.Item value="global" id="scope-global" />
-            <Label for="scope-global" class="font-normal">global</Label>
-          </div>
-        </RadioGroup.Root>
-      </Field.Field>
-
-      {#if scopeInput === 'project'}
+  <div class="mx-auto flex w-full max-w-3xl flex-col gap-7 px-4 py-6 sm:px-5">
+    <PageHead title={isNew ? 'New profile' : 'Profile'} class="mb-0">
+      {#snippet meta()}
+        {#if nameInput.trim()}
+          <span class="legend-sq text-foreground" style:--k={profileColor(nameInput.trim())}>{nameInput.trim()}</span>
+        {/if}
+        <span>{scopeInput}{#if scopeInput === 'project' && workspaceInput}{` · ${projectName}`}{/if}</span>
+      {/snippet}
+    </PageHead>
+    <section class="box px-4 pt-5 pb-4">
+      <h2 class="box-cap">Identity</h2>
+      <Field.FieldGroup class="gap-5">
         <Field.Field>
-          <Field.FieldLabel>Project</Field.FieldLabel>
-          <Select.Root type="single" bind:value={workspaceInput} disabled={!isNew}>
-            <Select.Trigger class="w-full">{projectName}</Select.Trigger>
-            <Select.Content>
-              <Select.Group>
-                {#each projects as p (p.workspace_id)}
-                  <Select.Item value={p.workspace_id} label={p.name}>{p.name}</Select.Item>
-                {/each}
-              </Select.Group>
-            </Select.Content>
-          </Select.Root>
+          <Field.FieldLabel for="pf-name" class="text-xs">Name</Field.FieldLabel>
+          <Field.FieldDescription class="prose-text text-xs">Lowercase, digits and hyphens. Immutable after creation.</Field.FieldDescription>
+          <Input id="pf-name" bind:value={nameInput} placeholder="profile-name" disabled={!isNew} />
         </Field.Field>
-      {/if}
 
-      <Field.FieldSet>
-        <Field.FieldLegend variant="label">Executor</Field.FieldLegend>
-        <Field.FieldDescription>
-          The primary agent and model, then the fallbacks tried in order when a step fails. Every
-          entry keeps this profile's SOUL and skills, only the executor changes.
-        </Field.FieldDescription>
-        <Field.FieldGroup>
-          {#each groups as _g, i}
-            <Field.Field>
-              <div class="rounded-md border border-border bg-muted/30 p-3">
-                <Field.FieldGroup class="grid gap-3 sm:grid-cols-2">
-                  <Field.Field>
-                    <!-- The group identity lives in the agent label (there is no
-                         separate group caption); the matching min-h keeps the two
-                         columns aligned whether or not a Remove button is shown. -->
-                    <div class="flex min-h-8 items-center gap-2">
-                      <Field.FieldLabel for={`pf-agent-${i}`}>
-                        {i === 0 ? 'Primary Agent' : `Fallback Agent ${i}`}
-                      </Field.FieldLabel>
-                      {#if i > 0}
-                        <!-- Below sm the fields stack, so the Remove button moves up to
-                             this row (top-right of the group); from sm up the model-row
-                             instance below takes over. sm:hidden / hidden sm:inline-flex
-                             keep exactly one of the pair visible at any width. -->
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          class="ml-auto max-sm:px-2 text-muted-foreground hover:text-destructive sm:hidden"
-                          onclick={() => removeFallback(i)}
-                        >
-                          <Trash2 data-icon="inline-start" />
-                          <span class="max-sm:sr-only">Remove</span>
-                        </Button>
-                      {/if}
-                    </div>
-                    <Combobox
-                      id={`pf-agent-${i}`}
-                      bind:value={groups[i].agent}
-                      options={agentOptions}
-                      onChange={(v) => onAgentChange(i, v)}
-                      placeholder="Select an agent"
-                      emptyText="No installed agents"
-                    />
-                  </Field.Field>
-                  <Field.Field>
-                    <div class="flex min-h-8 items-center gap-2">
-                      <Field.FieldLabel for={`pf-model-${i}`}>Model</Field.FieldLabel>
-                      {#if i > 0}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          class="ml-auto max-sm:px-2 text-muted-foreground hover:text-destructive hidden sm:inline-flex"
-                          onclick={() => removeFallback(i)}
-                        >
-                          <Trash2 data-icon="inline-start" />
-                          <span class="max-sm:sr-only">Remove</span>
-                        </Button>
-                      {/if}
-                    </div>
-                    <Combobox
-                      id={`pf-model-${i}`}
-                      bind:value={groups[i].model}
-                      options={modelOptionsFor(i)}
-                      disabledValues={disabledModelIds(i, groups)}
-                      placeholder="Select a model"
-                      emptyText="No models for this agent"
-                    />
-                  </Field.Field>
-                </Field.FieldGroup>
-              </div>
-            </Field.Field>
-          {/each}
-        </Field.FieldGroup>
-        <!-- Disabled until the agent detection call lands: before that
-             `nextFallbackPair` can only fail, which used to surface as a bogus
-             "nothing left to add" toast. -->
-        <Button
-          variant="outline"
-          size="sm"
-          class="self-start"
-          onclick={addFallback}
-          disabled={!metaLoaded}
-        >
-          {#if metaLoaded}
-            <Plus data-icon="inline-start" />
-            Add fallback
-          {:else}
-            <Spinner data-icon="inline-start" />
-            Loading agents...
-          {/if}
-        </Button>
-      </Field.FieldSet>
+        <Field.Field>
+          <Field.FieldLabel for="pf-desc" class="text-xs">Description</Field.FieldLabel>
+          <Field.FieldDescription class="prose-text text-xs">
+            Short summary shown in the profile list. {description.length}/{DESC_MAX}
+          </Field.FieldDescription>
+          <Textarea
+            id="pf-desc"
+            bind:value={description}
+            rows={2}
+            maxlength={DESC_MAX}
+            class="prose-text resize-none"
+          />
+        </Field.Field>
+      </Field.FieldGroup>
+    </section>
 
-      {#if tiers.length}
+    <section class="box px-4 pt-5 pb-4">
+      <h2 class="box-cap">Role prompt</h2>
+      <Field.FieldGroup class="gap-5">
+        <Field.Field>
+          <Field.FieldLabel for="pf-soul" class="text-xs">SOUL (role prompt)</Field.FieldLabel>
+          <Field.FieldDescription class="prose-text text-xs">The main field: the role/system prompt for this profile.</Field.FieldDescription>
+          <Textarea
+            id="pf-soul"
+            bind:value={soul}
+            rows={12}
+            class="prose-text text-sm leading-relaxed"
+            placeholder="The system prompt that defines this executor's role."
+          />
+        </Field.Field>
+      </Field.FieldGroup>
+    </section>
+
+    <section class="box px-4 pt-5 pb-4">
+      <h2 class="box-cap">Placement</h2>
+      <Field.FieldGroup class="gap-5">
+        <Field.Field>
+          <Field.FieldLabel class="text-xs">Scope</Field.FieldLabel>
+          <RadioGroup.Root bind:value={scopeInput} class="flex flex-row gap-6" disabled={!isNew}>
+            <div class="flex items-center gap-2">
+              <RadioGroup.Item value="project" id="scope-project" />
+              <Label for="scope-project" class="font-normal">project</Label>
+            </div>
+            <div class="flex items-center gap-2">
+              <RadioGroup.Item value="global" id="scope-global" />
+              <Label for="scope-global" class="font-normal">global</Label>
+            </div>
+          </RadioGroup.Root>
+        </Field.Field>
+
+        {#if scopeInput === 'project'}
+          <Field.Field>
+            <Field.FieldLabel class="text-xs">Project</Field.FieldLabel>
+            <Select.Root type="single" bind:value={workspaceInput} disabled={!isNew}>
+              <Select.Trigger class="w-full">{projectName}</Select.Trigger>
+              <Select.Content>
+                <Select.Group>
+                  {#each projects as p (p.workspace_id)}
+                    <Select.Item value={p.workspace_id} label={p.name}>{p.name}</Select.Item>
+                  {/each}
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+          </Field.Field>
+        {/if}
+      </Field.FieldGroup>
+    </section>
+
+    <section class="box px-4 pt-5 pb-4">
+      <h2 class="box-cap">Executor</h2>
+      <Field.FieldGroup class="gap-5">
+        <Field.FieldSet>
+          <Field.FieldLegend variant="label" class="sr-only">Executor</Field.FieldLegend>
+          <Field.FieldDescription class="prose-text text-xs">
+            The primary agent and model, then the fallbacks tried in order when a step fails. Every
+            entry keeps this profile's SOUL and skills, only the executor changes.
+          </Field.FieldDescription>
+          <Field.FieldGroup>
+            {#each groups as _g, i}
+              <Field.Field>
+                <div class="border border-line bg-panel-2 p-3">
+                  <Field.FieldGroup class="grid gap-3 sm:grid-cols-2">
+                    <Field.Field>
+                      <!-- The group identity lives in the agent label (there is no
+                           separate group caption); the matching min-h keeps the two
+                           columns aligned whether or not a Remove button is shown. -->
+                      <div class="flex min-h-8 items-center gap-2">
+                        <Field.FieldLabel for={`pf-agent-${i}`} class="text-xs">
+                          {i === 0 ? 'Primary Agent' : `Fallback Agent ${i}`}
+                        </Field.FieldLabel>
+                        {#if i > 0}
+                          <!-- Below sm the fields stack, so the Remove button moves up to
+                               this row (top-right of the group); from sm up the model-row
+                               instance below takes over. sm:hidden / hidden sm:inline-flex
+                               keep exactly one of the pair visible at any width. -->
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            class="ml-auto max-sm:px-2 text-muted-foreground hover:text-destructive sm:hidden"
+                            onclick={() => removeFallback(i)}
+                          >
+                            <Trash2 data-icon="inline-start" />
+                            <span class="max-sm:sr-only">Remove</span>
+                          </Button>
+                        {/if}
+                      </div>
+                      <Combobox
+                        id={`pf-agent-${i}`}
+                        bind:value={groups[i].agent}
+                        options={agentOptions}
+                        onChange={(v) => onAgentChange(i, v)}
+                        placeholder="Select an agent"
+                        emptyText="No installed agents"
+                      />
+                    </Field.Field>
+                    <Field.Field>
+                      <div class="flex min-h-8 items-center gap-2">
+                        <Field.FieldLabel for={`pf-model-${i}`} class="text-xs">Model</Field.FieldLabel>
+                        {#if i > 0}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            class="ml-auto max-sm:px-2 text-muted-foreground hover:text-destructive hidden sm:inline-flex"
+                            onclick={() => removeFallback(i)}
+                          >
+                            <Trash2 data-icon="inline-start" />
+                            <span class="max-sm:sr-only">Remove</span>
+                          </Button>
+                        {/if}
+                      </div>
+                      <Combobox
+                        id={`pf-model-${i}`}
+                        bind:value={groups[i].model}
+                        options={modelOptionsFor(i)}
+                        disabledValues={disabledModelIds(i, groups)}
+                        placeholder="Select a model"
+                        emptyText="No models for this agent"
+                      />
+                    </Field.Field>
+                  </Field.FieldGroup>
+                </div>
+              </Field.Field>
+            {/each}
+          </Field.FieldGroup>
+          <!-- Disabled until the agent detection call lands: before that
+               `nextFallbackPair` can only fail, which used to surface as a bogus
+               "nothing left to add" toast. -->
+          <Button
+            variant="outline"
+            size="sm"
+            class="self-start"
+            onclick={addFallback}
+            disabled={!metaLoaded}
+          >
+            {#if metaLoaded}
+              <Plus data-icon="inline-start" />
+              Add fallback
+            {:else}
+              <Spinner data-icon="inline-start" />
+              Loading agents...
+            {/if}
+          </Button>
+        </Field.FieldSet>
+      </Field.FieldGroup>
+    </section>
+
+    {#if tiers.length}
+      <section class="box px-4 pt-5 pb-4">
+        <h2 class="box-cap">Executor tiers</h2>
         <Field.FieldSet data-testid="profile-tiers">
-          <Field.FieldLegend variant="label">Executor tiers</Field.FieldLegend>
-          <Field.FieldDescription>
+          <Field.FieldLegend variant="label" class="sr-only">Executor tiers</Field.FieldLegend>
+          <Field.FieldDescription class="prose-text text-xs">
             Declared in profile.yaml for tier routing (nodes with <code>route: auto</code>), lightest
             first. Read-only here; saving keeps them.
           </Field.FieldDescription>
           <ul class="flex flex-col gap-1 text-sm">
             {#each tiers as t (t.name)}
-              <li class="rounded-md border border-border bg-muted/30 px-3 py-2">
+              <li class="border border-line bg-panel-2 px-3 py-2">
                 <span class="font-mono">{t.name}</span>: {t.executor}
                 {#if t.for}<span class="block text-xs text-muted-foreground">{t.for}</span>{/if}
               </li>
             {/each}
           </ul>
         </Field.FieldSet>
-      {/if}
+      </section>
+    {/if}
 
-      <Field.Field>
-        <Field.FieldLabel>Skills</Field.FieldLabel>
-        <Field.FieldDescription>Toggle the skills this profile grants.</Field.FieldDescription>
-        <div class="rounded-md border border-border">
-          {#if skillRows.length === 0}
-            <p class="px-3 py-6 text-center text-sm text-muted-foreground">
-              No skills available in this scope.
-            </p>
-          {:else}
-            <ul class="divide-y divide-border">
-              {#each skillRows as s (s.name)}
-                <li class="flex items-center gap-3 px-3 py-2">
-                  <Switch
-                    id={`skill-${s.name}`}
-                    checked={hasSkill(s.name)}
-                    onCheckedChange={() => toggleSkill(s.name)}
-                  />
-                  <Label for={`skill-${s.name}`} class="flex-1 cursor-pointer font-normal">
-                    {s.name}
-                  </Label>
-                  <span
-                    class="text-xs {s.scope === 'missing'
-                      ? 'text-warning'
-                      : 'text-muted-foreground'}"
-                  >
-                    {s.scope}
-                  </span>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      </Field.Field>
-    </Field.FieldGroup>
+    <section class="box px-4 pt-5 pb-4">
+      <h2 class="box-cap">Skills</h2>
+      <Field.FieldGroup class="gap-5">
+        <Field.Field>
+          <Field.FieldLabel class="sr-only">Skills</Field.FieldLabel>
+          <Field.FieldDescription class="prose-text text-xs">Toggle the skills this profile grants.</Field.FieldDescription>
+          <div class="border border-line bg-field">
+            {#if skillRows.length === 0}
+              <p class="px-3 py-6 text-center text-sm text-muted-foreground">
+                No skills available in this scope.
+              </p>
+            {:else}
+              <ul class="divide-y divide-line">
+                {#each skillRows as s (s.name)}
+                  <li class="flex items-center gap-3 px-3 py-2">
+                    <Switch
+                      id={`skill-${s.name}`}
+                      checked={hasSkill(s.name)}
+                      onCheckedChange={() => toggleSkill(s.name)}
+                    />
+                    <Label for={`skill-${s.name}`} class="flex-1 cursor-pointer font-normal">
+                      {s.name}
+                    </Label>
+                    <span
+                      class="text-xs {s.scope === 'missing'
+                        ? 'text-warning'
+                        : 'text-muted-foreground'}"
+                    >
+                      {s.scope}
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        </Field.Field>
+      </Field.FieldGroup>
+    </section>
   </div>
 </PageScroll>
+
+<StatusBar items={statusItems} />

@@ -1,43 +1,64 @@
 <script lang="ts">
   import type { RunDecisions } from './api.gen'
   import type { WfEvent } from './types'
-  import * as Card from '$lib/components/ui/card'
-  import { decisionRows, decisionsSummary, decisionUseLines } from './rundecisions'
+  import { decisionsSummary, decisionUseLines } from './rundecisions'
+  import { decisionBars, decisionSource } from './runview'
 
-  // The run's decision-model block (issue #165 Part 4): totals, one line per
-  // use, one row per decision. Renders nothing when the run journaled no
+  // The run's decision layer (issue #165 Part 4): totals, one line per use,
+  // and one bar per decision with its node and outcome (applied or not), how
+  // decisive the answer was (green when sharp or applied, orange when split,
+  // red on a provider error), the value, the verdict and every answer. Renders nothing when the run journaled no
   // decision, so an unconfigured run's page is unchanged.
   let { decisions, events }: { decisions?: RunDecisions | null; events: WfEvent[] } = $props()
 
-  const rows = $derived(decisions ? decisionRows(events) : [])
+  const bars = $derived(decisions ? decisionBars(events) : [])
+  const tone = { sharp: 'green', split: 'orange', error: 'red' } as const
+  const source = $derived(decisions ? decisionSource(events) : null)
 </script>
 
 {#if decisions}
-  <Card.Root data-testid="run-decisions">
-    <Card.Header><Card.Title class="text-sm">Decisions</Card.Title></Card.Header>
-    <Card.Content class="flex flex-col gap-2 text-xs">
-      <p class="font-mono" data-testid="run-decisions-summary">{decisionsSummary(decisions)}</p>
+  <section class="box px-4 pt-4 pb-3" style:--k="var(--c-green)" data-testid="run-decisions">
+    <span class="box-cap">Decisions</span>
+    <div class="mb-2 flex items-baseline justify-between gap-2">
+      <span class="hd text-green">Decision layer</span>
+      <span class="text-xs text-muted-foreground">asks <b class="text-green">{decisions.decisions}</b></span>
+    </div>
+    {#if bars.length}
+      <ol class="flex max-h-72 flex-col overflow-auto pr-1">
+        {#each bars as b (b.seq)}
+          <li
+            class="grid grid-cols-[minmax(0,1fr)_64px_auto] items-center gap-x-2 py-1 text-xs"
+            data-testid="run-decision-row"
+            title={`${b.answer} · ${b.outcome} · ${b.source}${b.latency ? ` · ${b.latency}` : ''}`}
+          >
+            <span class="min-w-0">
+              <span class="block truncate text-foreground">{b.use}</span>
+              <span class="block truncate text-[11px] text-muted-foreground">{b.node ?? 'run'} · {b.outcome}</span>
+              {#if b.answer}<span class="block truncate text-[11px] text-fg-2">{b.answer}</span>{/if}
+            </span>
+            <span
+              class="hatch-bar"
+              style:--k={`var(--c-${tone[b.verdict]})`}
+              aria-hidden="true"><i style:width="{Math.round(b.strength * 100)}%"></i></span
+            >
+            <span class="min-w-0 text-right whitespace-nowrap">
+              <span class="text-foreground">{b.value || '-'}</span>
+              <span style:color={`var(--c-${tone[b.verdict]})`}>{b.verdict}</span>
+            </span>
+          </li>
+        {/each}
+      </ol>
+    {/if}
+    <div class="mt-2 flex flex-col gap-0.5 border-t border-line pt-2 text-[11px] text-muted-foreground">
+      <p class="m-0">
+        <span class="text-green">sharp: decisive or applied</span> · <span class="text-orange">split: undecided</span> ·
+        <span style:color="var(--c-red)">error: provider failed</span> · the outcome under each use says whether it was applied
+        {#if source}· mode {source.mode || 'unknown'} · {source.source}{/if}
+      </p>
+      <p class="m-0 text-fg-2" data-testid="run-decisions-summary">{decisionsSummary(decisions)}</p>
       {#each decisionUseLines(decisions) as u (u.use)}
-        <div>
-          <span class="font-mono font-semibold">{u.use}</span>
-          <span class="text-muted-foreground"> · {u.text}</span>
-        </div>
+        <p class="m-0"><span class="text-fg-2">{u.use}</span> · {u.text}</p>
       {/each}
-      {#if rows.length}
-        <ol class="flex flex-col gap-1.5 border-t border-border pt-2">
-          {#each rows as r (r.seq)}
-            <li class="flex flex-col" data-testid="run-decision-row">
-              <span>
-                <span class="font-mono">{r.use}</span>
-                {#if r.node}<span class="text-muted-foreground"> {r.node}</span>{/if}
-                <span class="text-muted-foreground"> · {r.outcome}</span>
-              </span>
-              <span class="break-words">{r.answer}</span>
-              <span class="text-muted-foreground">{r.source}{r.latency ? ` · ${r.latency}` : ''}</span>
-            </li>
-          {/each}
-        </ol>
-      {/if}
-    </Card.Content>
-  </Card.Root>
+    </div>
+  </section>
 {/if}

@@ -13,7 +13,7 @@
 {#if $staleBuild}
   <div
     role="alert"
-    class="fixed inset-x-0 bottom-0 z-50 flex items-center justify-center gap-3 border-t bg-background/95 px-4 py-2 text-sm shadow-lg backdrop-blur"
+    class="fixed inset-x-0 bottom-0 z-50 flex items-center justify-center gap-3 border-t border-amber/60 bg-panel px-4 py-2 text-xs text-amber"
   >
     <RefreshCw class="size-4" />
     <span>apb was updated on this machine. Reload to use the new version.</span>

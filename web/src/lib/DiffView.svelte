@@ -47,16 +47,16 @@
 
   const lineClass = (kind: string) =>
     kind === 'add'
-      ? 'text-success'
+      ? 'text-green'
       : kind === 'del'
-        ? 'text-destructive'
+        ? 'text-red'
         : kind === 'meta'
-          ? 'text-muted-foreground'
-          : 'text-foreground/80'
+          ? 'text-violet'
+          : 'text-fg-2'
 </script>
 
 <div class="flex h-full min-h-0 flex-col gap-3">
-  <div class="flex flex-shrink-0 items-center gap-2 text-sm">
+  <div class="flex flex-shrink-0 flex-wrap items-center gap-2 text-sm">
     <Select.Root type="single" bind:value={from}>
       <Select.Trigger class="h-8 w-28">{from || 'from'}</Select.Trigger>
       <Select.Content>
@@ -78,45 +78,45 @@
       {#if loading}<Spinner data-icon="inline-start" />{/if}
       diff
     </Button>
-    {#if error}<span class="text-sm text-destructive" title={error}>error</span>{/if}
+    {#if error}<span class="text-sm text-red" title={error}>error</span>{/if}
   </div>
 
   {#if diff}
-    <div class="flex flex-shrink-0 flex-col gap-2 text-sm">
+    <div class="box flex flex-shrink-0 flex-col gap-2 px-3 py-2 text-xs">
       {#if diff.nodes_added.length}
         <div>
-          <h4 class="text-[11px] uppercase text-muted-foreground">nodes added</h4>
-          <ul class="pl-3.5">{#each diff.nodes_added as n (n)}<li class="text-success">+ {n}</li>{/each}</ul>
+          <h4 class="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">nodes added</h4>
+          <ul class="pl-3.5">{#each diff.nodes_added as n (n)}<li class="text-green">+ {n}</li>{/each}</ul>
         </div>
       {/if}
       {#if diff.nodes_removed.length}
         <div>
-          <h4 class="text-[11px] uppercase text-muted-foreground">nodes removed</h4>
-          <ul class="pl-3.5">{#each diff.nodes_removed as n (n)}<li class="text-destructive">- {n}</li>{/each}</ul>
+          <h4 class="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">nodes removed</h4>
+          <ul class="pl-3.5">{#each diff.nodes_removed as n (n)}<li class="text-red">- {n}</li>{/each}</ul>
         </div>
       {/if}
       {#if diff.nodes_changed.length}
         <div>
-          <h4 class="text-[11px] uppercase text-muted-foreground">nodes changed</h4>
-          <ul class="pl-3.5">{#each diff.nodes_changed as n (n)}<li class="text-warning">~ {n}</li>{/each}</ul>
+          <h4 class="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">nodes changed</h4>
+          <ul class="pl-3.5">{#each diff.nodes_changed as n (n)}<li class="text-amber">~ {n}</li>{/each}</ul>
         </div>
       {/if}
       {#if diff.edges_added.length}
         <div>
-          <h4 class="text-[11px] uppercase text-muted-foreground">edges added</h4>
-          <ul class="pl-3.5">{#each diff.edges_added as e (e)}<li class="text-success">+ {e}</li>{/each}</ul>
+          <h4 class="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">edges added</h4>
+          <ul class="pl-3.5">{#each diff.edges_added as e (e)}<li class="text-green">+ {e}</li>{/each}</ul>
         </div>
       {/if}
       {#if diff.edges_removed.length}
         <div>
-          <h4 class="text-[11px] uppercase text-muted-foreground">edges removed</h4>
-          <ul class="pl-3.5">{#each diff.edges_removed as e (e)}<li class="text-destructive">- {e}</li>{/each}</ul>
+          <h4 class="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">edges removed</h4>
+          <ul class="pl-3.5">{#each diff.edges_removed as e (e)}<li class="text-red">- {e}</li>{/each}</ul>
         </div>
       {/if}
     </div>
 
     <pre
-      class="min-h-0 flex-1 overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed">{#each lines as line (line)}<span
+      class="min-h-0 flex-1 overflow-auto border border-line bg-field p-3 font-mono text-xs leading-relaxed">{#each lines as line (line)}<span
           class={lineClass(line.kind)}>{line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}{line.text}{'\n'}</span>{/each}</pre>
   {/if}
 </div>
