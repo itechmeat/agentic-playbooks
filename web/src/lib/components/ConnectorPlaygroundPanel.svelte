@@ -18,7 +18,6 @@
   } from '../connectorplay'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
-  import * as Card from '$lib/components/ui/card'
   import * as Field from '$lib/components/ui/field'
   import * as Select from '$lib/components/ui/select'
   import { Switch } from '$lib/components/ui/switch'
@@ -121,10 +120,10 @@
   }
 
   const badgeClass = {
-    ok: 'border-success/30 bg-success/15 text-success',
-    warn: 'border-warning/30 bg-warning/15 text-warning',
-    danger: 'border-destructive/30 bg-destructive/15 text-destructive',
-    muted: '',
+    ok: 'border-current text-green',
+    warn: 'border-current text-amber',
+    danger: 'border-current text-red',
+    muted: 'text-muted-foreground',
   } as const
 
   const resultTone = $derived.by((): keyof typeof badgeClass => {
@@ -136,24 +135,21 @@
   const canCall = $derived(!calling && selectedFunction !== '' && selectedAccount !== '')
 </script>
 
-<Card.Root>
-  <Card.Header>
-    <div class="flex items-center gap-2">
-      <FlaskConical class="size-4 text-muted-foreground" />
-      <Card.Title class="text-sm">Playground</Card.Title>
-    </div>
-    <Card.Description>
+<section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+  <div class="flex flex-col gap-1">
+      <h2 class="box-cap">Playground</h2>
+    <p class="prose-text text-xs text-muted-foreground">
       Call a function manually. Dry run renders the request without touching secrets; a real
       call is trust-gated the same way as the healthcheck probe.
-    </Card.Description>
-  </Card.Header>
-  <Card.Content class="flex flex-col gap-4">
+    </p>
+  </div>
+  <div class="flex flex-col gap-4">
     {#if functions.length === 0}
-      <p class="text-sm text-muted-foreground">This connector declares no functions.</p>
+      <p class="prose-text text-xs text-muted-foreground">This connector declares no functions.</p>
     {:else}
       <Field.FieldGroup class="gap-3">
         <Field.Field>
-          <Field.FieldLabel for="pg-function">Function</Field.FieldLabel>
+          <Field.FieldLabel for="pg-function" class="text-xs">Function</Field.FieldLabel>
           <Select.Root type="single" bind:value={selectedFunction}>
             <Select.Trigger id="pg-function" class="w-full font-mono text-xs">
               {selectedFunction || 'select a function'}
@@ -167,14 +163,14 @@
             </Select.Content>
           </Select.Root>
           {#if currentFunction?.description}
-            <Field.FieldDescription>{currentFunction.description}</Field.FieldDescription>
+            <Field.FieldDescription class="prose-text text-xs">{currentFunction.description}</Field.FieldDescription>
           {/if}
         </Field.Field>
 
         <Field.Field>
-          <Field.FieldLabel for="pg-account">Account</Field.FieldLabel>
+          <Field.FieldLabel for="pg-account" class="text-xs">Account</Field.FieldLabel>
           {#if accounts.length === 0}
-            <p class="text-sm text-muted-foreground">
+            <p class="prose-text text-xs text-muted-foreground">
               No accounts configured for this connector.
             </p>
           {:else}
@@ -214,7 +210,7 @@
 
         {#if useRaw}
           <Field.Field>
-            <Field.FieldLabel for="pg-raw-args">Args (JSON)</Field.FieldLabel>
+            <Field.FieldLabel for="pg-raw-args" class="text-xs">Args (JSON)</Field.FieldLabel>
             <Textarea
               id="pg-raw-args"
               bind:value={rawArgsText}
@@ -226,11 +222,11 @@
         {:else if fields.length > 0}
           {#each fields as field (field.name)}
             <Field.Field>
-              <Field.FieldLabel for={`pg-f-${field.name}`}>
+              <Field.FieldLabel for={`pg-f-${field.name}`} class="text-xs">
                 {field.name}{#if field.required}<span class="text-destructive"> *</span>{/if}
               </Field.FieldLabel>
               {#if field.description}
-                <Field.FieldDescription>{field.description}</Field.FieldDescription>
+                <Field.FieldDescription class="prose-text text-xs">{field.description}</Field.FieldDescription>
               {/if}
               {#if field.kind === 'boolean'}
                 <Switch
@@ -280,7 +276,7 @@
       </div>
 
       {#if result}
-        <div class="flex flex-col gap-2 rounded-md border border-border p-3">
+        <div class="flex flex-col gap-2 border border-line bg-panel-2 p-3">
           <div class="flex flex-wrap items-center gap-2">
             <Badge variant="outline" class={badgeClass[resultTone]}>{resultSummary(result)}</Badge>
             {#if result.picked}
@@ -293,9 +289,9 @@
           {#if result.link}
             <p class="break-all font-mono text-xs text-muted-foreground">link: {result.link}</p>
           {/if}
-          <pre class="max-h-80 overflow-auto rounded bg-muted p-2 font-mono text-xs">{formatResultBody(result)}</pre>
+          <pre class="max-h-80 overflow-auto border border-line bg-field p-2 font-mono text-xs">{formatResultBody(result)}</pre>
         </div>
       {/if}
     {/if}
-  </Card.Content>
-</Card.Root>
+  </div>
+</section>

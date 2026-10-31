@@ -11,9 +11,7 @@
     type SuggestionRow,
     type WorkspaceSuggestions,
   } from '../suggestions'
-  import { Badge } from '$lib/components/ui/badge'
   import { Button } from '$lib/components/ui/button'
-  import * as Card from '$lib/components/ui/card'
   import { toast } from 'svelte-sonner'
   import BellOff from '@lucide/svelte/icons/bell-off'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
@@ -92,8 +90,8 @@
      read has to be visible, and hiding the section would report it as
      "nothing is silenced here". -->
 {#if loaded && (rows.length > 0 || warnings.length > 0)}
-  <section class="mb-8">
-    <h2 class="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+  <section class="box mb-7 px-4 pt-4 pb-2">
+    <h2 class="box-cap flex items-center gap-1.5">
       <BellOff class="size-3" />
       Silenced suggestions
     </h2>
@@ -107,34 +105,30 @@
         {/each}
       </ul>
     {/if}
-    <div class="flex flex-col gap-2">
+    <ul class="divide-y divide-line">
       {#each rows as r (key(r))}
-        <Card.Root>
-          <Card.Header>
-            <div class="flex flex-wrap items-center gap-2">
-              <Card.Title class="font-mono text-sm">{r.pattern}</Card.Title>
-              <Badge variant="outline">{kindLabel(r.kind)}</Badge>
-              <Badge variant="outline">{r.scope}</Badge>
-              <Badge variant="secondary">{r.project}</Badge>
-              <span class="text-xs text-muted-foreground">{untilLabel(r.snoozed_until, now)}</span>
-            </div>
-            <Card.Description>{r.synopsis || 'no synopsis recorded'}</Card.Description>
-            <Card.Action>
-              <Button
-                variant="ghost"
-                size="sm"
-                class="max-sm:px-2 text-muted-foreground hover:text-destructive"
-                onclick={() => remove(r)}
-                disabled={removing === key(r)}
-                title="Allow this suggestion again"
-              >
-                <Trash2 data-icon="inline-start" />
-                <span class="max-sm:sr-only">Remove</span>
-              </Button>
-            </Card.Action>
-          </Card.Header>
-        </Card.Root>
+        <li class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+          <span class="font-semibold">{r.pattern}</span>
+          <span class="tag text-fg-2">{kindLabel(r.kind)}</span>
+          <span class="tag text-fg-2">{r.scope}</span>
+          <span class="tag text-violet">{r.project}</span>
+          <span class="text-xs text-muted-foreground">{untilLabel(r.snoozed_until, now)}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="ml-auto max-sm:px-2 hover:text-destructive"
+            onclick={() => remove(r)}
+            disabled={removing === key(r)}
+            title="Allow this suggestion again"
+          >
+            <Trash2 data-icon="inline-start" />
+            <span class="max-sm:sr-only">Remove</span>
+          </Button>
+          <p class="prose-text w-full text-xs text-muted-foreground">
+            {r.synopsis || 'no synopsis recorded'}
+          </p>
+        </li>
       {/each}
-    </div>
+    </ul>
   </section>
 {/if}

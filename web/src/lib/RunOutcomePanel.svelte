@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { NodeCommits, RunGoal } from './api.gen'
-  import * as Card from '$lib/components/ui/card'
   import { Badge } from '$lib/components/ui/badge'
   import { commitLines, goalBadge, goalSummary, omittedCommits } from './runoutcome'
 
@@ -17,11 +16,10 @@
 </script>
 
 {#if goal}
-  <Card.Root data-testid="run-goal">
-    <Card.Header><Card.Title class="text-sm">Goal</Card.Title></Card.Header>
-    <Card.Content class="flex flex-col gap-2 text-xs">
-      <p class="break-words">{goal.statement}</p>
-      <p class="font-mono text-muted-foreground" data-testid="run-goal-summary">{goalSummary(goal)}</p>
+  <section class="box flex flex-col gap-2 px-4 pt-4 pb-3 text-xs" data-testid="run-goal">
+    <span class="box-cap">Goal</span>
+      <p class="prose-text m-0 break-words">{goal.statement}</p>
+      <p class="m-0 text-muted-foreground" data-testid="run-goal-summary">{goalSummary(goal)}</p>
       {#if checked.length}
         <ul class="flex flex-col gap-1">
           {#each checked as c (c.index)}
@@ -36,29 +34,27 @@
         </ul>
       {/if}
       {#if manual.length}
-        <div class="flex flex-col gap-1 border-t border-border pt-2" data-testid="run-goal-checklist">
+        <div class="flex flex-col gap-1 border-t border-line pt-2" data-testid="run-goal-checklist">
           <span class="text-muted-foreground">To confirm by hand</span>
           <ul class="flex flex-col gap-1">
             {#each manual as c (c.index)}
               <li class="flex items-start gap-1.5">
-                <span class="mt-0.5 inline-block size-3 shrink-0 rounded-sm border border-border" aria-hidden="true"></span>
+                <span class="mt-0.5 inline-block size-3 shrink-0 border border-line-2" aria-hidden="true"></span>
                 <span class="break-words">{c.description}</span>
               </li>
             {/each}
           </ul>
         </div>
       {/if}
-    </Card.Content>
-  </Card.Root>
+  </section>
 {/if}
 
 {#if lines.length}
-  <Card.Root data-testid="run-commits">
-    <Card.Header><Card.Title class="text-sm">Commits</Card.Title></Card.Header>
-    <Card.Content class="flex flex-col gap-1 text-xs">
+  <section class="box flex flex-col gap-1 px-4 pt-4 pb-3 text-xs" data-testid="run-commits">
+    <span class="box-cap">Commits</span>
       {#each lines as c, i (i)}
         <div data-testid="run-commit-row" class="break-words">
-          <span class="font-mono" title={c.sha}>{c.short}</span>
+          <span class="text-violet" title={c.sha}>{c.short}</span>
           <span> {c.subject}</span>
           <span class="text-muted-foreground"> · {c.node}</span>
         </div>
@@ -66,6 +62,5 @@
       {#if omitted > 0}
         <p class="text-muted-foreground">and {omitted} more</p>
       {/if}
-    </Card.Content>
-  </Card.Root>
+  </section>
 {/if}

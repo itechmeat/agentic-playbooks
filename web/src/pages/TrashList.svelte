@@ -6,9 +6,9 @@
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
   import ProjectFilter from '$lib/components/ProjectFilter.svelte'
+  import PageHead from '$lib/components/PageHead.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
   import { Button } from '$lib/components/ui/button'
-  import { Badge } from '$lib/components/ui/badge'
-  import * as Card from '$lib/components/ui/card'
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import { toast } from 'svelte-sonner'
@@ -32,6 +32,14 @@
       m.get(k)!.items.push(e)
     }
     return [...m.values()].sort((a, b) => a.project.localeCompare(b.project))
+  })
+
+  const statusItems = $derived.by((): StatusItem[] => {
+    const conflicts = filtered.filter((e) => e.conflict).length
+    return [
+      { label: 'in trash', value: filtered.length, tone: 'info' },
+      { label: 'id in use again', value: conflicts, tone: conflicts ? 'warning' : 'muted' },
+    ]
   })
 
   const key = (e: TrashListEntry) => `${e.workspace_id}/${e.name}`
@@ -86,30 +94,36 @@
   const fmtTime = (ms: number) => new Date(ms).toLocaleString()
 </script>
 
-<Topbar active="playbooks">
-  {#snippet title()}
-    <span class="truncate text-sm font-semibold">Trash</span>
-  {/snippet}
-  {#snippet actions()}
-    <Button href="#/" variant="outline" size="sm" class="max-sm:px-2">
-      <ArrowLeft data-icon="inline-start" />
-      <span class="max-sm:sr-only">Playbooks</span>
-    </Button>
-  {/snippet}
-</Topbar>
+<Topbar active="playbooks" />
 
 <PageScroll>
-  <div class="mx-auto w-full max-w-4xl px-4 py-6">
-    <ProjectFilter {items} />
+  <div class="mx-auto w-full max-w-5xl px-4 py-5 sm:px-5">
+    <PageHead title="Trash">
+      {#snippet meta()}
+        <span>deleted playbooks</span>
+        {#if loaded}
+          <span class="text-muted-foreground">{filtered.length} in the trash</span>
+        {/if}
+      {/snippet}
+      {#snippet actions()}
+        <ProjectFilter {items} class="" />
+        <Button href="#/" variant="outline" size="sm" class="max-sm:px-2">
+          <ArrowLeft data-icon="inline-start" />
+          <span class="max-sm:sr-only">Playbooks</span>
+        </Button>
+      {/snippet}
+    </PageHead>
     {#if !loaded}
       <div class="flex flex-col gap-3">
-        {#each Array(2) as _, i (i)}<Skeleton class="h-20 w-full" />{/each}
+        {#each Array(2) as _, i (i)}<Skeleton class="h-16 w-full" />{/each}
       </div>
     {:else if items.length === 0}
-      <Empty.Root class="border border-dashed">
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon"><Trash2 /></Empty.Media>
-          <Empty.Title>The trash is empty</Empty.Title>
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground">
+            <Trash2 />
+          </Empty.Media>
+          <Empty.Title class="text-sm font-semibold">The trash is empty</Empty.Title>
           <Empty.Description>
             A deleted playbook lands here with all its versions until you restore it.
           </Empty.Description>
@@ -117,56 +131,54 @@
       </Empty.Root>
     {:else}
       {#each groups as g (g.key)}
-        <section class="mb-8">
-          <h2
-            class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-          >
+        <section class="mb-6">
+          <h2 class="mb-2 px-0.5 text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
             {g.project}
           </h2>
-          <div class="flex flex-col gap-3">
+          <ul class="flex flex-col gap-2.5">
             {#each g.items as e (key(e))}
-              <Card.Root>
-                <Card.Header>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <Card.Title class="font-mono text-base">{e.id}</Card.Title>
-                    {#if e.conflict}
-                      <Badge variant="outline" class="border-warning/40 text-warning">
-                        id in use again
-                      </Badge>
-                    {/if}
-                  </div>
-                  <Card.Description class="text-xs">
-                    Deleted {fmtTime(e.deleted_at_ms)} · {e.versions.length}
-                    version{e.versions.length === 1 ? '' : 's'}{e.current
+              <li
+                class="flex flex-col gap-2 border bg-panel px-3.5 py-3 {e.conflict
+                  ? 'border-amber/60'
+                  : 'border-line-2'}"
+              >
+                <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span class="min-w-0 truncate font-semibold">{e.id}</span>
+                  {#if e.conflict}
+                    <span class="tag text-amber">id in use again</span>
+                  {/if}
+                  <span class="text-xs text-muted-foreground">
+                    deleted {fmtTime(e.deleted_at_ms)}
+                  </span>
+                  <span class="text-xs text-fg-2">
+                    {e.versions.length} version{e.versions.length === 1 ? '' : 's'}{e.current
                       ? ` · current v${e.current}`
                       : ''}
-                  </Card.Description>
-                  <Card.Action>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      class="max-sm:px-2"
-                      onclick={() => restore(e)}
-                      disabled={restoring === key(e)}
-                    >
-                      <Undo2 data-icon="inline-start" />
-                      <span class="max-sm:sr-only">Restore</span>
-                    </Button>
-                  </Card.Action>
-                </Card.Header>
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="ml-auto max-sm:px-2"
+                    onclick={() => restore(e)}
+                    disabled={restoring === key(e)}
+                  >
+                    <Undo2 data-icon="inline-start" />
+                    <span class="max-sm:sr-only">Restore</span>
+                  </Button>
+                </div>
                 {#if e.conflict}
-                  <Card.Content>
-                    <p class="flex items-start gap-2 text-sm text-warning">
-                      <TriangleAlert class="mt-0.5 size-4 shrink-0" />
-                      <span>{conflictMessage(e)}</span>
-                    </p>
-                  </Card.Content>
+                  <p class="flex items-start gap-2 text-xs text-amber">
+                    <TriangleAlert class="mt-0.5 size-3.5 shrink-0" />
+                    <span class="prose-text">{conflictMessage(e)}</span>
+                  </p>
                 {/if}
-              </Card.Root>
+              </li>
             {/each}
-          </div>
+          </ul>
         </section>
       {/each}
     {/if}
   </div>
 </PageScroll>
+
+<StatusBar items={statusItems} />

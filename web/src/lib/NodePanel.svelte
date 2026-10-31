@@ -293,9 +293,9 @@
   })
 
   const badgeClass = {
-    ok: 'border-success/30 bg-success/15 text-success',
-    warn: 'border-warning/30 bg-warning/15 text-warning',
-    danger: 'border-destructive/30 bg-destructive/15 text-destructive',
+    ok: 'text-green',
+    warn: 'text-amber',
+    danger: 'text-red',
     muted: '',
   } as const
 
@@ -406,7 +406,8 @@
   </div>
 {/snippet}
 
-<div class="flex flex-col gap-4 text-sm">
+<div class="box mt-2.5 flex flex-col gap-4 px-4 pt-5 pb-4 text-sm">
+  <span class="box-cap">{kind.replaceAll('_', ' ')} fields</span>
   <datalist id="apb-profile-options">
     {#each profiles as p (p.scope + '/' + p.name)}
       <option value={`${p.scope}/${p.name}`}>
@@ -452,7 +453,7 @@
         <Textarea
           id="np-input"
           rows={4}
-          class="max-h-[300px] overflow-auto"
+          class="prose-text max-h-[300px] overflow-auto"
           {readonly}
           value={draft}
           oninput={(e) => onDraftInput(e.currentTarget.value)}
@@ -469,7 +470,7 @@
         <Textarea
           id="np-prompt"
           rows={6}
-          class="max-h-[300px] overflow-auto"
+          class="prose-text max-h-[300px] overflow-auto"
           {readonly}
           value={f.prompt}
           oninput={(e) => setStr('prompt', e.currentTarget.value)}
@@ -594,9 +595,9 @@
           {#each connBindings as b (b.name)}
             {@const card = connectorCard(b.name)}
             {@const detail = connectorDetails[b.name]}
-            <div class="flex flex-col gap-2 rounded-md border border-border p-2">
+            <div class="flex flex-col gap-2 border border-line bg-panel-2 p-2">
               <div class="flex items-center gap-2">
-                <span class="truncate font-mono text-xs">{b.name}</span>
+                <span class="truncate text-xs font-semibold">{b.name}</span>
                 {#if card && card.trust !== 'approved'}
                   {@const badge = trustBadge(card.trust)}
                   <Badge variant="outline" class={badgeClass[badge.tone]}>{badge.label}</Badge>
@@ -783,7 +784,7 @@
         <Textarea
           id="np-finish-prompt"
           rows={6}
-          class="max-h-[300px] overflow-auto"
+          class="prose-text max-h-[300px] overflow-auto"
           {readonly}
           value={f.prompt}
           oninput={(e) => setStr('prompt', e.currentTarget.value)}
@@ -802,7 +803,7 @@
             oninput={(e) => setYaml(formKey, yamlKey, e.currentTarget.value)}
           />
           {#if yamlErrors[formKey]}
-            <p class="text-xs text-destructive">not saved: {yamlErrors[formKey]}</p>
+            <p class="text-xs text-red">not saved: {yamlErrors[formKey]}</p>
           {/if}
         </Field.Field>
       {/snippet}
@@ -843,7 +844,7 @@
         <Textarea
           id="np-pb-instr"
           rows={6}
-          class="max-h-[300px] overflow-auto"
+          class="prose-text max-h-[300px] overflow-auto"
           {readonly}
           value={f.instruction}
           oninput={(e) => setStr('instruction', e.currentTarget.value)}

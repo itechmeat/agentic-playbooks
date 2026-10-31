@@ -27,6 +27,13 @@ describe('AttemptModelsPanel', () => {
     expect(document.querySelector('[data-testid="run-models-mismatch"]')?.textContent).toContain('1 differ')
   })
 
+  it('renders a re-run node whose attempt number repeats', () => {
+    const row = { node: 'review', attempt: 1, executed_by: 'host', agent: null, model: 'opus', expected: 'opus', mismatch: false }
+    app = mount(AttemptModelsPanel, { target: document.body, props: { models: [row, { ...row }] } })
+    flushSync()
+    expect(document.querySelectorAll('[data-testid="run-model-row"]').length).toBe(2)
+  })
+
   it('renders nothing before the first attempt', () => {
     app = mount(AttemptModelsPanel, { target: document.body, props: { models: [] } })
     flushSync()

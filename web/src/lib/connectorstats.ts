@@ -68,11 +68,3 @@ export function outcomeSummary(byOutcome: Record<string, number>): string {
   })
   return entries.map(([code, n]) => `${code}: ${n}`).join(', ')
 }
-
-// Renders a duration in whole milliseconds; a non-finite input (should not
-// happen, but a stat with zero calls could otherwise divide to NaN upstream)
-// renders as a dash instead of "NaN ms".
-export function formatDurationMs(ms: number): string {
-  if (!Number.isFinite(ms)) return '-'
-  return `${Math.round(ms)} ms`
-}

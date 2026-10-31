@@ -57,3 +57,51 @@ export function subscribeChanges(cb: () => void, minIntervalMs = 600): () => voi
     ws.close()
   }
 }
+
+/**
+ * A slow lane next to `subscribeChanges` for reads too heavy to repeat on
+ * every change (the run listing reads every journal). `request()` runs `fn`
+ * at once when it last ran at least `minIntervalMs` ago, else once at the end
+ * of that window; requests in between collapse into that one call. While the
+ * tab is hidden nothing runs: the request waits and fires when the tab is
+ * shown again. `dispose()` drops a pending call.
+ */
+export function slowRefresh(
+  fn: () => void,
+  minIntervalMs = 10_000,
+): { request: () => void; dispose: () => void } {
+  let last = Number.NEGATIVE_INFINITY
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let waitingForVisible = false
+  let closed = false
+  const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  const run = () => {
+    timer = undefined
+    if (closed) return
+    if (hidden()) {
+      waitingForVisible = true
+      return
+    }
+    waitingForVisible = false
+    last = performance.now()
+    fn()
+  }
+  const request = () => {
+    if (closed || timer !== undefined) return
+    const wait = last + minIntervalMs - performance.now()
+    if (wait <= 0) run()
+    else timer = setTimeout(run, wait)
+  }
+  const onVisibility = () => {
+    if (waitingForVisible && !hidden()) request()
+  }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
+  return {
+    request,
+    dispose() {
+      closed = true
+      clearTimeout(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+    },
+  }
+}

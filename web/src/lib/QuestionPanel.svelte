@@ -1,5 +1,4 @@
 <script lang="ts">
-  import * as Card from '$lib/components/ui/card'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import type { QuestionEntry } from './rungates'
@@ -44,14 +43,11 @@
   }
 </script>
 
-<Card.Root class="border-primary/60">
-  <Card.Header>
-    <Card.Title class="text-sm">Question</Card.Title>
-  </Card.Header>
-  <Card.Content class="flex flex-col gap-3">
+<section class="box flex flex-col gap-3 px-4 pt-4 pb-3 glow" style:--k="var(--c-amber)">
+  <span class="box-cap">Question</span>
     <div class="flex flex-col gap-1">
-      <span class="font-mono text-xs">{question.node}</span>
-      <pre class="whitespace-pre-wrap break-words text-sm">{question.question}</pre>
+      <span class="text-xs text-amber">{question.node}</span>
+      <pre class="prose-text m-0 whitespace-pre-wrap break-words text-sm">{question.question}</pre>
     </div>
 
     {#if question.options.length}
@@ -80,5 +76,4 @@
       />
       <Button type="submit" size="sm" disabled={posting || !freeText.trim()}>Send</Button>
     </form>
-  </Card.Content>
-</Card.Root>
+</section>

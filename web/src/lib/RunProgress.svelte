@@ -2,7 +2,6 @@
   import { untrack } from 'svelte'
   import type { ProgressSummary } from './types'
   import { nextDisplay, showBar, waitingKindText, type ProgressDisplayState } from './progress'
-  import { Badge } from '$lib/components/ui/badge'
 
   let { progress, status, runKey }: {
     progress?: ProgressSummary | null
@@ -29,23 +28,21 @@
 {#if visible}
   <div class="flex items-center gap-2">
     <div
-      class="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      class="hatch-bar w-full"
       role="progressbar"
       aria-valuenow={shown}
       aria-valuemin="0"
       aria-valuemax="100"
       aria-label="run progress"
+      style:--k={waiting ? 'var(--c-amber)' : 'var(--c-blue)'}
     >
-      <div
-        class="h-full rounded-full bg-chart-1 transition-[width] duration-300"
-        style:width="{shown}%"
-      ></div>
+      <i class="transition-[width] duration-300" style:width="{shown}%"></i>
     </div>
-    <span class="shrink-0 font-mono text-xs text-muted-foreground">{shown}%</span>
+    <span class="shrink-0 text-xs text-fg-2 tabular-nums">{shown}%</span>
     {#if waiting}
-      <Badge variant="secondary" class="shrink-0">{waitingText}</Badge>
+      <span class="tag shrink-0 text-warning">{waitingText}</span>
     {:else if progress?.label}
-      <span class="shrink-0 text-xs text-muted-foreground">{progress.label}</span>
+      <span class="shrink-0 truncate text-xs text-muted-foreground">{progress.label}</span>
     {/if}
   </div>
 {/if}

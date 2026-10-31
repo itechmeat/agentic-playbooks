@@ -2,94 +2,158 @@
 @import 'tw-animate-css';
 @import 'shadcn-svelte/tailwind.css';
 @import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
 
 @custom-variant dark (&:is(.dark *));
 
+/* Terminal look. Two palettes with one structure: the raw palette (--c-*)
+   first, then the shadcn token names mapped onto it, so every primitive and
+   page picks the theme up without knowing about it. Dark is the default
+   (index.html ships `class="dark"`, mode-watcher owns it afterwards); the
+   light palette keeps the same hues, darkened for contrast on a light page. */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.769 0.166 70.08);
-  --warning-foreground: oklch(0.279 0.077 45.635);
-  --success: oklch(0.627 0.17 149.214);
-  --success-foreground: oklch(0.985 0 0);
-  --info: oklch(0.588 0.13 233);
-  --info-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* raw palette, light */
+  --c-bg: #f2f6f6;
+  --c-bg-2: #e8eff0;
+  --c-panel: #fbfcfc;
+  --c-panel-2: #eef3f4;
+  --c-line: #d3dee0;
+  --c-line-2: #b9c9cc;
+  --c-fg: #13232a;
+  --c-fg-2: #33484e;
+  --c-muted: #566b70;
+  /* faint is for decoration only (separators, spines, edges): it sits under
+     4.5:1, so text that carries information uses muted. */
+  --c-faint: #93a5a9;
+  --c-violet: #6849d4;
+  --c-blue: #1d68b6;
+  --c-orange: #9c4f08;
+  --c-green: #14743f;
+  --c-red: #c23636;
+  --c-amber: #7d5e00;
+  --c-pink: #ad3680;
+  --c-teal: #0c706b;
+  --c-glow: #dcebec;
+  --c-field: #ffffff;
+  --c-scroll: #c3d1d4;
+  --c-scroll-hover: #93a8ad;
+
+  /* shadcn tokens */
+  --background: var(--c-bg);
+  --foreground: var(--c-fg);
+  --card: var(--c-panel);
+  --card-foreground: var(--c-fg);
+  --popover: var(--c-panel);
+  --popover-foreground: var(--c-fg);
+  --primary: var(--c-violet);
+  --primary-foreground: #ffffff;
+  --secondary: var(--c-panel-2);
+  --secondary-foreground: var(--c-fg);
+  --muted: var(--c-panel-2);
+  --muted-foreground: var(--c-muted);
+  --accent: var(--c-bg-2);
+  --accent-foreground: var(--c-fg);
+  --destructive: var(--c-red);
+  --destructive-foreground: #ffffff;
+  --warning: var(--c-amber);
+  --warning-foreground: #ffffff;
+  --success: var(--c-green);
+  --success-foreground: #ffffff;
+  --info: var(--c-blue);
+  --info-foreground: #ffffff;
+  --border: var(--c-line-2);
+  --input: var(--c-line-2);
+  --ring: var(--c-violet);
+  --chart-1: var(--c-blue);
+  --chart-2: var(--c-green);
+  --chart-3: var(--c-amber);
+  --chart-4: var(--c-violet);
+  --chart-5: var(--c-orange);
+  --radius: 2px;
+  --sidebar: var(--c-panel);
+  --sidebar-foreground: var(--c-fg);
+  --sidebar-primary: var(--c-violet);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--c-bg-2);
+  --sidebar-accent-foreground: var(--c-fg);
+  --sidebar-border: var(--c-line);
+  --sidebar-ring: var(--c-violet);
+  color-scheme: light;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.769 0.166 70.08);
-  --warning-foreground: oklch(0.985 0 0);
-  --success: oklch(0.696 0.17 162.48);
-  --success-foreground: oklch(0.145 0 0);
-  --info: oklch(0.72 0.12 233);
-  --info-foreground: oklch(0.145 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* raw palette, dark (the approved mockup) */
+  --c-bg: #0c1416;
+  --c-bg-2: #101b1e;
+  --c-panel: #0a1113;
+  --c-panel-2: #0e171a;
+  --c-line: #22333a;
+  --c-line-2: #2c4048;
+  --c-fg: #d5e1e3;
+  --c-fg-2: #a9babd;
+  --c-muted: #7b9196;
+  /* decoration only, see the light palette */
+  --c-faint: #3e5258;
+  --c-violet: #a48cf7;
+  --c-blue: #74b3f2;
+  --c-orange: #f0a35c;
+  --c-green: #6dd398;
+  --c-red: #f07a7a;
+  --c-amber: #e7c467;
+  --c-pink: #e78bc1;
+  --c-teal: #5fd0c4;
+  --c-glow: #13242a;
+  --c-field: #071012;
+  --c-scroll: #22333a;
+  --c-scroll-hover: #3e5862;
+
+  --background: var(--c-bg);
+  --foreground: var(--c-fg);
+  --card: var(--c-panel);
+  --card-foreground: var(--c-fg);
+  --popover: var(--c-panel-2);
+  --popover-foreground: var(--c-fg);
+  --primary: var(--c-violet);
+  --primary-foreground: var(--c-bg);
+  --secondary: var(--c-panel-2);
+  --secondary-foreground: var(--c-fg);
+  --muted: #132126;
+  --muted-foreground: var(--c-muted);
+  --accent: #15252b;
+  --accent-foreground: var(--c-fg);
+  --destructive: var(--c-red);
+  --destructive-foreground: var(--c-bg);
+  --warning: var(--c-amber);
+  --warning-foreground: var(--c-bg);
+  --success: var(--c-green);
+  --success-foreground: var(--c-bg);
+  --info: var(--c-blue);
+  --info-foreground: var(--c-bg);
+  --border: var(--c-line-2);
+  --input: var(--c-line-2);
+  --ring: var(--c-violet);
+  --chart-1: var(--c-blue);
+  --chart-2: var(--c-green);
+  --chart-3: var(--c-amber);
+  --chart-4: var(--c-violet);
+  --chart-5: var(--c-orange);
+  --sidebar: var(--c-panel);
+  --sidebar-foreground: var(--c-fg);
+  --sidebar-primary: var(--c-violet);
+  --sidebar-primary-foreground: var(--c-bg);
+  --sidebar-accent: #15252b;
+  --sidebar-accent-foreground: var(--c-fg);
+  --sidebar-border: var(--c-line);
+  --sidebar-ring: var(--c-violet);
+  color-scheme: dark;
 }
 
 @theme inline {
+  /* JetBrains Mono is the UI face (html applies font-mono); Inter is kept
+     for long prose only, as `font-prose` (font-sans is the same face). */
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-sans: 'Inter Variable', system-ui, sans-serif;
+  --font-prose: 'Inter Variable', system-ui, sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -128,52 +192,47 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  /* Palette as utilities: text-violet, border-blue, bg-green/15, text-fg-2,
+     text-faint, border-line, bg-panel, bg-panel-2, bg-field, ... The bare
+     names sit beside Tailwind's numbered scales (violet-500) without
+     replacing them. */
+  --color-violet: var(--c-violet);
+  --color-blue: var(--c-blue);
+  --color-orange: var(--c-orange);
+  --color-green: var(--c-green);
+  --color-red: var(--c-red);
+  --color-amber: var(--c-amber);
+  --color-pink: var(--c-pink);
+  --color-teal: var(--c-teal);
+  --color-fg-2: var(--c-fg-2);
+  --color-faint: var(--c-faint);
+  --color-line: var(--c-line);
+  --color-line-2: var(--c-line-2);
+  --color-panel: var(--c-panel);
+  --color-panel-2: var(--c-panel-2);
+  --color-bg-2: var(--c-bg-2);
+  --color-field: var(--c-field);
+  /* Flat corners everywhere (rounded-full stays round for pills and dots). */
+  --radius-xs: 1px;
+  --radius-sm: 1px;
+  --radius-md: var(--radius);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-xl: var(--radius);
+  --radius-2xl: var(--radius);
+  --radius-3xl: var(--radius);
+  --radius-4xl: var(--radius);
 }
 
-/* Theme the SvelteFlow canvas chrome to match light/dark. Preflight strips the
-   library's default button look, so map its controls onto our tokens. */
-/* `#app` beats the library's own `.svelte-flow__*` rules on specificity, so
-   these win regardless of bundle order. */
-#app .svelte-flow__controls {
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  box-shadow: 0 1px 3px oklch(0 0 0 / 0.25);
-}
-#app .svelte-flow__controls-button {
-  background-color: var(--card);
-  border-bottom: 1px solid var(--border);
-  color: var(--card-foreground);
-}
-#app .svelte-flow__controls-button:hover {
-  background-color: var(--accent);
-  color: var(--accent-foreground);
-}
-#app .svelte-flow__controls-button svg {
-  fill: currentColor;
-}
-#app .svelte-flow__attribution {
-  background: transparent;
-}
-#app .svelte-flow__attribution a {
-  color: var(--muted-foreground);
-}
-/* Edge condition labels ("match: ...", "node: status") default to a
-   hardcoded white pill with `color: inherit`. The library only swaps that
-   pill to a dark variant when its own root carries a `.dark` class (via the
-   `colorMode` prop), which this app never sets - it themes via a `.dark`
-   class on `<html>` instead, one level up from where the library looks. So
-   the pill background stays white in both themes, while the text color
-   still inherits the page foreground, which is near-white in dark mode:
-   white text on a white pill. Pin both colors to the card tokens so the
-   pill tracks the same light/dark palette as the node cards. */
-#app .svelte-flow__edge-label {
-  color: var(--card-foreground);
-  background-color: var(--card);
-  border-radius: var(--radius-sm);
+/* No drop shadows: every shadow-* utility renders nothing. Selection and
+   focus use a colored outline plus `.glow` instead. */
+@theme {
+  --shadow-2xs: 0 0 #0000;
+  --shadow-xs: 0 0 #0000;
+  --shadow-sm: 0 0 #0000;
+  --shadow-md: 0 0 #0000;
+  --shadow-lg: 0 0 #0000;
+  --shadow-xl: 0 0 #0000;
+  --shadow-2xl: 0 0 #0000;
 }
 
 @layer base {
@@ -181,80 +240,311 @@
     @apply border-border outline-ring/50;
   }
   html {
-    @apply font-sans;
+    @apply font-mono;
     height: 100%;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
+    /* the soft teal glow at the top of the page */
+    background:
+      radial-gradient(1200px 700px at 60% -10%, var(--c-glow) 0%, var(--c-bg) 60%) fixed,
+      var(--c-bg);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
     margin: 0;
     height: 100%;
+  }
+  /* Scroll regions take programmatic focus (tabindex -1, see PageScroll);
+     they are not tab stops, so no focus ring around the whole page. */
+  [tabindex='-1']:focus-visible {
+    outline: none;
   }
   #app {
     display: flex;
     flex-direction: column;
     height: 100vh;
   }
+
+  /* Thin scrollbars, dark thumb on a transparent track, in both themes. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-scroll) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--c-scroll);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--c-scroll-hover);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+}
+
+/* Reusable pieces of the terminal look. Each is small on purpose: pages
+   compose them with Tailwind utilities. */
+@layer components {
+  /* Panel with a 1px border; pair with a `.box-cap` child for a caption
+     cut into the top border. Set `--k` to tint the border (profile color). */
+  .box {
+    position: relative;
+    border: 1px solid var(--k, var(--c-line-2));
+    background: var(--c-panel);
+  }
+  /* Lowercase caption sitting on the top border of its `.box` parent; its
+     background matches the page so the line looks cut (set `--cap-bg` when
+     the box sits on another surface). */
+  .box-cap {
+    position: absolute;
+    top: -0.6em;
+    left: 12px;
+    max-width: calc(100% - 24px);
+    padding: 0 8px;
+    overflow: hidden;
+    background: var(--cap-bg, var(--c-bg));
+    color: var(--c-muted);
+    font-size: 11px;
+    line-height: 1.1;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Small uppercase section heading. */
+  .hd {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  /* Colored square before a label (legends, profile dots); color from `--k`. */
+  .legend-sq::before {
+    content: '';
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin-right: 7px;
+    background: var(--k, var(--c-muted));
+    vertical-align: 0;
+  }
+  /* Progress bar: `<div class="hatch-bar" style:--k={c}><i style:width="40%"></i></div>`;
+     the fill ends in a hatched tip. (Use `style:` directives: the CSP refuses
+     static style attributes.) */
+  .hatch-bar {
+    position: relative;
+    height: 7px;
+    overflow: hidden;
+    background: color-mix(in oklab, var(--c-line) 70%, transparent);
+  }
+  .hatch-bar > i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--k, var(--c-blue));
+  }
+  .hatch-bar > i::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: -6px;
+    bottom: 0;
+    width: 6px;
+    background: repeating-linear-gradient(135deg, var(--k, var(--c-blue)) 0 1px, transparent 1px 3px);
+  }
+  /* Outlined tag (effects, kinds, statuses); takes the current text color. */
+  .tag {
+    display: inline-block;
+    border: 1px solid currentColor;
+    padding: 0 6px;
+    font-size: 11px;
+    line-height: 17px;
+    white-space: nowrap;
+  }
+  /* Selected or active element: colored outline and a soft glow in `--k`. */
+  .glow {
+    box-shadow:
+      0 0 0 1px var(--k, var(--c-violet)),
+      0 0 22px -6px var(--k, var(--c-violet));
+  }
+  /* Small ring spinner in the current text color (running states). */
+  .spin {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin-right: 5px;
+    border: 1.5px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    vertical-align: -1px;
+    animation: apb-spin 0.9s linear infinite;
+  }
+  /* Label/value grid: `<dl class="kv"><dt>..</dt><dd>..</dd></dl>`. */
+  .kv {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 16px;
+    font-size: 12px;
+  }
+  .kv dt {
+    color: var(--c-muted);
+  }
+  .kv dd {
+    margin: 0;
+    min-width: 0;
+    text-align: right;
+  }
+  /* Long human prose (descriptions, prompts, markdown) in Inter. */
+  .prose-text {
+    font-family: var(--font-prose);
+  }
+}
+
+@keyframes apb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* SvelteFlow canvas chrome. `#app` beats the library's own `.svelte-flow__*`
+   rules on specificity, so these win regardless of bundle order. The library
+   reads its colors from --xy-* variables, set here from the palette. */
+#app .svelte-flow {
+  --xy-background-color: transparent;
+  --xy-background-pattern-color: var(--c-line-2);
+  --xy-edge-stroke: var(--c-muted);
+  --xy-edge-stroke-selected: var(--c-violet);
+  --xy-edge-stroke-width: 1;
+  --xy-connectionline-stroke: var(--c-violet);
+  --xy-edge-label-background-color: var(--c-bg-2);
+  --xy-edge-label-color: var(--c-muted);
+  --xy-handle-background-color: var(--c-line-2);
+  --xy-handle-border-color: var(--c-panel);
+  --xy-node-border-radius: var(--radius);
+  --xy-selection-background-color: color-mix(in oklab, var(--c-violet) 10%, transparent);
+  --xy-selection-border: 1px dashed var(--c-violet);
+  --xy-minimap-background-color: var(--c-panel);
+  --xy-attribution-background-color: transparent;
+  background-color: color-mix(in oklab, var(--c-panel) 35%, transparent);
+}
+#app .svelte-flow__controls {
+  display: flex;
+  gap: 4px;
+  border-radius: 0;
+  box-shadow: none;
+}
+#app .svelte-flow__controls-button {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--c-line-2);
+  background-color: var(--c-panel);
+  color: var(--c-muted);
+}
+#app .svelte-flow__controls-button:hover {
+  border-color: var(--c-fg-2);
+  color: var(--c-fg);
+}
+#app .svelte-flow__controls-button svg {
+  fill: currentColor;
+  max-width: 10px;
+  max-height: 10px;
+}
+#app .svelte-flow__attribution {
+  background: transparent;
+}
+#app .svelte-flow__attribution a {
+  color: var(--c-faint);
+}
+/* Edge condition labels ("match: ...", "node: status") default to a white
+   pill with `color: inherit`; the library only swaps it for its own `.dark`
+   root, which this app never sets (the class lives on <html>). Pin them to
+   the palette: a small bordered tag on the page tone, failure edges in red
+   when the page marks the label `.fail`, fallbacks muted with `.else`. */
+#app .svelte-flow__edge-label {
+  padding: 0 4px;
+  border: 1px solid var(--c-line);
+  border-radius: 0;
+  background-color: var(--c-bg-2);
+  color: var(--c-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+#app .svelte-flow__edge-label.fail {
+  color: var(--c-red);
+}
+#app .svelte-flow__edge-label.else {
+  color: var(--c-muted);
 }
 
 /* CodeMirror token colors. The editor is themed through these variables (see
-   lib/CodeEditor.svelte) so it follows light/dark with the rest of the app
-   instead of carrying a second palette. Hues are the only chroma the app's
-   otherwise monochrome scale allows itself, kept muted enough to read as code
-   rather than as decoration. */
-:root {
-  --cm-key: oklch(0.48 0.14 264);
-  --cm-string: oklch(0.5 0.12 145);
-  --cm-number: oklch(0.55 0.15 35);
-  --cm-comment: oklch(0.6 0.02 260);
-  --cm-meta: oklch(0.52 0.11 330);
-  --cm-punct: oklch(0.55 0 0);
-}
-
+   lib/CodeEditor.svelte) so it follows light/dark with the rest of the app;
+   the hues come from the accent palette. */
+:root,
 .dark {
-  --cm-key: oklch(0.78 0.12 264);
-  --cm-string: oklch(0.8 0.13 145);
-  --cm-number: oklch(0.8 0.12 60);
-  --cm-comment: oklch(0.62 0.02 260);
-  --cm-meta: oklch(0.8 0.11 330);
-  --cm-punct: oklch(0.68 0 0);
+  --cm-key: var(--c-blue);
+  --cm-string: var(--c-green);
+  --cm-number: var(--c-orange);
+  --cm-comment: var(--c-muted);
+  --cm-meta: var(--c-violet);
+  --cm-punct: var(--c-fg-2);
 }
 
-/* The editor fills its pane and inherits the app's mono stack; the gutter and
-   the active line borrow the same tokens as every other surface. */
+/* The editor fills its pane and uses the app's mono face; the gutter and the
+   active line borrow the same tokens as every other surface. */
 #app .cm-host .cm-editor {
   height: 100%;
-  background-color: var(--background);
+  background-color: var(--c-field);
   color: var(--foreground);
   font-size: 13px;
 }
 #app .cm-host .cm-scroller {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   line-height: 1.625;
 }
 #app .cm-host .cm-editor.cm-focused {
-  outline: none;
+  outline: 1px solid var(--c-violet);
+  outline-offset: -1px;
 }
 #app .cm-host .cm-gutters {
-  background-color: var(--background);
-  border-right: 1px solid var(--border);
-  color: var(--muted-foreground);
+  background-color: var(--c-field);
+  border-right: 1px solid var(--c-line);
+  color: var(--c-faint);
 }
 #app .cm-host .cm-activeLine,
 #app .cm-host .cm-activeLineGutter {
-  background-color: var(--muted);
+  background-color: color-mix(in oklab, var(--c-line) 45%, transparent);
 }
 #app .cm-host .cm-content {
-  caret-color: var(--foreground);
+  caret-color: var(--c-violet);
 }
 #app .cm-host .cm-cursor {
-  border-left-color: var(--foreground);
+  border-left-color: var(--c-violet);
 }
 #app .cm-host .cm-selectionBackground,
 #app .cm-host .cm-editor ::selection {
-  background-color: var(--accent);
+  background-color: color-mix(in oklab, var(--c-violet) 25%, transparent);
 }
 #app .cm-host .cm-matchingBracket {
-  background-color: var(--accent);
-  color: var(--accent-foreground);
-  outline: 1px solid var(--border);
+  background-color: color-mix(in oklab, var(--c-violet) 20%, transparent);
+  color: var(--foreground);
+  outline: 1px solid var(--c-line-2);
 }

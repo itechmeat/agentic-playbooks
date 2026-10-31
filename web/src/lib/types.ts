@@ -12,6 +12,11 @@ export interface PlaybookSummary {
   current: string
   versions: string[]
   frozen: boolean
+  // How many nodes the current version has, and the profile names its agent
+  // nodes bind (own or `defaults.profile`), in first-use order. Optional: an
+  // older server does not send them.
+  node_count?: number
+  profiles?: string[]
   // Owning project (global dashboard). Empty on the pinned-root test server.
   workspace_id: string
   project: string

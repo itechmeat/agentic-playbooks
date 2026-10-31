@@ -30,6 +30,9 @@ fn lists_playbooks_with_versions() {
     assert_eq!(list[0].current, "1.0.0");
     assert_eq!(list[0].versions, vec!["1.0.0"]);
     assert_eq!(list[0].name, "Implement Task");
+    assert_eq!(list[0].node_count, 6);
+    // `plan` names the profile, `fix` inherits it from `defaults`: one name.
+    assert_eq!(list[0].profiles, vec!["architect".to_string()]);
 }
 
 #[test]

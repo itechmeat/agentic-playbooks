@@ -126,7 +126,7 @@
 <div bind:this={host} class="cm-host size-full min-h-0 overflow-hidden">
   {#if !view}
     <textarea
-      class="size-full resize-none whitespace-pre bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground outline-none [tab-size:2]"
+      class="size-full resize-none whitespace-pre bg-field p-3 font-mono text-[13px] leading-relaxed text-foreground outline-none [tab-size:2]"
       spellcheck="false"
       autocomplete="off"
       autocapitalize="off"

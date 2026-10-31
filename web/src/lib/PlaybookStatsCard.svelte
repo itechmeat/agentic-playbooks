@@ -18,7 +18,7 @@
 
 <div class="flex flex-col gap-3 text-xs" data-testid="playbook-stats">
   {#if error}
-    <p class="text-destructive" data-testid="playbook-stats-error">Could not load the stats: {error}</p>
+    <p class="text-red" data-testid="playbook-stats-error">Could not load the stats: {error}</p>
   {:else if loading && !report}
     <p class="flex items-center gap-2 text-muted-foreground" data-testid="playbook-stats-loading">
       <Spinner /> loading
@@ -27,13 +27,13 @@
     <p class="text-muted-foreground" data-testid="playbook-stats-empty">No runs of this playbook yet.</p>
   {:else}
     {#each versions as v (v.version)}
-      <section class="flex flex-col gap-1 border-b border-border pb-3" data-testid="playbook-stats-version">
+      <section class="flex flex-col gap-1 border-b border-line pb-3 last:border-b-0" data-testid="playbook-stats-version">
         <div class="flex items-center gap-2">
-          <span class="font-mono text-sm font-semibold">{v.version}</span>
-          <Badge variant="outline">{v.runs} {v.runs === 1 ? 'run' : 'runs'}</Badge>
+          <span class="text-sm font-semibold text-orange">{v.version}</span>
+          <Badge variant="secondary">{v.runs} {v.runs === 1 ? 'run' : 'runs'}</Badge>
         </div>
-        {#if v.note}<p class="text-muted-foreground">{v.note}</p>{/if}
-        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        {#if v.note}<p class="prose-text text-muted-foreground">{v.note}</p>{/if}
+        <dl class="kv">
           <dt class="text-muted-foreground">succeeded</dt>
           <dd>{rateText(v.success)}</dd>
           <dt class="text-muted-foreground">first pass</dt>
@@ -54,13 +54,13 @@
           {/if}
           {#if modelsText(v)}
             <dt class="text-muted-foreground">models</dt>
-            <dd data-testid="playbook-stats-models">{modelsText(v)}</dd>
+            <dd class="break-words" data-testid="playbook-stats-models">{modelsText(v)}</dd>
           {/if}
         </dl>
         {#if v.goal.length}
           <ul class="mt-1 flex flex-col gap-0.5" data-testid="playbook-stats-goal">
             {#each v.goal as g (g.index)}
-              <li class="break-words">
+              <li class="prose-text break-words">
                 <span class="text-muted-foreground">goal {g.index + 1}:</span>
                 {g.description}
                 <span class="text-muted-foreground">

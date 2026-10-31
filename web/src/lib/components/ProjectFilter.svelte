@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as Select from '$lib/components/ui/select'
+  import { cn } from '$lib/utils'
   import {
     ALL_PROJECTS,
     projectFilter,
@@ -8,7 +9,8 @@
 
   type Item = { workspace_id: string; project?: string | null }
 
-  let { items = [] as Item[] }: { items?: Item[] } = $props()
+  let { items = [] as Item[], class: className = 'mb-4' }: { items?: Item[]; class?: string } =
+    $props()
 
   const options = $derived(projectOptions(items))
   const knownIds = $derived(new Set(options.map((o) => o.id)))
@@ -32,9 +34,9 @@
   }
 </script>
 
-<div class="mb-4 flex items-center gap-2">
+<div class={cn('flex items-center gap-2', className)}>
   <Select.Root type="single" value={displayValue} {onValueChange}>
-    <Select.Trigger class="h-8 w-48" aria-label="Project filter">
+    <Select.Trigger size="sm" class="w-48" aria-label="Project filter">
       {triggerLabel}
     </Select.Trigger>
     <Select.Content>

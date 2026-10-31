@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   errorRate,
-  formatDurationMs,
   outcomeSummary,
   usageCardState,
   type ConnectorFunctionStat,
@@ -46,17 +45,6 @@ describe('outcomeSummary', () => {
   })
 })
 
-describe('formatDurationMs', () => {
-  it('rounds to the nearest millisecond', () => {
-    expect(formatDurationMs(12.6)).toBe('13 ms')
-  })
-  it('handles zero', () => {
-    expect(formatDurationMs(0)).toBe('0 ms')
-  })
-  it('non-finite input renders a dash rather than crashing', () => {
-    expect(formatDurationMs(Number.NaN)).toBe('-')
-  })
-})
 
 describe('usageCardState', () => {
   const stats = (over: Partial<ConnectorStats> = {}): ConnectorStats => ({

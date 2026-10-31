@@ -29,22 +29,22 @@
   } from '../lib/connectors'
   import {
     errorRate,
-    formatDurationMs,
     outcomeSummary,
     usageCardState,
     type ConnectorStats,
   } from '../lib/connectorstats'
+  import { formatDuration } from '../lib/format'
   import { fetchConnectorInbox, fetchConnectorInboxEvents } from '../lib/api'
   import type { ConnectorInbox, InboxEventRow } from '../lib/connectorinbox'
   import { renderMarkdown, safeExternalUrl } from '../lib/markdown'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
   import ConnectorPlaygroundPanel from '$lib/components/ConnectorPlaygroundPanel.svelte'
   import ConnectorInboxPanel from '$lib/components/ConnectorInboxPanel.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
-  import * as Card from '$lib/components/ui/card'
   import * as Table from '$lib/components/ui/table'
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
@@ -203,10 +203,10 @@
   })
 
   const badgeClass = {
-    ok: 'border-success/30 bg-success/15 text-success',
-    warn: 'border-warning/30 bg-warning/15 text-warning',
-    danger: 'border-destructive/30 bg-destructive/15 text-destructive',
-    muted: '',
+    ok: 'border-current text-green',
+    warn: 'border-current text-amber',
+    danger: 'border-current text-red',
+    muted: 'text-muted-foreground',
   } as const
 
   // `force` replaces a different installed version and is only ever passed
@@ -332,7 +332,32 @@
   // Everything the manifest describes is public and is shown in both states;
   // only what actually needs bytes on disk is gated on this.
   const installed = $derived(detail?.installed === true)
+  const statusItems = $derived.by((): StatusItem[] => {
+    if (!detail) return []
+    const badge = trustBadge(detail.trust)
+    const ready = detail.accounts.filter(accountReady).length
+    const items: StatusItem[] = [
+      { label: 'connector', value: `${detail.name}@${detail.version}`, tone: 'violet' },
+      {
+        label: 'trust',
+        value: badge.label,
+        tone: badge.tone === 'ok' ? 'success' : badge.tone === 'muted' ? 'muted' : badge.tone === 'warn' ? 'warning' : 'danger',
+      },
+      { label: 'functions', value: detail.functions.length, tone: 'info' },
+      {
+        label: 'accounts ready',
+        value: `${ready}/${detail.accounts.length}`,
+        tone: ready < detail.accounts.length ? 'warning' : 'muted',
+      },
+    ]
+    if (stats) items.push({ label: 'calls', value: stats.calls, tone: 'info' })
+    return items
+  })
+
   const usageState = $derived(usageCardState(installed, statsLoaded, statsFailed, stats))
+
+  // Column captions of the tables in this view (terminal look).
+  const TH = 'h-8 text-[11px] font-normal tracking-[0.08em] text-muted-foreground uppercase'
 </script>
 
 <Topbar active="connectors">
@@ -378,18 +403,18 @@
 </Topbar>
 
 <PageScroll>
-  <div class="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
+  <div class="mx-auto flex w-full max-w-5xl flex-col gap-7 px-4 py-6 sm:px-5">
     {#if !loaded}
       <div class="flex flex-col gap-3">
         {#each Array(3) as _, i (i)}<Skeleton class="h-24 w-full" />{/each}
       </div>
     {:else if !detail}
-      <Empty.Root>
+      <Empty.Root class="border border-dashed border-line-2 bg-panel">
         <Empty.Header>
-          <Empty.Media variant="icon">
+          <Empty.Media variant="icon" class="border border-line-2 bg-transparent text-muted-foreground">
             <Unplug />
           </Empty.Media>
-          <Empty.Title>{name}</Empty.Title>
+          <Empty.Title class="text-sm font-semibold">{name}</Empty.Title>
           <Empty.Description>
             {#if unknownName}
               No connector by this name is installed or offered by the server. The name in the
@@ -403,19 +428,20 @@
       </Empty.Root>
     {:else}
       {@const badge = trustBadge(detail.trust)}
-      <Card.Root>
-        <Card.Header>
+      <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+        <span class="box-cap">connector · {detail.name}</span>
+        <div class="flex flex-col gap-1">
           <div class="flex flex-wrap items-center gap-2">
-            <Card.Title class="text-base">{detail.meta.display_name ?? detail.name}</Card.Title>
+            <h1 class="text-base font-semibold">{detail.meta.display_name ?? detail.name}</h1>
             <span class="font-mono text-xs text-muted-foreground">v{detail.version}</span>
             <Badge variant="outline" class={badgeClass[badge.tone]}>{badge.label}</Badge>
           </div>
           {#if detail.meta.summary}
-            <Card.Description>{detail.meta.summary}</Card.Description>
+            <p class="prose-text text-xs text-muted-foreground">{detail.meta.summary}</p>
           {/if}
-        </Card.Header>
+        </div>
         {#if showHeaderMeta(detail)}
-          <Card.Content class="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <div class="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             {#each detail.meta.tags ?? [] as tag (tag)}
               <Badge variant="secondary">{tag}</Badge>
             {/each}
@@ -433,13 +459,13 @@
                 homepage
               </a>
             {/if}
-          </Card.Content>
+          </div>
         {/if}
-        <Card.Footer class="flex flex-col items-start gap-3">
+        <div class="flex flex-col items-start gap-3">
           {#if installed}
-            <p class="text-sm text-muted-foreground">{DISCONNECT_KEEPS_CONFIG}</p>
+            <p class="prose-text text-xs text-muted-foreground">{DISCONNECT_KEEPS_CONFIG}</p>
           {:else}
-            <p class="text-sm text-muted-foreground">
+            <p class="prose-text text-xs text-muted-foreground">
               Connecting installs the connector files locally. Any account configuration you had
               before is kept in a separate store and is picked up again automatically.
             </p>
@@ -489,35 +515,31 @@
               </Alert.Description>
             </Alert.Root>
           {/if}
-        </Card.Footer>
-      </Card.Root>
+        </div>
+      </section>
 
       {#if showAbout(detail)}
-        <Card.Root>
-          <Card.Header>
-            <Card.Title class="text-sm">About</Card.Title>
-          </Card.Header>
-          <Card.Content>
+        <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+          <h2 class="box-cap">About</h2>
+          <div>
             <!-- `renderMarkdown` escapes every character coming from the
                  connector folder, so nothing in PUBLIC.md can turn into a live
                  tag or attribute here. See lib/markdown.ts. -->
-            <div class="text-foreground">{@html renderMarkdown(detail.bodyMd)}</div>
-          </Card.Content>
-        </Card.Root>
+            <div class="prose-text text-sm text-foreground">{@html renderMarkdown(detail.bodyMd)}</div>
+          </div>
+        </section>
       {/if}
 
       {#if showFunctions(detail)}
-        <Card.Root>
-          <Card.Header>
-            <Card.Title class="text-sm">Functions</Card.Title>
-          </Card.Header>
-          <Card.Content>
+        <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+          <h2 class="box-cap">Functions</h2>
+          <div>
             <Table.Root>
               <Table.Header>
                 <Table.Row>
-                  <Table.Head>Name</Table.Head>
-                  <Table.Head>Description</Table.Head>
-                  <Table.Head>Read-only</Table.Head>
+                  <Table.Head class={TH}>Name</Table.Head>
+                  <Table.Head class={TH}>Description</Table.Head>
+                  <Table.Head class={TH}>Read-only</Table.Head>
                 </Table.Row>
               </Table.Header>
               <Table.Body>
@@ -535,7 +557,7 @@
                         </Badge>
                       {/if}
                     </Table.Cell>
-                    <Table.Cell class="whitespace-normal text-muted-foreground">
+                    <Table.Cell class="prose-text text-xs whitespace-normal text-muted-foreground">
                       {f.description}
                       {#if reason}
                         <span class="mt-1 block text-xs">Deprecated: {reason}</span>
@@ -546,8 +568,8 @@
                 {/each}
               </Table.Body>
             </Table.Root>
-          </Card.Content>
-        </Card.Root>
+          </div>
+        </section>
       {/if}
 
       <!-- Installed: always shown, because this is where accounts get
@@ -555,24 +577,22 @@
            installed: shown only when accounts already exist, which they can,
            since account config lives outside the installed files. -->
       {#if showAccounts(detail)}
-        <Card.Root>
-          <Card.Header>
-            <Card.Title class="text-sm">Accounts</Card.Title>
-          </Card.Header>
-          <Card.Content>
+        <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+          <h2 class="box-cap">Accounts</h2>
+          <div>
             {#if detail.accounts.length === 0}
-              <p class="text-sm text-muted-foreground">
+              <p class="prose-text text-xs text-muted-foreground">
                 No accounts configured for this connector yet.
               </p>
             {:else}
               <Table.Root>
                 <Table.Header>
                   <Table.Row>
-                    <Table.Head>Name</Table.Head>
-                    <Table.Head>Fields</Table.Head>
-                    <Table.Head>Missing env</Table.Head>
-                    <Table.Head>Trust</Table.Head>
-                    <Table.Head>Actions</Table.Head>
+                    <Table.Head class={TH}>Name</Table.Head>
+                    <Table.Head class={TH}>Fields</Table.Head>
+                    <Table.Head class={TH}>Missing env</Table.Head>
+                    <Table.Head class={TH}>Trust</Table.Head>
+                    <Table.Head class={TH}>Actions</Table.Head>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
@@ -693,8 +713,8 @@
                 </Table.Body>
               </Table.Root>
             {/if}
-          </Card.Content>
-        </Card.Root>
+          </div>
+        </section>
       {/if}
 
       <ConnectorInboxPanel
@@ -724,22 +744,19 @@
            them would misrepresent the data. A failed request is its own
            answer and keeps the card in either state. -->
       {#if usageState !== 'hidden'}
-        <Card.Root>
-          <Card.Header>
-            <div class="flex items-center gap-2">
-              <ChartNoAxesColumn class="size-4 text-muted-foreground" />
-              <Card.Title class="text-sm">Usage</Card.Title>
-            </div>
-            <Card.Description>
+        <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
+          <div class="flex flex-col gap-1">
+      <h2 class="box-cap">Usage</h2>
+            <p class="prose-text text-xs text-muted-foreground">
               Calls, error rate, and duration per function and account, read from recent run
               event logs. Read only - no new state is recorded here.
-            </Card.Description>
-          </Card.Header>
-          <Card.Content>
+            </p>
+          </div>
+          <div>
             {#if usageState === 'loading'}
               <Skeleton class="h-16 w-full" />
             {:else if usageState === 'error'}
-              <p class="text-sm text-muted-foreground">
+              <p class="prose-text text-xs text-muted-foreground">
                 Usage stats could not be loaded, so this connector's call history is unknown
                 here.
               </p>
@@ -747,7 +764,7 @@
               <!-- Split rather than an inline {#if}: a conditional that has to
                    carry its own leading space swallows it and renders
                    "callsin the last". -->
-              <p class="text-sm text-muted-foreground">
+              <p class="prose-text text-xs text-muted-foreground">
                 {#if stats}
                   No recorded calls in the last {stats.runsScanned}
                   run{stats.runsScanned === 1 ? '' : 's'} scanned.
@@ -758,7 +775,7 @@
               </p>
             {:else if stats}
               <div class="flex flex-col gap-3">
-                <p class="text-sm text-muted-foreground">
+                <p class="prose-text text-xs text-muted-foreground">
                   {stats.calls} call{stats.calls === 1 ? '' : 's'} across {stats.runsScanned} run{stats.runsScanned ===
                   1
                     ? ''
@@ -767,11 +784,11 @@
                 <Table.Root>
                   <Table.Header>
                     <Table.Row>
-                      <Table.Head>Function</Table.Head>
-                      <Table.Head>Account</Table.Head>
-                      <Table.Head>Calls</Table.Head>
-                      <Table.Head>Error rate</Table.Head>
-                      <Table.Head>Avg duration</Table.Head>
+                      <Table.Head class={TH}>Function</Table.Head>
+                      <Table.Head class={TH}>Account</Table.Head>
+                      <Table.Head class={TH}>Calls</Table.Head>
+                      <Table.Head class={TH}>Error rate</Table.Head>
+                      <Table.Head class={TH}>Avg duration</Table.Head>
                     </Table.Row>
                   </Table.Header>
                   <Table.Body>
@@ -787,16 +804,18 @@
                             {errorRate(f)}
                           {/if}
                         </Table.Cell>
-                        <Table.Cell>{formatDurationMs(f.avgDurationMs)}</Table.Cell>
+                        <Table.Cell>{formatDuration(f.avgDurationMs)}</Table.Cell>
                       </Table.Row>
                     {/each}
                   </Table.Body>
                 </Table.Root>
               </div>
             {/if}
-          </Card.Content>
-        </Card.Root>
+          </div>
+        </section>
       {/if}
     {/if}
   </div>
 </PageScroll>
+
+{#if detail}<StatusBar items={statusItems} />{/if}
