@@ -384,3 +384,32 @@ fn a_two_hour_pause_is_left_out_of_the_retro_durations() {
     let work = report.nodes.iter().find(|n| n.node == "work").unwrap();
     assert_eq!(work.duration_ms, 10_000);
 }
+
+/// A run that failed and was resumed a day later: the day it sat failed is
+/// not run time, the same as a pause.
+#[test]
+fn the_span_a_run_sat_failed_before_a_resume_is_left_out() {
+    let day: u128 = 24 * 3_600_000;
+    let root = tempfile::tempdir().unwrap();
+    let dir = write_run(
+        root.path(),
+        "r2",
+        &[
+            (
+                0,
+                json!({"type": "run_started", "playbook": "p", "version": "1.0.0"}),
+            ),
+            (5_000, json!({"type": "run_finished", "outcome": "failed"})),
+            (
+                5_000 + day,
+                json!({"type": "run_resumed", "from_node": "work"}),
+            ),
+            (
+                8_000 + day,
+                json!({"type": "run_finished", "outcome": "succeeded"}),
+            ),
+        ],
+    );
+    let report = run_retro::build(&RetroRun::load(&dir).unwrap(), &[], 0);
+    assert_eq!(report.duration_ms, Some(8_000));
+}

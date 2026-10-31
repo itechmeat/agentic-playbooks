@@ -16,10 +16,10 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub duration_ms: Option<u128>,
-    /// Milliseconds a run that has not ended spent paused so far, so a
-    /// listing can count its active time up from `started_ts` without the
-    /// pauses. Absent once the run ended (see `duration_ms`) and for a run
-    /// that was never paused.
+    /// Milliseconds a run that has not ended was inactive so far (paused,
+    /// or ended before a resume brought it back), so a listing can count its
+    /// active time up from `started_ts` without them. Absent once the run
+    /// ended (see `duration_ms`) and for a run that was never inactive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub paused_ms: Option<u128>,
@@ -67,7 +67,8 @@ pub struct RunSummary {
 /// Active time from the start to the last `run_finished` / `run_aborted`, or
 /// `None` for a run that has not ended (or never recorded its start). A
 /// `run_resumed` after the end makes the run live again, as in
-/// `run_retro::run_end`, so it has no duration until it ends once more.
+/// `run_retro::run_end`, so it has no duration until it ends once more, and
+/// the span it sat ended before that resume is not run time either.
 fn run_duration_ms(events: &[crate::event::Event], started_ts: u128) -> Option<u128> {
     if started_ts == 0 {
         return None;
@@ -77,9 +78,7 @@ fn run_duration_ms(events: &[crate::event::Event], started_ts: u128) -> Option<u
         EventPayload::RunResumed { .. } => Some(None),
         _ => None,
     })??;
-    Some(crate::pause::active_elapsed_ms(
-        events, started_ts, end, end,
-    ))
+    Some(crate::pause::active_run_ms(events, started_ts, end, end))
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -89,6 +88,8 @@ fn is_zero(n: &usize) -> bool {
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
     let runs_dir = root.join(".apb/runs");
     let mut out = Vec::new();
+    // One reference time for the whole listing.
+    let now = apb_core::clock::now_ms();
     if !runs_dir.is_dir() {
         return Ok(out);
     }
@@ -119,8 +120,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             .unwrap_or_else(|| (run_id.clone(), 0));
         let duration_ms = run_duration_ms(&view.events, started_ts);
         let paused_ms = if duration_ms.is_none() && started_ts > 0 {
-            let now = apb_core::clock::now_ms();
-            Some(crate::pause::paused_ms_between(
+            Some(crate::pause::inactive_ms_between(
                 &view.events,
                 started_ts,
                 now,

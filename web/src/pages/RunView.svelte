@@ -339,6 +339,10 @@
 
   async function load() {
     const seq = routeSeq
+    // A failed reload of a run on screen: the report and grades below are
+    // still fetched, but a failure of theirs then keeps what is shown (the
+    // server is likely just unreachable) instead of clearing it.
+    let reloadFailed = false
     try {
       const d = await fetchRun(id, workspace)
       if (seq !== routeSeq) return
@@ -360,25 +364,26 @@
     } catch (e) {
       if (seq !== routeSeq) return
       // Nothing on screen yet: say why in place of the page. A failed reload
-      // of a run already shown keeps it, toasts, and still refreshes the
-      // report and the grades below.
+      // of a run already shown keeps it, toasts, and still tries the report
+      // and the grades below.
       if (!detail) {
         loadError = String(e)
         return
       }
       toast.error('Failed to load run', { description: String(e) })
+      reloadFailed = true
     }
     try {
       const r = await fetchRunReport(id, workspace)
       if (seq === routeSeq) report = r.report
     } catch {
-      if (seq === routeSeq) report = null
+      if (seq === routeSeq && !reloadFailed) report = null
     }
     try {
       const g = (await fetchRunGrades(id, workspace)).grades
       if (seq === routeSeq) grades = g
     } catch {
-      if (seq === routeSeq) grades = []
+      if (seq === routeSeq && !reloadFailed) grades = []
     }
   }
 

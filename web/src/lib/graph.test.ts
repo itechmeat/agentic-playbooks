@@ -611,12 +611,15 @@ describe('card and edge data', () => {
       ...pb,
       nodes: [
         { id: 'answer', type: 'finish', prompt: 'Sum it up' },
+        { id: 'blank', type: 'finish', prompt: '' },
         { id: 'done', type: 'finish' },
       ],
       edges: [],
     }
     const { nodes } = toFlow(answering as never, null)
     expect(nodes.find((n) => n.id === 'answer')!.data.profile).toBe('developer')
+    // The engine counts any prompt, blank too.
+    expect(nodes.find((n) => n.id === 'blank')!.data.profile).toBe('developer')
     expect(nodes.find((n) => n.id === 'done')!.data.profile).toBeUndefined()
   })
 

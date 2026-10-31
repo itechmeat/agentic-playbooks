@@ -1147,10 +1147,10 @@ export type RunSummary = { run_id: string, playbook: string, status: string, sta
  */
 duration_ms?: number, 
 /**
- * Milliseconds a run that has not ended spent paused so far, so a
- * listing can count its active time up from `started_ts` without the
- * pauses. Absent once the run ended (see `duration_ms`) and for a run
- * that was never paused.
+ * Milliseconds a run that has not ended was inactive so far (paused,
+ * or ended before a resume brought it back), so a listing can count its
+ * active time up from `started_ts` without them. Absent once the run
+ * ended (see `duration_ms`) and for a run that was never inactive.
  */
 paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
@@ -1197,10 +1197,10 @@ workspace_id: string, project: string, run_id: string, playbook: string, status:
  */
 duration_ms?: number, 
 /**
- * Milliseconds a run that has not ended spent paused so far, so a
- * listing can count its active time up from `started_ts` without the
- * pauses. Absent once the run ended (see `duration_ms`) and for a run
- * that was never paused.
+ * Milliseconds a run that has not ended was inactive so far (paused,
+ * or ended before a resume brought it back), so a listing can count its
+ * active time up from `started_ts` without them. Absent once the run
+ * ended (see `duration_ms`) and for a run that was never inactive.
  */
 paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**

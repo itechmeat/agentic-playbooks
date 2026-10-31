@@ -98,6 +98,18 @@ describe('runview', () => {
       ],
     })
     expect(nodeRunData(retried, 302_000 + 60_000).get('build')?.progress).toBe(10)
+    // A second visit of a looping node: its attempts restart at 1, and its
+    // retry restarts the share although the first visit already reached 2.
+    const revisited = detail({
+      events: [
+        ...retried.events,
+        ev(7, 400_000, 'node_finished', { node: 'build', status: 'succeeded' }),
+        ev(8, 500_000, 'node_started', { node: 'build', attempt: 1 }),
+        ev(9, 500_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'claude', model: 'opus' }),
+        ev(10, 800_000, 'attempt_started', { node: 'build', attempt: 2, agent: 'claude', model: 'opus' }),
+      ],
+    })
+    expect(nodeRunData(revisited, 800_000 + 60_000).get('build')?.progress).toBe(10)
   })
 
   it('builds one log line per event with the node profile as actor', () => {

@@ -89,7 +89,24 @@
     ]
   })
 
+  // One timer for the earliest back-off still running; each pass re-arms it
+  // for the next, so a workspace that failed later is not dropped. `disposed`
+  // stops a request that fails after the page closed from arming it again.
   let statsRetry: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+  function scheduleStatsRetry() {
+    if (disposed || statsRetry !== undefined || statsFailedAt.size === 0) return
+    const next = Math.min(...statsFailedAt.values()) + STATS_RETRY_MS
+    statsRetry = setTimeout(
+      () => {
+        statsRetry = undefined
+        loadStats(runs)
+        scheduleStatsRetry()
+      },
+      Math.max(0, next - Date.now()),
+    )
+  }
+
   function loadStats(list: RunSummary[]) {
     const byWorkspace = new Map<string, RunSummary[]>()
     for (const r of list) byWorkspace.set(r.workspace_id, [...(byWorkspace.get(r.workspace_id) ?? []), r])
@@ -98,27 +115,25 @@
       if (done === 0 || statsFor.get(ws) === done) continue
       const failedAt = statsFailedAt.get(ws)
       if (failedAt !== undefined && Date.now() - failedAt < STATS_RETRY_MS) continue
+      // Its back-off is over: this request is the retry, a new failure
+      // starts a new one.
+      statsFailedAt.delete(ws)
       statsFor.set(ws, done)
       const seq = (statsSeq.get(ws) ?? 0) + 1
       statsSeq.set(ws, seq)
       fetchStats('', ws)
         .then((r) => {
           if (statsSeq.get(ws) !== seq) return
-          statsFailedAt.delete(ws)
           stats[ws] = r
         })
         .catch(() => {
-          if (statsSeq.get(ws) !== seq) return
+          if (disposed || statsSeq.get(ws) !== seq) return
           // Forget the count so the next pass after the back-off retries,
           // and schedule that pass: an idle dashboard has no change notice
           // that would run one.
           statsFor.delete(ws)
           statsFailedAt.set(ws, Date.now())
-          if (statsRetry === undefined)
-            statsRetry = setTimeout(() => {
-              statsRetry = undefined
-              loadStats(runs)
-            }, STATS_RETRY_MS)
+          scheduleStatsRetry()
         })
     }
   }
@@ -172,6 +187,7 @@
   }
 
   $effect(() => {
+    disposed = false
     const slow = slowRefresh(() => void loadRuns(), RUNS_INTERVAL_MS)
     load()
     slow.request()
@@ -182,6 +198,7 @@
     return () => {
       unsubscribe()
       slow.dispose()
+      disposed = true
       clearTimeout(statsRetry)
       statsRetry = undefined
     }

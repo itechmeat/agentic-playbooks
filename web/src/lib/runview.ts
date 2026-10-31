@@ -120,7 +120,9 @@ export function nodeFacts(events: WfEvent[]): Map<string, NodeFacts> {
         const f = get(node)
         f.attempts += 1
         if (typeof r.attempt === 'number') {
-          if (r.attempt > 1 && r.attempt > f.attempt) f.retryTs = e.ts
+          // Attempts restart at 1 on each visit of a looping node, and
+          // arrive in order: any attempt above the first is a retry.
+          if (r.attempt > 1) f.retryTs = e.ts
           f.attempt = Math.max(f.attempt, r.attempt)
         }
         f.agent = str(r.agent) ?? f.agent

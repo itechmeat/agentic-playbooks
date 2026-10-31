@@ -240,6 +240,45 @@ pub fn paused_intervals(events: &[Event], now_ms: u128) -> Vec<(u128, u128)> {
     out
 }
 
+/// The spans a run sat ended before a `run_resumed` brought it back to
+/// life, `[run_finished | run_aborted, run_resumed)`: a run resumed days
+/// after it failed was not running in between. An end no resume follows is
+/// the run's end, not a span.
+pub fn ended_intervals(events: &[Event]) -> Vec<(u128, u128)> {
+    let mut out = Vec::new();
+    let mut ended: Option<u128> = None;
+    for e in events {
+        match e.payload {
+            EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => {
+                ended.get_or_insert(e.ts);
+            }
+            EventPayload::RunResumed { .. } => {
+                if let Some(start) = ended.take() {
+                    out.push((start, e.ts.max(start)));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Milliseconds of `[from, to)` the run was not active: paused, or ended
+/// before a resume ([`ended_intervals`]). The run-time clock of the run
+/// listing and `apb stats`.
+pub fn inactive_ms_between(events: &[Event], from: u128, to: u128, now_ms: u128) -> u128 {
+    let mut spans = paused_intervals(events, now_ms);
+    spans.extend(ended_intervals(events));
+    paused_ms_in(&spans, from, to)
+}
+
+/// Active run time of `[from, to)`: the wall time minus
+/// [`inactive_ms_between`].
+pub fn active_run_ms(events: &[Event], from: u128, to: u128, now_ms: u128) -> u128 {
+    to.saturating_sub(from)
+        .saturating_sub(inactive_ms_between(events, from, to, now_ms))
+}
+
 /// Milliseconds of `[from, to)` the run spent paused.
 pub fn paused_ms_between(events: &[Event], from: u128, to: u128, now_ms: u128) -> u128 {
     paused_ms_in(&paused_intervals(events, now_ms), from, to)

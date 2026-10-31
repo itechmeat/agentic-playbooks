@@ -54,11 +54,13 @@ export function fieldToProfile(raw: string): ProfileRef | undefined {
 
 /**
  * Whether a node without its own profile runs on `defaults.profile`: an agent
- * task, and a finish node that composes an answer (it has a `prompt`), as the
- * engine's `effective_profile_ref` resolves it.
+ * task, and a finish node that composes an answer (it has a `prompt`, blank
+ * or not), as the engine's `effective_profile_ref` resolves them. A judge
+ * that emulates its decision model on an agent is left out: the graph shows
+ * a judge by its kind, not by a profile.
  */
 export function usesDefaultProfile(n: { type: string; prompt?: unknown }): boolean {
-  return n.type === 'agent_task' || (n.type === 'finish' && typeof n.prompt === 'string' && n.prompt.trim() !== '')
+  return n.type === 'agent_task' || (n.type === 'finish' && typeof n.prompt === 'string')
 }
 
 /** The key of a profile in a `profileModelMap`: the bare name for scope auto, `scope:name` for an explicit scope. */

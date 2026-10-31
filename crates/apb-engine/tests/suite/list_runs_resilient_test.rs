@@ -230,7 +230,11 @@ fn list_runs_duration_leaves_out_pauses_and_follows_a_resume() {
     assert_eq!(by_id("paused-1").paused_ms, None);
     assert_eq!(by_id("aborted-1").duration_ms, Some(25));
     assert_eq!(by_id("resumed-1").duration_ms, None);
-    assert_eq!(by_id("refinished-1").duration_ms, Some(130));
+    // 20 ms to the failure, then 30 ms after the resume: the 80 ms it sat
+    // failed is not run time.
+    assert_eq!(by_id("refinished-1").duration_ms, Some(50));
+    // Live again after a failure: the ended span counts as inactive.
+    assert_eq!(by_id("resumed-1").paused_ms, Some(80));
 }
 
 /// A live run that was paused and resumed carries the paused time so far, so
