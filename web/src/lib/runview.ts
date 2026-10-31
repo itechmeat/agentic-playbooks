@@ -65,7 +65,7 @@ function nodeProfileScope(node: PlaybookNode, defaults?: Record<string, unknown>
 
 /** What the journal says about one node's executions. */
 export interface NodeFacts {
-  /** Highest attempt number started. */
+  /** Attempt number of the latest `attempt_started`, in journal order. */
   attempt: number
   /** Attempts started over the whole run (re-runs included). */
   attempts: number
@@ -80,7 +80,7 @@ export interface NodeFacts {
   finishedTs?: number
   /** The latest attempt summary or supervisor note about the node. */
   note?: string
-  /** Agent and model of the latest attempt_started. */
+  /** Agent of the latest attempt_started that named one, and that attempt's model. */
   agent?: string
   model?: string
   transcript?: string
@@ -123,10 +123,14 @@ export function nodeFacts(events: WfEvent[]): Map<string, NodeFacts> {
           // Attempts restart at 1 on each visit of a looping node, and
           // arrive in order: any attempt above the first is a retry.
           if (r.attempt > 1) f.retryTs = e.ts
-          f.attempt = Math.max(f.attempt, r.attempt)
+          // The latest attempt, not the highest number: a second visit
+          // restarts at 1.
+          f.attempt = r.attempt
         }
         f.agent = str(r.agent) ?? f.agent
-        f.model = str(r.model) ?? f.model
+        // The latest attempt's own model (a hint for a host attempt), never
+        // an earlier visit's.
+        f.model = str(r.model)
         f.transcript = str(r.transcript) ?? f.transcript
         break
       }
@@ -144,20 +148,27 @@ export function nodeFacts(events: WfEvent[]): Map<string, NodeFacts> {
 /** The optional fields the graph node card reads from `data`. */
 export interface NodeRunData {
   profile?: string
-  model?: string
+  /** The model the latest attempt ran on; `null` when it reported none. */
+  model?: string | null
+  /**
+   * With `model: null`: the model the attempt was asked for (the attempt's
+   * own hint, else the profile's), shown as a hint only.
+   */
+  modelHint?: string
   progress?: number
   attempt?: number
   duration?: string
   note?: string
 }
 
-/** The latest attempt model of each node (the last row wins). */
+/**
+ * The latest attempt model of each node: the last row wins, since the rows
+ * come in the order the attempts started (a second visit of a looping node
+ * restarts its attempt numbers at 1).
+ */
 function modelsByNode(models: AttemptModel[] | null | undefined): Map<string, AttemptModel> {
   const out = new Map<string, AttemptModel>()
-  for (const a of models ?? []) {
-    const prev = out.get(a.node)
-    if (!prev || a.attempt >= prev.attempt) out.set(a.node, a)
-  }
+  for (const a of models ?? []) out.set(a.node, a)
   return out
 }
 
@@ -180,8 +191,16 @@ export function nodeRunData(detail: RunDetail, now: number): Map<string, NodeRun
     if (profile) d.profile = profile
     const f = facts.get(n.id)
     const m = models.get(n.id)
-    const mdl = m?.model ?? f?.model ?? m?.expected ?? undefined
-    if (mdl) d.model = mdl
+    if (m && !m.model) {
+      // The attempt reported no model (a host that named none): keep that
+      // state, and what it was asked for only as a hint.
+      d.model = null
+      const hint = f?.model ?? m.expected ?? undefined
+      if (hint) d.modelHint = hint
+    } else {
+      const mdl = m?.model ?? f?.model ?? undefined
+      if (mdl) d.model = mdl
+    }
     if (f && f.attempt > 0) d.attempt = f.attempt
     const status = detail.nodes[n.id] ?? ''
     if (f?.startedTs !== undefined) {

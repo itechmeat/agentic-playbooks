@@ -53,7 +53,10 @@
     switch (data.kind) {
       case 'agent_task':
         if (!data.profile) return 'agent task'
-        return data.model ? `${data.profile} · ${shortModel(data.model)}` : data.profile
+        if (data.model) return `${data.profile} · ${shortModel(data.model)}`
+        // The attempt reported no model: say so, the request only as a hint.
+        if (data.modelHint) return `${data.profile} · not reported (hint ${shortModel(data.modelHint)})`
+        return data.profile
       case 'judge':
         return 'judge · decides'
       case 'human_review':
@@ -179,7 +182,11 @@
     <div
       class="truncate text-[11px]"
       style:color={k}
-      title={data.kind === 'agent_task' && data.profile && data.model ? `${data.profile} · ${data.model}` : kindLine}
+      title={data.kind === 'agent_task' && data.profile && data.model
+        ? `${data.profile} · ${data.model}`
+        : data.kind === 'agent_task' && data.profile && data.modelHint
+          ? `${data.profile} · model not reported; asked for ${data.modelHint} (a hint, not the model it ran on)`
+          : kindLine}
     >
       {kindLine}
     </div>

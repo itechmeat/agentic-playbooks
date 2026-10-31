@@ -148,6 +148,50 @@ describe('runview', () => {
   })
 })
 
+describe('runview latest attempt', () => {
+  it('shows the latest visit of a looping node, not its highest attempt', () => {
+    // Visit 1 reached attempt 2 on a fallback model; visit 2 is on attempt 1
+    // with the primary model.
+    const d = detail({
+      events: [
+        ev(3, 2_000, 'node_started', { node: 'build', attempt: 1 }),
+        ev(4, 2_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'claude', model: 'opus' }),
+        ev(5, 3_000, 'attempt_started', { node: 'build', attempt: 2, agent: 'claude', model: 'sonnet' }),
+        ev(6, 4_000, 'node_finished', { node: 'build', status: 'succeeded' }),
+        ev(7, 5_000, 'node_started', { node: 'build', attempt: 1 }),
+        ev(8, 5_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'claude', model: 'opus' }),
+      ],
+      attempt_models: [
+        { node: 'build', attempt: 1, executed_by: 'cli', agent: 'claude', model: 'opus', expected: 'opus', mismatch: false },
+        { node: 'build', attempt: 2, executed_by: 'cli', agent: 'claude', model: 'sonnet', expected: 'opus', mismatch: true },
+        { node: 'build', attempt: 1, executed_by: 'cli', agent: 'claude', model: 'opus', expected: 'opus', mismatch: false },
+      ],
+    })
+    expect(nodeRunData(d, 6_000).get('build')).toMatchObject({ model: 'opus', attempt: 1 })
+  })
+
+  it('keeps a host attempt without a reported model unreported, the request as a hint', () => {
+    const d = detail({
+      events: [
+        ev(3, 2_000, 'node_started', { node: 'build', attempt: 1 }),
+        ev(4, 2_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'host', model: 'opus-hint' }),
+      ],
+      attempt_models: [
+        { node: 'build', attempt: 1, executed_by: 'host', agent: null, model: null, expected: 'opus', mismatch: false },
+      ],
+    })
+    const b = nodeRunData(d, 3_000).get('build')
+    expect(b?.model).toBeNull()
+    expect(b?.modelHint).toBe('opus-hint')
+    // No hint on the attempt: the profile's model is the hint.
+    const bare = detail({
+      events: [ev(3, 2_000, 'node_started', { node: 'build', attempt: 1 }), ev(4, 2_000, 'attempt_started', { node: 'build', attempt: 1, agent: 'host' })],
+      attempt_models: [{ node: 'build', attempt: 1, executed_by: 'host', agent: null, model: null, expected: 'opus', mismatch: false }],
+    })
+    expect(nodeRunData(bare, 3_000).get('build')).toMatchObject({ model: null, modelHint: 'opus' })
+  })
+})
+
 describe('runview graph helpers', () => {
   it('marks walked, active and idle edges', async () => {
     const { edgeRunState } = await import('./runview')

@@ -5,6 +5,8 @@
     profile?: string
     agent?: string
     model?: string
+    /** No model reported: the model the attempt was asked for, a hint only. */
+    modelHint?: string
     attempt?: number
     progress?: number
     duration?: string
@@ -41,8 +43,17 @@
           <span class="shrink-0 text-xs" style:color={profileColor(current.profile)}>{current.profile}</span>
         {/if}
       </div>
-      <div class="text-xs text-muted-foreground" title={current.model}>
-        {[current.agent, current.model ? shortModel(current.model) : '', current.attempt ? `attempt ${current.attempt}` : '', current.duration]
+      <div class="text-xs text-muted-foreground" title={current.model ?? current.modelHint}>
+        {[
+          current.agent,
+          current.model
+            ? shortModel(current.model)
+            : current.modelHint
+              ? `model not reported (hint ${shortModel(current.modelHint)})`
+              : '',
+          current.attempt ? `attempt ${current.attempt}` : '',
+          current.duration,
+        ]
           .filter(Boolean)
           .join(' · ')}
         {#if current.progress !== undefined}· {current.progress}%{/if}

@@ -186,7 +186,9 @@
       node,
       profile: d.profile,
       agent: f?.agent,
-      model: d.model ?? f?.model,
+      // No model reported: none shown as actual, the request as a hint.
+      model: d.model === null ? undefined : (d.model ?? f?.model),
+      modelHint: d.modelHint,
       attempt: d.attempt,
       progress: d.progress,
       duration: d.duration,
@@ -226,6 +228,12 @@
     const data = runData
     nodes = withProfileModels(flowNodes, profileModels).map((n) => {
       const { profile: _profile, model, ...rest } = data.get(n.id) ?? {}
+      // `null`: the attempt reported no model; the profile's must not stand
+      // in for it (it is in `modelHint`, shown as a hint).
+      if (model === null) {
+        const { model: _planned, ...base } = n.data
+        return { ...n, data: { ...base, ...rest } }
+      }
       const m = model ?? n.data.model
       return { ...n, data: { ...n.data, ...rest, ...(m ? { model: m } : {}) } }
     })

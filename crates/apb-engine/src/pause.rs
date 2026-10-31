@@ -267,9 +267,15 @@ pub fn ended_intervals(events: &[Event]) -> Vec<(u128, u128)> {
 /// before a resume ([`ended_intervals`]). The run-time clock of the run
 /// listing and `apb stats`.
 pub fn inactive_ms_between(events: &[Event], from: u128, to: u128, now_ms: u128) -> u128 {
+    paused_ms_in(&inactive_intervals(events, now_ms), from, to)
+}
+
+/// The paused intervals and the [`ended_intervals`] of a run: every span it
+/// was not active, for a fold that measures many spans of one journal.
+pub fn inactive_intervals(events: &[Event], now_ms: u128) -> Vec<(u128, u128)> {
     let mut spans = paused_intervals(events, now_ms);
     spans.extend(ended_intervals(events));
-    paused_ms_in(&spans, from, to)
+    spans
 }
 
 /// Active run time of `[from, to)`: the wall time minus

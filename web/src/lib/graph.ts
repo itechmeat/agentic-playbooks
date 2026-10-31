@@ -30,6 +30,11 @@ export type FlowNodeData = {
   profileScope?: ProfileScope
   /** The profile's model, e.g. `opus 5.5`; filled by `withProfileModels`. */
   model?: string
+  /**
+   * Run view: the latest attempt reported no model (`model` is then unset);
+   * the model it was asked for, shown only as a hint.
+   */
+  modelHint?: string
   /** Expected time of one execution as written, e.g. `30m`. */
   expected?: string
   /** Id of the sub-playbook a `playbook` node runs. */

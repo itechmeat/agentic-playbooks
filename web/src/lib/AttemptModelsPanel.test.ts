@@ -69,4 +69,14 @@ describe('AttemptModelsPanel', () => {
     expect(text).not.toContain('%')
     expect(document.querySelector('pre')).toBeNull()
   })
+
+  it('says a model was not reported and marks the request as a hint', () => {
+    app = mount(AttemptModelsPanel, {
+      target: document.body,
+      props: { current: { node: 'build', agent: 'host', modelHint: 'claude-opus-5-5', tail: [] } },
+    })
+    flushSync()
+    const text = document.querySelector('[data-testid="run-current-attempt"]')?.nextElementSibling?.textContent ?? ''
+    expect(text).toContain('model not reported (hint opus 5.5)')
+  })
 })
