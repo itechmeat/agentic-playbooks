@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
   import {
@@ -22,6 +22,7 @@
     type ProfileSummary,
   } from '../lib/api'
   import {
+    profileModelKey,
     profileModelMap,
     toFlow,
     withProfileModels,
@@ -29,6 +30,7 @@
     type FlowNode,
   } from '../lib/graph'
   import { accentVar, profileColor } from '../lib/profilecolor'
+  import type { ProfileScope } from '../lib/profileref'
   import { slowRefresh, subscribeChanges } from '../lib/ws'
   import { shortModel } from '../lib/format'
   import { onEscape } from '../lib/hooks/escape.svelte'
@@ -135,7 +137,10 @@
 
   function toggleStats() {
     showStats = !showStats
-    if (showStats) loadStats()
+    if (showStats) {
+      loadStats()
+      void reveal('[data-testid="playbook-stats-panel"]')
+    }
   }
 
   // "Will it fit here?": read each time the panel opens, since profiles,
@@ -164,7 +169,25 @@
 
   function toggleFit() {
     showFit = !showFit
-    if (showFit) loadFit()
+    if (showFit) {
+      loadFit()
+      void reveal('[data-testid="fit-panel"]')
+    }
+  }
+
+  function openHistory(open: boolean) {
+    showHistory = open
+    if (open) void reveal('[data-testid="history-panel"]')
+  }
+
+  // Below the three-column breakpoint (lg, 1024px) the right column sits
+  // under the graph: scroll a panel that just opened into view, else a tap
+  // on History, Stats, Fit, Problems or a node seems to do nothing.
+  async function reveal(selector: string) {
+    if (window.matchMedia?.('(min-width: 1024px)').matches) return
+    await tick()
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    document.querySelector(selector)?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' })
   }
   // --- end of 0.23.0 stats ---
 
@@ -172,6 +195,10 @@
   // person should look at), shown in a side panel; a person's action on one
   // in flight. A response for another playbook writes nothing.
   let showProblems = $state(false)
+  function toggleProblems() {
+    showProblems = !showProblems
+    if (showProblems) void reveal('[data-testid="known-problems-panel"]')
+  }
   let problems = $state<ProblemsView | null>(null)
   let problemsError = $state<string | null>(null)
   // The problems whose action is in flight: each is disabled on its own.
@@ -271,7 +298,9 @@
     defaults?: { max_parallel?: number | null; on_failure?: string | null } | null
   }
 
-  function metaOf(pb: PlaybookDetail['playbook']): PlaybookMeta {
+  // `effective`: the server's effective effects; the declared list (deduped)
+  // only when an older server sends none.
+  function metaOf(pb: PlaybookDetail['playbook'], effective?: string[]): PlaybookMeta {
     const raw = pb as unknown as Record<string, unknown>
     const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : [])
     const obj = (v: unknown) => (v && typeof v === 'object' ? (v as Record<string, unknown>) : null)
@@ -280,7 +309,7 @@
     const def = obj(raw.defaults)
     return {
       description: typeof raw.description === 'string' ? raw.description.trim() : '',
-      effects: list(raw.effects),
+      effects: [...new Set(effective ?? list(raw.effects))],
       requires: req ? { files: list(req.files), commands: list(req.commands) } : null,
       trigger: trig ? { when: list(trig.when), avoid_when: list(trig.avoid_when) } : null,
       defaults: def
@@ -302,33 +331,44 @@
 
   // Profile name -> model, resolved the way scope `auto` does for this project.
   const models = $derived(profileModelMap(profileList, workspace))
-  // Each profile the graph uses, in first-use order, for the legend.
+  // Each profile the graph's agent and answering finish nodes use, with the
+  // scope a node pinned it to, in first-use order, for the legend.
+  type UsedProfile = { name: string; scope?: ProfileScope; key: string }
   const usedProfiles = $derived.by(() => {
-    const seen: string[] = []
+    const seen: UsedProfile[] = []
     for (const n of nodes) {
-      const p = n.data.profile
-      if (p && n.data.kind === 'agent_task' && !seen.includes(p)) seen.push(p)
+      const name = n.data.profile
+      if (!name || (n.data.kind !== 'agent_task' && n.data.kind !== 'finish')) continue
+      const key = profileModelKey(name, n.data.profileScope)
+      if (!seen.some((u) => u.key === key)) seen.push({ name, scope: n.data.profileScope, key })
     }
     return seen
   })
   const hasJudge = $derived(nodes.some((n) => n.data.kind === 'judge'))
   const hasHumanGate = $derived(nodes.some((n) => n.data.kind === 'human_review'))
   const agentTasks = $derived(nodes.filter((n) => n.data.kind === 'agent_task').length)
-  const resolvedProfiles = $derived(usedProfiles.filter((p) => models.has(p)).length)
-  // The profile a name resolves to here, the way scope `auto` does: this
-  // project's own first, else the global one.
-  const resolveProfile = (p: string) =>
-    profileList.find((s) => s.name === p && s.scope === 'project' && s.workspace_id === workspace) ??
-    profileList.find((s) => s.name === p && s.scope === 'global')
+  const resolvedProfiles = $derived(usedProfiles.filter((p) => models.has(p.key)).length)
+  // The profile a ref resolves to here: an explicit scope exactly, else the
+  // way scope `auto` does (this project's own first, else the global one).
+  const resolveProfile = (p: string, scope?: ProfileScope) => {
+    const project = () =>
+      profileList.find((s) => s.name === p && s.scope === 'project' && s.workspace_id === workspace)
+    const global = () => profileList.find((s) => s.name === p && s.scope === 'global')
+    if (scope === 'project') return project()
+    if (scope === 'global') return global()
+    return project() ?? global()
+  }
   const untrustedProfiles = $derived(
-    usedProfiles.filter((p) => {
-      const r = resolveProfile(p)
-      return !!r && !r.trusted
-    }),
+    usedProfiles
+      .filter((p) => {
+        const r = resolveProfile(p.name, p.scope)
+        return !!r && !r.trusted
+      })
+      .map((p) => p.key),
   )
   const selectedAgent = $derived.by(() => {
     const p = selectedData?.profile
-    return p ? (resolveProfile(p)?.agent ?? '') : ''
+    return p ? (resolveProfile(p, selectedData?.profileScope)?.agent ?? '') : ''
   })
 
   // Select a node on the canvas: the card glows and the side shows it.
@@ -336,6 +376,7 @@
     selectedNodeId = nodeId
     showForm = false
     nodes = nodes.map((n) => (n.selected === (n.id === nodeId) ? n : { ...n, selected: n.id === nodeId }))
+    if (nodeId) void reveal('[data-testid="node-summary"]')
   }
 
   // Effects in their colors: what a run may touch, the riskier the warmer.
@@ -447,7 +488,7 @@
       edges = flow.edges
       playbookNodes = detail.playbook.nodes
       playbookEdges = detail.playbook.edges
-      meta = metaOf(detail.playbook)
+      meta = metaOf(detail.playbook, detail.effective_effects)
       publishOnly = detail.playbook.publish_only === true
       yamlText = detail.yaml
       name = detail.playbook.name || detail.id
@@ -503,7 +544,7 @@
     const items: StatusItem[] = [
       { label: 'playbook', value: version ? `${id}@${version}` : id, tone: 'orange' },
       errors.length > 0
-        ? { label: 'validate', value: `${errors.length} errors`, tone: 'danger', title: issuesTitle }
+        ? { label: 'validate', value: `${errors.length} ${errors.length === 1 ? 'error' : 'errors'}`, tone: 'danger', title: issuesTitle }
         : {
             label: 'validate',
             value: `ok · ${warnings} ${warnings === 1 ? 'warning' : 'warnings'}`,
@@ -688,10 +729,10 @@
   class="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-b border-line px-4 py-1.5 text-xs text-fg-2"
   data-testid="playbook-legend"
 >
-  {#each usedProfiles as p (p)}
-    <span class="legend-sq whitespace-nowrap" style:--k={profileColor(p)}>
-      {p}{#if models.get(p)}<span class="text-muted-foreground" title={models.get(p)}
-          >{` · ${shortModel(models.get(p) ?? '')}`}</span
+  {#each usedProfiles as p (p.key)}
+    <span class="legend-sq whitespace-nowrap" style:--k={profileColor(p.name)}>
+      {p.name}{#if models.get(p.key)}<span class="text-muted-foreground" title={models.get(p.key)}
+          >{` · ${shortModel(models.get(p.key) ?? '')}`}</span
         >{/if}
     </span>
   {/each}
@@ -732,7 +773,7 @@
               class="tag candidate-chip"
               title="A candidate version is on trial: open the history to compare and decide"
               data-testid="candidate-chip"
-              onclick={() => (showHistory = true)}
+              onclick={() => openHistory(true)}
             >
               candidate {candidate.version}
             </button>
@@ -766,7 +807,7 @@
             variant={showHistory ? 'default' : 'outline'}
             size="sm"
             class="h-7"
-            onclick={() => (showHistory = !showHistory)}
+            onclick={() => openHistory(!showHistory)}
             title="Show the version history of this playbook"
           >
             <History data-icon="inline-start" />
@@ -807,7 +848,7 @@
             variant={showProblems ? 'default' : 'outline'}
             size="sm"
             class="h-7"
-            onclick={() => (showProblems = !showProblems)}
+            onclick={toggleProblems}
             title="Known problems: trouble with this playbook's tools that earlier runs reported"
             data-testid="known-problems-toggle"
           >
@@ -1017,7 +1058,7 @@
       {/if}
 
       {#if showHistory}
-        <section class="box px-4 pt-3.5 pb-3.5">
+        <section class="box px-4 pt-3.5 pb-3.5" data-testid="history-panel">
           <span class="box-cap">version history</span>
           <div class="box-close">
             <Button

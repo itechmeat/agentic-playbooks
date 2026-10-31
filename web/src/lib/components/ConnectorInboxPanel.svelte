@@ -12,7 +12,6 @@
   import * as Table from '$lib/components/ui/table'
   import * as Alert from '$lib/components/ui/alert'
   import { Skeleton } from '$lib/components/ui/skeleton'
-  import Inbox from '@lucide/svelte/icons/inbox'
   import Copy from '@lucide/svelte/icons/copy'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
   import { untrack } from 'svelte'
@@ -207,9 +206,7 @@
                              list: the notice at the top scrolls away by event
                              #18, and an operator must not be able to mistake
                              what a stranger wrote for something apb produced. -->
-                        <div
-                          class="flex flex-col gap-1 border border-warning/40 bg-field p-2"
-                        >
+                        <div class="stranger-text flex flex-col gap-1 border p-2">
                           <span
                             class="flex items-center gap-1 text-xs font-medium tracking-wide text-amber uppercase"
                           >
@@ -232,3 +229,11 @@
     </div>
   </section>
 {/if}
+
+<style>
+  /* Text a stranger wrote: an amber tint unlike apb's own output. */
+  .stranger-text {
+    border-color: color-mix(in oklab, var(--c-amber) 50%, transparent);
+    background: color-mix(in oklab, var(--c-amber) 6%, var(--c-bg));
+  }
+</style>

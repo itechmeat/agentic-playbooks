@@ -110,7 +110,7 @@
         </div>
         {#each filtered as r (`${r.workspace_id}/${r.run_id}`)}
           {@const terminal = isTerminalRunStatus(r.status)}
-          {@const live = r.status === 'running' && r.started_ts > 0}
+          {@const live = r.status === 'running' && r.started_ts > 0 && !r.driver_dead}
           {@const look = needsLookLabel(r.needs_look)}
           <div
             class="box relative flex flex-col gap-2 px-3.5 py-2.5 transition-colors hover:border-violet {cols}"
@@ -163,16 +163,17 @@
                 </span>
               {/if}
             </div>
-            <div class="relative z-[1] w-fit text-xs text-fg-2" role="cell" title={new Date(r.started_ts).toLocaleString()}>
-              <span class="text-muted-foreground md:hidden">started&nbsp;</span>{formatAge(r.started_ts, now)}
+            <div class="relative z-[1] w-fit text-xs text-fg-2" role="cell" title={r.started_ts > 0 ? new Date(r.started_ts).toLocaleString() : undefined}>
+              <span class="text-muted-foreground md:hidden">started&nbsp;</span>{r.started_ts > 0 ? formatAge(r.started_ts, now) : '-'}
             </div>
             <!-- A finished run's duration is its active time (pauses left
                  out) from the listing; a running run counts up from its
-                 start. A paused or interrupted run is not running, and its
-                 wall time since start would count the pause, so it shows none. -->
-            <div class={live || r.duration_ms !== undefined ? 'text-xs text-fg-2' : 'hidden text-xs text-fg-2 md:block'} role="cell">
+                 start, less the time it spent paused so far. A paused or
+                 interrupted run, or one whose driver is gone, is not running,
+                 so it shows none. -->
+            <div class={['relative z-[1]', live || r.duration_ms !== undefined ? 'text-xs text-fg-2' : 'hidden text-xs text-fg-2 md:block']} role="cell">
               {#if live}
-                <span class="text-muted-foreground md:hidden">running&nbsp;</span>{formatDuration(now - r.started_ts)}
+                <span class="text-muted-foreground md:hidden">running&nbsp;</span>{formatDuration(now - r.started_ts - (r.paused_ms ?? 0))}
               {:else if r.duration_ms !== undefined}
                 <span class="text-muted-foreground md:hidden">took&nbsp;</span>{formatDuration(r.duration_ms)}
               {:else}

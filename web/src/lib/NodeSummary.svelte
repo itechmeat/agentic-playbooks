@@ -31,6 +31,13 @@
 
   const k = $derived(nodeKindColor(node.type, data?.profile))
   const str = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v))
+  // `isolation` is the bare level, or the long form `{ level, network, ... }`
+  // when more is declared.
+  const isolationText = (v: unknown) => {
+    if (!v || typeof v !== 'object') return str(v)
+    const o = v as { level?: unknown; network?: unknown }
+    return [str(o.level), o.network == null ? '' : `network ${str(o.network)}`].filter(Boolean).join(' · ')
+  }
 
   const incoming = $derived(edges.filter((e) => e.to === node.id))
   const outgoing = $derived(edges.filter((e) => e.from === node.id))
@@ -102,7 +109,7 @@
     {/if}
     {#if node.isolation}
       <dt>isolation</dt>
-      <dd>{str(node.isolation)}</dd>
+      <dd>{isolationText(node.isolation)}</dd>
     {/if}
     {#if node.continue_session}
       <dt>continues</dt>
@@ -140,7 +147,7 @@
   {#if options.length}
     <div class="mt-3 flex flex-wrap items-center gap-1.5 text-xs">
       <span class="text-muted-foreground">options</span>
-      {#each options as o (o)}<span class="tag text-amber">{o}</span>{/each}
+      {#each options as o, i (i)}<span class="tag text-amber">{o}</span>{/each}
     </div>
   {/if}
 

@@ -51,3 +51,17 @@ export function fieldToProfile(raw: string): ProfileRef | undefined {
   }
   return isValidProfileName(trimmed) ? trimmed : undefined
 }
+
+/**
+ * Whether a node without its own profile runs on `defaults.profile`: an agent
+ * task, and a finish node that composes an answer (it has a `prompt`), as the
+ * engine's `effective_profile_ref` resolves it.
+ */
+export function usesDefaultProfile(n: { type: string; prompt?: unknown }): boolean {
+  return n.type === 'agent_task' || (n.type === 'finish' && typeof n.prompt === 'string' && n.prompt.trim() !== '')
+}
+
+/** The key of a profile in a `profileModelMap`: the bare name for scope auto, `scope:name` for an explicit scope. */
+export function profileModelKey(name: string, scope?: ProfileScope): string {
+  return scope ? `${scope}:${name}` : name
+}

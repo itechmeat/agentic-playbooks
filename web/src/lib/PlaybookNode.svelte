@@ -96,7 +96,7 @@
     typeof data.progress === 'number' ? Math.max(0, Math.min(100, data.progress)) : null,
   )
 
-  // Third line: the run verdict when there is one, else the title.
+  // Last lines: the title, then the run verdict when there is one.
   const tail = (...parts: (string | number | undefined | null)[]) =>
     parts.filter((p) => p !== undefined && p !== null && p !== '').join(' · ')
   const statusLine = $derived.by(() => {
@@ -159,7 +159,7 @@
     {#if hasTarget}<Handle type="target" position={Position.Top} />{/if}
 
     <div class="flex items-baseline justify-between gap-2">
-      <b class="min-w-0 truncate font-semibold">{id}</b>
+      <b class="min-w-0 truncate font-semibold" title={subtitle ? `${subtitle} (${id})` : id}>{id}</b>
       <span class="flex shrink-0 items-baseline gap-1.5 text-[11px] text-muted-foreground">
         {#if data.list}
           <span class="list-badge" title="Runs once per item: items processed of the list" data-testid="node-list-badge">
@@ -194,10 +194,16 @@
       <div class="mt-0.5 truncate text-[11px]" style:color={k}>
         <span class="spin"></span>{tail('running', data.attempt ? `attempt ${data.attempt}` : undefined, data.note)}
       </div>
-    {:else if statusLine}
-      <div class={cn('mt-0.5 truncate text-[11px]', statusLine.tone)} title={statusLine.text}>{statusLine.text}</div>
-    {:else if subtitle}
-      <div class="mt-0.5 truncate text-[11px] text-muted-foreground" title={subtitle}>{subtitle}</div>
+    {:else}
+      <!-- The title stays next to the run verdict: no taller than a running
+           card, which shows its progress instead (the title is in the
+           heading's tooltip there). -->
+      {#if subtitle}
+        <div class="mt-0.5 truncate text-[11px] text-muted-foreground" title={subtitle}>{subtitle}</div>
+      {/if}
+      {#if statusLine}
+        <div class={cn('mt-0.5 truncate text-[11px]', statusLine.tone)} title={statusLine.text}>{statusLine.text}</div>
+      {/if}
     {/if}
 
     {#if data.cached || data.failure}

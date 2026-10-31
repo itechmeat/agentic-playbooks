@@ -82,6 +82,20 @@ async fn playbook_detail_includes_model_and_validation() {
     assert_eq!(json["version"], "1.0.0");
     assert_eq!(json["playbook"]["nodes"][0]["type"], "start");
     assert!(json["yaml"].as_str().unwrap().contains("implement-task"));
+    // The playbook declares no effects, yet its agent and script nodes may
+    // write files: the detail carries the effective set the run policy uses.
+    assert!(
+        json["playbook"]["effects"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    let effective: Vec<&str> = json["effective_effects"]
+        .as_array()
+        .expect("effective_effects")
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    assert!(effective.contains(&"fs_write"), "{effective:?}");
     // The seed's `architect` directory holds no profile and the `lint`
     // script was never added: shown as warnings (V91, V92), since the editor
     // saves the YAML first and the profile or the scripts may follow.

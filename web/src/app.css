@@ -482,7 +482,7 @@
   background: transparent;
 }
 #app .svelte-flow__attribution a {
-  color: var(--c-faint);
+  color: var(--c-muted);
 }
 /* Edge condition labels ("match: ...", "node: status") default to a white
    pill with `color: inherit`; the library only swaps it for its own `.dark`

@@ -9,7 +9,11 @@
     profiles = [],
     decides = false,
     humanGate = false,
-  }: { profiles?: { name: string; model?: string }[]; decides?: boolean; humanGate?: boolean } = $props()
+  }: {
+    profiles?: { name: string; key?: string; model?: string }[]
+    decides?: boolean
+    humanGate?: boolean
+  } = $props()
 
   const states = [
     { label: 'running', color: accentVar('blue') },
@@ -22,7 +26,7 @@
   class="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-b border-line px-4 py-1.5 text-xs text-fg-2"
   data-testid="run-legend"
 >
-  {#each profiles as p (p.name)}
+  {#each profiles as p (p.key ?? p.name)}
     <span class="legend-sq whitespace-nowrap" style:--k={profileColor(p.name)}
       >{p.name}{#if p.model}<span class="text-muted-foreground" title={p.model}>{` · ${shortModel(p.model)}`}</span>{/if}</span
     >

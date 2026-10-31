@@ -89,6 +89,7 @@
     ]
   })
 
+  let statsRetry: ReturnType<typeof setTimeout> | undefined
   function loadStats(list: RunSummary[]) {
     const byWorkspace = new Map<string, RunSummary[]>()
     for (const r of list) byWorkspace.set(r.workspace_id, [...(byWorkspace.get(r.workspace_id) ?? []), r])
@@ -108,9 +109,16 @@
         })
         .catch(() => {
           if (statsSeq.get(ws) !== seq) return
-          // Forget the count so the next pass after the back-off retries.
+          // Forget the count so the next pass after the back-off retries,
+          // and schedule that pass: an idle dashboard has no change notice
+          // that would run one.
           statsFor.delete(ws)
           statsFailedAt.set(ws, Date.now())
+          if (statsRetry === undefined)
+            statsRetry = setTimeout(() => {
+              statsRetry = undefined
+              loadStats(runs)
+            }, STATS_RETRY_MS)
         })
     }
   }
@@ -174,6 +182,8 @@
     return () => {
       unsubscribe()
       slow.dispose()
+      clearTimeout(statsRetry)
+      statsRetry = undefined
     }
   })
 

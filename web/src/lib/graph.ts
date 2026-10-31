@@ -1,6 +1,8 @@
 import dagre from '@dagrejs/dagre'
 import type { PlaybookDetail, WfLayout } from './types'
-import { profileToField, type ProfileScope } from './profileref'
+import { profileModelKey, profileToField, usesDefaultProfile, type ProfileScope } from './profileref'
+
+export { profileModelKey }
 import { listBadge } from './listprogress'
 
 /**
@@ -532,13 +534,14 @@ export function toFlow(
     for (const [id, pos] of autoLayout(playbook, exits)) auto.set(id, pos)
   }
 
-  // Agent tasks without their own profile run on the playbook default.
+  // Agent tasks and answering finish nodes without their own profile run on
+  // the playbook default.
   const defaults = playbook.defaults as { profile?: unknown } | null | undefined
   const defaultProfile = profileRefOf(defaults?.profile)
 
   const nodes: FlowNode[] = playbook.nodes.map((n) => {
     const own = profileRefOf(n.profile)
-    const ref = own ?? (n.type === 'agent_task' ? defaultProfile : undefined)
+    const ref = own ?? (usesDefaultProfile(n) ? defaultProfile : undefined)
     const profile = ref?.name
     const sub = n.type === 'playbook' ? playbookId(n.playbook) : undefined
     return {
@@ -599,10 +602,6 @@ export interface ProfileModelEntry {
   workspace_id?: string
 }
 
-/** The key of a profile in a `profileModelMap`: the bare name for scope auto, `scope:name` for an explicit scope. */
-export function profileModelKey(name: string, scope?: ProfileScope): string {
-  return scope ? `${scope}:${name}` : name
-}
 
 /**
  * Profile to model, for one workspace. The bare name resolves the way scope
@@ -629,10 +628,16 @@ export function profileModelMap(
   return map
 }
 
-/** Fills `data.model` of every node whose profile (in its scope) has a known model. */
+/**
+ * Sets `data.model` of every node to its profile's model (in its scope), and
+ * clears a model the profile no longer resolves to.
+ */
 export function withProfileModels(nodes: FlowNode[], models: Map<string, string>): FlowNode[] {
   return nodes.map((n) => {
     const model = n.data.profile ? models.get(profileModelKey(n.data.profile, n.data.profileScope)) : undefined
-    return model && model !== n.data.model ? { ...n, data: { ...n.data, model } } : n
+    if (model === n.data.model) return n
+    if (model) return { ...n, data: { ...n.data, model } }
+    const { model: _stale, ...data } = n.data
+    return { ...n, data }
   })
 }

@@ -606,6 +606,10 @@ pub(crate) async fn get_playbook(
                 "version": loaded.version,
                 "yaml": loaded.yaml,
                 "playbook": loaded.playbook,
+                // What a run may touch as the run policy counts it: inferred
+                // from the nodes, plus the playbook's and each node's own
+                // declaration. The declared list alone can understate it.
+                "effective_effects": apb_core::effects::effective(&loaded.playbook),
                 "layout": loaded.layout,
                 "validation": validation,
                 "frozen": reg.is_frozen(&id),

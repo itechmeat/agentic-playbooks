@@ -203,7 +203,7 @@
                   {/if}
                 </div>
                 <div class="col-span-full min-w-0 truncate text-xs text-fg-2 lg:col-span-1 lg:text-[13px]">
-                  {p.agent} <span class="text-faint" aria-hidden="true">·</span> <span title={p.model}>{shortModel(p.model)}</span>
+                  {p.agent} <span class="text-faint" aria-hidden="true">·</span> <span class="relative z-10" title={p.model}>{shortModel(p.model)}</span>
                 </div>
                 <div class="col-span-full flex min-w-0 flex-wrap gap-1 lg:col-span-1">
                   {#each p.skills as s (s)}
@@ -213,7 +213,7 @@
                   {/each}
                 </div>
                 <div class="relative z-10 col-start-2 row-start-1 flex justify-end gap-0.5 lg:order-last lg:col-start-auto lg:row-start-auto">
-                  <Button variant="ghost" size="icon-sm" href={editHref(p)} title="Edit" aria-label="Edit">
+                  <Button variant="ghost" size="icon-sm" href={editHref(p)} title="Edit" aria-label={`Edit ${p.name}`}>
                     <Pencil />
                   </Button>
                   <Button
@@ -223,7 +223,7 @@
                     onclick={() => askRemove(p)}
                     disabled={deleting === key(p)}
                     title="Delete"
-                    aria-label="Delete"
+                    aria-label={`Delete ${p.name}`}
                   >
                     <Trash2 />
                   </Button>

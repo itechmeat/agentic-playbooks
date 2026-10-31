@@ -267,11 +267,20 @@
             return { nodes: [...merged.values()] }
           })()
       const flow = toFlow(model, layoutInput)
-      nodes = withProfileModels(flow.nodes, models)
+      // Read untracked: a profile list or project change must not rebuild
+      // the graph (and drop a drag); the effect below applies the models.
+      nodes = withProfileModels(flow.nodes, untrack(() => models))
       edges = flow.edges
     } else if (error) {
       parseError = error
     }
+  })
+
+  // The profiles' models arrive (or the project changes) after the graph is
+  // drawn: fill them in place, positions untouched.
+  $effect(() => {
+    const m = models
+    untrack(() => (nodes = withProfileModels(nodes, m)))
   })
 
   function applyMutation(fn: (doc: Document) => Document): boolean {

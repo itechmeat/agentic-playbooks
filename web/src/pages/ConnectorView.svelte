@@ -58,7 +58,6 @@
   import Replace from '@lucide/svelte/icons/replace'
   import Stethoscope from '@lucide/svelte/icons/stethoscope'
   import ExternalLink from '@lucide/svelte/icons/external-link'
-  import ChartNoAxesColumn from '@lucide/svelte/icons/chart-no-axes-column'
 
   let { name, workspace = '' }: { name: string; workspace?: string } = $props()
 
@@ -746,7 +745,7 @@
       {#if usageState !== 'hidden'}
         <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
           <div class="flex flex-col gap-1">
-      <h2 class="box-cap">Usage</h2>
+            <h2 class="box-cap">Usage</h2>
             <p class="prose-text text-xs text-muted-foreground">
               Calls, error rate, and duration per function and account, read from recent run
               event logs. Read only - no new state is recorded here.

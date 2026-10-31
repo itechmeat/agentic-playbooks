@@ -25,6 +25,8 @@
 
   let items = $state<ConnectorCard[]>([])
   let loaded = $state(false)
+  // A failed installed fetch: the status bar says unknown, not 0.
+  let installedFailed = $state(false)
   let available = $state<AvailableConnector[]>([])
   let availableLoading = $state(true)
   // A failed /available fetch is tracked separately from an empty list: the
@@ -35,7 +37,9 @@
   async function loadInstalled() {
     try {
       items = await fetchConnectors()
+      installedFailed = false
     } catch (e) {
+      installedFailed = true
       toast.error('Failed to load connectors', { description: String(e) })
     } finally {
       loaded = true
@@ -76,11 +80,13 @@
   const statusItems = $derived.by((): StatusItem[] => {
     const ready = items.reduce((n, c) => n + c.accountsReady, 0)
     const total = items.reduce((n, c) => n + c.accountsTotal, 0)
+    // Before the first load, or after it failed, the counts are not known.
+    const known = (v: string | number) => (!loaded ? '...' : installedFailed ? 'unknown' : v)
     return [
-      { label: 'installed', value: items.length, tone: 'info' },
+      { label: 'installed', value: known(items.length), tone: installedFailed ? 'warning' : 'info' },
       {
         label: 'approved',
-        value: items.filter((c) => c.trust === 'approved').length,
+        value: known(items.filter((c) => c.trust === 'approved').length),
         tone: 'success',
       },
       {
@@ -88,7 +94,7 @@
         value: availableLoading ? '...' : availableFailed ? 'unknown' : available.length,
         tone: availableFailed ? 'warning' : 'violet',
       },
-      { label: 'accounts ready', value: `${ready}/${total}`, tone: ready < total ? 'warning' : 'muted' },
+      { label: 'accounts ready', value: known(`${ready}/${total}`), tone: ready < total ? 'warning' : 'muted' },
     ]
   })
 

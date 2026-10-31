@@ -108,8 +108,8 @@ describe('ConnectorInboxPanel', () => {
     )
     const both = render(ConnectorInboxPanel, { props: { ...props, expandedSeqs: [1, 2] } }).body
     expect(count(both)).toBe(2)
-    // And the marking is styled as a warning, not as ordinary muted text.
-    expect(both).toContain('border-warning/40')
+    // And the body carries the amber stranger-text tint, not ordinary output.
+    expect(both).toContain('stranger-text')
   })
 
   it('calls the listed events unread rather than stored', () => {

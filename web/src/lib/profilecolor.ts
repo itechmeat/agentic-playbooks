@@ -63,14 +63,14 @@ export function isTerminalNodeKind(kind: string | null | undefined): boolean {
 
 /**
  * CSS color of a run or node status: running blue, success green, failure
- * red, paused or waiting amber, anything else (pending, skipped, created)
- * faint. Always show the status text next to it; color is never the only
+ * or cancel red, paused or waiting amber, skipped faint, anything else
+ * (pending, created) muted. Always show the status text next to it; color is never the only
  * signal.
  */
 export function statusColor(status: string | null | undefined): string {
   const s = (status ?? '').toLowerCase()
   if (s.includes('succeed') || s === 'done' || s === 'ok' || s === 'passed') return accentVar('green')
-  if (s.includes('fail') || s.includes('timed') || s.includes('abort') || s === 'error')
+  if (s.includes('fail') || s.includes('timed') || s.includes('abort') || s.includes('cancel') || s === 'error')
     return accentVar('red')
   if (s.includes('run')) return accentVar('blue')
   if (s.includes('pause') || s.includes('wait') || s.includes('interrupt') || s.includes('review'))

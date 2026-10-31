@@ -1145,7 +1145,14 @@ export type RunSummary = { run_id: string, playbook: string, status: string, sta
  * or `run_aborted`), paused time left out: the same duration `apb stats`
  * counts. Absent while the run has not ended.
  */
-duration_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
+duration_ms?: number, 
+/**
+ * Milliseconds a run that has not ended spent paused so far, so a
+ * listing can count its active time up from `started_ts` without the
+ * pauses. Absent once the run ended (see `duration_ms`) and for a run
+ * that was never paused.
+ */
+paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
  * journal still reads `running` because the only thing that writes a
@@ -1188,7 +1195,14 @@ workspace_id: string, project: string, run_id: string, playbook: string, status:
  * or `run_aborted`), paused time left out: the same duration `apb stats`
  * counts. Absent while the run has not ended.
  */
-duration_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
+duration_ms?: number, 
+/**
+ * Milliseconds a run that has not ended spent paused so far, so a
+ * listing can count its active time up from `started_ts` without the
+ * pauses. Absent once the run ended (see `duration_ms`) and for a run
+ * that was never paused.
+ */
+paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
  * journal still reads `running` because the only thing that writes a

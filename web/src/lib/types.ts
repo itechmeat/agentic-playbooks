@@ -84,6 +84,9 @@ export interface PlaybookDetail {
     // Every agent node must run with isolation full (shown read-only).
     publish_only?: boolean
   }
+  // Inferred plus declared (playbook and node) effects, the set the run
+  // policy uses; absent from an older server.
+  effective_effects?: string[]
   layout: WfLayout | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
   frozen: boolean

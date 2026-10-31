@@ -92,7 +92,8 @@ pub fn is_frozen_dir(playbook_dir: &Path) -> bool {
     playbook_dir.join(FROZEN_MARKER).is_file()
 }
 
-/// Distinct profile names a playbook's nodes bind, in first-use order.
+/// Distinct profile names a playbook's nodes bind, in first-use order, scope
+/// dropped.
 fn bound_profile_names(pb: &Playbook) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for node in &pb.nodes {
@@ -116,8 +117,11 @@ pub struct PlaybookSummary {
     pub frozen: bool,
     /// How many nodes the current version has.
     pub node_count: usize,
-    /// Distinct profile names the current version's agent nodes bind (the
-    /// node's own profile, else `defaults.profile`), in first-use order.
+    /// Distinct profile names the current version's nodes run an agent with
+    /// (`NodeKind::effective_profile_ref`: an agent task's or an answering
+    /// finish node's own profile, else `defaults.profile`, and a judge's
+    /// emulation profile), in first-use order. Names only: two refs that
+    /// differ only in scope list once.
     pub profiles: Vec<String>,
 }
 

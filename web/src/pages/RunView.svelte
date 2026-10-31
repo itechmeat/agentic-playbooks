@@ -121,8 +121,8 @@
   const profiles = $derived(
     detail
       ? runProfiles(detail).map((p) => {
-          const model = p.model ?? profileModels.get(p.name)
-          return model ? { name: p.name, model } : { name: p.name }
+          const model = p.model ?? profileModels.get(p.key)
+          return model ? { name: p.name, key: p.key, model } : { name: p.name, key: p.key }
         })
       : [],
   )
@@ -199,7 +199,7 @@
     detail
       ? [
           { label: 'nodes', value: `${doneCount}/${steps.length}`, tone: 'info' },
-          { label: 'stage', value: stage ?? (terminal ? 'end' : 'none'), tone: 'orange' },
+          { label: 'stage', value: terminal ? 'end' : (stage ?? 'none'), tone: 'orange' },
           {
             label: 'parallel',
             value: `${runningCount}/${parallel?.value ?? 4}${parallel?.isDefault ? ' default' : ''}`,
@@ -238,10 +238,9 @@
   })
 
   // A running run's ages and progress move with the clock, not only with
-  // journal changes.
+  // journal changes; a finished run's "started ... ago" still ages, slower.
   $effect(() => {
-    if (terminal) return
-    const t = setInterval(() => (now = Date.now()), 10_000)
+    const t = setInterval(() => (now = Date.now()), terminal ? 60_000 : 10_000)
     return () => clearInterval(t)
   })
 
@@ -361,10 +360,13 @@
     } catch (e) {
       if (seq !== routeSeq) return
       // Nothing on screen yet: say why in place of the page. A failed reload
-      // of a run already shown keeps it and only toasts.
-      if (!detail) loadError = String(e)
-      else toast.error('Failed to load run', { description: String(e) })
-      return
+      // of a run already shown keeps it, toasts, and still refreshes the
+      // report and the grades below.
+      if (!detail) {
+        loadError = String(e)
+        return
+      }
+      toast.error('Failed to load run', { description: String(e) })
     }
     try {
       const r = await fetchRunReport(id, workspace)

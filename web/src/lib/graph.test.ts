@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import dagre from '@dagrejs/dagre'
+import { describe, expect, it, vi } from 'vitest'
 import {
   edgeTone,
   expectedText,
@@ -470,6 +471,24 @@ describe('toFlow fan-out ordering', () => {
     expect(spots.size).toBe(nodes.length)
   })
 
+  it('falls back to a grid when dagre throws on every attempt', () => {
+    const spy = vi.spyOn(dagre, 'layout').mockImplementation(() => {
+      throw new Error('layout failed')
+    })
+    try {
+      const { nodes } = toFlow(playbook as Parameters<typeof toFlow>[0], null)
+      expect(spy).toHaveBeenCalled()
+      for (const n of nodes) {
+        expect(Number.isFinite(n.position.x)).toBe(true)
+        expect(Number.isFinite(n.position.y)).toBe(true)
+      }
+      const spots = new Set(nodes.map((n) => `${n.position.x},${n.position.y}`))
+      expect(spots.size).toBe(nodes.length)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('still lays out an edge to a node that does not exist', () => {
     const pb = {
       ...playbook,
@@ -535,7 +554,7 @@ describe('card and edge data', () => {
     nodes: [
       { id: 'start', type: 'start' },
       { id: 'work', type: 'agent_task', expected_duration: '30m' },
-      { id: 'review', type: 'agent_task', profile: 'global/reviewer', expected_duration: 5400 },
+      { id: 'review', type: 'agent_task', profile: { name: 'reviewer', scope: 'global' }, expected_duration: 5400 },
       { id: 'child', type: 'playbook', playbook: { id: 'sub-flow', scope: 'auto' } },
       { id: 'gate', type: 'judge' },
       { id: 'done', type: 'finish' },
@@ -585,6 +604,27 @@ describe('card and edge data', () => {
     const nodes = withProfileModels(toFlow(pb, null).nodes, models)
     expect(nodes.find((n) => n.id === 'work')!.data.model).toBe('project-model')
     expect(nodes.find((n) => n.id === 'review')!.data.model).toBeUndefined()
+  })
+
+  it('binds an answering finish node to the default profile', () => {
+    const answering = {
+      ...pb,
+      nodes: [
+        { id: 'answer', type: 'finish', prompt: 'Sum it up' },
+        { id: 'done', type: 'finish' },
+      ],
+      edges: [],
+    }
+    const { nodes } = toFlow(answering as never, null)
+    expect(nodes.find((n) => n.id === 'answer')!.data.profile).toBe('developer')
+    expect(nodes.find((n) => n.id === 'done')!.data.profile).toBeUndefined()
+  })
+
+  it('clears a model the profile no longer resolves to', () => {
+    const filled = withProfileModels(toFlow(pb, null).nodes, profileModelMap([{ name: 'developer', model: 'old-model', scope: 'project', workspace_id: 'ws1' }], 'ws1'))
+    expect(filled.find((n) => n.id === 'work')!.data.model).toBe('old-model')
+    const cleared = withProfileModels(filled, new Map())
+    expect(cleared.find((n) => n.id === 'work')!.data.model).toBeUndefined()
   })
 
   it('respects an explicit profile scope over the auto resolution', () => {

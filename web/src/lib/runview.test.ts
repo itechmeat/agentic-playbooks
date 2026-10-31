@@ -89,6 +89,15 @@ describe('runview', () => {
     expect(half).toMatchObject({ profile: 'developer', model: 'opus-5.5', attempt: 1, progress: 50, duration: '5m 00s' })
     expect(nodeRunData(detail(), 2_000 + 3_600_000).get('build')?.progress).toBe(95)
     expect(nodeRunData(detail(), 5_000).get('check')).toEqual({ profile: 'reviewer' })
+    // A retry has no node_started of its own; its share starts over.
+    const retried = detail({
+      events: [
+        ...detail().events,
+        ev(5, 200_000, 'attempt_finished', { node: 'build', attempt: 1, status: 'failed' }),
+        ev(6, 302_000, 'attempt_started', { node: 'build', attempt: 2, agent: 'claude', model: 'opus' }),
+      ],
+    })
+    expect(nodeRunData(retried, 302_000 + 60_000).get('build')?.progress).toBe(10)
   })
 
   it('builds one log line per event with the node profile as actor', () => {
@@ -108,7 +117,7 @@ describe('runview', () => {
     expect(bars.map((b) => [b.value, b.verdict])).toEqual([
       ['complete', 'sharp'],
       ['p=0.53', 'split'],
-      ['error', 'split'],
+      ['error', 'error'],
     ])
     expect(bars[0].strength).toBeCloseTo(0.94)
   })
@@ -116,7 +125,10 @@ describe('runview', () => {
   it('reads profiles, stage, parallelism and the last note', () => {
     const d = detail()
     // The model the attempt actually ran on, the same one the graph card shows.
-    expect(runProfiles(d)).toEqual([{ name: 'developer', model: 'opus-5.5' }, { name: 'reviewer' }])
+    expect(runProfiles(d)).toEqual([
+      { name: 'developer', key: 'developer', model: 'opus-5.5' },
+      { name: 'reviewer', scope: 'project', key: 'project:reviewer' },
+    ])
     expect(currentStage(d)).toBe('build')
     expect(maxParallel(d)).toEqual({ value: 2, isDefault: false })
     expect(maxParallel(detail({ model: { ...d.model!, defaults: {} as never } }))).toEqual({ value: 4, isDefault: true })
@@ -135,5 +147,25 @@ describe('runview graph helpers', () => {
     expect(state('a', 'b')).toBe('active')
     expect(state('b', 'c')).toBe('idle')
     expect(edgeRunState([ev(1, 1, 'edge_traversed', { from: 'a', to: 'c' })], { a: 'succeeded', c: 'succeeded' })('a', 'c')).toBe('walked')
+  })
+
+  it('lights only the edge that led back into a looping node', async () => {
+    const { edgeRunState } = await import('./runview')
+    const state = edgeRunState(
+      [
+        ev(1, 1, 'edge_traversed', { from: 'start', to: 'build' }),
+        ev(2, 2, 'node_finished', { node: 'build', status: 'succeeded' }),
+        ev(3, 3, 'edge_traversed', { from: 'build', to: 'review' }),
+        ev(4, 4, 'node_finished', { node: 'review', status: 'failed' }),
+        ev(5, 5, 'edge_traversed', { from: 'review', to: 'build' }),
+      ],
+      { start: 'succeeded', build: 'running', review: 'failed' },
+    )
+    expect(state('review', 'build')).toBe('active')
+    expect(state('start', 'build')).toBe('walked')
+  })
+
+  it('reads an unknown node status as stopped part-way, not pending', () => {
+    expect(stepState('unknown')).toBe('current')
   })
 })

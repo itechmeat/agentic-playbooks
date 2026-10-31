@@ -25,7 +25,6 @@
   import { Textarea } from '$lib/components/ui/textarea'
   import { Spinner } from '$lib/components/ui/spinner'
   import { toast } from 'svelte-sonner'
-  import FlaskConical from '@lucide/svelte/icons/flask-conical'
   import Play from '@lucide/svelte/icons/play'
 
   let {
@@ -137,7 +136,7 @@
 
 <section class="box flex flex-col gap-3 px-4 pt-5 pb-4">
   <div class="flex flex-col gap-1">
-      <h2 class="box-cap">Playground</h2>
+    <h2 class="box-cap">Playground</h2>
     <p class="prose-text text-xs text-muted-foreground">
       Call a function manually. Dry run renders the request without touching secrets; a real
       call is trust-gated the same way as the healthcheck probe.

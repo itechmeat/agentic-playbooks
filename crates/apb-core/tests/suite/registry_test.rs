@@ -35,6 +35,27 @@ fn lists_playbooks_with_versions() {
     assert_eq!(list[0].profiles, vec!["architect".to_string()]);
 }
 
+/// A node without its own profile takes `defaults.profile`: with a default
+/// other than the explicit one, both names list, in first-use order.
+#[test]
+fn summary_profiles_include_the_inherited_default() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let yaml = VALID.replace(
+        "defaults:\n  profile: architect",
+        "defaults:\n  profile: reviewer",
+    );
+    assert_ne!(yaml, VALID);
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/implement-task/1.0.0/playbook.yaml"),
+        yaml,
+    )
+    .unwrap();
+    let list = Registry::open(dir.path()).unwrap().list().unwrap();
+    assert_eq!(list[0].profiles, vec!["architect", "reviewer"]);
+}
+
 #[test]
 fn loads_current_version_with_layout() {
     let dir = tempfile::tempdir().unwrap();

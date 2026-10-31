@@ -16,6 +16,13 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub duration_ms: Option<u128>,
+    /// Milliseconds a run that has not ended spent paused so far, so a
+    /// listing can count its active time up from `started_ts` without the
+    /// pauses. Absent once the run ended (see `duration_ms`) and for a run
+    /// that was never paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub paused_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub progress: Option<crate::progress::ProgressSummary>,
@@ -58,15 +65,18 @@ pub struct RunSummary {
 }
 
 /// Active time from the start to the last `run_finished` / `run_aborted`, or
-/// `None` for a run that has not ended (or never recorded its start).
+/// `None` for a run that has not ended (or never recorded its start). A
+/// `run_resumed` after the end makes the run live again, as in
+/// `run_retro::run_end`, so it has no duration until it ends once more.
 fn run_duration_ms(events: &[crate::event::Event], started_ts: u128) -> Option<u128> {
     if started_ts == 0 {
         return None;
     }
     let end = events.iter().rev().find_map(|e| match e.payload {
-        EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => Some(e.ts),
+        EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => Some(Some(e.ts)),
+        EventPayload::RunResumed { .. } => Some(None),
         _ => None,
-    })?;
+    })??;
     Some(crate::pause::active_elapsed_ms(
         events, started_ts, end, end,
     ))
@@ -108,6 +118,18 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
         let duration_ms = run_duration_ms(&view.events, started_ts);
+        let paused_ms = if duration_ms.is_none() && started_ts > 0 {
+            let now = apb_core::clock::now_ms();
+            Some(crate::pause::paused_ms_between(
+                &view.events,
+                started_ts,
+                now,
+                now,
+            ))
+            .filter(|ms| *ms > 0)
+        } else {
+            None
+        };
         let cfg = crate::run_config::read_run_config(&entry.path()).ok();
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
@@ -127,6 +149,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             status,
             started_ts,
             duration_ms,
+            paused_ms,
             progress,
             parent_run,
             continued_from,

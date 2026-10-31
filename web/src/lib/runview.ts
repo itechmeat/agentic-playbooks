@@ -9,6 +9,7 @@ import { decisionRows } from './rundecisions'
 import { runEventJournal } from './journal'
 import type { PlaybookNode, WfEvent } from './types'
 import { formatDuration } from './format'
+import { profileModelKey, usesDefaultProfile, type ProfileScope } from './profileref'
 
 /** `just now`, `5m ago`, `2h 21m ago`, `3d ago`. */
 export function formatAge(ts: number, now: number): string {
@@ -48,11 +49,18 @@ const DEFAULT_TASK_SECONDS = 120
 
 /** The profile a node binds: its own `profile`, else `defaults.profile` for an agent task. */
 export function nodeProfile(node: PlaybookNode, defaults?: Record<string, unknown> | null): string | null {
-  const ref = node.profile ?? (node.type === 'agent_task' ? defaults?.profile : undefined)
+  const ref = node.profile ?? (usesDefaultProfile(node) ? defaults?.profile : undefined)
   if (typeof ref === 'string') return ref || null
   if (ref && typeof ref === 'object' && typeof (ref as { name?: unknown }).name === 'string')
     return (ref as { name: string }).name
   return null
+}
+
+/** The explicit scope (`project` or `global`) of the profile ref `nodeProfile` reads, if any. */
+function nodeProfileScope(node: PlaybookNode, defaults?: Record<string, unknown> | null): ProfileScope | undefined {
+  const ref = node.profile ?? (usesDefaultProfile(node) ? defaults?.profile : undefined)
+  const scope = ref && typeof ref === 'object' ? (ref as { scope?: unknown }).scope : undefined
+  return scope === 'project' || scope === 'global' ? scope : undefined
 }
 
 /** What the journal says about one node's executions. */
@@ -63,6 +71,11 @@ export interface NodeFacts {
   attempts: number
   /** When the latest execution started. */
   startedTs?: number
+  /**
+   * When the latest retry (an attempt above the first) of that execution
+   * started: a retry has no `node_started` of its own.
+   */
+  retryTs?: number
   /** When the latest execution finished; absent while it runs. */
   finishedTs?: number
   /** The latest attempt summary or supervisor note about the node. */
@@ -97,6 +110,7 @@ export function nodeFacts(events: WfEvent[]): Map<string, NodeFacts> {
         const f = get(node)
         f.startedTs = e.ts
         f.finishedTs = undefined
+        f.retryTs = undefined
         break
       }
       case 'node_finished':
@@ -105,7 +119,10 @@ export function nodeFacts(events: WfEvent[]): Map<string, NodeFacts> {
       case 'attempt_started': {
         const f = get(node)
         f.attempts += 1
-        if (typeof r.attempt === 'number') f.attempt = Math.max(f.attempt, r.attempt)
+        if (typeof r.attempt === 'number') {
+          if (r.attempt > 1 && r.attempt > f.attempt) f.retryTs = e.ts
+          f.attempt = Math.max(f.attempt, r.attempt)
+        }
         f.agent = str(r.agent) ?? f.agent
         f.model = str(r.model) ?? f.model
         f.transcript = str(r.transcript) ?? f.transcript
@@ -173,7 +190,8 @@ export function nodeRunData(detail: RunDetail, now: number): Map<string, NodeRun
           parseExpectedDuration(n.expected_duration) ??
           (n.type === 'agent_task' || n.type === 'script' ? DEFAULT_TASK_SECONDS : undefined)
         if (expected) {
-          const pct = ((now - f.startedTs) / (expected * 1000)) * 100
+          // The estimate is per attempt: a retry starts its share over.
+          const pct = ((now - (f.retryTs ?? f.startedTs)) / (expected * 1000)) * 100
           d.progress = Math.max(0, Math.min(95, Math.round(pct)))
         }
       }
@@ -190,7 +208,7 @@ export type StepState = 'done' | 'current' | 'failed' | 'skipped' | 'pending'
 export function stepState(status: string | undefined): StepState {
   const s = (status ?? '').toLowerCase()
   if (s === 'succeeded') return 'done'
-  if (s === 'running' || s === 'ready' || s === 'interrupted' || s === 'lost') return 'current'
+  if (s === 'running' || s === 'ready' || s === 'interrupted' || s === 'lost' || s === 'unknown') return 'current'
   if (s === 'failed' || s === 'timed_out' || s === 'cancelled') return 'failed'
   if (s === 'skipped') return 'skipped'
   return 'pending'
@@ -302,8 +320,11 @@ export interface DecisionBar {
   value: string
   /** How decisive the answer is, 0..1: max(p, 1-p), or the confidence. */
   strength: number
-  /** `sharp` (decisive or applied) or `split` (advise only, or an error). */
-  verdict: 'sharp' | 'split'
+  /**
+   * `sharp` (decisive or applied), `split` (undecided) or `error` (the
+   * provider failed). Whether it was applied is `outcome`, not the verdict.
+   */
+  verdict: 'sharp' | 'split' | 'error'
   /** Mode and whether it was applied: `applied`, `shadow`, ... */
   outcome: string
   /** Every answer of the decision, or the error. */
@@ -346,7 +367,7 @@ export function decisionBars(events: WfEvent[]): DecisionBar[] {
         node: row.node,
         value,
         strength: Math.max(0, Math.min(1, strength)),
-        verdict: sharp ? 'sharp' : 'split',
+        verdict: error ? 'error' : sharp ? 'sharp' : 'split',
         outcome: row.outcome,
         answer: row.answer,
         source: row.source,
@@ -369,18 +390,22 @@ export function decisionSource(events: WfEvent[]): { mode: string; source: strin
 }
 
 /** The profile of each node that has one, and the model it ran on when known. */
-export function runProfiles(detail: RunDetail): { name: string; model?: string }[] {
+export function runProfiles(detail: RunDetail): { name: string; scope?: ProfileScope; key: string; model?: string }[] {
   const defaults = (detail.model as { defaults?: Record<string, unknown> | null } | null)?.defaults ?? null
   const models = modelsByNode(detail.attempt_models)
-  const out = new Map<string, string | undefined>()
+  const out = new Map<string, { name: string; scope?: ProfileScope; key: string; model?: string }>()
   for (const n of detail.model?.nodes ?? []) {
-    const p = nodeProfile(n, defaults)
-    if (!p) continue
+    const name = nodeProfile(n, defaults)
+    if (!name) continue
+    const scope = nodeProfileScope(n, defaults)
+    const key = profileModelKey(name, scope)
     const m = models.get(n.id)
     const mdl = m?.model ?? m?.expected ?? undefined
-    if (!out.has(p) || (!out.get(p) && mdl)) out.set(p, mdl)
+    const prev = out.get(key)
+    if (!prev) out.set(key, { name, ...(scope ? { scope } : {}), key, ...(mdl ? { model: mdl } : {}) })
+    else if (!prev.model && mdl) prev.model = mdl
   }
-  return [...out].map(([name, model]) => (model ? { name, model } : { name }))
+  return [...out.values()]
 }
 
 /**
@@ -412,23 +437,35 @@ export function currentStage(detail: RunDetail): string | null {
 export type EdgeRunState = 'walked' | 'active' | 'idle'
 
 /**
- * The run state of each edge `from -> to`: `active` when it leads into a
- * running node from a node that ran, `walked` once the journal traversed it,
- * `idle` otherwise.
+ * The run state of each edge `from -> to`: `active` when the journal
+ * traversed it into a node that is running now (since that node last
+ * finished, so a loop lights only the edge that led back), `walked` once the
+ * journal traversed it, `idle` otherwise. A journal with no traversals at all
+ * (an older one) falls back to "the source is done".
  */
 export function edgeRunState(
   events: WfEvent[],
   nodes: Record<string, string>,
 ): (from: string, to: string) => EdgeRunState {
   const walked = new Set<string>()
+  // Edges traversed into each node since it last finished.
+  const into = new Map<string, Set<string>>()
   for (const e of events) {
+    if (e.type === 'node_finished' && e.node) {
+      into.delete(e.node)
+      continue
+    }
     if (e.type !== 'edge_traversed') continue
     const r = e as Record<string, unknown>
-    walked.add(`${String(r.from)}\u0000${String(r.to)}`)
+    const key = `${String(r.from)}\u0000${String(r.to)}`
+    walked.add(key)
+    const set = into.get(String(r.to)) ?? new Set<string>()
+    set.add(key)
+    into.set(String(r.to), set)
   }
   return (from, to) => {
     const key = `${from}\u0000${to}`
-    const ran = stepState(nodes[from]) === 'done' || walked.has(key)
+    const ran = walked.size ? into.get(to)?.has(key) === true : stepState(nodes[from]) === 'done'
     if (nodes[to] === 'running' && ran) return 'active'
     return walked.has(key) ? 'walked' : 'idle'
   }

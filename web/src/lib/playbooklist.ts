@@ -5,9 +5,8 @@
 
 import type { StatsReport } from './api.gen'
 import type { RunSummary } from './types'
+import { isTerminalRunStatus } from './status'
 
-/** Statuses a run can no longer leave. */
-const TERMINAL = new Set(['succeeded', 'failed', 'aborted'])
 
 /** Key of a playbook across projects, the same one the list uses. */
 export const playbookKey = (workspaceId: string, id: string) => `${workspaceId}/${id}`
@@ -38,7 +37,7 @@ export function runHistory(runs: RunSummary[] | undefined, n = 12): (RunSummary 
 export function successRate(
   runs: RunSummary[] | undefined,
 ): { ok: number; of: number; pct: number } | null {
-  const done = (runs ?? []).filter((r) => TERMINAL.has(r.status))
+  const done = (runs ?? []).filter((r) => isTerminalRunStatus(r.status))
   if (done.length === 0) return null
   const ok = done.filter((r) => r.status === 'succeeded').length
   return { ok, of: done.length, pct: Math.round((ok / done.length) * 100) }
@@ -46,7 +45,7 @@ export function successRate(
 
 /** How many runs finished: a change in it is when the stats are worth reloading. */
 export function finishedCount(runs: RunSummary[] | undefined): number {
-  return (runs ?? []).filter((r) => TERMINAL.has(r.status)).length
+  return (runs ?? []).filter((r) => isTerminalRunStatus(r.status)).length
 }
 
 /** One-letter glyph of a playbook: the first letter or digit of its name, else of its id. */

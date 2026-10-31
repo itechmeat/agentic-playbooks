@@ -10,7 +10,6 @@ import {
 
 describe('profileAccent', () => {
   it('is stable for the same name', () => {
-    expect(profileAccent('developer')).toBe(profileAccent('developer'))
     expect(profileAccent('  reviewer ')).toBe(profileAccent('reviewer'))
   })
 
@@ -57,6 +56,7 @@ describe('statusColor', () => {
     expect(statusColor('succeeded')).toBe('var(--c-green)')
     expect(statusColor('failed')).toBe('var(--c-red)')
     expect(statusColor('aborted')).toBe('var(--c-red)')
+    expect(statusColor('cancelled')).toBe('var(--c-red)')
     expect(statusColor('paused')).toBe('var(--c-amber)')
     expect(statusColor('interrupted')).toBe('var(--c-amber)')
     expect(statusColor('skipped')).toBe('var(--c-faint)')

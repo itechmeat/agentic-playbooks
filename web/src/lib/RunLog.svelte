@@ -20,8 +20,25 @@
     void lines.length
     if (!el || !follow) return
     void tick().then(() => {
-      if (el) el.scrollTop = el.scrollHeight
+      if (el && follow) el.scrollTop = el.scrollHeight
     })
+  })
+
+  // A cited event is what the reader wants to see: stop following.
+  $effect(() => {
+    if (cited !== null) follow = false
+  })
+
+  // Lines that arrived while the tab was hidden could not scroll a box with
+  // no size: catch up when it is shown again.
+  $effect(() => {
+    const box = el
+    if (!box || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      if (follow && box.clientHeight > 0) box.scrollTop = box.scrollHeight
+    })
+    ro.observe(box)
+    return () => ro.disconnect()
   })
 </script>
 

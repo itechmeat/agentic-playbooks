@@ -42,7 +42,7 @@
     {#if waiting}
       <span class="tag shrink-0 text-warning">{waitingText}</span>
     {:else if progress?.label}
-      <span class="shrink-0 truncate text-xs text-muted-foreground">{progress.label}</span>
+      <span class="min-w-0 truncate text-xs text-muted-foreground" title={progress.label}>{progress.label}</span>
     {/if}
   </div>
 {/if}
