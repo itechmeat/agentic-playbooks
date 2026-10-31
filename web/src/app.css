@@ -320,6 +320,16 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* A close button sitting on the top border of its `.box` parent, right
+     side, opposite the caption; cut out of the line like `.box-cap`. */
+  .box-close {
+    position: absolute;
+    top: -12px;
+    right: 8px;
+    display: flex;
+    padding: 0 2px;
+    background: var(--cap-bg, var(--c-bg));
+  }
   /* Small uppercase section heading. */
   .hd {
     font-size: 12px;

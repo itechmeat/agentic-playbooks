@@ -166,13 +166,15 @@
             <div class="relative z-[1] w-fit text-xs text-fg-2" role="cell" title={new Date(r.started_ts).toLocaleString()}>
               <span class="text-muted-foreground md:hidden">started&nbsp;</span>{formatAge(r.started_ts, now)}
             </div>
-            <!-- The list carries no end time: a finished run's duration is on
-                 its page. A paused or interrupted run is not running, and its
-                 wall time since start would count the pause, so only a running
-                 run with a known start shows one. -->
-            <div class={live ? 'text-xs text-fg-2' : 'hidden text-xs text-fg-2 md:block'} role="cell">
+            <!-- A finished run's duration is its active time (pauses left
+                 out) from the listing; a running run counts up from its
+                 start. A paused or interrupted run is not running, and its
+                 wall time since start would count the pause, so it shows none. -->
+            <div class={live || r.duration_ms !== undefined ? 'text-xs text-fg-2' : 'hidden text-xs text-fg-2 md:block'} role="cell">
               {#if live}
                 <span class="text-muted-foreground md:hidden">running&nbsp;</span>{formatDuration(now - r.started_ts)}
+              {:else if r.duration_ms !== undefined}
+                <span class="text-muted-foreground md:hidden">took&nbsp;</span>{formatDuration(r.duration_ms)}
               {:else}
                 <span class="text-muted-foreground" title="See the run page">-</span>
               {/if}

@@ -208,6 +208,10 @@ pub(crate) async fn list_runs_handler(
             project: project.clone(),
         }));
     }
+    // Each workspace's listing is newest first; merge them into one newest
+    // first order, else "all projects" shows every run of one project above
+    // a newer run of the next.
+    out.sort_by_key(|e| std::cmp::Reverse(e.run.started_ts));
     Json(out).into_response()
 }
 

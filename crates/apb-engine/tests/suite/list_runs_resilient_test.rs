@@ -157,3 +157,25 @@ fn list_runs_keeps_a_run_whose_last_line_is_still_being_written() {
         .expect("a run with a torn last line must stay listed");
     assert_eq!(run.status, "succeeded");
 }
+
+/// The run list shows how long a finished run took: the listing carries its
+/// active duration from `run_started` to `run_finished`, and none for a run
+/// that has not ended.
+#[test]
+fn list_runs_carries_the_duration_of_a_finished_run_only() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+
+    let done = dir.path().join(".apb/runs/good-1");
+    fs::create_dir_all(&done).unwrap();
+    fs::write(done.join("events.jsonl"), GOOD_EVENTS).unwrap();
+
+    let open = dir.path().join(".apb/runs/open-1");
+    fs::create_dir_all(&open).unwrap();
+    fs::write(open.join("events.jsonl"), RUNNING_EVENTS).unwrap();
+
+    let runs = list_runs(dir.path()).unwrap();
+    let by_id = |id: &str| runs.iter().find(|r| r.run_id == id).expect("listed");
+    assert_eq!(by_id("good-1").duration_ms, Some(3));
+    assert_eq!(by_id("open-1").duration_ms, None);
+}

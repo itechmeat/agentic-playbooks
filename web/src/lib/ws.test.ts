@@ -26,15 +26,26 @@ describe('slowRefresh', () => {
     r.dispose()
   })
 
-  it('waits while the tab is hidden and runs once it is shown', () => {
+  it('runs the first request even in a hidden tab, so a background page still gets its data', () => {
     const fn = vi.fn()
     const r = slowRefresh(fn, 10_000)
     visibility = 'hidden'
     r.request()
-    expect(fn).not.toHaveBeenCalled()
+    expect(fn).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+
+  it('waits while the tab is hidden after the first call and runs once it is shown', () => {
+    const fn = vi.fn()
+    const r = slowRefresh(fn, 10_000)
+    r.request()
+    visibility = 'hidden'
+    vi.advanceTimersByTime(10_000)
+    r.request()
+    expect(fn).toHaveBeenCalledTimes(1)
     visibility = 'visible'
     document.dispatchEvent(new Event('visibilitychange'))
-    expect(fn).toHaveBeenCalledTimes(1)
+    expect(fn).toHaveBeenCalledTimes(2)
     r.dispose()
   })
 

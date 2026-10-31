@@ -1139,7 +1139,13 @@ default_on: boolean,
  */
 problem?: string, };
 
-export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
+export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, 
+/**
+ * Active milliseconds from `run_started` to the run's end (`run_finished`
+ * or `run_aborted`), paused time left out: the same duration `apb stats`
+ * counts. Absent while the run has not ended.
+ */
+duration_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
  * journal still reads `running` because the only thing that writes a
@@ -1176,7 +1182,13 @@ export type RunListEntry = {
 /**
  * Owning project (global dashboard). Empty on the pinned-root test server.
  */
-workspace_id: string, project: string, run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
+workspace_id: string, project: string, run_id: string, playbook: string, status: string, started_ts: number, 
+/**
+ * Active milliseconds from `run_started` to the run's end (`run_finished`
+ * or `run_aborted`), paused time left out: the same duration `apb stats`
+ * counts. Absent while the run has not ended.
+ */
+duration_ms?: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
  * journal still reads `running` because the only thing that writes a

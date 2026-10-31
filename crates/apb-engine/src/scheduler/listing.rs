@@ -10,6 +10,12 @@ pub struct RunSummary {
     pub playbook: String,
     pub status: String,
     pub started_ts: u128,
+    /// Active milliseconds from `run_started` to the run's end (`run_finished`
+    /// or `run_aborted`), paused time left out: the same duration `apb stats`
+    /// counts. Absent while the run has not ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub duration_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub progress: Option<crate::progress::ProgressSummary>,
@@ -51,6 +57,21 @@ pub struct RunSummary {
     pub needs_look: Option<crate::run_outcome::NeedsLook>,
 }
 
+/// Active time from the start to the last `run_finished` / `run_aborted`, or
+/// `None` for a run that has not ended (or never recorded its start).
+fn run_duration_ms(events: &[crate::event::Event], started_ts: u128) -> Option<u128> {
+    if started_ts == 0 {
+        return None;
+    }
+    let end = events.iter().rev().find_map(|e| match e.payload {
+        EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => Some(e.ts),
+        _ => None,
+    })?;
+    Some(crate::pause::active_elapsed_ms(
+        events, started_ts, end, end,
+    ))
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -86,6 +107,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
                 _ => None,
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
+        let duration_ms = run_duration_ms(&view.events, started_ts);
         let cfg = crate::run_config::read_run_config(&entry.path()).ok();
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
@@ -104,6 +126,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             playbook,
             status,
             started_ts,
+            duration_ms,
             progress,
             parent_run,
             continued_from,

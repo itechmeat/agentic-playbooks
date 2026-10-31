@@ -971,7 +971,7 @@
       {#if showStats}
         <section class="box px-4 pt-3.5 pb-3.5" data-testid="playbook-stats-panel">
           <span class="box-cap">run stats</span>
-          <div class="mb-1 flex justify-end">
+          <div class="box-close">
             <Button variant="ghost" size="icon-xs" title="Hide the run stats" onclick={() => (showStats = false)}>
               <X />
             </Button>
@@ -983,7 +983,7 @@
       {#if showFit}
         <section class="box px-4 pt-3.5 pb-3.5" data-testid="fit-panel">
           <span class="box-cap">will it fit here?</span>
-          <div class="mb-1 flex justify-end">
+          <div class="box-close">
             <Button variant="ghost" size="icon-xs" title="Hide the fit report" onclick={() => (showFit = false)}>
               <X />
             </Button>
@@ -995,7 +995,7 @@
       {#if showProblems}
         <section class="box px-4 pt-3.5 pb-3.5" data-testid="known-problems-panel">
           <span class="box-cap">known problems</span>
-          <div class="mb-1 flex justify-end">
+          <div class="box-close">
             <Button
               variant="ghost"
               size="icon-xs"
@@ -1019,7 +1019,7 @@
       {#if showHistory}
         <section class="box px-4 pt-3.5 pb-3.5">
           <span class="box-cap">version history</span>
-          <div class="mb-1 flex justify-end">
+          <div class="box-close">
             <Button
               variant="ghost"
               size="icon-xs"

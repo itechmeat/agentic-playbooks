@@ -62,9 +62,10 @@ export function subscribeChanges(cb: () => void, minIntervalMs = 600): () => voi
  * A slow lane next to `subscribeChanges` for reads too heavy to repeat on
  * every change (the run listing reads every journal). `request()` runs `fn`
  * at once when it last ran at least `minIntervalMs` ago, else once at the end
- * of that window; requests in between collapse into that one call. While the
- * tab is hidden nothing runs: the request waits and fires when the tab is
- * shown again. `dispose()` drops a pending call.
+ * of that window; requests in between collapse into that one call. The very
+ * first call always runs, so a page opened in a background tab still gets its
+ * data; after that, while the tab is hidden nothing runs: the request waits
+ * and fires when the tab is shown again. `dispose()` drops a pending call.
  */
 export function slowRefresh(
   fn: () => void,
@@ -78,7 +79,7 @@ export function slowRefresh(
   const run = () => {
     timer = undefined
     if (closed) return
-    if (hidden()) {
+    if (hidden() && last !== Number.NEGATIVE_INFINITY) {
       waitingForVisible = true
       return
     }
