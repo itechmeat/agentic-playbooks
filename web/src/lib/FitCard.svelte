@@ -17,6 +17,7 @@
     trustLine,
     trustSummary,
   } from './fit'
+  import StartActionsList from './StartActionsList.svelte'
 
   let {
     report = null,
@@ -86,6 +87,13 @@
           <p class="muted">Effects: {report.consent.effects.join(', ')}</p>
         {/if}
       </section>
+
+      {#if report.start_actions?.length}
+        <section data-testid="fit-start-actions">
+          <h3>Before a start</h3>
+          <StartActionsList actions={report.start_actions} />
+        </section>
+      {/if}
     </div>
   {/if}
 </div>

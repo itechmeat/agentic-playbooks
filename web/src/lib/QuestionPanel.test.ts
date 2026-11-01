@@ -6,7 +6,7 @@ describe('QuestionPanel', () => {
   it('renders the question text and an option button per option', () => {
     const { body } = render(QuestionPanel, {
       props: {
-        question: { node: 'ask', question: 'Which database?', options: ['pg', 'sqlite'] },
+        question: { runId: 'r', node: 'ask', question: 'Which database?', options: ['pg', 'sqlite'] },
         onAnswer: () => {},
       },
     })
@@ -21,7 +21,7 @@ describe('QuestionPanel', () => {
   it('renders the free-text field with no options', () => {
     const { body } = render(QuestionPanel, {
       props: {
-        question: { node: 'ask', question: 'Anything else?', options: [] },
+        question: { runId: 'r', node: 'ask', question: 'Anything else?', options: [] },
         onAnswer: () => {},
       },
     })
@@ -33,7 +33,7 @@ describe('QuestionPanel', () => {
     const hostile = '<img src=x onerror=alert(1)><script>evil()</script>'
     const { body } = render(QuestionPanel, {
       props: {
-        question: { node: 'ask', question: hostile, options: [] },
+        question: { runId: 'r', node: 'ask', question: hostile, options: [] },
         onAnswer: () => {},
       },
     })
@@ -46,7 +46,7 @@ describe('QuestionPanel', () => {
     const hostile = '<b>bold</b>'
     const { body } = render(QuestionPanel, {
       props: {
-        question: { node: 'ask', question: 'q', options: [hostile] },
+        question: { runId: 'r', node: 'ask', question: 'q', options: [hostile] },
         onAnswer: () => {},
       },
     })
@@ -58,7 +58,7 @@ describe('QuestionPanel', () => {
     const multiline = 'first line\nsecond line\nthird line'
     const { body } = render(QuestionPanel, {
       props: {
-        question: { node: 'ask', question: multiline, options: [] },
+        question: { runId: 'r', node: 'ask', question: multiline, options: [] },
         onAnswer: () => {},
       },
     })
@@ -70,7 +70,7 @@ describe('QuestionPanel', () => {
   it('disables the option buttons and submit while posting', () => {
     const { body } = render(QuestionPanel, {
       props: {
-        question: { node: 'ask', question: 'q', options: ['a'] },
+        question: { runId: 'r', node: 'ask', question: 'q', options: ['a'] },
         posting: true,
         onAnswer: () => {},
       },

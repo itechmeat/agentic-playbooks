@@ -40,6 +40,7 @@ pub mod liveness;
 // host execution mode (0.23.0)
 pub mod host_task;
 pub mod manifest;
+pub mod next_action;
 pub mod notify;
 pub mod parallel;
 // operator pause (issue #200)
@@ -49,6 +50,7 @@ pub mod proc;
 pub mod progress;
 pub mod publish;
 pub mod question;
+pub mod read_only;
 pub(crate) mod redact;
 pub mod report_html;
 pub mod review;
@@ -58,6 +60,8 @@ pub mod run_estimate;
 pub mod run_history;
 mod run_lineage;
 pub mod run_outcome;
+pub mod run_perms;
+pub mod run_redact;
 // --- run retrospective (#192 part 3) ---
 pub mod run_retro;
 // --- end of run retrospective ---

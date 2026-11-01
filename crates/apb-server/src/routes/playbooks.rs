@@ -210,7 +210,8 @@ pub(crate) struct RunBody {
 /// launch surface uses, `apb_engine::gate::check_run`: a draft or retired
 /// playbook, unmet `requires`, an untrusted connector or account, or a broken
 /// sub-playbook tree is refused with the gate's structural JSON (409; 404 when
-/// the playbook does not resolve). The person clicking Run is the trust
+/// the playbook does not resolve), and so is a param the start leaves
+/// without a value (`apb_engine::gate::check_params`). The person clicking Run is the trust
 /// confirmation, so the call acknowledges untrusted content the way MCP does
 /// after asking the user; connector trust is never bypassable. The returned
 /// permit is applied to the run verbatim (anti-TOCTOU), and its consent-time
@@ -251,6 +252,10 @@ pub(crate) async fn run_playbook_handler(
         id: id.clone(),
         version: None,
     };
+    // A refusal carries the start actions that answer it (`start_actions`).
+    let of = apb_engine::next_action::start::StartOf::of(&wref);
+    let refused =
+        |refusal: serde_json::Value| apb_mcp::tools::actions::refusal_with_actions(of, refusal);
     let permit = match apb_engine::gate::check_run(&root, &wref, true, false) {
         Ok(p) => p,
         Err(refusal) => {
@@ -259,14 +264,14 @@ pub(crate) async fn run_playbook_handler(
             } else {
                 StatusCode::CONFLICT
             };
-            return (status, Json(refusal)).into_response();
+            return (status, Json(refused(refusal))).into_response();
         }
     };
     // 0.24.0: an irreversible tree needs the dialog's confirmation, bound
     // to the nonce of the refusal the dialog showed.
     let deprecation = match permit.check_confirmation(body.confirm_irreversible.as_ref()) {
         Ok(note) => note,
-        Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
+        Err(refusal) => return (StatusCode::CONFLICT, Json(refused(refusal))).into_response(),
     };
     if permit.needs_consent() {
         opts.consent = Some(apb_engine::consent::RunConsent::irreversible("dashboard"));
@@ -274,6 +279,33 @@ pub(crate) async fn run_playbook_handler(
     let mut warnings = permit.warnings.clone();
     // Issue #192: the candidate the gate chose (and pinned) is what runs.
     let version = permit.run_version(None);
+    // A param the start leaves without a value is refused like the gate
+    // refuses, with the start actions that answer it.
+    let run_ref = apb_core::scope::PlaybookRef {
+        version: version.clone(),
+        ..wref.clone()
+    };
+    // Both read the playbook from disk: off the async runtime.
+    let (params_check, short) = {
+        let (root, run_ref, params) = (root.clone(), run_ref.clone(), opts.params.clone());
+        match tokio::task::spawn_blocking(move || {
+            (
+                apb_engine::gate::check_params(&root, &run_ref, &params),
+                apb_engine::gate::short_secret_warning(&root, &run_ref, &params),
+            )
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        }
+    };
+    if let Err(refusal) = params_check {
+        return (StatusCode::CONFLICT, Json(refused(refusal))).into_response();
+    }
+    warnings.extend(short);
     // The run's budget and the pre-start decision it may need; the check
     // reads the run history, off the async runtime.
     let checked = {

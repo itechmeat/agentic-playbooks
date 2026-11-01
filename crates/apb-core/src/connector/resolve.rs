@@ -324,31 +324,83 @@ fn baseline_refusals(
 /// account file) is silently skipped here too - the run proceeds without
 /// that connector's env names in the scrub list rather than failing outright.
 pub fn all_referenced_env_names(root: &Path) -> Vec<String> {
+    referenced(root).0
+}
+
+/// The env var names every installed connector's merged accounts reference
+/// (as [`all_referenced_env_names`]) and how many secrets they cannot name:
+/// a secret field sourced from a command, or a connector whose definition
+/// or account config does not load (its references are unknown).
+fn referenced(root: &Path) -> (Vec<String>, usize) {
     let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut commands = 0;
 
     for summary in store::list() {
-        let Ok(loaded) = store::load(&summary.name) else {
-            continue;
-        };
-        let Ok(merged) = config::load_merged(root, &summary.name) else {
+        let (Ok(loaded), Ok(merged)) = (
+            store::load(&summary.name),
+            config::load_merged(root, &summary.name),
+        ) else {
+            commands += 1;
             continue;
         };
         for account in &merged {
             for var in config::env_refs(&loaded.doc, account).into_values() {
                 names.insert(var);
             }
+            commands += config::cmd_refs(&loaded.doc, account).len();
         }
     }
 
-    names.into_iter().collect()
+    (names.into_iter().collect(), commands)
+}
+
+/// How many directories of the connectors root [`store::list`] leaves out
+/// (a `connector.yaml` that does not parse, a bad name): their references
+/// are unknown.
+fn unlisted_connectors() -> usize {
+    let Some(dir) = store::connectors_dir() else {
+        return 0;
+    };
+    let listed: BTreeSet<String> = store::list().into_iter().map(|c| c.name).collect();
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|e| !listed.contains(&*e.file_name().to_string_lossy()))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// The resolved values of [`all_referenced_env_names`]: the secrets a
 /// redactor of this workspace scrubs. Variables that resolve nowhere
 /// contribute nothing.
 pub fn resolve_referenced(root: &Path) -> Vec<crate::secret::Secret> {
-    let names = all_referenced_env_names(root);
-    secrets::resolve_each(root, names.iter().map(String::as_str))
+    resolve_referenced_checked(root).values
+}
+
+/// The workspace's referenced secrets as this process resolves them.
+pub struct ReferencedSecrets {
+    /// The values that resolved (see [`resolve_referenced`]).
+    pub values: Vec<crate::secret::Secret>,
+    /// How many referenced secrets this process could not resolve: a
+    /// variable that resolves nowhere here, a command-sourced field (never
+    /// run to redact), or a connector whose definition or accounts do not
+    /// load. A run's text may still hold such a value,
+    /// since the process that drove it may have resolved it.
+    pub unresolved: usize,
+}
+
+/// [`resolve_referenced`] with the count of the references it could not
+/// resolve.
+pub fn resolve_referenced_checked(root: &Path) -> ReferencedSecrets {
+    let (names, commands) = referenced(root);
+    let commands = commands + unlisted_connectors();
+    let values = secrets::resolve_each(root, names.iter().map(String::as_str));
+    // `resolve_each` keeps one value per name that resolves.
+    let unresolved = names.len() - values.len() + commands;
+    ReferencedSecrets { values, unresolved }
 }
 
 /// The non-secret facts about one installed connector that the playbook
@@ -974,6 +1026,46 @@ accounts:
             names,
             vec!["MOCK_TOKEN".to_string(), "SHARED_TOKEN".to_string(),]
         );
+    }
+
+    /// A variable that resolves nowhere and a command-sourced secret are
+    /// both counted unresolved; neither command runs.
+    #[test]
+    fn the_checked_resolve_counts_what_it_cannot_resolve() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _guard = set_config_dir(cfg.path());
+        write_fixture_connector(cfg.path());
+        let marker = root.path().join("ran");
+        write_project_account(
+            root.path(),
+            "mock-tracker",
+            "accounts:\n  - name: a\n    base_url: https://example.com\n    token: \"{{env.APB_TEST_NEVER_SET_TOKEN}}\"\n",
+        );
+        // A command source is allowed in the global config only.
+        let global = config::global_config_path("mock-tracker").unwrap();
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(
+            global,
+            format!(
+                "accounts:\n  - name: b\n    base_url: https://example.com\n    token: \"{{{{cmd:touch {}}}}}\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let checked = resolve_referenced_checked(root.path());
+        assert!(checked.values.is_empty());
+        assert_eq!(checked.unresolved, 2);
+        assert!(!marker.exists(), "a command ran");
+        // An account config that does not load hides its references: counted.
+        write_project_account(root.path(), "mock-tracker", "not: [valid: yaml");
+        assert_eq!(resolve_referenced_checked(root.path()).unresolved, 1);
+        // So does a connector whose definition does not parse.
+        let broken = cfg.path().join("connectors/broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("connector.yaml"), "not: [valid: yaml").unwrap();
+        assert_eq!(resolve_referenced_checked(root.path()).unresolved, 2);
     }
 
     #[test]

@@ -12,6 +12,12 @@ export type NodeType = (typeof NODE_TYPES)[number]
 /** The decisions a human_review gate without options offers. */
 export const DEFAULT_REVIEW_OPTIONS = ['approve', 'reject'] as const
 
+/** Every next-action code a run surface may carry. */
+export const ACTION_CODES = ['answer_question', 'decide_review', 'decide_publish', 'submit_host_task', 'supervisor_retry_node', 'supervisor_continue_from', 'supervisor_abort', 'resume_run', 'resume_with_budget', 'resolve_intent', 'wait_again', 'read_report'] as const
+
+/** Every start-action code a refused start may carry. */
+export const START_ACTION_CODES = ['confirm_irreversible_start', 'fix_requirement', 'acknowledge_untrusted'] as const
+
 /** Every run transition a person can be notified about, in report order. */
 export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished'] as const
 

@@ -20,7 +20,6 @@ mod sections;
 use std::path::Path;
 
 use crate::error::EngineError;
-use crate::redact::Redactor;
 use markup::Markup;
 use model::Report;
 
@@ -32,7 +31,9 @@ pub const STYLESHEET: &str = include_str!("report.css");
 /// The report of the run at `run_dir` of the workspace at `root`.
 pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
     let report = Report::load(root, run_dir)?;
-    let w = sections::Writer::new(Redactor::for_workspace(root, Vec::new()));
+    let w = sections::Writer::new(
+        crate::run_redact::RunRedactor::for_run(root, run_dir).into_scrubber(),
+    );
     let title = match &report.playbook {
         Some(p) => format!("{p} run {}", report.run_id),
         None => format!("Run {}", report.run_id),

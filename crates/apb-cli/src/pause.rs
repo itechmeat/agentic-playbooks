@@ -39,12 +39,12 @@ pub(crate) fn pause_cmd(
             } else {
                 "no new node starts, running nodes finish first"
             };
-            println!("pausing {run_id}: {how}");
+            say!("pausing {run_id}: {how}");
             print_resume_hint(run_id, until_ms);
             ExitCode::SUCCESS
         }
         Ok(PauseOutcome::Journaled { .. }) => {
-            println!("paused {run_id}: no driver was running, the run is now paused");
+            say!("paused {run_id}: no driver was running, the run is now paused");
             print_resume_hint(run_id, until_ms);
             ExitCode::SUCCESS
         }
@@ -57,11 +57,11 @@ pub(crate) fn pause_cmd(
 
 fn print_resume_hint(run_id: &str, until_ms: Option<u64>) {
     match until_ms {
-        Some(ms) => println!(
+        Some(ms) => say!(
             "it resumes on its own at {}; `apb resume {run_id}` continues it earlier",
             apb_core::dismiss::iso_utc(ms)
         ),
-        None => println!("`apb resume {run_id}` continues it"),
+        None => say!("`apb resume {run_id}` continues it"),
     }
 }
 
@@ -92,5 +92,5 @@ pub(crate) fn marker(p: &PauseInfo) -> String {
 
 /// The pause block of `apb runs <id>` and `apb wait`.
 pub(crate) fn print_block(p: &PauseInfo) {
-    println!("  {}", marker(p));
+    say!("  {}", marker(p));
 }

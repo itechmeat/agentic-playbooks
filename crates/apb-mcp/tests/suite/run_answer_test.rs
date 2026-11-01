@@ -39,7 +39,7 @@ fn run_answer_human_path_posts_answers_channel_entry() {
     )
     .unwrap();
 
-    let res = run_answer(dir.path(), "r1", None, "left", "human").unwrap();
+    let res = run_answer(dir.path(), "r1", None, "left", "human", None).unwrap();
     assert_eq!(res["posted_seq"], 0);
 
     let answers = read_answers_after(&run_dir, None).unwrap();
@@ -76,7 +76,7 @@ fn run_status_carries_pending_question_and_clears_after_answer() {
         "asked_at key must be present, got {pq}"
     );
 
-    run_answer(dir.path(), "r2", Some("ask"), "left", "supervisor").unwrap();
+    run_answer(dir.path(), "r2", Some("ask"), "left", "supervisor", None).unwrap();
 
     let status2 = run_status(dir.path(), "r2").unwrap();
     assert!(
@@ -93,7 +93,7 @@ fn run_answer_supervisor_path_accepted_on_answer_by_supervisor_node() {
     fs::write(run_dir.join("playbook.yaml"), SUPERVISOR_ASK_PB).unwrap();
     post_question(&run_dir, "ask", 1, "which way", Vec::new()).unwrap();
 
-    let res = run_answer(dir.path(), "r3", None, "left", "supervisor").unwrap();
+    let res = run_answer(dir.path(), "r3", None, "left", "supervisor", None).unwrap();
     assert_eq!(res["posted_seq"], 0);
 
     let answers = read_answers_after(&run_dir, None).unwrap();
@@ -107,7 +107,7 @@ fn run_answer_supervisor_path_rejected_on_answer_by_human_node() {
     fs::write(run_dir.join("playbook.yaml"), HUMAN_ASK_PB).unwrap();
     post_question(&run_dir, "ask", 1, "which way", Vec::new()).unwrap();
 
-    let err = run_answer(dir.path(), "r4", None, "left", "supervisor").unwrap_err();
+    let err = run_answer(dir.path(), "r4", None, "left", "supervisor", None).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("relay"),
@@ -162,7 +162,7 @@ fn wake_from_asked_question_still_reaches_supervisor_wait_event_after_answer() {
     drop(log);
     post_question(&run_dir, "ask", 1, "which way", Vec::new()).unwrap();
 
-    run_answer(dir.path(), "r5", None, "left", "human").unwrap();
+    run_answer(dir.path(), "r5", None, "left", "human", None).unwrap();
 
     let out = supervisor_wait_event(dir.path(), "r5", None, Some(2_000)).unwrap();
     assert!(

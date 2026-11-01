@@ -42,6 +42,8 @@ mod forward_patch_tool_test;
 mod grade_tool_test;
 #[path = "suite/memory_tools_test.rs"]
 mod memory_tools_test;
+#[path = "suite/next_actions_tools_test.rs"]
+mod next_actions_tools_test;
 #[path = "suite/patch_tool_test.rs"]
 mod patch_tool_test;
 #[path = "suite/policy_test.rs"]

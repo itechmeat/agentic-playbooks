@@ -113,7 +113,7 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
         return Ok(());
     };
     let (Some(root), Some(run_id)) = (
-        crate::run_retro::project_root_of(run_dir),
+        crate::run_config::project_root_of(run_dir),
         run_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned()),
@@ -212,7 +212,7 @@ fn decided_since(run_dir: &Path, events: &[Event], version: &str) -> Option<Cand
         EventPayload::RunStarted { playbook, .. } => Some(playbook.clone()),
         _ => None,
     })?;
-    let root = crate::run_retro::project_root_of(run_dir)?;
+    let root = crate::run_config::project_root_of(run_dir)?;
     let trial = apb_core::versioning::read_provenance(&root, &playbook, version)
         .ok()
         .flatten()?

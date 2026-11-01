@@ -136,9 +136,9 @@ impl RunIntent {
     pub fn gap_detail(&self, run_id: &str) -> String {
         let why = self.detail.as_deref().unwrap_or("no answer was recorded");
         format!(
-            "{}: whether it was sent is not known ({why}); resolve with apb intent resolve {run_id} {} --sent|--not-sent",
+            "{}: whether it was sent is not known ({why}); resolve with {}",
             self.who(),
-            self.id
+            crate::next_action::command::resolve_intent(run_id, Some(&self.id), None).line()
         )
     }
 
@@ -266,7 +266,7 @@ mod tests {
         assert!(rows[0].is_open_unknown());
         assert_eq!(
             rows[0].gap_detail("r1"),
-            "intent \"v1\" (si-a) by announce attempt 2: whether it was sent is not known (timeout); resolve with apb intent resolve r1 si-a --sent|--not-sent"
+            "intent \"v1\" (si-a) by announce attempt 2: whether it was sent is not known (timeout); resolve with apb intent resolve '--sent|--not-sent' r1 si-a"
         );
         let replayed = [
             events[0].clone(),

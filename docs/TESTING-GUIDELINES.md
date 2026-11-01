@@ -212,6 +212,57 @@ list of agents into one named test per agent and scenario
 - Agent-specific tests outside the suite are for what the scenarios do not
   cover (the exact argv of a form, a plan fallback, a side channel).
 
+## The journal corpus
+
+The journal compatibility rules (`CLAUDE.md`, "Conventions") are about what
+an older apb does with a journal a newer one wrote, so an in-binary test
+cannot check them. The journal corpus
+(`crates/apb-cli/tests/suite/journal_corpus_test.rs`) runs the released
+binaries of `v1.0.0-beta.1` and `v0.25.0` against journals this build wrote,
+this build against journals they wrote, and both on one journal: beta.1
+starts and pauses a run, this build resumes it, beta.1 reads it. The writers
+run the script-only playbooks of `tests/fixtures/journal-corpus/` (a script,
+a sub-playbook node, a `human_review` gate), so no agent is needed. Rows 7 and
+8 are synthetic journals (a record of a type no apb knows, with and without a
+later checkpoint) and test readers and resumers only.
+
+Build the old binaries once, into a directory outside `/tmp`:
+
+```
+scripts/old-apb.sh v1.0.0-beta.1 ~/.cache/apb-old-binaries
+scripts/old-apb.sh v0.25.0 ~/.cache/apb-old-binaries
+```
+
+Each call builds `apb` from a worktree of the tag (web build, then
+`cargo build --release --locked -p apb`, run inside that worktree) into
+`<dir>/<tag>/apb`, removes the worktree and the build directory after a
+successful build (a failed one leaves them, and the next call replaces
+them), and does nothing when the binary is already there. Then run the corpus:
+
+```
+APB_OLD_BINARIES=~/.cache/apb-old-binaries APB_CORPUS_REQUIRED=1 \
+  cargo nextest run -p apb --test main journal_corpus
+```
+
+Without `APB_OLD_BINARIES` every case prints one line and passes, so a plain
+`cargo nextest run --workspace` stays fast. `APB_CORPUS_REQUIRED=1` makes a
+missing binary a failure; CI's `journal-corpus` job sets it, builds the
+binaries with the same script and caches them by tag, toolchain and script.
+
+- Every binary of a case shares one temporary `HOME` and `XDG_CONFIG_HOME`
+  under cargo's target directory, never the real ones, and `APB_CONFIG_DIR`
+  is removed: the old binaries' registry and installation key writes stay in
+  the case, and every binary checks a run's origin stamp with the same key.
+- A writer's state is saved once; each operation of a reader (read, approve
+  and resume to the end, stop) starts from a fresh copy of it, in the same
+  project path, because a journal names its execution root.
+- Records are checked as plain JSON, never through this build's event types,
+  so an old writer's record is read the way it was written.
+- A change to the journal adds its own cases here: the new writer with each
+  old reader, an old writer with the new reader, a run continued by the other
+  binary, and a checkpoint written after the new record. A real journal enters
+  the fixtures only after a check for secrets.
+
 ## Running tests
 
 - Scoped first, full at milestones: `cargo test -p <crate>` while

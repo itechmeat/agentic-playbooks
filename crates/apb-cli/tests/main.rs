@@ -53,6 +53,10 @@ mod host_mode_cli_test;
 mod ingest_cli_test;
 #[path = "suite/intent_cli_test.rs"]
 mod intent_cli_test;
+// Unix-only: kills run drivers by process group.
+#[cfg(unix)]
+#[path = "suite/journal_corpus_test.rs"]
+mod journal_corpus_test;
 #[cfg(unix)]
 #[path = "suite/list_send_cli_test.rs"]
 mod list_send_cli_test;
@@ -60,8 +64,13 @@ mod list_send_cli_test;
 mod live_smoke_test;
 #[path = "suite/mcp_cli_test.rs"]
 mod mcp_cli_test;
+#[cfg(unix)]
+#[path = "suite/mcp_read_only_cli_test.rs"]
+mod mcp_read_only_cli_test;
 #[path = "suite/mcp_supervise_test.rs"]
 mod mcp_supervise_test;
+#[path = "suite/next_actions_cli_test.rs"]
+mod next_actions_cli_test;
 #[path = "suite/notify_cli_test.rs"]
 mod notify_cli_test;
 #[path = "suite/official_connectors_gate.rs"]
@@ -94,12 +103,16 @@ mod release_workflow_test;
 mod run_cli_test;
 #[path = "suite/run_doctor_cli_test.rs"]
 mod run_doctor_cli_test;
+#[path = "suite/run_secrets_cli_test.rs"]
+mod run_secrets_cli_test;
 #[path = "suite/run_wait_cli_test.rs"]
 mod run_wait_cli_test;
 #[path = "suite/runs_detail_cli_test.rs"]
 mod runs_detail_cli_test;
 #[path = "suite/sandbox_exec_test.rs"]
 mod sandbox_exec_test;
+#[path = "../../apb-server/tests/support/secret_runs.rs"]
+mod secret_runs;
 #[path = "suite/server_key_cli_test.rs"]
 mod server_key_cli_test;
 #[path = "suite/stats_cli_test.rs"]

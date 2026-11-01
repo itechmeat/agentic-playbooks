@@ -182,7 +182,7 @@ async fn post_answer_with_no_pending_question_surfaces_engine_message() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
     assert!(

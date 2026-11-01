@@ -1,3 +1,13 @@
+/// `println!` for a line a run surface prints: inside
+/// [`util::with_run_redaction`] the line loses the run's secret values first
+/// (`util::shown`); elsewhere it prints as written.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        println!("{}", $crate::util::shown(&format!($($arg)*)))
+    };
+}
+
+mod actions;
 mod budget;
 mod cache;
 mod candidate;
@@ -23,6 +33,7 @@ mod memory;
 mod notify;
 mod onboarding;
 mod pause;
+mod pipe;
 mod problems;
 mod profile;
 mod publish;
@@ -370,6 +381,13 @@ enum Command {
         /// Give up after this many seconds (default: no limit)
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
+        /// Keep waiting while the run and its live sub-playbook runs go on by
+        /// themselves (a timer, a question that gets its default, a pause
+        /// with `until` up to a minute past it); return when they finish (0
+        /// or 1), need input, also a paused run with an open gate or a
+        /// child's gate (3), or stop (4)
+        #[arg(long)]
+        follow_auto: bool,
     },
     /// Stop a run: interrupt whatever node it is executing right now, and
     /// finalize it outright if the process driving it is gone
@@ -388,6 +406,11 @@ enum Command {
         /// `apb publish show`)
         #[arg(long)]
         nonce: Option<String>,
+        /// The request this answers, as a next action names it
+        /// (`<kind>:<seq>`): refused when a later round replaced it or it
+        /// already has an answer
+        #[arg(long, value_name = "KIND:SEQ")]
+        request: Option<crate::actions::RequestArg>,
     },
     /// The publish gate of a run: show the exact plan, consent to it by its
     /// nonce, or skip the push
@@ -401,6 +424,11 @@ enum Command {
         /// The interactive node; omit when exactly one question is pending
         #[arg(long)]
         node: Option<String>,
+        /// The request this answers, as a next action names it
+        /// (`<kind>:<seq>`): refused when a later round replaced it or it
+        /// already has an answer
+        #[arg(long, value_name = "KIND:SEQ")]
+        request: Option<crate::actions::RequestArg>,
         text: String,
     },
     /// Ask the configured decision providers a bounded question (choose,
@@ -549,7 +577,12 @@ enum Command {
         no_open: bool,
     },
     /// Start stdio MCP server for the current project
-    Mcp,
+    Mcp {
+        /// Serve only the tools that read, in a process that writes nothing,
+        /// starts no program and sends no request
+        #[arg(long)]
+        read_only: bool,
+    },
     /// Update apb to the latest released version
     SelfUpdate {
         /// Report whether an update is available without installing it
@@ -702,6 +735,7 @@ fn registers_workspace(command: Option<&Command>) -> bool {
 const SANDBOX_EXEC: &str = "__sandbox-exec";
 
 fn main() -> ExitCode {
+    pipe::install();
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == SANDBOX_EXEC) {
         let code = apb_engine::sandbox::scope::exec_main(&args[2..]);
@@ -709,6 +743,12 @@ fn main() -> ExitCode {
     }
     let cli = Cli::parse();
     let root = std::env::current_dir().expect("cwd");
+    // A read-only server enters read-only mode before anything else runs:
+    // no workspace registration, no installation key, nothing written.
+    if matches!(cli.command, Some(Command::Mcp { read_only: true })) {
+        apb_engine::read_only::enter();
+        return serve::mcp_cmd(&root, apb_mcp::server::ServeMode::ReadOnly);
+    }
     // Auto-register the workspace in the project registry (spec 6.2). Only for
     // existing projects, so we don't clutter the registry with every directory
     // where `playbook` was run. Best-effort: does not fail or slow down the
@@ -841,7 +881,11 @@ fn main() -> ExitCode {
             &budget,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
-        Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
+        Some(Command::Wait {
+            run_id,
+            timeout,
+            follow_auto,
+        }) => wait_cmd(&root, &run_id, timeout, follow_auto),
         Some(Command::Note { run_id, text }) => note_cmd(&root, &run_id, &text),
         Some(Command::Review {
             run_id,
@@ -849,11 +893,23 @@ fn main() -> ExitCode {
             decision,
             note,
             nonce,
-        }) => review_cmd(&root, &run_id, &node_id, &decision, &note, nonce.as_deref()),
+            request,
+        }) => review_cmd(
+            &root,
+            &run_id,
+            &node_id,
+            &decision,
+            &note,
+            nonce.as_deref(),
+            request,
+        ),
         Some(Command::Publish { action }) => crate::publish::publish_cmd(&root, action),
-        Some(Command::Answer { run, node, text }) => {
-            answer_cmd(&root, &run, node.as_deref(), &text)
-        }
+        Some(Command::Answer {
+            run,
+            node,
+            request,
+            text,
+        }) => answer_cmd(&root, &run, node.as_deref(), &text, request),
         Some(Command::Dashboard {
             port,
             bind,
@@ -868,7 +924,7 @@ fn main() -> ExitCode {
         Some(Command::Ingest { bind, port }) => ingest_cmd(bind.as_deref(), port),
         Some(Command::Server { action }) => server_cmd(action),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
-        Some(Command::Mcp) => mcp_cmd(&root),
+        Some(Command::Mcp { .. }) => mcp_cmd(&root, apb_mcp::server::ServeMode::Normal),
         Some(Command::SelfUpdate { check }) => run_self_update(check),
         Some(Command::Projects { action }) => projects_cmd(action),
         Some(Command::Profile { action }) => profile_cmd(&root, action),

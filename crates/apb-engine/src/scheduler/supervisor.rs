@@ -284,7 +284,11 @@ pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
     let header = crate::context::instruction_section(cfg.instruction.as_deref());
     let events = read_all(run_dir)?;
     let ctx_md = format!("{header}{}", build_context(&events));
-    apb_core::fsutil::atomic_write_under(run_dir, &run_dir.join("context.md"), ctx_md.as_bytes())?;
+    apb_core::fsutil::atomic_write_private_under(
+        run_dir,
+        &run_dir.join("context.md"),
+        ctx_md.as_bytes(),
+    )?;
     for (node, output) in &RunState::fold(&events).outputs {
         let path = crate::context::node_output_path(run_dir, node);
         if path.parent() != Some(run_dir.join(crate::context::NODE_OUTPUTS_DIR).as_path()) {
@@ -297,7 +301,7 @@ pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
             run_dir,
             &run_dir.join(crate::context::NODE_OUTPUTS_DIR),
         )?;
-        apb_core::fsutil::atomic_write_under(run_dir, &path, output.as_bytes())?;
+        apb_core::fsutil::atomic_write_private_under(run_dir, &path, output.as_bytes())?;
     }
     Ok(())
 }

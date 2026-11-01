@@ -351,6 +351,9 @@ fn run_probe(
     args: &[String],
     extra_path: Option<&Path>,
 ) -> Result<ProbeOut, String> {
+    if crate::process_mode::is_read_only() {
+        return Err(crate::process_mode::READ_ONLY_REFUSAL.to_string());
+    }
     // PATH is built via join_paths (platform separator, correct handling of
     // paths with special characters and non-UTF8), rather than manual
     // concatenation via ':'. The binary's parent (extra_path) comes FIRST -
@@ -725,6 +728,9 @@ pub fn build_id() -> String {
 /// build on this.
 pub fn probe(refresh: bool) -> Vec<AgentInfo> {
     let probes = configured_probes();
+    if crate::process_mode::is_read_only() {
+        return unprobed(&probes);
+    }
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     // Current cache keys: probe description + binary/absent + sources +
     // env-auth (to compare against the cache). Every probe has a key, so
@@ -778,6 +784,33 @@ pub fn probe(refresh: bool) -> Vec<AgentInfo> {
     });
     agents
 }
+
+/// What a read-only process reports for detection: the memo as it is,
+/// stale or written by another build, never rewritten; without a memo,
+/// every configured agent as not installed with the reason. Nothing is
+/// probed, since a probe starts the agent's program.
+fn unprobed(probes: &[Probe]) -> Vec<AgentInfo> {
+    if let Some(cache) = read_cache() {
+        return cache.agents;
+    }
+    probes
+        .iter()
+        .map(|p| AgentInfo {
+            agent: p.id.clone(),
+            installed: false,
+            canonical_path: None,
+            version: None,
+            category: p.category,
+            models: None,
+            providers: None,
+            auth: None,
+            notes: vec![NOT_PROBED_READ_ONLY.to_string()],
+        })
+        .collect()
+}
+
+/// The note of an agent a read-only process did not probe.
+pub const NOT_PROBED_READ_ONLY: &str = "not probed: read-only server";
 
 fn read_cache() -> Option<DetectCache> {
     let path = cache_path()?;

@@ -169,6 +169,24 @@ fn render_types() -> String {
         apb_core::trust::OriginKind::decl(&cfg),
         apb_core::trust::TrustEntry::decl(&cfg),
         crate::routes::trust::TrustRevoked::decl(&cfg),
+        // Next actions: what a run is ready for, and what a refused start
+        // needs.
+        apb_engine::next_action::ActionCode::decl(&cfg),
+        apb_engine::next_action::Principal::decl(&cfg),
+        apb_engine::next_action::RequestKind::decl(&cfg),
+        apb_engine::next_action::RequestRef::decl(&cfg),
+        apb_engine::next_action::ActionTarget::decl(&cfg),
+        apb_engine::next_action::ArgValue::decl(&cfg),
+        apb_engine::next_action::ActionArg::decl(&cfg),
+        apb_engine::next_action::AutoOutcome::decl(&cfg),
+        apb_engine::next_action::AutoProgress::decl(&cfg),
+        apb_engine::next_action::NotReady::decl(&cfg),
+        apb_engine::next_action::NextAction::decl(&cfg),
+        apb_engine::next_action::StopVerdict::decl(&cfg),
+        apb_engine::next_action::RunActions::decl(&cfg),
+        apb_engine::next_action::start::StartActionCode::decl(&cfg),
+        apb_engine::next_action::start::Remedy::decl(&cfg),
+        apb_engine::next_action::start::StartAction::decl(&cfg),
         // "Will it fit here?"
         apb_engine::fit::FitSeverity::decl(&cfg),
         apb_engine::fit::FitItem::decl(&cfg),
@@ -288,6 +306,22 @@ fn render_consts() -> String {
     out.push_str(&format!(
         "\n/** The decisions a human_review gate without options offers. */\nexport const DEFAULT_REVIEW_OPTIONS = {}\n",
         ts_string_array(&schema::DEFAULT_REVIEW_OPTIONS)
+    ));
+    let action_codes: Vec<&str> = apb_engine::next_action::ActionCode::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every next-action code a run surface may carry. */\nexport const ACTION_CODES = {}\n",
+        ts_string_array(&action_codes)
+    ));
+    let start_codes: Vec<&str> = apb_engine::next_action::start::StartActionCode::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every start-action code a refused start may carry. */\nexport const START_ACTION_CODES = {}\n",
+        ts_string_array(&start_codes)
     ));
     let transitions: Vec<&str> = apb_core::notify::Transition::ALL
         .iter()

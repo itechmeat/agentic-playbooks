@@ -37,7 +37,8 @@ pub struct RunSummary {
     /// terminal event is the drive loop that no longer exists. The single-run
     /// surfaces (`run_status`, `apb doctor --run`) have answered this for a
     /// while; a listing could not, so a killed driver looked healthy in a table.
-    /// `false` also covers "no drive claim at all", which is not a problem.
+    /// `false` also covers "no drive claim at all", which is not a problem,
+    /// and a run that has ended ([`crate::run_view::RunView::driver_dead`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub driver_dead: bool,
     /// Events of a type this binary does not know, skipped when the journal
@@ -134,7 +135,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
         let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
-        let driver_dead = matches!(view.driver_alive, Some(false));
+        let driver_dead = view.driver_dead();
         let unknown_events = view.unknown.len();
         let status = view.run_status.as_str().into();
         let candidate_trial = crate::candidate::trial_of(&entry.path(), &view.events);

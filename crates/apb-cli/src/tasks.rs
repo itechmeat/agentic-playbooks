@@ -18,16 +18,16 @@ pub(crate) enum TasksAction {
 /// `apb tasks submit`: one host task's reply.
 #[derive(clap::Args)]
 pub(crate) struct SubmitArgs {
-    run_id: String,
-    task_id: String,
+    pub(crate) run_id: String,
+    pub(crate) task_id: String,
     /// succeeded, failed, or blocked (the output is then the question
     /// for the person)
     #[arg(long)]
-    status: String,
+    pub(crate) status: String,
     /// File holding the subagent's final reply, verbatim (`-` reads
     /// stdin)
     #[arg(long = "output-file", value_name = "FILE")]
-    output_file: PathBuf,
+    pub(crate) output_file: PathBuf,
     /// A short note for the journal
     #[arg(long)]
     note: Option<String>,

@@ -9,6 +9,18 @@ use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
 
+/// A captured stream may carry a secret the agent echoed: a new file is
+/// created 0600 on unix.
+fn private_mode(options: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = options;
+}
+
 #[derive(Debug)]
 pub(crate) struct CappedFile {
     file: Option<File>,
@@ -23,18 +35,24 @@ pub(crate) struct CappedFile {
 impl CappedFile {
     /// A fresh file at `path` (truncated if it exists).
     pub(crate) fn create(path: &Path, cap: u64) -> Self {
-        Self::over(File::create(path).ok(), cap)
+        // A read-only process creates no file: every write is a no-op.
+        if apb_core::process_mode::is_read_only() {
+            return Self::none();
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        private_mode(&mut options);
+        let file = options.open(path).ok();
+        // A file an older apb left readable keeps its mode through the open.
+        file.iter().for_each(apb_core::fsutil::narrow_open);
+        Self::over(file, cap)
     }
 
     /// `path` opened for appending (created if missing). What the file
     /// already holds counts against `cap`, so a file appended to more than
     /// once still stops at its cap.
     pub(crate) fn append(path: &Path, cap: u64) -> Self {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok();
+        let file = apb_core::fsutil::open_append_private(path).ok();
         let base = file
             .as_ref()
             .and_then(|f| f.metadata().ok())
@@ -109,6 +127,29 @@ impl CappedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capture file an older apb left readable by others is narrowed when
+    /// it is opened again, whether truncated or appended to.
+    #[cfg(unix)]
+    #[test]
+    fn a_reopened_capture_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for (name, open) in [
+            (
+                "out.log",
+                CappedFile::create as fn(&Path, u64) -> CappedFile,
+            ),
+            ("err.log", CappedFile::append),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "old").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let _f = open(&path, 10);
+            assert_eq!(mode(&path), 0o600, "{name}");
+        }
+    }
 
     #[test]
     fn the_cap_ends_the_copy_with_one_marker_and_counts_the_rest() {

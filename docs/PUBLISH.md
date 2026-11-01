@@ -210,7 +210,7 @@ only when it is identical, the push the person consented to.
   the target, the plan, a pending consent, the push and its state, the
   result.
 - An unknown push is listed by `apb intent list <run>` and resolved by
-  `apb intent resolve <run> <intent> --sent|--not-sent` after checking the
+  `apb intent resolve --sent|--not-sent <run> <intent>` after checking the
   remote.
 
 **MCP**
@@ -240,6 +240,9 @@ decision the gate does not offer is `400`, a stale nonce or a second
 decision `409` (the body names the current plan), a node that is not a
 gate `404`. The run payload carries `publish` and the plan in
 `progress.pending_reviews`. There is no separate route.
+`POST /api/runs/{id}/intents/{intent}/resolve`, the decision on an unknown
+push or send, is refused the same way by a dashboard without keys (`403`
+naming the `apb intent resolve` line).
 
 **Dashboard**
 

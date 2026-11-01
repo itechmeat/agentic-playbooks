@@ -294,7 +294,9 @@ export const postRunNotify = (id: string, notify: boolean, workspace = '') =>
 
 // POST /api/runs/{id}/review: a gate decision. `nonce` answers a publish
 // gate only: the nonce of the plan the person saw (a stale one is a 409
-// naming the current plan).
+// naming the current plan). `request` is the seq of the request the person
+// saw (a next action's `target.request.seq`): a replaced or already decided
+// request is a 409 instead of a decision on another one.
 export const postReview = (
   id: string,
   node: string,
@@ -302,12 +304,32 @@ export const postReview = (
   note = '',
   workspace = '',
   nonce?: string,
+  request?: number,
 ) =>
   requestJson<{ posted_seq: number }>(`${run(id)}/review${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify(nonce ? { node, decision, note, nonce } : { node, decision, note }),
+    body: JSON.stringify({
+      node,
+      decision,
+      note,
+      ...(nonce ? { nonce } : {}),
+      ...(request !== undefined ? { request } : {}),
+    }),
   })
+
+// POST /api/runs/{id}/intents/{intent}/resolve: a person's decision on a
+// send nobody can tell went out (`sent` true: it went out). 404 for an
+// unknown run or intent, 409 when the intent is not an open unknown send.
+export const resolveIntent = (runId: string, intent: string, sent: boolean, note = '', workspace = '') =>
+  requestJson<{ run_id: string; intent: string; settled: 'confirmed' | 'not_sent'; next?: unknown }>(
+    `${run(runId)}/intents/${encodeURIComponent(intent)}/resolve${qs({ workspace })}`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(note ? { sent, note } : { sent }),
+    },
+  )
 
 // POST /api/runs/{id}/pause (issue #200): the Pause button. `mode` is
 // `drain` (default) or `now`; `until` is an RFC 3339 time or a duration.
@@ -363,10 +385,11 @@ export const resumeRun = (
 // `node` is omitted when the run has exactly one pending question; the
 // server resolves it the same way `apb_engine::post_answer` does. Always
 // posted as answered_by "human" server-side - the dashboard never sends that
-// field.
+// field. `request` is the seq of the question the person saw (a next
+// action's `target.request.seq`): a replaced or answered one is a 409.
 export const postAnswer = (
   id: string,
-  body: { node?: string; answer: string },
+  body: { node?: string; answer: string; request?: number },
   workspace = '',
 ) =>
   requestJson<{ posted_seq: number }>(`${run(id)}/answer${qs({ workspace })}`, {

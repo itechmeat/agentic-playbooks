@@ -22,6 +22,7 @@ const report = (over: Partial<FitReport> = {}): FitReport => ({
   setup: [],
   trust: [],
   consent: { irreversible: [], effects: [] },
+  start_actions: [],
   ...over,
 })
 

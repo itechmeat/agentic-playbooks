@@ -30,8 +30,10 @@ use regex::Regex;
 use crate::secret::Secret;
 
 /// Shorter values are not scrubbed by value: a two-letter secret would blank
-/// every occurrence of that pair in the text. Token shapes still apply.
-const MIN_SECRET_LEN: usize = 6;
+/// every occurrence of that pair in the text. Token shapes still apply. A
+/// run start warns about a declared secret param this short
+/// ([`crate::run_params::too_short_to_scrub`]).
+pub const MIN_SECRET_LEN: usize = 6;
 
 static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
@@ -120,10 +122,7 @@ impl Scrubber {
     /// `text` with every secret value, local path, token shape and e-mail
     /// address replaced.
     pub fn scrub(&self, text: &str) -> String {
-        let mut out = text.to_string();
-        for s in &self.secrets {
-            out = s.scrub_as(&out, "[redacted]");
-        }
+        let mut out = self.scrub_values(text);
         if let Some(root) = &self.root {
             out = out
                 .replace(&format!("{root}/"), "")
@@ -135,6 +134,60 @@ impl Scrubber {
         out = HOME_PATH.replace_all(&out, "~").into_owned();
         out = crate::token_shape::redact_tokens(&out);
         EMAIL.replace_all(&out, "[email]").into_owned()
+    }
+
+    /// `text` with only the secret values replaced: paths, token shapes
+    /// and addresses stay as written, so a structured answer keeps its
+    /// paths usable.
+    pub fn scrub_values(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for s in &self.secrets {
+            out = s.scrub_as(&out, "[redacted]");
+        }
+        out
+    }
+
+    /// [`Scrubber::scrub_values`] over every string of a JSON value, in
+    /// place, object keys included. Numbers, booleans and the shape of the
+    /// value are left alone. Two keys that scrub alike keep the later entry,
+    /// as in [`Scrubber::redact_value`].
+    pub fn scrub_values_json(&self, v: &mut serde_json::Value) {
+        use serde_json::Value;
+        if self.secrets.is_empty() {
+            return;
+        }
+        match v {
+            Value::String(s) => {
+                if self.holds_value(s) {
+                    *s = self.scrub_values(s);
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|i| self.scrub_values_json(i)),
+            Value::Object(map) => {
+                if map.keys().any(|k| self.holds_value(k)) {
+                    let old = std::mem::take(map);
+                    *map = old
+                        .into_iter()
+                        .map(|(k, v)| (self.scrub_values(&k), v))
+                        .collect();
+                }
+                map.values_mut().for_each(|v| self.scrub_values_json(v));
+            }
+            _ => {}
+        }
+    }
+
+    /// The secret values this scrubber replaces (each at least six
+    /// characters long).
+    pub fn values(&self) -> &[Secret] {
+        &self.secrets
+    }
+
+    /// Whether `text` holds one of the secret values.
+    pub fn holds_value(&self, text: &str) -> bool {
+        self.secrets
+            .iter()
+            .any(|s| text.contains(s.expose_secret()))
     }
 
     /// [`Scrubber::scrub`] for text a person reads as written: every hidden
@@ -215,11 +268,7 @@ impl Scrubber {
     }
 
     fn check(&self, text: &str, shaped: fn(&str) -> bool) -> Option<ScrubFlag> {
-        if self
-            .secrets
-            .iter()
-            .any(|s| text.contains(s.expose_secret()))
-        {
+        if self.holds_value(text) {
             return Some(ScrubFlag::SecretValue);
         }
         shaped(text).then_some(ScrubFlag::TokenShape)
@@ -229,6 +278,35 @@ impl Scrubber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_scrubbing_replaces_only_the_values_and_keeps_the_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Scrubber::new(vec![Secret::new("violet hedgehog")], root.path());
+        let path = format!("{}/notes.txt", root.path().display());
+        assert_eq!(
+            r.scrub_values(&format!(
+                "violet hedgehog at {path} for dev.person@example.org"
+            )),
+            format!("[redacted] at {path} for dev.person@example.org")
+        );
+        let mut v = serde_json::json!({
+            "violet hedgehog": { "nested": ["a violet hedgehog", 3], "path": path },
+            "n": 7,
+            "ok": true
+        });
+        r.scrub_values_json(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "[redacted]": { "nested": ["a [redacted]", 3], "path": path },
+                "n": 7,
+                "ok": true
+            })
+        );
+        assert!(r.holds_value("x violet hedgehog"));
+        assert!(!r.holds_value("violet"));
+    }
 
     #[test]
     fn a_json_value_is_scrubbed_in_its_keys_as_well_as_its_values() {

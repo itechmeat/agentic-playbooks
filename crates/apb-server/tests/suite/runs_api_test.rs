@@ -349,27 +349,6 @@ fn publish_gate() -> (Vec<apb_engine::event::EventPayload>, String) {
     (payloads, nonce)
 }
 
-/// A dashboard state holding one issued key, and that key.
-fn keyed(root: std::path::PathBuf) -> (String, AppState) {
-    use apb_core::server_auth;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("server-auth.yaml");
-    let (key, _) = server_auth::issue_into(&path).unwrap();
-    let file = server_auth::load_from(&path).unwrap();
-    let auth = std::sync::Arc::new(
-        apb_server::auth::AuthState::new(
-            None,
-            file.keys,
-            &apb_core::config::ServerConfig::default(),
-        )
-        .unwrap(),
-    );
-    (
-        key.expose_secret().to_string(),
-        AppState::new(root).with_auth(auth),
-    )
-}
-
 /// `POST uri` with `body`, as a script would send it (no `Origin`), with
 /// the bearer `key` when given; the status and the body text.
 async fn post_as(
@@ -445,7 +424,7 @@ async fn a_publish_gate_shows_its_plan_and_takes_only_the_plans_nonce() {
     let dir = seed_with_run();
     let (payloads, nonce) = publish_gate();
     seed_gate_run_yaml(dir.path(), "pub-1", PUBLISH_GATE, &payloads);
-    let (key, state) = keyed(dir.path().to_path_buf());
+    let (key, state) = common::keyed(dir.path().to_path_buf());
     let app = build_router(state);
 
     let req = Request::get("/api/runs/pub-1")

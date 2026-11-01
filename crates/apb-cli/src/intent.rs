@@ -56,32 +56,43 @@ pub(crate) fn intent_cmd(root: &Path, action: IntentAction) -> ExitCode {
     }
 }
 
+/// The run's send intents, every text redacted by the run's secret values
+/// (a connector's error detail, an effect reference, a label can hold
+/// one).
 fn list(root: &Path, run_id: &str, json: bool) -> ExitCode {
     let intents = match run_intents(root, run_id) {
         Ok(i) => i,
         Err(e) => return fail("intent list", &e),
     };
+    let redactor = apb_engine::run_redact::WorkspaceRedaction::new(root).run(run_id);
     if json {
+        let mut v = serde_json::to_value(&intents).unwrap_or_else(|_| serde_json::json!([]));
+        redactor.redact_json(&mut v);
         println!(
             "{}",
-            serde_json::to_string_pretty(&intents).unwrap_or_else(|_| "[]".into())
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".into())
         );
         return ExitCode::SUCCESS;
     }
+    crate::util::with_run_redaction(redactor, || list_text(run_id, &intents))
+}
+
+fn list_text(run_id: &str, intents: &[apb_engine::run_outcome::RunIntent]) -> ExitCode {
     if intents.is_empty() {
-        println!("run `{run_id}` recorded no send intents");
+        say!("run `{run_id}` recorded no send intents");
     }
-    for i in &intents {
-        println!(
+    for i in intents {
+        say!(
             "{}",
             sanitize_for_terminal(&i.line(), QUESTION_TEXT_MAX * 2)
         );
     }
     let open = intents.iter().filter(|i| i.is_open_unknown()).count();
     if open > 0 {
-        println!(
-            "{open} {} not known; check the service, then: apb intent resolve {run_id} <intent> --sent|--not-sent",
-            if open == 1 { "send is" } else { "sends are" }
+        say!(
+            "{open} {} not known; check the service, then: {}",
+            if open == 1 { "send is" } else { "sends are" },
+            apb_engine::next_action::command::resolve_intent(run_id, None, None).line()
         );
     }
     ExitCode::SUCCESS

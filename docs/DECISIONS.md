@@ -240,13 +240,18 @@ Before anything leaves the machine, every text field is:
    template reads `{{nodes.*}}` or `{{run.context}}`, since it then carries
    agent output; the `detail` of earlier supervisor actions in
    `supervisor_triage`'s `meta` is sent only with `outputs`;
-2. redacted (unless `privacy.redact: false`): the values of every variable an
+2. stripped of the run's sensitive values, always, whatever
+   `privacy.redact` says: every param value declared `secret: true`, with a
+   credential-like name or a credential-shaped value, of the run and of its
+   parent runs (see "Secret params" in `HOWTO-authoring.md`). A grading
+   request about a run loses the same values;
+3. redacted (unless `privacy.redact: false`): the values of every variable an
    installed connector references and of the provider keys become
    `[redacted]`; token-shaped strings (JWTs, well-known key prefixes, bearer
    values, long mixed-case runs with digits) become `[redacted-token]`;
    absolute paths under the project become repo-relative and other home
    paths `~/...`; e-mail addresses become `[email]`;
-3. clipped to its own budget and then to its share of
+4. clipped to its own budget and then to its share of
    `privacy.max_state_bytes`, keeping head and tail with the cut marked; the
    shares shrink until the state as serialized (JSON escapes included) fits
    `max_state_bytes`.

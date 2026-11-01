@@ -155,6 +155,9 @@ fn doctor_run_reports_all_ok_for_a_healthy_run() {
          {\"seq\":3,\"ts\":4000,\"type\":\"run_finished\",\"outcome\":\"succeeded\"}\n",
     )
     .unwrap();
+    // A run apb drove is readable by its owner only; a hand-made one is
+    // narrowed the same way, else the files check warns.
+    apb_engine::run_perms::narrow(&rd);
 
     let out = apb()
         .arg("doctor")
@@ -244,6 +247,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         candidate_trial: false,
         candidate_skipped: None,
         task_type: None,
+        secret_params: Vec::new(),
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 

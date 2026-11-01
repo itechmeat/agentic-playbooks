@@ -3979,7 +3979,11 @@ pub(crate) fn maybe_compact_context(
         Err(_) => return Ok(None),
     };
     let compact_file = "context_compact.md";
-    apb_core::fsutil::atomic_write_under(run_dir, &run_dir.join(compact_file), summary.as_bytes())?;
+    apb_core::fsutil::atomic_write_private_under(
+        run_dir,
+        &run_dir.join(compact_file),
+        summary.as_bytes(),
+    )?;
     Ok(Some(EventPayload::ContextCompacted {
         compact_file: compact_file.to_string(),
         model,

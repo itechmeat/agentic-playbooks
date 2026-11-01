@@ -413,6 +413,11 @@ pub struct ReviewDecideArgs {
     /// only after the person was shown that exact plan.
     #[serde(default)]
     pub nonce: Option<String>,
+    /// The journal seq of the request this answers: a next action's
+    /// `arguments.request`. When given, a request a later round replaced is
+    /// refused as a conflict, and so is one that already has an answer.
+    #[serde(default)]
+    pub request: Option<u64>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -440,6 +445,11 @@ pub struct RunAnswerArgs {
     #[serde(default)]
     pub node: Option<String>,
     pub answer: String,
+    /// The journal seq of the request this answers: a next action's
+    /// `arguments.request`. When given, a request a later round replaced is
+    /// refused as a conflict, and so is one that already has an answer.
+    #[serde(default)]
+    pub request: Option<u64>,
     /// workspace_id of another workspace (spec 7). Only meaningful with
     /// `run_id`; the supervisor-token path resolves its own run and ignores
     /// this. None - the current workspace.

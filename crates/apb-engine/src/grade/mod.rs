@@ -82,8 +82,9 @@ pub fn grade_model(run_dir: &Path) -> Result<ModelGraded, EngineError> {
             reason: reason.to_string(),
         })
     };
-    let root = crate::run_retro::project_root_of(run_dir).unwrap_or_else(|| run_dir.to_path_buf());
+    let root = crate::run_config::project_root_of(run_dir).unwrap_or_else(|| run_dir.to_path_buf());
     let Some(decider) = crate::decision::standalone::StandaloneDecider::for_project(&root)
+        .map(|d| d.for_run(run_dir))
         .filter(|d| {
             d.mode_for(apb_decide::UseSite::Grade) != apb_core::decisions::DecisionMode::Off
         })

@@ -210,6 +210,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::runs::post_answer_handler),
         )
         .route(
+            "/api/runs/{id}/intents/{intent}/resolve",
+            post(routes::runs::post_intent_resolve_handler),
+        )
+        .route(
             "/api/runs/{id}/pause",
             post(routes::runs::post_pause_handler),
         )

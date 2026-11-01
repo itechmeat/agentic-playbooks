@@ -48,7 +48,11 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         let fit = fit == Some(true);
-        let Some(query) = query.filter(|q| !q.trim().is_empty()) else {
+        // A read-only server ranks nothing: ranking asks a decision model.
+        let query = query.filter(|q| !q.trim().is_empty());
+        let ranking_skipped = self.is_read_only() && query.is_some();
+        let query = query.filter(|_| !self.is_read_only());
+        let Some(query) = query else {
             // The fit reads every entry's tree: off the async runtime.
             let result = tokio::task::spawn_blocking(move || {
                 tools::playbook_catalog(
@@ -66,6 +70,12 @@ impl WfMcp {
                 Err(tools::ToolError::Engine(format!(
                     "catalog task failed: {e}"
                 )))
+            });
+            let result = result.map(|mut v| {
+                if ranking_skipped && let Some(obj) = v.as_object_mut() {
+                    obj.insert("ranking".into(), json!({ "skipped": "read_only" }));
+                }
+                v
             });
             return to_call_tool_result(result);
         };
@@ -161,6 +171,11 @@ impl WfMcp {
         }): Parameters<PlaybookMemoryArgs>,
     ) -> CallToolResult {
         let action = action.as_deref().unwrap_or("get");
+        if self.is_read_only() && action != "get" {
+            return to_call_tool_result(Ok(super::read_only::refused(
+                "a read-only server only reads remembered input (action get)",
+            )));
+        }
         // Memory is personal to a project: another workspace's is read,
         // never written from here.
         if workspace.is_some() && action != "get" {

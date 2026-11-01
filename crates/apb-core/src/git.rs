@@ -105,13 +105,25 @@ pub fn base() -> Command {
 /// `git --no-pager` without any of apb's own `GIT_*` variables and without
 /// settings: the start of [`base`] and of [`transport::command`].
 fn bare_git() -> Command {
-    let mut cmd = Command::new("git");
+    // A read-only process starts no program: the command it would run is
+    // one that does not exist, so every caller's spawn fails before git
+    // runs. [`Repo::locate`] refuses earlier, with the reason.
+    let program = if crate::process_mode::is_read_only() {
+        READ_ONLY_GIT
+    } else {
+        "git"
+    };
+    let mut cmd = Command::new(program);
     for k in git_vars() {
         cmd.env_remove(k);
     }
     cmd.arg("--no-pager");
     cmd
 }
+
+/// What a read-only process runs in place of git: an empty program name,
+/// which no file system can hold, so the spawn always fails.
+const READ_ONLY_GIT: &str = "";
 
 /// Why a directory is not a repository apb runs git in.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -129,6 +141,9 @@ pub enum RepoError {
     /// The installed git is older than [`MIN_GIT`].
     #[error("git {0} is too old: apb needs git 2.31 or newer")]
     GitTooOld(String),
+    /// This process is read-only and runs no git (`apb mcp --read-only`).
+    #[error("read-only server")]
+    ReadOnly,
 }
 
 /// The installed git's version (`2.53.0`), read once per process; `None`
@@ -172,6 +187,9 @@ pub struct Repo {
 impl Repo {
     /// The repository `dir` belongs to.
     pub fn locate(dir: &Path) -> Result<Repo, RepoError> {
+        if crate::process_mode::is_read_only() {
+            return Err(RepoError::ReadOnly);
+        }
         match git_version() {
             None => return Err(RepoError::NotARepository),
             Some(v) if !new_enough(v) => return Err(RepoError::GitTooOld(v.to_string())),

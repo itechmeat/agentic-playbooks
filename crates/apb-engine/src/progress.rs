@@ -39,7 +39,7 @@ pub enum WaitingKind {
 /// The pending question for a run whose `waiting_kind` is
 /// `Some(WaitingKind::Question)` (spec 2026-07-20-interactive-nodes). Built
 /// from the `questions.jsonl` / `answers.jsonl` channel files directly
-/// (`pending_question_for_run`), not from the event log, so it is visible
+/// (`pending_questions_for_run`), not from the event log, so it is visible
 /// even before drive journals `QuestionAsked` for it.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +58,18 @@ pub struct PendingQuestion {
     /// observed it); the web treats `0` as "just now" rather than
     /// synthesizing a non-deterministic clock reading here.
     pub asked_at: u128,
+    /// With `question_timeout_seconds`: what is left of it, in milliseconds,
+    /// on the clock the drive's deadline runs on (paused time left out), so
+    /// it stays where it is while the run is paused. Absent for a question
+    /// without a timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub timeout_ms: Option<u64>,
+    /// The answer the engine posts when the timeout runs out. Absent when
+    /// the node has none (the timeout then fails the attempt) or no timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub default_answer: Option<String>,
 }
 
 /// The pending human-review gate for a run whose `waiting_kind` is
@@ -336,6 +348,21 @@ pub struct ProgressSummary {
     pub plan_key: String,
 }
 
+/// Why a read-only server returns a host task without its prompt.
+pub const PROMPT_WITHHELD_READ_ONLY: &str = "read_only";
+
+impl ProgressSummary {
+    /// Every pending host task without its prompt (see
+    /// [`crate::host_task::PendingHostTask::withhold_prompt`]): a read-only
+    /// server applies this to the summary itself, before any copy of it is
+    /// serialized, so no surface it answers carries a prompt.
+    pub fn withhold_task_prompts(&mut self) {
+        for t in &mut self.pending_tasks {
+            t.withhold_prompt(PROMPT_WITHHELD_READ_ONLY);
+        }
+    }
+}
+
 /// Strongly-connected components of the playbook graph (iterative Tarjan),
 /// returned as groups of node ids. Node order follows `playbook.nodes`.
 fn sccs(playbook: &Playbook) -> Vec<Vec<String>> {
@@ -411,106 +438,117 @@ pub use crate::legacy_snapshot::load_run_playbook;
 /// visible even before drive journals `QuestionAsked` for it (the live
 /// transport in a later task depends on this exact property). Node order
 /// follows `playbook.nodes`, giving a deterministic pick when more than one
-/// interactive node happens to be pending at once.
+/// interactive node happens to be pending at once. Each channel file is read
+/// once for all nodes.
 fn pending_questions_for_run(
     run_dir: &Path,
     playbook: &Playbook,
     events: &[Event],
 ) -> Vec<PendingQuestion> {
+    let Some(channel) = QuestionChannel::read(run_dir) else {
+        return Vec::new();
+    };
+    let now_ms = apb_core::clock::now_ms();
     playbook
         .nodes
         .iter()
-        .filter_map(|n| {
-            // Every agent_task: an interactive one asks through its CLI, and
-            // in host execution mode (0.23.0) any agent step can come back
-            // `blocked` with a question. A node that never asked has no
-            // channel entry, so this costs nothing for the rest.
-            if matches!(n.kind, NodeKind::AgentTask { .. }) {
-                pending_question_for_node(run_dir, playbook, events, &n.id)
-            } else {
-                None
-            }
-        })
+        // Every agent_task: an interactive one asks through its CLI, and in
+        // host execution mode (0.23.0) any agent step can come back
+        // `blocked` with a question. A node that never asked has no channel
+        // entry, so this costs nothing for the rest.
+        .filter(|n| matches!(n.kind, NodeKind::AgentTask { .. }))
+        .filter_map(|n| channel.pending_for(n, events, now_ms))
         .collect()
 }
 
-/// A single node's pending question, or `None` when every asked question has
-/// a matching answer. Mirrors `compute_with`'s `review_pending` count-based
-/// detection: the node has a pending question when its asked-question count
-/// exceeds its answered count, and the pending question is the first
-/// unanswered entry (index == the answered count, since answers consume
-/// questions in posting order).
-fn pending_question_for_node(
-    run_dir: &Path,
-    playbook: &Playbook,
-    events: &[Event],
-    node_id: &str,
-) -> Option<PendingQuestion> {
-    // A read failure (corrupt/unreadable questions.jsonl or answers.jsonl) is
-    // not silent: it writes one stderr warning naming the file and error,
-    // the same handling `load_run_playbook` gives an unparseable snapshot,
-    // then collapses to "no pending question" (the channel files are
-    // engine-written and append-only, so a read failure here is a
-    // filesystem-level fault worth a terminal signal rather than an
-    // authoring one).
-    let questions: Vec<_> = match crate::question::read_questions_after(run_dir, None) {
-        Ok(qs) => qs,
-        Err(e) => {
+/// The two question channel files of a run, read once.
+struct QuestionChannel {
+    questions: Vec<crate::question::PostedQuestion>,
+    answers: Vec<crate::question::PostedAnswer>,
+}
+
+impl QuestionChannel {
+    /// Reads both files. A read failure (corrupt/unreadable questions.jsonl
+    /// or answers.jsonl) is not silent: it writes one stderr warning naming
+    /// the file and error, the same handling `load_run_playbook` gives an
+    /// unparseable snapshot, then collapses to "no pending question" (the
+    /// channel files are engine-written and append-only, so a read failure
+    /// here is a filesystem-level fault worth a terminal signal rather than
+    /// an authoring one).
+    fn read(run_dir: &Path) -> Option<Self> {
+        let warn = |file: &str, e: crate::error::EngineError| {
             eprintln!(
-                "apb: warning: run {} questions.jsonl unreadable: {e}",
+                "apb: warning: run {} {file} unreadable: {e}",
                 run_dir.display()
             );
-            return None;
-        }
+        };
+        let questions = crate::question::read_questions_after(run_dir, None)
+            .map_err(|e| warn("questions.jsonl", e))
+            .ok()?;
+        let answers = crate::question::read_answers_after(run_dir, None)
+            .map_err(|e| warn("answers.jsonl", e))
+            .ok()?;
+        Some(Self { questions, answers })
     }
-    .into_iter()
-    .filter(|q| q.node == node_id)
-    .collect();
-    let answered = match crate::question::read_answers_after(run_dir, None) {
-        Ok(ans) => ans,
-        Err(e) => {
-            eprintln!(
-                "apb: warning: run {} answers.jsonl unreadable: {e}",
-                run_dir.display()
-            );
-            return None;
-        }
-    }
-    .into_iter()
-    .filter(|a| a.node == node_id)
-    .count();
-    if questions.len() <= answered {
-        return None;
-    }
-    let q = &questions[answered];
-    let answer_by = playbook
-        .node(node_id)
-        .and_then(|n| match &n.kind {
-            NodeKind::AgentTask { answer_by, .. } => Some(answer_by.as_str().to_string()),
-            _ => None,
+
+    /// A single node's pending question, or `None` when every asked
+    /// question has a matching answer. Mirrors `compute_with`'s
+    /// `review_pending` count-based detection: the node has a pending
+    /// question when its asked-question count exceeds its answered count,
+    /// and the pending question is the first unanswered entry (index == the
+    /// answered count, since answers consume questions in posting order).
+    fn pending_for(
+        &self,
+        node: &apb_core::schema::Node,
+        events: &[Event],
+        now_ms: u128,
+    ) -> Option<PendingQuestion> {
+        let node_id = node.id.as_str();
+        let answered = self.answers.iter().filter(|a| a.node == node_id).count();
+        let q = self
+            .questions
+            .iter()
+            .filter(|q| q.node == node_id)
+            .nth(answered)?;
+        let (answer_by, timeout_s, default_answer) = match &node.kind {
+            NodeKind::AgentTask {
+                answer_by,
+                question_timeout_seconds,
+                default_answer,
+                ..
+            } => (
+                answer_by.as_str().to_string(),
+                *question_timeout_seconds,
+                default_answer.clone(),
+            ),
+            _ => ("human".to_string(), None, None),
+        };
+        // asked_at: the ts of the (answered-count)-th `QuestionAsked` event
+        // journaled for this node, positionally matching the channel order,
+        // since drive journals them in the order it observes new channel
+        // entries. `0` when drive has not journaled it yet (the web treats
+        // `0` as "just now" rather than a synthesized clock reading).
+        let asked_at = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::QuestionAsked { node, .. } if node == node_id => Some(e.ts),
+                _ => None,
+            })
+            .nth(answered);
+        Some(PendingQuestion {
+            node: node_id.to_string(),
+            question: q.question.clone(),
+            options: q.options.clone(),
+            answer_by,
+            asked_at: asked_at.unwrap_or(0),
+            timeout_ms: timeout_s.map(|secs| {
+                let opened = asked_at.unwrap_or(now_ms);
+                let active = crate::pause::active_elapsed_ms(events, opened, now_ms, now_ms);
+                u64::try_from((u128::from(secs) * 1000).saturating_sub(active)).unwrap_or(u64::MAX)
+            }),
+            default_answer: timeout_s.and(default_answer),
         })
-        .unwrap_or_else(|| "human".to_string());
-    // asked_at: the ts of the (answered-count)-th `QuestionAsked` event
-    // journaled for this node, positionally matching the channel order,
-    // since drive journals them in the order it observes new channel
-    // entries. `0` when drive has not journaled it yet (the web treats `0`
-    // as "just now" rather than a synthesized clock reading, which would be
-    // non-deterministic at fold time).
-    let asked_at = events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::QuestionAsked { node, .. } if node == node_id => Some(e.ts),
-            _ => None,
-        })
-        .nth(answered)
-        .unwrap_or(0);
-    Some(PendingQuestion {
-        node: node_id.to_string(),
-        question: q.question.clone(),
-        options: q.options.clone(),
-        answer_by,
-        asked_at,
-    })
+    }
 }
 
 /// Sums, over `events`, every completed `QuestionAsked`-to-`QuestionAnswered`
@@ -604,6 +642,9 @@ pub fn from_run_dir_with_root(
     // the tighter block, so a task only names `waiting_on` when nothing else
     // does.
     summary.pending_tasks = crate::host_task::pending_tasks(run_dir, events);
+    if crate::read_only::active() {
+        summary.withhold_task_prompts();
+    }
     if summary.waiting_on.is_none()
         && let Some(t) = summary.pending_tasks.first()
     {

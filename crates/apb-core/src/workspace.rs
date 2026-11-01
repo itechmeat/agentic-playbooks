@@ -62,6 +62,7 @@ pub fn read_id(root: &Path) -> Option<String> {
 /// directory) is refused with `InvalidData` rather than followed or replaced:
 /// it is not this workspace's identity.
 pub fn ensure_id(root: &Path) -> std::io::Result<String> {
+    crate::process_mode::guard()?;
     let playbook = root.join(".apb");
     std::fs::create_dir_all(&playbook)?;
     let path = playbook.join(WORKSPACE_FILE);
@@ -123,6 +124,9 @@ pub fn ensure_id(root: &Path) -> std::io::Result<String> {
 /// its caller, and never creates `.apb/` itself (a driver of a deleted
 /// workspace must not bring it back).
 pub fn ensure_local_ignored(root: &Path) {
+    if crate::process_mode::is_read_only() {
+        return;
+    }
     let playbook = root.join(".apb");
     if !playbook.is_dir() {
         return;

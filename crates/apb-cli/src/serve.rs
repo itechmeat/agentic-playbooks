@@ -310,9 +310,9 @@ pub(crate) fn dev_cmd(root: PathBuf, no_open: bool) -> ExitCode {
     }
 }
 
-pub(crate) fn mcp_cmd(root: &Path) -> ExitCode {
+pub(crate) fn mcp_cmd(root: &Path, mode: apb_mcp::server::ServeMode) -> ExitCode {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    match rt.block_on(apb_mcp::server::serve_stdio(root.to_path_buf())) {
+    match rt.block_on(apb_mcp::server::serve_stdio(root.to_path_buf(), mode)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mcp failed: {e}");

@@ -5,6 +5,8 @@
   // button calls `onconfirm`, which sends the refusal's `consent_nonce`.
   // `action` says what the person is about to do: start a run (the default)
   // or resume a paused one (issue #200), which asks the same question.
+  // `subRun` names a sub-playbook run being resumed: its effects are its
+  // own playbook's, not the page's.
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
 
   let {
@@ -12,12 +14,14 @@
     playbookId,
     sources = [],
     action = 'run',
+    subRun = null,
     onconfirm,
   }: {
     open?: boolean
     playbookId: string
     sources?: string[]
     action?: 'run' | 'resume'
+    subRun?: string | null
     onconfirm: () => void
   } = $props()
 
@@ -32,7 +36,10 @@
     <AlertDialog.Header>
       <AlertDialog.Title>{action === 'resume' ? 'Resume' : 'Run'} a playbook with irreversible effects?</AlertDialog.Title>
       <AlertDialog.Description>
-        {#if sources.length}
+        {#if subRun}
+          The sub-playbook run <code data-testid="irreversible-subrun">{subRun}</code> has irreversible
+          effects{sources.length ? ':' : ', such as a push, a merge or a deploy.'}
+        {:else if sources.length}
           The playbook <code class="text-amber">{playbookId}</code> has irreversible effects:
         {:else}
           The playbook <code class="text-amber">{playbookId}</code> declares irreversible effects, such as a push, a merge or a deploy.

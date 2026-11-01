@@ -47,7 +47,11 @@ pub fn supervisor_wait_result(
     let status = run_status(root, run_id)?;
     let (wake, next_after_seq, reason) = match outcome {
         SupervisorWait::Wake(w) => {
-            let (detail, clipped) = clip_tail(&w.detail, WAKE_DETAIL_MAX_BYTES);
+            // Redacted before the clip, so a cut never splits a secret.
+            let dir = super::resolve_run_dir(root, run_id)?;
+            let detail =
+                apb_engine::run_redact::RunRedactor::for_run(root, &dir).redact_str(&w.detail);
+            let (detail, clipped) = clip_tail(&detail, WAKE_DETAIL_MAX_BYTES);
             let mut v = json!({
                 "seq": w.seq,
                 "trigger": w.trigger,
@@ -110,7 +114,9 @@ pub fn sv_run_inspect_with(
     run_id: &str,
     full_events: bool,
 ) -> Result<Value, ToolError> {
-    let mut v = engine_run_inspect(root, run_id)?;
+    let dir = super::resolve_run_dir(root, run_id)?;
+    // Redacted before any elision, so a cut never splits a secret.
+    let mut v = super::redacted_answer(root, &dir, engine_run_inspect(root, run_id)?);
     if !full_events && let Some(events) = v.get_mut("events").and_then(Value::as_array_mut) {
         for e in events {
             elide_long_strings(e);

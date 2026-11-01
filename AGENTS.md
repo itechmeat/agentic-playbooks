@@ -62,7 +62,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`bundle/`), remembered run input per project (`run_memory/`: `key`,
   `schema` the params digest and the value check, `store` the file, bound
   to the installation by a MAC for a global playbook), the credential-shape
-  detector of values and param names (`token_shape.rs`), run quality
+  detector of values and param names (`token_shape.rs`), a run's sensitive
+  params (`run_params.rs`: `sensitive`, the one rule remembered input and
+  run redaction share, and `redacted`), the process-wide read-only mode of
+  `apb mcp --read-only` and the guard every write and program start checks
+  (`process_mode.rs`), run quality
   (`quality/`: `criteria` the `quality:` block, the built-in criteria and
   their digests, `grade` the grade a grader stores, `compare` the comparable
   key and the deterministic comparison of a candidate with `current`), known
@@ -217,7 +221,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the earlier runs of a playbook the estimate and the comparison share),
   the redactor every text that
   leaves the machine goes through (`redact.rs`, over
-  `apb_core::scrub::Scrubber`), known problems (`known_problems/`: `observe`
+  `apb_core::scrub::Scrubber`), the run-scoped redactor of a run's secret
+  values and its ancestors' (`run_redact.rs`: `RunRedactor`, `redact_text`
+  for text that leaves the machine, `redact_json` for structured answers;
+  a read-only process missing a referenced connector secret withholds the
+  run text as `[secrets_unresolved]`),
+  the run directory's private modes and their narrowing (`run_perms.rs`),
+  entering read-only mode with the decision client's request ban
+  (`read_only.rs`), next actions (`next_action/`: `observation` one read of
+  a run and its live children, `verdict` the waits and the one stop
+  verdict, `deadlines` on the paused-interval clock, `types` the action
+  shapes, `command` the one command-line renderer every surface prints,
+  `start` and `start_action` the start actions of a refused start and of
+  the fit report with their remedies), known problems (`known_problems/`: `observe`
   at a run's end, `at_start` what a starting run shows and journals once,
   `view`, `decide`, `recheck_one` and `scan` for the surfaces; `extract` the
   sightings of a journal, `source` a problem's current and old source text,
@@ -256,7 +272,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate/`, with `trust_scan` the
   connector and profile-bundle trust facts collected before any refusal and
-  `isolation` the `isolation_unavailable` refusal),
+  `isolation` the `isolation_unavailable` refusal, and `params` the
+  `param_needs_value` refusal every launch surface checks after the gate,
+  with the start warning about a declared secret value too short to scrub),
   the "will it fit here?" report (`fit/`: compatibility, `setup`, `trust` and
   consent kept apart, `report` the shapes), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
@@ -266,8 +284,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   views the model grader and the recheck use, the judge node and edge answers
   (`scheduler/judge` runs them), and `report/`: the labellers, statistics
   and replay behind `apb decisions`; see `docs/DECISIONS.md`).
-- `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
+- `apb-mcp` - rmcp stdio MCP server (`server/`, with `read_only` the
+  allowlist of `apb mcp --read-only` and the tables every tool is classified
+  in) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
+  `actions` the next actions and start actions as tool calls with
+  `available_to_caller`,
   `meta`, `intent` for `run_intent_resolve` and `apb intent`, `budget` for the
   budget arguments, the pre-start decision and the estimate and budget blocks
   the HTTP API reuses, `memory` for `playbook_memory` and the `remember` of a
@@ -300,7 +322,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
   --html`, `grade.rs` is `apb grade` and the grade lines of `apb runs
   <id>`, `candidate.rs` is `apb candidate`, `problems.rs` is `apb
-  problems`, `discover.rs` is `apb discover`.
+  problems`, `discover.rs` is `apb discover`, `actions.rs` prints next
+  actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
+  `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `memory` for remembered run

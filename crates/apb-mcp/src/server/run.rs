@@ -165,7 +165,12 @@ impl WfMcp {
             false,
         ) {
             Ok(p) => p,
-            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+            Err(refusal) => {
+                return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                    apb_engine::next_action::start::StartOf::of(&wref),
+                    refusal,
+                )));
+            }
         };
         // 0.24.0 irreversible consent: as for playbook_run,
         // `confirm_irreversible` after asking the person, bound to the nonce
@@ -177,8 +182,19 @@ impl WfMcp {
             client.as_deref(),
         ) {
             Ok(c) => c,
-            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+            Err(refusal) => {
+                return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                    apb_engine::next_action::start::StartOf::of(&wref),
+                    refusal,
+                )));
+            }
         };
+        if let Err(refusal) = apb_engine::gate::check_params(&root_b, &wref, &payload.params) {
+            return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                apb_engine::next_action::start::StartOf::of(&wref),
+                refusal,
+            )));
+        }
         // The plan the user confirmed must still be what runs: the digest and
         // the profile bundles the gate verified equal the signed plan's.
         if permit.playbook_digest != payload.digest {
@@ -218,7 +234,12 @@ impl WfMcp {
                 Ok(p) => p,
                 Err(refusal) => return to_call_tool_result(Ok(refusal)),
             };
-        let warnings = checked.warnings;
+        let mut warnings = checked.warnings;
+        warnings.extend(apb_engine::gate::short_secret_warning(
+            &root_b,
+            &wref,
+            &payload.params,
+        ));
         // Burn the nonce right before launch (all gates passed): check-and-insert
         // atomically, so a race between two execute calls does not run the
         // plan twice.
@@ -391,11 +412,22 @@ impl WfMcp {
             false,
         ) {
             Ok(p) => p,
-            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+            Err(refusal) => {
+                return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                    apb_engine::next_action::start::StartOf::of(&wref),
+                    refusal,
+                )));
+            }
         };
         // Issue #192: the candidate version the gate chose (and pinned) for
         // a start without an explicit version is the one that runs.
         let version = permit.run_version(version.as_deref());
+        // The start the gate pinned: a refusal's start actions name it, so
+        // their remedy targets the version that was refused.
+        let pinned = apb_core::scope::PlaybookRef {
+            version: version.clone(),
+            ..wref.clone()
+        };
         let mut candidate = super::StartNotes::of(&permit, &self.root);
         // --- 0.24.0 irreversible consent ---
         // `confirm_irreversible` is the consent, checked against the nonce of
@@ -409,9 +441,21 @@ impl WfMcp {
             execution.client.as_deref(),
         ) {
             Ok(c) => c,
-            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+            Err(refusal) => {
+                return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                    apb_engine::next_action::start::StartOf::of(&pinned),
+                    refusal,
+                )));
+            }
         };
         // --- end 0.24.0 irreversible consent ---
+        // A param the start leaves without a value, refused like the gate.
+        if let Err(refusal) = apb_engine::gate::check_params(&self.root, &pinned, &params) {
+            return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                apb_engine::next_action::start::StartOf::of(&pinned),
+                refusal,
+            )));
+        }
 
         // supervise:"self" does not combine with a global scope: refused
         // before the budget check, so nobody is asked about a start that
@@ -442,6 +486,9 @@ impl WfMcp {
         // with zero configured accounts). Surfaced on every successful run
         // response so the caller can show them to the user; never a refusal.
         let mut warnings = permit.warnings.clone();
+        warnings.extend(apb_engine::gate::short_secret_warning(
+            &self.root, &pinned, &params,
+        ));
         let checked = match tools::budget::preflight(
             &resolved_def,
             resolved.mode.as_str(),
@@ -553,12 +600,12 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::run_status(&root, &run_id))
+        to_call_tool_result(tools::run_status_as(&root, &run_id, self.action_caller()))
     }
 
     #[tool(
         description = concat!(
-            "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review or publish gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. A publish gate (pending_review.publish) asks a person to consent to an exact push: relay that plan before any review_decide, as its `next` says. On reason timeout, call run_wait again with the same arguments. A run its budget paused (pause.cause budget) carries budget and a next that says to ask the person, then call run_resume with budget. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
+            "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review or publish gate, a supervisor decision, host tasks), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason`, `next` (the reason of the primary next action), `instruction` (how to act on it here, when it says more) and `next_actions`: each action names the tool that takes it, the arguments it carries (pass `request` back unchanged, so an answer to a request a later round replaced is refused), what you fill in, and whether you may take it or relay it to the person (`relay_to_person`). Use this after playbook_run with background: true, run_resume, run_answer, review_decide or run_task_submit, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. A publish gate (pending_review.publish) asks a person to consent to an exact push: relay that plan before any review_decide, as its `instruction` says. On reason timeout, call run_wait again with the same arguments. A run its budget paused (pause.cause budget) carries budget and an instruction that says to ask the person, then call run_resume with budget. Host tasks (needs: host_task, `pending_tasks`): the run waits for YOU to execute agent steps. Contract (also each task's `execution_note`): ",
             apb_engine::host_task_contract!(),
             " For each pending task tell your subagent to read `prompt_path` as its task and `role_path` as its system context (`prompt` and `role_prompt` carry the same text inline; pass inline_prompt: false to drop them), have it load `skills` and work in `workdir` with `env` set (`hint_note` labels `model_hint` with its `hint_source`, and `fallback_of` says what closed the previous step), then submit its final reply verbatim with run_task_submit; independent tasks may run concurrently. If the subagent needs the user, submit status blocked with the question as output."
         ),
@@ -579,6 +626,7 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         let total = tools::wait_timeout(timeout_ms);
+        let caller = self.action_caller();
         // One waiter across all slices, so a gate's grace is not restarted
         // at every slice boundary.
         let waiter = match apb_engine::run_wait::RunWaiter::new(&root, &run_id) {
@@ -600,7 +648,7 @@ impl WfMcp {
         )
         .await;
         to_call_tool_result(res.and_then(|res| {
-            let mut out = tools::run_wait_result(&root, &run_id, &res)?;
+            let mut out = tools::run_wait_result_as(&root, &run_id, &res, caller)?;
             if inline_prompt == Some(false) {
                 tools::drop_inline_prompts(&mut out);
             }
@@ -692,7 +740,7 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::run_report(&root, &run_id))
+        to_call_tool_result(tools::run_report_as(&root, &run_id, self.action_caller()))
     }
 
     #[tool(
@@ -921,6 +969,7 @@ impl WfMcp {
             decision,
             note,
             nonce,
+            request,
             workspace,
         }): Parameters<ReviewDecideArgs>,
     ) -> CallToolResult {
@@ -935,6 +984,7 @@ impl WfMcp {
             &decision,
             &note,
             nonce.as_deref(),
+            request,
         ))
     }
 
@@ -949,6 +999,7 @@ impl WfMcp {
             token,
             node,
             answer,
+            request,
             workspace,
         }): Parameters<RunAnswerArgs>,
     ) -> CallToolResult {
@@ -985,6 +1036,7 @@ impl WfMcp {
             node.as_deref(),
             &answer,
             answered_by,
+            request,
         ))
     }
 

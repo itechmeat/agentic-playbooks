@@ -25,7 +25,8 @@ permissions:
 # metadata, the tests build full debug code). Measured on the single job,
 # web checks, cargo deny and clippy added 1.5 to 3 minutes to the test run
 # they now run beside. `build-and-test` stays as one job of that name over
-# the three, because the main branch ruleset requires that check.
+# them and the journal corpus, because the main branch ruleset requires that
+# check.
 jobs:
   web:
     runs-on: ubuntu-26.04
@@ -173,12 +174,96 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --doc
 
-  # One stable check name over the three Linux jobs: the main branch ruleset
+  # The journal corpus (crates/apb-cli/tests/suite/journal_corpus_test.rs):
+  # the released binaries of v1.0.0-beta.1 and v0.25.0 against journals this
+  # build wrote, and this build against theirs. scripts/old-apb.sh builds each
+  # from a worktree of its tag; the binaries are cached by tag, toolchain and
+  # script, so only a new toolchain or a changed script rebuilds them (a cold
+  # build of both takes several minutes). APB_CORPUS_REQUIRED=1 turns a
+  # missing binary into a failure instead of the local skip.
+  journal-corpus:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      OLD_APB_TAGS: v0.25.0 v1.0.0-beta.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The old binaries are built from their tags.
+          fetch-depth: 0
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # Must precede every cargo step: apb-server embeds web/dist through
+      # rust-embed, and web/dist is not checked in.
+      - name: Build web (embedded by apb-server via rust-embed)
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: stable
+
+      # The old binaries' behaviour comes from their tags, not from the
+      # toolchain that built them: the key leaves the toolchain out, so a new
+      # stable release keeps the cache.
+      - name: Cache key parts
+        id: key
+        run: |
+          echo "tags=$(echo "$OLD_APB_TAGS" | tr ' ' '_')" >> "$GITHUB_OUTPUT"
+
+      # Restores what CI's test-linux job saved on main (the same debug
+      # test build).
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: linux-test
+          save-if: false
+
+      # Restored and saved apart: the binaries do not depend on the tests,
+      # so a corpus failure never throws away a cold build.
+      - name: Restore old binaries
+        id: old-bins
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/apb-old-binaries
+          key: old-apb-${{ runner.os }}-${{ steps.key.outputs.tags }}-${{ hashFiles('scripts/old-apb.sh') }}
+
+      - name: Build old binaries
+        run: |
+          for tag in $OLD_APB_TAGS; do
+            scripts/old-apb.sh "$tag" "$HOME/.cache/apb-old-binaries"
+          done
+
+      - name: Save old binaries
+        if: steps.old-bins.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/apb-old-binaries
+          key: ${{ steps.old-bins.outputs.cache-primary-key }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@45fceba0fc176f41d2aee1ca9d6598ba628eea62 # nextest
+
+      - name: Journal corpus
+        env:
+          APB_CORPUS_REQUIRED: "1"
+        run: |
+          APB_OLD_BINARIES="$HOME/.cache/apb-old-binaries" \
+            cargo nextest run --profile ci -p apb --test main journal_corpus
+
+  # One stable check name over the Linux jobs: the main branch ruleset
   # requires `build-and-test`, the name the single job used to have. It runs
   # even when a job it needs failed (`!cancelled()`), so a failure is reported
   # here as a failure rather than as a skipped required check.
   build-and-test:
-    needs: [web, lint, test-linux]
+    needs: [web, lint, test-linux, journal-corpus]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 2
@@ -188,9 +273,11 @@ jobs:
           WEB: ${{ needs.web.result }}
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test-linux.result }}
+          CORPUS: ${{ needs.journal-corpus.result }}
         run: |
-          echo "web=$WEB lint=$LINT test-linux=$TEST"
-          [ "$WEB" = "success" ] && [ "$LINT" = "success" ] && [ "$TEST" = "success" ]
+          echo "web=$WEB lint=$LINT test-linux=$TEST journal-corpus=$CORPUS"
+          [ "$WEB" = "success" ] && [ "$LINT" = "success" ] && [ "$TEST" = "success" ] \
+            && [ "$CORPUS" = "success" ]
 
   # The release gate (test-gate.yml) runs the suite on macOS arm and Intel,
   # so a Linux-only assumption in a test (a GNU tool, /proc, the util-linux

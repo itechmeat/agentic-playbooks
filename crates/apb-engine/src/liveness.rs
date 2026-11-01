@@ -135,6 +135,11 @@ type PsRun<'a> = &'a dyn Fn(u32) -> Option<PsOutput>;
 /// Runs the real `ps` named by `program`. Split from `run_ps` so a test can
 /// point it at a stub binary that reproduces a reduced `ps`.
 fn run_ps_program(program: &str, pid: u32) -> Option<PsOutput> {
+    // A read-only process starts no program: the probe could not ask,
+    // which is `Unknown`.
+    if crate::read_only::active() {
+        return None;
+    }
     let out = Command::new(program)
         .args(["-o", "stat=", "-o", "args=", "-p", &pid.to_string()])
         .output()

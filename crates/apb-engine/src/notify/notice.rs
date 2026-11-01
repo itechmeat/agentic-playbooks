@@ -13,7 +13,6 @@ use apb_core::notify::Transition;
 use super::transitions::TransitionId;
 use crate::event::{Event, EventPayload};
 use crate::pause::kind::PauseBy;
-use crate::redact::Redactor;
 
 /// One notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,10 +45,10 @@ impl Notice {
             Some(url) => format!("Open the run: {url}"),
             None => format!("Details: `apb runs {run_id}`."),
         });
-        let redactor = Redactor::for_workspace(root, Vec::new());
+        let redactor = crate::run_redact::RunRedactor::for_run(root, run_dir);
         Notice {
-            subject: redactor.redact(&subject),
-            text: redactor.redact(&lines.join("\n")),
+            subject: redactor.redact_text(&subject),
+            text: redactor.redact_text(&lines.join("\n")),
         }
     }
 

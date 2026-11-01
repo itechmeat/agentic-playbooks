@@ -261,6 +261,10 @@ pub(crate) struct DecisionRunner {
     /// Variables whose values never leave the machine (connector secrets).
     scrub_names: Vec<String>,
     chain: OnceLock<Chains>,
+    /// The workspace's secrets, the provider keys and the webhook secrets.
+    /// The run's own secret values are not in it: they are read at every
+    /// request ([`DecisionRunner::run_values`]), since an accepted patch may
+    /// declare another param secret in the middle of a drive.
     redactor: OnceLock<redact::Redactor>,
     cache: DecisionCache,
     ledger: Mutex<Ledger>,
@@ -422,28 +426,58 @@ impl DecisionRunner {
         })
     }
 
+    /// The run's own secret values (`crate::run_redact`) as they stand now,
+    /// which every request loses whatever `privacy.redact` says. Read anew
+    /// at every request: the set only grows, and a cached one would miss a
+    /// declaration a patch added after the first decision.
+    fn run_values(&self) -> redact::Redactor {
+        redact::Redactor::new(crate::run_redact::secret_values(&self.run_dir), &self.root)
+    }
+
+    /// Every string of `v` as a request carries it
+    /// ([`DecisionRunner::outbound_text_with`]), the run's values read now.
+    pub(crate) fn outbound_value(&self, v: Value) -> Value {
+        self.outbound_value_with(&self.run_values(), v)
+    }
+
+    /// `text` as a request carries it: the full redactor when
+    /// `privacy.redact` is on, and without the run's secret values
+    /// (`run_values`, read once for the whole request) either way.
+    fn outbound_text_with(&self, run_values: &redact::Redactor, text: &str) -> String {
+        let text = run_values.scrub_values(text);
+        if self.settings.privacy.redact {
+            self.redactor().redact(&text)
+        } else {
+            text
+        }
+    }
+
+    /// [`DecisionRunner::outbound_text_with`] over every string of `v`.
+    fn outbound_value_with(&self, run_values: &redact::Redactor, mut v: Value) -> Value {
+        run_values.scrub_values_json(&mut v);
+        if self.settings.privacy.redact {
+            self.redactor().redact_value(v)
+        } else {
+            v
+        }
+    }
+
     /// Steps 2 and 3: the state object as sent.
     fn build_state(&self, parts: &StateParts) -> Value {
         let privacy = &self.settings.privacy;
-        let meta = Value::Object(parts.meta.clone());
-        let meta = if privacy.redact {
-            self.redactor().redact_value(meta)
-        } else {
-            meta
-        };
+        // One read of the run's values for the whole state: every field is
+        // scrubbed against the same set.
+        let run_values = self.run_values();
+        let meta = self.outbound_value_with(&run_values, Value::Object(parts.meta.clone()));
         let meta_len = serde_json::to_string(&meta).map_or(0, |s| s.len());
         // Each field redacted once, before any clip.
         let texts: Vec<Option<String>> = parts
             .fields
             .iter()
             .map(|f| {
-                self.settings.sends(f.class.send_class()).then(|| {
-                    if privacy.redact {
-                        self.redactor().redact(&f.text)
-                    } else {
-                        f.text.clone()
-                    }
-                })
+                self.settings
+                    .sends(f.class.send_class())
+                    .then(|| self.outbound_text_with(&run_values, &f.text))
             })
             .collect();
         let fields = parts.fields.len().max(1);
@@ -1059,9 +1093,7 @@ impl DecisionRunner {
         request: &DecisionRequest,
     ) -> Result<apb_decide::DecisionResponse, apb_decide::DecideError> {
         let mut request = request.clone();
-        if self.settings.privacy.redact {
-            request.state = self.redactor().redact_value(request.state);
-        }
+        request.state = self.outbound_value(request.state);
         self.chains().all.decide(&request, None)
     }
 }
@@ -1463,6 +1495,47 @@ mod tests {
             DecisionOutcome::Answered { meta, replayed, .. } => (meta, *replayed),
             other => panic!("not answered: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_secret_a_patch_declares_after_the_first_decision_is_redacted_from_the_next() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let value = "plain-message-value";
+        let cfg_run = crate::run_config::RunConfig {
+            params: BTreeMap::from([("message".to_string(), value.to_string())]),
+            ..Default::default()
+        };
+        crate::run_config::write_run_config(root.path(), &cfg_run).unwrap();
+        let snapshot = |secret: &str| {
+            format!(
+                "schema: 2\nid: demo\nname: demo\nversion: 1.0.0\nparams:\n  - name: message\n    type: text\n{secret}nodes:\n  - id: start\n    type: start\nedges: []\n"
+            )
+        };
+        std::fs::write(root.path().join("playbook.yaml"), snapshot("")).unwrap();
+        let runner = enforce_runner(cfg.path(), root.path());
+        let text = format!("the message is {value}");
+        assert!(
+            runner
+                .outbound_value(json!(text))
+                .to_string()
+                .contains(value),
+            "not declared yet"
+        );
+        // A patch accepted mid-drive declares the param secret.
+        std::fs::write(
+            root.path().join("playbook.yaml"),
+            snapshot("    secret: true\n"),
+        )
+        .unwrap();
+        assert!(
+            !runner
+                .outbound_value(json!(text))
+                .to_string()
+                .contains(value)
+        );
+        let v = runner.outbound_value(json!({ "m": text }));
+        assert!(!v.to_string().contains(value), "{v}");
     }
 
     #[test]

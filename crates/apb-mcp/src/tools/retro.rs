@@ -22,5 +22,6 @@ pub fn run_retro_context(
         .unwrap_or(apb_engine::run_retro::DEFAULT_COMPARE_LAST)
         .min(apb_engine::run_retro::MAX_COMPARE_LAST);
     let report = apb_engine::run_retro::retro(root, &dir, n)?;
-    serde_json::to_value(report).map_err(|e| ToolError::Engine(e.to_string()))
+    let answer = serde_json::to_value(report).map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(super::redacted_answer(root, &dir, answer))
 }

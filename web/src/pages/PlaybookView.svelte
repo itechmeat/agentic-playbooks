@@ -55,6 +55,10 @@
   import NodePanel from '../lib/NodePanel.svelte'
   import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
   import RunStartDialog from '../lib/RunStartDialog.svelte'
+  import StartActionsList from '../lib/StartActionsList.svelte'
+  import { startRefusalOf } from '../lib/nextactions'
+  import { sameRoute } from '../lib/routeguard'
+  import type { StartAction } from '../lib/api.gen'
   import type { RunBudget, RunInput } from '../lib/api'
   import { consentStep } from '../lib/irreversibleconsent'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
@@ -583,6 +587,9 @@
   // The dialog reopened after a `budget_needs_decision` refusal: it keeps
   // the typed values and shows the pause or continue choice.
   let startRetry = $state(false)
+  // A refused start that says what it needs first: its message and start
+  // actions, shown beside the graph until the next start or a close.
+  let startRefusal = $state<{ message: string; actions: StartAction[] } | null>(null)
 
   function openStart() {
     startRetry = false
@@ -597,12 +604,20 @@
 
   async function run(consentNonce?: string) {
     starting = true
+    startRefusal = null
+    // An answer that arrives after the page moved to another playbook is
+    // not this page's: it only ends the pending start, nothing else.
+    const still = sameRoute(() => routeToken)
     try {
       const started = await runPlaybook(id, workspace, {
         consentNonce,
         budget: startBudget,
         input: startInput,
       })
+      if (!still()) {
+        starting = false
+        return
+      }
       const { run_id, warnings } = started
       for (const w of warnings ?? []) toast.warning(w)
       for (const r of started.not_remembered ?? []) {
@@ -612,6 +627,7 @@
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
       starting = false
+      if (!still()) return
       if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
         const step = consentStep(e.body, consentNonce)
         if (step.kind === 'stop') {
@@ -633,6 +649,8 @@
         return
       }
       toast.error('Failed to start run', { description: String(e) })
+      const refusal = startRefusalOf(e)
+      if (refusal) startRefusal = refusal
     }
   }
 
@@ -679,6 +697,7 @@
     // playbook's graph or version list.
     void id
     void workspace
+    startRefusal = null
     nodes = []
     edges = []
     playbookNodes = []
@@ -1008,6 +1027,19 @@
 
     <!-- Right: the selected node, and the history and stats when asked for. -->
     <div class="flex min-w-0 flex-col gap-[18px] pt-2.5 lg:min-h-0 lg:overflow-auto">
+      {#if startRefusal}
+        <section class="box start-refusal" data-testid="start-refusal">
+          <span class="box-cap">start refused</span>
+          <div class="box-close">
+            <Button variant="ghost" size="icon-xs" title="Hide the refusal" onclick={() => (startRefusal = null)}>
+              <X />
+            </Button>
+          </div>
+          <p class="start-refusal-message">{startRefusal.message}</p>
+          <StartActionsList actions={startRefusal.actions} />
+        </section>
+      {/if}
+
       <!-- 0.23.0 stats (C3) -->
       {#if showStats}
         <section class="box px-4 pt-3.5 pb-3.5" data-testid="playbook-stats-panel">
@@ -1179,6 +1211,20 @@
 />
 
 <style>
+  /* A refused start and what it needs first. */
+  .start-refusal {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    font-size: 13px;
+    --k: var(--c-red);
+  }
+  .start-refusal-message {
+    margin: 0;
+    color: var(--destructive);
+    overflow-wrap: anywhere;
+  }
   /* Plain CSS over the app's variables. */
   .candidate-slot {
     margin-bottom: 12px;

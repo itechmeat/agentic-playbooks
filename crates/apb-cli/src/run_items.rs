@@ -55,11 +55,11 @@ pub(crate) fn items_cmd(root: &Path, run_id: &str, filter: &ItemFilter<'_>) -> E
         return ExitCode::from(2);
     }
     if lists.is_empty() {
-        println!("run `{run_id}` has no list");
+        say!("run `{run_id}` has no list");
         return ExitCode::SUCCESS;
     }
     for line in item_lines(&lists, filter) {
-        println!("{line}");
+        say!("{line}");
     }
     ExitCode::SUCCESS
 }

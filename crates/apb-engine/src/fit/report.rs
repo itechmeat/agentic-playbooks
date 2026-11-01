@@ -67,6 +67,10 @@ pub struct FitReport {
     pub setup: Vec<FitItem>,
     pub trust: Vec<TrustItem>,
     pub consent: ConsentView,
+    /// What a start needs first, from the items above
+    /// ([`crate::next_action::start::from_fit`]); the consent itself comes
+    /// with the gate's refusal, which carries its nonce.
+    pub start_actions: Vec<crate::next_action::start_action::StartAction>,
 }
 
 /// The short form of a report, for a list.

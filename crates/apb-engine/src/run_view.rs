@@ -131,6 +131,9 @@ pub fn recalled_input(run_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What a run surface reports for a liveness it did not probe.
+pub const LIVENESS_UNKNOWN: &str = "unknown";
+
 /// One observation of a run, with the process-table overlay applied once.
 #[derive(Debug)]
 pub struct RunView {
@@ -150,6 +153,10 @@ pub struct RunView {
     pub run_status: RunStatus,
     /// The pause to report (issue #200), read through [`RunView::pause`].
     pause: Option<crate::pause::PauseInfo>,
+    /// Whether the liveness overlay was applied. A read-only process starts
+    /// no process probe, so its view keeps the journal's statuses, has no
+    /// `driver_alive`, and reports liveness as unknown.
+    pub liveness_checked: bool,
 }
 
 /// Token usage summed over a run's own agent attempts that reported it (see
@@ -247,9 +254,15 @@ impl RunView {
     pub fn load(run_dir: &Path, run_id: &str) -> Result<Self, EngineError> {
         let crate::event::JournalRead { events, unknown } = crate::event::read_journal(run_dir)?;
         let progress = crate::progress::from_run_dir(run_dir, &events);
-        let driver_alive = crate::liveness::driver_alive(run_dir, run_id);
-        let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
-        let run_status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
+        let liveness_checked = !crate::read_only::active();
+        let (driver_alive, run_status) = if liveness_checked {
+            let driver_alive = crate::liveness::driver_alive(run_dir, run_id);
+            let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
+            let status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
+            (driver_alive, status)
+        } else {
+            (None, RunState::fold(&events).run_status)
+        };
         // A control file a surface cannot read only hides the `pausing`
         // overlay; it never fails the view.
         let pending_pause = if run_status == RunStatus::Running {
@@ -267,7 +280,18 @@ impl RunView {
             progress,
             driver_alive,
             run_status,
+            liveness_checked,
         })
+    }
+
+    /// The run has a drive claim whose process is provably gone and the run
+    /// has not ended: it is waiting for a resume nobody will do on their
+    /// own. A finished run has nothing left to drive, so a stale claim there
+    /// (a child driven in-process by its parent's drive, a driver that
+    /// exited after writing the outcome) is never reported. The one "driver
+    /// dead" predicate of every surface.
+    pub fn driver_dead(&self) -> bool {
+        self.driver_alive == Some(false) && !self.run_status.is_terminal()
     }
 
     /// The run's pause: the latest `run_paused` of a paused run, or the
@@ -281,7 +305,26 @@ impl RunView {
     /// `running` for a live one the fold calls interrupted, `interrupted` for
     /// in-flight work under a provably dead driver).
     pub fn nodes(&self) -> BTreeMap<String, String> {
+        if !self.liveness_checked {
+            return self
+                .state
+                .nodes
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().to_string()))
+                .collect();
+        }
         crate::liveness::reported_node_statuses(&self.events, self.driver_alive)
+    }
+
+    /// `driver_alive` as a run surface reports it: `true`, `false`, `null`
+    /// (nothing claims to drive the run) or `"unknown"` (a read-only
+    /// process did not probe).
+    pub fn driver_alive_json(&self) -> serde_json::Value {
+        if self.liveness_checked {
+            serde_json::json!(self.driver_alive)
+        } else {
+            serde_json::json!(LIVENESS_UNKNOWN)
+        }
     }
 
     /// Token usage over the run's attempts, `None` when none reported any.
@@ -687,5 +730,32 @@ mod tests {
         let nodes = view.nodes();
         assert_eq!(nodes["script"], "interrupted");
         assert_eq!(nodes["agent"], "interrupted");
+        assert!(view.driver_dead());
+    }
+
+    /// A finished run whose drive claim names a process that is gone (a
+    /// sub-playbook child its parent drove in-process) is not "driver dead":
+    /// nothing is left to drive.
+    #[test]
+    fn a_finished_run_is_never_driver_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r1");
+        write_run(
+            &run_dir,
+            &[
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+                EventPayload::RunFinished {
+                    outcome: "succeeded".into(),
+                },
+            ],
+            reaped_pid(),
+        );
+        let view = RunView::load(&run_dir, "r1").unwrap();
+        assert_eq!(view.driver_alive, Some(false));
+        assert_eq!(view.run_status, RunStatus::Succeeded);
+        assert!(!view.driver_dead());
     }
 }

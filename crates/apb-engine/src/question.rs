@@ -12,7 +12,7 @@
 //! adding a new facade that forgets to check it.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
@@ -68,7 +68,7 @@ pub fn post_question(
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
     let path = run_dir.join("questions.jsonl");
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = apb_core::fsutil::open_append_private(&path)?;
     writeln!(file, "{line}")?;
     file.flush()?;
 
@@ -184,6 +184,24 @@ pub fn post_answer(
     answer: &str,
     answered_by: &str,
 ) -> Result<u64, EngineError> {
+    post_answer_to(run_dir, node, answer, answered_by, None)
+}
+
+/// [`post_answer`] naming the request it answers: `request` is the journal
+/// seq of the `question_asked` the caller was shown. Checked inside the
+/// lock that guards the append, against the journal and the queued
+/// answers, so no answer lands between the check and the append: a request
+/// that a later round replaced is refused with `Conflict`, one that already
+/// has an answer (queued by the timeout path or another caller, or
+/// journaled) with `AlreadyAnswered`. `None` keeps [`post_answer`]'s
+/// behaviour.
+pub fn post_answer_to(
+    run_dir: &Path,
+    node: Option<&str>,
+    answer: &str,
+    answered_by: &str,
+    request: Option<u64>,
+) -> Result<u64, EngineError> {
     let target = resolve_pending_node(run_dir, node)?;
     if answered_by == "supervisor" && answer_by_for(run_dir, &target) == AnswerBy::Human {
         return Err(EngineError::Invalid(format!(
@@ -191,7 +209,49 @@ pub fn post_answer(
         )));
     }
     let _lock = apb_core::fsutil::lock_dir(run_dir, ANSWERS_LOCK)?;
+    if let Some(seq) = request {
+        check_question_request(run_dir, &target, seq)?;
+    }
     append_answer(run_dir, &target, answer, answered_by)
+}
+
+/// Whether the question request opened at journal seq `seq` for `node` is
+/// still the one waiting for an answer. Runs under [`ANSWERS_LOCK`].
+fn check_question_request(run_dir: &Path, node: &str, seq: u64) -> Result<(), EngineError> {
+    use crate::event::EventPayload;
+    let events = crate::event::read_all_lossy_tail(run_dir)?;
+    let asked: Vec<u64> = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node))
+        .map(|e| e.seq)
+        .collect();
+    let Some(round) = asked.iter().position(|s| *s == seq) else {
+        return Err(EngineError::NotFound(format!(
+            "node `{node}` asked no question at journal seq {seq}"
+        )));
+    };
+    let journaled = events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node),
+        )
+        .count();
+    if round < journaled && asked.len() > journaled {
+        return Err(EngineError::Conflict(format!(
+            "the question of node `{node}` at seq {seq} was answered; the node now asks the question at seq {}",
+            asked[journaled]
+        )));
+    }
+    let queued = read_answers_after(run_dir, None)?
+        .iter()
+        .filter(|a| a.node == node)
+        .count();
+    if queued > round {
+        return Err(EngineError::AlreadyAnswered(format!(
+            "the question of node `{node}` at seq {seq} already has an answer"
+        )));
+    }
+    Ok(())
 }
 
 /// Lock file serializing every `answers.jsonl` writer (spec 2026-07-20, Task
@@ -227,10 +287,7 @@ fn append_answer(
     };
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run_dir.join("answers.jsonl"))?;
+    let mut f = apb_core::fsutil::open_append_private(&run_dir.join("answers.jsonl"))?;
     writeln!(f, "{line}")?;
     f.flush()?;
 

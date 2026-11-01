@@ -7,7 +7,7 @@ fn review_decide_writes_reviews_channel() {
     let run_dir = dir.path().join(".apb/runs/r1");
     fs::create_dir_all(&run_dir).unwrap();
 
-    let res = review_decide(dir.path(), "r1", "gate", "approved", "lgtm", None).unwrap();
+    let res = review_decide(dir.path(), "r1", "gate", "approved", "lgtm", None, None).unwrap();
     assert!(res["posted_seq"].is_number());
 
     let channel = fs::read_to_string(run_dir.join("reviews.jsonl")).unwrap();
@@ -20,13 +20,13 @@ fn review_decide_writes_reviews_channel() {
 #[test]
 fn review_decide_unknown_run_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(review_decide(dir.path(), "ghost", "gate", "approved", "", None).is_err());
+    assert!(review_decide(dir.path(), "ghost", "gate", "approved", "", None, None).is_err());
 }
 
 #[test]
 fn review_decide_rejects_path_traversal() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(review_decide(dir.path(), "../evil", "gate", "approved", "", None).is_err());
+    assert!(review_decide(dir.path(), "../evil", "gate", "approved", "", None, None).is_err());
 }
 
 const GATE: &str = r#"
@@ -56,13 +56,13 @@ fn review_decide_validates_the_node_against_the_run_snapshot() {
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("playbook.yaml"), GATE).unwrap();
 
-    let err = review_decide(dir.path(), "r1", "ghost", "approved", "", None).unwrap_err();
+    let err = review_decide(dir.path(), "r1", "ghost", "approved", "", None, None).unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::NotFound(_)),
         "a node that is not a gate must be not-found, got: {err:?}"
     );
 
-    let err = review_decide(dir.path(), "r1", "gate", "approved", "", None).unwrap_err();
+    let err = review_decide(dir.path(), "r1", "gate", "approved", "", None, None).unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::Conflict(_)),
         "a gate with nothing pending must be a conflict, got: {err:?}"
@@ -80,7 +80,7 @@ fn review_decide_validates_the_node_against_the_run_snapshot() {
         plan_digest: None,
     })
     .unwrap();
-    let res = review_decide(dir.path(), "r1", "gate", "approved", "", None).unwrap();
+    let res = review_decide(dir.path(), "r1", "gate", "approved", "", None, None).unwrap();
     assert_eq!(res["posted_seq"], serde_json::json!(0));
 }
 
@@ -184,7 +184,8 @@ fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
     assert_eq!(status["publish"][0]["awaiting_consent"], true);
     assert_eq!(status["publish"][0]["plan"]["nonce"], nonce);
 
-    let missing = review_decide(dir.path(), "r1", "publish", "publish", "", None).unwrap_err();
+    let missing =
+        review_decide(dir.path(), "r1", "publish", "publish", "", None, None).unwrap_err();
     assert!(
         missing.to_string().contains(&nonce),
         "names the current plan: {missing}"
@@ -196,6 +197,7 @@ fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
         "publish",
         "",
         Some("publish-00000000000000000000000000000000"),
+        None,
     )
     .unwrap_err();
     assert!(
@@ -204,7 +206,16 @@ fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
     );
     assert!(!run_dir.join("reviews.jsonl").exists());
 
-    let res = review_decide(dir.path(), "r1", "publish", "publish", "ok", Some(&nonce)).unwrap();
+    let res = review_decide(
+        dir.path(),
+        "r1",
+        "publish",
+        "publish",
+        "ok",
+        Some(&nonce),
+        None,
+    )
+    .unwrap();
     assert_eq!(res["posted_seq"], serde_json::json!(0));
     let channel = fs::read_to_string(run_dir.join("reviews.jsonl")).unwrap();
     let line: serde_json::Value = serde_json::from_str(channel.lines().next().unwrap()).unwrap();

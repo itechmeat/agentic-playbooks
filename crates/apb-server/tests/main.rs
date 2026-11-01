@@ -37,6 +37,8 @@ mod ingest_test;
 mod memory_api_test;
 #[path = "suite/meta_api_test.rs"]
 mod meta_api_test;
+#[path = "suite/next_actions_api_test.rs"]
+mod next_actions_api_test;
 #[path = "suite/notify_api_test.rs"]
 mod notify_api_test;
 #[path = "suite/problems_api_test.rs"]
@@ -45,10 +47,14 @@ mod problems_api_test;
 mod profiles_api_test;
 #[path = "suite/quality_api_test.rs"]
 mod quality_api_test;
+#[path = "suite/run_secrets_api_test.rs"]
+mod run_secrets_api_test;
 #[path = "suite/runs_api_test.rs"]
 mod runs_api_test;
 #[path = "suite/runs_watch_test.rs"]
 mod runs_watch_test;
+#[path = "support/secret_runs.rs"]
+mod secret_runs;
 #[path = "suite/stats_api_test.rs"]
 mod stats_api_test;
 #[path = "suite/suggestions_api_test.rs"]

@@ -199,6 +199,15 @@ pub struct RunConfig {
     /// refuses the start outright.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir_queue_wait_ms: Option<u64>,
+    /// The start shares the workdir with whatever run holds it
+    /// (`--allow-shared-workdir`): it takes no workdir lock. Persisted for
+    /// the same reason `mode` is: a detached driver learns everything it
+    /// knows from `runs/<id>`, and without it the driver would wait for the
+    /// lock the start chose not to take, then fail the run. `false`
+    /// (including every config written before this field existed) is the
+    /// single-writer default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_workdir: bool,
     /// What `apb eval` asks of a run it starts (0.24.0). Persisted because
     /// the detached driver learns everything from `runs/<id>`. `None` for
     /// every other run and every config written before the field existed.
@@ -248,9 +257,18 @@ impl RunConfig {
     }
 }
 
+/// The project root of a run directory laid out as `<root>/.apb/runs/<id>`.
+pub(crate) fn project_root_of(run_dir: &Path) -> Option<PathBuf> {
+    let runs = run_dir.parent()?;
+    let apb = runs.parent()?;
+    (runs.file_name()? == "runs" && apb.file_name()? == ".apb")
+        .then(|| apb.parent().map(Path::to_path_buf))
+        .flatten()
+}
+
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {
     let yaml = yaml_serde::to_string(cfg).map_err(|e| EngineError::Yaml(e.to_string()))?;
-    atomic_write(&run_dir.join("run.yaml"), yaml.as_bytes())?;
+    apb_core::fsutil::atomic_write_private(&run_dir.join("run.yaml"), yaml.as_bytes())?;
     Ok(())
 }
 

@@ -83,7 +83,10 @@ pub(crate) const QUESTION_TEXT_MAX: usize = 160;
 /// node ids are not routed through this - they are already validated safe
 /// segments, not model output.
 pub(crate) fn sanitize_for_terminal(s: &str, max: usize) -> String {
-    let cleaned = apb_core::text::replace_hidden(s, ' ');
+    // Redacted before anything collapses or cuts it, so neither splits a
+    // secret value into a shape the redactor no longer knows.
+    let s = shown(s);
+    let cleaned = apb_core::text::replace_hidden(&s, ' ');
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim();
     if trimmed.chars().count() <= max {
@@ -94,4 +97,48 @@ pub(crate) fn sanitize_for_terminal(s: &str, max: usize) -> String {
     }
 }
 
+/// A rendered `apb` command line for the terminal: redacted like
+/// [`sanitize_for_terminal`], every hidden character shown as `?`, but its
+/// spaces kept as they are, so the line still gives back its words when
+/// copied.
+pub(crate) fn sanitize_command(s: &str) -> String {
+    apb_core::text::replace_hidden(&shown(s), '?')
+}
+
 pub(crate) use apb_core::step_env::StepCaller;
+
+thread_local! {
+    /// The redactor of the run whose surface this thread prints, if any
+    /// ([`with_run_redaction`]).
+    static RUN_REDACTOR: std::cell::RefCell<Option<std::rc::Rc<apb_engine::run_redact::RunRedactor>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with every line it prints through `say!` and every text it
+/// passes through [`sanitize_for_terminal`] redacted by `redactor`: the
+/// secret values of one run, its ancestors and the workspace replaced. The
+/// redactor in force before is restored afterwards.
+pub(crate) fn with_run_redaction<T>(
+    redactor: apb_engine::run_redact::RunRedactor,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<std::rc::Rc<apb_engine::run_redact::RunRedactor>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let before = self.0.take();
+            RUN_REDACTOR.with(|r| *r.borrow_mut() = before);
+        }
+    }
+    let before = RUN_REDACTOR.with(|r| r.borrow_mut().replace(std::rc::Rc::new(redactor)));
+    let _restore = Restore(before);
+    f()
+}
+
+/// `text` as a run surface prints it: without the secret values of the run
+/// [`with_run_redaction`] is about, unchanged outside one.
+pub(crate) fn shown(text: &str) -> String {
+    RUN_REDACTOR.with(|r| match r.borrow().as_ref() {
+        Some(redactor) => redactor.redact_str(text),
+        None => text.to_string(),
+    })
+}

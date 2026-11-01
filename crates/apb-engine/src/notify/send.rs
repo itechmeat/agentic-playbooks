@@ -78,7 +78,7 @@ impl Notifier {
     /// The notifier of a run directory laid out as `<root>/.apb/runs/<id>`,
     /// for a caller that holds only the run directory.
     pub(crate) fn of_run_dir(run_dir: &Path) -> Option<Self> {
-        let root = crate::run_retro::project_root_of(run_dir)?;
+        let root = crate::run_config::project_root_of(run_dir)?;
         let run_id = run_dir.file_name()?.to_str()?.to_string();
         Some(Self::new(&root, run_dir, &run_id))
     }

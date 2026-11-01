@@ -37,7 +37,12 @@ pub struct RunDetail {
     pub nodes: std::collections::BTreeMap<String, String>,
     pub outputs: std::collections::BTreeMap<String, String>,
     pub instruction: Option<String>,
+    /// The run's params as shown: every sensitive value (a param declared
+    /// secret, a secret-shaped name, a credential-shaped value) reads
+    /// `<redacted>`.
     pub params: std::collections::BTreeMap<String, String>,
+    /// The names of the params whose value `params` hides.
+    pub redacted_params: Vec<String>,
     /// The run's working tree (issue #67 item 8), once resolved; null means
     /// the nodes run in the project root.
     pub worktree: Option<String>,
@@ -178,6 +183,9 @@ pub struct RunDetail {
     // --- end host execution mode ---
     #[cfg_attr(test, ts(type = "WfEvent[]"))]
     pub events: Vec<apb_engine::event::Event>,
+    /// What the run and its live sub-playbook runs are ready for, each
+    /// action with the run id it acts on, from the same read as the rest.
+    pub next_actions: apb_engine::next_action::RunActions,
 }
 
 /// GET /api/runs: every reachable project's runs by default, or exactly one
@@ -197,22 +205,49 @@ pub(crate) async fn list_runs_handler(
         Ok(w) => w,
         Err(e) => return e,
     };
-    let mut out: Vec<RunListEntry> = Vec::new();
+    // The listing reads every run's files and resolves the workspaces'
+    // connector secrets: off the async runtime.
+    match tokio::task::spawn_blocking(move || listed_runs(workspaces)).await {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Every run of `workspaces`, each redacted with its own values (and its
+/// ancestors'), newest first across the workspaces.
+fn listed_runs(
+    workspaces: Vec<(String, String, std::path::PathBuf)>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut out: Vec<(u128, serde_json::Value)> = Vec::new();
     for (workspace_id, project, root) in workspaces {
         let Ok(list) = apb_engine::list_runs(&root) else {
             continue;
         };
-        out.extend(list.into_iter().map(|run| RunListEntry {
-            run,
-            workspace_id: workspace_id.clone(),
-            project: project.clone(),
-        }));
+        // The workspace's connector secrets are resolved once.
+        let redaction = apb_engine::run_redact::WorkspaceRedaction::new(&root);
+        for run in list {
+            let redactor = redaction.run(&run.run_id);
+            let started = run.started_ts;
+            let run_id = run.run_id.clone();
+            let entry = RunListEntry {
+                run,
+                workspace_id: workspace_id.clone(),
+                project: project.clone(),
+            };
+            // A row that does not serialize fails the listing, as it did
+            // when the whole list was serialized at once: a run never
+            // vanishes from the dashboard without a word.
+            let mut v = serde_json::to_value(&entry).map_err(|e| format!("run `{run_id}`: {e}"))?;
+            redactor.redact_json(&mut v);
+            out.push((started, v));
+        }
     }
     // Each workspace's listing is newest first; merge them into one newest
     // first order, else "all projects" shows every run of one project above
     // a newer run of the next.
-    out.sort_by_key(|e| std::cmp::Reverse(e.run.started_ts));
-    Json(out).into_response()
+    out.sort_by_key(|(started, _)| std::cmp::Reverse(*started));
+    Ok(out.into_iter().map(|(_, v)| v).collect())
 }
 
 pub(crate) async fn get_run_handler(
@@ -237,10 +272,17 @@ pub(crate) async fn get_run_handler(
     // (#85.4, #102.4 cause A) - a live open attempt reads running, a dead
     // driver interrupted, a sub-playbook child follows its parent's drive.
     let view = match apb_engine::run_view::RunView::load(&run_dir, &id) {
-        Ok(view) => view,
+        Ok(view) => std::sync::Arc::new(view),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let cfg = apb_engine::run_config::read_run_config(&run_dir).unwrap_or_default();
+    // Each action redacted with the values of the run it acts on (a child's
+    // with its own), before the whole detail is redacted with this run's.
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(&root);
+    let next_actions = apb_engine::next_action::for_surface(
+        &redaction,
+        &apb_engine::next_action::Observation::from_view(&run_dir, &id, view.clone()),
+    );
 
     // The run's playbook snapshot (may be missing for very old runs). Kept in
     // scope because it also feeds the graph JSON and layout lookup below.
@@ -307,18 +349,35 @@ pub(crate) async fn get_run_handler(
     let budget = view.budget(&run_dir);
     let estimate = apb_engine::run_estimate::snapshot::read(&run_dir);
     let notify = apb_mcp::tools::notify::run_block(&run_dir, &view.events);
-    Json(RunDetail {
+    let redactor = redaction.run_dir(&run_dir);
+    let (params, redacted_params) = redactor.params(&cfg.params);
+    let (run_status, driver_alive) = (view.run_status, view.driver_alive);
+    let worktree = view.state.worktree.clone();
+    let unknown_events = view.unknown.len();
+    // The journal, the outputs and the progress move into the answer when
+    // this handler holds the one view the actions were read from (the
+    // observation is gone), and are copied from that same view otherwise.
+    let (events, outputs, progress) = match std::sync::Arc::try_unwrap(view) {
+        Ok(view) => (view.events, view.state.outputs, view.progress),
+        Err(shared) => (
+            shared.events.clone(),
+            shared.state.outputs.clone(),
+            shared.progress.clone(),
+        ),
+    };
+    let detail = RunDetail {
         run_id: id,
         playbook: playbook_id,
         version,
-        run_status: view.run_status,
+        run_status,
         failure_reason,
-        driver_alive: view.driver_alive,
+        driver_alive,
         nodes,
-        worktree: view.state.worktree.clone(),
-        outputs: view.state.outputs,
+        worktree,
+        outputs,
         instruction: cfg.instruction,
-        params: cfg.params,
+        params,
+        redacted_params,
         model: playbook_json,
         layout,
         hooks,
@@ -341,14 +400,23 @@ pub(crate) async fn get_run_handler(
         estimate,
         usage,
         decisions,
-        unknown_events: view.unknown.len(),
+        unknown_events,
         execution,
         execution_fallback,
-        progress: view.progress,
+        progress,
         answer,
-        events: view.events,
-    })
-    .into_response()
+        events,
+        next_actions,
+    };
+    // Everything else the page shows (outputs, events, progress, the
+    // outcome) without the run's secret values; numbers and paths kept.
+    match serde_json::to_value(&detail) {
+        Ok(mut v) => {
+            redactor.redact_json(&mut v);
+            Json(v).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -360,6 +428,27 @@ pub(crate) struct ReviewBody {
     /// A publish gate only: the nonce of the plan the person saw.
     #[serde(default)]
     nonce: Option<String>,
+    /// The journal seq of the review request this decides (a next
+    /// action's `target.request.seq`).
+    #[serde(default)]
+    request: Option<u64>,
+}
+
+/// The answer to a gate's engine refusal: 404 for a node or request that
+/// is not there, 409 when the request changed or was already answered,
+/// 400 for a decision the gate does not take; anything else is a server
+/// fault.
+fn gate_refusal(e: apb_engine::EngineError) -> axum::response::Response {
+    use apb_engine::EngineError;
+    match e {
+        EngineError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
+        EngineError::Conflict(what) => (StatusCode::CONFLICT, what).into_response(),
+        e @ EngineError::AlreadyAnswered(_) => {
+            (StatusCode::CONFLICT, e.to_string()).into_response()
+        }
+        EngineError::Invalid(what) => (StatusCode::BAD_REQUEST, what).into_response(),
+        e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// A publish consent is a person's (decision record 0010). A dashboard
@@ -414,18 +503,9 @@ pub(crate) async fn post_review_handler(
     // decision is pending on it or the nonce answers an older plan (the
     // message names the current one), `Invalid` means a decision the gate
     // does not offer or a `publish` without the plan's nonce.
-    match apb_engine::review::post_decision(&run_dir, cmd, body.nonce) {
+    match apb_engine::review::post_decision_to(&run_dir, cmd, body.nonce, body.request) {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
-        Err(apb_engine::EngineError::NotFound(what)) => {
-            (StatusCode::NOT_FOUND, what).into_response()
-        }
-        Err(apb_engine::EngineError::Conflict(what)) => {
-            (StatusCode::CONFLICT, what).into_response()
-        }
-        Err(apb_engine::EngineError::Invalid(what)) => {
-            (StatusCode::BAD_REQUEST, what).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => gate_refusal(e),
     }
 }
 
@@ -438,6 +518,10 @@ pub(crate) struct AnswerBody {
     #[serde(default)]
     node: Option<String>,
     answer: String,
+    /// The journal seq of the question this answers (a next action's
+    /// `target.request.seq`).
+    #[serde(default)]
+    request: Option<u64>,
 }
 
 /// POST /api/runs/{id}/answer: the web facade for answering an interactive
@@ -447,7 +531,9 @@ pub(crate) struct AnswerBody {
 /// which owns the `answer_by` policy and the pending-node resolution, so this
 /// handler mirrors `post_review_handler` exactly: on failure the engine
 /// error's message (including the policy's relay-instruction text) is
-/// surfaced verbatim as the response body.
+/// surfaced verbatim as the response body, with the status of
+/// [`gate_refusal`] (404 when no question waits, 409 when `request` names
+/// a question a later round replaced or one already answered).
 pub(crate) async fn post_answer_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -465,10 +551,72 @@ pub(crate) async fn post_answer_handler(
     if !run_dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
     }
-    match apb_engine::post_answer(&run_dir, body.node.as_deref(), &body.answer, "human") {
+    match apb_engine::question::post_answer_to(
+        &run_dir,
+        body.node.as_deref(),
+        &body.answer,
+        "human",
+        body.request,
+    ) {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => gate_refusal(e),
     }
+}
+
+/// Body of `POST /api/runs/{id}/intents/{intent}/resolve`.
+#[derive(Deserialize)]
+pub(crate) struct IntentResolveBody {
+    /// The send went out (`true`) or it did not.
+    sent: bool,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// POST /api/runs/{id}/intents/{intent}/resolve: a person's decision on a
+/// send nobody can tell went out, through the same tool `apb intent
+/// resolve` and MCP `run_intent_resolve` use. 404 for an unknown run or
+/// intent, 409 for an intent whose outcome is known or still in flight.
+pub(crate) async fn post_intent_resolve_handler(
+    State(state): State<AppState>,
+    AxPath((id, intent)): AxPath<(String, String)>,
+    Query(q): Query<WorkspaceQuery>,
+    Json(body): Json<IntentResolveBody>,
+) -> impl IntoResponse {
+    if let Some(why) = keyless_intent_refusal(&state.auth, &id, &intent) {
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    let run_id = id.clone();
+    answer(&state, &id, q.workspace.as_deref(), move |root| {
+        apb_mcp::tools::intent::run_intent_resolve(
+            &root,
+            &run_id,
+            &intent,
+            body.sent,
+            body.note,
+            apb_mcp::tools::intent::IntentCaller::person("dashboard"),
+        )
+    })
+    .await
+    .into_response()
+}
+
+/// Why a dashboard without keys refuses a decision on an unknown send:
+/// anything on this machine reaches it, a step's agent included, and the
+/// decision lets a repeat of the send go out again or answers it as sent,
+/// as a publish consent would push ([`keyless_publish_refusal`]). It points
+/// at the CLI; the ids are quoted as shell words, never trusted as written.
+fn keyless_intent_refusal(
+    auth: &crate::auth::AuthState,
+    run_id: &str,
+    intent: &str,
+) -> Option<String> {
+    (!auth.enabled()).then(|| {
+        let line = apb_engine::next_action::command::resolve_intent(run_id, Some(intent), None);
+        format!(
+            "a dashboard without keys does not record a decision on a send, since anything on this machine can reach it; check the service, then run `{}`, or issue a key with `apb server key issue` and sign in",
+            line.line()
+        )
+    })
 }
 
 /// Body of `POST /api/runs/{id}/pause` (issue #200). Every field is optional:
@@ -718,7 +866,12 @@ pub(crate) async fn get_run_report_handler(
         Err(e) => return e,
     };
     match apb_engine::supervisor_report_or_summary(&root, &id) {
-        Ok(report) => Json(serde_json::json!({ "report": report })).into_response(),
+        Ok(report) => {
+            let run_dir = root.join(".apb/runs").join(&id);
+            let report =
+                apb_engine::run_redact::RunRedactor::for_run(&root, &run_dir).redact_str(&report);
+            Json(serde_json::json!({ "report": report })).into_response()
+        }
         Err(apb_engine::EngineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response()
         }

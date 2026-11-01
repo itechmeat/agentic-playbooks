@@ -765,7 +765,7 @@ fn supervisor_wait_event_surfaces_a_host_task_of_the_supervised_run() {
     let waited = apb_mcp::tools::run_wait_result(dir.path(), &run_id, &res).unwrap();
     assert_eq!(waited["needs"], "host_task", "{waited}");
     assert!(
-        waited["next"].as_str().unwrap().contains(contract),
+        waited["instruction"].as_str().unwrap().contains(contract),
         "{waited}"
     );
     assert_eq!(waited["pending_tasks"][0]["execution_note"], contract);

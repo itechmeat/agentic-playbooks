@@ -19,14 +19,15 @@
   }: {
     question: QuestionEntry
     posting?: boolean
-    onAnswer: (node: string, answer: string) => void | Promise<void>
+    /** Posts to the question's own run, naming its request (`runposts`). */
+    onAnswer: (question: QuestionEntry, answer: string) => void | Promise<void>
   } = $props()
 
   let freeText = $state('')
 
   function submitOption(opt: string) {
     if (posting) return
-    void onAnswer(question.node, opt)
+    void onAnswer(question, opt)
   }
 
   async function submitFreeText(e: SubmitEvent) {
@@ -35,7 +36,7 @@
     if (!value || posting) return
     freeText = value
     try {
-      await onAnswer(question.node, value)
+      await onAnswer(question, value)
       freeText = ''
     } catch {
       // Keep the trimmed draft so the user does not lose their answer.

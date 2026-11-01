@@ -269,6 +269,7 @@ fn warn_read_only(path: &Path, reason: &str) {
 /// `name` of any entry that lacks it. Only ever called with a file whose
 /// `schema_version` this build knows ([`read_file`] refuses the others).
 fn write_file(path: &Path, file: &ProjectsFile) -> std::io::Result<()> {
+    crate::process_mode::guard()?;
     let mut out = file.clone();
     out.schema_version = SCHEMA_VERSION;
     for e in out.entries.values_mut() {
@@ -313,6 +314,18 @@ fn with_registry<T>(
     let mut probe = snapshot.clone();
     let out = f(&mut probe);
     if probe == snapshot && !snapshot.needs_upgrade() {
+        return Ok(out);
+    }
+    // A read-only process answers a listing from the view and refuses a
+    // registration or a removal that would change the file.
+    if crate::process_mode::is_read_only() {
+        if access == Access::Write && probe != snapshot {
+            return Err(RegistryReadOnly {
+                path: path.display().to_string(),
+                reason: crate::process_mode::READ_ONLY_REFUSAL.to_string(),
+            }
+            .into());
+        }
         return Ok(out);
     }
     let base = path
@@ -417,6 +430,9 @@ fn apply_time_transitions(file: &mut ProjectsFile, cfg: &GlobalConfig) {
 /// failure (no config, lock held past the timeout, corrupt file) is
 /// silently swallowed.
 pub fn touch(root: &Path) {
+    if crate::process_mode::is_read_only() {
+        return;
+    }
     let cfg = GlobalConfig::load().unwrap_or_default();
     if registration_disabled(&cfg) {
         return;

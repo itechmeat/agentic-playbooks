@@ -86,6 +86,63 @@ configuration records the values it started with), so prefer a connector
 account or an environment variable for a credential the playbook uses on
 every run.
 
+**What is delivered.** The executor gets the value: the agent's prompt, a
+script's environment, and a host task's prompt handed to the host that
+drives the run (`pending_tasks` of `run_status` and `run_wait`, `apb
+tasks`). The run's journal, `run.yaml`, node outputs and transcripts keep
+what the executor produced, because routing, conditions, resume and child
+runs read them.
+
+**What is redacted.** Everywhere else a run's data leaves apb, the run's
+sensitive values are replaced: every param value declared `secret: true`,
+whose name looks like a credential's, or that looks like a credential
+itself, the same values of every parent run (followed up to 8 levels), and
+the secrets the project's connectors read from the environment or a
+secrets file (a secret a connector reads from a command is not run for
+this, so an echoed command-sourced value is not replaced). That covers the
+MCP run and supervisor tools, the dashboard's run list, run page, report and saved
+report page (whose run page shows a hidden param as `<redacted>` and names
+it in `redacted_params`), `apb runs`, `apb wait`, the HTML report, the
+notifications, every grading view and stored grade, the known problems a
+run adds to its playbook's store, and the git output the publish step
+records. A value echoed by an agent or a script into its output, an error
+or its stderr is replaced as well, and so is the value a child run received
+through a param of its own that is not marked secret. A value shorter than
+6 characters is not matched by value (it would blank every occurrence of
+that text); a credential shape is still replaced. The param itself is still
+shown as `<redacted>`, but an output, an error or an event that echoes such
+a short value keeps it, so a start whose declared secret value is that
+short gets a warning (on the terminal for `apb run`, in `warnings` of the
+MCP and dashboard start answers); it is not refused. Use a longer value
+where the echo matters.
+
+**Decision requests never carry a declared secret.** Every request to a
+decision model, from a run (completion checks, judges, retry advice,
+reviews, host task questions) or about one (grading, known-problem
+rechecks), loses the run's sensitive values before any clip, whatever
+`privacy.redact` says. `privacy.redact` only governs the further scrubbing
+of paths, e-mail addresses and connector secrets.
+
+**A run's secret set only grows.** The params declared secret when a run
+starts are recorded in its manifest (`secret_params`). A current-run patch
+that declares another param secret adds it; a patch that removes `secret:
+true` does not make the value visible again, for that run or its children.
+A run started by an apb without this record uses the declarations of its
+current snapshot, so a patch that removed a declaration from such a run
+before this release is not undone.
+
+**Files.** A run directory is created readable by its owner only (0700),
+and the files that can hold an echoed value (`run.yaml`, `events.jsonl`,
+the question, answer and review logs, transcripts, `stdout.log`,
+`stderr.log`, node outputs, host task replies) are created 0600. Driving or
+resuming a run narrows an older run directory the same way, clearing only
+the group and other bits (an executable helper stays executable) and never
+following a symbolic link; `apb doctor --run <id>` reports a run directory
+that is still readable by others, with the `chmod` line that fixes it.
+An older apb keeps creating files readable by the group and shows params
+and outputs unredacted on its dashboard; the next drive by this release
+narrows the files again.
+
 ## Visual editor and graph check
 
 The dashboard renders a playbook as a top-to-bottom graph, and the canvas is
@@ -2604,7 +2661,10 @@ missing file and the other way round:
 - **Setup**: what a person can provide: profiles, skills and the models of
   their executor chains, connector accounts and secret env vars, and param
   values a start must pass (`param_needs_value`) or that memory holds in a
-  form that no longer fits (`remembered_incompatible`).
+  form that no longer fits (`remembered_incompatible`). A start that leaves
+  such a param without a value is refused on every surface (the CLI, MCP
+  and the dashboard) with policy `param_needs_value`, the params in
+  `missing` and a `provide_param` start action for each.
 - **Trust**: each digest of the tree (the playbook, imported scripts,
   profile bundles, connectors and accounts, sub-playbooks) with whether it is
   approved and whether an acknowledge at start stands in for it.

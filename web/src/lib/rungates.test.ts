@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { deadlineNote, runGates } from './rungates'
 import type { ProgressSummary, RunDetail, WfEvent } from './types'
-import type { PendingHostTask } from './api.gen'
+import type { NextAction, PendingHostTask, PendingQuestion, RunActions } from './api.gen'
 
 const progress = (over: Partial<ProgressSummary> = {}): ProgressSummary => ({
   percent: 0,
@@ -19,7 +19,12 @@ const progress = (over: Partial<ProgressSummary> = {}): ProgressSummary => ({
   ...over,
 })
 
-const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetail['run_status']): RunDetail => ({
+const detail = (
+  events: Partial<WfEvent>[],
+  p: ProgressSummary,
+  status: RunDetail['run_status'],
+  actions: NextAction[] = [],
+): RunDetail => ({
   run_id: 'r',
   playbook: 'p',
   version: '1.0.0',
@@ -31,6 +36,7 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   outputs: {},
   instruction: null,
   params: {},
+  redacted_params: [],
   worktree: null,
   model: null,
   layout: null,
@@ -42,6 +48,7 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   unknown_events: 0,
   execution: 'cli',
   execution_fallback: false,
+  next_actions: { observed_at_ms: 0, status, stop: 'needs_input', actions } satisfies RunActions,
   events: events.map((e, i) => ({ seq: i, ts: i, type: '', ...e })),
 })
 
@@ -92,8 +99,8 @@ describe('runGates', () => {
       'running',
     )
     const gates = runGates(d)
-    expect(gates.reviews).toEqual([{ node: 'gate', options: ['approve', 'reject'] }])
-    expect(gates.questions).toEqual([{ node: 'ask', question: 'Which?', options: ['a', 'b'] }])
+    expect(gates.reviews).toEqual([{ node: 'gate', options: ['approve', 'reject'], runId: 'r' }])
+    expect(gates.questions).toEqual([{ node: 'ask', question: 'Which?', options: ['a', 'b'], runId: 'r' }])
     expect(gates.waits).toEqual(['w'])
   })
 })
@@ -104,7 +111,7 @@ describe('review recommendation', () => {
 
   it('is hidden when the gate has no recommendation', () => {
     const d = detail([], progress({ pending_reviews: [review] }), 'running')
-    expect(runGates(d).reviews[0]).toEqual({ node: 'g', options: ['approve', 'needs_changes'] })
+    expect(runGates(d).reviews[0]).toEqual({ node: 'g', options: ['approve', 'needs_changes'], runId: 'r' })
   })
 
   it('shows one advisory line when the gate carries one', () => {
@@ -209,10 +216,46 @@ describe('publish gates', () => {
     const d = detail([], progress({ pending_reviews: [review, publish] }), 'running')
     const gates = runGates(d)
     expect(gates.reviews.map((r) => r.node)).toEqual(['gate'])
-    expect(gates.publishes).toEqual([{ node: 'ship', plan, prompt: 'Check the subjects.' }])
+    expect(gates.publishes).toEqual([{ node: 'ship', plan, prompt: 'Check the subjects.', runId: 'r' }])
   })
 
   it('is empty without progress', () => {
     expect(runGates(detail([], null as unknown as ProgressSummary, 'running')).publishes).toEqual([])
+  })
+
+  // Each gate carries the request it answers: the run id and the seq of the
+  // run's own matching next action, and a publish gate the nonce of its plan.
+  // A child's action of the same node is never taken for the page's own.
+  it('carries the run id and request seq of the matching next action', () => {
+    const act = (code: NextAction['code'], node: string, run_id: string, seq: number, kind: 'question' | 'review' | 'publish'): NextAction => ({
+      code,
+      run_id,
+      target: { node, request: { kind, seq } },
+      args: [],
+      principals: ['person'],
+      ready: true,
+      reason: '',
+    })
+    const question: PendingQuestion = { node: 'ask', question: 'Which?', options: [], answer_by: 'human', asked_at: 0 }
+    const d = detail(
+      [],
+      progress({ pending_reviews: [review, publish], pending_questions: [question] }),
+      'running',
+      [
+        act('decide_review', 'gate', 'child-1', 99, 'review'),
+        act('decide_review', 'gate', 'r', 7, 'review'),
+        act('decide_publish', 'ship', 'r', 9, 'publish'),
+        act('answer_question', 'ask', 'r', 12, 'question'),
+      ],
+    )
+    const gates = runGates(d)
+    expect(gates.reviews[0]).toMatchObject({ node: 'gate', runId: 'r', request: 7 })
+    expect(gates.publishes[0]).toMatchObject({ node: 'ship', runId: 'r', request: 9, plan: { nonce: 'publish-0123' } })
+    expect(gates.questions[0]).toMatchObject({ node: 'ask', runId: 'r', request: 12 })
+  })
+
+  it('names no request when the run lists no matching action', () => {
+    const d = detail([], progress({ pending_reviews: [review] }), 'running', [])
+    expect(runGates(d).reviews[0]).toEqual({ node: 'gate', options: ['approve', 'reject'], runId: 'r' })
   })
 })

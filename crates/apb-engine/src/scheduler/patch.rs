@@ -108,6 +108,10 @@ pub(crate) fn apply_patch(
 
     let from_version = playbook.version.clone();
     let base = playbook.clone();
+    // The run's secret set only grows: the declarations of the snapshot the
+    // patch replaces and of the patched playbook both stay recorded, before
+    // the new snapshot can drop one.
+    crate::run_redact::keep_secret_declarations(run_dir, &[playbook, &loaded.playbook])?;
     snapshot_playbook(run_dir, &loaded.yaml)?;
     log.append(EventPayload::PatchApplied {
         version: version.clone(),

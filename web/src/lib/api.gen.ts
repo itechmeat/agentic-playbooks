@@ -226,7 +226,19 @@ answer_by: string,
  * observed it); the web treats `0` as "just now" rather than
  * synthesizing a non-deterministic clock reading here.
  */
-asked_at: number, };
+asked_at: number, 
+/**
+ * With `question_timeout_seconds`: what is left of it, in milliseconds,
+ * on the clock the drive's deadline runs on (paused time left out), so
+ * it stays where it is while the run is paused. Absent for a question
+ * without a timeout.
+ */
+timeout_ms?: number, 
+/**
+ * The answer the engine posts when the timeout runs out. Absent when
+ * the node has none (the timeout then fails the attempt) or no timeout.
+ */
+default_answer?: string, };
 
 export type HintSource = { "kind": "primary", profile: string, } | { "kind": "fallback", index: number, of: number, profile: string, } | { "kind": "tier", tier: string, profile: string, } | { "kind": "host_fallback", profile: string, };
 
@@ -310,7 +322,13 @@ env: { [key in string]: string },
 /**
  * Milliseconds since epoch when the task was requested.
  */
-requested_at: number, };
+requested_at: number, 
+/**
+ * Why the prompt texts, their paths and `env` are empty: a read-only
+ * server never returns a host task's prompt (`read_only`). Absent on a
+ * task delivered whole.
+ */
+prompt_withheld?: string, };
 
 export type ReviewRecommendation = { 
 /**
@@ -1159,7 +1177,8 @@ paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, cont
  * terminal event is the drive loop that no longer exists. The single-run
  * surfaces (`run_status`, `apb doctor --run`) have answered this for a
  * while; a listing could not, so a killed driver looked healthy in a table.
- * `false` also covers "no drive claim at all", which is not a problem.
+ * `false` also covers "no drive claim at all", which is not a problem,
+ * and a run that has ended ([`crate::run_view::RunView::driver_dead`]).
  */
 driver_dead?: boolean, 
 /**
@@ -1209,7 +1228,8 @@ paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, cont
  * terminal event is the drive loop that no longer exists. The single-run
  * surfaces (`run_status`, `apb doctor --run`) have answered this for a
  * while; a listing could not, so a killed driver looked healthy in a table.
- * `false` also covers "no drive claim at all", which is not a problem.
+ * `false` also covers "no drive claim at all", which is not a problem,
+ * and a run that has ended ([`crate::run_view::RunView::driver_dead`]).
  */
 driver_dead?: boolean, 
 /**
@@ -1247,7 +1267,17 @@ driver_alive: boolean | null,
 /**
  * Per-node reported status (`lost` and `interrupted` included).
  */
-nodes: { [key in string]: string }, outputs: { [key in string]: string }, instruction: string | null, params: { [key in string]: string }, 
+nodes: { [key in string]: string }, outputs: { [key in string]: string }, instruction: string | null, 
+/**
+ * The run's params as shown: every sensitive value (a param declared
+ * secret, a secret-shaped name, a credential-shaped value) reads
+ * `<redacted>`.
+ */
+params: { [key in string]: string }, 
+/**
+ * The names of the params whose value `params` hides.
+ */
+redacted_params: Array<string>, 
 /**
  * The run's working tree (issue #67 item 8), once resolved; null means
  * the nodes run in the project root.
@@ -1370,7 +1400,12 @@ execution: "cli" | "host",
 /**
  * A `cli` run whose steps fall back to host tasks when no CLI can start.
  */
-execution_fallback: boolean, events: WfEvent[], };
+execution_fallback: boolean, events: WfEvent[], 
+/**
+ * What the run and its live sub-playbook runs are ready for, each
+ * action with the run id it acts on, from the same read as the rest.
+ */
+next_actions: RunActions, };
 
 export type TrashEntry = { 
 /**
@@ -1463,6 +1498,77 @@ approved_at_ms: number, };
 
 export type TrustRevoked = { revoked: Array<TrustEntry>, };
 
+export type ActionCode = "answer_question" | "decide_review" | "decide_publish" | "submit_host_task" | "supervisor_retry_node" | "supervisor_continue_from" | "supervisor_abort" | "resume_run" | "resume_with_budget" | "resolve_intent" | "wait_again" | "read_report";
+
+export type Principal = "person" | "operator" | "host" | "supervisor";
+
+export type RequestKind = "question" | "review" | "publish";
+
+export type RequestRef = { kind: RequestKind, seq: number, nonce?: string, };
+
+export type ActionTarget = { node?: string, item?: string, task_id?: string, request?: RequestRef, };
+
+export type ArgValue = { "kind": "given", value: string, } | { "kind": "choice", options: Array<string>, default?: string, } | { "kind": "supplied", hint: string, };
+
+export type ActionArg = { name: string, value: ArgValue, required: boolean, };
+
+export type AutoOutcome = "answered_default" | "timer_elapses" | "attempt_fails" | "wait_times_out" | "resume_attempt";
+
+export type AutoProgress = { "kind": "at", at_ms: number, outcome: AutoOutcome, assured: boolean, } | { "kind": "frozen", remaining_ms: number, outcome: AutoOutcome, };
+
+export type NotReady = { code: string, detail: string, };
+
+export type NextAction = { code: ActionCode, 
+/**
+ * The run it acts on: the observed run or one of its live children.
+ */
+run_id: string, target: ActionTarget, args: Array<ActionArg>, 
+/**
+ * Whom the run accepts it from.
+ */
+principals: Array<Principal>, 
+/**
+ * The run's state allows it now.
+ */
+ready: boolean, not_ready?: NotReady, auto?: AutoProgress, 
+/**
+ * One English line.
+ */
+reason: string, 
+/**
+ * The `apb` command line that takes the action, from the one renderer
+ * every surface prints ([`super::command::render`]); set on the actions
+ * a surface shows ([`super::for_surface`]), absent for an action the
+ * CLI has no command for.
+ */
+command?: string, };
+
+export type StopVerdict = "finished" | "progresses_by_itself" | "stopped" | "needs_input";
+
+export type RunActions = { observed_at_ms: number, status: RunStatus, stop: StopVerdict, 
+/**
+ * In primary order: the first is the one to lead with.
+ */
+actions: Array<NextAction>, 
+/**
+ * The index of the primary action in `actions`.
+ */
+primary?: number, 
+/**
+ * A live child sat too deep to be observed; its waits are not here.
+ */
+children_truncated?: boolean, };
+
+export type StartActionCode = "confirm_irreversible_start" | "fix_requirement" | "acknowledge_untrusted";
+
+export type Remedy = { "remedy": "approve_digest", kind: string, digest: string, } | { "remedy": "provide_param", name: string, } | { "remedy": "install_agent", agent: string, } | { "remedy": "set_env", name: string, } | { "remedy": "run_doctor" } | { "remedy": "manual", detail: string, };
+
+export type StartAction = { code: StartActionCode, playbook: string, version?: string, args: Array<ActionArg>, principals: Array<Principal>, remedy?: Remedy, 
+/**
+ * One English line.
+ */
+reason: string, };
+
 export type FitSeverity = "blocking" | "note";
 
 export type FitItem = { code: string, 
@@ -1506,7 +1612,13 @@ ready: boolean,
 /**
  * Every trust item is approved.
  */
-trusted: boolean, needs_consent: boolean, compatibility: Array<FitItem>, setup: Array<FitItem>, trust: Array<TrustItem>, consent: ConsentView, };
+trusted: boolean, needs_consent: boolean, compatibility: Array<FitItem>, setup: Array<FitItem>, trust: Array<TrustItem>, consent: ConsentView, 
+/**
+ * What a start needs first, from the items above
+ * ([`crate::next_action::start::from_fit`]); the consent itself comes
+ * with the gate's refusal, which carries its nonce.
+ */
+start_actions: Array<StartAction>, };
 
 export type FitSummary = { ready: boolean, 
 /**

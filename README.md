@@ -185,7 +185,7 @@ apb tasks [run]     host tasks of host-mode runs; `apb tasks submit` replies to 
 apb trash list      deleted playbooks; `apb trash restore <name|id>` brings one back
 apb trust list      approvals in the trust store; `apb trust revoke <digest|id>` removes them
 apb dashboard       web UI (port 7321)
-apb mcp             stdio MCP server for coding agents
+apb mcp             stdio MCP server for coding agents (--read-only: look, never act)
 apb self-update     update apb to the latest release (--check only reports)
 ```
 
@@ -238,6 +238,10 @@ claude mcp add --scope user agentic-playbooks -- apb mcp
 
 Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
 with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
+
+`apb mcp --read-only` serves only the tools that read playbooks and runs, in a
+process that writes nothing, starts no program and sends no request; see
+[docs/MCP.md](docs/MCP.md#read-only-server).
 
 Tool families: playbook CRUD and validation, run control (`playbook_run`,
 `run_wait`, `run_status`, `run_events`, `run_report`, `run_pause`, `run_resume`, `run_stop`), profile and advisory

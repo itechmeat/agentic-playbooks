@@ -209,6 +209,13 @@ pub(super) fn isolation_items(
     origin: PlaybookOrigin,
 ) -> Vec<FitItem> {
     use apb_core::isolation::contract::Backend;
+    // The contract needs the sandbox probe, which starts bwrap.
+    if crate::read_only::active() {
+        return not_checked(
+            "isolation",
+            playbook.nodes.iter().filter(|n| n.kind.is_isolated()),
+        );
+    }
     crate::gate::isolation::node_contracts(root, playbook, origin, false)
         .into_iter()
         .map(|n| {
@@ -257,12 +264,42 @@ pub(super) fn isolation_items(
         .collect()
 }
 
+/// The detail of an item a read-only process did not check: checking it
+/// would start a program.
+pub const NOT_CHECKED_READ_ONLY: &str = "not checked by a read-only server";
+
+/// One `code` note per node of `nodes`, not checked (see
+/// [`NOT_CHECKED_READ_ONLY`]).
+fn not_checked<'a>(
+    code: &str,
+    nodes: impl Iterator<Item = &'a apb_core::schema::Node>,
+) -> Vec<FitItem> {
+    nodes
+        .map(|n| FitItem {
+            code: code.to_string(),
+            subject: Some(n.id.clone()),
+            detail: NOT_CHECKED_READ_ONLY.to_string(),
+            severity: FitSeverity::Note,
+        })
+        .collect()
+}
+
 /// One item per publish node: the remote it pins on this project, and
 /// whether its push URL is one the publish step pushes to. A missing remote
 /// or a refused URL blocks: the step would refuse at its plan.
 pub(super) fn publish_items(root: &Path, playbook: &apb_core::schema::Playbook) -> Vec<FitItem> {
     use apb_core::publish::url::PushUrl;
     use apb_core::schema::NodeKind;
+    // The remote is read with git.
+    if crate::read_only::active() {
+        return not_checked(
+            "publish_target",
+            playbook
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Publish { .. })),
+        );
+    }
     let repo = apb_core::git::Repo::locate(root).ok();
     playbook
         .nodes
@@ -336,11 +373,19 @@ pub(super) fn input_items(recall: &Recall) -> Vec<FitItem> {
         detail: d.clone(),
         severity: FitSeverity::Note,
     }));
-    out.extend(recall.missing.iter().map(|name| FitItem {
-        code: "param_needs_value".to_string(),
-        subject: Some(name.clone()),
-        detail: "no default and nothing remembered: a start must pass a value".to_string(),
-        severity: FitSeverity::Note,
-    }));
+    out.extend(needs_value_items(&recall.missing));
     out
+}
+
+/// A `param_needs_value` item per name: a start must pass a value.
+pub(super) fn needs_value_items(names: &[String]) -> Vec<FitItem> {
+    names
+        .iter()
+        .map(|name| FitItem {
+            code: "param_needs_value".to_string(),
+            subject: Some(name.clone()),
+            detail: "no default and nothing remembered: a start must pass a value".to_string(),
+            severity: FitSeverity::Note,
+        })
+        .collect()
 }

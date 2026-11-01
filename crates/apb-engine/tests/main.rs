@@ -311,6 +311,8 @@ mod model_grade_test;
 #[cfg(unix)]
 #[path = "suite/named_outputs_test.rs"]
 mod named_outputs_test;
+#[path = "suite/next_action_test.rs"]
+mod next_action_test;
 #[path = "suite/notify_send_test.rs"]
 mod notify_send_test;
 #[path = "suite/notify_transitions_test.rs"]
@@ -377,6 +379,8 @@ mod review_test;
 #[cfg(unix)]
 #[path = "suite/run_estimate_test.rs"]
 mod run_estimate_test;
+#[path = "suite/run_file_modes_test.rs"]
+mod run_file_modes_test;
 #[path = "suite/run_outcome_list_test.rs"]
 mod run_outcome_list_test;
 #[path = "suite/run_outcome_test.rs"]
@@ -385,6 +389,10 @@ mod run_outcome_test;
 mod run_provenance_test;
 #[path = "suite/run_retro_test.rs"]
 mod run_retro_test;
+// Unix-only: its agents are shell scripts.
+#[cfg(unix)]
+#[path = "suite/run_secrets_test.rs"]
+mod run_secrets_test;
 #[path = "suite/run_wait_test.rs"]
 mod run_wait_test;
 #[path = "suite/runner_registry_test.rs"]
