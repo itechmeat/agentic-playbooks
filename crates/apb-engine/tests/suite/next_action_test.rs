@@ -2,6 +2,7 @@
 //! start and of a fit report, and the request an answer or a decision
 //! names, checked inside the lock that guards its append.
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::path::Path;
 
@@ -63,7 +64,15 @@ fn an_irreversible_untrusted_start_gets_two_actions_and_one_retry_passes() {
         &linear("rel", "", ", effects: [irreversible]"),
     );
 
-    let refused = check_start(dir.path(), &wref("rel"), false, false, None).expect_err("refused");
+    let refused = check_start(
+        dir.path(),
+        &wref("rel"),
+        false,
+        false,
+        None,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect_err("refused");
     let codes: Vec<_> = refused.actions.iter().map(|a| a.code).collect();
     assert!(
         codes.contains(&StartActionCode::AcknowledgeUntrusted),
@@ -102,8 +111,15 @@ fn an_irreversible_untrusted_start_gets_two_actions_and_one_retry_passes() {
         "acknowledge_untrusted",
     ) == "true";
     let nonce = Confirmation::Nonce(given(&confirm.args, "confirm_irreversible").to_string());
-    let (_permit, note) =
-        check_start(dir.path(), &wref("rel"), ack, false, Some(&nonce)).expect("the retry passes");
+    let (_permit, note) = check_start(
+        dir.path(),
+        &wref("rel"),
+        ack,
+        false,
+        Some(&nonce),
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("the retry passes");
     assert_eq!(note, None);
 }
 
@@ -120,7 +136,15 @@ fn requires_and_consent_refusals_give_their_actions() {
         "req",
         &linear("req", "requires:\n  files: [CHANGELOG.md]\n", ""),
     );
-    let refused = check_start(dir.path(), &wref("req"), true, false, None).expect_err("refused");
+    let refused = check_start(
+        dir.path(),
+        &wref("req"),
+        true,
+        false,
+        None,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect_err("refused");
     assert_eq!(refused.refusal["policy"], "requires_unmet");
     assert!(matches!(
         &refused.actions[..],
@@ -133,7 +157,15 @@ fn requires_and_consent_refusals_give_their_actions() {
         "rel",
         &linear("rel", "effects: [irreversible]\n", ""),
     );
-    let refused = check_start(dir.path(), &wref("rel"), true, false, None).expect_err("refused");
+    let refused = check_start(
+        dir.path(),
+        &wref("rel"),
+        true,
+        false,
+        None,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect_err("refused");
     let codes: Vec<_> = refused.actions.iter().map(|a| a.code).collect();
     assert_eq!(codes, vec![StartActionCode::ConfirmIrreversibleStart]);
 }

@@ -15,14 +15,18 @@ pub enum StartActionCode {
     ConfirmIrreversibleStart,
     FixRequirement,
     AcknowledgeUntrusted,
+    ConfirmLaunch,
+    LaunchByPerson,
 }
 
 impl StartActionCode {
     /// Every code, in declaration order.
-    pub const ALL: [StartActionCode; 3] = [
+    pub const ALL: [StartActionCode; 5] = [
         StartActionCode::ConfirmIrreversibleStart,
         StartActionCode::FixRequirement,
         StartActionCode::AcknowledgeUntrusted,
+        StartActionCode::ConfirmLaunch,
+        StartActionCode::LaunchByPerson,
     ];
 
     /// The wire name.
@@ -31,6 +35,8 @@ impl StartActionCode {
             StartActionCode::ConfirmIrreversibleStart => "confirm_irreversible_start",
             StartActionCode::FixRequirement => "fix_requirement",
             StartActionCode::AcknowledgeUntrusted => "acknowledge_untrusted",
+            StartActionCode::ConfirmLaunch => "confirm_launch",
+            StartActionCode::LaunchByPerson => "launch_by_person",
         }
     }
 }

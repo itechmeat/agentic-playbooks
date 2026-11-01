@@ -14,6 +14,7 @@
 //! ignore the knob on every surface (secret egress).
 
 pub mod isolation;
+pub mod launch;
 pub(crate) mod params;
 pub(crate) mod trust_scan;
 
@@ -83,9 +84,7 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
         .collect();
     Ok(Preflight {
         version: loaded.version.clone(),
-        digest: loaded
-            .trust_digest()
-            .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?,
+        digest: definition_digest_of(&loaded)?,
         effects,
         children: tree.children,
     })
@@ -141,6 +140,11 @@ pub struct RunPermit {
     /// waiting or it runs. Surfaces report it in the start response, and
     /// [`RunPermit::apply`] hands it to the manifest for `run_status`.
     pub candidate_skipped: Option<String>,
+    /// The launch check's grant ([`launch`]): what the run's manifest
+    /// records once the engine rechecked it. Set by [`check_run`].
+    pub launch: Option<launch::LaunchGrant>,
+    /// Warnings of a person's launch past a damaged settings or floor file.
+    pub launch_warnings: Vec<String>,
 }
 
 /// The gate for an agent resuming an existing run (MCP `run_resume`). A
@@ -254,7 +258,7 @@ fn resume_consent_need_inner(
         .ok()
         .and_then(|c| c.expected_children);
     // Children resolve from the run's own origin, as the run spawns them.
-    let origin = crate::scheduler::parent_run_origin(&run_dir);
+    let origin = crate::run_origin::parent_run_origin(&run_dir);
     let sources = consent_sources(root, &playbook, &origin, pins.as_ref());
     let local = !require_local || apb_core::run_origin::verify(&run_dir, run_id);
     let recorded = crate::manifest::read(&run_dir)
@@ -404,34 +408,11 @@ fn collect_pinned_effects(
             continue;
         }
         let pin = pins.get(&n.id)?;
-        let loaded = load_pinned(root, pin)?;
+        let loaded = pin.load(root)?;
         effects.extend(apb_core::effects::effective(&loaded));
         collect_pinned_effects(root, &loaded, &pin.children, effects)?;
     }
     Some(())
-}
-
-/// The definition a sub-playbook pin names, at its pinned version; `None`
-/// when it no longer resolves or no longer matches the pinned digest.
-fn load_pinned(root: &Path, pin: &ChildExpectation) -> Option<Playbook> {
-    let origin = match pin.scope {
-        ProfileScope::Global => Origin::Global,
-        _ => Origin::Project { workspace_id: None },
-    };
-    let cref = PlaybookRef {
-        origin,
-        id: pin.id.clone(),
-        version: Some(pin.version.clone()),
-    };
-    let resolved = apb_core::store::resolve(root, &cref).ok()?;
-    if resolved.digest != pin.playbook_digest {
-        return None;
-    }
-    Registry::open_dir(&resolved.definition_parent)
-        .ok()?
-        .load(&resolved.id, Some(&resolved.version))
-        .ok()
-        .map(|l| l.playbook)
 }
 
 // --- 0.24.0 irreversible consent ---
@@ -441,7 +422,7 @@ pub(crate) fn pinned_child_effects(
     root: &Path,
     pin: &ChildExpectation,
 ) -> Option<std::collections::BTreeSet<Effect>> {
-    let loaded = load_pinned(root, pin)?;
+    let loaded = pin.load(root)?;
     pinned_tree_effects(root, &loaded, &pin.children)
 }
 
@@ -606,14 +587,16 @@ impl RunPermit {
             .or_else(|| self.candidate.clone())
     }
 
-    pub fn apply(self, opts: &mut crate::RunOptions) {
-        let has_overrides = opts.overrides.as_ref().is_some_and(|o| !o.is_empty());
-        opts.expected_digest = Some(self.playbook_digest);
-        opts.expected_profile_bundles = (!has_overrides).then_some(self.profile_bundles);
-        opts.expected_children = Some(self.children);
-        opts.expected_connectors = self.connectors;
-        opts.expected_connector_accounts = self.connector_accounts;
-        opts.candidate_skipped = self.candidate_skipped;
+    /// The canonical digest of what this permit authorizes (see
+    /// [`launch::permit_digest`]).
+    pub fn permit_digest(&self) -> String {
+        launch::permit_digest(
+            &self.playbook_digest,
+            &self.profile_bundles,
+            &self.connectors,
+            &self.connector_accounts,
+            &self.children,
+        )
     }
 
     // --- 0.24.0 irreversible consent ---
@@ -687,11 +670,19 @@ impl RunPermit {
 /// verified bundle set (and the engine snapshot), matching the manifest. All
 /// current MCP paths (autonomous, supervise:"self") do not spawn an external supervisor
 /// agent - they pass `false`.
+///
+/// `launch` says who launches and how they confirmed: after the version is
+/// chosen and the permit is complete, the launch check ([`launch`]) decides
+/// on the final permit, outside the candidate's own check, so a launch
+/// refusal never turns into `candidate_skipped`. A retry that passes the
+/// refusal's `launch_version` and `launch_choice` makes no draw: it gets
+/// that version, or a fresh refusal (`launch_choice_changed`).
 pub fn check_run(
     root: &Path,
     wref: &PlaybookRef,
     acknowledge_untrusted: bool,
     supervised: bool,
+    launch: &launch::LaunchContext,
 ) -> Result<RunPermit, Value> {
     // Cross-workspace: a direct run in a foreign workspace is forbidden, only through
     // the two-phase contract (spec 7). This path bypasses it, hence the refusal.
@@ -729,6 +720,17 @@ pub fn check_run(
     if let Ok(digest) = loaded.trust_digest() {
         check_import_approval(&playbook_dir, &wref.id, &loaded.version, &digest)?;
     }
+    let gate = Gate {
+        root,
+        wref,
+        acknowledge_untrusted,
+        supervised,
+        launch,
+    };
+    if let (Some(choice), Some(version)) = (launch.launch_choice, launch.launch_version.as_deref())
+    {
+        return gate.fixed_choice(&reg, &playbook_dir, &loaded, choice, version);
+    }
 
     // Candidate trials (issue #192): a start without an explicit version may
     // run the candidate instead of `current`. Chosen here, before the permit
@@ -754,9 +756,7 @@ pub fn check_run(
         let current_trusted = loaded
             .trust_digest()
             .is_ok_and(|d| TrustStore::load().is_approved(&d));
-        let digest = cand
-            .trust_digest()
-            .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
+        let digest = definition_digest_of(&cand)?;
         if current_trusted {
             match check_run_loaded(
                 root,
@@ -770,8 +770,8 @@ pub fn check_run(
                 supervised,
             ) {
                 Ok(mut permit) => {
-                    permit.candidate = Some(version);
-                    return Ok(permit);
+                    permit.candidate = Some(version.clone());
+                    return gate.admit(permit, &cand, &version, launch::Choice::Candidate);
                 }
                 Err(refusal) => {
                     candidate_skipped = Some(skip_reason(&refusal));
@@ -783,14 +783,17 @@ pub fn check_run(
     }
 
     // Digest-based trust: unapproved content requires an explicit acknowledge.
-    let digest = loaded
-        .trust_digest()
-        .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
+    let digest = definition_digest_of(&loaded)?;
     let trust = RunTrust {
         playbook_trusted: false,
         acknowledge_untrusted,
     };
-    check_run_loaded(root, wref, &loaded, digest.clone(), trust, supervised)
+    let choice = if wref.version.is_some() {
+        launch::Choice::Explicit
+    } else {
+        launch::Choice::Current
+    };
+    let checked = check_run_loaded(root, wref, &loaded, digest.clone(), trust, supervised)
         .map_err(|refusal| {
             with_consent_hint(refusal, || {
                 // The hint must be the nonce the retry is checked against: the
@@ -801,17 +804,28 @@ pub fn check_run(
                     acknowledge_untrusted: true,
                 };
                 match check_run_loaded(root, wref, &loaded, digest.clone(), acked, supervised) {
-                    Ok(permit) => (permit.irreversible.clone(), permit.consent_nonce()),
+                    Ok(permit) => {
+                        let launch_hint = gate
+                            .admit(permit.clone(), &loaded, &loaded.version, choice)
+                            .err();
+                        (
+                            permit.irreversible.clone(),
+                            permit.consent_nonce(),
+                            launch_hint,
+                        )
+                    }
                     // Another refusal would stop the retry anyway: the live
                     // sources over the playbook digest, a best effort.
                     Err(_) => {
                         let sources = consent_sources(root, &loaded.playbook, &wref.origin, None);
                         let nonce = crate::consent::consent_nonce(&digest, &sources);
-                        (sources, nonce)
+                        (sources, nonce, None)
                     }
                 }
             })
         })
+        .and_then(|permit| gate.admit(permit, &loaded, &loaded.version, choice));
+    checked
         .map(|mut permit| {
             permit.candidate_skipped = candidate_skipped.clone();
             permit
@@ -822,6 +836,210 @@ pub fn check_run(
             }
             refusal
         })
+}
+
+/// One call of [`check_run`]: what the launch check and a fixed choice
+/// need again.
+struct Gate<'a> {
+    root: &'a Path,
+    wref: &'a PlaybookRef,
+    acknowledge_untrusted: bool,
+    supervised: bool,
+    launch: &'a launch::LaunchContext,
+}
+
+impl Gate<'_> {
+    /// The launch check on the final permit: the permit with its grant, or
+    /// the launch refusal.
+    fn admit(
+        &self,
+        mut permit: RunPermit,
+        loaded: &apb_core::registry::LoadedPlaybook,
+        version: &str,
+        choice: launch::Choice,
+    ) -> Result<RunPermit, Value> {
+        let tolerant = !self.launch.initiator.is_agent_channel();
+        let tree = launch::Tree {
+            root: self.root,
+            playbook: &loaded.playbook,
+            origin: &self.wref.origin,
+            children: &permit.children,
+            require_pins: true,
+        };
+        let (effective, warnings) = launch::effective_for(
+            tree,
+            tolerant,
+            &self.launch.initiator,
+            self.launch.handed_config_dir(),
+        )?;
+        let subject = launch::Subject {
+            root: self.root,
+            id: &self.wref.id,
+            global: matches!(self.wref.origin, Origin::Global),
+            version,
+            choice,
+            definition_digest: &permit.playbook_digest,
+            permit_digest: permit.permit_digest(),
+            children_digest: launch::children_digest(&permit.children),
+        };
+        let grant = launch::decide(self.launch, &subject, &effective, tolerant)?;
+        permit.launch = Some(grant);
+        permit.launch_warnings = warnings;
+        Ok(permit)
+    }
+
+    /// A retry that fixed its version and choice from a refusal: no draw.
+    /// The version runs when the choice still names it; otherwise the
+    /// answer is a fresh check without the confirmation, marked
+    /// `launch_choice_changed` when it refuses.
+    fn fixed_choice(
+        &self,
+        reg: &Registry,
+        playbook_dir: &Path,
+        current: &apb_core::registry::LoadedPlaybook,
+        choice: launch::Choice,
+        version: &str,
+    ) -> Result<RunPermit, Value> {
+        let still = match choice {
+            launch::Choice::Explicit => self.wref.version.as_deref() == Some(version),
+            launch::Choice::Current => self.wref.version.is_none() && current.version == version,
+            launch::Choice::Candidate => self.wref.version.is_none(),
+        };
+        let candidate = match (still, choice) {
+            (true, launch::Choice::Candidate) => {
+                let trusted = current
+                    .trust_digest()
+                    .is_ok_and(|d| TrustStore::load().is_approved(&d));
+                crate::candidate::fixed_candidate(reg, playbook_dir, current, version)
+                    .filter(|_| trusted)
+            }
+            _ => None,
+        };
+        match (still, choice, candidate) {
+            (true, launch::Choice::Candidate, Some(cand)) => {
+                let digest = definition_digest_of(&cand)?;
+                let trust = RunTrust {
+                    playbook_trusted: true,
+                    acknowledge_untrusted: self.acknowledge_untrusted,
+                };
+                check_run_loaded(self.root, self.wref, &cand, digest, trust, self.supervised)
+                    .and_then(|mut permit| {
+                        permit.candidate = Some(version.to_string());
+                        self.admit(permit, &cand, version, choice)
+                    })
+            }
+            (true, launch::Choice::Current | launch::Choice::Explicit, _) => {
+                let digest = definition_digest_of(current)?;
+                let trust = RunTrust {
+                    playbook_trusted: false,
+                    acknowledge_untrusted: self.acknowledge_untrusted,
+                };
+                check_run_loaded(
+                    self.root,
+                    self.wref,
+                    current,
+                    digest,
+                    trust,
+                    self.supervised,
+                )
+                .and_then(|permit| self.admit(permit, current, version, choice))
+            }
+            _ => {
+                let fresh = self.launch.unconfirmed();
+                check_run(
+                    self.root,
+                    self.wref,
+                    self.acknowledge_untrusted,
+                    self.supervised,
+                    &fresh,
+                )
+                .map_err(|mut refusal| {
+                    refusal["launch_choice_changed"] = json!(true);
+                    refusal
+                })
+            }
+        }
+    }
+}
+
+/// The trust digest of `loaded`, or the refusal of a definition that does
+/// not read.
+fn definition_digest_of(loaded: &apb_core::registry::LoadedPlaybook) -> Result<String, Value> {
+    loaded
+        .trust_digest()
+        .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))
+}
+
+/// What the launch check of a trial verified: the child pins and the root's
+/// profile bundles the engine is handed verbatim (`expected_children`,
+/// `expected_profile_bundles`), and the grant.
+pub struct TrialLaunch {
+    pub children: std::collections::BTreeMap<String, ChildExpectation>,
+    pub profile_bundles: std::collections::BTreeMap<String, String>,
+    pub grant: launch::LaunchGrant,
+}
+
+/// The launch check of a trial (MCP `playbook_trial`, and each `apb eval`),
+/// which runs a draft past the lifecycle check: the tree resolved and
+/// verified the way a start resolves it, the launch decided on it, and the
+/// verified child pins and root profile bundles the trial hands the engine,
+/// so what runs is what was checked. The nonce covers the root's profile
+/// bundles, connectors and accounts like a start's, so a SOUL, skill or
+/// connector changed after the person was asked does not match.
+pub fn check_trial_launch(
+    root: &Path,
+    loaded: &apb_core::registry::LoadedPlaybook,
+    origin: &Origin,
+    explicit: bool,
+    ctx: &launch::LaunchContext,
+) -> Result<TrialLaunch, Value> {
+    let tree = resolve_tree(root, &loaded.playbook, origin, &loaded.playbook.id, true)?;
+    let digest = definition_digest_of(loaded)?;
+    // Digests only: the trial's own trust rules apply elsewhere, so nothing
+    // here refuses an unapproved bundle or connector.
+    let profile_bundles = check_profile_bundles(root, &loaded.playbook, origin, true, false)?;
+    let (connectors, connector_accounts) = trust_scan::scan_connectors(root, &loaded.playbook)
+        .map(|scan| (scan.connectors, scan.accounts))
+        .unwrap_or_default();
+    let tolerant = !ctx.initiator.is_agent_channel();
+    let (effective, _) = launch::effective_for(
+        launch::Tree {
+            root,
+            playbook: &loaded.playbook,
+            origin,
+            children: &tree.children,
+            require_pins: true,
+        },
+        tolerant,
+        &ctx.initiator,
+        ctx.handed_config_dir(),
+    )?;
+    let subject = launch::Subject {
+        root,
+        id: &loaded.playbook.id,
+        global: matches!(origin, Origin::Global),
+        version: &loaded.version,
+        choice: if explicit {
+            launch::Choice::Explicit
+        } else {
+            launch::Choice::Current
+        },
+        definition_digest: &digest,
+        permit_digest: launch::permit_digest(
+            &digest,
+            &profile_bundles,
+            &connectors,
+            &connector_accounts,
+            &tree.children,
+        ),
+        children_digest: launch::children_digest(&tree.children),
+    };
+    let grant = launch::decide(ctx, &subject, &effective, tolerant)?;
+    Ok(TrialLaunch {
+        children: tree.children,
+        profile_bundles,
+        grant,
+    })
 }
 
 /// `candidate_skipped` of a start whose candidate does not inherit trust.
@@ -858,7 +1076,10 @@ struct RunTrust {
 /// (`acknowledge_untrusted` and `confirm_irreversible`) in one retry.
 /// `hint` yields the sources and the nonce; it runs only for a trust
 /// refusal.
-fn with_consent_hint(mut refusal: Value, hint: impl FnOnce() -> (Vec<String>, String)) -> Value {
+fn with_consent_hint(
+    mut refusal: Value,
+    hint: impl FnOnce() -> (Vec<String>, String, Option<Value>),
+) -> Value {
     let is_trust = refusal
         .get("policy")
         .and_then(Value::as_str)
@@ -866,10 +1087,13 @@ fn with_consent_hint(mut refusal: Value, hint: impl FnOnce() -> (Vec<String>, St
     if !is_trust {
         return refusal;
     }
-    let (sources, nonce) = hint();
+    let (sources, nonce, launch_refusal) = hint();
     if !sources.is_empty() {
         refusal["irreversible"] = json!(sources);
         refusal["consent_nonce"] = json!(nonce);
+    }
+    if let Some(launch_refusal) = &launch_refusal {
+        launch::merge_hint(&mut refusal, launch_refusal);
     }
     refusal
 }
@@ -948,6 +1172,8 @@ fn check_run_loaded(
         playbook_id: wref.id.clone(),
         candidate: None,
         candidate_skipped: None,
+        launch: None,
+        launch_warnings: Vec::new(),
     })
 }
 

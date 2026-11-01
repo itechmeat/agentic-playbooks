@@ -13,6 +13,8 @@
     consentSummary,
     fitBadges,
     itemLine,
+    launchDetail,
+    launchSummary,
     setupSummary,
     trustLine,
     trustSummary,
@@ -87,6 +89,14 @@
           <p class="muted">Effects: {report.consent.effects.join(', ')}</p>
         {/if}
       </section>
+
+      {#if report.launch}
+        <section data-testid="fit-launch">
+          <h3>Launch</h3>
+          <p class="summary" class:blocking={!!report.launch.problem}>{launchSummary(report.launch)}</p>
+          <p class="muted" data-testid="fit-launch-detail">{launchDetail(report.launch)}</p>
+        </section>
+      {/if}
 
       {#if report.start_actions?.length}
         <section data-testid="fit-start-actions">

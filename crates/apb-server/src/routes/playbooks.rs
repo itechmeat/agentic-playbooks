@@ -1,9 +1,10 @@
 use crate::state::*;
+use apb_core::launch::floor::SaveChannel;
 
 use apb_core::registry::{PlaybookSummary, Registry, RegistryError};
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{
-    delete_playbook, list_versions_with_provenance, save_definition, save_layout, version_diff,
+    delete_playbook, list_versions_with_provenance, save_definition_by, save_layout, version_diff,
 };
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
@@ -29,11 +30,34 @@ pub(crate) fn tag_summary(
 pub(crate) struct CreatePlaybookBody {
     id: String,
     yaml: String,
+    /// The lowering of the launch floor the person confirmed in the editor
+    /// (see [`editor_channel`]).
+    #[serde(default)]
+    confirm_lower_floor: Option<apb_core::launch::LaunchPolicy>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct UpdatePlaybookBody {
     yaml: String,
+    #[serde(default)]
+    confirm_lower_floor: Option<apb_core::launch::LaunchPolicy>,
+}
+
+/// The save channel of the editor: with keys, a person who lowers a launch
+/// floor only to the declaration they confirmed (`confirm_lower_floor`,
+/// sent after the 409 `launch_floor_lowering_unconfirmed` the editor shows
+/// and confirms); without keys, a save that never lowers a floor (409
+/// `launch_floor_lowering_needs_terminal`, pointing to `apb launch floor
+/// --lower-to`).
+fn editor_channel(
+    auth: &crate::auth::AuthState,
+    confirm: Option<apb_core::launch::LaunchPolicy>,
+) -> SaveChannel {
+    if auth.enabled() {
+        SaveChannel::Editor { lower_to: confirm }
+    } else {
+        SaveChannel::KeylessEditor
+    }
 }
 
 #[derive(Deserialize)]
@@ -67,7 +91,10 @@ pub(crate) async fn create_playbook(
         Ok(r) => r,
         Err(e) => return e,
     };
-    match save_definition(&root, &body.id, &body.yaml, None, true) {
+    // The editor is a person saving the version they read: the launch floor
+    // rises with its declaration and is lowered only as confirmed.
+    let channel = editor_channel(&state.auth, body.confirm_lower_floor);
+    match save_definition_by(&root, &body.id, &body.yaml, None, true, channel) {
         Ok(saved) => (
             if saved.unchanged {
                 StatusCode::OK
@@ -98,7 +125,8 @@ pub(crate) async fn update_playbook(
     if !dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("playbook `{id}` not found")).into_response();
     }
-    match save_definition(&root, &id, &body.yaml, None, true) {
+    let channel = editor_channel(&state.auth, body.confirm_lower_floor);
+    match save_definition_by(&root, &id, &body.yaml, None, true, channel) {
         Ok(saved) => Json(saved.answer(&id)).into_response(),
         Err(e) => versioning_error(e),
     }
@@ -182,6 +210,38 @@ pub(crate) struct RunBody {
     /// `invalid_notify` like MCP rather than the extractor's plain error.
     #[serde(default)]
     notify: Option<serde_json::Value>,
+    /// A dashboard without keys counts as the CLI without a terminal for
+    /// the launch policy: an `ask` playbook starts only with the
+    /// `launch_nonce` of its 409 refusal here, together with that refusal's
+    /// `launch_version` and `launch_choice`; a `deny` one never does. A
+    /// dashboard with keys ignores these fields.
+    #[serde(default)]
+    confirm_launch: Option<String>,
+    #[serde(default)]
+    launch_version: Option<String>,
+    #[serde(default)]
+    launch_choice: Option<String>,
+}
+
+/// The launch context of a click in the dashboard: a person's with keys;
+/// without keys anything on the machine reaches the port, so it is decided
+/// like the CLI without a terminal (an `ask` launch only with its nonce, a
+/// `deny` launch refused).
+pub(crate) fn dashboard_launch(
+    auth: &crate::auth::AuthState,
+    kind: apb_engine::gate::launch::LaunchKind,
+    confirm_launch: Option<String>,
+    launch_version: Option<String>,
+    launch_choice: Option<&str>,
+) -> apb_engine::gate::launch::LaunchContext {
+    use apb_engine::gate::launch::{LaunchConfirmation, LaunchContext};
+    let keys = auth.enabled();
+    let ctx = LaunchContext::dashboard_with(keys, kind);
+    if keys {
+        return ctx;
+    }
+    ctx.confirmed(confirm_launch.map(|nonce| LaunchConfirmation::DashboardNonce { nonce }))
+        .fixed(launch_version, launch_choice)
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -233,6 +293,20 @@ pub(crate) async fn run_playbook_handler(
         Ok(r) => r,
         Err(e) => return e,
     };
+    let launch_kind = match &body.continued_from {
+        Some(pred) => apb_engine::gate::launch::LaunchKind::ContinueFrom {
+            run_id: pred.clone(),
+            node: String::new(),
+        },
+        None => apb_engine::gate::launch::LaunchKind::Start,
+    };
+    let launch = dashboard_launch(
+        &state.auth,
+        launch_kind,
+        body.confirm_launch.clone(),
+        body.launch_version.clone(),
+        body.launch_choice.as_deref(),
+    );
     let mut opts = apb_engine::RunOptions {
         instruction: body.instruction,
         params: body.params,
@@ -255,7 +329,10 @@ pub(crate) async fn run_playbook_handler(
     let of = apb_engine::next_action::start::StartOf::of(&wref);
     let refused =
         |refusal: serde_json::Value| apb_mcp::tools::actions::refusal_with_actions(of, refusal);
-    let permit = match apb_engine::gate::check_run(&root, &wref, true, false) {
+    // The click is the person's launch when the dashboard has keys (design
+    // 3.1 item 7); without keys it is decided like the CLI without a
+    // terminal (see `dashboard_launch`).
+    let permit = match apb_engine::gate::check_run(&root, &wref, true, false, &launch) {
         Ok(p) => p,
         Err(refusal) => {
             let status = if refusal["policy"] == "not_found" {
@@ -276,6 +353,7 @@ pub(crate) async fn run_playbook_handler(
         opts.consent = Some(apb_engine::consent::RunConsent::irreversible("dashboard"));
     }
     let mut warnings = permit.warnings.clone();
+    warnings.extend(permit.launch_warnings.iter().cloned());
     // Issue #192: the candidate the gate chose (and pinned) is what runs.
     let version = permit.run_version(None);
     // A param the start leaves without a value is refused like the gate

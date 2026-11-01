@@ -735,10 +735,28 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
         // ALWAYS moved - otherwise a repeated apply after a failure would
         // leave current on schema 1.
         if !dst_ver.exists() {
-            crate::fsutil::copy_tree(&src_ver, &dst_ver)?;
-            if let Some((_nv, yaml)) = plan.rewritten.get(&(u.id.clone(), u.from_version.clone())) {
-                crate::fsutil::atomic_write(&dst_ver.join("playbook.yaml"), yaml.as_bytes())?;
-            }
+            let rewritten = plan.rewritten.get(&(u.id.clone(), u.from_version.clone()));
+            // The new version is a publication like any other: the launch
+            // floor is raised from what it declares first, under the floor
+            // lock (a person's channel: it never lowers it).
+            let declared = match rewritten {
+                Some((_nv, yaml)) => crate::launch::floor::declared_of(yaml),
+                None => std::fs::read_to_string(src_ver.join("playbook.yaml"))
+                    .ok()
+                    .and_then(|y| crate::launch::floor::declared_of(&y)),
+            };
+            let authority = crate::launch::floor::SaveAuthority {
+                key: crate::launch::floor::FloorKey::project_of(root, &u.id)?,
+                channel: crate::launch::floor::SaveChannel::Person,
+            };
+            crate::launch::floor::publish(&authority, &id_dir, declared, || {
+                crate::fsutil::copy_tree(&src_ver, &dst_ver)?;
+                if let Some((_nv, yaml)) = rewritten {
+                    crate::fsutil::atomic_write(&dst_ver.join("playbook.yaml"), yaml.as_bytes())?;
+                }
+                Ok::<(), MigError>(())
+            })
+            .map_err(|e| MigError::Io(std::io::Error::other(e.to_string())))??;
         }
         current::move_current(
             &id_dir,

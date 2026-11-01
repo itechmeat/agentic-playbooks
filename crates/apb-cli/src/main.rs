@@ -27,6 +27,7 @@ mod grade;
 mod import_preview;
 mod intent;
 mod interrupt;
+mod launch;
 mod make_global;
 mod manage;
 mod memory;
@@ -375,6 +376,8 @@ enum Command {
         confirm_irreversible: Option<String>,
         #[command(flatten)]
         budget: budget::ResumeBudgetFlags,
+        #[command(flatten)]
+        launch: launch::LaunchFlags,
     },
     /// Block until a run finishes, needs input (a question, a review, a
     /// supervisor decision) or stops, then print why. A single call that
@@ -537,12 +540,16 @@ enum Command {
         /// Evaluate a draft playbook (only the scratch copy is marked active)
         #[arg(long)]
         draft: bool,
-        /// Approve the suite and start without asking
+        /// Approve the suite and its cost and start without asking. It is
+        /// not a launch confirmation: a playbook that asks before an agent
+        /// launches it needs --confirm-launch (or the terminal question)
         #[arg(long)]
         yes: bool,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        launch: launch::LaunchFlags,
     },
     // --- end 0.24.0 eval suites ---
     /// Inspect and manage the project-local node result cache
@@ -598,6 +605,13 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// A playbook's launch floor: the strictest `agent_launch` any saved
+    /// version declared, which keeps an agent from launching a looser copy.
+    /// Lowering it is a person's decision, asked at an interactive terminal
+    Launch {
+        #[command(subcommand)]
+        cmd: LaunchCmd,
+    },
     /// List or manage the workspace registry (spec 6)
     Projects {
         #[command(subcommand)]
@@ -628,15 +642,11 @@ enum Command {
         /// The run's working tree, forwarded from `apb run --worktree`.
         #[arg(long, value_name = "DIR")]
         worktree: Option<String>,
-        /// The irreversible consent `apb run --supervise` obtained (`cli` or
-        /// `cli_flag`), forwarded across the detached spawn. Any other value
-        /// is refused.
-        #[arg(long, value_name = "BY", value_parser = ["cli", "cli_flag"], requires = "consent_nonce")]
-        consent: Option<String>,
-        /// The consent nonce of the tree the forwarded consent was given for;
-        /// the child refuses when its own gate computes another one.
-        #[arg(long = "consent-nonce", value_name = "NONCE", requires = "consent")]
-        consent_nonce: Option<String>,
+        /// The handoff file holding the launch decision and the irreversible
+        /// consent `apb run --supervise` obtained (`apb_engine::launch_handoff`):
+        /// read once, deleted, checked against this process's own gate.
+        #[arg(long = "launch-handoff", value_name = "FILE")]
+        launch_handoff: Option<PathBuf>,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -685,6 +695,10 @@ enum Command {
         /// `run_resumed`. Only meaningful with `--resume`.
         #[arg(long = "budget-json")]
         budget_json: Option<String>,
+        /// The handoff file holding the resume's launch grant
+        /// (`apb_engine::launch_handoff`). Only meaningful with `--resume`.
+        #[arg(long = "launch-handoff", value_name = "FILE")]
+        launch_handoff: Option<PathBuf>,
     },
     /// The waker of a paused run with an `until` (issue #200): sleeps until
     /// then and resumes the run only if the same pause still holds it. Spawned
@@ -714,6 +728,22 @@ enum Command {
         node: String,
         #[arg(long)]
         attempt: u32,
+    },
+}
+
+/// `apb launch` subcommands.
+#[derive(Subcommand)]
+enum LaunchCmd {
+    /// Print a playbook's launch floor, or lower it (a person, at an
+    /// interactive terminal; refused inside a run step)
+    Floor {
+        id: String,
+        /// The global playbook of that id
+        #[arg(long)]
+        global: bool,
+        /// The policy to lower the floor to: allow, ask or deny
+        #[arg(long = "lower-to", value_name = "POLICY")]
+        lower_to: Option<String>,
     },
 }
 
@@ -866,9 +896,12 @@ fn main() -> ExitCode {
             ..
         }) => pause_cmd(&root, &run_id, now, reason, until.as_deref(), keep_lock),
         Some(Command::Resume {
-            all: true, budget, ..
+            all: true,
+            budget,
+            launch,
+            ..
         }) => match budget.request() {
-            Ok(None) => resume_all_cmd(&root),
+            Ok(None) => resume_all_cmd(&root, &launch),
             _ => {
                 eprintln!(
                     "--all takes no budget flags: change a run's budget with `apb resume <run-id>`"
@@ -882,6 +915,7 @@ fn main() -> ExitCode {
             allow_environment_drift,
             confirm_irreversible,
             budget,
+            launch,
             ..
         }) => resume_cmd(
             &root,
@@ -890,7 +924,16 @@ fn main() -> ExitCode {
             allow_environment_drift,
             confirm_irreversible,
             &budget,
+            &launch,
         ),
+        Some(Command::Launch {
+            cmd:
+                LaunchCmd::Floor {
+                    id,
+                    global,
+                    lower_to,
+                },
+        }) => launch::floor_cmd(&root, &id, global, lower_to.as_deref()),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Wait {
             run_id,
@@ -980,6 +1023,7 @@ fn main() -> ExitCode {
             draft,
             yes,
             json,
+            launch,
         }) => eval::eval_cmd(
             &root,
             eval::EvalArgs {
@@ -997,6 +1041,8 @@ fn main() -> ExitCode {
                 draft,
                 yes,
                 json,
+                launch,
+                launch_grant: None,
             },
         ),
         // --- end 0.24.0 eval suites ---
@@ -1030,8 +1076,7 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
-            consent,
-            consent_nonce,
+            launch_handoff,
             handshake,
             budget,
             notify,
@@ -1044,7 +1089,7 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
-            consent.zip(consent_nonce),
+            launch_handoff.as_deref(),
             &handshake,
             &budget,
             &notify,
@@ -1060,6 +1105,7 @@ fn main() -> ExitCode {
             by,
             pause_seq,
             budget_json,
+            launch_handoff,
         }) => drive_run_child(
             &run_root,
             &run_id,
@@ -1070,6 +1116,7 @@ fn main() -> ExitCode {
                 by: by.as_deref(),
                 pause_seq,
                 budget_json: budget_json.as_deref(),
+                launch_handoff: launch_handoff.as_deref(),
             },
         ),
         Some(Command::PauseWaker {

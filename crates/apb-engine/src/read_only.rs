@@ -235,4 +235,33 @@ mod tests {
             assert!(value.to_string().contains(READ_ONLY_REFUSAL), "{value}");
         }
     }
+
+    read_only_test! {
+        fn a_launch_floor_and_a_handoff_are_never_written() {
+            use apb_core::launch::LaunchPolicy;
+            use apb_core::launch::floor::FloorKey;
+            let dir = tempfile::tempdir().unwrap();
+            set_env("APB_CONFIG_DIR", dir.path());
+            super::enter();
+            let e = apb_core::launch::floor::set_by_person(&FloorKey::global("p"), LaunchPolicy::Deny)
+                .unwrap_err();
+            assert!(e.to_string().contains(READ_ONLY_REFUSAL), "{e}");
+            let grant = crate::gate::launch::LaunchGrant::child(
+                "r1",
+                &apb_core::launch::LaunchRecord {
+                    kind: "start".into(),
+                    initiator: "dashboard".into(),
+                    confirmation: None,
+                    policy: LaunchPolicy::Allow,
+                    sources: Vec::new(),
+                },
+            );
+            let e = crate::launch_handoff::write(dir.path(), &crate::launch_handoff::Handoff::Resume(grant))
+                .unwrap_err();
+            assert!(e.to_string().contains(READ_ONLY_REFUSAL), "{e}");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing was written");
+            // Reading the floors writes nothing either.
+            assert!(apb_core::launch::floor::read().unwrap().is_empty());
+        }
+    }
 }

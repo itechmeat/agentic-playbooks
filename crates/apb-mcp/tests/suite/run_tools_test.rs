@@ -178,7 +178,8 @@ fn status_unknown_run_is_error() {
 fn resume_unknown_run_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let err = apb_mcp::tools::run_resume(dir.path(), "ghost-1", None, false, None).unwrap_err();
+    let err =
+        apb_mcp::tools::run_resume(dir.path(), "ghost-1", None, false, None, None).unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::NotFound(_)),
         "expected NotFound, got {err:?}"
@@ -1022,8 +1023,8 @@ mod drift_resume {
 
         // Without the override the tool must return the drift error itself,
         // NOT an Ok ack with `detached: true` for a run that would never move.
-        let err =
-            apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), false, None).unwrap_err();
+        let err = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), false, None, None)
+            .unwrap_err();
         assert!(
             err.to_string().contains("environment drift"),
             "run_resume must surface the drift error inline, got: {err:?}"
@@ -1043,7 +1044,7 @@ mod drift_resume {
         // subcommand) and exits fast, but that is AFTER the in-process preflight
         // returned Ok - which is exactly what this asserts: the override reaches
         // the engine path and is reflected back in the ack.
-        let ack = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), true, None)
+        let ack = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), true, None, None)
             .expect("override must pass the preflight and ack");
         assert_eq!(ack["detached"], serde_json::json!(true));
         assert!(
@@ -1501,7 +1502,7 @@ fn run_resume_refuses_a_busy_workdir() {
         std::process::id().to_string(),
     )
     .unwrap();
-    let err = apb_mcp::tools::run_resume(root, "busy-1", None, false, None).unwrap_err();
+    let err = apb_mcp::tools::run_resume(root, "busy-1", None, false, None, None).unwrap_err();
     assert!(
         matches!(&err, apb_mcp::tools::ToolError::Conflict(m) if m.contains("another write-run holds the workdir")),
         "expected the busy-lock conflict, got {err:?}"

@@ -72,6 +72,27 @@ pub(crate) fn choose_at_gate(
     reg.load(id, Some(&version)).ok().map(|l| (version, l))
 }
 
+/// The candidate `version` a launch retry fixed from its refusal, without a
+/// draw: the pointer still names it, it is not `current`, and its lineage
+/// still reaches `current`; `None` otherwise (the retry is refused with a
+/// fresh nonce).
+pub(crate) fn fixed_candidate(
+    reg: &Registry,
+    playbook_dir: &Path,
+    current: &LoadedPlaybook,
+    version: &str,
+) -> Option<LoadedPlaybook> {
+    recover_interrupted_move(playbook_dir);
+    let named = read_candidate(playbook_dir)?;
+    if named != version
+        || named == current.version
+        || !lineage_reaches(playbook_dir, &named, &current.version)
+    {
+        return None;
+    }
+    reg.load(&current.playbook.id, Some(version)).ok()
+}
+
 /// Finishes or undoes a move of `current` a crash interrupted, under the
 /// pointer lock, when one waits; best effort (reported on stderr).
 fn recover_interrupted_move(playbook_dir: &Path) {

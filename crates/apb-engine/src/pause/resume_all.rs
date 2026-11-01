@@ -11,6 +11,12 @@
 //! 2. a paused run whose `until` has passed is resumed (the waker that would
 //!    have done it died with the machine);
 //! 3. any other paused run is left alone.
+//!
+//! Before either resume (and before a due quota pause's probe) each run
+//! goes through the launch check of a resume (`crate::gate::launch`): an
+//! authorized run passes, any other one needs its policy to admit the
+//! caller. A run the launch policy refuses is listed as such and left as it
+//! is: it is not marked driverless.
 
 use std::path::Path;
 
@@ -57,6 +63,9 @@ pub enum ResumeAllAction {
     Busy { detail: String },
     /// A paused run whose `until` has not passed, or that has none.
     LeftPaused,
+    /// The launch policy refused the caller for a run never authorized: left
+    /// as it is, not marked driverless.
+    LaunchRefused { detail: String },
 }
 
 /// One run [`resume_all`] considered.
@@ -70,6 +79,24 @@ pub struct ResumeAllEntry {
 /// workspace at `root` (see the module docs). Returns one entry per run it
 /// considered, in run-id order; finished runs and live ones are not listed.
 pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
+    resume_all_as(root, &|run_id, _| {
+        Some(crate::gate::launch::LaunchContext::engine(
+            crate::gate::launch::EngineResume::ResumeAll,
+            run_id,
+        ))
+    })
+}
+
+/// Who resumes a run of [`resume_all_as`] and how they confirm: called
+/// first with no refusal for the run's context; when the launch check
+/// refuses, called again with the refusal (a terminal asks the person
+/// then) for a context to retry with, `None` to leave the run.
+pub type LaunchAsk<'a> =
+    dyn Fn(&str, Option<&serde_json::Value>) -> Option<crate::gate::launch::LaunchContext> + 'a;
+
+/// [`resume_all`] by the caller `ask` describes (`apb resume --all` passes
+/// the CLI's initiator and its confirmation).
+pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEntry>, EngineError> {
     let runs_dir = root.join(".apb/runs");
     let mut ids: Vec<String> = match std::fs::read_dir(&runs_dir) {
         Ok(rd) => rd
@@ -98,9 +125,44 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
         let Ok(events) = read_all(&run_dir) else {
             continue;
         };
-        let action = match RunState::fold(&events).run_status {
-            RunStatus::Paused => match super::waker::latest_pause(&events) {
-                Some((seq, _, Some(until))) if u128::from(until) <= now => {
+        let status = RunState::fold(&events).run_status;
+        let due = match status {
+            RunStatus::Paused => super::waker::latest_pause(&events)
+                .and_then(|(seq, _, until)| until.map(|u| (seq, u)))
+                .filter(|(_, until)| u128::from(*until) <= now)
+                .map(|(seq, _)| seq),
+            _ => None,
+        };
+        let candidate = match status {
+            RunStatus::Paused => due.is_some(),
+            RunStatus::Running | RunStatus::Interrupted => {
+                crate::liveness::driver_alive(&run_dir, &run_id) != Some(true)
+            }
+            _ => false,
+        };
+        if !candidate {
+            if status == RunStatus::Paused {
+                out.push(ResumeAllEntry {
+                    run_id,
+                    action: ResumeAllAction::LeftPaused,
+                });
+            }
+            continue;
+        }
+        // The launch check, before any probe or resume.
+        let grant = match launch_for(root, &run_id, ask) {
+            Ok(g) => g,
+            Err(detail) => {
+                out.push(ResumeAllEntry {
+                    run_id,
+                    action: ResumeAllAction::LaunchRefused { detail },
+                });
+                continue;
+            }
+        };
+        let action = match status {
+            RunStatus::Paused => match due {
+                Some(seq) => {
                     // A due quota pause probes its executor first, as its
                     // waker would have (design 6.6).
                     // A probe whose outcome is not known never leads to a
@@ -110,6 +172,11 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                         &run_id,
                         seq,
                         super::probe::RESUME_ALL_JOURNAL_TRIES,
+                        // Only a grant stands for a launch check: a run whose
+                        // check was set aside (a tree that does not resolve)
+                        // is checked again as the engine's own resume before
+                        // its executor is probed.
+                        grant.is_some(),
                     ) {
                         Ok(super::WakeProbe::Repaused { seq, .. }) => {
                             super::waker::spawn_waker(root, &run_id, seq);
@@ -122,7 +189,12 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                         Err(e) => ResumeAllAction::Refused {
                             detail: super::waker::refusal_text(e),
                         },
-                        Ok(_) => match super::waker::try_engine_resume(root, &run_id, Some(seq)) {
+                        Ok(_) => match super::waker::try_engine_resume(
+                            root,
+                            &run_id,
+                            Some(seq),
+                            grant.as_ref(),
+                        ) {
                             Ok(pid) => ResumeAllAction::Resumed {
                                 cause: ResumeCause::Due,
                                 pid,
@@ -136,13 +208,10 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
                         },
                     }
                 }
-                _ => ResumeAllAction::LeftPaused,
+                None => ResumeAllAction::LeftPaused,
             },
             RunStatus::Running | RunStatus::Interrupted => {
-                if crate::liveness::driver_alive(&run_dir, &run_id) == Some(true) {
-                    continue;
-                }
-                match super::waker::try_engine_resume(root, &run_id, None) {
+                match super::waker::try_engine_resume(root, &run_id, None, grant.as_ref()) {
                     Ok(pid) => ResumeAllAction::Resumed {
                         cause: ResumeCause::Driverless,
                         pid,
@@ -168,6 +237,36 @@ pub fn resume_all(root: &Path) -> Result<Vec<ResumeAllEntry>, EngineError> {
         out.push(ResumeAllEntry { run_id, action });
     }
     Ok(out)
+}
+
+/// The launch check of one run of the pass: the grant to resume with, or
+/// the refusal's text when the caller gave up.
+fn launch_for(
+    root: &Path,
+    run_id: &str,
+    ask: &LaunchAsk<'_>,
+) -> Result<Option<crate::gate::launch::LaunchGrant>, String> {
+    let text = crate::gate::launch::refusal_line;
+    let ctx = ask(run_id, None).ok_or_else(|| "left by the caller".to_string())?;
+    match crate::resume_launch::check_resume_launch(root, run_id, &ctx) {
+        Ok(g) => Ok(g),
+        // A run whose snapshot does not read is the resume's own problem:
+        // it refuses (and a driverless run is marked) as before, while the
+        // engine still refuses an unchecked run that is not `allow`.
+        Err(refusal)
+            if !refusal["policy"]
+                .as_str()
+                .is_some_and(crate::gate::launch::is_launch_refusal) =>
+        {
+            Ok(None)
+        }
+        Err(refusal) => {
+            let Some(retry) = ask(run_id, Some(&refusal)) else {
+                return Err(text(&refusal));
+            };
+            crate::resume_launch::check_resume_launch(root, run_id, &retry).map_err(|v| text(&v))
+        }
+    }
 }
 
 /// Journals `run_paused { reason: "driverless", by: engine }` on a run no

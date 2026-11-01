@@ -227,6 +227,27 @@ pub struct RunExecutionManifest {
     /// declarations (see `crate::run_redact`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_params: Vec<String>,
+    /// The launch authorization the run was admitted with (see
+    /// [`crate::gate::launch`]): who launched it, how an `ask` or `deny`
+    /// launch was confirmed, the policy and its sources. Written once at
+    /// start; it covers the run for its whole lifetime. Never a nonce.
+    /// Absent in a run an older apb started, which a resume checks again.
+    /// Read leniently, so a shape a newer apb wrote reads as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_launch"
+    )]
+    pub launch: Option<apb_core::launch::LaunchRecord>,
+}
+
+/// A launch record that does not read (a newer apb's shape) is absent.
+fn lenient_launch<'de, D>(d: D) -> Result<Option<apb_core::launch::LaunchRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<yaml_serde::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| yaml_serde::from_value(v).ok()))
 }
 
 // --- host execution mode (0.23.0) ---
@@ -332,6 +353,7 @@ impl RunExecutionManifest {
             && self.candidate_skipped.is_none()
             && self.task_type.is_none()
             && self.secret_params.is_empty()
+            && self.launch.is_none()
     }
 
     /// Each bound node's profile and bundle digests (the supervisor's

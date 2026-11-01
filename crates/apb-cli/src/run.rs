@@ -35,6 +35,11 @@ use crate::util::{QUESTION_TEXT_MAX, open_registry, sanitize_for_terminal};
 ///
 /// Issue #192: also returns the version to start - the one asked for, or the
 /// candidate the gate chose (and pinned) for a start without one.
+///
+/// The launch policy: `launch` says who launches (the CLI at a terminal or
+/// not, a run step, or a forwarded grant); a launch a person at this
+/// terminal may confirm is asked once (see [`crate::launch::with_prompt`]).
+/// The grant goes to `opts.launch` with the rest of the permit.
 fn gate_run(
     root: &Path,
     name: &str,
@@ -42,6 +47,7 @@ fn gate_run(
     supervised: bool,
     opts: &mut RunOptions,
     how: &crate::consent::CliConsent,
+    launch: &apb_engine::gate::launch::LaunchContext,
 ) -> Result<(Option<crate::consent::Granted>, Option<String>), String> {
     let wref = apb_core::scope::PlaybookRef {
         origin: apb_core::scope::Origin::Project { workspace_id: None },
@@ -53,14 +59,27 @@ fn gate_run(
             apb_engine::next_action::start::StartOf::of(&wref),
             &refusal,
         );
-        let mut message = gate_refusal_message(&refusal);
+        let launch_refusal = refusal["policy"]
+            .as_str()
+            .is_some_and(apb_engine::gate::launch::is_launch_refusal);
+        let mut message = if launch_refusal {
+            format!("run {}", crate::launch::refusal_message(&refusal))
+        } else {
+            gate_refusal_message(&refusal)
+        };
         for line in crate::actions::start_lines(&actions) {
             message.push_str("\n  ");
             message.push_str(&line);
         }
         message
     };
-    let permit = apb_engine::gate::check_run(root, &wref, true, supervised).map_err(refused)?;
+    let permit = crate::launch::with_prompt(launch, |ctx| {
+        apb_engine::gate::check_run(root, &wref, true, supervised, ctx)
+    })
+    .map_err(refused)?;
+    for w in &permit.launch_warnings {
+        eprintln!("warning: {w}");
+    }
     let run_ref = apb_core::scope::PlaybookRef {
         version: permit.run_version(version),
         ..wref.clone()
@@ -442,6 +461,12 @@ pub(crate) struct RunArgs {
     /// file with the spawn env overlay and the wall-clock deadline).
     #[arg(long, value_name = "FILE", hide = true)]
     pub eval_settings: Option<PathBuf>,
+    /// Internal: the launch handoff `apb eval` wrote for this case
+    /// (`apb_engine::launch_handoff`).
+    #[arg(long, value_name = "FILE", hide = true)]
+    pub launch_handoff: Option<PathBuf>,
+    #[command(flatten)]
+    pub launch: crate::launch::LaunchFlags,
     #[command(flatten)]
     pub budget: crate::budget::BudgetFlags,
     #[command(flatten)]
@@ -606,6 +631,8 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         execution,
         confirm_irreversible,
         eval_settings,
+        launch_handoff,
+        launch,
         budget,
         notify,
         estimate,
@@ -719,6 +746,20 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         eprintln!("--eval-settings is only for a cli run");
         return ExitCode::from(2);
     }
+    // Who launches: an eval case runs under the authorization its parent
+    // `apb eval` checked (a handoff bound to the definition under test);
+    // anything else is this CLI, at a terminal or not, or a run step.
+    let launch_kind = match &continued_from {
+        Some(pred) => apb_engine::gate::launch::LaunchKind::ContinueFrom {
+            run_id: pred.clone(),
+            node: String::new(),
+        },
+        None => apb_engine::gate::launch::LaunchKind::Start,
+    };
+    let launch = match launch_handoff.as_deref() {
+        Some(path) => crate::eval::case_launch(root, path, launch_kind),
+        None => launch.context(launch_kind),
+    };
     if supervise {
         // The detached child has no terminal, so the consent is obtained
         // here, against the same gate the child runs, and forwarded with the
@@ -727,15 +768,22 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             params: parsed.clone(),
             ..Default::default()
         };
-        let (granted, start_version) = match gate_run(root, name, version, true, &mut probe, &how) {
-            Ok(g) => g,
-            Err(msg) => {
-                eprintln!("run failed: {msg}");
-                return ExitCode::from(2);
-            }
+        let (granted, start_version) =
+            match gate_run(root, name, version, true, &mut probe, &how, &launch) {
+                Ok(g) => g,
+                Err(msg) => {
+                    eprintln!("run failed: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
+        // The child gets the launch decision and the consent in a handoff
+        // file (never on argv), with the version and choice this gate made:
+        // its own gate makes no draw and must reach the same permit.
+        let Some(grant) = probe.launch.take() else {
+            eprintln!("run failed: the run gate gave no launch grant");
+            return ExitCode::from(2);
         };
-        // The child runs the version this gate chose, so its own gate pins
-        // the same tree the consent above was given for.
+        let requested = version;
         let version = start_version.as_deref();
         let budget = match crate::budget::prestart(root, name, version, execution_name, budget) {
             Ok(b) => b.budget,
@@ -762,16 +810,41 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             .into_iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
+        let handoff = apb_engine::launch_handoff::Handoff::Supervise {
+            grant: apb_engine::gate::launch::HandoffGrant {
+                record: grant.record.clone(),
+                binding: apb_engine::gate::launch::HandoffBinding::Nonce {
+                    nonce: grant.nonce.clone().unwrap_or_default(),
+                },
+                // The driver reads the config dir this check read.
+                config_dir: apb_core::config::config_dir(),
+            },
+            version: grant.version.clone().unwrap_or_default(),
+            choice: grant
+                .choice
+                .unwrap_or(apb_engine::gate::launch::Choice::Explicit),
+            consent: granted.map(|g| apb_engine::launch_handoff::ForwardedConsent {
+                by: g.by,
+                nonce: g.nonce,
+            }),
+        };
+        let handoff = match apb_engine::launch_handoff::write(root, &handoff) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("run failed: cannot hand the launch over: {e}");
+                return ExitCode::from(2);
+            }
+        };
         return spawn_detached_supervised(
             root,
             name,
-            version,
+            requested,
             instruction.as_deref(),
             &param_args,
             allow_shared_workdir,
             continued_from.as_deref(),
             worktree.as_deref(),
-            granted.as_ref(),
+            &handoff,
             budget.as_ref(),
             notify.as_ref(),
         );
@@ -793,7 +866,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     opts.eval = eval;
     // The consent and the `expected_*` pins come from the run gate
     // (`gate_run`).
-    let start_version = match gate_run(root, name, version, false, &mut opts, &how) {
+    let start_version = match gate_run(root, name, version, false, &mut opts, &how, &launch) {
         Ok((_, v)) => v,
         Err(msg) => {
             eprintln!("run failed: {msg}");
@@ -931,10 +1004,19 @@ pub(crate) fn spawn_detached_supervised(
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
     worktree: Option<&str>,
-    consent: Option<&crate::consent::Granted>,
+    handoff: &Path,
     budget: Option<&apb_core::budget::BudgetRequest>,
     notify: Option<&apb_core::notify::NotifyRequest>,
 ) -> ExitCode {
+    // Whatever happens below, the handoff never outlives this call: the
+    // child deletes it when it takes it, this removes it otherwise.
+    struct Discard<'a>(&'a Path);
+    impl Drop for Discard<'_> {
+        fn drop(&mut self) {
+            apb_engine::launch_handoff::discard(self.0);
+        }
+    }
+    let _discard = Discard(handoff);
     let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -968,10 +1050,7 @@ pub(crate) fn spawn_detached_supervised(
     if let Some(tree) = worktree {
         cmd.arg("--worktree").arg(tree);
     }
-    if let Some(granted) = consent {
-        cmd.arg("--consent").arg(&granted.by);
-        cmd.arg("--consent-nonce").arg(&granted.nonce);
-    }
+    cmd.arg("--launch-handoff").arg(handoff);
     if let Some(b) = budget {
         cmd.args(crate::budget::BudgetFlags::args_of(b));
     }
@@ -1037,7 +1116,7 @@ pub(crate) fn drive_supervised_child(
     allow_shared_workdir: bool,
     continued_from: Option<String>,
     worktree: Option<String>,
-    consent: Option<(String, String)>,
+    launch_handoff: Option<&Path>,
     handshake: &Path,
     budget: &crate::budget::BudgetFlags,
     notify: &crate::notify::NotifyFlags,
@@ -1066,13 +1145,47 @@ pub(crate) fn drive_supervised_child(
         notify,
     }
     .options();
-    // The consent the parent obtained, checked against this process's own
+    // The launch decision and the consent the parent obtained, from the
+    // handoff its parent wrote: each checked against this process's own
     // gate by its nonce, so a tree that changed in between is refused.
-    let how = match consent {
-        Some((by, nonce)) => crate::consent::CliConsent::Forwarded { by, nonce },
-        None => crate::consent::CliConsent::None,
+    // Without a valid handoff this process is the CLI without a terminal.
+    let kind = match &opts.continued_from {
+        Some(pred) => apb_engine::gate::launch::LaunchKind::ContinueFrom {
+            run_id: pred.clone(),
+            node: String::new(),
+        },
+        None => apb_engine::gate::launch::LaunchKind::Start,
     };
-    let start_version = match gate_run(root, name, version, true, &mut opts, &how) {
+    let mut launch = apb_engine::gate::launch::LaunchContext::new(
+        apb_engine::gate::launch::Initiator::cli(false),
+        kind,
+    );
+    let mut how = crate::consent::CliConsent::None;
+    let parent = apb_engine::launch_handoff::parent_pid();
+    match launch_handoff.map(|p| apb_engine::launch_handoff::take(root, p, parent)) {
+        Some(Ok(apb_engine::launch_handoff::Handoff::Supervise {
+            grant,
+            version: v,
+            choice,
+            consent,
+        })) => {
+            launch = launch
+                .confirmed(Some(
+                    apb_engine::gate::launch::LaunchConfirmation::Forwarded { handoff: grant },
+                ))
+                .fixed(Some(v), Some(choice.as_str()));
+            if let Some(c) = consent {
+                how = crate::consent::CliConsent::Forwarded {
+                    by: c.by,
+                    nonce: c.nonce,
+                };
+            }
+        }
+        Some(Ok(_)) => eprintln!("apb: the launch handoff is not a supervised start's"),
+        Some(Err(e)) => eprintln!("apb: launch handoff refused: {e}"),
+        None => {}
+    }
+    let start_version = match gate_run(root, name, version, true, &mut opts, &how, &launch) {
         Ok((_, v)) => v,
         Err(msg) => {
             let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
@@ -1110,6 +1223,7 @@ pub(crate) struct DriveRunArgs<'a> {
     pub(crate) by: Option<&'a str>,
     pub(crate) pause_seq: Option<u64>,
     pub(crate) budget_json: Option<&'a str>,
+    pub(crate) launch_handoff: Option<&'a Path>,
 }
 
 /// Body of the hidden `__drive-run` subcommand: the detached driver process.
@@ -1130,7 +1244,24 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
         by,
         pause_seq,
         budget_json,
+        launch_handoff,
     } = *args;
+    // The resume's launch grant, from the handoff its parent wrote; without
+    // a valid one the engine continues only a run that needs none.
+    let launch = launch_handoff.and_then(|path| {
+        match apb_engine::launch_handoff::take(root, path, apb_engine::launch_handoff::parent_pid())
+        {
+            Ok(apb_engine::launch_handoff::Handoff::Resume(grant)) => Some(grant),
+            Ok(_) => {
+                eprintln!("apb: the launch handoff is not a resume's");
+                None
+            }
+            Err(e) => {
+                eprintln!("apb: launch handoff refused: {e}");
+                None
+            }
+        }
+    });
     let budget = match budget_json.map(serde_json::from_str::<apb_engine::budget::BudgetResume>) {
         Some(Err(e)) => Err(apb_engine::error::EngineError::Invalid(format!(
             "unreadable budget change: {e}"
@@ -1139,7 +1270,7 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
         None => Ok(None),
     };
     let res = if resume && let Some(seq) = pause_seq {
-        apb_engine::scheduler::resume_pause(root, run_id, seq)
+        apb_engine::scheduler::resume_pause(root, run_id, seq, launch.as_ref())
     } else if resume {
         let by = by
             .and_then(apb_engine::pause::PauseBy::parse)
@@ -1153,6 +1284,7 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
                     allow_environment_drift,
                     by,
                     budget: budget.as_ref(),
+                    launch: launch.as_ref(),
                 },
             )
         })
@@ -1352,6 +1484,20 @@ fn run_detail_text(
     );
     if view.driver_dead() {
         say!("  driver dead");
+    }
+    if let Some(l) = apb_engine::gate::launch::run_authorization(&run_dir) {
+        let how = l
+            .confirmation
+            .as_deref()
+            .map(|c| format!(", confirmed by {c}"))
+            .unwrap_or_default();
+        say!(
+            "  launch: {} by {}{how}; policy {} ({})",
+            l.kind,
+            sanitize_for_terminal(&l.initiator, QUESTION_TEXT_MAX),
+            l.policy,
+            sanitize_for_terminal(&l.sources.join(", "), QUESTION_TEXT_MAX)
+        );
     }
     if let Some(p) = view.pause() {
         crate::pause::print_block(p);
@@ -1581,6 +1727,7 @@ pub(crate) fn resume_cmd(
     allow_environment_drift: bool,
     confirm_irreversible: Option<String>,
     budget: &crate::budget::ResumeBudgetFlags,
+    launch: &crate::launch::LaunchFlags,
 ) -> ExitCode {
     let budget = match budget.request() {
         Ok(b) => b,
@@ -1589,10 +1736,28 @@ pub(crate) fn resume_cmd(
             return ExitCode::from(2);
         }
     };
+    // The launch policy of a run never authorized (one an older apb
+    // started): the CLI's own decision table, separate from the origin and
+    // trust checks `apb resume` keeps not making.
+    let ctx = launch.context(apb_engine::gate::launch::LaunchKind::Resume {
+        run_id: run_id.to_string(),
+    });
+    let grant = match crate::launch::with_prompt(&ctx, |c| {
+        apb_engine::resume_launch::check_resume_launch(root, run_id, c)
+    }) {
+        Ok(g) => g,
+        // A run that does not exist fails below with the engine's own error.
+        Err(v) if v["policy"] == "not_found" => None,
+        Err(refusal) => {
+            eprintln!("resume {}", crate::launch::refusal_message(&refusal));
+            return ExitCode::from(2);
+        }
+    };
     let req = apb_engine::ResumeRequest {
         from_node,
         allow_environment_drift,
         budget: budget.as_ref(),
+        launch: grant.as_ref(),
         ..apb_engine::ResumeRequest::operator()
     };
     // 0.24.0 irreversible consent: a run of an irreversible tree with no
@@ -1683,9 +1848,20 @@ fn resume_failed(e: &apb_engine::EngineError) -> ExitCode {
 
 /// `apb resume --all` (issue #200): resumes what a lost driver or a passed
 /// pause `until` left waiting, one line per run it considered.
-pub(crate) fn resume_all_cmd(root: &Path) -> ExitCode {
+pub(crate) fn resume_all_cmd(root: &Path, launch: &crate::launch::LaunchFlags) -> ExitCode {
     use apb_engine::pause::ResumeAllAction;
-    match apb_engine::pause::resume_all(root) {
+    // Each run never authorized meets this CLI's decision table: a person
+    // at the terminal is asked per run, a nonce flag matches at most one.
+    let ask = |run_id: &str, refusal: Option<&serde_json::Value>| {
+        let ctx = launch.context(apb_engine::gate::launch::LaunchKind::ResumeAll {
+            run_id: run_id.to_string(),
+        });
+        match refusal {
+            None => Some(ctx),
+            Some(r) => crate::launch::prompt_retry(&ctx, r),
+        }
+    };
+    match apb_engine::pause::resume_all_as(root, &ask) {
         Ok(entries) => {
             if entries.is_empty() {
                 println!("nothing to resume");
@@ -1705,6 +1881,9 @@ pub(crate) fn resume_all_cmd(root: &Path) -> ExitCode {
                         format!("left as is, the workdir is busy: {detail}")
                     }
                     ResumeAllAction::LeftPaused => "left paused".to_string(),
+                    ResumeAllAction::LaunchRefused { detail } => {
+                        format!("left: launch policy: {detail}")
+                    }
                 };
                 println!("{}  {what}", e.run_id);
             }

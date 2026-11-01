@@ -34,6 +34,7 @@ pub mod graphutil;
 pub mod isolation;
 pub mod judge;
 pub mod known_problems;
+pub mod launch;
 pub mod list;
 pub mod migration;
 pub mod model_check;
@@ -87,4 +88,42 @@ pub mod zcode_tasks_index;
 pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A config dir of a unit test's own: `APB_CONFIG_DIR` points at a fresh
+/// directory under [`env_test_lock`] until drop, so a test that writes
+/// launch floors, trust or the projects registry never touches the
+/// developer's real config dir.
+#[cfg(test)]
+pub(crate) struct TestConfig {
+    _dir: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_config() -> TestConfig {
+    let lock = env_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::var_os("APB_CONFIG_DIR");
+    // SAFETY: env mutation is serialized by the lock, held until drop.
+    unsafe { std::env::set_var("APB_CONFIG_DIR", dir.path()) };
+    TestConfig {
+        _dir: dir,
+        prev,
+        _lock: lock,
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfig {
+    fn drop(&mut self) {
+        // SAFETY: still under the lock (the guard drops after this body).
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
+                None => std::env::remove_var("APB_CONFIG_DIR"),
+            }
+        }
+    }
 }

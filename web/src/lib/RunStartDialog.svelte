@@ -17,10 +17,13 @@
   // starts checked when runs here notify by default, and a start sends the
   // choice only when it differs from that. Run hands the budget and the
   // input to `onrun`; the page starts the run (and its irreversible-consent
-  // dialog, when needed).
+  // dialog, when needed). When the playbook's launch policy holds agents
+  // back (`ask` or `deny`), the dialog says so: the click is a person's
+  // launch, which the policy never holds.
   import { untrack } from 'svelte'
   import { fetchEstimate, fetchMemory, fetchNotify, type RunBudget, type RunInput } from './api'
-  import type { MachineNotify, RunEstimate } from './api.gen'
+  import type { LaunchView, MachineNotify, RunEstimate } from './api.gen'
+  import { launchDetail, launchSummary } from './fit'
   import { NOTIFY_UNREADABLE, onWords, startNotify, targetText } from './notify'
   import type { PlaybookParam } from './types'
   import {
@@ -55,6 +58,7 @@
     params = [],
     busy = false,
     retry = false,
+    launch = null,
     onrun,
   }: {
     open?: boolean
@@ -64,6 +68,7 @@
     params?: PlaybookParam[]
     busy?: boolean
     retry?: boolean
+    launch?: LaunchView | null
     onrun: (budget: RunBudget | undefined, input: RunInput) => void
   } = $props()
 
@@ -216,6 +221,15 @@
         The estimate comes from comparable past runs of this version on this machine.
       </Dialog.Description>
     </Dialog.Header>
+
+    {#if launch && (launch.policy !== 'allow' || launch.floor || launch.problem)}
+      <section class="launch" data-testid="run-start-launch">
+        <p><strong>Launch policy {launch.policy}:</strong> {launchSummary(launch)}.</p>
+        <p class="muted hint" data-testid="run-start-launch-detail">
+          {launchDetail(launch)}. Starting it here is your own launch.
+        </p>
+      </section>
+    {/if}
 
     <section class="estimate" data-testid="run-start-estimate">
       {#if loadError}
@@ -434,5 +448,17 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .launch {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in oklab, var(--warning) 40%, transparent);
+    border-radius: var(--radius-md, 6px);
+    background: color-mix(in oklab, var(--warning) 8%, transparent);
+  }
+  .launch p {
+    margin: 0;
   }
 </style>

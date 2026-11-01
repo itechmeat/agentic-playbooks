@@ -52,6 +52,18 @@ pub fn read_id(root: &Path) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// Whether `id` has the shape apb mints: `ws-` and lowercase hex (at most
+/// 64 digits). Anything else in `workspace.local` is not an id apb wrote.
+pub fn is_well_formed_id(id: &str) -> bool {
+    id.strip_prefix("ws-").is_some_and(|hex| {
+        !hex.is_empty()
+            && hex.len() <= 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
 /// Reads or creates the local `workspace_id` in `<root>/.apb/workspace.local`.
 /// Also ensures that `<root>/.apb/.gitignore` ignores this file (otherwise a
 /// clone would drag the id along and collide with the original) and the rest

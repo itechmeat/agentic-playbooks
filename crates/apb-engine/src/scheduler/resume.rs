@@ -376,6 +376,7 @@ pub fn resume_detached_by(
             allow_environment_drift,
             by,
             budget: None,
+            launch: None,
         },
     )
 }
@@ -389,6 +390,12 @@ pub struct ResumeRequest<'a> {
     pub allow_environment_drift: bool,
     pub by: PauseBy,
     pub budget: Option<&'a crate::budget::BudgetResume>,
+    /// The launch check's grant for a run without an authorization (see
+    /// [`crate::resume_launch::check_resume_launch`]): committed under the
+    /// run's event lock with `run_resumed`, rechecked against the run as it
+    /// is then. `None` for an authorized run, and for an unchecked resume,
+    /// which continues only a run whose policy is `allow`.
+    pub launch: Option<&'a crate::gate::launch::LaunchGrant>,
 }
 
 impl ResumeRequest<'_> {
@@ -399,6 +406,7 @@ impl ResumeRequest<'_> {
             allow_environment_drift: false,
             by: PauseBy::Operator,
             budget: None,
+            launch: None,
         }
     }
 }
@@ -421,9 +429,11 @@ pub(crate) fn resume_detached_pause(
     root: &Path,
     run_id: &str,
     pause_seq: u64,
+    launch: Option<&crate::gate::launch::LaunchGrant>,
 ) -> Result<u32, EngineError> {
     let req = ResumeRequest {
         by: PauseBy::Engine,
+        launch,
         ..ResumeRequest::operator()
     };
     resume_detached_inner(root, run_id, &req, Some(pause_seq))
@@ -440,6 +450,7 @@ fn resume_detached_inner(
         allow_environment_drift,
         by,
         budget,
+        launch,
     } = *req;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -448,6 +459,10 @@ fn resume_detached_inner(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
+    // The launch authorization, checked here without writing anything, so
+    // a refusal reaches the caller; the driver commits it.
+    crate::resume_launch::verify_resume_launch(root, run_id, launch)
+        .map_err(EngineError::Invalid)?;
     // Synchronous preflight: surface a drift refusal HERE rather than letting
     // the detached child hit it with null stdio. The child re-runs the same
     // check (it is the authoritative one and writes the accepted events when
@@ -472,7 +487,18 @@ fn resume_detached_inner(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| EngineError::Invalid(format!("cannot pass the budget change on: {e}")))?;
-    let pid = crate::driver::spawn_detached_driver(
+    // A grant reaches the driver through a handoff file it reads once and
+    // deletes; never on its argv.
+    let handoff = match launch {
+        Some(g) => Some(
+            crate::launch_handoff::write(root, &crate::launch_handoff::Handoff::Resume(g.clone()))
+                .map_err(|e| {
+                    EngineError::Invalid(format!("cannot hand the launch grant over: {e}"))
+                })?,
+        ),
+        None => None,
+    };
+    let spawned = crate::driver::spawn_detached_driver(
         root,
         run_id,
         &crate::driver::DriverArgs {
@@ -482,9 +508,27 @@ fn resume_detached_inner(
             by: Some(by),
             pause_seq,
             budget_json: budget_json.as_deref(),
+            launch_handoff: handoff.as_deref(),
         },
-    )
-    .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
+    );
+    let pid = match spawned {
+        Ok(pid) => pid,
+        Err(e) => {
+            if let Some(h) = &handoff {
+                crate::launch_handoff::discard(h);
+            }
+            return Err(EngineError::Invalid(format!(
+                "cannot start the detached run driver: {e}"
+            )));
+        }
+    };
+    // The driver checks that its parent wrote the handoff: wait until it
+    // took it, so this process outlives that check.
+    if let Some(h) = &handoff
+        && !crate::launch_handoff::await_consumed(h, crate::launch_handoff::CONSUME_WAIT)
+    {
+        crate::launch_handoff::discard(h);
+    }
     // As in `hand_to_detached_driver`: name the driver before returning, so a
     // stop issued the moment this call comes back sees a live driver instead of
     // finalizing a run the child is about to drive.
@@ -598,6 +642,7 @@ pub fn resume_by(
             allow_environment_drift,
             by,
             budget: None,
+            launch: None,
         },
     )
 }
@@ -619,7 +664,12 @@ pub fn resume_req(
 /// checked under the run's event lock, the lock `request_pause` and
 /// `stop_run` journal under: a pause, resume or stop that came after the
 /// waker's own check makes this a `Conflict` that journals nothing.
-pub fn resume_pause(root: &Path, run_id: &str, pause_seq: u64) -> Result<RunResult, EngineError> {
+pub fn resume_pause(
+    root: &Path,
+    run_id: &str,
+    pause_seq: u64,
+    launch: Option<&crate::gate::launch::LaunchGrant>,
+) -> Result<RunResult, EngineError> {
     // A superseded pause ends here, before any check that could journal a
     // refusal (a consent, a busy workdir, a resume plan after a stop).
     pause_still_holds(root, run_id, pause_seq)?;
@@ -627,6 +677,7 @@ pub fn resume_pause(root: &Path, run_id: &str, pause_seq: u64) -> Result<RunResu
     crate::budget::check_resume(root, run_id, None, PauseBy::Engine)?;
     let req = ResumeRequest {
         by: PauseBy::Engine,
+        launch,
         ..ResumeRequest::operator()
     };
     resume_inner_checked(root, run_id, &req, false, Some(pause_seq))
@@ -704,6 +755,7 @@ fn journal_resumed(
 
 /// What [`journal_resumed`] checks the journal against and adds to it.
 struct ResumeJournal<'a> {
+    root: &'a Path,
     run_id: &'a str,
     /// The lifecycle the resume planned against.
     planned: Option<u64>,
@@ -711,13 +763,17 @@ struct ResumeJournal<'a> {
     pause_seq: Option<u64>,
     by: PauseBy,
     budget: Option<&'a crate::budget::BudgetResume>,
+    /// The launch grant to commit with `run_resumed`.
+    launch: Option<&'a crate::gate::launch::LaunchGrant>,
+    /// A child reattached by its parent's resume.
+    nested: bool,
 }
 
 fn try_journal_resumed(
     log: &mut EventLog,
     run_dir: &Path,
     plan: &ResumeJournal<'_>,
-    payload: EventPayload,
+    mut payload: EventPayload,
 ) -> Result<bool, EngineError> {
     let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)?;
     let events = read_all(run_dir)?;
@@ -728,6 +784,17 @@ fn try_journal_resumed(
     };
     if let Some(why) = refusal {
         return Err(EngineError::Conflict(why.into()));
+    }
+    // The launch authorization is committed here, under the event lock and
+    // after the supersede checks, so a refused or superseded resume leaves
+    // none behind.
+    if !plan.nested {
+        let record =
+            crate::resume_launch::commit_resume_launch(plan.root, plan.run_id, plan.launch)
+                .map_err(EngineError::Invalid)?;
+        if let EventPayload::RunResumed { launch, .. } = &mut payload {
+            *launch = record;
+        }
     }
     let budget = crate::budget::resume::resume_events(&events, plan.budget, plan.by)?;
     let changed = !budget.is_empty();
@@ -832,6 +899,7 @@ pub(crate) fn resume_inner(
         allow_environment_drift,
         by,
         budget: None,
+        launch: None,
     };
     resume_inner_checked(root, run_id, &req, allow_shared_workdir, None)
 }
@@ -851,6 +919,7 @@ fn resume_inner_checked(
         allow_environment_drift,
         by,
         budget,
+        launch,
     } = *req;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -885,7 +954,6 @@ fn resume_inner_checked(
         crate::manifest::write(&run_dir, &m)?;
     }
     let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
-    let cfg = crate::run_config::read_run_config(&run_dir)?;
     // Opening the log refuses a journal with an unknown event (one a newer
     // apb wrote) that no checkpoint settles; one that is settled is skipped,
     // and said so once.
@@ -983,17 +1051,24 @@ fn resume_inner_checked(
         &mut log,
         &run_dir,
         &ResumeJournal {
+            root,
             run_id,
             planned,
             pause_seq,
             by,
             budget,
+            launch,
+            // A child reattached by its parent's resume is covered by the
+            // parent (its pin, see `run_playbook_node`), not by a check of
+            // its own.
+            nested: allow_shared_workdir,
         },
         &mut guard,
         EventPayload::RunResumed {
             from_node: decision.start_node.clone(),
             by: Some(by),
             explicit: decision.reason == ResumeReason::ExplicitFromNode,
+            launch: None,
         },
     )?;
     // A budget set on a run that started without one needs the run's
@@ -1002,6 +1077,9 @@ fn resume_inner_checked(
     if budget_changed {
         crate::budget::resume::ensure_estimate(root, &run_dir);
     }
+    // Read after `run_resumed`: the launch commit may have persisted the
+    // run's child pins, which the drive must spawn from.
+    let cfg = crate::run_config::read_run_config(&run_dir)?;
     // The persisted mode, as a resume drives it (`RunMode::on_resume`): an
     // agent-supervised run keeps its supervisor agent (heartbeat monitoring
     // and parking both continue), a session-supervised one resumes

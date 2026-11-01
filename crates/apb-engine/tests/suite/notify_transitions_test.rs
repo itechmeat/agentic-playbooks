@@ -415,6 +415,7 @@ fn a_notification_that_failed_as_the_run_ended_is_reported_as_given_up() {
             from_node: "s".into(),
             by: None,
             explicit: false,
+            launch: None,
         },
     ));
     let view = RunNotify::from_events(&events, NOW).unwrap();

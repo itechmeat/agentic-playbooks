@@ -540,27 +540,14 @@ fn a_start_from_inside_a_run_cannot_consent_with_the_flag() {
         .success();
 }
 
-/// The hidden `__drive-supervised --consent` accepts only `cli` and
-/// `cli_flag`, and only together with the nonce.
+/// The detached supervised child takes its consent and its launch decision
+/// only from a handoff its own parent wrote: the consent never travels on
+/// argv any more, and a handoff another process wrote is refused, leaving
+/// the child without a consent, so nothing starts.
 #[test]
-fn drive_supervised_accepts_only_the_cli_consents() {
+fn drive_supervised_takes_its_consent_only_from_its_parents_handoff() {
     let dir = seeded_irreversible();
     let handshake = dir.path().join("hs.txt");
-    playbook()
-        .args([
-            "__drive-supervised",
-            "rel",
-            "--consent",
-            "dashboard",
-            "--consent-nonce",
-            "x",
-            "--handshake",
-        ])
-        .arg(&handshake)
-        .current_dir(dir.path())
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("invalid value 'dashboard'"));
     playbook()
         .args([
             "__drive-supervised",
@@ -573,7 +560,60 @@ fn drive_supervised_accepts_only_the_cli_consents() {
         .current_dir(dir.path())
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("--consent-nonce"));
+        .stderr(predicate::str::contains("--consent"));
+    // A handoff whose writer (this test) is not the child's parent.
+    use apb_engine::gate::launch::{Choice, HandoffBinding, HandoffGrant};
+    let handoff = apb_engine::launch_handoff::write(
+        dir.path(),
+        &apb_engine::launch_handoff::Handoff::Supervise {
+            grant: HandoffGrant {
+                record: apb_core::launch::LaunchRecord {
+                    kind: "start".into(),
+                    initiator: "cli_terminal".into(),
+                    confirmation: None,
+                    policy: apb_core::launch::LaunchPolicy::Allow,
+                    sources: vec![],
+                },
+                binding: HandoffBinding::Nonce { nonce: "x".into() },
+                config_dir: None,
+            },
+            version: "1.0.0".into(),
+            choice: Choice::Current,
+            consent: Some(apb_engine::launch_handoff::ForwardedConsent {
+                by: "cli".into(),
+                nonce: "x".into(),
+            }),
+        },
+    )
+    .unwrap();
+    // Spawned through a shell, so its parent is not the handoff's writer.
+    let line = [
+        crate::common::apb_bin().display().to_string(),
+        "__drive-supervised".into(),
+        "rel".into(),
+        "--param".into(),
+        "who=x".into(),
+        "--launch-handoff".into(),
+        handoff.display().to_string(),
+        "--handshake".into(),
+        handshake.display().to_string(),
+    ]
+    .map(|a| format!("'{a}'"))
+    .join(" ");
+    assert_cmd::Command::new("sh")
+        .args(["-c", &format!("{line}; exit $?")])
+        .env("APB_CONFIG_DIR", crate::common::sandbox_config_dir())
+        .env_remove("APB_RUN_ID")
+        .env_remove("APB_HOST_TASK")
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "not written by this process's parent",
+        ));
+    let reported = std::fs::read_to_string(&handshake).unwrap();
+    assert!(reported.contains("irreversible"), "{reported}");
+    assert!(!handoff.exists(), "a refused handoff is still deleted");
     assert!(no_runs(dir.path()));
 }
 

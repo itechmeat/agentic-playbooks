@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use crate::content::TreeFile;
 use crate::fsutil::atomic_write;
+use crate::launch::floor::{self, FloorKey, SaveAuthority, SaveChannel};
 use crate::registry::{Registry, is_frozen_dir, is_safe_segment, list_versions, parse_version};
 use crate::schema::{Playbook, SchemaError};
 use crate::validate::{Issue, Severity, ValidationContext, validate};
@@ -137,6 +138,7 @@ pub fn create_version_with_override(
             make_current,
             imported_scripts: None,
             imported: None,
+            channel: SaveChannel::Person,
         },
     )
 }
@@ -155,6 +157,8 @@ struct NewVersion<'a> {
     make_current: bool,
     imported_scripts: Option<&'a [TreeFile]>,
     imported: Option<&'a ImportProvenance>,
+    /// The channel the version comes through (its launch floor check).
+    channel: SaveChannel,
 }
 
 fn create_version_impl(
@@ -220,6 +224,11 @@ fn create_version_impl(
 
     validate_playbook(root, &playbook)?;
 
+    let authority = SaveAuthority {
+        key: FloorKey::project_of(root, id)?,
+        channel: req.channel,
+    };
+
     if is_new {
         fs::create_dir_all(&playbook_dir)?;
     }
@@ -243,7 +252,14 @@ fn create_version_impl(
         Some(own) => Some(own.clone()),
         None => inherited,
     };
-    let version_path = match commit_version_dir(&playbook_dir, &version, &playbook, scripts, bump) {
+    let version_path = match commit_version_dir(
+        &playbook_dir,
+        &version,
+        &playbook,
+        scripts,
+        bump,
+        &authority,
+    ) {
         Ok(path) => path,
         Err(e) => {
             // A playbook this call created has no version and no `current`:
@@ -381,6 +397,29 @@ pub fn save_definition(
     version_override: Option<&str>,
     make_current: bool,
 ) -> Result<Saved, VersioningError> {
+    save_definition_by(
+        root,
+        id,
+        yaml,
+        version_override,
+        make_current,
+        SaveChannel::Person,
+    )
+}
+
+/// [`save_definition`] through `channel`: an agent channel may not declare
+/// a looser `agent_launch` than the playbook's launch floor
+/// (`launch_policy_loosened`), and the dashboard editor's save lowers the
+/// floor only to a lowering the person confirmed (see
+/// [`crate::launch::floor`]).
+pub fn save_definition_by(
+    root: &Path,
+    id: &str,
+    yaml: &str,
+    version_override: Option<&str>,
+    make_current: bool,
+    channel: SaveChannel,
+) -> Result<Saved, VersioningError> {
     let base = if is_safe_segment(id) {
         read_current_pointer(&playbooks_dir(root).join(id))
     } else {
@@ -395,8 +434,19 @@ pub fn save_definition(
             unchanged: true,
         });
     }
-    let version =
-        create_version_with_override(root, id, yaml, None, version_override, make_current)?;
+    let version = create_version_impl(
+        root,
+        id,
+        &NewVersion {
+            yaml,
+            base_version: None,
+            version_override,
+            make_current,
+            imported_scripts: None,
+            imported: None,
+            channel,
+        },
+    )?;
     approve_written(root, id, &version, base.as_deref(), "saved");
     Ok(Saved {
         version,
@@ -490,6 +540,7 @@ pub fn save_imported(
                 ImportedScripts::CarryCurrent => None,
             },
             imported: Some(provenance),
+            channel: SaveChannel::Person,
         },
     )?;
     // No approve_written here, by design: an import cannot vouch for a
@@ -694,12 +745,18 @@ pub(crate) fn create_patch_version_with(
     playbook.id = id.to_string();
     validate_playbook(root, &playbook)?;
 
+    // A patch is always an agent's (the supervisor, the forward patch).
+    let authority = SaveAuthority {
+        key: FloorKey::project_of(root, id)?,
+        channel: SaveChannel::Agent,
+    };
     let version_path = commit_version_dir(
         &playbook_dir,
         &version,
         &playbook,
         VersionScripts::CarryFrom(Some(base_version)),
         VersionBump::Patch,
+        &authority,
     )?;
     let version = version_path
         .file_name()
@@ -859,6 +916,8 @@ pub fn delete_playbook(root: &Path, id: &str, ts_millis: u128) -> Result<PathBuf
         )));
     }
 
+    // The floor outlives the store directory: a recreate of the id meets it.
+    floor::keep_before_removal(&FloorKey::project_of(root, id)?, &src)?;
     fs::rename(&src, &dst)?;
     Ok(dst)
 }
@@ -1013,6 +1072,17 @@ fn read_version_yaml(base: &Path, id: &str, version: &str) -> Result<String, Ver
 /// Errors: `NotFound` when nothing in the trash matches, `Conflict` when a
 /// playbook with that id exists again (nothing is moved then).
 pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, VersioningError> {
+    restore_from_trash_by(root, name, SaveChannel::Person)
+}
+
+/// [`restore_from_trash`] through `channel`: the restored copy is published
+/// like a save (see [`crate::launch::floor::publish`]); an agent channel may
+/// not bring back a `current` that declares looser than the floor.
+pub fn restore_from_trash_by(
+    root: &Path,
+    name: &str,
+    channel: SaveChannel,
+) -> Result<RestoredPlaybook, VersioningError> {
     if !is_safe_segment(name) {
         return Err(VersioningError::NotFound(format!("`{name}` in trash")));
     }
@@ -1038,8 +1108,19 @@ pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, V
     }
     // A playbook created with the same id between the check and the move
     // makes the rename fail (the target is not empty), which is the same
-    // conflict.
-    match fs::rename(&src, &dst) {
+    // conflict. The rename is a publication: the floor is checked and
+    // raised from what comes back (its `current` and every version) first.
+    let authority = SaveAuthority {
+        key: FloorKey::project_of(root, &entry.id)?,
+        channel,
+    };
+    let declared = entry.current.as_deref().and_then(|v| {
+        fs::read_to_string(src.join(v).join("playbook.yaml"))
+            .ok()
+            .and_then(|y| floor::declared_of(&y))
+    });
+    let declared = declared.max(floor::scan(&src).filter(|_| channel != SaveChannel::Agent));
+    match floor::publish(&authority, &src, declared, || fs::rename(&src, &dst))? {
         Ok(()) => {}
         Err(e)
             if matches!(
@@ -1078,6 +1159,19 @@ pub fn create_draft_in(
     yaml: &str,
     origin: crate::profile_store::PlaybookOrigin,
 ) -> Result<String, VersioningError> {
+    create_draft_in_by(parent, id, yaml, origin, SaveChannel::Person)
+}
+
+/// [`create_draft_in`] through `channel` (see [`save_definition_by`]). The
+/// floor key follows `origin`: the global store's machine-wide key, or the
+/// project that owns `parent` (`<root>/.apb`).
+pub fn create_draft_in_by(
+    parent: &Path,
+    id: &str,
+    yaml: &str,
+    origin: crate::profile_store::PlaybookOrigin,
+    channel: SaveChannel,
+) -> Result<String, VersioningError> {
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
@@ -1101,8 +1195,22 @@ pub fn create_draft_in(
         return Err(VersioningError::Validation(errors));
     }
 
-    // Atomic collision check: create the playbook folder non-recursively -
-    // if it already exists, it's a duplicate (no TOCTOU between exists() and write).
+    let key = match origin {
+        crate::profile_store::PlaybookOrigin::Global => FloorKey::global(id),
+        crate::profile_store::PlaybookOrigin::Project => {
+            let owner = parent.parent().ok_or_else(|| {
+                VersioningError::NotFound(format!("the project of `{}`", parent.display()))
+            })?;
+            FloorKey::project_of(owner, id)?
+        }
+    };
+    let authority = SaveAuthority { key, channel };
+    let canonical =
+        yaml_serde::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))?;
+    // Atomic collision check first: create the playbook folder
+    // non-recursively - if it already exists, it's a duplicate (no TOCTOU
+    // between exists() and write), and nothing touches the floor. An empty
+    // folder runs nothing.
     match fs::create_dir(&playbook_dir) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -1112,12 +1220,20 @@ pub fn create_draft_in(
         }
         Err(e) => return Err(e.into()),
     }
-
-    let canonical =
-        yaml_serde::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))?;
-    let vdir = playbook_dir.join("1.0.0");
-    fs::create_dir_all(&vdir)?;
-    atomic_write(&vdir.join("playbook.yaml"), canonical.as_bytes())?;
+    // The version's file is its publication: the floor is checked and raised
+    // first, under the floor lock (see `crate::launch::floor::publish`).
+    let published = floor::publish(&authority, &playbook_dir, playbook.agent_launch, || {
+        let vdir = playbook_dir.join("1.0.0");
+        fs::create_dir_all(&vdir)?;
+        atomic_write(&vdir.join("playbook.yaml"), canonical.as_bytes())?;
+        Ok::<(), VersioningError>(())
+    });
+    if published.is_err() {
+        // Refused before anything was written: the empty folder this call
+        // made leaves again.
+        let _ = fs::remove_dir(&playbook_dir);
+    }
+    published??;
     current::move_current(&playbook_dir, &current::MoveCurrent::created("1.0.0"))
         .map_err(|e| e.into_versioning(id))?;
     Ok("1.0.0".to_string())
@@ -1273,6 +1389,7 @@ fn commit_version_dir(
     playbook: &Playbook,
     scripts: VersionScripts<'_>,
     bump: VersionBump,
+    authority: &SaveAuthority,
 ) -> Result<PathBuf, VersioningError> {
     let mut version = initial_version.to_string();
 
@@ -1289,7 +1406,20 @@ fn commit_version_dir(
         }
 
         let target = playbook_dir.join(&version);
-        match fs::rename(&tmp, &target) {
+        // The rename is the publication: the launch floor is checked and
+        // raised first, under the floor lock, so a stricter version is never
+        // runnable before its floor is durable.
+        let published = floor::publish(authority, playbook_dir, playbook.agent_launch, || {
+            fs::rename(&tmp, &target)
+        });
+        let renamed = match published {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = remove_dir_all(&tmp);
+                return Err(e.into());
+            }
+        };
+        match renamed {
             Ok(()) => return Ok(target),
             Err(e)
                 if matches!(
@@ -1431,6 +1561,7 @@ mod tests {
 
     #[test]
     fn commit_version_dir_rewrites_yaml_on_collision_bump() {
+        let _cfg = crate::test_config();
         let dir = tempfile::tempdir().unwrap();
         let playbook_dir = dir.path().join("apb");
         fs::create_dir_all(playbook_dir.join("1.0.0/scripts")).unwrap();
@@ -1447,6 +1578,10 @@ mod tests {
             &playbook,
             VersionScripts::CarryFrom(Some("1.0.0")),
             VersionBump::Minor,
+            &SaveAuthority {
+                key: FloorKey::global("implement-task"),
+                channel: SaveChannel::Person,
+            },
         )
         .unwrap();
         assert_eq!(path.file_name().unwrap().to_string_lossy(), "1.2.0");
@@ -1458,6 +1593,7 @@ mod tests {
 
     #[test]
     fn failed_first_commit_keeps_a_concurrent_writers_version() {
+        let _cfg = crate::test_config();
         let dir = tempfile::tempdir().unwrap();
         let playbook_dir = dir.path().join("apb");
         fs::create_dir_all(playbook_dir.join("1.0.0")).unwrap();
@@ -1476,6 +1612,7 @@ mod tests {
 
     #[test]
     fn frozen_playbook_refuses_new_versions_and_patches() {
+        let _cfg = crate::test_config();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         crate::registry::init_project(root).unwrap();

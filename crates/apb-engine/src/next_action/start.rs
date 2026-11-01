@@ -8,7 +8,12 @@
 //! - `acknowledge_untrusted`: the start acknowledges content nobody
 //!   approved (an approval by digest is the lasting fix);
 //! - `fix_requirement`: something must change first, said by a
-//!   [`Remedy`].
+//!   [`Remedy`];
+//! - `confirm_launch`: a person confirms an agent's launch of an `ask`
+//!   playbook by echoing the refusal's launch nonce (with its fixed version
+//!   and choice);
+//! - `launch_by_person`: only a person launches it (the dashboard, a
+//!   terminal).
 //!
 //! A fit report's items become actions through one explicit table of
 //! actionable codes ([`FIT_CODES`]), independent of the item's severity: a
@@ -131,7 +136,50 @@ pub fn from_refusal(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
     if let Some(nonce) = refusal["consent_nonce"].as_str() {
         out.push(confirm(of, &strings(refusal, consent), nonce));
     }
+    out.extend(launch_action(of, refusal));
     out
+}
+
+/// The launch action a refusal carries, on its own or beside a trust or
+/// consent refusal: `confirm_launch` with the nonce and the fixed version
+/// and choice, or `launch_by_person`.
+fn launch_action(of: StartOf<'_>, refusal: &Value) -> Option<StartAction> {
+    let policy = refusal["launch_policy"].as_str()?;
+    let sources = strings(refusal, "launch_sources").join(", ");
+    let version = refusal["launch_version"].as_str().map(str::to_string);
+    if let Some(nonce) = refusal["launch_nonce"].as_str() {
+        let mut a = of.action(
+            StartActionCode::ConfirmLaunch,
+            vec![Principal::Person, Principal::Operator, Principal::Host],
+            None,
+            format!(
+                "playbook `{}` is `{policy}` for agents ({sources}); a person confirms this launch",
+                of.playbook
+            ),
+        );
+        a.version = version.or(a.version);
+        a.args = vec![given("confirm_launch", nonce)];
+        if let Some(v) = refusal["launch_version"].as_str() {
+            a.args.push(given("launch_version", v));
+        }
+        if let Some(c) = refusal["launch_choice"].as_str() {
+            a.args.push(given("launch_choice", c));
+        }
+        return Some(a);
+    }
+    refusal["launch_by_person"].as_bool()?.then(|| {
+        let mut a = of.action(
+            StartActionCode::LaunchByPerson,
+            vec![Principal::Person],
+            None,
+            format!(
+                "playbook `{}` is `{policy}` for agents ({sources}); a person launches it from the dashboard or a terminal",
+                of.playbook
+            ),
+        );
+        a.version = version.or(a.version);
+        a
+    })
 }
 
 /// `confirm_irreversible_start`: a person agrees to `sources` by echoing
@@ -271,6 +319,7 @@ pub fn check_start(
     acknowledge_untrusted: bool,
     supervised: bool,
     confirmation: Option<&crate::consent::Confirmation>,
+    launch: &crate::gate::launch::LaunchContext,
 ) -> Result<(RunPermit, Option<&'static str>), StartRefusal> {
     let of = StartOf::of(wref);
     let refused = |refusal: Value| {
@@ -278,8 +327,8 @@ pub fn check_start(
         actions.sort_by_key(|a| a.code);
         StartRefusal { refusal, actions }
     };
-    let permit =
-        crate::gate::check_run(root, wref, acknowledge_untrusted, supervised).map_err(refused)?;
+    let permit = crate::gate::check_run(root, wref, acknowledge_untrusted, supervised, launch)
+        .map_err(refused)?;
     let note = permit.check_confirmation(confirmation).map_err(refused)?;
     Ok((permit, note))
 }
@@ -489,7 +538,9 @@ mod tests {
             [
                 "confirm_irreversible_start",
                 "fix_requirement",
-                "acknowledge_untrusted"
+                "acknowledge_untrusted",
+                "confirm_launch",
+                "launch_by_person"
             ]
         );
         for c in StartActionCode::ALL {

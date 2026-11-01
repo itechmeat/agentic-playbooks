@@ -9,6 +9,7 @@
 //! shared `common::env_lock`, with `VarGuard`s that restore the prior value on
 //! drop so a mutation never races or leaks into another module.
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::path::Path;
 
 use apb_core::connector::config::{self, account_digest};
@@ -240,7 +241,14 @@ fn unapproved_connector_refused_even_with_acknowledge() {
     // The connector digest is NOT approved. acknowledge_untrusted must NOT
     // bypass connector trust (it guards secret egress).
 
-    let refusal = check_run(root.path(), &wref(), true, false).unwrap_err();
+    let refusal = check_run(
+        root.path(),
+        &wref(),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_connector_requires_approve");
     let connectors = refusal["connectors"].as_array().expect("connectors list");
     assert!(
@@ -265,7 +273,14 @@ fn approving_connector_digest_passes_connector_check() {
     // Accounts are still unapproved: the gate moves PAST the connector check
     // and refuses on the account instead, proving the connector check passed.
 
-    let refusal = check_run(root.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        root.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "unapproved_connector_account");
     let accounts = refusal["accounts"].as_array().expect("accounts list");
     assert!(
@@ -289,7 +304,14 @@ fn changed_account_field_refuses() {
     // and trust no longer applies (spec 7: a shared-config edit must re-approve).
     write_accounts(root.path(), "https://evil.example.com");
 
-    let refusal = check_run(root.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        root.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "unapproved_connector_account");
     let accounts = refusal["accounts"].as_array().expect("accounts list");
     assert!(
@@ -311,7 +333,14 @@ fn fully_approved_yields_permit_with_matching_maps() {
     approve_connector();
     approve_accounts(root.path(), &parsed_playbook());
 
-    let permit = check_run(root.path(), &wref(), false, false).expect("permit");
+    let permit = check_run(
+        root.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("permit");
 
     // Connector map: name -> live tree digest.
     let loaded = store::load(CONNECTOR_NAME).unwrap();
@@ -353,7 +382,14 @@ fn missing_env_var_refuses() {
     guards.push(clear_var(TOKEN_A));
     guards.push(clear_var(TOKEN_B));
 
-    let refusal = check_run(root.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        root.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "connector_env_missing");
     let missing = refusal["missing"].as_array().expect("missing list");
     assert!(
@@ -411,7 +447,13 @@ fn cmd_secret_passes_env_gate_without_executing_command() {
     // The gate must not report a missing env var for the cmd-sourced acct1,
     // and must not execute the command. It permits (acct2's env var is set by
     // `setup`, and both accounts are approved after the rewrite).
-    let result = check_run(root.path(), &wref(), false, false);
+    let result = check_run(
+        root.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    );
     assert!(result.is_ok(), "gate should permit: {result:?}");
     assert!(
         !sentinel.exists(),
@@ -480,7 +522,14 @@ fn child_pin_carries_connector_map() {
     write_pb_named(root.path(), PARENT_ID, parent_yaml());
     approve_named(PARENT_ID, parent_yaml());
 
-    let permit = check_run(root.path(), &parent_wref(), false, false).expect("permit");
+    let permit = check_run(
+        root.path(),
+        &parent_wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("permit");
 
     // The parent binds no connectors itself...
     assert!(
@@ -528,7 +577,14 @@ fn operator_launch_returns_child_pins_with_the_child_connector_map() {
     approve_accounts(root.path(), &parsed_playbook());
     write_pb_named(root.path(), PARENT_ID, parent_yaml());
 
-    let permit = check_run(root.path(), &parent_wref(), true, false).expect("the gate permits");
+    let permit = check_run(
+        root.path(),
+        &parent_wref(),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("the gate permits");
 
     assert!(
         permit.connectors.is_empty() && permit.connector_accounts.is_empty(),
@@ -560,7 +616,14 @@ fn operator_launch_refuses_an_untrusted_child_connector() {
     let _g = setup(cfg.path(), root.path(), "https://first.example.com");
     write_pb_named(root.path(), PARENT_ID, parent_yaml());
 
-    let refusal = check_run(root.path(), &parent_wref(), true, false).unwrap_err();
+    let refusal = check_run(
+        root.path(),
+        &parent_wref(),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_connector_requires_approve");
     assert!(
         refusal["connectors"]
@@ -615,8 +678,14 @@ fn zero_account_connector_warns_but_permits() {
     approve_connector();
 
     // Not a hard refusal: the gate still permits the run (finding 11).
-    let permit = check_run(root.path(), &zero_wref(), false, false)
-        .expect("a zero-account connector permits, it is not a hard refusal");
+    let permit = check_run(
+        root.path(),
+        &zero_wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("a zero-account connector permits, it is not a hard refusal");
     // It surfaces a consent-time warning naming the connector.
     assert!(
         permit.warnings.iter().any(|w| w.contains(CONNECTOR_NAME)),
@@ -683,8 +752,14 @@ fn zero_account_warning_names_binding_nodes_and_functions() {
     approve_named(ZERO_NAMED_PB_ID, zero_account_named_yaml());
     approve_connector();
 
-    let permit = check_run(root.path(), &zero_named_wref(), false, false)
-        .expect("a zero-account connector still permits (warning, not hard refusal)");
+    let permit = check_run(
+        root.path(),
+        &zero_named_wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("a zero-account connector still permits (warning, not hard refusal)");
 
     let expected = "connector `mock-tracker` is bound but has no configured accounts; \
 nodes [lock_scope, pr] call functions [create_item, list_items] and will fail until an account is added";

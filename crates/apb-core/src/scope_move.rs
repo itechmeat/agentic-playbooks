@@ -15,11 +15,17 @@
 //! the history come from one moment. Locks are always taken source first,
 //! then the destination's namespace lock. The copy's history gets one
 //! `scope_move` line before it is published.
+//!
+//! The copy carries its launch floor: the destination's key (passed by the
+//! caller, never derived from a path) is raised to the stricter of the
+//! source key's floor and every copied version's declaration before the
+//! final rename, under the floor lock (see [`crate::launch::floor`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::fsutil::{copy_tree, ensure_no_symlink_below, lock_dir};
+use crate::launch::floor::{self, FloorKey, SaveAuthority};
 use crate::registry::is_safe_segment;
 use crate::versioning::current::{self, MoveCurrent, MovedBy};
 
@@ -32,6 +38,8 @@ pub enum ScopeMoveError {
     NotFound(String),
     #[error("a playbook `{0}` already exists at the destination")]
     IdTaken(String),
+    #[error(transparent)]
+    Launch(#[from] floor::FloorError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -69,6 +77,7 @@ pub fn copy_playbook_to(
     dst_parent: &Path,
     id: &str,
     from_scope: &str,
+    floors: &CopyFloors,
 ) -> Result<PathBuf, ScopeMoveError> {
     if !is_safe_segment(id) {
         return Err(ScopeMoveError::InvalidId(id.to_string()));
@@ -94,17 +103,49 @@ pub fn copy_playbook_to(
     let staging = dst_parent
         .join(STAGING_DIR)
         .join(format!("{id}-{}", crate::clock::now_nanos()));
-    let staged = stage(src_playbook_dir, &staging, from_scope).and_then(|()| {
-        #[cfg(windows)]
-        std::fs::remove_dir(&dst)?;
-        std::fs::rename(&staging, &dst)
-    });
+    let staged = stage(src_playbook_dir, &staging, from_scope)
+        .map_err(ScopeMoveError::from)
+        .and_then(|()| {
+            let carried = floor::floor_of(Some(&floors.from), Some(src_playbook_dir))?
+                .max(floor::scan(&staging));
+            floor::publish(&floors.to, &dst, carried, || {
+                #[cfg(windows)]
+                std::fs::remove_dir(&dst)?;
+                std::fs::rename(&staging, &dst)
+            })?
+            .map_err(ScopeMoveError::from)
+        });
     if let Err(e) = staged {
         let _ = std::fs::remove_dir_all(&staging);
         let _ = std::fs::remove_dir(&dst);
-        return Err(e.into());
+        return Err(e);
     }
     Ok(dst)
+}
+
+/// The launch floor keys of a copy: the source's, read, and the
+/// destination's with the channel the copy comes through.
+#[derive(Debug, Clone)]
+pub struct CopyFloors {
+    pub from: FloorKey,
+    pub to: SaveAuthority,
+}
+
+impl CopyFloors {
+    /// A person's copy of project playbook `id` of workspace `ws` to the
+    /// global store.
+    pub fn project_to_global(workspace_id: &str, id: &str, channel: floor::SaveChannel) -> Self {
+        CopyFloors {
+            from: FloorKey::Project {
+                workspace_id: workspace_id.to_string(),
+                id: id.to_string(),
+            },
+            to: SaveAuthority {
+                key: FloorKey::global(id),
+                channel,
+            },
+        }
+    }
 }
 
 fn stage(src: &Path, staging: &Path, from_scope: &str) -> io::Result<()> {
@@ -195,6 +236,7 @@ mod tests {
 
     #[test]
     fn a_move_waits_for_a_copy_and_the_copy_reads_one_moment() {
+        let _cfg = crate::test_config();
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let dir = seed(src.path());
@@ -210,7 +252,13 @@ mod tests {
                         std::thread::sleep(pause);
                     }
                 })));
-                let out = copy_playbook_to(&dir, dst.path(), "p", "project");
+                let out = copy_playbook_to(
+                    &dir,
+                    dst.path(),
+                    "p",
+                    "project",
+                    &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+                );
                 crate::fsutil::copy_seam::set(None);
                 out
             });
@@ -244,6 +292,7 @@ mod tests {
 
     #[test]
     fn the_copy_recovers_the_source_and_leaves_transient_files_out() {
+        let _cfg = crate::test_config();
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let dir = seed(src.path());
@@ -258,7 +307,14 @@ mod tests {
         fail_after(None);
         assert!(dir.join(INTENT_FILE).exists());
 
-        let copied = copy_playbook_to(&dir, dst.path(), "p", "project").unwrap();
+        let copied = copy_playbook_to(
+            &dir,
+            dst.path(),
+            "p",
+            "project",
+            &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+        )
+        .unwrap();
         assert!(!dir.join(INTENT_FILE).exists(), "the source was recovered");
         for name in [INTENT_FILE, "other.lock", ".candidate.lock"] {
             assert!(!copied.join(name).exists(), "{name} was copied");
@@ -271,39 +327,68 @@ mod tests {
 
     #[test]
     fn a_copy_whose_history_line_does_not_land_is_not_published() {
+        let _cfg = crate::test_config();
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let dir = seed(src.path());
         use crate::versioning::current::fault::{Step, fail_after};
         fail_after(Some(Step::History));
-        let out = copy_playbook_to(&dir, dst.path(), "p", "project");
+        let out = copy_playbook_to(
+            &dir,
+            dst.path(),
+            "p",
+            "project",
+            &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+        );
         fail_after(None);
         assert!(matches!(out, Err(ScopeMoveError::Io(_))), "{out:?}");
         assert!(!dst.path().join("playbooks/p").exists());
         // A retry copies it whole.
-        let copied = copy_playbook_to(&dir, dst.path(), "p", "project").unwrap();
+        let copied = copy_playbook_to(
+            &dir,
+            dst.path(),
+            "p",
+            "project",
+            &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+        )
+        .unwrap();
         assert!(!copied.join(INTENT_FILE).exists());
         assert!(!history(&copied, 10).unwrap().pending);
     }
 
     #[test]
     fn a_source_whose_current_names_no_runnable_version_still_copies() {
+        let _cfg = crate::test_config();
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let dir = seed(src.path());
         fs::create_dir_all(dir.join("2.0.0")).unwrap();
         fs::write(dir.join("current"), "2.0.0").unwrap();
-        let copied = copy_playbook_to(&dir, dst.path(), "p", "project").unwrap();
+        let copied = copy_playbook_to(
+            &dir,
+            dst.path(),
+            "p",
+            "project",
+            &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(copied.join("current")).unwrap(), "2.0.0");
     }
 
     #[test]
     fn an_intent_that_does_not_read_refuses_the_copy() {
+        let _cfg = crate::test_config();
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let dir = seed(src.path());
         fs::write(dir.join(INTENT_FILE), "{not json").unwrap();
-        let out = copy_playbook_to(&dir, dst.path(), "p", "project");
+        let out = copy_playbook_to(
+            &dir,
+            dst.path(),
+            "p",
+            "project",
+            &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+        );
         assert!(matches!(out, Err(ScopeMoveError::Io(_))), "{out:?}");
         assert!(!dst.path().join("playbooks/p").exists());
     }

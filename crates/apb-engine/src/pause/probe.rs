@@ -57,9 +57,23 @@ fn quota_executor(events: &[Event], seq: u64) -> Option<(String, String)> {
 /// manifest: a run directory this machine created (the run gate, the same
 /// call the waker's resume makes) and an executor binary unchanged since the
 /// run started (environment drift).
-fn verify_before_probe(root: &Path, run_id: &str, run_dir: &Path) -> Result<(), EngineError> {
+fn verify_before_probe(
+    root: &Path,
+    run_id: &str,
+    run_dir: &Path,
+    launch_checked: bool,
+) -> Result<(), EngineError> {
     crate::gate::check_resume(root, run_id, true)
         .map_err(|v| EngineError::Conflict(v.to_string()))?;
+    // A run the launch policy would not let the engine resume is never
+    // probed (the probe runs an executor of the run).
+    if !launch_checked {
+        crate::resume_launch::check_engine_resume(
+            root,
+            run_id,
+            crate::gate::launch::EngineResume::QuotaProbe,
+        )?;
+    }
     crate::scheduler::check_environment_drift(run_dir, false)?;
     Ok(())
 }
@@ -83,7 +97,7 @@ fn journal_message(root: &Path, msg: &str) -> String {
 /// is never probed: that refusal is the `Err`, and so is an outcome that
 /// could not be journaled ([`journal_outcome`]).
 pub fn probe_before_wake(root: &Path, run_id: &str, seq: u64) -> Result<WakeProbe, EngineError> {
-    probe_before_wake_within(root, run_id, seq, JOURNAL_TRIES)
+    probe_before_wake_within(root, run_id, seq, JOURNAL_TRIES, false)
 }
 
 /// [`probe_before_wake`] offering the outcome to the run's event lock at
@@ -95,6 +109,7 @@ pub(crate) fn probe_before_wake_within(
     run_id: &str,
     seq: u64,
     journal_tries: u32,
+    launch_checked: bool,
 ) -> Result<WakeProbe, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -116,7 +131,7 @@ pub(crate) fn probe_before_wake_within(
             "node `{node}` had {prior} quota pauses already"
         )));
     }
-    verify_before_probe(root, run_id, &run_dir)?;
+    verify_before_probe(root, run_id, &run_dir, launch_checked)?;
     let run = crate::scheduler::run_quota_probe(&run_dir, &node, &agent, &model);
     let (detail, repause) = match &run {
         ProbeRun::Unavailable(why) => return Ok(WakeProbe::Skipped(why.clone())),

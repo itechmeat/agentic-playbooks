@@ -694,3 +694,66 @@ fn resume_all_reports_a_busy_journal_quickly_as_busy() {
     assert!(took < Duration::from_secs(30), "took {took:?}");
     assert!(probes(&events(root, &res.run_id)).is_empty());
 }
+
+/// `apb resume --all` probes a quota-paused run's executor only after a
+/// real launch check: a never-authorized run whose launch check could not
+/// be made (its child tree no longer resolves) is checked again as the
+/// engine's own resume before the probe, so a `deny` run is never probed.
+#[cfg(unix)]
+#[test]
+fn resume_all_never_probes_a_run_whose_launch_check_was_set_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quotatree");
+    // The playbook gains a sub-playbook node after `work`.
+    let body = WF
+        .replace("PLAYBOOK_ID", "quotatree")
+        .replace(
+            "  - { id: done, type: finish, outcome: success }\n",
+            "  - { id: c, type: playbook, playbook: kid }\n  - { id: done, type: finish, outcome: success }\n",
+        )
+        .replace(
+            "  - { from: work, to: done, condition:",
+            "  - { from: c, to: done }\n  - { from: work, to: c, condition:",
+        );
+    fs::write(
+        root.join(".apb/playbooks/quotatree/1.0.0/playbook.yaml"),
+        &body,
+    )
+    .unwrap();
+    seed(root, "kid");
+    common::seed_main(root);
+    let prog = stub(root, &[QUOTA_429]);
+    let env = Env::set(&prog);
+
+    let res = run(root, "quotatree", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused, "{body}");
+    assert_eq!(calls(root), 1, "the node's one attempt");
+    let (_, _, _, _, until) = last_pause(&events(root, &res.run_id));
+    // The child is gone and the machine denies agent launches.
+    fs::remove_dir_all(root.join(".apb/playbooks/kid")).unwrap();
+    let cfg = std::env::var_os("APB_CONFIG_DIR").unwrap();
+    fs::write(
+        Path::new(&cfg).join("policy.yaml"),
+        "launch:\n  agent: deny\n",
+    )
+    .unwrap();
+    let until = u128::from(until.unwrap());
+    while apb_core::clock::now_ms() <= until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let entries = apb_engine::pause::resume_all(root).unwrap();
+    assert!(
+        matches!(
+            entries.as_slice(),
+            [apb_engine::pause::ResumeAllEntry {
+                action: apb_engine::pause::ResumeAllAction::Refused { .. },
+                ..
+            }]
+        ),
+        "{entries:?}"
+    );
+    assert_eq!(calls(root), 1, "no probe ran");
+    assert!(probes(&events(root, &res.run_id)).is_empty());
+    drop(env);
+}

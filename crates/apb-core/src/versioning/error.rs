@@ -16,6 +16,9 @@ pub enum VersioningError {
     Conflict(String),
     #[error("playbook `{0}` is frozen: definition changes are disabled")]
     Frozen(String),
+    /// The launch floor refused the save, or its file does not read.
+    #[error(transparent)]
+    Launch(#[from] crate::launch::floor::FloorError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }

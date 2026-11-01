@@ -41,6 +41,9 @@ fn start_args(budget: Option<BudgetArg>) -> PlaybookRunArgs {
         budget,
         remember: None,
         notify: None,
+        launch_version: None,
+        launch_choice: None,
+        confirm_launch: None,
     }
 }
 
@@ -190,6 +193,9 @@ fn resume_args(run_id: &str, confirm_budget: Option<String>) -> RunResumeArgs {
             ..BudgetResumeArg::default()
         }),
         confirm_budget,
+        launch_version: None,
+        launch_choice: None,
+        confirm_launch: None,
     }
 }
 

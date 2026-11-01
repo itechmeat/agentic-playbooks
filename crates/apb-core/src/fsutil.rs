@@ -563,6 +563,20 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_via_temp(dir, path, bytes, create_private)
 }
 
+/// Flushes the directory entry list of `dir` to disk, so a rename into it
+/// survives a power cut. A no-op off unix.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+    Ok(())
+}
+
 /// RAII lock for a state directory (`<dir>/<lock_name>`), tagged with a unique
 /// owner token. The guard removes the file only if the token is still ours
 /// (after a force-steal of a stale lock, this protects against cascading

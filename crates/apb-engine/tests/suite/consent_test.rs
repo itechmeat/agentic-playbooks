@@ -5,6 +5,7 @@
 
 use apb_core::registry::init_project;
 use apb_engine::consent::{Confirmation, RunConsent};
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 
 use crate::common;
 use apb_engine::event::{EventPayload, read_all};
@@ -268,7 +269,14 @@ fn the_gate_refuses_with_the_sources_and_accepts_a_consent() {
         id: "parent".into(),
         version: None,
     };
-    let permit = apb_engine::gate::check_run(dir.path(), &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        dir.path(),
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     let refusal = permit.check_confirmation(None).expect_err("needs consent");
     assert_eq!(refusal["policy"], "irreversible_requires_confirmation");
     assert_eq!(
@@ -315,11 +323,24 @@ fn a_trust_refusal_of_an_irreversible_tree_names_its_sources_too() {
         id: "rel".into(),
         version: None,
     };
-    let refusal =
-        apb_engine::gate::check_run(dir.path(), &wref, false, false).expect_err("untrusted");
+    let refusal = apb_engine::gate::check_run(
+        dir.path(),
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect_err("untrusted");
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
     assert_eq!(refusal["irreversible"], serde_json::json!(["node a"]));
-    let permit = apb_engine::gate::check_run(dir.path(), &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        dir.path(),
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     assert_eq!(refusal["consent_nonce"], permit.consent_nonce().as_str());
 }
 
@@ -343,8 +364,14 @@ fn a_trust_refusal_nonce_is_accepted_on_the_retry_of_a_tree_with_a_sub_playbook(
         id: "parent".into(),
         version: None,
     };
-    let refusal =
-        apb_engine::gate::check_run(dir.path(), &wref, false, false).expect_err("untrusted");
+    let refusal = apb_engine::gate::check_run(
+        dir.path(),
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect_err("untrusted");
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
     assert_eq!(
         refusal["irreversible"],
@@ -354,7 +381,14 @@ fn a_trust_refusal_nonce_is_accepted_on_the_retry_of_a_tree_with_a_sub_playbook(
         .as_str()
         .expect("a nonce")
         .to_string();
-    let permit = apb_engine::gate::check_run(dir.path(), &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        dir.path(),
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     assert_eq!(
         permit.check_confirmation(Some(&Confirmation::Nonce(hint))),
         Ok(None)

@@ -112,6 +112,20 @@ pub(crate) fn apply_patch(
     // patch replaces and of the patched playbook both stay recorded, before
     // the new snapshot can drop one.
     crate::run_redact::keep_secret_declarations(run_dir, &[playbook, &loaded.playbook])?;
+    // The launch policy is approved content: a supervisor's patch never
+    // loosens what the run's snapshot declares.
+    if loaded.playbook.agent_launch.unwrap_or_default() < playbook.agent_launch.unwrap_or_default()
+    {
+        return append_patch_rejected(
+            log,
+            format!(
+                "{}: the patch declares agent_launch `{}`, looser than the run's `{}`; only a person may loosen a launch policy",
+                apb_core::launch::floor::LOOSENED,
+                loaded.playbook.agent_launch.unwrap_or_default(),
+                playbook.agent_launch.unwrap_or_default()
+            ),
+        );
+    }
     snapshot_playbook(run_dir, &loaded.yaml)?;
     log.append(EventPayload::PatchApplied {
         version: version.clone(),

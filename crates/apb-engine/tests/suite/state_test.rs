@@ -157,6 +157,7 @@ fn run_resumed_folds_to_running() {
                 from_node: "a".into(),
                 by: None,
                 explicit: false,
+                launch: None,
             },
         ),
     ];

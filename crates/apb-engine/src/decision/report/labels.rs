@@ -779,6 +779,7 @@ mod tests {
                 from_node: "placeholder".into(),
                 by: None,
                 explicit: false,
+                launch: None,
             },
         )
     }

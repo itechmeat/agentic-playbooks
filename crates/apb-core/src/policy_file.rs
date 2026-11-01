@@ -3,25 +3,33 @@
 //! so it lives beside `config.yaml` instead of inside it: an older apb
 //! never opens it and loads its config exactly as before.
 //!
-//! One section today, `notify:`, the filters of a default notification
-//! subscription:
+//! Two sections: `notify:`, the filters of a default notification
+//! subscription, and `launch:`, the launch policy of agents
+//! ([`crate::launch`]):
 //!
 //! ```yaml
 //! notify:
 //!   finished: [failed, aborted]          # the outcomes a `finished` notice covers
 //!   playbooks: [deploy, global:triage]   # the playbooks a default subscription covers
+//! launch:
+//!   agent: ask                           # every playbook, for an agent
+//!   playbooks:                           # machine: exact `<workspace id>/<id>` or `global/<id>`
+//!     "3f2a.../deploy": allow            # project file: `<id>` or `global:<id>`
 //! ```
 //!
 //! The machine file sets them; a project file may only narrow them. The
 //! reader is strict: an unknown section, key or value is an error that
-//! names it, and a present file with an error creates no default
-//! subscription (the run journals the problem). No apb surface writes the
-//! file; `apb doctor` reads it.
+//! names it. A present file with an error creates no default subscription
+//! (the run journals the problem) and refuses launches through agent
+//! channels (`policy_file_invalid`). No apb surface writes the file; `apb
+//! doctor` reads it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::launch::policy::LaunchPolicy;
 use crate::notify::FinishOutcome;
 use crate::registry::is_safe_segment;
 
@@ -36,6 +44,48 @@ pub const GLOBAL_PREFIX: &str = "global:";
 #[serde(default, deny_unknown_fields)]
 pub struct PolicyFile {
     pub notify: NotifyPolicy,
+    pub launch: LaunchSection,
+}
+
+/// The `launch:` section: the default for every playbook an agent
+/// launches, and per-playbook entries. Machine keys are exact
+/// (`<workspace id>/<id>` or `global/<id>`), so an entry reaches one
+/// playbook of one project; project keys are `<id>` or `global:<id>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LaunchSection {
+    pub agent: Option<LaunchPolicy>,
+    pub playbooks: BTreeMap<String, LaunchPolicy>,
+}
+
+impl LaunchSection {
+    fn validate(&self, source: PolicySource) -> Result<(), String> {
+        for key in self.playbooks.keys() {
+            let ok = match source {
+                PolicySource::Machine => key
+                    .split_once('/')
+                    .is_some_and(|(ws, id)| is_safe_segment(ws) && is_safe_segment(id)),
+                PolicySource::Project => {
+                    is_safe_segment(key.strip_prefix(GLOBAL_PREFIX).unwrap_or(key))
+                }
+            };
+            if !ok {
+                let want = match source {
+                    PolicySource::Machine => "`<workspace id>/<id>` or `global/<id>`",
+                    PolicySource::Project => "`<id>` or `global:<id>`",
+                };
+                return Err(format!(
+                    "launch.playbooks: `{key}` is not a playbook key ({want})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the section sets anything.
+    pub fn is_empty(&self) -> bool {
+        self.agent.is_none() && self.playbooks.is_empty()
+    }
 }
 
 /// The `notify:` section: filters of a default subscription. Absent keys
@@ -162,18 +212,26 @@ impl Policies {
 
     /// Both files, or only the machine's without a workspace.
     pub fn load_in(root: Option<&Path>) -> Result<Self, PolicyError> {
-        let machine = match machine_path() {
-            Some(p) => read(&p).map_err(|message| PolicyError {
+        Self::load_with(root, machine_path().as_deref())
+    }
+
+    /// Both files, the machine's read from `machine` (a config dir's
+    /// `policy.yaml`; `None` without one).
+    pub fn load_with(root: Option<&Path>, machine: Option<&Path>) -> Result<Self, PolicyError> {
+        let machine = match machine {
+            Some(p) => read(p, PolicySource::Machine).map_err(|message| PolicyError {
                 source: PolicySource::Machine,
                 message,
             })?,
             None => PolicyFile::default(),
         };
         let project = match root {
-            Some(root) => read(&project_path(root)).map_err(|message| PolicyError {
-                source: PolicySource::Project,
-                message,
-            })?,
+            Some(root) => {
+                read(&project_path(root), PolicySource::Project).map_err(|message| PolicyError {
+                    source: PolicySource::Project,
+                    message,
+                })?
+            }
             None => PolicyFile::default(),
         };
         let policies = Policies { machine, project };
@@ -211,18 +269,22 @@ impl Policies {
 
 /// One file at `path`: absent or empty is the default; anything present
 /// must read whole.
-fn read(path: &Path) -> Result<PolicyFile, String> {
+fn read(path: &Path, source: PolicySource) -> Result<PolicyFile, String> {
     let raw = match crate::fsutil::read_settings_file(path, crate::fsutil::SETTINGS_FILE_MAX_BYTES)
     {
         Ok(Some(raw)) => raw,
         Ok(None) => return Ok(PolicyFile::default()),
         Err(e) => return Err(format!("cannot read `{}`: {e}", path.display())),
     };
-    parse(&raw).map_err(|e| format!("invalid `{}`: {e}", path.display()))
+    parse_as(&raw, source).map_err(|e| format!("invalid `{}`: {e}", path.display()))
 }
 
-/// The file's text, checked.
+/// The machine file's text, checked.
 pub fn parse(raw: &str) -> Result<PolicyFile, String> {
+    parse_as(raw, PolicySource::Machine)
+}
+
+fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
     if raw.trim().is_empty() {
         return Ok(PolicyFile::default());
     }
@@ -233,6 +295,7 @@ pub fn parse(raw: &str) -> Result<PolicyFile, String> {
         _ => return Err("the top level must be a mapping".into()),
     };
     file.notify.validate()?;
+    file.launch.validate(source)?;
     Ok(file)
 }
 
@@ -242,10 +305,10 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
     let mut ok = true;
     let mut parts = Vec::new();
     let files = [
-        ("machine", machine_path()),
-        ("project", Some(project_path(root))),
+        ("machine", machine_path(), PolicySource::Machine),
+        ("project", Some(project_path(root)), PolicySource::Project),
     ];
-    for (label, path) in files {
+    for (label, path, source) in files {
         let Some(path) = path else {
             parts.push(format!("{label}: no config dir"));
             continue;
@@ -254,12 +317,12 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
             parts.push(format!("{label}: absent"));
             continue;
         }
-        match read(&path) {
+        match read(&path, source) {
             Ok(file) => parts.push(format!("{label}: {}", summary(&file))),
             Err(e) => {
                 ok = false;
                 parts.push(format!(
-                    "{label}: {e}; no default notification subscription until it is fixed"
+                    "{label}: {e}; no default notification subscription and no agent launch until it is fixed"
                 ));
             }
         }
@@ -284,6 +347,20 @@ fn summary(file: &PolicyFile) -> String {
     }
     if let Some(p) = &n.playbooks {
         sets.push(format!("notify.playbooks [{}]", p.join(", ")));
+    }
+    let l = &file.launch;
+    if let Some(a) = l.agent {
+        sets.push(format!("launch.agent {a}"));
+    }
+    if !l.playbooks.is_empty() {
+        sets.push(format!(
+            "launch.playbooks [{}]",
+            l.playbooks
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if sets.is_empty() {
         "valid, sets nothing".into()

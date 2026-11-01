@@ -1112,6 +1112,7 @@ mod tests {
                     from_node: "a".into(),
                     by: None,
                     explicit: false,
+                    launch: None,
                 },
             ),
         ];

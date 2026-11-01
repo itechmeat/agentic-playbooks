@@ -187,7 +187,7 @@ fn run_resume_refuses_a_plain_resume_and_detaches_one_with_a_raise() {
     let _l = env_lock();
     let f = budget_paused();
     let _reaper = crate::driver_reaper::DriverReaper::new(f.root(), &f.run_id);
-    let plain = tools::run_resume(f.root(), &f.run_id, None, false, None).unwrap();
+    let plain = tools::run_resume(f.root(), &f.run_id, None, false, None, None).unwrap();
     assert_eq!(plain["error"], "budget_paused");
     assert_eq!(plain["budget"]["paused"]["node"], "b");
     assert!(plain["detail"].as_str().unwrap().contains("`b`"));
@@ -196,7 +196,7 @@ fn run_resume_refuses_a_plain_resume_and_detaches_one_with_a_raise() {
         raise_tokens: Some(1000),
         ..BudgetResume::default()
     };
-    let ack = tools::run_resume(f.root(), &f.run_id, None, false, Some(&raise)).unwrap();
+    let ack = tools::run_resume(f.root(), &f.run_id, None, false, Some(&raise), None).unwrap();
     assert_eq!(ack["detached"], true, "{ack}");
     let sets = read_all(&f.root().join(".apb/runs").join(&f.run_id))
         .unwrap()

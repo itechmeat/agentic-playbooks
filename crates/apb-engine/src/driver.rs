@@ -239,6 +239,9 @@ pub struct DriverArgs<'a> {
     pub pause_seq: Option<u64>,
     /// The resume's budget change, as the JSON the child reads back.
     pub budget_json: Option<&'a str>,
+    /// The path of the handoff file holding the resume's launch grant
+    /// ([`crate::launch_handoff`]); the grant itself never goes on argv.
+    pub launch_handoff: Option<&'a Path>,
 }
 
 /// Re-execs this binary as `apb __drive-run ...` in a separate, detached OS
@@ -264,6 +267,7 @@ pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -
         by,
         pause_seq,
         budget_json,
+        launch_handoff,
     } = *args;
     let exe = apb_core::fsutil::reexec_exe()?;
     // The child gets an absolute root: it starts from a different working
@@ -293,6 +297,9 @@ pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -
         }
         if let Some(b) = budget_json {
             cmd.arg("--budget-json").arg(b);
+        }
+        if let Some(h) = launch_handoff {
+            cmd.arg("--launch-handoff").arg(h);
         }
     }
     cmd.current_dir(&root);

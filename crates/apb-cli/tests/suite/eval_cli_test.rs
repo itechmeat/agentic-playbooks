@@ -1255,3 +1255,173 @@ fn a_fixture_or_change_cannot_replace_the_definitions() {
     let detail = rep["checks"][0]["detail"].as_str().unwrap();
     assert!(detail.contains("carries `.apb`"), "{detail}");
 }
+
+// ------------------------------------------------------------ launch policy
+
+/// [`PLAYBOOK`] declaring `agent_launch: <policy>`.
+fn with_launch(policy: &str) -> String {
+    PLAYBOOK.replacen(
+        "version: 1.0.0\n",
+        &format!("version: 1.0.0\nagent_launch: {policy}\n"),
+        1,
+    )
+}
+
+impl Env {
+    /// `apb eval rev --yes --json <args>` with extra environment variables.
+    fn eval_json_with(&self, args: &[&str], vars: &[(&str, &str)]) -> (i32, Value) {
+        let mut cmd = apb();
+        cmd.args(["eval", "rev", "--yes", "--json"])
+            .args(args)
+            .current_dir(self.project.path())
+            .env("APB_CONFIG_DIR", self.cfg.path())
+            .env("APB_AGENT_CMD", &self.stub)
+            .env("APB_NO_REGISTRY", "1")
+            .env_remove("APB_RUN_ID")
+            .env_remove("APB_HOST_TASK");
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        let v = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "not json ({e}): {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        (out.status.code().unwrap_or(-1), v)
+    }
+
+    /// Nothing of an eval run exists: no case started.
+    fn ran_nothing(&self) -> bool {
+        !self.cfg.path().join("evals/runs").exists()
+            && !self.cfg.path().join("evals/scratch").exists()
+    }
+}
+
+/// The `--confirm-launch=`, `--launch-version=` and `--launch-choice=` flags
+/// a launch refusal's message prints.
+fn launch_flags(message: &str) -> Vec<String> {
+    let at = message
+        .find("--confirm-launch=")
+        .unwrap_or_else(|| panic!("the refusal prints the flags: {message}"));
+    message[at..]
+        .split_whitespace()
+        .take(3)
+        .map(|s| s.trim_end_matches([',', '.']).to_string())
+        .collect()
+}
+
+/// An `ask` playbook without a terminal: refused up front with the start
+/// action, before any case; a wrong nonce is refused; both run-step markers
+/// are refused even with the right nonce; the right nonce runs every case,
+/// and each case's run records the parent's initiator and confirmation.
+#[test]
+fn an_ask_playbook_is_evaluated_only_with_its_launch_nonce() {
+    let env = setup(&with_launch("ask"));
+    let (code, v) = env.eval_json_with(&[], &[]);
+    assert_eq!(code, 2, "{v:#}");
+    assert_eq!(v["error"], "launch_refused", "{v:#}");
+    let message = v["message"].as_str().unwrap().to_string();
+    assert!(
+        message.contains("launch_requires_confirmation"),
+        "{message}"
+    );
+    assert!(env.ran_nothing(), "refused before any case started");
+    let flags = launch_flags(&message);
+    let flag_args: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let nonce = flags[0]
+        .strip_prefix("--confirm-launch=")
+        .expect("the first flag carries the nonce")
+        .to_string();
+    let nonce = nonce.as_str();
+
+    let mut wrong = flags.clone();
+    wrong[0] = "--confirm-launch=launch-0000".into();
+    let wrong: Vec<&str> = wrong.iter().map(String::as_str).collect();
+    let (code, v) = env.eval_json_with(&wrong, &[]);
+    assert_eq!(
+        (code, v["error"].as_str()),
+        (2, Some("launch_refused")),
+        "{v:#}"
+    );
+    assert!(env.ran_nothing());
+
+    for marker in ["APB_RUN_ID", "APB_HOST_TASK"] {
+        let (code, v) = env.eval_json_with(&flag_args, &[(marker, "parent-1")]);
+        assert_eq!(code, 2, "{marker}: {v:#}");
+        assert!(
+            v["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("launch_refused_in_run_step")),
+            "{marker}: {v:#}"
+        );
+        assert!(env.ran_nothing(), "{marker}");
+    }
+
+    let (code, v) = env.eval_json_with(&flag_args, &[]);
+    assert_eq!(code, 0, "{v:#}");
+    let reps = v["result"]["cases"][0]["repetitions"].as_array().unwrap();
+    assert!(!reps.is_empty());
+    for rep in reps {
+        assert_eq!(rep["verdict"], "passed", "{rep:#}");
+        let run_dir = PathBuf::from(rep["run_dir"].as_str().unwrap());
+        let manifest = fs::read_to_string(run_dir.join("manifest.yaml")).unwrap();
+        assert!(manifest.contains("kind: eval"), "{manifest}");
+        assert!(manifest.contains("initiator: cli\n"), "{manifest}");
+        assert!(manifest.contains("confirmation: cli_flag"), "{manifest}");
+        assert!(
+            !manifest.contains(nonce),
+            "no nonce in the case manifest: {manifest}"
+        );
+    }
+}
+
+/// `--yes` approves the suite and its cost, never a launch: a `deny`
+/// playbook without a terminal is refused before any case.
+#[test]
+fn yes_never_confirms_a_deny_launch() {
+    let env = setup(&with_launch("deny"));
+    let (code, v) = env.eval_json_with(&[], &[]);
+    assert_eq!(code, 2, "{v:#}");
+    assert!(
+        v["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("launch_requires_person")),
+        "{v:#}"
+    );
+    assert!(env.ran_nothing());
+}
+
+/// At an interactive terminal an `ask` eval asks once and runs every case
+/// under that answer.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_interactive_eval_of_an_ask_playbook_asks_once() {
+    let env = setup(&with_launch("ask"));
+    let stub = env.stub.display().to_string();
+    let Some((code, shown)) = crate::common::on_a_terminal(
+        env.project.path(),
+        env.cfg.path(),
+        &["eval", "rev", "--yes", "--json"],
+        &[("APB_AGENT_CMD", &stub), ("APB_NO_REGISTRY", "1")],
+        b"y\n",
+    ) else {
+        eprintln!("skipped: no `script` to make a pseudo-terminal");
+        return;
+    };
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(shown.matches("Launch it? [y/N]").count(), 1, "{shown}");
+    let runs = env.cfg.path().join("evals/runs/rev");
+    let manifests: Vec<String> = fs::read_dir(&runs)
+        .unwrap()
+        .flatten()
+        .map(|e| fs::read_to_string(e.path().join("manifest.yaml")).unwrap())
+        .collect();
+    assert!(!manifests.is_empty(), "{shown}");
+    for m in manifests {
+        assert!(m.contains("initiator: cli_terminal"), "{m}");
+        assert!(m.contains("confirmation: terminal_prompt"), "{m}");
+    }
+}

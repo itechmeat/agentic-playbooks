@@ -2,7 +2,7 @@
 // report keeps four sections apart (compatibility, setup, trust, consent),
 // and so does everything here: being ready and being trusted are two
 // separate facts, never one verdict.
-import type { FitItem, FitReport, TrustItem } from './api.gen'
+import type { FitItem, FitReport, LaunchRecord, LaunchView, TrustItem } from './api.gen'
 
 export type Tone = 'ok' | 'warn' | 'danger' | 'muted'
 
@@ -81,4 +81,35 @@ export function trustLine(t: TrustItem): string {
 // One line for a compatibility or setup item.
 export function itemLine(i: FitItem): string {
   return i.subject ? `${i.subject}: ${i.detail}` : i.detail
+}
+
+// The launch policy an agent's start meets: allow is today's behaviour, ask
+// needs a person's confirmation the host relays, deny is a person's start
+// only. A person's own start from the dashboard is never held by it.
+export function launchSummary(l: LaunchView): string {
+  if (l.problem) return `agents are refused until this is fixed: ${l.problem}`
+  switch (l.policy) {
+    case 'allow':
+      return 'an agent may launch it'
+    case 'ask':
+      return 'an agent launches it only after a person confirms'
+    case 'deny':
+      return 'only a person launches it'
+  }
+}
+
+// What holds the policy: its sources and the launch floor.
+export function launchDetail(l: LaunchView): string {
+  const parts: string[] = []
+  if (l.sources.length) parts.push(`from ${l.sources.join(', ')}`)
+  parts.push(l.floor ? `launch floor ${l.floor}` : 'no launch floor')
+  return parts.join('; ')
+}
+
+// One line for a run's launch authorization: what was launched, by whom,
+// how it was confirmed, and the policy it was admitted under.
+export function launchRecordLine(r: LaunchRecord): string {
+  const how = r.confirmation ? `, confirmed by ${r.confirmation.replace(/_/g, ' ')}` : ''
+  const sources = r.sources.length ? ` (${r.sources.join(', ')})` : ''
+  return `${r.kind.replace(/_/g, ' ')} by ${r.initiator.replace(/_/g, ' ')}${how}; policy ${r.policy}${sources}`
 }

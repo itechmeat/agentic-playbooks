@@ -82,6 +82,7 @@ mod supervisor;
 mod transcript;
 mod worktree;
 
+pub(crate) use crate::run_origin::parent_run_origin;
 pub(crate) use control_apply::{ControlScan, scan_control};
 pub use deadline::DEADLINE_REASON;
 use deadline::DeadlineWatch;
@@ -101,7 +102,6 @@ pub(crate) use journal::{
 };
 pub use listing::{RunSummary, list_runs};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
-pub(crate) use node::parent_run_origin;
 use node::*;
 pub use outcome::RunResult;
 pub(crate) use outcome::{AttemptOutcome, ExecOptions, LiveContext, NodeCtx, ResumeContext};

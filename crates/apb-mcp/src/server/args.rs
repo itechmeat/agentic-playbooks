@@ -126,6 +126,22 @@ pub struct PlaybookRunArgs {
     /// the start (notify_unavailable).
     #[serde(default)]
     pub notify: Option<crate::tools::notify::NotifyArg>,
+    /// confirm_launch - a person's confirmation of this launch when the
+    /// playbook asks before an agent launches it (`agent_launch: ask`).
+    /// Pass the `launch_nonce` of the refusal you showed the person, with
+    /// its `launch_version` and `launch_choice`; never pass it without
+    /// asking. A `deny` playbook is launched only by a person (the
+    /// dashboard or a terminal), and a run step cannot confirm at all.
+    #[serde(default)]
+    pub confirm_launch: Option<String>,
+    /// launch_version - the version the launch refusal named, passed back
+    /// with confirm_launch.
+    #[serde(default)]
+    pub launch_version: Option<String>,
+    /// launch_choice - how the refusal chose that version (`candidate`,
+    /// `current` or `explicit`), passed back with confirm_launch.
+    #[serde(default)]
+    pub launch_choice: Option<String>,
 }
 
 /// A run's budget argument. A predictive stop, not a security control: the
@@ -401,6 +417,22 @@ pub struct RunResumeArgs {
     /// `budget_change_requires_confirmation` refusal they were shown.
     #[serde(default)]
     pub confirm_budget: Option<String>,
+    /// confirm_launch - a person's confirmation of this launch when the
+    /// playbook asks before an agent launches it (`agent_launch: ask`).
+    /// Pass the `launch_nonce` of the refusal you showed the person, with
+    /// its `launch_version` and `launch_choice`; never pass it without
+    /// asking. A `deny` playbook is launched only by a person (the
+    /// dashboard or a terminal), and a run step cannot confirm at all.
+    #[serde(default)]
+    pub confirm_launch: Option<String>,
+    /// launch_version - the version the launch refusal named, passed back
+    /// with confirm_launch.
+    #[serde(default)]
+    pub launch_version: Option<String>,
+    /// launch_choice - how the refusal chose that version (`candidate`,
+    /// `current` or `explicit`), passed back with confirm_launch.
+    #[serde(default)]
+    pub launch_choice: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -661,6 +693,22 @@ pub struct PlaybookTrialArgs {
     /// Definition scope: "project" (default) or "global".
     #[serde(default)]
     pub scope: Option<String>,
+    /// confirm_launch - a person's confirmation of this launch when the
+    /// playbook asks before an agent launches it (`agent_launch: ask`).
+    /// Pass the `launch_nonce` of the refusal you showed the person, with
+    /// its `launch_version` and `launch_choice`; never pass it without
+    /// asking. A `deny` playbook is launched only by a person (the
+    /// dashboard or a terminal), and a run step cannot confirm at all.
+    #[serde(default)]
+    pub confirm_launch: Option<String>,
+    /// launch_version - the version the launch refusal named, passed back
+    /// with confirm_launch.
+    #[serde(default)]
+    pub launch_version: Option<String>,
+    /// launch_choice - how the refusal chose that version (`candidate`,
+    /// `current` or `explicit`), passed back with confirm_launch.
+    #[serde(default)]
+    pub launch_choice: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -889,6 +937,22 @@ pub struct PlaybookExecutePlanArgs {
     /// The run's budget (see playbook_run).
     #[serde(default)]
     pub budget: Option<BudgetArg>,
+    /// confirm_launch - a person's confirmation of this launch when the
+    /// playbook asks before an agent launches it (`agent_launch: ask`).
+    /// Pass the `launch_nonce` of the refusal you showed the person, with
+    /// its `launch_version` and `launch_choice`; never pass it without
+    /// asking. A `deny` playbook is launched only by a person (the
+    /// dashboard or a terminal), and a run step cannot confirm at all.
+    #[serde(default)]
+    pub confirm_launch: Option<String>,
+    /// launch_version - the version the launch refusal named, passed back
+    /// with confirm_launch.
+    #[serde(default)]
+    pub launch_version: Option<String>,
+    /// launch_choice - how the refusal chose that version (`candidate`,
+    /// `current` or `explicit`), passed back with confirm_launch.
+    #[serde(default)]
+    pub launch_choice: Option<String>,
 }
 
 /// `confirm_irreversible`: the refusal's `consent_nonce` (a string), or a

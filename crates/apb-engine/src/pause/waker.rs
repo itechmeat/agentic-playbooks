@@ -80,6 +80,7 @@ pub(crate) fn try_engine_resume(
     root: &Path,
     run_id: &str,
     pause_seq: Option<u64>,
+    launch: Option<&crate::gate::launch::LaunchGrant>,
 ) -> Result<u32, EngineError> {
     // Acknowledged: like `apb resume`, the operator who set up the pause or
     // the boot unit is the confirmation; what still refuses is a run
@@ -92,10 +93,16 @@ pub(crate) fn try_engine_resume(
     crate::gate::check_resume(root, run_id, true)
         .map_err(|v| EngineError::Conflict(v.to_string()))?;
     match pause_seq {
-        Some(seq) => crate::scheduler::resume_detached_pause(root, run_id, seq),
-        None => {
-            crate::scheduler::resume_detached_by(root, run_id, None, false, super::PauseBy::Engine)
-        }
+        Some(seq) => crate::scheduler::resume_detached_pause(root, run_id, seq, launch),
+        None => crate::scheduler::resume_detached_req(
+            root,
+            run_id,
+            &crate::scheduler::ResumeRequest {
+                by: super::PauseBy::Engine,
+                launch,
+                ..crate::scheduler::ResumeRequest::operator()
+            },
+        ),
     }
 }
 
@@ -149,8 +156,16 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
             // Another run holding the busy lock of this run's tree is not a
             // refusal: the run stays paused and the waker retries until the
             // lock frees or another pause, resume or stop supersedes it.
+            let grant = match crate::resume_launch::check_engine_resume(
+                root,
+                run_id,
+                crate::gate::launch::EngineResume::PauseWaker,
+            ) {
+                Ok(g) => g,
+                Err(e) => return Ok(WakeOutcome::Refused(refusal_text(e))),
+            };
             loop {
-                match try_engine_resume(root, run_id, Some(seq)) {
+                match try_engine_resume(root, run_id, Some(seq), grant.as_ref()) {
                     Ok(pid) => return Ok(WakeOutcome::Resumed { pid }),
                     Err(EngineError::WorkdirBusy(_))
                         if run_dir.is_dir()
@@ -269,6 +284,7 @@ mod tests {
                     from_node: "a".into(),
                     by: Some(PauseBy::Operator),
                     explicit: false,
+                    launch: None,
                 },
             ),
         ];

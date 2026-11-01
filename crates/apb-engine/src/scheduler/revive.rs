@@ -607,6 +607,7 @@ edges:
             from_node: "c".into(),
             by: None,
             explicit: true,
+            launch: None,
         });
         events.push(revived_record("j", &["c2"], "c"));
         let mut run = Run::new(events);

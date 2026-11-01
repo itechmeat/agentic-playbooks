@@ -257,6 +257,7 @@ impl WfMcp {
                     variant,
                     move_profiles,
                     dry_run,
+                    by_agent: true,
                 },
             )
         })

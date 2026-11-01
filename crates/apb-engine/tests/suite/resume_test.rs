@@ -349,6 +349,7 @@ fn run_resumed_serializes_with_snake_case_tag() {
         from_node: "a".into(),
         by: None,
         explicit: false,
+        launch: None,
     };
     let json = serde_json::to_string(&payload).unwrap();
     assert!(

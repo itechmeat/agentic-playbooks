@@ -247,7 +247,7 @@ type Unchanged = fn(&Playbook, &Playbook) -> bool;
 
 /// The parts of the definition a forward patch may not change, as (the
 /// refusal code, why, the comparison), in the order they are checked.
-fn protected_fields() -> [(&'static str, &'static str, Unchanged); 7] {
+fn protected_fields() -> [(&'static str, &'static str, Unchanged); 8] {
     [
         (
             "goal_changed",
@@ -283,6 +283,11 @@ fn protected_fields() -> [(&'static str, &'static str, Unchanged); 7] {
             "the `supervisor` block (capabilities, promotion and trial policies) changed",
             |a, b| json(&a.supervisor) == json(&b.supervisor),
         ),
+        (
+            "launch_policy_changed",
+            "`agent_launch` is approved content: only a person may change a playbook's launch policy",
+            |a, b| a.agent_launch == b.agent_launch,
+        ),
     ]
 }
 
@@ -293,8 +298,9 @@ fn protected_fields() -> [(&'static str, &'static str, Unchanged); 7] {
 /// block (what a candidate is compared on), and the fields trust and policy
 /// rest on: `requires`, the `supervisor` block (its capabilities and
 /// promotion and trial policies), the decision opt-ins in `defaults`
-/// (`host_decisions`, `retry_advice`), the run's `worktree`, each node's
-/// connector grants and each sub-playbook a node runs.
+/// (`host_decisions`, `retry_advice`), the run's `worktree`, the launch
+/// policy (`agent_launch`), each node's connector grants and each
+/// sub-playbook a node runs.
 ///
 /// A node may still bind another profile: profile trust is not inherited
 /// from the base version, the run gate checks every profile bundle of the
@@ -392,6 +398,26 @@ mod tests {
 
     fn ev(seq: u64, ts: u128, payload: EventPayload) -> Event {
         Event { seq, ts, payload }
+    }
+
+    /// `agent_launch` is approved content: a forward patch may neither
+    /// loosen nor tighten it (only a person changes a launch policy).
+    #[test]
+    fn a_forward_patch_never_changes_the_launch_policy() {
+        let yaml = |decl: &str| {
+            format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\n{decl}nodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+            )
+        };
+        let root = tempfile::tempdir().unwrap();
+        let base = Playbook::from_yaml(&yaml("agent_launch: deny\n")).unwrap();
+        for patched in ["", "agent_launch: ask\n"] {
+            let patched = Playbook::from_yaml(&yaml(patched)).unwrap();
+            let err = definition_guard(root.path(), &base, &patched).unwrap_err();
+            assert!(err.to_string().contains("launch_policy_changed"), "{err}");
+        }
+        let same = Playbook::from_yaml(&yaml("agent_launch: deny\n")).unwrap();
+        assert!(definition_guard(root.path(), &base, &same).is_ok());
     }
 
     #[test]

@@ -630,6 +630,7 @@ mod tests {
             from_node: "w".into(),
             by: None,
             explicit: false,
+            launch: None,
         };
         let waits = vec![
             at(
@@ -1048,6 +1049,7 @@ mod tests {
             from_node: "work".into(),
             by: None,
             explicit,
+            launch: None,
         };
         let first = events(&[paused.clone(), resumed(false)]);
         assert!(

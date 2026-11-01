@@ -2708,6 +2708,74 @@ Scope (project vs global) is only about where the definition is stored, not
 about applicability. A global playbook still declares `requires` to stay honest
 about where it can run.
 
+## Launch policy (agent_launch)
+
+`agent_launch` says how far a coding agent may launch the playbook on its
+own:
+
+```yaml
+schema: 2
+id: deploy
+version: 1.2.0
+agent_launch: ask   # allow (default) | ask | deny
+```
+
+- `allow`: an agent starts it like a person does (the behaviour without the
+  key).
+- `ask`: an agent's start is refused with a launch nonce; the host asks the
+  person and calls again with `confirm_launch` (MCP) or `--confirm-launch`
+  (CLI), together with the `launch_version` and `launch_choice` the refusal
+  named, so the retry runs exactly the version the person was shown.
+- `deny`: only a person launches it, from the dashboard or from an
+  interactive terminal (where `apb run` asks).
+
+The key is part of the definition and its trust digest. It covers a start,
+`playbook_trial`, `playbook_execute_plan`, `apb eval` and the first resume of
+a run that holds no authorization; a run authorized once is never asked again,
+including after a pause. A run's policy is the strictest over its whole tree,
+so a sub-playbook's `deny` makes the run `deny`. Inside a run step (a script
+or an agent with `APB_RUN_ID` or `APB_HOST_TASK` set) nothing confirms a
+launch, whatever the channel. `apb eval --yes` approves the suite and its
+cost, never a launch.
+
+**The floor.** Removing or loosening the key does not loosen the policy for
+an agent: every saved version raises the playbook's launch floor, and an
+agent's save (`playbook_update`, `playbook_create` over an existing or
+trashed id, a capture, a discover save, `playbook_make_global`, a trash
+restore, a supervisor or forward patch) that declares less than the floor is
+refused with `launch_policy_loosened`. A person lowers it by saving the
+looser version in the editor of a dashboard signed in with a key (the editor
+shows the floor and asks before it lowers it; a dashboard without keys never
+lowers a floor), or at a terminal:
+
+```sh
+apb launch floor deploy                  # print the floor
+apb launch floor deploy --lower-to allow # asks; refused inside a run step
+apb launch floor triage --global --lower-to ask
+```
+
+A global playbook has one floor for the whole machine, so it holds in every
+project that runs it; a project playbook's floor is keyed by the workspace
+that owns it.
+
+**Settings.** The machine's `<config dir>/policy.yaml` and the project's
+`.apb/policy.yaml` take a `launch:` section beside `notify:`:
+
+```yaml
+launch:
+  agent: ask                     # the default for every playbook
+  playbooks:
+    "<workspace id>/deploy": allow   # machine file: exact keys, or global/<id>
+```
+
+In the project file, `playbooks:` keys are `<id>` or `global:<id>`. The
+project file only narrows; an exact machine entry replaces the playbook's
+declaration and floor (the machine file is the person's own). The fit report,
+the dashboard's start dialog and `apb doctor` show the effective policy, its
+sources and the floor; `apb runs <id>`, `run_status` and the run page show
+how a run was authorized. See GUARDRAILS.md "Launch policy for agents" for
+the guarantee and its limits.
+
 ## Will it fit here?
 
 Before a playbook runs in a project, one read-only report tells whether it

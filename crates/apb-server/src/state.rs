@@ -242,6 +242,26 @@ pub(crate) fn versioning_error(e: VersioningError) -> Response {
             Json(serde_json::json!({ "error": "frozen", "playbook": what })),
         )
             .into_response(),
+        VersioningError::Launch(e) => {
+            use apb_core::launch::floor::FloorError;
+            let mut body = serde_json::json!({ "error": e.code(), "message": e.to_string() });
+            // A lowering names both levels, so the editor can ask the person
+            // to confirm exactly this one and send it back.
+            if let FloorError::Loosened {
+                declared, floor, ..
+            }
+            | FloorError::LoweringUnconfirmed {
+                declared, floor, ..
+            }
+            | FloorError::LoweringNeedsTerminal {
+                declared, floor, ..
+            } = &e
+            {
+                body["declared"] = serde_json::json!(declared);
+                body["floor"] = serde_json::json!(floor);
+            }
+            (StatusCode::CONFLICT, Json(body)).into_response()
+        }
         VersioningError::Io(e) => {
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }

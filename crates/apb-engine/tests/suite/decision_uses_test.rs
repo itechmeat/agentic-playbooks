@@ -4,6 +4,7 @@
 //! with `enforce_refused: no_threshold`) and where it applies, capped,
 //! uncalibrated, switched off mid-run and with the provider down.
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1356,7 +1357,14 @@ fn gated_options(root: &Path) -> RunOptions {
         id: "d".into(),
         version: None,
     };
-    let permit = apb_engine::gate::check_run(root, &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        root,
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     let mut opts = RunOptions::default();
     permit.apply(&mut opts);
     opts

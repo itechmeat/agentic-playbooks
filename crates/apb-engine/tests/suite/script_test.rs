@@ -1,3 +1,4 @@
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use apb_engine::script::run_script;
 use apb_engine::state::NodeStatus;
 use std::fs;
@@ -240,7 +241,14 @@ fn a_run_refuses_scripts_changed_since_its_permit() {
         id: "s".into(),
         version: None,
     };
-    let permit = apb_engine::gate::check_run(root.path(), &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        root.path(),
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
 
     let marker = root.path().join("marker");
     write_script(

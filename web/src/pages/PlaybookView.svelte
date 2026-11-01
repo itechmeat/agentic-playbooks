@@ -72,6 +72,7 @@
   import type { StartAction } from '../lib/api.gen'
   import type { RunBudget, RunInput } from '../lib/api'
   import { consentStep } from '../lib/irreversibleconsent'
+  import { launchQuestion, launchStep, type LaunchConfirmation } from '../lib/launch'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
   import NodeSummary from '../lib/NodeSummary.svelte'
@@ -619,6 +620,9 @@
   function openStart() {
     startRetry = false
     startOpen = true
+    // The dialog shows the launch policy from the fit report, which is
+    // otherwise loaded only with the fit panel: fetch it fresh here.
+    loadFit()
   }
 
   function startWith(budget: RunBudget | undefined, input: RunInput) {
@@ -627,9 +631,13 @@
     void run()
   }
 
-  async function run(consentNonce?: string) {
+  // The launch confirmation the last start carried, for its consent retry.
+  let lastLaunch: LaunchConfirmation | undefined
+
+  async function run(consentNonce?: string, launch?: LaunchConfirmation) {
     starting = true
     startRefusal = null
+    lastLaunch = launch
     // An answer that arrives after the page moved to another playbook is
     // not this page's: it only ends the pending start, nothing else.
     const still = sameRoute(() => routeToken)
@@ -638,6 +646,7 @@
         consentNonce,
         budget: startBudget,
         input: startInput,
+        launch,
       })
       if (!still()) {
         starting = false
@@ -664,6 +673,16 @@
         irreversibleOpen = true
         return
       }
+      // A dashboard without keys starts an `ask` playbook only with the
+      // nonce of its refusal, after the person confirms here.
+      const launchNext = e instanceof ApiError ? launchStep(e.body, launch) : null
+      if (launchNext?.kind === 'confirm') {
+        if (window.confirm(launchQuestion(launchNext))) {
+          const confirmation = launchNext.confirmation
+          queueMicrotask(() => void run(consentNonce, confirmation))
+        }
+        return
+      }
       if (e instanceof ApiError && e.code === 'budget_needs_decision') {
         // Show the dialog again, the typed values kept and the choice shown.
         toast.error('The budget needs a decision', {
@@ -680,7 +699,8 @@
   }
 
   function confirmIrreversibleRun() {
-    void run(irreversibleNonce)
+    // The launch confirmation of the same start rides the consent retry.
+    void run(irreversibleNonce, lastLaunch)
   }
   // --- end 0.24.0 irreversible consent ---
 
@@ -1244,6 +1264,7 @@
   params={runParams}
   busy={starting}
   retry={startRetry}
+  launch={fit?.launch ?? null}
   onrun={startWith}
 />
 

@@ -201,6 +201,12 @@ pub struct Playbook {
     /// schema 2; no migration.
     #[serde(default, skip_serializing_if = "is_false")]
     pub publish_only: bool,
+    /// Whether an agent may launch this playbook on its own (`allow`), only
+    /// with a person's confirmation the host relays (`ask`), or not at all
+    /// (`deny`); absent reads as `allow`. Part of the approved definition,
+    /// held up by the launch floor (`crate::launch::floor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_launch: Option<crate::launch::policy::LaunchPolicy>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }

@@ -87,6 +87,7 @@ pub fn playbook_trial(
     params: BTreeMap<String, String>,
     instruction: Option<String>,
     scope: &str,
+    launch: &apb_engine::gate::launch::LaunchContext,
 ) -> Result<Value, ToolError> {
     use apb_core::schema::Effect;
 
@@ -122,9 +123,33 @@ pub fn playbook_trial(
         }));
     }
 
+    // The launch policy, decided on the tree the trial resolves; the
+    // verified child pins and root profile bundles go to the engine, so a
+    // child whose `current` moves, or a profile edited, after this check is
+    // not what runs.
+    let checked = match apb_engine::gate::check_trial_launch(
+        root,
+        &loaded,
+        &origin,
+        version.is_some(),
+        launch,
+    ) {
+        Ok(v) => v,
+        Err(refusal) => {
+            let of = apb_engine::next_action::start::StartOf {
+                playbook: id,
+                version,
+            };
+            return Ok(super::actions::policy_refusal(of, refusal));
+        }
+    };
+
     let opts = RunOptions {
         instruction,
         params,
+        expected_children: Some(checked.children),
+        expected_profile_bundles: Some(checked.profile_bundles),
+        launch: Some(checked.grant),
         ..Default::default()
     };
     let resolved_version = loaded.version.clone();

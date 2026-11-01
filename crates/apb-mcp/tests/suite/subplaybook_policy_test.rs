@@ -1,3 +1,4 @@
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::path::Path;
 
 use apb_core::profile::ProfileScope;
@@ -90,7 +91,14 @@ fn recursive_permit_pins_child() {
     approve(dir.path(), "parent");
     approve(dir.path(), "child");
 
-    let permit = check_run(dir.path(), &wref(), false, false).expect("permit");
+    let permit = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("permit");
     let child = permit.children.get("c").expect("child pinned at node c");
     assert_eq!(child.id, "child");
     assert_eq!(child.scope, ProfileScope::Project);
@@ -112,7 +120,14 @@ fn cycle_is_refused() {
     approve(dir.path(), "parent");
     approve(dir.path(), "child");
 
-    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "sub_playbook_cycle");
     let cycle = refusal["cycle"].as_array().expect("cycle path");
     // parent -> child -> parent (the repeated pair closes the cycle).
@@ -161,7 +176,14 @@ fn gated_run_threads_child_pins_into_parent_config() {
     approve(dir.path(), "child");
 
     // The gate produces the pins...
-    let permit = check_run(dir.path(), &wref(), false, false).expect("permit");
+    let permit = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("permit");
     assert!(
         permit.children.contains_key("c"),
         "gate pinned child at node c"
@@ -213,7 +235,14 @@ fn untrusted_child_digest_refuses_and_acknowledge_allows() {
     // Only the parent is approved; the child's own digest is untrusted.
     approve(dir.path(), "parent");
 
-    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
     assert_eq!(refusal["id"], "child", "refusal names the untrusted child");
     assert!(
@@ -222,7 +251,14 @@ fn untrusted_child_digest_refuses_and_acknowledge_allows() {
     );
 
     // Acknowledging untrusted content lets the whole tree through.
-    let permit = check_run(dir.path(), &wref(), true, false).expect("acknowledged permit");
+    let permit = check_run(
+        dir.path(),
+        &wref(),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("acknowledged permit");
     assert!(permit.children.contains_key("c"));
 }
 
@@ -240,7 +276,14 @@ fn draft_child_refuses_naming_child() {
     approve(dir.path(), "child");
     set_lifecycle(dir.path(), "child", Lifecycle::Draft);
 
-    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "draft_requires_trial");
     assert_eq!(refusal["id"], "child");
 }
@@ -259,7 +302,14 @@ fn retired_child_refuses_naming_child() {
     approve(dir.path(), "child");
     set_lifecycle(dir.path(), "child", Lifecycle::Retired);
 
-    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "retired_not_runnable");
     assert_eq!(refusal["id"], "child");
 }
@@ -277,7 +327,14 @@ fn child_with_unmet_requires_refuses_naming_child() {
     approve(dir.path(), "parent");
     approve(dir.path(), "child");
 
-    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    let refusal = check_run(
+        dir.path(),
+        &wref(),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "requires_unmet");
     assert_eq!(refusal["id"], "child");
     let missing = refusal["missing"].as_array().expect("missing list");

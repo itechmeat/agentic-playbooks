@@ -129,6 +129,28 @@ pub struct RunOptions {
     /// target. Ignored for a sub-playbook child, which inherits its
     /// parent's reviews and questions.
     pub notify: Option<apb_core::notify::NotifyRequest>,
+    /// The launch check's grant ([`crate::gate::launch`]), from the run
+    /// gate's permit, or a child's inherited one. A top-level start
+    /// rechecks its policy state before the manifest records it and
+    /// refuses a start of a playbook agents may not launch freely without
+    /// one.
+    pub launch: Option<crate::gate::launch::LaunchGrant>,
+}
+
+/// A permit hands the engine exactly what the gate verified (decision record
+/// 0003). It lives here, beside [`RunOptions`], so the gate never depends on
+/// the scheduler.
+impl crate::gate::RunPermit {
+    pub fn apply(self, opts: &mut RunOptions) {
+        let has_overrides = opts.overrides.as_ref().is_some_and(|o| !o.is_empty());
+        opts.expected_digest = Some(self.playbook_digest);
+        opts.expected_profile_bundles = (!has_overrides).then_some(self.profile_bundles);
+        opts.expected_children = Some(self.children);
+        opts.expected_connectors = self.connectors;
+        opts.expected_connector_accounts = self.connector_accounts;
+        opts.candidate_skipped = self.candidate_skipped;
+        opts.launch = self.launch;
+    }
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -479,6 +501,13 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
         return Err(EngineError::Invalid(format!(
             "run `{run_id}` has already been driven - use resume to continue it"
         )));
+    }
+    // A run prepared without an authorization (by an older apb, or a
+    // driver started by hand) is driven only when its playbook is `allow`
+    // for agents now, read strictly: this entry takes no launch handoff.
+    if crate::gate::launch::run_authorization(&run_dir).is_none() {
+        crate::resume_launch::verify_resume_launch(root, run_id, None)
+            .map_err(EngineError::Conflict)?;
     }
 
     // The snapshot parser rather than `Playbook::from_yaml`: a run dir is a

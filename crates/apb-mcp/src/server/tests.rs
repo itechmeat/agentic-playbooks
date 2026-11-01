@@ -626,6 +626,9 @@ async fn supervise_self_returns_token() {
             budget: None,
             remember: None,
             notify: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
 
@@ -683,6 +686,9 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
             budget: None,
             remember: Some(true),
             notify: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     let text = result_text(&result);
@@ -728,6 +734,9 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
         budget: None,
         remember: Some(true),
         notify: None,
+        launch_version: None,
+        launch_choice: None,
+        confirm_launch: None,
     };
     // A refused start remembers nothing.
     let refused = server
@@ -784,6 +793,9 @@ async fn background_run_returns_run_id_without_blocking() {
             budget: None,
             remember: None,
             notify: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -1587,6 +1599,9 @@ async fn prepare_then_execute_runs_in_target_workspace() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1631,6 +1646,9 @@ async fn token_is_single_use() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert!(result_text(&first).contains("run_ref"));
@@ -1640,6 +1658,9 @@ async fn token_is_single_use() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert!(
@@ -1676,6 +1697,9 @@ async fn digest_drift_invalidates_plan() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert!(
@@ -1709,6 +1733,9 @@ async fn tampered_token_is_rejected() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert!(
@@ -1781,6 +1808,9 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert!(
@@ -1795,6 +1825,9 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
             acknowledge_untrusted: Some(true),
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert!(
@@ -1856,6 +1889,9 @@ async fn execute_plan_refuses_an_unapproved_child_without_acknowledge() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
@@ -1919,6 +1955,9 @@ async fn global_scope_playbook_runs_in_current_project() {
             budget: None,
             remember: None,
             notify: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -2067,6 +2106,9 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             budget: None,
             remember: None,
             notify: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     unsafe {
@@ -2179,6 +2221,9 @@ fn rel_args(
         budget: None,
         remember: None,
         notify: None,
+        launch_version: None,
+        launch_choice: None,
+        confirm_launch: None,
     }
 }
 
@@ -2402,6 +2447,9 @@ async fn execute_plan_needs_the_consent_nonce_and_records_the_client() {
                 acknowledge_untrusted: None,
                 confirm_irreversible: confirm,
                 budget: None,
+                launch_version: None,
+                launch_choice: None,
+                confirm_launch: None,
             }),
             Some("claude-code".to_string()),
         )
@@ -2478,6 +2526,9 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
                 workspace: None,
                 budget: None,
                 confirm_budget: None,
+                launch_version: None,
+                launch_choice: None,
+                confirm_launch: None,
             },
             Some("claude-code".into()),
         )
@@ -2576,6 +2627,8 @@ fn the_run_outcome_fields_are_documented_where_they_are_returned() {
 mod budget;
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
+// The launch policy of agents on the start and authoring tools.
+mod launch;
 mod notify;
 // Known problems: the read, a person's decision and a recheck.
 mod problems;
@@ -2654,6 +2707,9 @@ async fn playbook_run_refuses_a_param_without_a_value() {
             budget: None,
             remember: None,
             notify: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert_needs_who(&result_text(&result), dir.path());
@@ -2688,6 +2744,9 @@ async fn playbook_execute_plan_refuses_a_param_without_a_value() {
             acknowledge_untrusted: None,
             confirm_irreversible: None,
             budget: None,
+            launch_version: None,
+            launch_choice: None,
+            confirm_launch: None,
         }))
         .await;
     assert_needs_who(&result_text(&res), b.path());

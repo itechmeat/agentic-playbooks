@@ -36,6 +36,7 @@
     runSteps,
   } from '../lib/runview'
   import { candidateTrialLabel } from '../lib/versioninfo'
+  import { launchRecordLine } from '../lib/fit'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
@@ -809,6 +810,13 @@
         </section>
       {/if}
 
+      {#if detail.launch}
+        <section class="box launch-box" style:--k="var(--c-violet)" data-testid="run-launch">
+          <span class="box-cap">Launch</span>
+          <span>{launchRecordLine(detail.launch)}</span>
+        </section>
+      {/if}
+
       {#if hookEntries.length}
         <section class="box flex flex-col gap-2 px-4 pt-4 pb-3">
           <span class="box-cap">Webhooks</span>
@@ -980,5 +988,14 @@
   .save-report:focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+  /* The launch authorization box: plain CSS, the padding of its neighbours. */
+  .launch-box {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 16px 16px 12px;
+    font-size: 12px;
+    overflow-wrap: anywhere;
   }
 </style>

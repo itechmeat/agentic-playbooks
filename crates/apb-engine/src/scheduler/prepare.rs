@@ -695,6 +695,27 @@ pub(crate) fn prepare_run_target(
     )?;
     // --- end 0.24.0 irreversible consent ---
 
+    // The launch authorization, checked again against the policy state of
+    // what is about to run, before anything is written.
+    // Read in the project that owns the definition (a trial's worktree
+    // executes elsewhere), as the launch check read it.
+    let owner = match consent_origin {
+        apb_core::scope::Origin::Global => root.to_path_buf(),
+        _ => t
+            .definition_parent
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.to_path_buf()),
+    };
+    check_launch(
+        &owner,
+        &playbook,
+        &consent_origin,
+        opts.expected_children.as_ref(),
+        opts.launch.as_ref(),
+        opts.parent_run.is_some(),
+    )?;
+
     // The notification subscription: a child inherits its parent's, a
     // top-level run checks its own request against the configs and pins the
     // target. A person's request that cannot be honoured refuses the start
@@ -994,6 +1015,32 @@ pub(crate) fn prepare_run_target(
     // The run's secret classification, fixed at start: a later patch adds
     // to it and never removes from it (`crate::run_redact`).
     manifest.secret_params = crate::run_redact::declared_secret(&playbook);
+    // The final launch recheck, under the floor lock until the record is
+    // written: a publication raises a floor under the same lock, so it lands
+    // either before this check (and refuses the start) or after the record.
+    // The check above refused early, before anything was written; script
+    // copies and profile materialization ran since.
+    let floor_hold = if opts.parent_run.is_none() {
+        prep_try_unstarted(
+            &mut log,
+            &unstarted,
+            apb_core::launch::floor::hold().map_err(|e| EngineError::Invalid(e.to_string())),
+        )?
+    } else {
+        None
+    };
+    manifest.launch = prep_try_unstarted(
+        &mut log,
+        &unstarted,
+        check_launch(
+            &owner,
+            &playbook,
+            &consent_origin,
+            opts.expected_children.as_ref(),
+            opts.launch.as_ref(),
+            opts.parent_run.is_some(),
+        ),
+    )?;
     if !manifest.is_empty() {
         prep_try_unstarted(
             &mut log,
@@ -1001,6 +1048,7 @@ pub(crate) fn prepare_run_target(
             crate::manifest::write(&run_dir, &manifest),
         )?;
     }
+    drop(floor_hold);
     // Mark the directory as created by this installation (after the
     // write-once manifest, which the stamp covers), so a resume can tell it
     // from a run directory that arrived with the repository.
@@ -1088,6 +1136,76 @@ pub(crate) fn prepare_run_target(
         start_node,
         mode: opts.mode,
     })
+}
+
+/// The launch authorization a start records (see [`crate::gate::launch`]).
+/// A child keeps the grant it inherited through its pin. A top-level start
+/// with a grant recomputes the policy state of the tree it is about to run
+/// and refuses (`launch_policy_changed`) when a floor or a settings file
+/// changed since the check; one without a grant (a start that bypassed
+/// every launch surface) runs only a playbook agents may launch freely, and
+/// records nothing.
+fn check_launch(
+    root: &Path,
+    playbook: &apb_core::schema::Playbook,
+    origin: &apb_core::scope::Origin,
+    pins: Option<&BTreeMap<String, crate::run_config::ChildExpectation>>,
+    grant: Option<&crate::gate::launch::LaunchGrant>,
+    child: bool,
+) -> Result<Option<apb_core::launch::LaunchRecord>, EngineError> {
+    use crate::gate::launch;
+    if child {
+        return Ok(grant.map(|g| g.record.clone()));
+    }
+    let empty = BTreeMap::new();
+    let tree = launch::Tree {
+        root,
+        playbook,
+        origin,
+        children: pins.unwrap_or(&empty),
+        // A node without a pin fails closed at its spawn; here it only
+        // leaves the tree's policy unread for that node.
+        require_pins: false,
+    };
+    let refused = |v: serde_json::Value| {
+        EngineError::Invalid(format!(
+            "{}: {}",
+            v["policy"].as_str().unwrap_or("launch_refused"),
+            v["detail"].as_str().unwrap_or_default()
+        ))
+    };
+    match grant {
+        Some(g) => {
+            if let Some(state) = &g.policy_state {
+                let (now, _) = launch::effective(tree, g.tolerant).map_err(refused)?;
+                if launch::policy_state(&now) != *state {
+                    return Err(EngineError::Invalid(format!(
+                        "{}: the launch policy of playbook `{}` changed since the launch was checked (now `{}`: {}); launch it again",
+                        launch::POLICY_CHANGED,
+                        playbook.id,
+                        now.policy,
+                        now.sources.join(", ")
+                    )));
+                }
+            }
+            Ok(Some(g.record.clone()))
+        }
+        None => {
+            // Strict: an unchecked start never reads past a damaged
+            // settings or floor file, which an agent can write; it runs
+            // only a playbook agents may launch freely.
+            let (now, _) = launch::effective(tree, false).map_err(refused)?;
+            if now.policy != apb_core::launch::LaunchPolicy::Allow {
+                return Err(EngineError::Invalid(format!(
+                    "launch_unchecked: playbook `{}` is `{}` for agents ({}), and this start passed no launch check; start it through apb run, MCP playbook_run or the dashboard",
+                    playbook.id,
+                    now.policy,
+                    now.sources.join(", ")
+                )));
+            }
+            Ok(None)
+        }
+    }
 }
 
 // --- 0.24.0 irreversible consent ---

@@ -16,6 +16,7 @@
   import { ApiError, resumeRun } from './api'
   import type { NextAction, RunActions } from './api.gen'
   import { authState } from './auth.svelte'
+  import { launchQuestion, launchStep } from './launch'
   import { consentStep } from './irreversibleconsent'
   import IrreversibleRunDialog from './IrreversibleRunDialog.svelte'
   import {
@@ -147,14 +148,29 @@
     )
   }
 
-  async function resume(key: string, target: string, consentNonce?: string) {
+  // The launch nonce the last resume carried, for its consent retry.
+  let resumeLaunchNonce: string | undefined
+
+  async function resume(key: string, target: string, consentNonce?: string, launchNonce?: string) {
     busy = key
+    resumeLaunchNonce = launchNonce
     try {
-      await resumeRun(target, workspace, { consentNonce })
+      await resumeRun(target, workspace, { consentNonce, launchNonce })
       toast.success('Run resumed')
       void reload()
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
+      // A never-authorized run of an `ask` playbook on a dashboard without
+      // keys: resumed only with its refusal's nonce, once confirmed here.
+      const sent = launchNonce ? { nonce: launchNonce } : undefined
+      const launchNext = e instanceof ApiError ? launchStep(e.body, sent) : null
+      if (launchNext?.kind === 'confirm') {
+        if (window.confirm(launchQuestion(launchNext))) {
+          const nonce = launchNext.confirmation.nonce
+          queueMicrotask(() => void resume(key, target, consentNonce, nonce))
+        }
+      } else if (launchNext) {
+        toast.error('Resume refused', { description: launchNext.message })
+      } else if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
         const step = consentStep(e.body, consentNonce)
         if (step.kind === 'stop') {
           toast.error('Resume refused', { description: step.message })
@@ -368,7 +384,8 @@
   action="resume"
   subRun={resumeTarget && resumeTarget !== runId ? resumeTarget : null}
   onconfirm={() => {
-    if (resumeTarget) void resume(`resume:${resumeTarget}`, resumeTarget, irreversibleNonce)
+    if (resumeTarget)
+      void resume(`resume:${resumeTarget}`, resumeTarget, irreversibleNonce, resumeLaunchNonce)
   }}
 />
 

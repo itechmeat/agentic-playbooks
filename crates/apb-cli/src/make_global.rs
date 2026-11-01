@@ -33,6 +33,7 @@ pub(crate) fn make_global_cmd(root: &Path, args: MakeGlobalArgs) -> ExitCode {
         variant,
         move_profiles: args.move_profiles,
         dry_run: args.dry_run,
+        by_agent: false,
     };
     let out = match make_global(root, &args.id, opts) {
         Ok(v) => v,

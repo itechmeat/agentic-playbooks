@@ -69,6 +69,11 @@ pub(crate) struct EvalArgs {
     pub draft: bool,
     pub yes: bool,
     pub json: bool,
+    /// The launch confirmation flags: separate from `yes`, which approves
+    /// the suite and its cost and never a launch.
+    pub launch: crate::launch::LaunchFlags,
+    /// The grant the launch check gave, handed to every case.
+    pub launch_grant: Option<apb_engine::gate::launch::HandoffGrant>,
 }
 
 /// Printed once per invocation: the honest boundary of an eval run.
@@ -548,9 +553,28 @@ fn start_run(
     if let Some(f) = overrides_file {
         cmd.arg("--overrides").arg(f);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("cannot start apb run: {e}"))?;
+    // The case runs under the launch this process checked: a handoff the
+    // case's `apb run` takes once (bound to the definition under test).
+    let handoff = match &args.launch_grant {
+        Some(grant) => Some(
+            apb_engine::launch_handoff::write(
+                tree,
+                &apb_engine::launch_handoff::Handoff::Eval {
+                    grant: grant.clone(),
+                },
+            )
+            .map_err(|e| format!("cannot hand the launch over: {e}"))?,
+        ),
+        None => None,
+    };
+    if let Some(h) = &handoff {
+        cmd.arg("--launch-handoff").arg(h);
+    }
+    let out = cmd.output();
+    if let Some(h) = &handoff {
+        apb_engine::launch_handoff::discard(h);
+    }
+    let out = out.map_err(|e| format!("cannot start apb run: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     match stdout
         .lines()
@@ -1452,6 +1476,81 @@ fn compare_only(root: &Path, evals_home: &Path, args: &EvalArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The launch policy of an eval, checked once in this process before any
+/// case starts: the CLI's own decision table (a run step with either
+/// marker, else the CLI at a terminal or not) for the version under test.
+/// `--yes` plays no part in it. Each case then runs under the grant this
+/// returns, bound to the definition it was checked for.
+fn eval_launch(
+    root: &Path,
+    args: &EvalArgs,
+    loaded: &apb_core::registry::LoadedPlaybook,
+) -> Result<apb_engine::gate::launch::HandoffGrant, String> {
+    let ctx = args
+        .launch
+        .context(apb_engine::gate::launch::LaunchKind::Eval);
+    let origin = apb_core::scope::Origin::Project { workspace_id: None };
+    let explicit = args.version.is_some();
+    let checked = crate::launch::with_prompt(&ctx, |c| {
+        apb_engine::gate::check_trial_launch(root, loaded, &origin, explicit, c)
+    })
+    .map_err(|refusal| {
+        let mut msg = format!("eval {}", crate::launch::refusal_message(&refusal));
+        let actions = apb_engine::next_action::start::from_refusal(
+            apb_engine::next_action::start::StartOf {
+                playbook: &args.id,
+                version: args.version.as_deref(),
+            },
+            &refusal,
+        );
+        for line in crate::actions::start_lines(&actions) {
+            msg.push_str("\n  ");
+            msg.push_str(&line);
+        }
+        msg
+    })?;
+    let digest = loaded.trust_digest().map_err(|e| e.to_string())?;
+    Ok(apb_engine::gate::launch::HandoffGrant {
+        record: checked.grant.record,
+        // The verified child pins are bound too: a child that changes
+        // between this check and a repetition is decided afresh there.
+        binding: apb_engine::gate::launch::HandoffBinding::Definition {
+            id: args.id.clone(),
+            version: loaded.version.clone(),
+            digest,
+            children: apb_engine::gate::launch::children_digest(&checked.children),
+        },
+        // The named carve-out of the config dir rule: each case reads the
+        // config dir this process resolved.
+        config_dir: apb_core::config::config_dir(),
+    })
+}
+
+/// The launch context of an eval case (`apb run --launch-handoff`): the
+/// grant its parent `apb eval` checked, taken from the handoff, or the CLI
+/// without a terminal when the handoff is missing or refused.
+pub(crate) fn case_launch(
+    root: &Path,
+    path: &Path,
+    kind: apb_engine::gate::launch::LaunchKind,
+) -> apb_engine::gate::launch::LaunchContext {
+    use apb_engine::gate::launch::{Initiator, LaunchConfirmation, LaunchContext};
+    let ctx = LaunchContext::new(Initiator::cli(false), kind);
+    match apb_engine::launch_handoff::take(root, path, apb_engine::launch_handoff::parent_pid()) {
+        Ok(apb_engine::launch_handoff::Handoff::Eval { grant }) => {
+            ctx.confirmed(Some(LaunchConfirmation::Forwarded { handoff: grant }))
+        }
+        Ok(_) => {
+            eprintln!("apb: the launch handoff is not an eval case's");
+            ctx
+        }
+        Err(e) => {
+            eprintln!("apb: launch handoff refused: {e}");
+            ctx
+        }
+    }
+}
+
 pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     let Some(evals_home) = core_eval::evals_home() else {
         return fail(args.json, "no_config_dir", "no apb config directory".into());
@@ -1516,6 +1615,15 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
             format!("`{}` has no evals/ directory", args.id),
         );
     }
+    // The launch policy, once, before anything is copied or asked.
+    let launch_grant = if args.dry_run {
+        None
+    } else {
+        match eval_launch(root, &args, &loaded) {
+            Ok(g) => Some(g),
+            Err(msg) => return fail(args.json, "launch_refused", msg),
+        }
+    };
     let overrides = match build_overrides(&args, &playbook) {
         Ok(o) => o,
         Err(e) => return fail(args.json, "bad_overrides", e),
@@ -1542,6 +1650,10 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     let suite_digest = match snapshot_suite(&playbook_dir, &playbook, &scratch, |_| {}) {
         Ok(d) => d,
         Err(e) => return fail(args.json, "invalid_suite", e),
+    };
+    let args = EvalArgs {
+        launch_grant,
+        ..args
     };
     let outcome = run_eval(
         root,
