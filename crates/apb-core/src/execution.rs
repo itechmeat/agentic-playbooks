@@ -216,11 +216,10 @@ struct ProjectFile {
 /// The project's `execution:` section. A missing file or section is empty;
 /// a malformed file is an error.
 pub fn project_execution(root: &Path) -> Result<ProjectExecution, String> {
-    let path = root.join(".apb/config.yaml");
-    if !path.is_file() {
+    let path = crate::config::project_config_path(root);
+    let Some(raw) = crate::config::read_project_config(root)? else {
         return Ok(ProjectExecution::default());
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    };
     let parsed: ProjectFile = yaml_serde::from_str(&raw)
         .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
     Ok(parsed.execution)

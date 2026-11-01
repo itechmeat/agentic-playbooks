@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import type { MachineNotify, RunNotify } from './api.gen'
-import { canNotify, notifyState, onText, onWords, sentLines, startNotify, targetText } from './notify'
+import type { FinishOutcome, MachineNotify, RunNotify } from './api.gen'
+
+const ALL_OUTCOMES: FinishOutcome[] = ['succeeded', 'needs_look', 'failed', 'aborted']
+import {
+  canNotify,
+  journalCoverage,
+  notifySetNote,
+  notifyState,
+  onText,
+  onWords,
+  sentLines,
+  startNotify,
+  targetText,
+} from './notify'
 
 const target = { connector: 'telegram', account: 'me', function: 'send_message', to: '42' }
 
@@ -8,6 +20,7 @@ const on: RunNotify = {
   active: true,
   target,
   on: ['review', 'question', 'paused', 'finished'],
+  finished: ALL_OUTCOMES,
   source: 'run',
   sent: [
     { transition: 'review.12', state: 'confirmed', at: 1 },
@@ -24,6 +37,7 @@ describe('notify', () => {
       kind: 'on',
       target: 'telegram/me send_message to 42',
       on: 'everything',
+      finished: ALL_OUTCOMES,
       source: 'run',
     })
     expect(notifyState({ ...on, on: ['review'] })).toMatchObject({ on: 'review' })
@@ -33,7 +47,7 @@ describe('notify', () => {
   it('reads a run without notifications and keeps the last problem', () => {
     expect(notifyState(null)).toEqual({ kind: 'off' })
     expect(
-      notifyState({ active: false, on: [], sent: [], problems: ['old', 'connector `telegram` is not approved'] }),
+      notifyState({ active: false, on: [], finished: [], sent: [], problems: ['old', 'connector `telegram` is not approved'] }),
     ).toEqual({ kind: 'off', problem: 'connector `telegram` is not approved' })
     expect(sentLines(undefined)).toEqual([])
   })
@@ -46,14 +60,45 @@ describe('notify', () => {
   })
 
   it('sends a start choice only when it differs from what the workspace does anyway', () => {
-    const optIn: MachineNotify = { target, on: [], default_on: false }
+    const optIn: MachineNotify = { target, on: [], default_on: false, finished: ALL_OUTCOMES }
     const byDefault: MachineNotify = { ...optIn, default_on: true }
     expect(canNotify(null)).toBe(false)
-    expect(canNotify({ on: [], default_on: false })).toBe(false)
+    expect(canNotify({ on: [], finished: ALL_OUTCOMES, default_on: false })).toBe(false)
     expect(startNotify(optIn, false)).toBeUndefined()
     expect(startNotify(optIn, true)).toBe(true)
     expect(startNotify(byDefault, true)).toBeUndefined()
     expect(startNotify(byDefault, false)).toBe(false)
-    expect(startNotify({ on: [], default_on: false }, true)).toBeUndefined()
+    expect(startNotify({ on: [], finished: ALL_OUTCOMES, default_on: false }, true)).toBeUndefined()
+  })
+
+  it('names the opt-in transitions and a narrowed end', () => {
+    expect(onText(['review', 'question', 'paused', 'finished', 'host_task'])).toBe('everything, host_task')
+    expect(onText(['review', 'finished'], ['failed', 'aborted'])).toBe('review, finished (failed, aborted)')
+    expect(onText(['review', 'question', 'paused', 'finished'], ['failed'])).toBe(
+      'review, question, paused, finished (failed)',
+    )
+    expect(onWords(['host_task', 'supervisor'])).toBe(
+      'a host task waiting and a failed step waiting for the supervisor',
+    )
+    expect(notifyState({ ...on, finished: ['failed'] })).toMatchObject({
+      on: 'review, question, paused, finished (failed)',
+    })
+  })
+
+  it('reads the journal names of a filtered subscription', () => {
+    expect(journalCoverage(['finished:failed', 'host_task'])).toEqual({
+      on: ['finished', 'host_task'],
+      finished: ['failed'],
+    })
+    expect(journalCoverage(['review', 'finished']).finished).toEqual(ALL_OUTCOMES)
+    // A repeated name counts once, as the engine reads it.
+    expect(journalCoverage(['finished:failed', 'finished:failed', 'finished:failed', 'finished:failed']).finished).toEqual(['failed'])
+    expect(journalCoverage(['finished:later', 'someday', 'review'])).toEqual({
+      on: ['review'],
+      finished: ALL_OUTCOMES,
+    })
+    expect(notifySetNote({ target, on: ['finished:failed', 'host_task'], source: 'run' })).toBe(
+      'notifications on: telegram/me about finished (failed), host_task (from run)',
+    )
   })
 })

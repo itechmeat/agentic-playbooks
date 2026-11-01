@@ -71,6 +71,8 @@ mod models_table_test;
 mod notify_config_test;
 #[path = "suite/overrides_test.rs"]
 mod overrides_test;
+#[path = "suite/policy_file_test.rs"]
+mod policy_file_test;
 #[path = "suite/process_env_test.rs"]
 mod process_env_test;
 #[path = "suite/profile_resolve_test.rs"]

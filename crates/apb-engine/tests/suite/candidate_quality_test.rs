@@ -20,7 +20,9 @@ use apb_engine::grade::reader::ReadRequest;
 use apb_engine::grade::{SubmitOutcome, grades_of, read, start_session, submit};
 use apb_engine::state::RunStatus;
 
-use crate::candidate_trial_test::{ID, events_of, forward, forward_err, pointer, start};
+use crate::candidate_trial_test::{
+    ID, assert_promoted_by, events_of, forward, forward_err, pointer, start,
+};
 
 /// A small gate: three graded runs a side, four trials, and a margin wide
 /// enough that three clean trials are shown not worse (0 poor of 3 has a
@@ -177,6 +179,7 @@ fn trials_are_held_one_failure_rejects_nothing_and_spent_trials_go_to_a_person()
         (Verdict::Promote, "cli")
     );
     assert_eq!(pointer(root, "current").as_deref(), Some(version.as_str()));
+    assert_promoted_by(root, "person", None);
     // The held trial's run reports what stands now, not the stale verdict.
     let t4_dir = run_dir(root, &t4);
     let now = trial_of(&t4_dir, &read_all(&t4_dir).unwrap()).unwrap();
@@ -251,6 +254,7 @@ fn clean_trials_are_promoted_by_quality() {
         (q.verdict, q.decided_by.as_str()),
         (Verdict::Promote, "apb")
     );
+    assert_promoted_by(root, "quality", Some(&t3));
 }
 
 /// Copies the directory `from` to `to`, files and folders.

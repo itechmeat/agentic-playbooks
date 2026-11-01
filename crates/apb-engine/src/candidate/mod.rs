@@ -30,6 +30,7 @@ use apb_core::candidate::{
     promote_policy, random_draw, read_candidate,
 };
 use apb_core::registry::{LoadedPlaybook, Registry};
+use apb_core::versioning::current;
 use apb_core::versioning::{supersede_candidate, supersede_candidate_locked};
 use serde::Serialize;
 
@@ -50,6 +51,7 @@ pub(crate) fn choose_at_gate(
     id: &str,
     current: &LoadedPlaybook,
 ) -> Option<(String, LoadedPlaybook)> {
+    recover_interrupted_move(playbook_dir);
     if let Some(c) = read_candidate(playbook_dir)
         && c != current.version
         && !lineage_reaches(playbook_dir, &c, &current.version)
@@ -68,6 +70,20 @@ pub(crate) fn choose_at_gate(
         random_draw(),
     )?;
     reg.load(id, Some(&version)).ok().map(|l| (version, l))
+}
+
+/// Finishes or undoes a move of `current` a crash interrupted, under the
+/// pointer lock, when one waits; best effort (reported on stderr).
+fn recover_interrupted_move(playbook_dir: &Path) {
+    if !current::intent_pending(playbook_dir) {
+        return;
+    }
+    let recovered = current::lock(playbook_dir)
+        .map_err(current::MoveError::from)
+        .and_then(|held| current::recover(playbook_dir, &held));
+    if let Err(e) = recovered {
+        eprintln!("apb: could not recover an interrupted move of `current`: {e}");
+    }
 }
 
 /// Whether a top-level run starting on `version` of the playbook in
@@ -136,6 +152,9 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
             }
         });
     let lock = apb_core::candidate::lock(&playbook_dir)?;
+    if current::intent_pending(&playbook_dir) {
+        current::recover(&playbook_dir, &lock).map_err(|e| e.into_versioning(&id))?;
+    }
     // Replaced by a newer forward patch or already decided: not ours to judge.
     let Some(line) = Line::open(&root, &id).filter(|l| l.candidate == version) else {
         return Ok(());
@@ -177,9 +196,17 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
             let taken = taken
                 .filter(|(at, _)| *at == trial.line.current)
                 .map(|(_, t)| t);
-            quality::settle_trial(log, &trial, &current.playbook, &gate, succeeded, taken)
+            quality::settle_trial(
+                log,
+                &trial,
+                &current.playbook,
+                &gate,
+                succeeded,
+                taken,
+                &lock,
+            )
         }
-        policy => settle::by_successes(log, &trial, policy, succeeded),
+        policy => settle::by_successes(log, &trial, policy, succeeded, &lock),
     }
 }
 

@@ -22,7 +22,7 @@
     "@types/node": "^26.6.5",
     "bits-ui": "^2.20.2",
     "clsx": "^2.1.1",
-    "happy-dom": "^20.14.5",
+    "happy-dom": "^21.0.4",
     "mode-watcher": "^1.1.0",
     "shadcn-svelte": "^1.7.1",
     "svelte": "^5.57.2",

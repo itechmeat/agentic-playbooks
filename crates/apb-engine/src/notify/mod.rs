@@ -28,7 +28,7 @@ pub mod view;
 
 use std::path::Path;
 
-use apb_core::notify::{NotifySource, Transition};
+use apb_core::notify::{Coverage, FinishOutcome, NotifySource, Transition};
 
 use crate::event::{Event, EventPayload};
 use record::NotifyTargetRecord;
@@ -42,6 +42,8 @@ pub use view::RunNotify;
 pub struct Active {
     pub target: NotifyTargetRecord,
     pub on: Vec<Transition>,
+    /// The outcomes a `finished` notice is sent for.
+    pub finished: Vec<FinishOutcome>,
     pub source: String,
     /// The seq the subscription took effect at: a transition journaled
     /// before it is not news to this subscription.
@@ -57,6 +59,11 @@ pub struct Active {
 }
 
 impl Active {
+    /// What the subscription covers.
+    pub fn coverage(&self) -> Coverage {
+        Coverage::new(&self.on, &self.finished)
+    }
+
     /// Whether a try recorded at `seq`, `ts_ms` came after the set that put
     /// this subscription in force.
     pub fn is_after_set(&self, seq: u64, ts_ms: u64) -> bool {
@@ -75,6 +82,8 @@ pub struct NotifyState {
     /// The transitions of the latest subscription the run had, in force or
     /// turned off since; empty when it never had one.
     pub last_on: Vec<Transition>,
+    /// The `finished` outcomes of that subscription.
+    pub last_finished: Vec<FinishOutcome>,
 }
 
 impl NotifyState {
@@ -98,17 +107,15 @@ impl NotifyState {
             if let Some(p) = problem {
                 state.problems.push(p.clone());
             }
-            let on = Transition::normalized(
-                &on.iter()
-                    .filter_map(|t| Transition::parse(t))
-                    .collect::<Vec<_>>(),
-            );
+            let Coverage { on, finished } = Coverage::from_journal_names(on);
             state.active = match target {
                 Some(target) if !on.is_empty() => {
                     state.last_on = on.clone();
+                    state.last_finished = finished.clone();
                     Some(Active {
                         target: target.clone(),
                         on,
+                        finished,
                         source: source.clone(),
                         since_seq: state.active.as_ref().map_or(e.seq, |a| a.since_seq),
                         set_seq: e.seq,

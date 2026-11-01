@@ -887,8 +887,7 @@ struct ProjectUse {
 /// The project's `decisions:` section, `Ok(None)` when absent. Tolerant of
 /// every other key in `.apb/config.yaml`; strict inside the section.
 fn project_section(root: &Path) -> Result<Option<ProjectDecisions>, String> {
-    let path = root.join(".apb/config.yaml");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
+    let Some(raw) = crate::config::read_project_config(root)? else {
         return Ok(None);
     };
     let doc: yaml_serde::Value = match yaml_serde::from_str(&raw) {

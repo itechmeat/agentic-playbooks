@@ -108,7 +108,14 @@ fn no_version_but_the_current_one_reads_promoted() {
         true,
     )
     .unwrap();
-    apb_core::versioning::promote_version(dir.path(), "demo", "1.0.0").unwrap();
+    use apb_core::versioning::current::{MoveCurrent, MovedBy, Surface, move_current};
+    let back = MoveCurrent::new(
+        "1.0.0",
+        MovedBy::Person {
+            surface: Surface::Cli,
+        },
+    );
+    move_current(&dir.path().join(".apb/playbooks/demo"), &back).unwrap();
 
     let infos = list_versions_with_provenance(dir.path(), "demo").unwrap();
     assert!(

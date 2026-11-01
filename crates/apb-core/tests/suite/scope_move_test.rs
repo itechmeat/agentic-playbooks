@@ -39,7 +39,7 @@ fn the_copy_is_whole_keeps_its_digest_and_leaves_the_draft_out() {
     let dst = tempfile::tempdir().unwrap();
     let dir = seed(src.path());
 
-    let copied = copy_playbook_to(&dir, dst.path(), "p").unwrap();
+    let copied = copy_playbook_to(&dir, dst.path(), "p", "project").unwrap();
     assert_eq!(copied, dst.path().join("playbooks/p"));
     assert_eq!(digest(dst.path()), digest(src.path()));
     assert!(copied.join("meta/1.0.0.yaml").is_file());
@@ -58,7 +58,7 @@ fn an_existing_id_is_refused() {
     let dir = seed(src.path());
     seed(dst.path());
     assert!(matches!(
-        copy_playbook_to(&dir, dst.path(), "p"),
+        copy_playbook_to(&dir, dst.path(), "p", "project"),
         Err(ScopeMoveError::IdTaken(_))
     ));
 }
@@ -78,7 +78,7 @@ fn a_failed_copy_leaves_no_staging_behind() {
             .unwrap()
             .success()
     );
-    assert!(copy_playbook_to(&dir, dst.path(), "p").is_err());
+    assert!(copy_playbook_to(&dir, dst.path(), "p", "project").is_err());
     assert!(!dst.path().join("playbooks/p").exists());
     assert!(staging_is_empty(dst.path()));
 }
@@ -94,7 +94,7 @@ fn a_linked_meta_directory_never_lets_the_copy_remove_outside_it() {
     fs::remove_dir_all(dir.join("meta")).unwrap();
     std::os::unix::fs::symlink(outside.path(), dir.join("meta")).unwrap();
 
-    assert!(copy_playbook_to(&dir, dst.path(), "p").is_err());
+    assert!(copy_playbook_to(&dir, dst.path(), "p", "project").is_err());
     assert_eq!(
         fs::read_to_string(outside.path().join("instruction-draft.md")).unwrap(),
         "keep me"
@@ -110,7 +110,7 @@ fn an_id_claimed_by_another_writer_is_taken() {
     // A new draft claims its id with an empty directory first.
     fs::create_dir_all(dst.path().join("playbooks/p")).unwrap();
     assert!(matches!(
-        copy_playbook_to(&dir, dst.path(), "p"),
+        copy_playbook_to(&dir, dst.path(), "p", "project"),
         Err(ScopeMoveError::IdTaken(_))
     ));
 }

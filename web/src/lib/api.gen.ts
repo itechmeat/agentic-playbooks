@@ -1110,7 +1110,9 @@ unestimated_tokens: Array<string>,
  */
 unestimated_cost: Array<string>, note?: string, };
 
-export type Transition = "review" | "question" | "paused" | "finished";
+export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor";
+
+export type FinishOutcome = "succeeded" | "needs_look" | "failed" | "aborted";
 
 export type NotifyTarget = { connector: string, account: string, function: string, to: string, };
 
@@ -1130,6 +1132,11 @@ at: number, };
 
 export type RunNotify = { active: boolean, target?: NotifyTarget, on: Array<Transition>, 
 /**
+ * The outcomes a `finished` notice is sent for; every outcome when
+ * nothing narrows it.
+ */
+finished: Array<FinishOutcome>, 
+/**
  * Where the subscription in force came from.
  */
 source?: string, 
@@ -1148,8 +1155,15 @@ target?: NotifyTarget,
  */
 on: Array<Transition>, 
 /**
+ * The run outcomes a `finished` notice covers by default (the
+ * `policy.yaml` filters of the machine and the workspace).
+ */
+finished: Array<FinishOutcome>, 
+/**
  * Whether a run of this workspace notifies without being asked (the
- * machine default, unless the project turned it off).
+ * machine default, unless the project turned it off), for the
+ * playbook the request names: the `policy.yaml` playbook filters
+ * apply to it as they do at its start.
  */
 default_on: boolean, 
 /**
@@ -2223,3 +2237,61 @@ is_candidate?: boolean,
  * ([`approval`]).
  */
 awaiting_approval?: boolean, provenance: VersionProvenance | null, };
+
+export type Surface = "cli" | "dashboard";
+
+export type MovedBy = { "kind": "person", surface: Surface, } | { "kind": "candidate_promotion", run_id?: string, basis: string, } | { "kind": "patch_promotion", run_id: string, } | { "kind": "created" } | { "kind": "migration" } | { "kind": "scope_move", from_scope: string, };
+
+export type Moved = { change_id: string, from: string | null, to: string, 
+/**
+ * The candidate whose trial the move ended.
+ */
+superseded_candidate: string | null, 
+/**
+ * The new current version was imported with scripts nobody approved:
+ * starts stay refused until a person approves it. Moving grants
+ * nothing.
+ */
+awaiting_approval: boolean, 
+/**
+ * `current` moved, but its follow-up (the candidate's trial record,
+ * the history line) did not finish; the next recovery finishes it.
+ */
+audit_pending: boolean, };
+
+export type EntryKind = "move" | "aborted";
+
+export type HistoryEntry = { 
+/**
+ * Absent on a move.
+ */
+kind?: EntryKind, change_id: string, at_ms: number, from?: string, 
+/**
+ * The version `current` moved to; absent on an aborted move.
+ */
+to?: string, by?: MovedBy, 
+/**
+ * A person's reason, scrubbed and cut.
+ */
+reason?: string, superseded_candidate?: string, 
+/**
+ * The sha256 of the line before; absent on the first line.
+ */
+prev?: string, };
+
+export type History = { 
+/**
+ * Newest first.
+ */
+entries: Array<HistoryEntry>, 
+/**
+ * The record has a gap: a line lost or edited (the `prev` chain
+ * breaks), a move that does not start where the previous one ended,
+ * or a `current` other than the last recorded target (moved by an
+ * older apb or by hand).
+ */
+incomplete: boolean, 
+/**
+ * A move was interrupted and waits for recovery.
+ */
+pending: boolean, };

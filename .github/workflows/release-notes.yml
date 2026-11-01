@@ -1,28 +1,74 @@
 name: release-notes
 
+# Applies docs/release-notes/<tag>.md as the body of a GitHub Release, on
+# releases and pre-releases alike. It is not a job of the generated
+# release.yml: dist runs its post-announce jobs after the Homebrew publish,
+# which is skipped on a pre-release, so the notes were skipped with it.
+# Instead this workflow follows every completed run of the Release workflow
+# and acts only on a successful tag push of this repository whose tag points
+# at the commit that run built. `workflow_run` workflows run from the default
+# branch, so a change here takes effect once it is merged.
 on:
-  workflow_call:
-    inputs:
-      plan:
-        required: true
-        type: string
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
 
 # Nothing by default; the one job that edits the release gets write access.
 permissions: {}
 
 jobs:
   apply-notes:
+    # A pull request run of Release (event `pull_request`), a failed run and a
+    # run from a fork never get here. The tag checks follow in the first step.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
+      # Before anything is checked out or edited: the run's ref is a version
+      # tag of this repository (a branch with the same name has no tag ref),
+      # and that tag, dereferenced through annotated tag objects, names the
+      # exact commit the Release run built.
+      - name: Verify the tag of the Release run
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::not a version tag: ${TAG}"
+            exit 1
+          fi
+          # A missing tag is a 404, and `gh api` failing stops the step.
+          object=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+            --jq '.object.type + " " + .object.sha')
+          read -r type sha <<<"${object}"
+          while [[ "${type}" == "tag" ]]; do
+            object=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" \
+              --jq '.object.type + " " + .object.sha')
+            read -r type sha <<<"${object}"
+          done
+          if [[ "${type}" != "commit" || "${sha}" != "${HEAD_SHA}" ]]; then
+            echo "::error::tag ${TAG} points at ${type} ${sha}, the Release run built ${HEAD_SHA}"
+            exit 1
+          fi
       # `gh` below authenticates through GH_TOKEN, so the checkout does not
       # need to leave the token in .git/config.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
       - name: Apply release notes as the release body
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${GITHUB_REF_NAME}" --notes-file "docs/release-notes/${GITHUB_REF_NAME}.md"
+        run: |
+          set -euo pipefail
+          notes="docs/release-notes/${TAG}.md"
+          if [[ ! -f "${notes}" ]]; then
+            echo "::error::${notes} is missing"
+            exit 1
+          fi
+          gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --notes-file "${notes}"

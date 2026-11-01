@@ -9,9 +9,9 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use apb_core::notify::{NotifyRequest, NotifyTarget, Transition};
+use apb_core::notify::{FinishOutcome, NotifyRequest, NotifyTarget, Transition};
 use apb_engine::notify::{ChangedBy, RunNotify};
-use apb_mcp::tools::notify::{NotifyError, transitions};
+use apb_mcp::tools::notify::{NotifyError, outcomes, transitions};
 
 use crate::util::{QUESTION_TEXT_MAX, StepCaller, sanitize_for_terminal};
 
@@ -23,12 +23,16 @@ pub(crate) struct NotifyFlags {
     #[arg(long, conflicts_with = "no_notify")]
     pub notify: bool,
     /// No notifications for this run, whatever the machine default
-    #[arg(long = "no-notify", conflicts_with_all = ["notify_on", "notify_via", "notify_to"])]
+    #[arg(long = "no-notify", conflicts_with_all = ["notify_on", "notify_finished", "notify_via", "notify_to"])]
     pub no_notify: bool,
     /// Only these transitions, comma separated: review, question, paused,
-    /// finished. Implies --notify
+    /// finished, host_task, supervisor. Implies --notify
     #[arg(long = "notify-on", value_name = "LIST", value_delimiter = ',')]
     pub notify_on: Vec<String>,
+    /// Send the end-of-run notice only for these outcomes, comma
+    /// separated: succeeded, needs_look, failed, aborted. Implies --notify
+    #[arg(long = "notify-finished", value_name = "LIST", value_delimiter = ',')]
+    pub notify_finished: Vec<String>,
     /// Send through this connector account instead of the machine's:
     /// <connector>/<account>[:function]. Implies --notify
     #[arg(long = "notify-via", value_name = "CONNECTOR/ACCOUNT[:FUNCTION]")]
@@ -48,6 +52,7 @@ impl NotifyFlags {
         }
         let asked = self.notify
             || !self.notify_on.is_empty()
+            || !self.notify_finished.is_empty()
             || self.notify_via.is_some()
             || self.notify_to.is_some();
         if !asked {
@@ -56,6 +61,7 @@ impl NotifyFlags {
         let machine = machine_base(self.notify_via.as_deref(), self.notify_to.as_deref())?;
         on_request(
             (!self.notify_on.is_empty()).then_some(self.notify_on.as_slice()),
+            (!self.notify_finished.is_empty()).then_some(self.notify_finished.as_slice()),
             self.notify_via.as_deref(),
             self.notify_to.as_deref(),
             machine.as_ref(),
@@ -67,13 +73,23 @@ impl NotifyFlags {
     /// joined to its flag with `=`, so a recipient that starts with `-` (a
     /// chat group's id) is never read as a flag.
     pub(crate) fn args_of(req: &NotifyRequest) -> Vec<String> {
-        let NotifyRequest::On { target, on } = req else {
+        let NotifyRequest::On {
+            target,
+            on,
+            finished,
+        } = req
+        else {
             return vec!["--no-notify".into()];
         };
         let mut out = vec!["--notify".to_string()];
         if let Some(on) = on {
-            let names: Vec<&str> = on.iter().map(|t| t.as_str()).collect();
-            out.push(format!("--notify-on={}", names.join(",")));
+            out.push(format!("--notify-on={}", on_text_with(on, ",")));
+        }
+        if let Some(finished) = finished {
+            out.push(format!(
+                "--notify-finished={}",
+                outcome_text_with(finished, ",")
+            ));
         }
         if let Some(t) = target {
             out.extend([
@@ -85,29 +101,36 @@ impl NotifyFlags {
     }
 }
 
-/// An `On` request from the flag values: the transitions, and a target
-/// built over `base` (the run's current target, or the machine's) from
-/// `via` and `to`.
+/// The non-empty, trimmed names of a comma-separated flag value.
+fn names_of(list: &[String]) -> Vec<String> {
+    list.iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// An `On` request from the flag values: the transitions, the outcomes of
+/// the end-of-run notice, and a target built over `base` (the run's
+/// current target, or the machine's) from `via` and `to`.
 fn on_request(
     on: Option<&[String]>,
+    finished: Option<&[String]>,
     via: Option<&str>,
     to: Option<&str>,
     base: Option<&NotifyTarget>,
 ) -> Result<NotifyRequest, String> {
     let on = on
-        .map(|names| {
-            let names: Vec<String> = names
-                .iter()
-                .map(|n| n.trim().to_string())
-                .filter(|n| !n.is_empty())
-                .collect();
-            transitions(&names)
-        })
+        .map(|names| transitions(&names_of(names)))
+        .transpose()
+        .map_err(|e| e.detail().to_string())?;
+    let finished = finished
+        .map(|names| outcomes(&names_of(names)))
         .transpose()
         .map_err(|e| e.detail().to_string())?;
     let req = NotifyRequest::On {
         target: target_of(via, to, base)?,
         on,
+        finished,
     };
     req.validate()?;
     Ok(req)
@@ -199,7 +222,7 @@ pub(crate) fn block_lines(block: &RunNotify) -> Vec<String> {
             clean(&t.account),
             clean(&t.function),
             clean(&t.to),
-            on_text(&block.on),
+            about_text(&block.on, &block.finished),
             block
                 .source
                 .as_deref()
@@ -218,12 +241,48 @@ pub(crate) fn block_lines(block: &RunNotify) -> Vec<String> {
 }
 
 fn on_text(on: &[Transition]) -> String {
-    on.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+    on_text_with(on, ", ")
 }
 
-/// Prints the warnings of a start's notify check, or refuses the start.
-pub(crate) fn start_check(root: &Path, req: Option<&NotifyRequest>) -> Result<(), String> {
-    match apb_mcp::tools::notify::start_check(root, req) {
+fn on_text_with(on: &[Transition], sep: &str) -> String {
+    on.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(sep)
+}
+
+fn outcome_text_with(outcomes: &[FinishOutcome], sep: &str) -> String {
+    outcomes
+        .iter()
+        .map(|o| o.as_str())
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// `review, finished (failed, aborted)`: the transitions, with the outcomes
+/// of `finished` when they are narrowed.
+fn about_text(on: &[Transition], finished: &[FinishOutcome]) -> String {
+    let narrowed = !finished.is_empty() && finished.len() < FinishOutcome::ALL.len();
+    on.iter()
+        .map(|t| match t {
+            Transition::Finished if narrowed => {
+                format!("finished ({})", outcome_text_with(finished, ", "))
+            }
+            t => t.as_str().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Prints the warnings of the notify check of a start of project playbook
+/// `playbook`, or refuses the start.
+pub(crate) fn start_check(
+    root: &Path,
+    playbook: &str,
+    req: Option<&NotifyRequest>,
+) -> Result<(), String> {
+    let key = apb_core::policy_file::PlaybookKey {
+        id: playbook,
+        global: false,
+    };
+    match apb_mcp::tools::notify::start_check(root, Some(&key), req) {
         Ok(warnings) => {
             for w in warnings {
                 eprintln!("warning: {}", sanitize_for_terminal(&w, QUESTION_TEXT_MAX));
@@ -244,13 +303,20 @@ pub(crate) struct NotifyChange<'a> {
     /// `Some("review,finished")` narrows them.
     pub on: Option<&'a str>,
     pub off: bool,
+    /// `Some("failed,aborted")`: the end-of-run notice only for these
+    /// outcomes.
+    pub finished: Option<&'a str>,
     pub via: Option<&'a str>,
     pub to: Option<&'a str>,
 }
 
 impl NotifyChange<'_> {
     fn is_empty(&self) -> bool {
-        self.on.is_none() && !self.off && self.via.is_none() && self.to.is_none()
+        self.on.is_none()
+            && !self.off
+            && self.finished.is_none()
+            && self.via.is_none()
+            && self.to.is_none()
     }
 
     /// The engine request, a target left out filled from `base`.
@@ -258,11 +324,10 @@ impl NotifyChange<'_> {
         if self.off {
             return Ok(NotifyRequest::Off);
         }
-        let on: Option<Vec<String>> = self
-            .on
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.split(',').map(str::to_string).collect());
-        on_request(on.as_deref(), self.via, self.to, base)
+        let split = |s: &str| s.split(',').map(str::to_string).collect::<Vec<_>>();
+        let on = self.on.filter(|s| !s.trim().is_empty()).map(split);
+        let finished = self.finished.map(split);
+        on_request(on.as_deref(), finished.as_deref(), self.via, self.to, base)
     }
 }
 
@@ -325,7 +390,44 @@ fn machine_cmd(root: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let by_default = apb_core::notify::effective(&cfg, &project, None).is_some();
+    let policies = match apb_core::policy_file::Policies::load(root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "notify: {}",
+                sanitize_for_terminal(&e.message, QUESTION_TEXT_MAX * 2)
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let finished = policies.finished();
+    if finished.len() < FinishOutcome::ALL.len() {
+        println!(
+            "end-of-run notice for: {}",
+            outcome_text_with(&finished, ", ")
+        );
+    }
+    for (label, list) in [
+        ("machine", &policies.machine.notify.playbooks),
+        ("project", &policies.project.notify.playbooks),
+    ] {
+        if let Some(list) = list {
+            println!(
+                "default covers only ({label} policy.yaml): {}",
+                clean(&list.join(", "))
+            );
+        }
+    }
+    let by_default = apb_core::notify::effective(
+        apb_core::notify::Settings {
+            machine: &cfg,
+            project: &project,
+            policies: &policies,
+        },
+        None,
+        None,
+    )
+    .is_some();
     println!(
         "runs here notify {}",
         if by_default {
@@ -339,7 +441,7 @@ fn machine_cmd(root: &Path) -> ExitCode {
 
 /// `apb notify test`: one live message through the target.
 fn test_cmd(root: &Path, change: &NotifyChange<'_>) -> ExitCode {
-    if change.on.is_some() || change.off {
+    if change.on.is_some() || change.off || change.finished.is_some() {
         eprintln!("notify test takes only --via and --to");
         return ExitCode::from(2);
     }
@@ -501,6 +603,7 @@ mod tests {
                     to: to.into(),
                 }),
                 on: Some(vec![Transition::Review, Transition::Finished]),
+                finished: Some(vec![FinishOutcome::Failed, FinishOutcome::Aborted]),
             };
             let args = NotifyFlags::args_of(&req);
             let parsed = <Probe as clap::Parser>::try_parse_from(

@@ -12,14 +12,17 @@ vi.mock('svelte-sonner', () => ({ toast: { success: vi.fn(), error: vi.fn(), war
 import { toast } from 'svelte-sonner'
 import { ApiError } from './api/http'
 import RunNotifyControl from './RunNotifyControl.svelte'
-import type { MachineNotify, RunNotify } from './api.gen'
+import type { FinishOutcome, MachineNotify, RunNotify } from './api.gen'
+
+const ALL_OUTCOMES: FinishOutcome[] = ['succeeded', 'needs_look', 'failed', 'aborted']
 
 const target = { connector: 'telegram', account: 'me', function: 'send_message', to: '42' }
-const machine: MachineNotify = { target, on: ['review', 'question', 'paused', 'finished'], default_on: false }
+const machine: MachineNotify = { target, on: ['review', 'question', 'paused', 'finished'], default_on: false, finished: ALL_OUTCOMES }
 const on: RunNotify = {
   active: true,
   target,
   on: ['review', 'finished'],
+  finished: ALL_OUTCOMES,
   source: 'run',
   sent: [{ transition: 'review.12', state: 'confirmed', at: 1 }],
   problems: [],
@@ -84,8 +87,8 @@ describe('RunNotifyControl', () => {
   })
 
   it('has no button without a target, and shows a problem a default had', async () => {
-    fetchNotify.mockResolvedValue({ on: [], default_on: false })
-    await show({ notify: { active: false, on: [], sent: [], problems: ['connector `telegram` is not approved'] } })
+    fetchNotify.mockResolvedValue({ on: [], finished: ALL_OUTCOMES, default_on: false })
+    await show({ notify: { active: false, on: [], finished: [], sent: [], problems: ['connector `telegram` is not approved'] } })
     expect(byTestId('run-notify-problem')?.textContent).toBe('connector `telegram` is not approved')
     expect(byTestId('run-notify-on')).toBeNull()
     expect(byTestId('run-notify-off')).toBeNull()
@@ -136,7 +139,7 @@ describe('RunNotifyControl', () => {
     expect(byTestId('run-notify-no-target')).toBeNull()
     expect(byTestId('run-notify-machine-problem')).toBeNull()
     expect(byTestId('run-notify-on')).toBeNull()
-    answer({ on: [], default_on: false })
+    answer({ on: [], finished: ALL_OUTCOMES, default_on: false })
     await tick()
     flushSync()
     expect(byTestId('run-notify-no-target')).not.toBeNull()
@@ -152,5 +155,48 @@ describe('RunNotifyControl', () => {
     document.body.innerHTML = ''
     await show({ notify: null, status: 'succeeded' })
     expect(byTestId('run-notify-state')).toBeNull()
+  })
+
+  it('narrows the end-of-run notice of a live run to the outcomes kept checked', async () => {
+    fetchNotify.mockResolvedValue(machine)
+    postRunNotify.mockResolvedValue({ run_id: 'run-1' })
+    const onchange = vi.fn()
+    await show({ notify: on, onchange })
+    expect(byTestId('run-notify-filter')).not.toBeNull()
+    const apply = byTestId('run-notify-filter-apply') as HTMLButtonElement
+    expect(apply.disabled).toBe(true)
+    for (const o of ['succeeded', 'needs_look'] as const) {
+      const box = byTestId(`run-notify-outcome-${o}`) as HTMLInputElement
+      expect(box.checked).toBe(true)
+      box.click()
+      flushSync()
+    }
+    expect(apply.disabled).toBe(false)
+    apply.click()
+    await tick()
+    expect(postRunNotify).toHaveBeenCalledWith('run-1', { finished: ['failed', 'aborted'] }, 'w')
+    expect(toast.success).toHaveBeenCalledWith('The end-of-run notice filter is changed')
+    expect(onchange).toHaveBeenCalled()
+  })
+
+  it('shows the filter in force, and offers none without an end notice or on an ended run', async () => {
+    fetchNotify.mockResolvedValue(machine)
+    await show({ notify: { ...on, finished: ['failed'] } })
+    expect((byTestId('run-notify-outcome-failed') as HTMLInputElement).checked).toBe(true)
+    expect((byTestId('run-notify-outcome-succeeded') as HTMLInputElement).checked).toBe(false)
+    // Unchecking the last one leaves nothing to apply.
+    ;(byTestId('run-notify-outcome-failed') as HTMLInputElement).click()
+    flushSync()
+    expect((byTestId('run-notify-filter-apply') as HTMLButtonElement).disabled).toBe(true)
+    unmount(app!)
+    app = null
+    document.body.innerHTML = ''
+    await show({ notify: { ...on, on: ['review'] } })
+    expect(byTestId('run-notify-filter')).toBeNull()
+    unmount(app!)
+    app = null
+    document.body.innerHTML = ''
+    await show({ notify: on, status: 'failed' })
+    expect(byTestId('run-notify-filter')).toBeNull()
   })
 })

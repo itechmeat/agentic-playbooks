@@ -338,6 +338,100 @@ mod tests {
         }
     }
 
+    /// A notice prints the command of the very request it is about, read
+    /// back by the shell and the real parser; a notice about a request that
+    /// moved on prints none, and the supervisor's prints none.
+    #[test]
+    fn a_notice_command_answers_only_the_notified_request() {
+        use apb_core::notify::Transition;
+        use apb_engine::notify::notice::command_for;
+        use apb_engine::notify::transitions::TransitionId;
+
+        let review = |seq: u64| {
+            let mut a = action(
+                ActionCode::DecideReview,
+                "r-1",
+                Some("gate"),
+                vec![supplied("decision")],
+            );
+            a.target.request = Some(request(RequestKind::Review, seq));
+            a
+        };
+        let open = vec![review(9)];
+        let parse = |line: String| match Cli::try_parse_from(through_shell(&line))
+            .unwrap_or_else(|e| panic!("{line} does not parse: {e}"))
+            .command
+        {
+            Some(Command::Review {
+                run_id,
+                node_id,
+                request,
+                nonce,
+                ..
+            }) => (run_id, node_id, request.map(|r| r.seq), nonce),
+            _ => panic!("not a review: {line}"),
+        };
+        let notified = TransitionId {
+            kind: Transition::Review,
+            seq: 9,
+        };
+        let line = command_for(&open, "r-1", &notified, None).unwrap().line();
+        assert_eq!(parse(line), ("r-1".into(), "gate".into(), Some(9), None));
+        // A late notice about review 5, while review 9 is open: no command
+        // that could answer 9.
+        let late = TransitionId {
+            kind: Transition::Review,
+            seq: 5,
+        };
+        assert!(command_for(&open, "r-1", &late, None).is_none());
+        // Another run's action never answers this run's notice.
+        assert!(command_for(&open, "r-2", &notified, None).is_none());
+
+        let mut publish = action(
+            ActionCode::DecidePublish,
+            "r-1",
+            Some("push"),
+            vec![
+                supplied("decision"),
+                ActionArg {
+                    name: "nonce".into(),
+                    value: ArgValue::Given {
+                        value: "plan-0123abcd".into(),
+                    },
+                    required: true,
+                },
+            ],
+        );
+        publish.target.request = Some(request(RequestKind::Publish, 4));
+        let line = command_for(
+            &[publish],
+            "r-1",
+            &TransitionId {
+                kind: Transition::Review,
+                seq: 4,
+            },
+            None,
+        )
+        .unwrap()
+        .line();
+        assert_eq!(
+            parse(line),
+            (
+                "r-1".into(),
+                "push".into(),
+                Some(4),
+                Some("plan-0123abcd".into())
+            )
+        );
+
+        let retry = action(ActionCode::SupervisorRetryNode, "r-1", Some("w"), vec![]);
+        let wake = TransitionId {
+            kind: Transition::Supervisor,
+            seq: 3,
+        };
+        assert!(command_for(&[retry], "r-1", &wake, None).is_none());
+    }
+
     #[test]
     fn a_host_task_submission_reads_back() {
         for value in HARD.iter().filter(|v| !v.is_empty()) {

@@ -16,6 +16,25 @@ use apb_engine::state::RunStatus;
 
 pub(crate) const ID: &str = "trial";
 
+/// The newest move of `current` was this candidate promotion, recorded on
+/// a complete history, and settling left no pointer lock behind (it moved
+/// `current` under the lock it already held).
+pub(crate) fn assert_promoted_by(root: &Path, basis: &str, run_id: Option<&str>) {
+    use apb_core::versioning::current::{MovedBy, history};
+    let dir = root.join(".apb/playbooks").join(ID);
+    let h = history(&dir, 1).unwrap();
+    assert!(!h.incomplete && !h.pending, "{h:?}");
+    assert_eq!(
+        h.entries[0].by,
+        Some(MovedBy::CandidatePromotion {
+            run_id: run_id.map(str::to_string),
+            basis: basis.to_string(),
+        }),
+        "{h:?}"
+    );
+    assert!(!dir.join(".candidate.lock").exists());
+}
+
 /// `{policy}` goes under `supervisor.policy`; `{p1}` is the first node's
 /// script.
 fn playbook(policy: &str, p1: &str) -> String {
@@ -187,6 +206,7 @@ fn a_forward_patch_changes_an_executed_node_and_the_next_run_promotes_it() {
         .unwrap();
     assert_eq!(trial.outcome.as_deref(), Some("promoted"));
     assert_eq!(trial.run_id.as_deref(), Some(second.as_str()));
+    assert_promoted_by(root, "successes:1", Some(&second));
 
     let summary = apb_engine::candidate::trial_of(
         &root.join(".apb/runs").join(&second),
@@ -283,6 +303,7 @@ fn after_n_successes_promotes_on_the_nth_trial() {
             .any(|e| matches!(e, EventPayload::CandidatePromoted { successes: 2, basis, .. } if basis.as_deref() == Some("successes")))
     );
     assert_eq!(pointer(root, "current").as_deref(), Some("1.0.1"));
+    assert_promoted_by(root, "successes:2", Some(&third));
 }
 
 #[test]
@@ -443,6 +464,42 @@ fn a_forward_patch_from_a_run_of_an_older_version_is_refused() {
     let err = forward_err(root, &first, &playbook(policy, "fail.sh"));
     assert!(err.contains("stale_base"), "{err}");
     assert_eq!(pointer(root, "candidate"), None);
+}
+
+#[test]
+fn the_gate_finishes_a_promotion_a_crash_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let policy = "    promote_supervisor_patches: on_success";
+    seed(root, policy);
+    let (first, _, _) = start(root);
+    forward(root, &first, &playbook(policy, "also-ok.sh"));
+    // A promotion stopped right after `current` moved: the pointer still
+    // names the candidate, its trial is not recorded, the history lacks
+    // the line, the intent waits.
+    let pb = root.join(".apb/playbooks").join(ID);
+    fs::write(pb.join("current"), "1.0.1").unwrap();
+    let by = r#"{"kind":"candidate_promotion","run_id":"r0","basis":"successes:1"}"#;
+    fs::write(
+        pb.join("current.intent.json"),
+        format!(
+            r#"{{"change_id":"c1","from":"1.0.0","to":"1.0.1","by":{by},"supersede":null,"finish_candidate":{{"version":"1.0.1","trial":{{"run_id":"r0"}}}},"history_line":{{"change_id":"c1","at_ms":1,"from":"1.0.0","to":"1.0.1","by":{by}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let (_, outcome, chosen) = start(root);
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(chosen, None);
+    assert!(!pb.join("current.intent.json").exists());
+    assert_eq!(pointer(root, "candidate"), None);
+    let trial = read_provenance(root, ID, "1.0.1")
+        .unwrap()
+        .unwrap()
+        .trial
+        .unwrap();
+    assert_eq!(trial.outcome.as_deref(), Some("promoted"));
+    assert_promoted_by(root, "successes:1", Some("r0"));
 }
 
 #[test]

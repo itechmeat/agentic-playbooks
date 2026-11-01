@@ -180,6 +180,8 @@ describe('RunStartDialog', () => {
 
     fetchNotify.mockResolvedValue({ target, on: ['review'], default_on: true })
     const byDefault = await open(null, [])
+    // The default is asked for this playbook: its `policy.yaml` filter applies.
+    expect(fetchNotify).toHaveBeenLastCalledWith('w', 'p')
     expect((byTestId('run-start-notify-me') as HTMLInputElement).checked).toBe(true)
     // The hint names what this machine sends, not every transition.
     expect(byTestId('run-start-notify')?.textContent).toContain('About a review waiting, through')

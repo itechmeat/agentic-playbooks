@@ -5,10 +5,8 @@ use apb_core::candidate::policy::unreadable;
 use apb_core::quality::compare::{CompareMode, QualityGate};
 use apb_core::registry::init_project;
 use apb_core::schema::Playbook;
-use apb_core::versioning::{
-    PromotePolicy, VersioningError, create_patch_version, promote_policy, promote_version,
-    read_provenance,
-};
+use apb_core::versioning::current::{MoveCurrent, MoveError, MovedBy, Surface, move_current};
+use apb_core::versioning::{PromotePolicy, create_patch_version, promote_policy, read_provenance};
 
 const VALID: &str = include_str!("../fixtures/valid.yaml");
 
@@ -21,6 +19,17 @@ fn seed(root: &Path) {
     fs::create_dir_all(root.join(".apb/profiles/architect")).unwrap();
 }
 
+/// A person makes `version` of `implement-task` current.
+fn make_current(root: &Path, version: &str) -> Result<(), MoveError> {
+    let req = MoveCurrent::new(
+        version,
+        MovedBy::Person {
+            surface: Surface::Cli,
+        },
+    );
+    move_current(&root.join(".apb/playbooks/implement-task"), &req).map(drop)
+}
+
 fn playbook_with_policy(policy: &str) -> Playbook {
     let yaml =
         format!("{VALID}\nsupervisor:\n  policy:\n    promote_supervisor_patches: {policy}\n");
@@ -28,7 +37,7 @@ fn playbook_with_policy(policy: &str) -> Playbook {
 }
 
 #[test]
-fn promote_version_moves_current_and_marks_provenance() {
+fn a_move_to_a_patch_version_moves_current() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let version = create_patch_version(
@@ -41,7 +50,7 @@ fn promote_version_moves_current_and_marks_provenance() {
     )
     .unwrap();
 
-    promote_version(dir.path(), "implement-task", &version).unwrap();
+    make_current(dir.path(), &version).unwrap();
 
     assert_eq!(
         fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
@@ -52,13 +61,13 @@ fn promote_version_moves_current_and_marks_provenance() {
 }
 
 #[test]
-fn promote_version_keeps_current_when_the_version_has_no_playbook() {
+fn a_move_keeps_current_when_the_version_has_no_playbook() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     fs::create_dir_all(dir.path().join(".apb/playbooks/implement-task/1.0.1")).unwrap();
 
-    let err = promote_version(dir.path(), "implement-task", "1.0.1").unwrap_err();
-    assert!(matches!(err, VersioningError::NotFound(_)));
+    let err = make_current(dir.path(), "1.0.1").unwrap_err();
+    assert!(matches!(err, MoveError::NotFound(_)));
     assert_eq!(
         fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
             .unwrap()
@@ -70,14 +79,14 @@ fn promote_version_keeps_current_when_the_version_has_no_playbook() {
 /// An ordinary saved version carries no provenance sidecar (only supervisor
 /// patches do), and it still has to be selectable as the current one.
 #[test]
-fn promote_version_switches_to_a_version_without_provenance() {
+fn a_move_switches_to_a_version_without_provenance() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let version_dir = dir.path().join(".apb/playbooks/implement-task/1.1.0");
     fs::create_dir_all(version_dir.join("scripts")).unwrap();
     fs::write(version_dir.join("playbook.yaml"), VALID).unwrap();
 
-    promote_version(dir.path(), "implement-task", "1.1.0").unwrap();
+    make_current(dir.path(), "1.1.0").unwrap();
 
     assert_eq!(
         fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
@@ -91,8 +100,8 @@ fn promote_version_switches_to_a_version_without_provenance() {
             .is_none()
     );
 
-    // And back down to the older one: promotion is not one-directional.
-    promote_version(dir.path(), "implement-task", "1.0.0").unwrap();
+    // And back down to the older one: a move is not one-directional.
+    make_current(dir.path(), "1.0.0").unwrap();
     assert_eq!(
         fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
             .unwrap()

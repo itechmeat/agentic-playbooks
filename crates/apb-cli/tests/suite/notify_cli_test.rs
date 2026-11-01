@@ -258,3 +258,61 @@ fn a_broken_machine_config_does_not_stop_turning_a_run_off() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(text(&out.stdout).trim(), "notify: off");
 }
+
+#[test]
+fn an_outcome_filter_is_checked_by_name_and_the_doctor_reads_the_policy_file() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let out = apb_in(
+        dir.path(),
+        &["run", "quick", "--notify-finished", "crashed"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(text(&out.stderr).contains("crashed"), "{out:?}");
+    assert_eq!(runs(dir.path()), 0);
+
+    let run_dir = dir.path().join(".apb/runs/r-live");
+    fs::create_dir_all(&run_dir).unwrap();
+    let mut log = apb_engine::event::EventLog::create(&run_dir).unwrap();
+    log.append(apb_engine::event::EventPayload::RunStarted {
+        playbook: "quick".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    let out = apb_in(dir.path(), &["notify", "r-live", "--finished=sometimes"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(text(&out.stderr).contains("sometimes"), "{out:?}");
+    let out = apb_in(
+        dir.path(),
+        &["notify", "r-live", "--on=review", "--finished=failed"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(text(&out.stderr).contains("add `finished`"), "{out:?}");
+    let out = apb_in(dir.path(), &["notify", "r-live", "--finished=failed"]);
+    assert_eq!(out.status.code(), Some(2), "no target anywhere: {out:?}");
+    assert!(text(&out.stderr).contains("cannot be sent"), "{out:?}");
+
+    let out = apb_in(dir.path(), &["doctor"]);
+    assert!(
+        text(&out.stdout).contains("policy: machine: absent; project: absent"),
+        "{out:?}"
+    );
+    fs::write(
+        dir.path().join(".apb/policy.yaml"),
+        "schedules:\n  nightly: on\n",
+    )
+    .unwrap();
+    let out = apb_in(dir.path(), &["doctor"]);
+    let stdout = text(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("policy:"))
+        .unwrap_or_default();
+    assert!(
+        line.starts_with("[warn]") && line.contains("schedules"),
+        "{stdout}"
+    );
+    let out = apb_in(dir.path(), &["notify"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(text(&out.stderr).contains("policy.yaml"), "{out:?}");
+}

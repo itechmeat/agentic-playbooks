@@ -98,7 +98,7 @@ fn ids(events: &[Event]) -> Vec<String> {
 }
 
 fn ids_within(events: &[Event], window: KeyWindow) -> Vec<String> {
-    due(events, &NotifyState::fold(events), NOW, window)
+    due(events, &NotifyState::fold(events), NOW, window, &|| false)
         .iter()
         .map(|t| t.id())
         .collect()
@@ -452,4 +452,229 @@ fn a_keyed_try_nobody_knows_about_is_not_reported_as_not_sent_after_a_failed_rep
     let view = RunNotify::from_events(&events, NOW).unwrap();
     assert_eq!(view.sent[0].state, "unknown");
     assert!(view.problems.is_empty(), "{:?}", view.problems);
+}
+
+/// An event from its journal JSON (`type` and fields), at `seq`.
+fn raw(seq: u64, record: serde_json::Value) -> Event {
+    let mut record = record;
+    record["seq"] = seq.into();
+    record["ts"] = (NOW - 100_000 + seq).into();
+    serde_json::from_value(record).unwrap()
+}
+
+fn host_task_requested(seq: u64, task: &str) -> Event {
+    raw(
+        seq,
+        serde_json::json!({ "type": "host_task_requested", "task_id": task, "node": "w", "attempt": 1, "prompt_ref": "p" }),
+    )
+}
+
+fn host_task_submitted(seq: u64, task: &str) -> Event {
+    raw(
+        seq,
+        serde_json::json!({ "type": "host_task_submitted", "task_id": task, "status": "succeeded", "submitted_by": "host" }),
+    )
+}
+
+fn wake(seq: u64, trigger: &str) -> Event {
+    raw(
+        seq,
+        serde_json::json!({ "type": "wake_raised", "trigger": trigger, "node": "w", "detail": "exit 1" }),
+    )
+}
+
+fn finished(seq: u64, outcome: &str) -> Event {
+    ev(
+        seq,
+        EventPayload::RunFinished {
+            outcome: outcome.into(),
+        },
+    )
+}
+
+#[test]
+fn a_host_task_is_open_until_it_is_submitted_or_the_run_ends() {
+    let mut events = vec![
+        started(),
+        subscribed(1, &["host_task"]),
+        host_task_requested(2, "t-1"),
+    ];
+    assert_eq!(ids(&events), ["host_task.2"]);
+    events.push(host_task_submitted(3, "t-1"));
+    assert!(ids(&events).is_empty());
+    events.push(host_task_requested(4, "t-2"));
+    assert_eq!(ids(&events), ["host_task.4"]);
+    events.push(finished(5, "failed"));
+    assert!(ids(&events).is_empty(), "the end closes it");
+    // Not subscribed by default: the default four do not cover it.
+    let default = vec![
+        started(),
+        subscribed(1, &["review", "question", "paused", "finished"]),
+        host_task_requested(2, "t-1"),
+    ];
+    assert!(ids(&default).is_empty());
+}
+
+#[test]
+fn a_supervisor_wake_is_open_until_the_supervisor_acts_or_the_run_pauses() {
+    let base = || {
+        vec![
+            started(),
+            subscribed(1, &["supervisor"]),
+            wake(2, "node_failed"),
+        ]
+    };
+    assert_eq!(ids(&base()), ["supervisor.2"]);
+    // An anomaly wake is not a park.
+    let anomaly = vec![
+        started(),
+        subscribed(1, &["supervisor"]),
+        wake(2, "anomaly"),
+    ];
+    assert!(ids(&anomaly).is_empty());
+    // A context note does not resolve it; a retry does.
+    let mut events = base();
+    events.push(raw(
+        3,
+        serde_json::json!({ "type": "supervisor_action", "action": "context_append", "detail": "n" }),
+    ));
+    assert_eq!(ids(&events), ["supervisor.2"]);
+    events.push(raw(
+        4,
+        serde_json::json!({ "type": "supervisor_action", "action": "node_retry", "node": "w", "detail": "" }),
+    ));
+    assert!(ids(&events).is_empty());
+    // A pause closes it (and opens a pause, not covered here).
+    let mut events = base();
+    events.push(paused(3, PauseBy::Supervisor));
+    assert!(ids(&events).is_empty());
+    // So does a patch, and the run's end.
+    let mut events = base();
+    events.push(raw(
+        3,
+        serde_json::json!({ "type": "patch_applied", "version": "1.0.1", "classification": "improvement", "continue_from": "w" }),
+    ));
+    assert!(ids(&events).is_empty());
+    let mut events = base();
+    events.push(aborted(3, PauseBy::Supervisor));
+    let due = ids(&events);
+    assert!(!due.iter().any(|t| t.starts_with("supervisor")), "{due:?}");
+}
+
+#[test]
+fn a_filtered_end_is_due_only_for_its_outcomes() {
+    let run_end = |outcome: Event, on: &[&str], needs_look: bool| {
+        let events = vec![started(), subscribed(1, on), outcome];
+        due(&events, &NotifyState::fold(&events), NOW, WINDOW, &|| {
+            needs_look
+        })
+        .iter()
+        .map(|t| t.id())
+        .collect::<Vec<_>>()
+    };
+    let failed_only = ["finished:failed"];
+    assert_eq!(
+        run_end(finished(2, "failed"), &failed_only, false),
+        ["finished.2"]
+    );
+    assert!(run_end(finished(2, "succeeded"), &failed_only, false).is_empty());
+    assert!(run_end(aborted(2, PauseBy::Engine), &failed_only, false).is_empty());
+    let look = ["finished:needs_look"];
+    assert_eq!(
+        run_end(finished(2, "succeeded"), &look, true),
+        ["finished.2"]
+    );
+    assert!(run_end(finished(2, "succeeded"), &look, false).is_empty());
+    let plain = ["finished:succeeded"];
+    assert!(run_end(finished(2, "succeeded"), &plain, true).is_empty());
+    assert_eq!(
+        run_end(finished(2, "succeeded"), &plain, false),
+        ["finished.2"]
+    );
+    let aborted_only = ["finished:aborted"];
+    assert_eq!(
+        run_end(aborted(2, PauseBy::Supervisor), &aborted_only, false),
+        ["finished.2"]
+    );
+    // Without `finished` among the transitions, no end is due.
+    assert!(run_end(finished(2, "failed"), &["review"], false).is_empty());
+    // Unfiltered, every end that is news is due, without asking.
+    assert_eq!(
+        run_end(finished(2, "succeeded"), &["finished"], false),
+        ["finished.2"]
+    );
+}
+
+#[test]
+fn a_resume_keeps_the_journaled_filter() {
+    // The filter in force is the journal's: settings read at a resume do
+    // not change it, so a success after the resume is still left out.
+    let events = vec![
+        started(),
+        subscribed(1, &["finished:failed", "host_task"]),
+        paused(2, PauseBy::Operator),
+        raw(
+            3,
+            serde_json::json!({ "type": "run_resumed", "from_node": "s" }),
+        ),
+        finished(4, "succeeded"),
+    ];
+    assert!(ids(&events).is_empty());
+    let state = NotifyState::fold(&events);
+    let active = state.active.unwrap();
+    assert_eq!(
+        active.finished,
+        vec![apb_core::notify::FinishOutcome::Failed]
+    );
+}
+
+#[test]
+fn a_notice_names_who_is_expected_and_never_a_prompt_or_a_wake_detail() {
+    use apb_core::notify::Transition;
+    use apb_engine::notify::notice::Notice;
+    use apb_engine::notify::transitions::TransitionId;
+
+    let root = tempfile::tempdir().unwrap();
+    let run_dir = root.path().join(".apb/runs/r-1");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let events = vec![
+        started(),
+        host_task_requested(2, "t-1"),
+        raw(
+            3,
+            serde_json::json!({ "type": "wake_raised", "trigger": "node_timeout", "node": "w", "detail": "the secret detail" }),
+        ),
+    ];
+    let host = Notice::compose(
+        root.path(),
+        &run_dir,
+        "r-1",
+        &events,
+        &TransitionId {
+            kind: Transition::HostTask,
+            seq: 2,
+        },
+        &[],
+    );
+    assert!(host.text.contains("waiting for its host"), "{}", host.text);
+    assert!(
+        !host.text.contains("run `"),
+        "no action, no command: {}",
+        host.text
+    );
+    let sup = Notice::compose(
+        root.path(),
+        &run_dir,
+        "r-1",
+        &events,
+        &TransitionId {
+            kind: Transition::Supervisor,
+            seq: 3,
+        },
+        &[],
+    );
+    assert!(sup.text.contains("timed out"), "{}", sup.text);
+    assert!(sup.text.contains("supervisor"), "{}", sup.text);
+    assert!(!sup.text.contains("secret detail"), "{}", sup.text);
+    assert!(!sup.text.contains("run `"), "{}", sup.text);
 }

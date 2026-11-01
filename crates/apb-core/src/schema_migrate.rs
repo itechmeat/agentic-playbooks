@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
+
+use crate::versioning::current;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -738,7 +740,11 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
                 crate::fsutil::atomic_write(&dst_ver.join("playbook.yaml"), yaml.as_bytes())?;
             }
         }
-        crate::fsutil::atomic_write(&id_dir.join("current"), u.new_version.as_bytes())?;
+        current::move_current(
+            &id_dir,
+            &current::MoveCurrent::new(&u.new_version, current::MovedBy::Migration),
+        )
+        .map_err(|e| MigError::Io(e.into_io()))?;
     }
     Ok(())
 }

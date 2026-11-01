@@ -155,6 +155,7 @@ fn render_types() -> String {
         apb_engine::run_estimate::RunEstimate::decl(&cfg),
         // "Notify me".
         apb_core::notify::Transition::decl(&cfg),
+        apb_core::notify::FinishOutcome::decl(&cfg),
         apb_core::notify::NotifyTarget::decl(&cfg),
         apb_engine::notify::view::NotifySent::decl(&cfg),
         apb_engine::notify::RunNotify::decl(&cfg),
@@ -276,6 +277,13 @@ fn render_types() -> String {
         apb_core::versioning::TrialRecord::decl(&cfg),
         apb_core::versioning::VersionProvenance::decl(&cfg),
         apb_core::versioning::VersionInfo::decl(&cfg),
+        // The one move of `current`: what moved, who moved it, its history.
+        apb_core::versioning::current::Surface::decl(&cfg),
+        apb_core::versioning::current::MovedBy::decl(&cfg),
+        apb_core::versioning::current::Moved::decl(&cfg),
+        apb_core::versioning::current::EntryKind::decl(&cfg),
+        apb_core::versioning::current::HistoryEntry::decl(&cfg),
+        apb_core::versioning::current::History::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"
@@ -331,6 +339,22 @@ fn render_consts() -> String {
         "\n/** Every run transition a person can be notified about, in report order. */\nexport const NOTIFY_TRANSITIONS = {}\n",
         ts_string_array(&transitions)
     ));
+    let transitions: Vec<&str> = apb_core::notify::Transition::DEFAULT
+        .iter()
+        .map(|t| t.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** The transitions a subscription covers when nothing narrows it. */\nexport const NOTIFY_DEFAULT_TRANSITIONS = {}\n",
+        ts_string_array(&transitions)
+    ));
+    let outcomes: Vec<&str> = apb_core::notify::FinishOutcome::ALL
+        .iter()
+        .map(|o| o.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every run outcome an end-of-run notice can be narrowed to. */\nexport const NOTIFY_OUTCOMES = {}\n",
+        ts_string_array(&outcomes)
+    ));
     out.push_str(&format!(
         "\n/** The dashboard's default port (the dev server proxies to it). */\nexport const DEFAULT_PORT = {}\n",
         apb_core::config::DEFAULT_PORT
@@ -360,6 +384,10 @@ fn render_consts() -> String {
             "\n/** The shortest and the longest quote a known problem's close may rest on. */\nexport const QUOTE_MIN = {QUOTE_MIN}\nexport const QUOTE_MAX = {QUOTE_MAX}\n"
         ));
     }
+    out.push_str(&format!(
+        "\n/** The longest reason a move of `current` keeps, in characters. */\nexport const CURRENT_REASON_MAX = {}\n",
+        apb_core::versioning::current::REASON_MAX
+    ));
     render_isolation_consts(&mut out);
     render_publish_consts(&mut out);
     out.push_str(&format!(

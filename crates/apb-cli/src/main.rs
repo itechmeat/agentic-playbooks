@@ -55,6 +55,7 @@ mod tasks;
 mod trash;
 mod trust;
 mod util;
+mod version;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -300,8 +301,12 @@ enum Command {
         #[arg(long, value_name = "LIST", num_args = 0..=1, require_equals = true, default_missing_value = "", conflicts_with = "off")]
         on: Option<String>,
         /// Turn notifications off for the run
-        #[arg(long, conflicts_with_all = ["via", "to"])]
+        #[arg(long, conflicts_with_all = ["via", "to", "finished"])]
         off: bool,
+        /// Send the end-of-run notice only for these outcomes, comma
+        /// separated: succeeded, needs_look, failed, aborted
+        #[arg(long, value_name = "LIST", require_equals = true)]
+        finished: Option<String>,
         /// Send through this connector account: <connector>/<account>[:function]
         #[arg(long, value_name = "CONNECTOR/ACCOUNT[:FUNCTION]")]
         via: Option<String>,
@@ -462,6 +467,10 @@ enum Command {
     /// current by quality, or decide it: --promote makes it current,
     /// --keep-current drops it and changes nothing
     Candidate(crate::candidate::CandidateArgs),
+    /// A playbook's versions and its current one: list them, make one
+    /// current (use, with --expect and --reason), or show the moves of
+    /// current (history)
+    Version(crate::version::VersionArgs),
     // --- 0.23.0 stats (C3) ---
     /// Cross-run metrics per playbook version and node, from the run
     /// journals only: outcome rate, first-pass success, retries, fallbacks
@@ -834,6 +843,7 @@ fn main() -> ExitCode {
             run,
             on,
             off,
+            finished,
             via,
             to,
         }) => notify::notify_cmd(
@@ -842,6 +852,7 @@ fn main() -> ExitCode {
             &notify::NotifyChange {
                 on: on.as_deref(),
                 off,
+                finished: finished.as_deref(),
                 via: via.as_deref(),
                 to: to.as_deref(),
             },
@@ -934,6 +945,7 @@ fn main() -> ExitCode {
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
         Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
         Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
+        Some(Command::Version(args)) => version::version_cmd(&root, args),
         Some(Command::Problems(args)) => problems::problems_cmd(&root, args),
         Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---

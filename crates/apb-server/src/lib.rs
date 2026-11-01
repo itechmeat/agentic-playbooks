@@ -60,9 +60,19 @@ pub fn build_router(state: AppState) -> Router {
             "/api/playbooks/{id}/versions",
             get(routes::playbooks::list_versions_handler),
         )
+        // Deprecated: moves `current` without an expectation; the
+        // dashboard posts to `/current` instead.
         .route(
             "/api/playbooks/{id}/versions/{version}/promote",
-            post(routes::playbooks::promote_version_handler),
+            post(routes::current::post_promote_version_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/current",
+            post(routes::current::post_current_handler),
+        )
+        .route(
+            "/api/playbooks/{id}/current-history",
+            get(routes::current::get_history_handler),
         )
         .route(
             "/api/playbooks/{id}/frozen",

@@ -702,7 +702,11 @@ pub(crate) fn prepare_run_target(
     let notify_set = match &opts.parent_run {
         Some(parent) => crate::notify::start::inherited(&root.join(".apb/runs").join(parent)),
         None => {
-            let check = crate::notify::check(root, opts.notify.as_ref());
+            let playbook_key = apb_core::policy_file::PlaybookKey {
+                id,
+                global: t.origin_label == "global",
+            };
+            let check = crate::notify::check(root, Some(&playbook_key), opts.notify.as_ref());
             if let Some(why) = check.refusal {
                 return Err(EngineError::Invalid(format!(
                     "{}: {why}",

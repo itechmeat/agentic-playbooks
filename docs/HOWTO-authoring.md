@@ -155,6 +155,66 @@ graph page and read the rendered branches back, the way a human reviewer
 would. This is advisory only, no code path depends on `agent-browser`; a
 plain manual look is equally valid.
 
+## The current version
+
+Every save makes a new immutable version; the `current` pointer says which
+one new runs start on. It moves only through one locked operation, whoever
+moves it: a person, a candidate promotion, an in-run patch the run proved,
+a new version saved as current, a schema migration, or a copy into another
+scope.
+
+- CLI: `apb version list <playbook>` marks the current version and the
+  candidate on trial; `apb version use <playbook> <version> [--expect
+  <version>] [--reason <text>]` makes a version current, and with
+  `--expect` only while `current` still names the version you saw;
+  `apb version history <playbook>` shows the moves, newest first. Each
+  takes `--scope project|global` (project by default) and `--json`. A
+  move is refused inside a run step.
+- Dashboard: in a playbook's version history, Make current shows the move
+  (from and to), takes an optional reason and moves only from the version
+  the page showed. When `current` changed meanwhile, the dialog says so
+  and the list reloads. Below the versions, the moves of `current` are
+  listed with who moved it, when and why.
+- HTTP: `POST /api/playbooks/{id}/current` with `{ version,
+  expected_current, reason? }` (`expected_current` is required, `null`
+  when `current` was unset) answers what moved, or 409 `stale` (with
+  `actual`), `frozen`, `is_candidate`, `record_unreadable` (a trial
+  record that does not read) or `run_step` (the server runs inside a run
+  step), 403 `read_only` in a read-only process, 404 `not_found` for an
+  unknown playbook or version, and 400 `invalid` for a body of the wrong
+  shape; `GET
+  /api/playbooks/{id}/current-history` answers the moves. The older
+  `POST /api/playbooks/{id}/versions/{version}/promote` still works but
+  moves without an expectation and is deprecated.
+
+A frozen playbook refuses a move by a person, a promotion or a new
+version; a schema migration and a copy into another scope carry the
+definition as it is and are exempt. The candidate on trial is not made
+current by hand: decide it as a candidate (`apb candidate <playbook>
+--promote`, or its card in the dashboard). Moving `current` grants nothing:
+a version imported with scripts that wait for an approval may become
+current, and its runs stay refused until a person approves it.
+
+Each move is recorded in `current-history.jsonl` next to `current`, with
+who moved it and a reason a person gave. The reason is scrubbed (connector
+secrets, local paths, addresses and token shapes) and cut to 256
+characters before it is written; a reason with nothing left after the
+scrub, or that still looks like a secret once cut, is dropped and the
+move is recorded without it. Text from a run is never stored, only a
+bounded basis such as `successes:3` or `quality` and the run id. A move
+interrupted by a crash leaves `current.intent.json`; the next move, the
+history, a candidate settlement or a run start without an explicit
+version finishes it, or records it as aborted when `current` never
+changed.
+
+The history checks itself by value, not by file times, so a clone or a
+copy of the project reads the same. It reports `incomplete` when a line was
+lost or edited, when a move does not start where the previous one ended,
+or when `current` names another version than the last recorded move (an
+older apb or a hand edit moved it). One limit: a series of untracked moves
+that ends on the recorded version (A to B and back to A outside apb) is not
+seen; the pointer is then where the history says it is.
+
 ## Deleting and restoring a playbook
 
 Deleting a playbook (the dashboard's Delete, MCP `playbook_delete`) moves its

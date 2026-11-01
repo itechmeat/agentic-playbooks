@@ -4,12 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
-use apb_core::candidate::{
-    OUTCOME_PROMOTED, OUTCOME_REJECTED, clear_candidate_if, read_candidate, update_trial,
-};
+use apb_core::candidate::{OUTCOME_REJECTED, clear_candidate_if, read_candidate, update_trial};
+use apb_core::fsutil::DirLock;
 use apb_core::quality::QualityRecord;
 use apb_core::registry::{LoadedPlaybook, Registry};
-use apb_core::versioning::{TrialRecord, promote_version};
+use apb_core::versioning::TrialRecord;
+use apb_core::versioning::current::{MoveCurrent, MovedBy, TrialFinal, move_current_locked};
 
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
@@ -81,20 +81,35 @@ impl Line {
         Ok(())
     }
 
-    /// Makes the candidate `current` and records it.
+    /// Makes the candidate `current` through the one move of `current`,
+    /// which also records its trial as promoted; `basis` says why
+    /// (`successes:<n>`, `quality`, `person`). The caller holds the
+    /// pointer lock (`held`). Returns the trial record as it now stands.
     pub(super) fn promote(
         &self,
         run_id: Option<&str>,
         quality: Option<QualityRecord>,
+        basis: String,
+        held: &DirLock,
     ) -> Result<TrialRecord, EngineError> {
-        promote_version(&self.root, &self.id, &self.candidate)?;
-        Ok(update_trial(&self.root, &self.id, &self.candidate, |t| {
-            t.outcome = Some(OUTCOME_PROMOTED.to_string());
-            t.run_id = run_id.map(str::to_string).or(t.run_id.take());
-            if quality.is_some() {
-                t.quality = quality;
-            }
-        })?)
+        let run_id = run_id.map(str::to_string);
+        let req = MoveCurrent {
+            to: &self.candidate,
+            expected_from: Some(Some(&self.current)),
+            by: MovedBy::CandidatePromotion {
+                run_id: run_id.clone(),
+                basis,
+            },
+            reason: None,
+            trial: Some(TrialFinal { run_id, quality }),
+        };
+        move_current_locked(&self.playbook_dir, &req, held)
+            .map_err(|e| e.into_versioning(&self.id))?;
+        Ok(
+            apb_core::versioning::read_provenance(&self.root, &self.id, &self.candidate)?
+                .and_then(|p| p.trial)
+                .unwrap_or_default(),
+        )
     }
 }
 

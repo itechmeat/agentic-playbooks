@@ -126,6 +126,7 @@ apb decisions       decision-model report, stored thresholds, replay
 apb stats           cross-run metrics per playbook version and node (read-only)
 apb grade <run>     grade an ended run by rules (built-in quality criteria) or by the decision model (--model: the playbook's own criteria); --show, --json, --reopen; --backfill <playbook> [--version] [--last N] [--model]
 apb candidate <id>  a playbook's candidate compared with current by quality (--promote, --keep-current [--reason])
+apb version list|use|history <id>  the versions and the current one; use moves current (--expect <version>, --reason <text>, --scope project|global)
 apb problems <id>   a playbook's known problems (--json); confirm|dismiss|reopen <pid> [--reason]; close <pid> --quote; recheck [<pid>] [--holds|--model]; scan [--last N]
 apb discover        step sequences past agent sessions repeat, as drafts (--project <ws|dir>, --all-projects, --root <name>, --sessions <dir> --agent claude-code|codex, --since 30d, --json); list; show <id> [--paths]; save <id> <slug> [--scope]; dismiss <id> <slug> [--hard] [--global]
 apb eval <id>       run a playbook's eval cases in scratch repositories, store and compare pass counts

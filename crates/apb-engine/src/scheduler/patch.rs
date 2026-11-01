@@ -237,7 +237,18 @@ pub(crate) fn promote_applied_patch(
         changed_nodes_succeeded(applied, playbook, &state),
         0,
     ) {
-        promote_version(root, &playbook.id, &applied.version)?;
+        let run_id = run_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        current::move_current(
+            &apb_core::candidate::playbook_dir(root, &playbook.id),
+            &current::MoveCurrent::new(
+                &applied.version,
+                current::MovedBy::PatchPromotion { run_id },
+            ),
+        )
+        .map_err(|e| e.into_versioning(&playbook.id))?;
         log.append(EventPayload::VersionPromoted {
             version: applied.version.clone(),
         })?;

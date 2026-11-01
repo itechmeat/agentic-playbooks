@@ -25,6 +25,8 @@ mod bind_interlock_test;
 mod budget_api_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
+#[path = "suite/current_api_test.rs"]
+mod current_api_test;
 #[path = "suite/discover_api_test.rs"]
 mod discover_api_test;
 #[path = "suite/fit_api_test.rs"]

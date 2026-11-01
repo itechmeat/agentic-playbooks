@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use apb_core::candidate::{PromotePolicy, lineage_reaches, promote_policy};
+use apb_core::fsutil::DirLock;
 use apb_core::quality::QualityRecord;
 use apb_core::quality::compare::{
     QualityDecision, QualityGate, Verdict, decide, expected_of, own_grader_of,
@@ -32,6 +33,8 @@ use crate::event::{EventLog, EventPayload};
 pub const BASIS_QUALITY: &str = "quality";
 /// Who decided when the rule did.
 pub const DECIDED_BY_APB: &str = "apb";
+/// The basis of a promotion a person decided.
+const BASIS_PERSON: &str = "person";
 /// One side of a comparison: the grades and how many trial runs there were.
 struct Side {
     grades: Vec<Grade>,
@@ -193,10 +196,19 @@ fn apply(
     decision: &QualityDecision,
     run_id: Option<&str>,
     by: &str,
+    held: &DirLock,
 ) -> Result<(QualityRecord, u32), EngineError> {
     let rec = record(decision, by);
+    let basis = if by == DECIDED_BY_APB {
+        BASIS_QUALITY
+    } else {
+        BASIS_PERSON
+    };
     let successes = match decision.verdict {
-        Verdict::Promote => line.promote(run_id, Some(rec.clone()))?.successes,
+        Verdict::Promote => {
+            line.promote(run_id, Some(rec.clone()), basis.to_string(), held)?
+                .successes
+        }
         Verdict::KeepCurrent => {
             line.reject(
                 run_id,
@@ -225,6 +237,7 @@ pub(super) fn settle_trial(
     gate: &QualityGate,
     succeeded: bool,
     taken: Option<Taken>,
+    held: &DirLock,
 ) -> Result<(), EngineError> {
     let line = &trial.line;
     if trial.migrated() {
@@ -241,7 +254,7 @@ pub(super) fn settle_trial(
             t.successes = t.successes.saturating_add(1);
         })?;
     }
-    let (rec, successes) = apply(line, &decision, Some(&trial.run_id), DECIDED_BY_APB)?;
+    let (rec, successes) = apply(line, &decision, Some(&trial.run_id), DECIDED_BY_APB, held)?;
     let (version, run_id) = (line.candidate.clone(), trial.run_id.clone());
     log.append(match rec.verdict {
         Verdict::Promote => EventPayload::CandidatePromoted {
@@ -304,12 +317,14 @@ pub fn resettle(root: &Path, id: &str) -> Result<Option<QualityRecord>, EngineEr
         return Ok(None);
     };
     let taken = Taken::of(&line, &current, &gate, None);
-    let _held = apb_core::candidate::lock(&apb_core::candidate::playbook_dir(root, id))?;
+    let held = apb_core::candidate::lock(&apb_core::candidate::playbook_dir(root, id))?;
     if !line.unchanged() {
         return Ok(None);
     }
     let (decision, _) = taken.confirmed(&line, &current, &gate, None);
-    Ok(Some(apply(&line, &decision, None, DECIDED_BY_APB)?.0))
+    Ok(Some(
+        apply(&line, &decision, None, DECIDED_BY_APB, &held)?.0,
+    ))
 }
 
 /// A person's decision on a candidate.
@@ -337,7 +352,7 @@ pub fn decide_by_person(
     };
     let gate = quality_gate(&current);
     let taken = gate.as_ref().map(|g| Taken::of(&line, &current, g, None));
-    let _held = apb_core::candidate::lock(&apb_core::candidate::playbook_dir(root, id))?;
+    let held = apb_core::candidate::lock(&apb_core::candidate::playbook_dir(root, id))?;
     if !line.unchanged() {
         return Err(EngineError::Conflict(format!(
             "the candidate of playbook `{id}` changed while deciding: look again and decide"
@@ -361,7 +376,7 @@ pub fn decide_by_person(
         per_criterion: compared,
         reason,
     };
-    Ok(apply(&line, &decided, None, by)?.0)
+    Ok(apply(&line, &decided, None, by, &held)?.0)
 }
 
 /// A candidate and how it compares, for the playbook surfaces.

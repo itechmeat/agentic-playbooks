@@ -107,7 +107,8 @@ impl Notifier {
         {
             a.set_at_ms = u64::MAX;
         }
-        if due(events, &own, now_ms, KeyWindow::OPEN).is_empty() {
+        let needs_look = || crate::run_outcome::NeedsLook::for_run(&self.run_dir, events).is_some();
+        if due(events, &own, now_ms, KeyWindow::OPEN, &needs_look).is_empty() {
             return;
         }
         let state = NotifyState::in_force(&self.run_dir, events);
@@ -130,7 +131,7 @@ impl Notifier {
             )
         });
         let started = Instant::now();
-        for t in due(events, &state, now_ms, window) {
+        for t in due(events, &state, now_ms, window, &needs_look) {
             let left = budget.saturating_sub(started.elapsed()).as_secs();
             if left == 0 {
                 break;
