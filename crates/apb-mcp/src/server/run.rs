@@ -501,9 +501,10 @@ impl WfMcp {
         // The notification request: one the person made that cannot be
         // honoured refuses the start before anything is written; a machine
         // default that cannot be used only warns.
-        let notify = match tools::notify::NotifyArg::request_of(notify.as_ref())
-            .and_then(|req| tools::notify::start_check(&self.root, req.as_ref()).map(|w| (req, w)))
-        {
+        let notify = match tools::notify::NotifyArg::request_of(notify.as_ref()).and_then(|req| {
+            let key = apb_core::policy_file::PlaybookKey::of(&run_ref);
+            tools::notify::start_check(&self.root, Some(&key), req.as_ref()).map(|w| (req, w))
+        }) {
             Ok((req, notes)) => {
                 warnings.extend(notes);
                 req
@@ -764,7 +765,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Change whether a person hears about a live run: notify true sends its transitions (a review or a question waiting, a pause nobody asked for, the end) through the run's current target, or the machine's notify target; false stops them; { on: [...] } keeps only these of the transitions it notifies about (review, question, paused, finished). It never sets a target or widens the transitions: the person does that in the dashboard or with apb notify. Call it only when the person asked. The target is checked now (it can carry notifications, the connector and the account are approved) and its digests are pinned: a target that fails is refused with notify_unavailable and nothing changes. A run that has ended is refused with run_ended. Returns the run's notify block.",
+        description = "Change whether a person hears about a live run: notify true sends its transitions (a review or a question waiting, a pause nobody asked for, the end) through the run's current target, or the machine's notify target; false stops them; { on: [...], finished: [...] } keeps only these of the transitions it notifies about (review, question, paused, finished, host_task, supervisor) and of the outcomes its end-of-run notice covers (succeeded, needs_look, failed, aborted); a field left out keeps the run's. It never sets a target or widens the transitions or the outcomes: the person does that in the dashboard or with apb notify. Call it only when the person asked. The target is checked now (it can carry notifications, the connector and the account are approved) and its digests are pinned: a target that fails is refused with notify_unavailable and nothing changes. A run that has ended is refused with run_ended. Returns the run's notify block.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_notify(

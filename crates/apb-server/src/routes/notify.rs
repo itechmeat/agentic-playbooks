@@ -5,7 +5,7 @@
 //! (`apb_mcp::tools::notify`), so both surfaces answer alike: 400
 //! `invalid_notify`, 409 `notify_unavailable` and `run_ended`.
 
-use apb_core::notify::{NotifyRequest, NotifyTarget, Transition};
+use apb_core::notify::{FinishOutcome, NotifyRequest, NotifyTarget, Transition};
 use apb_mcp::tools::notify::{NotifyArg, NotifyError};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxPath, Query, State};
@@ -27,8 +27,13 @@ pub struct MachineNotify {
     pub target: Option<NotifyTarget>,
     /// The transitions a run notifies about by default.
     pub on: Vec<Transition>,
+    /// The run outcomes a `finished` notice covers by default (the
+    /// `policy.yaml` filters of the machine and the workspace).
+    pub finished: Vec<FinishOutcome>,
     /// Whether a run of this workspace notifies without being asked (the
-    /// machine default, unless the project turned it off).
+    /// machine default, unless the project turned it off), for the
+    /// playbook the request names: the `policy.yaml` playbook filters
+    /// apply to it as they do at its start.
     pub default_on: bool,
     /// Why the machine or the project notify settings do not read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,33 +42,57 @@ pub struct MachineNotify {
 }
 
 impl MachineNotify {
-    fn read(root: Option<&std::path::Path>) -> Self {
+    fn read(root: Option<&std::path::Path>, playbook: Option<&str>) -> Self {
         let machine = match apb_core::config::GlobalConfig::load() {
             Ok(cfg) => cfg.notify,
             Err(problem) => {
                 return MachineNotify {
                     target: None,
                     on: Vec::new(),
+                    finished: Vec::new(),
                     default_on: false,
                     problem: Some(problem),
                 };
             }
         };
-        let project = match root.map(apb_core::config::project_notify).transpose() {
-            Ok(p) => p.unwrap_or_default(),
+        let read_workspace = || -> Result<_, String> {
+            let project = root
+                .map(apb_core::config::project_notify)
+                .transpose()?
+                .unwrap_or_default();
+            // Without a workspace, only the machine's `policy.yaml` counts.
+            let policies = apb_core::policy_file::Policies::load_in(root).map_err(|e| e.message)?;
+            Ok((project, policies))
+        };
+        let on = Transition::normalized(&machine.on);
+        let (project, policies) = match read_workspace() {
+            Ok(read) => read,
             Err(problem) => {
                 return MachineNotify {
                     target: machine.target,
-                    on: Transition::normalized(&machine.on),
+                    on,
+                    finished: Vec::new(),
                     default_on: false,
                     problem: Some(problem),
                 };
             }
         };
-        let default_on = apb_core::notify::effective(&machine, &project, None).is_some();
+        // The dashboard starts a playbook of the workspace's project.
+        let key = playbook.map(|id| apb_core::policy_file::PlaybookKey { id, global: false });
+        let default_on = apb_core::notify::effective(
+            apb_core::notify::Settings {
+                machine: &machine,
+                project: &project,
+                policies: &policies,
+            },
+            key.as_ref(),
+            None,
+        )
+        .is_some();
         MachineNotify {
             target: machine.target,
-            on: Transition::normalized(&machine.on),
+            on,
+            finished: policies.finished(),
             default_on,
             problem: None,
         }
@@ -81,12 +110,23 @@ pub(crate) fn refusal(e: NotifyError) -> Response {
     (status, Json(e.body())).into_response()
 }
 
-/// GET /api/notify[?workspace=<id>]: the machine's target and whether runs
-/// of the workspace notify by default.
+/// Query of `GET /api/notify`.
+#[derive(Deserialize, Default)]
+pub(crate) struct NotifyQuery {
+    workspace: Option<String>,
+    /// The project playbook the Run dialog starts.
+    playbook: Option<String>,
+}
+
+/// GET /api/notify[?workspace=<id>][&playbook=<id>]: the machine's target
+/// and whether runs of the workspace (of that playbook) notify by default.
 pub(crate) async fn get_notify_handler(
     State(state): State<AppState>,
-    Query(q): Query<WorkspaceQuery>,
+    Query(q): Query<NotifyQuery>,
 ) -> impl IntoResponse {
+    if q.playbook.as_deref().is_some_and(|id| !is_safe_id(id)) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
     // A workspace asked for must resolve; without one, the pinned project
     // (if the server has one) decides the default.
     let root = match resolve_root(&state, q.workspace.as_deref()) {
@@ -94,7 +134,12 @@ pub(crate) async fn get_notify_handler(
         Err(e) if q.workspace.is_some() => return e,
         Err(_) => None,
     };
-    match tokio::task::spawn_blocking(move || MachineNotify::read(root.as_deref())).await {
+    let playbook = q.playbook;
+    match tokio::task::spawn_blocking(move || {
+        MachineNotify::read(root.as_deref(), playbook.as_deref())
+    })
+    .await
+    {
         Ok(view) => Json(view).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -114,7 +159,7 @@ pub(crate) fn parse_request(value: &serde_json::Value) -> Result<NotifyRequest, 
     NotifyArg::deserialize(value)
         .map_err(|e| {
             NotifyError::Invalid(format!(
-                "notify must be true, false or {{ on, target }}: {e}"
+                "notify must be true, false or {{ on, finished, target }}: {e}"
             ))
         })
         .and_then(|arg| arg.request())
@@ -144,7 +189,7 @@ pub(crate) async fn post_run_notify_handler(
         Ok(Json(b)) => parse_request(&b.notify),
         Err(e @ (JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_))) => {
             Err(NotifyError::Invalid(format!(
-                "the body must be {{ \"notify\": true | false | {{ on, target }} }}: {}",
+                "the body must be {{ \"notify\": true | false | {{ on, finished, target }} }}: {}",
                 e.body_text()
             )))
         }

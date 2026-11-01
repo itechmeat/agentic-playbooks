@@ -3,17 +3,63 @@
 // and the journal notes of the notification events. Pure functions; the
 // components only render them.
 
-import type { MachineNotify, NotifyTarget, RunNotify, Transition } from './api.gen'
-import { NOTIFY_TRANSITIONS } from './consts.gen'
+import type { FinishOutcome, MachineNotify, NotifyTarget, RunNotify, Transition } from './api.gen'
+import { NOTIFY_DEFAULT_TRANSITIONS, NOTIFY_OUTCOMES, NOTIFY_TRANSITIONS } from './consts.gen'
 
 /** `telegram/me send_message to 123456789`. */
 export function targetText(t: NotifyTarget): string {
   return `${t.connector}/${t.account} ${t.function} to ${t.to}`
 }
 
-/** `review, finished`; every transition reads `everything`. */
-export function onText(on: Transition[]): string {
-  return NOTIFY_TRANSITIONS.every((t) => on.includes(t)) ? 'everything' : on.join(', ')
+/**
+ * `review, finished`; every default transition reads `everything`, with the
+ * opt-in ones (`host_task`, `supervisor`) named after it. A `finished`
+ * narrowed to some outcomes reads `finished (failed, aborted)`.
+ */
+export function onText(on: Transition[], finished: FinishOutcome[] = [...NOTIFY_OUTCOMES]): string {
+  const narrowed = finished.length > 0 && finished.length < NOTIFY_OUTCOMES.length
+  if (!narrowed && NOTIFY_DEFAULT_TRANSITIONS.every((t) => on.includes(t))) {
+    const extra = NOTIFY_TRANSITIONS.filter((t) => on.includes(t) && !isDefault(t))
+    return ['everything', ...extra].join(', ')
+  }
+  const name = (t: Transition) => (t === 'finished' && narrowed ? `finished (${outcomeText(finished)})` : t)
+  return on.map(name).join(', ')
+}
+
+function isDefault(t: Transition): boolean {
+  return (NOTIFY_DEFAULT_TRANSITIONS as readonly Transition[]).includes(t)
+}
+
+/** `failed, aborted`, in report order. */
+export function outcomeText(outcomes: FinishOutcome[]): string {
+  return NOTIFY_OUTCOMES.filter((o) => outcomes.includes(o)).join(', ')
+}
+
+/**
+ * The transitions and outcomes of a journaled `notify_set.on`: `finished`
+ * or one `finished:<outcome>` per outcome; a name this dashboard does not
+ * know is left out.
+ */
+export function journalCoverage(names: string[]): { on: Transition[]; finished: FinishOutcome[] } {
+  const on: Transition[] = []
+  const finished: FinishOutcome[] = []
+  let plainFinished = false
+  const add = (t: Transition) => {
+    if (!on.includes(t)) on.push(t)
+  }
+  for (const name of names) {
+    if (name.startsWith('finished:')) {
+      const outcome = name.slice('finished:'.length)
+      if ((NOTIFY_OUTCOMES as readonly string[]).includes(outcome)) {
+        if (!finished.includes(outcome as FinishOutcome)) finished.push(outcome as FinishOutcome)
+        add('finished')
+      }
+    } else if ((NOTIFY_TRANSITIONS as readonly string[]).includes(name)) {
+      plainFinished ||= name === 'finished'
+      add(name as Transition)
+    }
+  }
+  return { on, finished: plainFinished || finished.length === 0 ? [...NOTIFY_OUTCOMES] : finished }
 }
 
 /** What a start notifies about, in words for the Run dialog. */
@@ -23,6 +69,8 @@ export function onWords(on: Transition[]): string {
     question: 'a question waiting',
     paused: 'a pause you did not make',
     finished: 'the end of the run',
+    host_task: 'a host task waiting',
+    supervisor: 'a failed step waiting for the supervisor',
   }
   const said = NOTIFY_TRANSITIONS.filter((t) => on.includes(t)).map((t) => words[t])
   if (said.length < 2) return said.join('')
@@ -35,7 +83,7 @@ export const NOTIFY_UNREADABLE = 'The notification settings could not be read.'
 /** What the run view's control shows about a run's notifications. */
 export type NotifyState =
   | { kind: 'off'; problem?: string }
-  | { kind: 'on'; target: string; on: string; source?: string }
+  | { kind: 'on'; target: string; on: string; source?: string; finished: FinishOutcome[] }
 
 export function notifyState(block: RunNotify | null | undefined): NotifyState {
   const problem = block?.problems.at(-1)
@@ -45,7 +93,8 @@ export function notifyState(block: RunNotify | null | undefined): NotifyState {
   return {
     kind: 'on',
     target: targetText(block.target),
-    on: onText(block.on),
+    on: onText(block.on, block.finished),
+    finished: block.finished,
     ...(block.source ? { source: block.source } : {}),
   }
 }
@@ -98,7 +147,8 @@ export function notifySetNote(r: Record<string, unknown>): string {
     const why = typeof r.problem === 'string' && r.problem ? `: ${r.problem}` : ''
     return `notifications off${from}${who}${why}`
   }
-  const on = Array.isArray(r.on) ? onText(r.on as Transition[]) : ''
+  const cov = Array.isArray(r.on) ? journalCoverage(r.on.map(String)) : null
+  const on = cov ? onText(cov.on, cov.finished) : ''
   return `notifications on: ${t.connector}/${t.account ?? ''} about ${on}${from}${who}`
 }
 
@@ -123,4 +173,12 @@ export function notifyEventNote(type: string, r: Record<string, unknown>): strin
       : `notification through ${via} failed (${String(r.outcome ?? 'unknown')})`
   }
   return undefined
+}
+
+/** The outcomes the run view's filter offers, in words. */
+export const OUTCOME_WORDS: Record<FinishOutcome, string> = {
+  succeeded: 'succeeded',
+  needs_look: 'needs a look',
+  failed: 'failed',
+  aborted: 'stopped by apb or the supervisor',
 }

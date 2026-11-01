@@ -19,7 +19,13 @@ export const ACTION_CODES = ['answer_question', 'decide_review', 'decide_publish
 export const START_ACTION_CODES = ['confirm_irreversible_start', 'fix_requirement', 'acknowledge_untrusted'] as const
 
 /** Every run transition a person can be notified about, in report order. */
-export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished'] as const
+export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished', 'host_task', 'supervisor'] as const
+
+/** The transitions a subscription covers when nothing narrows it. */
+export const NOTIFY_DEFAULT_TRANSITIONS = ['review', 'question', 'paused', 'finished'] as const
+
+/** Every run outcome an end-of-run notice can be narrowed to. */
+export const NOTIFY_OUTCOMES = ['succeeded', 'needs_look', 'failed', 'aborted'] as const
 
 /** The dashboard's default port (the dev server proxies to it). */
 export const DEFAULT_PORT = 7321
@@ -36,6 +42,9 @@ export const GAP_LABELS = { manual_criterion: "to confirm by hand", self_reporte
 /** The shortest and the longest quote a known problem's close may rest on. */
 export const QUOTE_MIN = 12
 export const QUOTE_MAX = 400
+
+/** The longest reason a move of `current` keeps, in characters. */
+export const CURRENT_REASON_MAX = 256
 
 /** The sentence of every isolation hold and limit code. */
 export const ISOLATION_CODE_TEXTS = { "user.namespaces": "Own PID, IPC and UTS namespaces: no operator process is visible, signalable or traceable.", "user.no_privileges": "No capabilities and no new privileges.", "user.new_session": "A new session with no controlling terminal.", "files.declared_view": "Only the declared view of the filesystem; the home directory is hidden except declared paths.", "files.git_control_read_only": "The repository's config, hooks and info are read-only.", "files.apb_masked": "The project's .apb directory is masked except the attempt's own paths.", "credentials.env_allowlist": "The environment is an allowlist, even when the profile says inherit; connector variables are withheld.", "credentials.sockets_dropped": "The ssh agent, session bus and display variables are dropped.", "credentials.git_config_replaced": "The operator's git config is replaced by one holding only the user name and email.", "network.none": "Own network namespace: loopback only.", "network.scoped": "Host abstract unix sockets and signals outside the sandbox are closed (Landlock scope).", "no_sandbox": "No sandbox: the agent runs as the operator in a scratch directory.", "user.host_uid": "The host uid is unchanged: created files belong to the operator, and the operator's groups still apply.", "user.not_separated": "Operator processes are visible to the agent.", "files.system_readable": "/usr, /etc, /opt and /sys are readable.", "files.not_separated": "The agent can read and write everything the operator can.", "credentials.agent_login_readable": "The agent's own provider login is readable by everything in the sandbox, including code the agent runs.", "credentials.home_readable": "The operator's home directory, with its credentials, stays readable.", "network.open_any_host": "The network reaches any host, including services on the host's loopback.", "network.abstract_sockets_open": "Host abstract unix sockets (X11, session bus) stay reachable: the kernel offers no Landlock scope.", "network.not_separated": "The network is the operator's own.", "kernel.escapes": "Kernel escapes are outside the contract.", "scripts.outside": "Script nodes, goal scripts, project checks and baseline reads run outside the sandbox." } as const

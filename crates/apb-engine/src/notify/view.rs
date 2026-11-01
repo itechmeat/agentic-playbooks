@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use apb_core::connector::sites::NOTIFY_SITE;
-use apb_core::notify::{NotifyTarget, Transition};
+use apb_core::notify::{FinishOutcome, NotifyTarget, Transition};
 use serde::Serialize;
 
 use super::NotifyState;
@@ -24,6 +24,9 @@ pub struct RunNotify {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub target: Option<NotifyTarget>,
     pub on: Vec<Transition>,
+    /// The outcomes a `finished` notice is sent for; every outcome when
+    /// nothing narrows it.
+    pub finished: Vec<FinishOutcome>,
     /// Where the subscription in force came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -113,6 +116,7 @@ impl RunNotify {
             active: active.is_some(),
             target: active.map(|a| a.target.target()),
             on: active.map(|a| a.on.clone()).unwrap_or_default(),
+            finished: active.map(|a| a.finished.clone()).unwrap_or_default(),
             source: active.map(|a| a.source.clone()),
             sent,
             problems,

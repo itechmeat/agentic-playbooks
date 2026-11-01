@@ -1,0 +1,28 @@
+# A notification sink for the journal corpus (journal_corpus_test.rs): one
+# function that can carry notifications, pointed by its account at a local
+# HTTP service the test runs. No auth, so every binary of a case resolves
+# the same account without a secret.
+name: corpus-sink
+version: 0.1.0
+healthcheck: ping
+account_fields:
+  - name: base_url
+    required: true
+functions:
+  - name: ping
+    description: Fake reachability check
+    mock: { status: 200, body: { ok: true } }
+  - name: notify_person
+    description: Send a message to a person
+    method: POST
+    url: "{{account.base_url}}/messages"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string }
+        subject: { type: string }
+        text: { type: string }
+      required: [to, text]
+    people: { to: to, subject: subject, text: text }
+    idempotency: { mode: none, result_ref: id }

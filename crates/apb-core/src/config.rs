@@ -599,11 +599,10 @@ fn project_section<T: serde::de::DeserializeOwned + Default>(
     root: &Path,
     key: &str,
 ) -> Result<T, String> {
-    let path = root.join(".apb/config.yaml");
-    if !path.is_file() {
+    let path = project_config_path(root);
+    let Some(raw) = read_project_config(root)? else {
         return Ok(T::default());
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    };
     let invalid =
         |e: yaml_serde::Error| format!("invalid project config `{}`: {e}", path.display());
     let doc: yaml_serde::Value = yaml_serde::from_str(&raw).map_err(invalid)?;
@@ -635,6 +634,22 @@ pub fn project_output_limits(
     root: &Path,
 ) -> Result<crate::output_limits::OutputLimitSettings, String> {
     project_section(root, "output_limits")
+}
+
+/// The project config file of the workspace at `root`.
+pub(crate) fn project_config_path(root: &Path) -> PathBuf {
+    root.join(".apb/config.yaml")
+}
+
+/// The text of the project config of the workspace at `root`, `None` when
+/// it is absent; read through the one bounded settings reader (a regular
+/// file of at most [`crate::fsutil::SETTINGS_FILE_MAX_BYTES`]).
+pub(crate) fn read_project_config(root: &Path) -> Result<Option<String>, String> {
+    crate::fsutil::read_settings_file(
+        &project_config_path(root),
+        crate::fsutil::SETTINGS_FILE_MAX_BYTES,
+    )
+    .map_err(|e| format!("cannot read project config: {e}"))
 }
 
 /// The project-level `notify:` section (see `crate::notify`): it may only

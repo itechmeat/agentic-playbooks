@@ -33,7 +33,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   V116-V120; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
-  narrowing, a run's request, and `precedence` combining them), the run
+  narrowing, a run's request, the outcome classes and the journal names of
+  a filtered `finished` (`Coverage`), and `precedence` combining them),
+  the settings file `policy.yaml` of the machine and the project
+  (`policy_file.rs`: the strict reader of its `notify:` filters and the
+  doctor line; nothing in apb writes it), the run
   budget's schema,
   the precedence of a run argument over the playbook's block and the amount
   parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
@@ -57,7 +61,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the name-only plan; `process_env/sets.rs`: the base set, each agent's own
   set living in its module), registry and versioning (`versioning/`: `diff` the definition
   diff, `imported` the import provenance, `approval` the approval of a
-  version by its exact digest), bundle export, import and the import preview
+  version by its exact digest, `error` and `sidecar` the error and the
+  provenance types, `current` the one locked operation that moves
+  `current` with its intent file, recovery and value-audited history:
+  `current/model` the history line, `history` the audit, `intent` the
+  intent file, `fault` the test-only crash points), bundle export, import and the import preview
   (`bundle/`), remembered run input per project (`run_memory/`: `key`,
   `schema` the params digest and the value check, `store` the file, bound
   to the installation by a MAC for a global playbook), the credential-shape
@@ -77,7 +85,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `flags` check), the
   one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
-  another scope's store (`scope_move.rs`), schema 1->2 migrator
+  another scope's store (`scope_move.rs`, under the source's pointer lock,
+  with a `scope_move` history line on the staged copy), schema 1->2 migrator
   (`schema_migrate.rs`), a node's isolation (`isolation.rs`: the level, the
   network, the extra paths and the machine's settings; `isolation/contract`
   the pure contract of what this machine enforces, with its code and reason
@@ -314,7 +323,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   send intents and records a person's decision on an unknown one. `budget.rs`
   holds the budget flags of `apb run` and `apb resume`, the estimate printing
   and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb
-  memory`, `make_global.rs` is `apb make-global`, `publish.rs` is `apb
+  memory`, `make_global.rs` is `apb make-global`, `version.rs` is `apb
+  version list|use|history`, `publish.rs` is `apb
   publish show|approve|skip` (thin wrappers over the review channel), `import_preview.rs` prints
   the preview `apb import` shows before it asks for acceptance. `notify.rs`
   is `apb notify` and the notify flags of `apb run` (forwarded to the
@@ -328,6 +338,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `memory` for remembered run
   input, `notify` for the machine's notify target and a live run's change,
+  `current` for moving a playbook's `current` and its history,
   `quality` for a run's grades and a playbook's candidate, `problems` for
   a playbook's known problems, `discover` for history discovery, loopback
   only; `state.rs` also holds the tool-layer
@@ -519,7 +530,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   inside a run step (`APB_RUN_ID`, `APB_HOST_TASK`, read through
   `apb_core::step_env`), a start from a step may not name its own target,
   and MCP `run_notify` only turns notifications on or off and narrows them
-  (`notify::set` with `ChangedBy::Host`).
+  (`notify::set` with `ChangedBy::Host`), outcome filter included. Which
+  playbooks and outcomes a default subscription covers comes from
+  `policy.yaml` (`apb_core::policy_file`); a filtered `finished` is
+  journaled as `finished:<outcome>` names, which older readers ignore.
+  `host_task` and `supervisor` are opt-in transitions; their waits
+  (`scheduler/host.rs`, `scheduler/supervisor.rs` `await_control`) run the
+  same throttled sweep, and a notice's command comes only from
+  `next_action::command::render` for the notified request.
+- **Moving `current`** goes through `apb_core::versioning::current`
+  (`move_current`, or `move_current_locked` under the candidate lock a
+  settlement already holds): an intent file, ordered writes, recovery,
+  and a history line chained by hash; a candidate's own promotion writes
+  its trial record inside the operation. No other code writes `current`.
 - A **baseline check** (`baseline_check`) reads its sources once before the
   first node that can act (`apb_core::effects::node_acts`) and once at the
   finish, journaled as `baseline_observed` and `baseline_compared`; the
@@ -606,9 +629,8 @@ Releases are built by [cargo-dist](https://opensource.axo.dev/cargo-dist)
 0.32.0, configured in `dist-workspace.toml`. `dist generate` writes
 `.github/workflows/release.yml` from that config; the file is GENERATED and
 must never be hand-edited directly. To change release CI, edit
-`dist-workspace.toml` (and the referenced `.github/build-setup.yml`,
-`.github/workflows/test-gate.yml`, `.github/workflows/release-notes.yml`),
-then re-run `dist generate` and commit the regenerated workflow alongside the
+`dist-workspace.toml` (and the referenced `.github/build-setup.yml` and
+`.github/workflows/test-gate.yml`), then re-run `dist generate` and commit the regenerated workflow alongside the
 config change.
 
 Pushing a tag `vX.Y.Z` triggers the release workflow: it builds the shell
@@ -624,7 +646,19 @@ Every action is pinned to a commit SHA (`[dist.github-action-commits]` for the
 generated file); `release_workflow_test` in apb-cli checks all three. `dist plan` also runs
 on every PR (`pr-run-mode = "plan"`) to catch config drift before a tag is
 pushed. `docs/release-notes/<tag>.md` is required per tag and becomes the
-published release body via a post-announce job.
+published release body, on releases and pre-releases alike, through
+`.github/workflows/release-notes.yml`. That workflow is not part of the
+generated file (dist's post-announce jobs follow the Homebrew publish, which
+is skipped on a pre-release, so `dist-workspace.toml` has none): it runs on
+`workflow_run` of the Release workflow and, before any checkout or edit,
+requires a successful `push` run of this repository whose ref is a tag
+`vX.Y.Z` or `vX.Y.Z-pre` that dereferences to the run's head commit. It then
+checks out that commit without credentials and runs `gh release edit` with
+the notes file, failing when the file is missing. As a `workflow_run`
+workflow it runs from the default branch, so a change to it takes effect
+once merged. `release_workflow_test` covers its trigger, permissions and
+checks, with a pre-release run that passes and a pull request run that does
+not.
 
 Every archive also ships `THIRD-PARTY-NOTICES.txt` (`include` in
 `dist-workspace.toml`), generated from `Cargo.lock` and `web/bun.lock` by

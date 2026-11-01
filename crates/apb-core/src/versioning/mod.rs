@@ -13,7 +13,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::content::TreeFile;
 use crate::fsutil::atomic_write;
@@ -22,104 +22,25 @@ use crate::schema::{Playbook, SchemaError};
 use crate::validate::{Issue, Severity, ValidationContext, validate};
 
 pub mod approval;
+pub mod current;
 mod diff;
+mod error;
 mod imported;
+mod sidecar;
 
 pub use crate::candidate::policy::{PromotePolicy, promote_policy};
 pub use diff::{VersionDiff, diff_definitions, line_diff};
+pub use error::VersioningError;
 pub use imported::{
     BundleOrigin, ImportProvenance, MAX_FILE_NAME, ScriptEntry, sanitize_file_name,
 };
+pub use sidecar::read_current_pointer;
+pub(crate) use sidecar::written_digest;
+pub use sidecar::{
+    TrialRecord, VersionProvenance, read_provenance_in, supersede_candidate_locked, update_trial_in,
+};
 
 const MAX_RENAME_ATTEMPTS: u32 = 100;
-
-#[derive(Debug, thiserror::Error)]
-pub enum VersioningError {
-    #[error("playbook `{0}` not found")]
-    NotFound(String),
-    #[error("{}", crate::validate::render_issues(.0))]
-    Validation(Vec<Issue>),
-    #[error("schema error: {0}")]
-    Schema(String),
-    #[error("version conflict: {0}")]
-    Conflict(String),
-    #[error("playbook `{0}` is frozen: definition changes are disabled")]
-    Frozen(String),
-    #[error(transparent)]
-    Io(#[from] io::Error),
-}
-
-/// Who made a version, stored beside it in `meta/<version>.yaml`. Which
-/// version is in use is not part of it: the `current` pointer is the one
-/// authority for that (see [`VersionInfo::is_current`]). Sidecars written by
-/// older builds carry a `promoted` flag that drifted from `current` (a
-/// rollback or a save that did not move `current` left it set); it is
-/// ignored on read.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
-pub struct VersionProvenance {
-    pub created_by: String,
-    pub run_id: Option<String>,
-    pub classification: Option<String>,
-    // --- forward patches and candidate trials (issue #192) ---
-    /// `next_runs` for a forward patch (a candidate for the next runs);
-    /// absent for a patch the run migrated onto (`current_run`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub scope: Option<String>,
-    /// The version the patch was made from: the lineage of a candidate that
-    /// replaced an earlier one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub base_version: Option<String>,
-    /// Why the supervisor made the forward patch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub rationale: Option<String>,
-    /// What the rationale rests on: journal seqs, node ids, durations.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
-    pub evidence: Vec<String>,
-    /// How the candidate fared in its trials; absent until a trial run ends.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub trial: Option<TrialRecord>,
-    // --- end forward patches ---
-    /// Where an imported version came from (`created_by: import`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub imported: Option<ImportProvenance>,
-}
-
-/// The trial record of a candidate version (issue #192): how many trial runs
-/// it passed, and its fate once decided. A historical fact like the rest of
-/// the sidecar: whether the version is in use is still `current` alone.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
-pub struct TrialRecord {
-    /// Trial runs that succeeded with every goal criterion holding.
-    #[serde(default)]
-    pub successes: u32,
-    /// `promoted`, `rejected` or `superseded`; absent while it is still on
-    /// trial.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub outcome: Option<String>,
-    /// The trial run that decided the outcome (for `superseded`: the run
-    /// whose forward patch replaced it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub run_id: Option<String>,
-    /// Why it was rejected, or the version that superseded it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub reason: Option<String>,
-    /// The latest quality decision under `promote_supervisor_patches:
-    /// { when: quality }`; absent under every other policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub quality: Option<crate::quality::QualityRecord>,
-}
 
 fn advance_minor_pair(major: u32, minor: u32) -> Result<(u32, u32), ()> {
     match minor.checked_add(1) {
@@ -356,22 +277,23 @@ fn create_version_impl(
         return Err(e);
     }
 
-    if is_new || req.make_current {
-        atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
-    }
     // A version a person writes ends the trial of a forward patch made from
     // an older line: promoting that candidate later would undo this one.
-    if !is_new {
+    // Made current, the move ends it itself and its history line says so.
+    if is_new || req.make_current {
+        if let Err(e) =
+            current::move_current(&playbook_dir, &current::MoveCurrent::created(&version))
+        {
+            if is_new {
+                discard_new_playbook_dir(&playbook_dir);
+            }
+            return Err(e.into_versioning(id));
+        }
+    } else {
         supersede_candidate(&playbook_dir, None, &format!("a person created {version}"))?;
     }
 
     Ok(version)
-}
-
-/// The trust digest of the committed version directory `version_dir`.
-fn written_digest(version_dir: &Path) -> io::Result<String> {
-    let yaml = fs::read_to_string(version_dir.join("playbook.yaml"))?;
-    crate::scope::definition_digest(&yaml, version_dir).map_err(io::Error::other)
 }
 
 /// The import record of `base` (a version of the playbook in
@@ -811,48 +733,6 @@ pub fn write_provenance(
     Ok(())
 }
 
-/// The provenance of `version` of the playbook in `playbook_dir`, `None`
-/// when it has none or it does not read.
-pub fn read_provenance_in(playbook_dir: &Path, version: &str) -> Option<VersionProvenance> {
-    if !is_safe_segment(version) {
-        return None;
-    }
-    let yaml =
-        fs::read_to_string(playbook_dir.join("meta").join(format!("{version}.yaml"))).ok()?;
-    yaml_serde::from_str(&yaml).ok()
-}
-
-/// Ends the trial of the candidate of the playbook in `playbook_dir`,
-/// unless it is `keep`: removes the pointer and records the `superseded`
-/// outcome with `reason` on its trial record. Returns the version it ended.
-/// The caller holds the candidate lock (`_held`).
-pub fn supersede_candidate_locked(
-    playbook_dir: &Path,
-    keep: Option<&str>,
-    reason: &str,
-    _held: &crate::fsutil::DirLock,
-) -> Result<Option<String>, VersioningError> {
-    let Some(candidate) = crate::candidate_pointer::read_candidate(playbook_dir) else {
-        return Ok(None);
-    };
-    if keep == Some(candidate.as_str()) {
-        return Ok(None);
-    }
-    crate::candidate_pointer::clear_candidate_if(playbook_dir, &candidate)?;
-    let path = playbook_dir.join("meta").join(format!("{candidate}.yaml"));
-    if path.is_file() {
-        let mut provenance = read_provenance_in(playbook_dir, &candidate).unwrap_or_default();
-        let mut trial = provenance.trial.take().unwrap_or_default();
-        trial.outcome = Some(crate::candidate_pointer::OUTCOME_SUPERSEDED.to_string());
-        trial.reason = Some(reason.to_string());
-        provenance.trial = Some(trial);
-        let yaml = yaml_serde::to_string(&provenance)
-            .map_err(|e| VersioningError::Schema(e.to_string()))?;
-        atomic_write(&path, yaml.as_bytes())?;
-    }
-    Ok(Some(candidate))
-}
-
 /// [`supersede_candidate_locked`] under the playbook's candidate lock.
 pub fn supersede_candidate(
     playbook_dir: &Path,
@@ -865,24 +745,6 @@ pub fn supersede_candidate(
     let lock =
         crate::fsutil::lock_dir(playbook_dir, crate::candidate_pointer::CANDIDATE_LOCK_FILE)?;
     supersede_candidate_locked(playbook_dir, keep, reason, &lock)
-}
-
-/// A person promotes `version` by hand (the dashboard): [`promote_version`],
-/// and any other candidate on trial ends as `superseded`, so a forward
-/// patch made from the line the person just moved past never runs or
-/// promotes over their choice.
-pub fn promote_version_by_person(
-    root: &Path,
-    id: &str,
-    version: &str,
-) -> Result<(), VersioningError> {
-    promote_version(root, id, version)?;
-    supersede_candidate(
-        &playbooks_dir(root).join(id),
-        None,
-        &format!("a person promoted {version}"),
-    )?;
-    Ok(())
 }
 
 /// Returns provenance of version if sidecar already exists.
@@ -972,29 +834,6 @@ fn awaits_approval(root: &Path, id: &str, version: &str, trust: &crate::trust::T
         .and_then(|reg| reg.load(id, Some(version)))
         .and_then(|loaded| loaded.trust_digest())
         .is_ok_and(|digest| trust.is_approved(&digest))
-}
-
-/// Makes `version` the current one: a promotion (a supervisor patch that
-/// passed its run, the dashboard's "Use") and a rollback are the same move of
-/// the one `current` pointer. Any stored version qualifies, newer or older,
-/// with or without a provenance sidecar.
-///
-/// What is required instead is a version that can actually run: the directory
-/// must hold a `playbook.yaml`, so `current` never points at a half-written
-/// or empty version directory.
-pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), VersioningError> {
-    let playbook_dir = playbook_version_dir(root, id, version)?;
-    // Promotion repoints `current`, a definition change - refused while frozen.
-    if is_frozen_dir(&playbooks_dir(root).join(id)) {
-        return Err(VersioningError::Frozen(id.to_string()));
-    }
-    if !playbook_dir.join(version).join("playbook.yaml").is_file() {
-        return Err(VersioningError::NotFound(format!("{id}@{version}")));
-    }
-    atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
-    // A candidate a person promotes by hand is no longer on trial.
-    crate::candidate_pointer::clear_candidate_if(&playbook_dir, version)?;
-    Ok(())
 }
 
 /// Soft deletion of playbook: moves `.apb/playbooks/<id>` to
@@ -1092,15 +931,6 @@ pub fn list_trash(root: &Path) -> Result<Vec<TrashEntry>, VersioningError> {
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(out)
-}
-
-/// The version `current` names in `playbook_dir`, when it names one that
-/// is a safe path segment (a tampered pointer such as `../x` reads as none).
-pub(crate) fn read_current_pointer(playbook_dir: &Path) -> Option<String> {
-    fs::read_to_string(playbook_dir.join("current"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && is_safe_segment(s))
 }
 
 /// Saves canvas layout for version. Layout is mutable: overwriting
@@ -1288,7 +1118,8 @@ pub fn create_draft_in(
     let vdir = playbook_dir.join("1.0.0");
     fs::create_dir_all(&vdir)?;
     atomic_write(&vdir.join("playbook.yaml"), canonical.as_bytes())?;
-    atomic_write(&playbook_dir.join("current"), b"1.0.0")?;
+    current::move_current(&playbook_dir, &current::MoveCurrent::created("1.0.0"))
+        .map_err(|e| e.into_versioning(id))?;
     Ok("1.0.0".to_string())
 }
 
@@ -1666,9 +1497,18 @@ mod tests {
             .unwrap_err();
         assert!(matches!(e2, VersioningError::Frozen(_)), "got {e2:?}");
 
-        // Promotion (repoints current) is refused too.
-        let e3 = promote_version(root, "implement-task", "1.0.0").unwrap_err();
-        assert!(matches!(e3, VersioningError::Frozen(_)), "got {e3:?}");
+        // Moving `current` is refused too.
+        let e3 = current::move_current(
+            &pb_dir,
+            &current::MoveCurrent::new(
+                "1.0.0",
+                current::MovedBy::Person {
+                    surface: current::Surface::Cli,
+                },
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(e3, current::MoveError::Frozen), "got {e3:?}");
 
         // Unfreezing lets a new version through again.
         fs::remove_file(pb_dir.join(crate::registry::FROZEN_MARKER)).unwrap();

@@ -23,8 +23,12 @@ pub const TRIAL_TEXT: &str = "This is a test message from apb. Notifications abo
 /// would notify a run through (the machine's, unless `target` names
 /// another). The target it went to, or why it could not be sent.
 pub fn send_trial(root: &Path, target: Option<NotifyTarget>) -> Result<NotifyTarget, String> {
-    let request = NotifyRequest::On { target, on: None };
-    let check = super::check(root, Some(&request));
+    let request = NotifyRequest::On {
+        target,
+        on: None,
+        finished: None,
+    };
+    let check = super::check(root, None, Some(&request));
     if let Some(why) = check.refusal {
         return Err(why);
     }

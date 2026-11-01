@@ -11,7 +11,7 @@ use apb_core::registry::{Registry, is_safe_segment};
 use apb_core::schema::{FailurePolicy, NodeKind, Outcome, Playbook, WaitFor};
 use apb_core::store::ResolvedPlaybook;
 use apb_core::validate::{Severity, ValidationContext, validate};
-use apb_core::versioning::{promote_policy, promote_version};
+use apb_core::versioning::{current, promote_policy};
 use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};

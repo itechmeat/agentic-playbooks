@@ -9,10 +9,13 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use apb_core::connector::{config, store};
-use apb_core::notify::{NotifyRequest, NotifyTarget, Transition};
+use apb_core::notify::{FinishOutcome, NotifyRequest, NotifyTarget, Transition};
 use apb_core::registry::init_project;
 use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
 use apb_engine::event::{Event, EventPayload, read_all};
+use apb_engine::next_action::{
+    ActionArg, ActionCode, ActionTarget, ArgValue, NextAction, Principal, RequestKind, RequestRef,
+};
 use apb_engine::notify::{ChangedBy, RunNotify};
 use apb_engine::review::{ReviewCommand, post_review};
 use apb_engine::run_outcome::{NeedsLook, outcome_intents};
@@ -162,6 +165,7 @@ impl Env {
                     to: "42".into(),
                 }),
                 on: Some(on.to_vec()),
+                finished: None,
             }),
             ..RunOptions::default()
         }
@@ -169,9 +173,13 @@ impl Env {
 
     /// Runs `p` on a thread; the caller drives the gate.
     fn run_in_background(&self, on: &[Transition]) -> Background {
+        self.run_in_background_with(Self::options(on))
+    }
+
+    /// Runs `p` with `opts` on a thread; the caller drives the gate.
+    fn run_in_background_with(&self, opts: RunOptions) -> Background {
         let (tx, rx) = mpsc::channel();
         let root: PathBuf = self.root().to_path_buf();
-        let opts = Self::options(on);
         let handle = std::thread::spawn({
             let root = root.clone();
             move || {
@@ -399,8 +407,16 @@ fn a_waiting_review_is_sent_once_while_the_drive_keeps_sweeping() {
     let sent = server.requests();
     assert_eq!(sent.len(), 1);
     let text = request_json(&sent[0])["text"].as_str().unwrap().to_string();
+    let review_seq = events
+        .iter()
+        .find(|e| matches!(e.payload, EventPayload::ReviewRequested { .. }))
+        .map(|e| e.seq)
+        .unwrap();
+    // The command of the shared renderer, naming the very request.
     assert!(
-        text.contains("\"Ship it\"") && text.contains("apb review"),
+        text.contains("\"Ship it\"")
+            && text.contains("apb review")
+            && text.contains(&format!("--request=review:{review_seq} ")),
         "{text}"
     );
 }
@@ -442,7 +458,7 @@ fn a_target_that_cannot_carry_notifications_refuses_the_start() {
     {
         t.function = "create_item".into();
     }
-    let check = apb_engine::notify::check(env.root(), opts.notify.as_ref());
+    let check = apb_engine::notify::check(env.root(), None, opts.notify.as_ref());
     let why = check.refusal.expect("refused");
     assert!(why.contains("cannot carry notifications"), "{why}");
     let err = run(env.root(), "p", None, opts).unwrap_err().to_string();
@@ -506,7 +522,26 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
             },
         ),
     ];
-    let question = Notice::build(
+    // The run's next actions as a surface reads them: the notice's
+    // command comes from them, for the very request each transition
+    // opened.
+    let actions = vec![
+        open_action(
+            ActionCode::AnswerQuestion,
+            "ask",
+            RequestKind::Question,
+            1,
+            "answer",
+        ),
+        open_action(
+            ActionCode::DecideReview,
+            "gate",
+            RequestKind::Review,
+            2,
+            "decision",
+        ),
+    ];
+    let question = Notice::compose(
         env.root(),
         &run_dir,
         "r1",
@@ -515,12 +550,15 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
             kind: Transition::Question,
             seq: 1,
         },
+        &actions,
     );
     assert!(question.subject.contains("p asked you a question"));
     assert!(
         question
             .text
-            .contains("apb answer r1 --node ask \"<answer>\"")
+            .contains("apb answer --node=ask --request=question:1 r1 '<answer>'"),
+        "{}",
+        question.text
     );
     assert!(
         question
@@ -529,7 +567,7 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
     );
     assert!(!question.text.contains("secret plan"));
 
-    let review = Notice::build(
+    let review = Notice::compose(
         env.root(),
         &run_dir,
         "r1",
@@ -538,8 +576,14 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
             kind: Transition::Review,
             seq: 2,
         },
+        &actions,
     );
-    assert!(review.text.contains("apb review r1 gate --decision"));
+    assert!(
+        review.text.contains("apb review '--decision=<")
+            && review.text.contains("--request=review:2 r1 gate`"),
+        "{}",
+        review.text
+    );
     assert!(!review.text.contains("line by line"));
     assert!(
         !review.text.contains("notify-token-value")
@@ -550,6 +594,35 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
     let line = review.one_line();
     assert!(!line.contains('\n'));
     assert!(line.starts_with(&review.subject));
+}
+
+/// An open action of run `r1` at `node` answering request `kind`:`seq`,
+/// with one argument to supply.
+fn open_action(code: ActionCode, node: &str, kind: RequestKind, seq: u64, arg: &str) -> NextAction {
+    NextAction {
+        code,
+        run_id: "r1".into(),
+        target: ActionTarget {
+            node: Some(node.into()),
+            request: Some(RequestRef {
+                kind,
+                seq,
+                nonce: None,
+            }),
+            ..ActionTarget::default()
+        },
+        args: vec![ActionArg {
+            name: arg.into(),
+            value: ArgValue::Supplied { hint: arg.into() },
+            required: true,
+        }],
+        principals: vec![Principal::Person],
+        ready: true,
+        not_ready: None,
+        auto: None,
+        reason: String::new(),
+        command: None,
+    }
 }
 
 const HOLD_THEN_GATE: &str = "schema: 2\nid: p\nname: P\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: hold, type: script, script: \"scripts/hold.sh\", runner: sh }\n  - { id: gate, type: human_review, title: Ship it }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: s, to: hold }\n  - { from: hold, to: gate }\n  - { from: gate, to: done }\n";
@@ -590,6 +663,7 @@ fn setting_the_subscription_up_again_sends_a_review_the_gate_refused() {
         &NotifyRequest::On {
             target: None,
             on: None,
+            finished: None,
         },
         ChangedBy::Person,
     )
@@ -780,7 +854,7 @@ fn a_request_the_project_narrows_to_nothing_is_refused_not_dropped() {
     if let Some(NotifyRequest::On { on, .. }) = opts.notify.as_mut() {
         *on = None;
     }
-    let check = apb_engine::notify::check(env.root(), opts.notify.as_ref());
+    let check = apb_engine::notify::check(env.root(), None, opts.notify.as_ref());
     let why = check.refusal.expect("an explicit request is refused");
     assert!(why.contains("no transition is left"), "{why}");
 }
@@ -794,7 +868,7 @@ fn a_machine_default_that_cannot_be_read_is_journaled_as_a_problem() {
         "notify:\n  default: sometimes\n",
     )
     .unwrap();
-    let check = apb_engine::notify::check(env.root(), None);
+    let check = apb_engine::notify::check(env.root(), None, None);
     assert_eq!(check.refusal, None);
     assert_eq!(check.warnings.len(), 1);
     assert!(matches!(
@@ -868,6 +942,7 @@ fn a_sub_playbook_follows_its_parent_set_up_again_after_a_trust_refusal() {
         &NotifyRequest::On {
             target: Some(target),
             on: None,
+            finished: None,
         },
         ChangedBy::Person,
     )
@@ -893,13 +968,349 @@ fn settings_that_do_not_read_are_journaled_as_their_own_source_and_off_needs_non
         "notify:\n  enabled: maybe\n",
     )
     .unwrap();
-    let check = apb_engine::notify::check(env.root(), None);
+    let check = apb_engine::notify::check(env.root(), None, None);
     assert!(matches!(
         check.event(),
         Some(EventPayload::NotifySet { source, problem: Some(_), .. }) if source == "project"
     ));
     // A run that asked for none has nothing to warn about.
-    let off = apb_engine::notify::check(env.root(), Some(&NotifyRequest::Off));
+    let off = apb_engine::notify::check(env.root(), None, Some(&NotifyRequest::Off));
     assert!(off.warnings.is_empty());
     assert!(off.event().is_none());
+}
+
+/// A run whose subscription filters its end by outcome: a success is not
+/// sent under `finished: [failed]` and is sent under `finished: [succeeded]`.
+#[test]
+fn a_filtered_end_is_sent_only_for_its_outcomes() {
+    for (finished, sends) in [(FinishOutcome::Failed, 0), (FinishOutcome::Succeeded, 1)] {
+        let script = (0..sends)
+            .map(|_| Reply::Respond(200, r#"{"id":"m-1"}"#.into()))
+            .collect();
+        let server = spawn_script(script);
+        let env = Env::new(FINISH_ONLY, &server);
+        let mut opts = Env::options(&[Transition::Finished]);
+        if let Some(NotifyRequest::On { finished: f, .. }) = opts.notify.as_mut() {
+            *f = Some(vec![finished]);
+        }
+        let res = run(env.root(), "p", None, opts).unwrap();
+        assert_eq!(res.outcome, RunStatus::Succeeded);
+        let run_dir = env.root().join(".apb/runs").join(&res.run_id);
+        let events = read_all(&run_dir).unwrap();
+        let on = events.iter().find_map(|e| match &e.payload {
+            EventPayload::NotifySet { on, .. } => Some(on.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            on,
+            Some(vec![format!("finished:{}", finished.as_str())]),
+            "the journal carries the filter by name"
+        );
+        assert_eq!(notify_intents(&events).len(), sends, "{finished:?}");
+        assert_eq!(server.requests().len(), sends);
+    }
+}
+
+/// A present `policy.yaml` that does not read creates no default
+/// subscription; the run journals the problem as the file's source.
+#[test]
+fn a_damaged_policy_file_creates_no_default_subscription_and_journals_it() {
+    let server = spawn_script(vec![]);
+    let env = Env::new(FINISH_ONLY, &server);
+    std::fs::write(
+        env.cfg.path().join("config.yaml"),
+        format!(
+            "notify:\n  default: on\n  target: {{ connector: {CONNECTOR}, account: me, function: notify_person, to: \"42\" }}\n"
+        ),
+    )
+    .unwrap();
+    let key = apb_core::policy_file::PlaybookKey {
+        id: "p",
+        global: false,
+    };
+    assert!(
+        apb_engine::notify::check(env.root(), Some(&key), None)
+            .plan
+            .is_some(),
+        "the default applies while the files read"
+    );
+    std::fs::write(
+        env.root().join(".apb/policy.yaml"),
+        "notify:\n  finished: [someday]\n",
+    )
+    .unwrap();
+    let check = apb_engine::notify::check(env.root(), Some(&key), None);
+    assert!(check.plan.is_none());
+    assert!(check.refusal.is_none());
+    match check.event() {
+        Some(EventPayload::NotifySet {
+            target: None,
+            source,
+            problem: Some(problem),
+            ..
+        }) => {
+            assert_eq!(source, "project");
+            assert!(problem.contains("someday"), "{problem}");
+        }
+        other => panic!("no journaled problem: {other:?}"),
+    }
+    // A playbook filter that leaves this playbook out is no subscription and
+    // no problem.
+    std::fs::write(
+        env.root().join(".apb/policy.yaml"),
+        "notify:\n  playbooks: [other]\n",
+    )
+    .unwrap();
+    let check = apb_engine::notify::check(env.root(), Some(&key), None);
+    assert!(check.plan.is_none() && check.event().is_none());
+}
+
+const HOST_TASK_PB: &str = "schema: 1\nid: p\nname: P\nversion: 1.0.0\ndefaults:\n  profile: main\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: agent_task, prompt: \"Do the secret task\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: done }\n";
+
+/// A host task the host has not submitted is notified while the attempt
+/// still waits for it: the sink holds the notice before anything submits
+/// the task, and the notice never carries the task's prompt.
+#[test]
+fn a_host_task_is_notified_while_the_attempt_still_waits_for_it() {
+    use apb_core::execution::{ExecutionMode, ExecutionRequest};
+    let server = spawn_script(vec![Reply::Respond(200, r#"{"id":"m-1"}"#.into())]);
+    let env = Env::new(HOST_TASK_PB, &server);
+    common::seed_profile(env.root(), "main", "claude-code", "haiku", &[]);
+    let mut opts = Env::options(&[Transition::HostTask]);
+    opts.execution = ExecutionRequest {
+        mode: Some(ExecutionMode::Host),
+        host_session: true,
+        client: Some("test-host".into()),
+        inherited: false,
+    };
+    let run_id = apb_engine::scheduler::run_background(env.root(), "p", None, opts).unwrap();
+    let run_dir = env.root().join(".apb/runs").join(&run_id);
+    let task = poll("the host task", || {
+        apb_engine::host_task::pending_for_run(env.root(), &run_id)
+            .ok()?
+            .into_iter()
+            .next()
+    });
+    poll("the host_task notice at the sink", || {
+        (!server.requests().is_empty()).then_some(())
+    });
+    // Still open: nothing submitted it.
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::HostTaskSubmitted { .. })),
+        "the notice came before the submission"
+    );
+    let text = request_json(&server.requests()[0])["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("waiting for its host"), "{text}");
+    assert!(text.contains("apb tasks submit"), "{text}");
+    assert!(!text.contains("secret task"), "no prompt: {text}");
+
+    apb_engine::host_task::submit_to_run(
+        env.root(),
+        &run_id,
+        apb_engine::host_task::SubmitRequest {
+            task_id: task.task_id.clone(),
+            status: apb_engine::host_task::SubmitStatus::Succeeded,
+            output: "done".into(),
+            usage: None,
+            note: None,
+            submitted_by: "host".into(),
+            client: Some("test-host".into()),
+            model: None,
+            findings: None,
+            warnings: None,
+        },
+    )
+    .unwrap();
+    poll("the run to end", || {
+        let events = read_all(&run_dir).ok()?;
+        events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+            .then_some(())
+    });
+    assert_eq!(server.requests().len(), 1, "sent once");
+}
+
+const FAILING_PB: &str = "schema: 2\nid: p\nname: P\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: script, script: \"scripts/fail.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: done }\n";
+
+/// A failed node of a supervised run is notified while the run is parked
+/// for its supervisor: the sink holds the notice before any supervisor
+/// command is posted, and the notice names no command and no wake detail.
+#[test]
+fn a_failed_node_is_notified_while_the_run_waits_for_its_supervisor() {
+    let server = spawn_script(vec![Reply::Respond(200, r#"{"id":"m-1"}"#.into())]);
+    let env = Env::new(FINISH_ONLY, &server);
+    env.add_playbook(
+        "p",
+        FAILING_PB,
+        &[(
+            "fail.sh",
+            "echo 'secret failure detail' >&2\nexit 1\n".into(),
+        )],
+    );
+    let mut opts = Env::options(&[Transition::Supervisor]);
+    opts.mode = apb_engine::run_config::RunMode::Supervised;
+    let root = env.root().to_path_buf();
+    let handle = std::thread::spawn(move || run(&root, "p", None, opts));
+    let run_dir = env.run_dir();
+    poll("the supervisor notice at the sink", || {
+        (!server.requests().is_empty()).then_some(())
+    });
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::WakeRaised { trigger, .. }
+                if *trigger == apb_engine::event::WakeTrigger::NodeFailed
+        )),
+        "parked on the failure"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::SupervisorAction { .. })),
+        "the notice came before any supervisor action"
+    );
+    let text = request_json(&server.requests()[0])["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("waits for its supervisor"), "{text}");
+    assert!(!text.contains("secret failure detail"), "{text}");
+    assert!(!text.contains("run `apb"), "no command: {text}");
+
+    apb_engine::control::post_control(
+        &run_dir,
+        apb_engine::control::Control::Abort {
+            reason: "done".into(),
+            by: None,
+        },
+    )
+    .unwrap();
+    let res = handle.join().unwrap().unwrap();
+    assert_eq!(res.outcome, RunStatus::Aborted);
+}
+
+/// The `on` names of the latest `notify_set` of the run.
+fn latest_on(run_dir: &Path) -> Vec<String> {
+    read_all(run_dir)
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::NotifySet { on, .. } => Some(on.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// A host keeps or narrows the outcome filter, never widens it: `finished`
+/// left out keeps `[failed]` through a change of `on`, and through off and
+/// on again.
+#[test]
+fn a_host_never_widens_the_outcome_filter_and_keeps_it_through_off_and_on() {
+    let server = spawn_script(vec![Reply::Respond(200, r#"{"id":"m-1"}"#.into())]);
+    let env = Env::new(WITH_GATE, &server);
+    // Turned on again by a host, the run sends through the machine's
+    // target (a host never names one).
+    std::fs::write(
+        env.cfg.path().join("config.yaml"),
+        format!(
+            "notify:\n  target: {{ connector: {CONNECTOR}, account: me, function: notify_person, to: \"42\" }}\n"
+        ),
+    )
+    .unwrap();
+    let mut opts = Env::options(&[Transition::Review, Transition::Finished]);
+    if let Some(NotifyRequest::On { finished, .. }) = opts.notify.as_mut() {
+        *finished = Some(vec![FinishOutcome::Failed]);
+    }
+    let mut bg = env.run_in_background_with(opts);
+    let run_dir = env.run_dir();
+    poll("the review notification to settle", || {
+        let events = read_all(&run_dir).ok()?;
+        let (intent, _) = notify_intents(&events).into_iter().next()?;
+        settlement(&events, &intent)
+    });
+    let run_id = run_dir.file_name().unwrap().to_str().unwrap().to_string();
+    let host = |on: Option<Vec<Transition>>, finished: Option<Vec<FinishOutcome>>| {
+        apb_engine::notify::set(
+            env.root(),
+            &run_id,
+            &NotifyRequest::On {
+                target: None,
+                on,
+                finished,
+            },
+            ChangedBy::Host,
+        )
+    };
+    let widened = host(
+        None,
+        Some(vec![FinishOutcome::Failed, FinishOutcome::Succeeded]),
+    );
+    assert!(
+        matches!(&widened, Err(apb_engine::notify::SetError::NotAllowed(m)) if m.contains("finished:succeeded")),
+        "{widened:?}"
+    );
+    assert_eq!(latest_on(&run_dir), ["review", "finished:failed"]);
+    // Narrowing `on` with `finished` left out keeps the filter.
+    let kept = host(Some(vec![Transition::Finished]), None).unwrap();
+    assert!(kept.refusal.is_none(), "{kept:?}");
+    assert_eq!(latest_on(&run_dir), ["finished:failed"]);
+    // Off, then on again through the host: the last filter comes back.
+    apb_engine::notify::set(env.root(), &run_id, &NotifyRequest::Off, ChangedBy::Host).unwrap();
+    let again = host(None, None).unwrap();
+    assert!(again.refusal.is_none(), "{again:?}");
+    assert_eq!(latest_on(&run_dir), ["finished:failed"]);
+    let widened = host(None, Some(vec![FinishOutcome::Aborted]));
+    assert!(widened.is_err(), "{widened:?}");
+    // An outcome filter without `finished` among the transitions filters
+    // nothing: refused, not taken.
+    let person = |on: Vec<Transition>, finished: Option<Vec<FinishOutcome>>| {
+        apb_engine::notify::set(
+            env.root(),
+            &run_id,
+            &NotifyRequest::On {
+                target: None,
+                on: Some(on),
+                finished,
+            },
+            ChangedBy::Person,
+        )
+        .unwrap()
+    };
+    let idle = person(vec![Transition::Review], Some(vec![FinishOutcome::Failed]));
+    assert!(
+        idle.refusal
+            .as_deref()
+            .is_some_and(|m| m.contains("add `finished` to `on`")),
+        "{idle:?}"
+    );
+    assert_eq!(latest_on(&run_dir), ["finished:failed"]);
+    // Once `finished` was left out, adding it back takes the settings'
+    // filter, never every outcome.
+    std::fs::write(
+        env.cfg.path().join("policy.yaml"),
+        "notify:\n  finished: [failed, aborted]\n",
+    )
+    .unwrap();
+    assert!(person(vec![Transition::Review], None).refusal.is_none());
+    assert_eq!(latest_on(&run_dir), ["review"]);
+    let back = person(vec![Transition::Review, Transition::Finished], None);
+    assert!(back.refusal.is_none(), "{back:?}");
+    assert_eq!(
+        latest_on(&run_dir),
+        ["review", "finished:failed", "finished:aborted"]
+    );
+
+    decide(&run_dir);
+    assert_eq!(bg.finish(), RunStatus::Succeeded);
+    // A success under `[failed]`: only the review was sent.
+    assert_eq!(server.requests().len(), 1);
 }

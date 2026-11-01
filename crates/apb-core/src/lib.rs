@@ -41,6 +41,7 @@ pub mod models_table;
 pub mod notify;
 pub mod output_limits;
 pub mod overrides;
+pub mod policy_file;
 pub mod preflight;
 pub mod process_env;
 pub mod process_mode;

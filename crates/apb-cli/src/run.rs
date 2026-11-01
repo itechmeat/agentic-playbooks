@@ -744,7 +744,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        if let Err(e) = crate::notify::start_check(root, notify.as_ref()) {
+        if let Err(e) = crate::notify::start_check(root, name, notify.as_ref()) {
             eprintln!("run failed: {e}");
             return ExitCode::from(2);
         }
@@ -820,7 +820,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if let Err(e) = crate::notify::start_check(root, notify.as_ref()) {
+    if let Err(e) = crate::notify::start_check(root, name, notify.as_ref()) {
         eprintln!("run failed: {e}");
         return ExitCode::from(2);
     }

@@ -25,8 +25,10 @@ github-build-setup = "../build-setup.yml"
 # is not "skipped"). As a plan job its failure only skipped the builds, which
 # host tolerates. The build legs themselves only build (build-setup.yml).
 local-artifacts-jobs = ["./test-gate"]
-# Post-announce jobs to run in CI
-post-announce-jobs = ["./release-notes"]
+# No post-announce jobs: dist calls them after the Homebrew publish, which is
+# skipped on a pre-release, so they were skipped too. The release notes are
+# applied by .github/workflows/release-notes.yml, a separate workflow_run
+# workflow that follows every successful Release run of a version tag.
 # Which actions to run on pull requests
 pr-run-mode = "plan"
 # Keyless build-provenance attestations (Sigstore via GitHub OIDC) for every

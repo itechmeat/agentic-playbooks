@@ -106,6 +106,19 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         execution_detail,
     );
 
+    // `policy.yaml` (machine and project): strict, so a key the reader does
+    // not know is named here rather than discovered by a missing notice.
+    let (policy_ok, policy_detail) = crate::policy_file::doctor_line(root);
+    r.push(
+        if policy_ok {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        "policy",
+        policy_detail,
+    );
+
     let reg = match Registry::open(root) {
         Ok(reg) => reg,
         Err(e) => {

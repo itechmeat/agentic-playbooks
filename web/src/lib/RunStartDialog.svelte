@@ -152,7 +152,7 @@
         })
     }
     if (fresh) {
-      fetchNotify(ws)
+      fetchNotify(ws, id)
         .then((m) => {
           if (!live) return
           machineNotify = m

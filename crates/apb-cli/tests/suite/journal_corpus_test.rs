@@ -29,10 +29,22 @@
 //!
 //! Rows 1 to 6 are runs real writers produced; rows 7 and 8 are synthetic
 //! journals that test readers and resumers only, and say so in their names.
+//!
+//! Rows 3 and 4 run with a real notification subscription the new writer
+//! takes at start: a filtered end-of-run notice (`finished:failed`) and the
+//! `host_task` transition, sent through a connector of the case's config
+//! dir to a local HTTP sink the test counts. An old reader's resume must
+//! send nothing; a positive control (the same state with a plain `finished`
+//! subscription) shows the sink, the target and its trust can carry a
+//! notice, so "nothing sent" is not vacuous.
 
 use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -51,6 +63,104 @@ const DEADLINE: Duration = Duration::from_secs(60);
 
 /// A type no apb knows: a record a newer apb might write.
 const FUTURE_TYPE: &str = "corpus_future_record";
+
+/// The notification sink connector (`tests/fixtures/journal-corpus-sink`).
+const SINK: &str = "corpus-sink";
+
+/// The subscription rows 3 and 4 start with, as the journal names it.
+const FILTERED_ON: [&str; 2] = ["finished:failed", "host_task"];
+
+// ---------------------------------------------------------------- the sink
+
+/// An HTTP service on `127.0.0.1:0` that answers every request with a sent
+/// message and counts the requests.
+struct Sink {
+    base_url: String,
+    count: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Sink {
+    fn spawn() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (seen, stopped) = (count.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            while !stopped.load(Ordering::SeqCst) {
+                let mut stream = match listener.accept() {
+                    Ok((s, _)) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => return,
+                };
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                drain_request(&mut stream);
+                seen.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"id":"m-1"}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        Sink {
+            base_url,
+            count,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Reads one request's head and body.
+fn drain_request(stream: &mut std::net::TcpStream) {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    let head_end = loop {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        }
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    while raw.len() < head_end + length {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        }
+    }
+}
 
 // ---------------------------------------------------------------- binaries
 
@@ -352,6 +462,11 @@ impl Case {
     /// end in the foreground.
     fn approve_and_resume(&self, reader: &Path, run: &str) {
         self.restore();
+        self.approve_and_resume_restored(reader, run);
+    }
+
+    /// [`Case::approve_and_resume`] on the runs as they are now.
+    fn approve_and_resume_restored(&self, reader: &Path, run: &str) {
         let ran = self.run(reader, &["review", run, "gate", "--decision", "approved"]);
         assert!(ran.ok(), "{}: {} review: {ran:?}", self.name, label(reader));
         let ran = self.run(reader, &["resume", run]);
@@ -401,7 +516,126 @@ impl Case {
         self.stop(reader, run);
     }
 
+    /// The sink connector, installed in the case's config dir with an
+    /// account pointing at `sink`, both approved by `binary`.
+    fn install_sink(&self, binary: &Path, sink: &Sink) {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/journal-corpus-sink");
+        let dst = self
+            .dir
+            .path()
+            .join("home/.config/apb/connectors")
+            .join(SINK);
+        fs::create_dir_all(&dst).unwrap();
+        fs::copy(fixture.join("connector.yaml"), dst.join("connector.yaml")).unwrap();
+        let accounts = self.root().join(".apb/connector-config");
+        fs::create_dir_all(&accounts).unwrap();
+        fs::write(
+            accounts.join(format!("{SINK}.yaml")),
+            format!(
+                "accounts:\n  - name: me\n    default: true\n    base_url: {}\n",
+                sink.base_url
+            ),
+        )
+        .unwrap();
+        for args in [
+            vec!["connector", "approve", SINK],
+            vec!["connector", "approve", SINK, "--account", "me"],
+        ] {
+            let ran = self.run(binary, &args);
+            assert!(ran.ok(), "{}: {}: {ran:?}", self.name, args.join(" "));
+        }
+    }
+
+    /// The `on` names of the run's `notify_set`, read without any apb type.
+    fn notify_on(journal: &[Value]) -> Option<Vec<String>> {
+        journal.iter().find(|e| e["type"] == "notify_set").map(|e| {
+            e["on"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(str::to_string))
+                .collect()
+        })
+    }
+
+    /// Restores the saved runs with the subscription's names replaced by
+    /// `on`, approves the gate and resumes to the end with `reader`; how
+    /// many notices reached the sink meanwhile.
+    fn resume_with_subscription(
+        &self,
+        reader: &Path,
+        run: &str,
+        on: &[&str],
+        sink: &Sink,
+    ) -> usize {
+        self.restore();
+        rewrite_journal(&self.run_dir(run), |records| {
+            records
+                .into_iter()
+                .map(|mut r| {
+                    if r["type"] == "notify_set" {
+                        r["on"] = Value::from(on.to_vec());
+                    }
+                    r
+                })
+                .collect()
+        });
+        let before = sink.count();
+        self.approve_and_resume_restored(reader, run);
+        sink.count() - before
+    }
+
     // ----------------------------------------------------- writers
+
+    /// [`Case::write_waiting_at_review`] by the new binary, with the run's
+    /// own subscription: the end-of-run notice only for `failed`, and host
+    /// tasks, through the sink. The fixture checks the exact journal names
+    /// and that the writer sent nothing.
+    fn write_notified_waiting_at_review(&mut self, sink: &Sink) -> String {
+        let new = new_binary();
+        self.seed(&new);
+        self.install_sink(&new, sink);
+        let via = format!("--notify-via={SINK}/me:notify_person");
+        let ran = self.run(
+            &new,
+            &[
+                "run",
+                PLAYBOOK,
+                "--detach",
+                "--notify-on=finished,host_task",
+                "--notify-finished=failed",
+                &via,
+                "--notify-to=42",
+            ],
+        );
+        assert!(
+            ran.ok(),
+            "{}: apb run --detach --notify: {ran:?}",
+            self.name
+        );
+        let run = ran
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("run started: "))
+            .unwrap_or_else(|| panic!("{}: no run id in {ran:?}", self.name))
+            .trim()
+            .to_string();
+        self.guards.push(RunGuard::new(&self.root(), &run));
+        let journal = self.wait_journal(&run, "the review gate", |j| {
+            j.iter().any(|e| e["type"] == "review_requested")
+        });
+        assert_eq!(
+            Self::notify_on(&journal),
+            Some(FILTERED_ON.iter().map(|s| s.to_string()).collect()),
+            "{}: the new writer journals the exact names",
+            self.name
+        );
+        self.kill_driver(&run);
+        assert_eq!(sink.count(), 0, "{}: the writer sent nothing", self.name);
+        self.save();
+        run
+    }
 
     /// The writer runs the playbook to its review gate; the state saved is
     /// that run waiting at the gate with its driver gone.
@@ -551,27 +785,65 @@ fn row2_beta1_writer_new_reader() {
     case.read_resume_stop(&new_binary(), &run);
 }
 
-/// Row 3: the new binary writes a run waiting at review; beta.1 reads,
-/// resumes to the end and stops.
+/// Row 3: the new binary writes a run waiting at review, with its own
+/// subscription (`finished:failed`, `host_task`); beta.1 reads, resumes to
+/// the end and stops. beta.1 drops both names it does not know, so its
+/// resume to a success sends nothing; with a plain `finished` the same
+/// resume sends one notice (the positive control).
 #[test]
 fn row3_new_writer_beta1_reader() {
     let mut case = Case::new("row 3");
     let Some(beta1) = old_binary(BETA1, &case) else {
         return;
     };
-    let run = case.write_waiting_at_review(&new_binary());
-    case.read_resume_stop(&beta1, &run);
+    let sink = Sink::spawn();
+    let run = case.write_notified_waiting_at_review(&sink);
+    let ran = case.read(&beta1, &run);
+    assert!(
+        !ran.stdout.contains("unknown event"),
+        "row 3: beta.1 knows every record: {ran:?}"
+    );
+    assert_eq!(
+        case.resume_with_subscription(&beta1, &run, &FILTERED_ON, &sink),
+        0,
+        "row 3: beta.1 sends no notice for a filtered subscription"
+    );
+    case.stop(&beta1, &run);
+    assert_eq!(
+        case.resume_with_subscription(&beta1, &run, &["finished"], &sink),
+        1,
+        "row 3: positive control, beta.1 sends the plain end-of-run notice"
+    );
 }
 
-/// Row 4: the same state as row 3, read, resumed and stopped by 0.25.0.
+/// Row 4: the same state as row 3, read, resumed and stopped by 0.25.0,
+/// which has no notifications: it skips `notify_set` as an unknown record
+/// before a checkpoint, and its resume sends nothing. The positive control
+/// is the new binary's resume of the plain `finished` copy.
 #[test]
 fn row4_new_writer_v025_reader() {
     let mut case = Case::new("row 4");
     let Some(v025) = old_binary(V025, &case) else {
         return;
     };
-    let run = case.write_waiting_at_review(&new_binary());
-    case.read_resume_stop(&v025, &run);
+    let sink = Sink::spawn();
+    let run = case.write_notified_waiting_at_review(&sink);
+    let ran = case.read(&v025, &run);
+    assert!(
+        ran.stdout.contains("unknown event"),
+        "row 4: 0.25.0 skips the subscription record and says so: {ran:?}"
+    );
+    assert_eq!(
+        case.resume_with_subscription(&v025, &run, &FILTERED_ON, &sink),
+        0,
+        "row 4: 0.25.0 sends nothing"
+    );
+    case.stop(&v025, &run);
+    assert_eq!(
+        case.resume_with_subscription(&new_binary(), &run, &["finished"], &sink),
+        1,
+        "row 4: positive control, the new binary sends the plain end-of-run notice"
+    );
 }
 
 /// Row 5: the new binary's driver is killed mid-node (an open attempt, a

@@ -241,6 +241,11 @@ fn valid_patch_migrates_run_and_promotes_improvement() {
             .trim(),
         version
     );
+    // The promotion is recorded as the run's.
+    use apb_core::versioning::current::{MovedBy, history};
+    let h = history(&dir.path().join(".apb/playbooks/migrate"), 1).unwrap();
+    assert_eq!(h.entries[0].to.as_deref(), Some(version.as_str()));
+    assert_eq!(h.entries[0].by, Some(MovedBy::PatchPromotion { run_id }));
 }
 
 #[test]

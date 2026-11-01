@@ -3,8 +3,7 @@ use crate::state::*;
 use apb_core::registry::{PlaybookSummary, Registry, RegistryError};
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{
-    delete_playbook, list_versions_with_provenance, promote_version_by_person, save_definition,
-    save_layout, version_diff,
+    delete_playbook, list_versions_with_provenance, save_definition, save_layout, version_diff,
 };
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
@@ -336,9 +335,10 @@ pub(crate) async fn run_playbook_handler(
         Err(e) => return super::notify::refusal(e),
     };
     let checked = {
-        let (root, notify) = (root.clone(), notify.clone());
+        let (root, notify, wref) = (root.clone(), notify.clone(), wref.clone());
         tokio::task::spawn_blocking(move || {
-            apb_mcp::tools::notify::start_check(&root, notify.as_ref())
+            let key = apb_core::policy_file::PlaybookKey::of(&wref);
+            apb_mcp::tools::notify::start_check(&root, Some(&key), notify.as_ref())
         })
         .await
     };
@@ -541,24 +541,6 @@ pub(crate) async fn list_versions_handler(
     };
     match list_versions_with_provenance(&root, &id) {
         Ok(infos) => Json(infos).into_response(),
-        Err(e) => versioning_error(e),
-    }
-}
-
-pub(crate) async fn promote_version_handler(
-    State(state): State<AppState>,
-    AxPath((id, version)): AxPath<(String, String)>,
-    Query(q): Query<WorkspaceQuery>,
-) -> impl IntoResponse {
-    if !is_safe_id(&id) || !is_safe_id(&version) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    match promote_version_by_person(&root, &id, &version) {
-        Ok(()) => Json(serde_json::json!({ "promoted": version })).into_response(),
         Err(e) => versioning_error(e),
     }
 }

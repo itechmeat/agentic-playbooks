@@ -5,11 +5,11 @@
 
 use apb_core::connector::idempotency::IdempotencyMode;
 use apb_core::connector::sites::NOTIFY_SITE;
-use apb_core::notify::Transition;
+use apb_core::notify::{FinishOutcome, Transition};
 
 use super::NotifyState;
 use crate::connector::intent::{IntentRecord, IntentState, Ledger, effective_state, ledger};
-use crate::event::{Event, EventPayload};
+use crate::event::{Event, EventPayload, WakeTrigger};
 use crate::pause::kind::PauseBy;
 
 /// How many sends one transition gets in all.
@@ -53,16 +53,39 @@ pub fn transition_of(label: &str) -> Option<&str> {
 
 /// The transitions of `events` still open at the end of the journal, in
 /// journal order: a review nobody decided, a question nobody answered, a
-/// pause the engine or the supervisor made that nothing resumed, and the
-/// run's end (a stop a person made is not news to them). The end of the
-/// run closes every wait; a resume closes the end.
+/// host task nobody submitted, a failed or timed-out node the supervisor
+/// has not acted on, a pause the engine or the supervisor made that nothing
+/// resumed, and the run's end (a stop a person made is not news to them).
+/// The end of the run closes every wait; a resume closes the end.
 pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
     let mut reviews: Vec<(String, u64)> = Vec::new();
     let mut questions: Vec<(String, Vec<u64>, usize)> = Vec::new();
+    let mut host_tasks: Vec<(String, u64)> = Vec::new();
+    let mut supervisor: Option<u64> = None;
     let mut paused: Option<u64> = None;
     let mut finished: Option<u64> = None;
     for e in events {
         match &e.payload {
+            EventPayload::HostTaskRequested { task_id, .. } => {
+                host_tasks.retain(|(id, _)| id != task_id);
+                host_tasks.push((task_id.clone(), e.seq));
+            }
+            EventPayload::HostTaskSubmitted { task_id, .. } => {
+                host_tasks.retain(|(id, _)| id != task_id);
+            }
+            // The supervisor park of `progress::pending_supervisor_decision`:
+            // a failure or a timeout waits until the supervisor retries or
+            // continues, or the run pauses, is patched or ends.
+            EventPayload::WakeRaised {
+                trigger: WakeTrigger::NodeFailed | WakeTrigger::NodeTimeout,
+                ..
+            } => supervisor = Some(e.seq),
+            EventPayload::SupervisorAction { action, .. }
+                if crate::progress::supervisor_action_resolves_wake(action) =>
+            {
+                supervisor = None;
+            }
+            EventPayload::PatchApplied { .. } => supervisor = None,
             EventPayload::ReviewRequested { node, .. } => {
                 reviews.retain(|(n, _)| n != node);
                 reviews.push((node.clone(), e.seq));
@@ -83,6 +106,7 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
                 }
             }
             EventPayload::RunPaused { by, .. } => {
+                supervisor = None;
                 // An older journal's pause carries no `by`; the views read
                 // it as the supervisor's.
                 paused = (by.unwrap_or(PauseBy::Supervisor) != PauseBy::Operator).then_some(e.seq);
@@ -94,6 +118,8 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
             EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => {
                 reviews.clear();
                 questions.clear();
+                host_tasks.clear();
+                supervisor = None;
                 paused = None;
                 let by_person = matches!(
                     &e.payload,
@@ -119,6 +145,12 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
                 .map(|seq| TransitionId::new(Transition::Question, seq)),
         );
     }
+    out.extend(
+        host_tasks
+            .into_iter()
+            .map(|(_, seq)| TransitionId::new(Transition::HostTask, seq)),
+    );
+    out.extend(supervisor.map(|seq| TransitionId::new(Transition::Supervisor, seq)));
     out.extend(paused.map(|seq| TransitionId::new(Transition::Paused, seq)));
     out.extend(finished.map(|seq| TransitionId::new(Transition::Finished, seq)));
     out.sort_by_key(|t| t.seq);
@@ -160,22 +192,53 @@ impl KeyWindow {
     }
 }
 
+/// How the run whose end is journaled at `seq` came out. A success is
+/// `needs_look` when `needs_look` says the outcome calls for a look (it is
+/// asked only for a success); a stop by anything but a person is
+/// `aborted`.
+pub fn finish_outcome(events: &[Event], seq: u64, needs_look: &dyn Fn() -> bool) -> FinishOutcome {
+    match events.iter().find(|e| e.seq == seq).map(|e| &e.payload) {
+        Some(EventPayload::RunFinished { outcome }) if outcome == "succeeded" => {
+            if needs_look() {
+                FinishOutcome::NeedsLook
+            } else {
+                FinishOutcome::Succeeded
+            }
+        }
+        Some(EventPayload::RunFinished { outcome }) if outcome == "aborted" => {
+            FinishOutcome::Aborted
+        }
+        Some(EventPayload::RunAborted { .. }) => FinishOutcome::Aborted,
+        _ => FinishOutcome::Failed,
+    }
+}
+
 /// The transitions due a notification as of `now_ms`: open, of a kind the
-/// subscription covers, journaled at or after it took effect, and allowed
-/// another try. `window` is the target's [`KeyWindow`].
+/// subscription covers (for the run's end, of an outcome it covers),
+/// journaled at or after it took effect, and allowed another try. `window`
+/// is the target's [`KeyWindow`]; `needs_look` tells a success that calls
+/// for a look, asked only when the subscription filters outcomes.
 pub fn due(
     events: &[Event],
     state: &NotifyState,
     now_ms: u64,
     window: KeyWindow,
+    needs_look: &dyn Fn() -> bool,
 ) -> Vec<TransitionId> {
     let Some(active) = &state.active else {
         return Vec::new();
     };
+    let coverage = active.coverage();
+    let covered = |t: &TransitionId| match t.kind {
+        Transition::Finished if coverage.filters_finish() => {
+            coverage.covers_finish(finish_outcome(events, t.seq, needs_look))
+        }
+        kind => active.on.contains(&kind),
+    };
     let ledger = Ledger::fold(events);
     open_transitions(events)
         .into_iter()
-        .filter(|t| t.seq >= active.since_seq && active.on.contains(&t.kind))
+        .filter(|t| t.seq >= active.since_seq && covered(t))
         .filter(|t| {
             let held: Vec<&IntentRecord> = tries(&ledger, &t.label())
                 .into_iter()

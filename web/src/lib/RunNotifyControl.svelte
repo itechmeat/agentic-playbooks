@@ -6,12 +6,15 @@
   // (through the machine's target) or off; the server checks the target at
   // that moment and refuses one it cannot use. Until the machine's settings
   // are read, nothing is said about them; settings that do not read say so.
+  // A live run that notifies about its end gets an outcome filter: the
+  // end-of-run notice only for the outcomes the person keeps checked.
   // `actions` renders next to the button (the run page's "Save report").
   import type { Snippet } from 'svelte'
   import { toast } from 'svelte-sonner'
-  import { ApiError, fetchNotify, postRunNotify } from './api'
-  import type { MachineNotify, RunNotify } from './api.gen'
-  import { NOTIFY_UNREADABLE, canNotify, notifyState, sentLines } from './notify'
+  import { ApiError, fetchNotify, postRunNotify, type NotifyChange } from './api'
+  import type { FinishOutcome, MachineNotify, RunNotify } from './api.gen'
+  import { NOTIFY_OUTCOMES } from './consts.gen'
+  import { NOTIFY_UNREADABLE, OUTCOME_WORDS, canNotify, notifyState, sentLines } from './notify'
   import { isTerminalRunStatus } from './status'
   import { Button } from '$lib/components/ui/button'
 
@@ -67,19 +70,45 @@
   const live = $derived(!isTerminalRunStatus(status))
   const canTurnOn = $derived(canNotify(machine))
   const shown = $derived(live || !!notify)
+  // The outcome filter, offered while a live run notifies about its end.
+  const filtering = $derived(live && view.kind === 'on' && !!notify?.on.includes('finished'))
+  const current = $derived<FinishOutcome[]>(notify?.finished ?? [])
+  // Keyed by content: a reload with the same filter (every journal write
+  // of a live run reloads) never resets a change not applied yet.
+  const currentKey = $derived(current.join(','))
+  let picked = $state<FinishOutcome[]>([])
+  $effect(() => {
+    picked = currentKey ? (currentKey.split(',') as FinishOutcome[]) : []
+  })
+  const filterChanged = $derived(
+    picked.length > 0 && (picked.length !== current.length || picked.some((o) => !current.includes(o))),
+  )
 
-  async function change(on: boolean) {
+  function toggle(o: FinishOutcome, checked: boolean) {
+    picked = NOTIFY_OUTCOMES.filter((x) => (x === o ? checked : picked.includes(x)))
+  }
+
+  /** The toasts of a change: a filter change, or turning notifications on or off. */
+  function words(next: NotifyChange): { done: string; failed: string } {
+    if (typeof next !== 'boolean') {
+      return { done: 'The end-of-run notice filter is changed', failed: 'Could not change the filter' }
+    }
+    return next
+      ? { done: 'Notifications are on for this run', failed: 'Notifications cannot be sent' }
+      : { done: 'Notifications are off for this run', failed: 'Could not turn notifications off' }
+  }
+
+  async function change(next: NotifyChange) {
+    const said = words(next)
     busy = true
     try {
-      const res = await postRunNotify(id, on, workspace)
+      const res = await postRunNotify(id, next, workspace)
       for (const w of res.warnings ?? []) toast.warning(w)
-      toast.success(on ? 'Notifications are on for this run' : 'Notifications are off for this run')
+      toast.success(said.done)
       onchange()
     } catch (e) {
       const detail = e instanceof ApiError && e.detail ? e.detail : String(e)
-      toast.error(on ? 'Notifications cannot be sent' : 'Could not turn notifications off', {
-        description: detail,
-      })
+      toast.error(said.failed, { description: detail })
     } finally {
       busy = false
     }
@@ -110,6 +139,29 @@
         <span class="notify-sent" data-testid="run-notify-sent">{line}</span>
       {/each}
     </div>
+    {#if filtering}
+      <fieldset class="notify-filter" data-testid="run-notify-filter" disabled={busy}>
+        <legend>End-of-run notice when the run</legend>
+        {#each NOTIFY_OUTCOMES as o (o)}
+          <label class="notify-outcome">
+            <input
+              type="checkbox"
+              data-testid={`run-notify-outcome-${o}`}
+              checked={picked.includes(o)}
+              onchange={(e) => toggle(o, e.currentTarget.checked)}
+            />
+            {OUTCOME_WORDS[o]}
+          </label>
+        {/each}
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="run-notify-filter-apply"
+          disabled={busy || !filterChanged}
+          onclick={() => change({ finished: picked })}>Apply</Button
+        >
+      </fieldset>
+    {/if}
   {/if}
   <div class="notify-actions">
     {#if live && view.kind === 'on'}
@@ -170,6 +222,31 @@
   }
   .muted {
     color: var(--muted-foreground);
+  }
+  .notify-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 12px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .notify-filter legend {
+    float: left;
+    margin-right: 4px;
+    padding: 0;
+    color: var(--muted-foreground);
+  }
+  .notify-outcome {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
+  .notify-outcome input {
+    accent-color: var(--primary);
   }
   .notify-actions {
     display: flex;

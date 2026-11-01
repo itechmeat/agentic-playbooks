@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod connectors;
+pub mod current;
 pub mod discover;
 pub mod estimate;
 pub mod fit;

@@ -95,6 +95,8 @@ pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
             copy_tree(&from, &to)?;
         } else if ft.is_file() {
             fs::copy(&from, &to)?;
+            #[cfg(test)]
+            copy_seam::after_file();
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -106,6 +108,31 @@ pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A pause between two file reads of [`copy_tree`], for the unit tests
+/// that race a writer against a copy in progress.
+#[cfg(test)]
+pub(crate) mod copy_seam {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static AFTER_FILE: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
+    }
+
+    /// Runs `hook` after every file [`super::copy_tree`] copies on this
+    /// thread; `None` removes it.
+    pub(crate) fn set(hook: Option<Box<dyn FnMut()>>) {
+        AFTER_FILE.with(|h| *h.borrow_mut() = hook);
+    }
+
+    pub(super) fn after_file() {
+        AFTER_FILE.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
 }
 
 /// Fails when `path`, or any existing component of it strictly below
@@ -176,6 +203,67 @@ pub fn open_regular_no_follow(path: &Path) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+/// The largest settings file apb reads (`policy.yaml`, a project's
+/// `.apb/config.yaml`).
+pub const SETTINGS_FILE_MAX_BYTES: u64 = 1 << 20;
+
+/// The text of the small settings file at `path`, `None` when it is absent.
+/// A link is followed, but what it reaches must be a regular file (never a
+/// fifo or a device, which could block or never end) of at most `cap`
+/// bytes, in UTF-8; anything else is an error that names the file.
+pub fn read_settings_file(path: &Path, cap: u64) -> io::Result<Option<String>> {
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let opened = File::open(path);
+    let file = match opened {
+        Ok(f) => f,
+        // No `.apb` directory (a file in its place) is no settings file.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    let too_large = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is larger than {cap} bytes", path.display()),
+        )
+    };
+    if meta.len() > cap {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(file, cap.saturating_add(1)), &mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not UTF-8 text", path.display()),
+        )
+    })
 }
 
 /// Reads at most `cap` bytes of `reader`. Returns them and whether more was

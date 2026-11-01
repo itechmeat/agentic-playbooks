@@ -128,3 +128,5 @@ mod stdio_profile_e2e_test;
 mod suggestions_cli_test;
 #[path = "suite/supervise_cli_test.rs"]
 mod supervise_cli_test;
+#[path = "suite/version_cli_test.rs"]
+mod version_cli_test;

@@ -5,9 +5,10 @@
 use apb_core::config::{GlobalConfig, ServerConfig, project_notify};
 use apb_core::connector::def::ConnectorDoc;
 use apb_core::notify::{
-    NotifyRequest, NotifySettings, NotifySource, NotifyTarget, ProjectNotify, Toggle, Transition,
-    effective,
+    Effective, NotifyRequest, NotifySettings, NotifySource, NotifyTarget, ProjectNotify, Settings,
+    Toggle, Transition, effective,
 };
+use apb_core::policy_file::Policies;
 
 use crate::common::env_lock;
 
@@ -24,17 +25,35 @@ fn machine(default: Toggle) -> NotifySettings {
     NotifySettings {
         default,
         target: Some(target("1")),
-        on: Transition::ALL.to_vec(),
+        on: Transition::DEFAULT.to_vec(),
     }
+}
+
+/// [`effective`] without `policy.yaml` filters and without a playbook.
+fn eff(
+    machine: &NotifySettings,
+    project: &ProjectNotify,
+    request: Option<&NotifyRequest>,
+) -> Option<Effective> {
+    let policies = Policies::default();
+    effective(
+        Settings {
+            machine,
+            project,
+            policies: &policies,
+        },
+        None,
+        request,
+    )
 }
 
 #[test]
 fn nothing_asked_follows_the_machine_default() {
     let none = ProjectNotify::default();
-    assert_eq!(effective(&machine(Toggle::Off), &none, None), None);
-    let on = effective(&machine(Toggle::On), &none, None).unwrap();
+    assert_eq!(eff(&machine(Toggle::Off), &none, None), None);
+    let on = eff(&machine(Toggle::On), &none, None).unwrap();
     assert_eq!(on.source, NotifySource::Machine);
-    assert_eq!(on.on, Transition::ALL.to_vec());
+    assert_eq!(on.on, Transition::DEFAULT.to_vec());
     assert_eq!(on.target, Some(target("1")));
 }
 
@@ -44,17 +63,17 @@ fn a_project_turns_the_default_off_or_narrows_it_but_never_turns_it_on() {
         enabled: Some(false),
         on: None,
     };
-    assert_eq!(effective(&machine(Toggle::On), &off, None), None);
+    assert_eq!(eff(&machine(Toggle::On), &off, None), None);
     let on_only = ProjectNotify {
         enabled: Some(true),
         on: None,
     };
-    assert_eq!(effective(&machine(Toggle::Off), &on_only, None), None);
+    assert_eq!(eff(&machine(Toggle::Off), &on_only, None), None);
     let narrow = ProjectNotify {
         enabled: None,
         on: Some(vec![Transition::Finished, Transition::Review]),
     };
-    let e = effective(&machine(Toggle::On), &narrow, None).unwrap();
+    let e = eff(&machine(Toggle::On), &narrow, None).unwrap();
     assert_eq!(e.on, vec![Transition::Review, Transition::Finished]);
     assert_eq!(e.source, NotifySource::Project);
 }
@@ -68,30 +87,28 @@ fn a_run_request_wins_over_the_project_and_the_machine() {
     let req = NotifyRequest::On {
         target: Some(target("2")),
         on: Some(vec![Transition::Question]),
+        finished: None,
     };
-    let e = effective(&machine(Toggle::Off), &off, Some(&req)).unwrap();
+    let e = eff(&machine(Toggle::Off), &off, Some(&req)).unwrap();
     assert_eq!(e.target, Some(target("2")));
     assert_eq!(e.on, vec![Transition::Question]);
     assert_eq!(e.source, NotifySource::Run);
     assert!(e.source.is_explicit());
     let none = ProjectNotify::default();
     assert_eq!(
-        effective(&machine(Toggle::On), &none, Some(&NotifyRequest::Off)),
+        eff(&machine(Toggle::On), &none, Some(&NotifyRequest::Off)),
         None
     );
 }
 
 #[test]
 fn a_request_without_a_target_borrows_the_machine_one_or_names_none() {
-    let req = NotifyRequest::On {
-        target: None,
-        on: None,
-    };
+    let req = NotifyRequest::plain_on();
     let none = ProjectNotify::default();
-    let e = effective(&machine(Toggle::Off), &none, Some(&req)).unwrap();
+    let e = eff(&machine(Toggle::Off), &none, Some(&req)).unwrap();
     assert_eq!(e.target, Some(target("1")));
     let bare = NotifySettings::default();
-    assert_eq!(effective(&bare, &none, Some(&req)).unwrap().target, None);
+    assert_eq!(eff(&bare, &none, Some(&req)).unwrap().target, None);
 }
 
 #[test]
@@ -279,13 +296,10 @@ fn a_request_narrowed_to_nothing_comes_back_for_the_caller_to_refuse() {
         on: Some(vec![Transition::Finished]),
     };
     // A default narrowed to nothing is no subscription.
-    assert_eq!(effective(&review_only, &finished_only, None), None);
+    assert_eq!(eff(&review_only, &finished_only, None), None);
     // A run that asked keeps its empty list.
-    let asked = NotifyRequest::On {
-        target: None,
-        on: None,
-    };
-    let e = effective(&review_only, &finished_only, Some(&asked)).unwrap();
+    let asked = NotifyRequest::plain_on();
+    let e = eff(&review_only, &finished_only, Some(&asked)).unwrap();
     assert!(e.on.is_empty());
     assert_eq!(e.source, NotifySource::Run);
 }

@@ -16,6 +16,8 @@ pub const CANDIDATE_FILE: &str = "candidate";
 pub const CANDIDATE_LOCK_FILE: &str = ".candidate.lock";
 /// The trial outcome of a candidate a newer version replaced.
 pub const OUTCOME_SUPERSEDED: &str = "superseded";
+/// The trial outcome of a candidate that became `current`.
+pub const OUTCOME_PROMOTED: &str = "promoted";
 
 /// The candidate version of the playbook in `playbook_dir`, if one is set.
 pub fn read_candidate(playbook_dir: &Path) -> Option<String> {

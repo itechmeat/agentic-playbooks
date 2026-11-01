@@ -10,7 +10,8 @@
 
 use std::path::Path;
 
-use apb_core::notify::{NotifyRequest, NotifyTarget, Transition};
+use apb_core::notify::{FinishOutcome, NotifyRequest, NotifyTarget, Transition};
+use apb_core::policy_file::PlaybookKey;
 use apb_engine::event::Event;
 use apb_engine::notify::{ChangedBy, RunNotify, SetError};
 use schemars::JsonSchema;
@@ -41,9 +42,14 @@ pub enum NotifyArg {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NotifySettingsArg {
-    /// The transitions to notify about: review, question, paused, finished.
+    /// The transitions to notify about: review, question, paused, finished,
+    /// host_task, supervisor.
     #[serde(default)]
     pub on: Option<Vec<String>>,
+    /// The run outcomes a `finished` notice is sent for: succeeded,
+    /// needs_look, failed, aborted.
+    #[serde(default)]
+    pub finished: Option<Vec<String>>,
     /// Where the messages go: an approved connector account and a function
     /// that can carry notifications, and the recipient.
     #[serde(default)]
@@ -84,13 +90,18 @@ pub enum NotifyChangeArg {
     Narrow(NotifyNarrowArg),
 }
 
-/// The transitions a live run keeps notifying about: only ones its
-/// subscription already covers.
+/// What a live run keeps notifying about: only transitions and outcomes
+/// its subscription already covers. Each field left out keeps the run's.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NotifyNarrowArg {
-    /// review, question, paused, finished.
-    pub on: Vec<String>,
+    /// review, question, paused, finished, host_task, supervisor.
+    #[serde(default)]
+    pub on: Option<Vec<String>>,
+    /// The run outcomes a `finished` notice is sent for: succeeded,
+    /// needs_look, failed, aborted.
+    #[serde(default)]
+    pub finished: Option<Vec<String>>,
 }
 
 impl NotifyChangeArg {
@@ -98,14 +109,19 @@ impl NotifyChangeArg {
     pub fn request(&self) -> Result<NotifyRequest, NotifyError> {
         let req = match self {
             NotifyChangeArg::Flag(false) => NotifyRequest::Off,
-            NotifyChangeArg::Flag(true) => NotifyRequest::On {
-                target: None,
-                on: None,
-            },
-            NotifyChangeArg::Narrow(n) => NotifyRequest::On {
-                target: None,
-                on: Some(transitions(&n.on)?),
-            },
+            NotifyChangeArg::Flag(true) => NotifyRequest::plain_on(),
+            NotifyChangeArg::Narrow(n) => {
+                if n.on.is_none() && n.finished.is_none() {
+                    return Err(NotifyError::Invalid(
+                        "name `on`, `finished` or both, or pass true or false".into(),
+                    ));
+                }
+                NotifyRequest::On {
+                    target: None,
+                    on: n.on.as_deref().map(transitions).transpose()?,
+                    finished: n.finished.as_deref().map(outcomes).transpose()?,
+                }
+            }
         };
         req.validate().map_err(NotifyError::Invalid)?;
         Ok(req)
@@ -160,13 +176,11 @@ impl NotifyArg {
     pub fn request(&self) -> Result<NotifyRequest, NotifyError> {
         let req = match self {
             NotifyArg::Flag(false) => NotifyRequest::Off,
-            NotifyArg::Flag(true) => NotifyRequest::On {
-                target: None,
-                on: None,
-            },
+            NotifyArg::Flag(true) => NotifyRequest::plain_on(),
             NotifyArg::Settings(s) => NotifyRequest::On {
                 target: s.target.clone().map(NotifyTarget::from),
                 on: s.on.as_deref().map(transitions).transpose()?,
+                finished: s.finished.as_deref().map(outcomes).transpose()?,
             },
         };
         req.validate().map_err(NotifyError::Invalid)?;
@@ -186,18 +200,26 @@ pub fn transitions(names: &[String]) -> Result<Vec<Transition>, NotifyError> {
         .map(|n| {
             Transition::parse(n.trim()).ok_or_else(|| {
                 NotifyError::Invalid(format!(
-                    "unknown transition `{n}`: expected review, question, paused or finished"
+                    "unknown transition `{n}`: expected {}",
+                    Transition::names()
                 ))
             })
         })
         .collect()
 }
 
-/// The check before a start in the workspace at `root`: the warnings to
-/// show with the start's answer (a machine default that will not notify),
-/// or the refusal of a request the person made that cannot be honoured.
+/// Parses outcome names, refusing an unknown one.
+pub fn outcomes(names: &[String]) -> Result<Vec<FinishOutcome>, NotifyError> {
+    FinishOutcome::parse_all(names).map_err(NotifyError::Invalid)
+}
+
+/// The check before a start of `playbook` in the workspace at `root`: the
+/// warnings to show with the start's answer (a machine default that will
+/// not notify), or the refusal of a request the person made that cannot be
+/// honoured.
 pub fn start_check(
     root: &Path,
+    playbook: Option<&PlaybookKey>,
     request: Option<&NotifyRequest>,
 ) -> Result<Vec<String>, NotifyError> {
     // Only a person sets a target: a start from inside a run step may ask
@@ -211,7 +233,7 @@ pub fn start_check(
             "this start comes from {step}, and a run step does not choose where notifications go; leave out the target to use the machine's, or ask the person to start it"
         )));
     }
-    let check = apb_engine::notify::check(root, request);
+    let check = apb_engine::notify::check(root, playbook, request);
     match check.refusal {
         Some(why) => Err(NotifyError::Unavailable(why)),
         None => Ok(check.warnings),
@@ -284,10 +306,7 @@ mod tests {
         assert_eq!(arg(json!(false)).request().unwrap(), NotifyRequest::Off);
         assert_eq!(
             arg(json!(true)).request().unwrap(),
-            NotifyRequest::On {
-                target: None,
-                on: None
-            }
+            NotifyRequest::plain_on()
         );
         let req = arg(json!({ "on": ["finished", "review"] }))
             .request()
@@ -296,7 +315,8 @@ mod tests {
             req,
             NotifyRequest::On {
                 target: None,
-                on: Some(vec![Transition::Finished, Transition::Review])
+                on: Some(vec![Transition::Finished, Transition::Review]),
+                finished: None,
             }
         );
     }
@@ -324,6 +344,40 @@ mod tests {
     }
 
     #[test]
+    fn an_outcome_filter_parses_and_is_refused_where_it_filters_nothing() {
+        let change = |v: Value| {
+            serde_json::from_value::<NotifyChangeArg>(v)
+                .unwrap()
+                .request()
+        };
+        assert_eq!(change(json!({})).unwrap_err().code(), INVALID_NOTIFY);
+        assert_eq!(
+            change(json!({ "finished": ["failed"] })).unwrap(),
+            NotifyRequest::On {
+                target: None,
+                on: None,
+                finished: Some(vec![FinishOutcome::Failed]),
+            }
+        );
+        let unknown = change(json!({ "finished": ["someday"] })).unwrap_err();
+        assert_eq!(unknown.code(), INVALID_NOTIFY);
+        assert!(unknown.detail().contains("someday"));
+        for idle in [
+            change(json!({ "on": ["review"], "finished": ["failed"] })).unwrap_err(),
+            arg(json!({ "on": ["review"], "finished": ["failed"] }))
+                .request()
+                .unwrap_err(),
+        ] {
+            assert_eq!(idle.code(), INVALID_NOTIFY);
+            assert!(
+                idle.detail().contains("add `finished`"),
+                "{}",
+                idle.detail()
+            );
+        }
+    }
+
+    #[test]
     fn unknown_fields_do_not_parse() {
         assert!(serde_json::from_value::<NotifyArg>(json!({ "via": "x" })).is_err());
     }
@@ -344,7 +398,8 @@ mod tests {
             narrow.request().unwrap(),
             NotifyRequest::On {
                 target: None,
-                on: Some(vec![Transition::Review])
+                on: Some(vec![Transition::Review]),
+                finished: None,
             }
         );
     }

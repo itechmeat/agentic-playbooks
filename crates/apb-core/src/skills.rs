@@ -34,8 +34,7 @@ struct ProjectConfigSkills {
 /// a path that leaves `root` lexically (`..`, an absolute path elsewhere) or
 /// through a symlink is refused with `ScopeForbidden`.
 pub fn project_skills_dir(root: &Path) -> Result<PathBuf, ProfileError> {
-    let cfg = root.join(".apb/config.yaml");
-    let Ok(raw) = std::fs::read_to_string(&cfg) else {
+    let Ok(Some(raw)) = crate::config::read_project_config(root) else {
         return Ok(root.join(".agents/skills"));
     };
     let Some(dir) = yaml_serde::from_str::<ProjectConfigSkills>(&raw)

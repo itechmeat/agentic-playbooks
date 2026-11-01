@@ -20,8 +20,11 @@ import type {
   WriteResult,
 } from '../types'
 import type {
+  FinishOutcome,
   FitReport,
   Graded,
+  History,
+  Moved,
   KnownProblem,
   MachineNotify,
   PlaybookCandidate,
@@ -35,6 +38,7 @@ import type {
   RunGrades,
   RunNotify,
   ResultSummary,
+  Transition,
   ResultView,
   RootInfo,
 } from '../api.gen'
@@ -278,15 +282,19 @@ export const runReportHtmlUrl = (id: string, workspace = '') =>
   `${run(id)}/report.html${qs({ workspace })}`
 
 // GET /api/notify: the machine's notify target (no secret in it) and
-// whether runs of the workspace notify without being asked.
-export const fetchNotify = (workspace = '') =>
-  getJson<MachineNotify>(`/api/notify${qs({ workspace })}`)
+// whether runs of the workspace (of `playbook`, when named) notify
+// without being asked.
+export const fetchNotify = (workspace = '', playbook = '') =>
+  getJson<MachineNotify>(`/api/notify${qs({ workspace, playbook })}`)
 
 // POST /api/runs/{id}/notify: a person turns a live run's notifications on
-// (`true`, through the machine's target or the run's current one) or off.
+// (`true`, through the machine's target or the run's current one) or off,
+// or changes what they cover (`{ finished: [...] }`: the outcomes the
+// end-of-run notice is sent for; a field left out keeps the run's).
 // Refused with 409 `notify_unavailable` when the target cannot be used, and
 // `run_ended` for a run that ended.
-export const postRunNotify = (id: string, notify: boolean, workspace = '') =>
+export type NotifyChange = boolean | { on?: Transition[]; finished?: FinishOutcome[] }
+export const postRunNotify = (id: string, notify: NotifyChange, workspace = '') =>
   requestJson<{ run_id: string; notify?: RunNotify; warnings?: string[] }>(
     `${run(id)}/notify${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ notify }) },
@@ -514,11 +522,30 @@ export const runPlaybook = (
 export const fetchEstimate = (id: string, workspace = '', version?: string) =>
   getJson<RunEstimate & { summary: string }>(`${pb(id)}/estimate${qs({ workspace, version })}`)
 
-export const promoteVersion = (id: string, version: string, workspace = '') =>
-  requestJson<{ promoted: string }>(
-    `${pb(id)}/versions/${encodeURIComponent(version)}/promote${qs({ workspace })}`,
-    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
-  )
+// POST /api/playbooks/{id}/current: a person makes `version` current,
+// only while `current` still names `expectedCurrent` (`null`: it was
+// unset; 409 `stale` with `actual` otherwise).
+export const makeCurrent = (
+  id: string,
+  version: string,
+  expectedCurrent: string | null,
+  reason = '',
+  workspace = '',
+) =>
+  requestJson<Moved>(`${pb(id)}/current${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      version,
+      expected_current: expectedCurrent,
+      ...(reason ? { reason } : {}),
+    }),
+  })
+
+// GET /api/playbooks/{id}/current-history: the moves of `current`, newest
+// first, and whether the record has a gap or a move waits.
+export const fetchCurrentHistory = (id: string, workspace = '') =>
+  getJson<History>(`${pb(id)}/current-history${qs({ workspace })}`)
 
 // The whole response, diagnostics included: they are how a corrupt or
 // unreadable store becomes visible instead of looking like an empty list.

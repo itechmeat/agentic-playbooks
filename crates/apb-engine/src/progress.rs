@@ -210,7 +210,7 @@ pub struct PendingSupervisor {
 /// retry and continue_from leave the park loop to resume driving; context and
 /// progress notes do not. Abort/pause clear the pending state via their own
 /// terminal events (`RunAborted` / `RunPaused`), not via this action list.
-fn supervisor_action_resolves_wake(action: &str) -> bool {
+pub(crate) fn supervisor_action_resolves_wake(action: &str) -> bool {
     use crate::event::supervisor_action::{NODE_RETRY, RUN_CONTINUE_FROM};
     action == NODE_RETRY || action == RUN_CONTINUE_FROM
 }

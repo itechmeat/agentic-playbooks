@@ -119,7 +119,9 @@ pub struct PlaybookRunArgs {
     /// waiting, a pause they did not make, the end) through a connector:
     /// true uses the machine's notify target, false turns notifications off
     /// for this run, an object sets `on` (review, question, paused,
-    /// finished) and/or `target`. Pass it only when the person asked. A
+    /// finished, host_task, supervisor), `finished` (the outcomes the
+    /// end-of-run notice covers: succeeded, needs_look, failed, aborted)
+    /// and/or `target`. Pass it only when the person asked. A
     /// target that cannot carry notifications or is not approved refuses
     /// the start (notify_unavailable).
     #[serde(default)]
@@ -257,8 +259,9 @@ pub struct RunReportArgs {
 pub struct RunNotifyArgs {
     pub run_id: String,
     /// true: notify through the run's current target or the machine's;
-    /// false: stop notifying; `{ on: [...] }` keeps only these
-    /// transitions. Never a target: a person changes that.
+    /// false: stop notifying; `{ on: [...], finished: [...] }` keeps only
+    /// these transitions and end-of-run outcomes (a field left out keeps the
+    /// run's). Never a target: a person changes that.
     pub notify: crate::tools::notify::NotifyChangeArg,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]

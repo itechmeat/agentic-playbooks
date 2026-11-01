@@ -482,6 +482,10 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
         let started = std::time::Instant::now();
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
+        // The drive loop does not sweep while this attempt waits, and the
+        // submission closes the `host_task` transition before it sweeps
+        // again: the wait sweeps itself, throttled and briefly.
+        let notifier = crate::notify::send::Notifier::of_run_dir(self.run_dir);
         loop {
             if let Some(gone) = run_dir_gone(self.run_dir) {
                 return Err(gone);
@@ -571,6 +575,9 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                 self.mark("expired");
                 let _ = self.close(&task_id, "expired", msg.clone());
                 return Err(AgentFailure::new(ErrorClass::Timeout, msg));
+            }
+            if let Some(n) = &notifier {
+                n.sweep_throttled();
             }
             std::thread::sleep(HOST_POLL);
         }

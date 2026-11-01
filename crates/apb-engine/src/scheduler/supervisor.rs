@@ -172,6 +172,10 @@ pub(crate) use crate::driver::ensure_run_dir;
 /// same cursor, so neither the top-of-loop nor the next await_control call will
 /// see it again. `Progress` is likewise applied in place: it logs `RunProgress`
 /// (stamped with `current_node`) and the wait continues.
+///
+/// The drive loop does not sweep notifications while the run is parked
+/// here, and the supervisor's command closes the `supervisor` transition
+/// before it sweeps again: the wait sweeps itself, throttled and briefly.
 pub(crate) fn await_control(
     run_dir: &Path,
     log: &mut EventLog,
@@ -179,6 +183,7 @@ pub(crate) fn await_control(
     current_node: &str,
 ) -> Result<(Control, u64), EngineError> {
     let mut cursor = cursor;
+    let notifier = crate::notify::send::Notifier::of_run_dir(run_dir);
     loop {
         ensure_run_dir(run_dir)?;
         for entry in read_control_after(run_dir, cursor)? {
@@ -210,6 +215,9 @@ pub(crate) fn await_control(
                 }
                 other => return Ok((other, entry.seq)),
             }
+        }
+        if let Some(n) = &notifier {
+            n.sweep_throttled();
         }
         std::thread::sleep(AWAIT_CONTROL_POLL);
     }

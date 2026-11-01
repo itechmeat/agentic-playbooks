@@ -117,7 +117,8 @@ pub fn make_global(root: &Path, id: &str, opts: MakeGlobalOpts) -> Result<Value,
 
     let project_dir = project_playbooks.join(id);
     let global_dir =
-        apb_core::scope_move::copy_playbook_to(&project_dir, &global_parent, id).map_err(engine)?;
+        apb_core::scope_move::copy_playbook_to(&project_dir, &global_parent, id, "project")
+            .map_err(engine)?;
     undo.global_dir = Some(global_dir);
     let copy = Registry::open_dir(&global_parent).and_then(|reg| reg.load(id, None));
     let refusal = match copy

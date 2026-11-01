@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::fsutil::{DirLock, atomic_write, lock_dir};
 use crate::schema::Playbook;
 use crate::versioning::{
-    TrialRecord, VersionProvenance, VersioningError, create_patch_version_with, read_provenance,
-    write_provenance,
+    TrialRecord, VersionProvenance, VersioningError, create_patch_version_with,
 };
 
 pub mod policy;
@@ -22,7 +21,7 @@ pub use policy::{PromotePolicy, TrialPolicy, promote_policy, trial_policy};
 
 use crate::candidate_pointer::CANDIDATE_LOCK_FILE as LOCK_FILE;
 pub use crate::candidate_pointer::{
-    CANDIDATE_FILE, OUTCOME_SUPERSEDED, clear_candidate_if, read_candidate,
+    CANDIDATE_FILE, OUTCOME_PROMOTED, OUTCOME_SUPERSEDED, clear_candidate_if, read_candidate,
 };
 
 /// `scope` of a forward patch in its provenance and in the MCP tool.
@@ -30,8 +29,8 @@ pub const SCOPE_NEXT_RUNS: &str = "next_runs";
 /// `scope` of an in-run patch (the default).
 pub const SCOPE_CURRENT_RUN: &str = "current_run";
 
-/// Trial outcomes recorded in [`TrialRecord::outcome`].
-pub const OUTCOME_PROMOTED: &str = "promoted";
+/// Trial outcomes recorded in [`TrialRecord::outcome`] (besides
+/// [`OUTCOME_PROMOTED`] and [`OUTCOME_SUPERSEDED`]).
 pub const OUTCOME_REJECTED: &str = "rejected";
 
 /// A uniform draw in `[0, 1)` for a [`TrialPolicy::Share`] start, from a
@@ -174,17 +173,25 @@ pub fn update_trial(
     version: &str,
     f: impl FnOnce(&mut TrialRecord),
 ) -> Result<TrialRecord, VersioningError> {
-    let mut provenance = read_provenance(root, id, version)?.unwrap_or_default();
-    let mut trial = provenance.trial.take().unwrap_or_default();
-    f(&mut trial);
-    provenance.trial = Some(trial.clone());
-    write_provenance(root, id, version, &provenance)?;
-    Ok(trial)
+    // An unsafe id would name a directory outside the playbook store.
+    if !crate::registry::is_safe_segment(id) {
+        return Err(VersioningError::NotFound(id.to_string()));
+    }
+    crate::versioning::update_trial_in(&playbook_dir(root, id), version, f)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_trial_update_never_leaves_the_playbook_store() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join(".apb/x/1.0.0")).unwrap();
+        let e = update_trial(t.path(), "../x", "1.0.0", |_| {}).unwrap_err();
+        assert!(matches!(e, VersioningError::NotFound(_)), "{e:?}");
+        assert!(!t.path().join(".apb/x/meta").exists());
+    }
 
     #[test]
     fn a_draw_is_in_the_unit_interval() {

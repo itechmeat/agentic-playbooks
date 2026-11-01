@@ -6,6 +6,7 @@
     ApiError,
     decideKnownProblem,
     fetchCandidate,
+    fetchCurrentHistory,
     fetchFit,
     fetchKnownProblem,
     fetchKnownProblems,
@@ -15,8 +16,8 @@
     fetchStats,
     fetchVersions,
     keepCurrentCandidate,
+    makeCurrent,
     promoteCandidate,
-    promoteVersion,
     runPlaybook,
     setFrozen,
     type ProfileSummary,
@@ -42,7 +43,17 @@
     VersionInfo,
     PlaybookNode as PlaybookNodeType,
   } from '../lib/types'
-  import type { CandidateQualityView, FitReport, ProblemsView, QualityRecord } from '../lib/api.gen'
+  import type {
+    CandidateQualityView,
+    FitReport,
+    History as CurrentHistory,
+    Moved,
+    ProblemsView,
+    QualityRecord,
+  } from '../lib/api.gen'
+  import MakeCurrentDialog from '../lib/MakeCurrentDialog.svelte'
+  import CurrentHistoryList from '../lib/CurrentHistoryList.svelte'
+  import { moveOutcome } from '../lib/currentmove'
   import type { ProblemAction, ProblemDecision } from '../lib/api'
   import FitCard from '../lib/FitCard.svelte'
   import CandidateQualityCard from '../lib/CandidateQualityCard.svelte'
@@ -97,7 +108,11 @@
   // version list; a person's decision on it in flight.
   let candidate = $state<CandidateQualityView | null>(null)
   let deciding = $state(false)
-  let activating = $state<string | null>(null)
+  // The moves of `current`, read with the version list, and the version a
+  // person is about to make current.
+  let currentHistory = $state<CurrentHistory | null>(null)
+  let moveTarget = $state<string | null>(null)
+  let moveOpen = $state(false)
   let frozen = $state<boolean>(false)
   let freezing = $state<boolean>(false)
   let starting = $state<boolean>(false)
@@ -433,6 +448,7 @@
   // Version history newest-first: the API lists versions oldest first in
   // semver order, so this only reverses it.
   const versionsDesc = $derived([...versions].reverse())
+  const currentVersion = $derived(versions.find((v) => v.is_current)?.version ?? null)
 
   async function loadVersions(token: number) {
     try {
@@ -441,6 +457,15 @@
       versions = vs
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load versions', { description: String(e) })
+    }
+    try {
+      const h = await fetchCurrentHistory(id, workspace)
+      if (token === loadToken) currentHistory = h
+    } catch (e) {
+      if (token === loadToken) {
+        currentHistory = null
+        toast.error('Failed to load the moves of current', { description: String(e) })
+      }
     }
     try {
       const c = await fetchCandidate(id, workspace)
@@ -672,21 +697,33 @@
     }
   }
 
-  // Repoints `current` at the chosen version. Any stored version can be made
-  // current, newer or older - the only refusal is a frozen playbook, which the
-  // button reflects rather than discovering on click.
-  async function useVersion(v: string) {
-    activating = v
-    try {
-      await promoteVersion(id, v, workspace)
-      // Awaited: the button stays busy until the refreshed version list is on
-      // screen, so the toast and the `current` badge never disagree.
-      await reload()
-      toast.success(`Now using ${v}`)
-    } catch (e) {
-      toast.error('Failed to switch version', { description: String(e) })
-    } finally {
-      activating = null
+  // "Make current": the dialog posts the move with the version this page
+  // shows as current, so a move made elsewhere meanwhile is never undone
+  // unseen; a stale answer reloads the list. Any stored version can be made
+  // current except the candidate on trial, which its own card decides.
+  function askMakeCurrent(v: string) {
+    moveTarget = v
+    moveOpen = true
+  }
+
+  // `expected` is the `current` the dialog showed the person, kept while
+  // the page reloads underneath it.
+  const submitMove = (reason: string, expected: string | null) =>
+    moveOutcome(() => makeCurrent(id, moveTarget ?? '', expected, reason, workspace))
+
+  async function moved(m: Moved) {
+    // Awaited: the toast and the `current` badge never disagree.
+    await reload()
+    toast.success(`Now using ${m.to}`)
+    if (m.awaiting_approval) {
+      toast.warning(`${m.to} waits for an approval of its imported scripts`, {
+        description: 'Runs stay refused until a person approves it.',
+      })
+    }
+    if (m.audit_pending) {
+      toast.warning('The move is recorded later', {
+        description: 'Its history line is written by the next change of current.',
+      })
     }
   }
 
@@ -709,6 +746,9 @@
     showForm = false
     versions = []
     candidate = null
+    currentHistory = null
+    moveOpen = false
+    moveTarget = null
     deciding = false
     validation = []
     stats = null
@@ -1149,14 +1189,16 @@
                         variant="outline"
                         size="xs"
                         class="ml-auto"
-                        onclick={() => useVersion(v.version)}
-                        disabled={activating !== null || frozen}
+                        onclick={() => askMakeCurrent(v.version)}
+                        disabled={frozen || v.is_candidate}
                         title={frozen
                           ? 'Frozen playbook: unfreeze it to change the current version'
-                          : 'Make this version the current one'}
+                          : v.is_candidate
+                            ? 'The candidate on trial is decided in its card'
+                            : 'Make this version the current one'}
+                        data-testid="make-current"
                       >
-                        {#if activating === v.version}<Spinner data-icon="inline-start" />{/if}
-                        Use
+                        Make current
                       </Button>
                     {/if}
                   </div>
@@ -1165,6 +1207,9 @@
               {/each}
             </ul>
           {/if}
+          <div class="current-moves">
+            <CurrentHistoryList history={currentHistory} />
+          </div>
         </section>
       {/if}
 
@@ -1202,6 +1247,18 @@
   onrun={startWith}
 />
 
+{#if moveTarget}
+  <MakeCurrentDialog
+    bind:open={moveOpen}
+    playbookId={id}
+    from={currentVersion}
+    to={moveTarget}
+    submit={submitMove}
+    onstale={reload}
+    ondone={moved}
+  />
+{/if}
+
 <!-- 0.24.0 irreversible consent -->
 <IrreversibleRunDialog
   bind:open={irreversibleOpen}
@@ -1211,6 +1268,12 @@
 />
 
 <style>
+  .current-moves {
+    margin-top: 10px;
+    border-top: 1px solid var(--c-line);
+    padding-top: 8px;
+  }
+
   /* A refused start and what it needs first. */
   .start-refusal {
     display: flex;

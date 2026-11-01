@@ -96,6 +96,44 @@ async fn the_machine_target_is_shown_and_the_project_can_turn_the_default_off() 
     assert!(off.get("target").is_some());
 }
 
+/// The Run dialog's default for a playbook follows the `policy.yaml`
+/// playbook filter, as the start itself does.
+#[tokio::test]
+async fn the_default_of_a_playbook_follows_the_policy_filter() {
+    let cfg = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    fs::write(
+        cfg.path().join("config.yaml"),
+        "notify:\n  default: on\n  target: { connector: telegram, account: me, function: send_message, to: \"123456789\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        cfg.path().join("policy.yaml"),
+        "notify:\n  playbooks: [alpha]\n",
+    )
+    .unwrap();
+    let default_for = |playbook: &'static str| {
+        let app = app.clone();
+        async move {
+            let (status, body) = call(
+                &app,
+                "GET",
+                &format!("/api/notify?playbook={playbook}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["default_on"].clone()
+        }
+    };
+    assert_eq!(default_for("alpha").await, true);
+    assert_eq!(default_for("beta").await, false);
+    let (status, _) = call(&app, "GET", "/api/notify?playbook=..%2Fx", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn a_start_whose_notifications_cannot_be_sent_is_refused_before_a_run_exists() {
     let _cfg = common::config_sandbox().await;

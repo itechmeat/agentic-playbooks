@@ -4,6 +4,7 @@
 //! promote it.
 
 use apb_core::candidate::PromotePolicy;
+use apb_core::fsutil::DirLock;
 
 use super::line::Trial;
 use crate::error::EngineError;
@@ -17,6 +18,7 @@ pub(super) fn by_successes(
     trial: &Trial,
     policy: PromotePolicy,
     succeeded: bool,
+    held: &DirLock,
 ) -> Result<(), EngineError> {
     let line = &trial.line;
     let goal_failed = trial.goal_failed();
@@ -47,7 +49,12 @@ pub(super) fn by_successes(
     {
         return Ok(());
     }
-    line.promote(Some(&trial.run_id), None)?;
+    line.promote(
+        Some(&trial.run_id),
+        None,
+        format!("{BASIS_SUCCESSES}:{}", record.successes),
+        held,
+    )?;
     log.append(EventPayload::CandidatePromoted {
         version: line.candidate.clone(),
         run_id: trial.run_id.clone(),

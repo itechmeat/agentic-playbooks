@@ -11,7 +11,10 @@
 
 use std::path::Path;
 
-use apb_core::notify::{NotifyRequest, NotifySource, NotifyTarget, Transition};
+use apb_core::notify::{
+    Coverage, FinishOutcome, NotifyRequest, NotifySource, NotifyTarget, Transition,
+};
+use apb_core::policy_file::{PlaybookKey, Policies, PolicySource};
 
 use super::NotifyState;
 use super::record::NotifyTargetRecord;
@@ -30,7 +33,15 @@ pub const REFUSED_START: &str = "notifications were asked for but cannot be sent
 pub struct NotifyPlan {
     pub target: NotifyTargetRecord,
     pub on: Vec<Transition>,
+    /// The outcomes a `finished` notice is sent for.
+    pub finished: Vec<FinishOutcome>,
     pub source: NotifySource,
+}
+
+impl NotifyPlan {
+    fn coverage(&self) -> Coverage {
+        Coverage::new(&self.on, &self.finished)
+    }
 }
 
 /// What a launch surface checks before it starts a run.
@@ -55,7 +66,7 @@ impl NotifyCheck {
         if let Some(plan) = &self.plan {
             return Some(set_event(
                 Some(plan.target.clone()),
-                &plan.on,
+                &plan.coverage(),
                 plan.source,
                 None,
                 None,
@@ -64,7 +75,7 @@ impl NotifyCheck {
         let source = self.failed?;
         Some(set_event(
             None,
-            &[],
+            &Coverage::new(&[], &[]),
             source,
             None,
             self.warnings.first().cloned(),
@@ -73,21 +84,42 @@ impl NotifyCheck {
 }
 
 /// The check of a run's subscription in the workspace at `root`, from the
-/// machine config, the project config and the run's `request` (`None`:
-/// the run asks for nothing).
-pub fn check(root: &Path, request: Option<&NotifyRequest>) -> NotifyCheck {
+/// machine config, the project config, both `policy.yaml` files and the
+/// run's `request` (`None`: the run asks for nothing), for a run of
+/// `playbook` (`None` when the caller does not know it yet: the
+/// `playbooks` filters pass).
+pub fn check(
+    root: &Path,
+    playbook: Option<&PlaybookKey>,
+    request: Option<&NotifyRequest>,
+) -> NotifyCheck {
     // A run that asked for none has nothing to check, whatever the configs.
     if matches!(request, Some(NotifyRequest::Off)) {
         return NotifyCheck::default();
     }
     let explicit = matches!(request, Some(NotifyRequest::On { .. }));
-    let eff = match settings(root, request) {
+    let eff = match settings(root, playbook, request) {
         Ok(Some(eff)) => eff,
         Ok(None) => return NotifyCheck::default(),
         // Settings that cannot even be read are journaled as the source
         // whose file failed.
         Err((problem, source)) => return unavailable(problem, explicit, Some(source)),
     };
+    // An outcome filter the run asked for must have an end to filter.
+    if matches!(
+        request,
+        Some(NotifyRequest::On {
+            finished: Some(_),
+            ..
+        })
+    ) && !eff.on.contains(&Transition::Finished)
+    {
+        return unavailable(
+            apb_core::notify::OUTCOMES_WITHOUT_FINISHED.to_string(),
+            true,
+            Some(NotifySource::Run),
+        );
+    }
     let source = eff.source;
     match verify(root, eff) {
         Ok(plan) => NotifyCheck {
@@ -118,6 +150,7 @@ fn unavailable(problem: String, explicit: bool, source: Option<NotifySource>) ->
 /// source whose settings did not read.
 fn settings(
     root: &Path,
+    playbook: Option<&PlaybookKey>,
     request: Option<&NotifyRequest>,
 ) -> Result<Option<apb_core::notify::Effective>, (String, NotifySource)> {
     if let Some(r) = request {
@@ -125,9 +158,22 @@ fn settings(
     }
     let machine = apb_core::config::GlobalConfig::load().map_err(|e| (e, NotifySource::Machine))?;
     let project = apb_core::config::project_notify(root).map_err(|e| (e, NotifySource::Project))?;
+    // A present `policy.yaml` that does not read creates no default
+    // subscription: the run journals why, as the source whose file failed.
+    let policies = Policies::load(root).map_err(|e| {
+        let source = match e.source {
+            PolicySource::Machine => NotifySource::Machine,
+            PolicySource::Project => NotifySource::Project,
+        };
+        (e.message, source)
+    })?;
     Ok(apb_core::notify::effective(
-        &machine.notify,
-        &project,
+        apb_core::notify::Settings {
+            machine: &machine.notify,
+            project: &project,
+            policies: &policies,
+        },
+        playbook,
         request,
     ))
 }
@@ -163,6 +209,7 @@ fn verify(root: &Path, eff: apb_core::notify::Effective) -> Result<NotifyPlan, S
     Ok(NotifyPlan {
         target: record(&target, pins.connector, pins.account),
         on: eff.on,
+        finished: eff.finished,
         source: eff.source,
     })
 }
@@ -184,14 +231,14 @@ fn record(
 
 fn set_event(
     target: Option<NotifyTargetRecord>,
-    on: &[Transition],
+    coverage: &Coverage,
     source: NotifySource,
     by: Option<PauseBy>,
     problem: Option<String>,
 ) -> EventPayload {
     EventPayload::NotifySet {
         target,
-        on: on.iter().map(|t| t.as_str().to_string()).collect(),
+        on: coverage.journal_names(),
         source: source.as_str().to_string(),
         by,
         problem,
@@ -205,14 +252,23 @@ pub(crate) fn inherited(parent_dir: &Path) -> Option<EventPayload> {
     let events = crate::event::read_all_lossy_tail(parent_dir).ok()?;
     let active = NotifyState::fold(&events).active?;
     let on = super::inheritable(&active.on);
-    (!on.is_empty()).then(|| set_event(Some(active.target), &on, NotifySource::Parent, None, None))
+    (!on.is_empty()).then(|| {
+        set_event(
+            Some(active.target),
+            &Coverage::new(&on, &FinishOutcome::ALL),
+            NotifySource::Parent,
+            None,
+            None,
+        )
+    })
 }
 
 /// A person's change of the subscription of live run `run_id`: `Off`
 /// turns it off; `On` checks the target like a start does and journals
-/// it. A target or a transition list left out keeps the run's current
-/// one, else the default. A refused change journals nothing and comes back
-/// in the check.
+/// it. A target left out keeps the run's current one, else the default; a
+/// transition list or an outcome filter left out keeps the run's current
+/// one, else the last one it had, else the default. A refused change
+/// journals nothing and comes back in the check.
 pub fn set(
     root: &Path,
     run_id: &str,
@@ -238,25 +294,61 @@ pub fn set(
             NotifyCheck::default(),
             set_event(
                 None,
-                &[],
+                &Coverage::new(&[], &[]),
                 NotifySource::Person,
                 Some(PauseBy::Operator),
                 None,
             ),
         ),
-        NotifyRequest::On { target, on } => {
+        NotifyRequest::On {
+            target,
+            on,
+            finished,
+        } => {
             let state = NotifyState::fold(&events);
             if by == ChangedBy::Host {
-                host_bounds(root, &state, target.as_ref(), on.as_deref())?;
+                host_bounds(
+                    root,
+                    &state,
+                    target.as_ref(),
+                    on.as_deref(),
+                    finished.as_deref(),
+                )?;
             }
-            let current = state.active;
+            // What the change leaves out keeps the run's current value, or,
+            // turned off, the last one it had: a host that turns
+            // notifications off and on again restores the filter. An
+            // outcome filter is kept only from a subscription that covered
+            // the end; otherwise the settings' filter applies.
+            let current = state.active.as_ref();
+            let had_one = !state.last_on.is_empty();
+            let last_on = had_one.then(|| state.last_on.clone());
+            let covers_end = |on: &[Transition]| on.contains(&Transition::Finished);
+            let last_finished =
+                (had_one && covers_end(&state.last_on)).then(|| state.last_finished.clone());
+            let on = on
+                .clone()
+                .or_else(|| current.map(|a| a.on.clone()))
+                .or(last_on);
+            let finished = finished.clone().or_else(|| {
+                on.as_deref()
+                    .is_some_and(covers_end)
+                    .then(|| {
+                        current
+                            .filter(|a| covers_end(&a.on))
+                            .map(|a| a.finished.clone())
+                            .or(last_finished)
+                    })
+                    .flatten()
+            });
             let request = NotifyRequest::On {
                 target: target
                     .clone()
-                    .or_else(|| current.as_ref().map(|a| a.target.target())),
-                on: on.clone().or_else(|| current.map(|a| a.on)),
+                    .or_else(|| current.map(|a| a.target.target())),
+                on,
+                finished,
             };
-            let mut check = check(root, Some(&request));
+            let mut check = check(root, None, Some(&request));
             let Some(plan) = check.plan.as_mut() else {
                 // An explicit request either plans or is refused; anything
                 // else must not pass as a change that was made.
@@ -268,7 +360,7 @@ pub fn set(
             plan.source = NotifySource::Person;
             let payload = set_event(
                 Some(plan.target.clone()),
-                &plan.on,
+                &plan.coverage(),
                 NotifySource::Person,
                 Some(PauseBy::Operator),
                 None,
@@ -294,41 +386,46 @@ pub enum ChangedBy {
 }
 
 /// A host's change, against the journal the change is made on: no target,
-/// and no transition beyond the ones the run notifies about, or last
-/// notified about, or else the default a plain "on" gets.
+/// no transition beyond the ones the run notifies about, or last notified
+/// about, or else the default a plain "on" gets, and no `finished` outcome
+/// beyond the same subscription's.
 fn host_bounds(
     root: &Path,
     state: &NotifyState,
     target: Option<&NotifyTarget>,
     on: Option<&[Transition]>,
+    finished: Option<&[FinishOutcome]>,
 ) -> Result<(), SetError> {
     if target.is_some() {
         return Err(SetError::NotAllowed(
             "a host does not choose where notifications go; the person sets a target in the dashboard or with `apb notify`".to_string(),
         ));
     }
-    let Some(on) = on else {
+    if on.is_none() && finished.is_none() {
         return Ok(());
+    }
+    let (bound_on, bound_finished) = match (&state.active, state.last_on.is_empty()) {
+        (Some(a), _) => (a.on.clone(), a.finished.clone()),
+        (None, false) => (state.last_on.clone(), state.last_finished.clone()),
+        (None, true) => settings(root, None, Some(&NotifyRequest::plain_on()))
+            .ok()
+            .flatten()
+            .map(|e| (e.on, e.finished))
+            .unwrap_or_default(),
     };
-    let bound = match (&state.active, state.last_on.is_empty()) {
-        (Some(a), _) => a.on.clone(),
-        (None, false) => state.last_on.clone(),
-        (None, true) => {
-            let plain = NotifyRequest::On {
-                target: None,
-                on: None,
-            };
-            settings(root, Some(&plain))
-                .ok()
-                .flatten()
-                .map(|e| e.on)
-                .unwrap_or_default()
-        }
-    };
-    match on.iter().find(|t| !bound.contains(t)) {
+    let widened_on = on
+        .unwrap_or_default()
+        .iter()
+        .find(|t| !bound_on.contains(t))
+        .map(|t| t.as_str());
+    let widened_finished = finished
+        .unwrap_or_default()
+        .iter()
+        .find(|o| !bound_finished.contains(o))
+        .map(|o| format!("finished:{}", o.as_str()));
+    match widened_on.map(str::to_string).or(widened_finished) {
         Some(wider) => Err(SetError::NotAllowed(format!(
-            "`{}` is not among the transitions the person chose for this run; a host only narrows them, the person widens them in the dashboard or with `apb notify`",
-            wider.as_str()
+            "`{wider}` is not among what the person chose for this run; a host only narrows it, the person widens it in the dashboard or with `apb notify`"
         ))),
         None => Ok(()),
     }
