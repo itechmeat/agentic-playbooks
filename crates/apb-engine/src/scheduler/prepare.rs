@@ -38,7 +38,7 @@ pub(crate) fn prepare_run(
 /// non-scalar its trimmed YAML serialization. This matches how callers already
 /// hand params in as strings, so a defaulted param and an explicitly passed one
 /// render identically.
-fn stringify_param_default(v: &yaml_serde::Value) -> String {
+pub(crate) fn stringify_param_default(v: &yaml_serde::Value) -> String {
     match v {
         yaml_serde::Value::String(s) => s.clone(),
         yaml_serde::Value::Bool(b) => b.to_string(),
@@ -537,7 +537,7 @@ fn allocate_run(root: &Path, id: &str) -> Result<(String, PathBuf, EventLog), En
     for _ in 0..1000 {
         let run_id = format!("{id}-{ms}");
         let run_dir = runs.join(&run_id);
-        match std::fs::create_dir(&run_dir) {
+        match apb_core::fsutil::create_private_dir(&run_dir) {
             Ok(()) => {
                 let log = EventLog::open(&run_dir)?;
                 return Ok((run_id, run_dir, log));
@@ -919,6 +919,9 @@ pub(crate) fn prepare_run_target(
         workdir_queue_wait_ms: opts
             .workdir_queue_wait
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
+        // Same reason as `mode`: a detached driver must not take the lock
+        // this start chose to share.
+        shared_workdir: opts.allow_shared_workdir,
         eval: opts.eval.clone(),
         output_limits: Some(output_limits),
     };
@@ -984,6 +987,9 @@ pub(crate) fn prepare_run_target(
         .quality
         .as_ref()
         .map(|q| task_type_at_start(q, root, &cfg.params));
+    // The run's secret classification, fixed at start: a later patch adds
+    // to it and never removes from it (`crate::run_redact`).
+    manifest.secret_params = crate::run_redact::declared_secret(&playbook);
     if !manifest.is_empty() {
         prep_try_unstarted(
             &mut log,

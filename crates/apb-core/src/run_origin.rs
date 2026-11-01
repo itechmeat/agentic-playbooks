@@ -40,6 +40,7 @@ fn load_key_from(path: &Path) -> Option<Vec<u8>> {
 /// Creates the installation's run-origin key if it does not exist yet. A
 /// no-op without a config directory.
 pub fn ensure_key() -> std::io::Result<()> {
+    crate::process_mode::guard()?;
     let Some(path) = key_path() else {
         return Ok(());
     };

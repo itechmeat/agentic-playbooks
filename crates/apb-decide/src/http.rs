@@ -20,6 +20,29 @@ use serde_json::Value;
 
 use crate::{ApiKey, DecideError};
 
+/// Set once a process may send no request at all (a read-only apb
+/// process); never cleared.
+static REQUESTS_FORBIDDEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Forbids every request of this process from now on: each exchange fails
+/// with [`DecideError::Unavailable`] before anything is sent. For a process
+/// that must make no network request and spend nothing, whatever provider
+/// chain it already built.
+pub fn forbid_requests() {
+    REQUESTS_FORBIDDEN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `Err` once [`forbid_requests`] was called: the check before any request.
+pub(crate) fn check_allowed() -> Result<(), DecideError> {
+    if REQUESTS_FORBIDDEN.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(DecideError::Unavailable(
+            "requests are forbidden in this process (read-only server)".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Most retries after the first attempt.
 const MAX_RETRIES: u32 = 2;
 
@@ -64,6 +87,7 @@ impl Route {
         body: &[u8],
         budget: Duration,
     ) -> Result<(u16, Option<u64>, String), DecideError> {
+        check_allowed()?;
         let config = ureq::Agent::config_builder()
             .max_redirects(0)
             .timeout_global(Some(budget))

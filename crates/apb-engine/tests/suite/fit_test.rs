@@ -160,13 +160,16 @@ fn memory_that_does_not_read_is_a_note_and_stays_where_it_is() {
     let _cfg = EnvVar::set("APB_CONFIG_DIR", cfg.path());
     let root = tempfile::tempdir().unwrap();
     init_project(root.path()).unwrap();
-    write_playbook(&root.path().join(".apb"), "p", &linear("p", "", PROMPT));
+    write_playbook(
+        &root.path().join(".apb"),
+        "p",
+        &linear("p", "params:\n  - { name: who, type: text }\n", PROMPT),
+    );
     let memory = root.path().join(".apb/memory/project");
     fs::create_dir_all(&memory).unwrap();
     fs::write(memory.join("p.json"), "{ not json").unwrap();
 
     let fit = assess(root.path(), &wref(project(), "p")).unwrap();
-    assert!(fit.ready);
     assert!(memory.join("p.json").is_file(), "a fit changes nothing");
     assert!(
         fit.setup
@@ -184,6 +187,21 @@ fn memory_that_does_not_read_is_a_note_and_stays_where_it_is() {
         if fs::read(&file).is_err() {
             let fit = assess(root.path(), &wref(project(), "p")).unwrap();
             assert!(fit.setup.iter().any(|i| i.code == "remembered_unreadable"));
+            // The gate then counts nothing as remembered and refuses a start
+            // without `who`: the report says so too.
+            let refused = apb_engine::gate::check_params(
+                root.path(),
+                &wref(project(), "p"),
+                &Default::default(),
+            );
+            assert!(refused.is_err());
+            assert!(
+                fit.setup
+                    .iter()
+                    .any(|i| i.code == "param_needs_value" && i.subject.as_deref() == Some("who")),
+                "{:?}",
+                fit.setup
+            );
         }
     }
 }

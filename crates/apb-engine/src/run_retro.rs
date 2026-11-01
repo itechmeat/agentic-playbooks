@@ -14,7 +14,7 @@
 //! through the `apb stats` journal walk ([`crate::run_stats::StatsRun`]).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -241,15 +241,6 @@ pub fn retro(root: &Path, run_dir: &Path, compare_last: usize) -> Result<RetroRe
             .collect()
     };
     Ok(build(&run, &history, compare_last))
-}
-
-/// The project root of a run directory laid out as `<root>/.apb/runs/<id>`.
-pub(crate) fn project_root_of(run_dir: &Path) -> Option<PathBuf> {
-    let runs = run_dir.parent()?;
-    let apb = runs.parent()?;
-    (runs.file_name()? == "runs" && apb.file_name()? == ".apb")
-        .then(|| apb.parent().map(Path::to_path_buf))
-        .flatten()
 }
 
 /// One attempt while the journal is walked; its actual model comes from

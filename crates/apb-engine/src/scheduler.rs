@@ -66,7 +66,7 @@ mod node_workdir;
 mod outcome;
 mod patch;
 mod pipeline;
-mod prepare;
+pub(crate) mod prepare;
 mod protect;
 pub(crate) mod provenance;
 mod publish;
@@ -308,6 +308,10 @@ fn drive(
     mode: RunMode,
     lock: &mut Option<crate::workdir::WorkdirGuard>,
 ) -> Result<RunResult, EngineError> {
+    // Every drive (a start, a resume, a continued run) passes here: a run
+    // directory an older apb left readable beyond its owner is narrowed
+    // before the run goes on (`crate::run_perms`).
+    crate::run_perms::narrow(run_dir);
     let run_id_for_failure = run_id.clone();
     let result = drive_inner(
         playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode, lock,

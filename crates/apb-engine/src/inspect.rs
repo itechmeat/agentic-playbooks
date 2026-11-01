@@ -187,7 +187,7 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
 pub fn write_supervisor_report(root: &Path, run_id: &str, text: &str) -> Result<(), EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
     let report_path = run_dir.join("supervisor").join("report.md");
-    apb_core::fsutil::atomic_write_under(&run_dir, &report_path, text.as_bytes())?;
+    apb_core::fsutil::atomic_write_private_under(&run_dir, &report_path, text.as_bytes())?;
     Ok(())
 }
 
@@ -317,7 +317,7 @@ pub fn write_supervisor_session(
         capabilities: capabilities.to_vec(),
     };
     let bytes = serde_json::to_vec(&session).map_err(|e| EngineError::Yaml(e.to_string()))?;
-    apb_core::fsutil::atomic_write_under(&run_dir, &session_path, &bytes)?;
+    apb_core::fsutil::atomic_write_private_under(&run_dir, &session_path, &bytes)?;
     Ok(())
 }
 
@@ -371,7 +371,7 @@ pub fn find_session_by_token(
 pub fn touch_heartbeat(root: &Path, run_id: &str) -> Result<(), EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
     let heartbeat_path = run_dir.join("supervisor").join("heartbeat");
-    apb_core::fsutil::atomic_write_under(
+    apb_core::fsutil::atomic_write_private_under(
         &run_dir,
         &heartbeat_path,
         apb_core::clock::now_ms().to_string().as_bytes(),

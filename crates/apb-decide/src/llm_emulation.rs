@@ -432,6 +432,7 @@ impl LlmEmulation {
         body: &[u8],
         budget: Duration,
     ) -> Result<(u16, Option<u64>, String), DecideError> {
+        crate::http::check_allowed()?;
         let config = ureq::Agent::config_builder()
             .max_redirects(0)
             .timeout_global(Some(budget))

@@ -654,7 +654,10 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
         vdir.join("playbook.yaml"),
         NOAGENT.replace(
             "version: 1.0.0\n",
-            "version: 1.0.0\nparams:\n  - { name: who, type: text }\n  - { name: key, type: text }\n",
+            // `key` has a default: a start that leaves a param without
+            // a value is refused (`param_needs_value`), and the start
+            // below passes only what memory holds.
+            "version: 1.0.0\nparams:\n  - { name: who, type: text }\n  - { name: key, type: text, default: \"\" }\n",
         ),
     )
     .expect("write playbook");
@@ -1281,6 +1284,7 @@ async fn run_answer_token_path_posts_supervisor_answer_on_supervisor_node() {
             token: Some(token),
             node: None,
             answer: "left".to_string(),
+            request: None,
             workspace: None,
         }))
         .await;
@@ -1314,6 +1318,7 @@ async fn run_answer_token_path_relays_on_human_only_node() {
             token: Some(token),
             node: None,
             answer: "left".to_string(),
+            request: None,
             workspace: None,
         }))
         .await;
@@ -1337,6 +1342,7 @@ async fn run_answer_run_id_path_posts_human_answer() {
             token: None,
             node: None,
             answer: "left".to_string(),
+            request: None,
             workspace: None,
         }))
         .await;
@@ -1362,6 +1368,7 @@ async fn run_answer_requires_exactly_one_of_run_id_or_token() {
             token: None,
             node: None,
             answer: "left".to_string(),
+            request: None,
             workspace: None,
         }))
         .await;
@@ -1377,6 +1384,7 @@ async fn run_answer_requires_exactly_one_of_run_id_or_token() {
             token: Some("tok".to_string()),
             node: None,
             answer: "left".to_string(),
+            request: None,
             workspace: None,
         }))
         .await;
@@ -2254,6 +2262,23 @@ async fn every_mcp_start_path_needs_the_consent_nonce_for_an_irreversible_playbo
             .as_str()
             .expect("a nonce")
             .to_string();
+        // Beside the refusal, the start action that answers it, carrying
+        // the same nonce and taken by a person only.
+        let action = &out["start_actions"][0];
+        assert_eq!(
+            action["code"], "confirm_irreversible_start",
+            "{mode}: {out}"
+        );
+        assert_eq!(
+            action["args"][0]["value"]["value"],
+            nonce.as_str(),
+            "{mode}"
+        );
+        assert_eq!(
+            action["principals"],
+            serde_json::json!(["person"]),
+            "{mode}"
+        );
         assert!(
             no_runs(proj.path()),
             "{mode}: a refused start writes no run"
@@ -2556,3 +2581,118 @@ mod notify;
 mod problems;
 // Run quality: grading sessions, grades and the candidate.
 mod quality;
+
+/// Every next-action code maps to a tool this server really serves.
+#[test]
+fn every_next_action_code_maps_to_a_served_tool() {
+    let served: Vec<String> = WfMcp::new(PathBuf::from("."))
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    for code in apb_engine::next_action::ActionCode::ALL {
+        let tool = crate::tools::actions::tool_of(code);
+        assert!(served.iter().any(|t| t == tool), "{code:?} -> {tool}");
+    }
+}
+
+/// The runs written under `root`.
+fn runs_in(root: &Path) -> Vec<std::path::PathBuf> {
+    fs::read_dir(root.join(".apb/runs"))
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
+/// A refusal of a start that leaves `who` without a value: the policy, a
+/// `provide_param` start action for `who`, and no run.
+fn assert_needs_who(answer: &str, root: &Path) {
+    let v: serde_json::Value = serde_json::from_str(answer).unwrap();
+    assert!(
+        answer.contains(apb_engine::gate::PARAM_NEEDS_VALUE),
+        "{answer}"
+    );
+    let actions = v["start_actions"].as_array().expect("start_actions");
+    assert!(
+        actions
+            .iter()
+            .any(|a| a["remedy"]["remedy"] == "provide_param" && a["remedy"]["name"] == "who"),
+        "{answer}"
+    );
+    assert!(runs_in(root).is_empty(), "a refused start wrote a run");
+}
+
+const WHO: &str = "version: 1.0.0\nparams:\n  - { name: who, type: text }\n";
+
+/// `playbook_run` without a value for a param that has no default and
+/// nothing remembered is refused before anything starts.
+#[tokio::test]
+async fn playbook_run_refuses_a_param_without_a_value() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_noagent(dir.path());
+    let vdir = dir.path().join(".apb/playbooks/noagent_sv/1.0.0");
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT.replace("version: 1.0.0\n", WHO),
+    )
+    .unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let result = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent_sv".to_string(),
+            version: None,
+            params: BTreeMap::new(),
+            instruction: None,
+            supervise: None,
+            background: None,
+            acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
+            scope: None,
+            continued_from: None,
+            worktree: None,
+            execution: None,
+            budget: None,
+            remember: None,
+            notify: None,
+        }))
+        .await;
+    assert_needs_who(&result_text(&result), dir.path());
+}
+
+/// A signed plan prepared without the value is refused at execution the
+/// same way, in the target workspace, before anything starts there.
+#[tokio::test]
+async fn playbook_execute_plan_refuses_a_param_without_a_value() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let (a, b, b_id) = setup_two(cfg.path());
+    let yaml = NOAGENT
+        .replace("id: noagent_sv", "id: noagent")
+        .replace("No Agent Supervised", "No Agent")
+        .replace("version: 1.0.0\n", WHO);
+    fs::write(
+        b.path().join(".apb/playbooks/noagent/1.0.0/playbook.yaml"),
+        yaml,
+    )
+    .unwrap();
+    approve_version(b.path(), "noagent", "1.0.0");
+    let server = WfMcp::new(a.path().to_path_buf());
+    let plan = prepared_token(&server, &b_id).await;
+    let token = plan["plan_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a plan: {plan}"))
+        .to_string();
+    let res = server
+        .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
+            plan_token: token,
+            acknowledge_untrusted: None,
+            confirm_irreversible: None,
+            budget: None,
+        }))
+        .await;
+    assert_needs_who(&result_text(&res), b.path());
+    assert!(runs_in(a.path()).is_empty());
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}

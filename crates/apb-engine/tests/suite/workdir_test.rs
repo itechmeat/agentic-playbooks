@@ -29,6 +29,7 @@ fn run_config_round_trips() {
         mode: RunMode::Supervised,
         max_parallel: Some(2),
         workdir_queue_wait_ms: Some(60_000),
+        shared_workdir: true,
         eval: None,
         output_limits: Some(apb_core::output_limits::OutputLimits {
             tail_bytes: 4096,
@@ -48,6 +49,8 @@ fn run_config_round_trips() {
     // no other way to learn that its wait is about another run finishing, not
     // about a sub-millisecond lock handover.
     assert_eq!(back.workdir_queue_wait_ms, Some(60_000));
+    // And for a shared workdir: its detached driver takes no lock either.
+    assert!(back.shared_workdir);
     // And for the output limits: a re-drive keeps the ones the run started with.
     assert_eq!(back.output_limits().tail_bytes, 4096);
 }

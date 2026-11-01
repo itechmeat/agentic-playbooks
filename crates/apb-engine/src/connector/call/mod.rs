@@ -138,7 +138,21 @@ pub fn execute_with_within(req: CallRequest, ctx: CallContext, max_secs: u64) ->
     execute_bounded(req, &ctx, Some(max_secs))
 }
 
+/// The refusal of a connector call in a read-only process: no account is
+/// resolved, nothing is sent and nothing is journaled.
+fn read_only_refusal() -> Option<CallError> {
+    crate::read_only::active().then(|| {
+        CallError::new(
+            CallErrorCode::Permission,
+            apb_core::process_mode::READ_ONLY_REFUSAL,
+        )
+    })
+}
+
 fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> (Value, bool) {
+    if let Some(e) = read_only_refusal() {
+        return (e.to_json(), false);
+    }
     match run(&req, ctx, max_secs) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Answer(ok) => (ok.to_success_json(), true),
@@ -861,13 +875,18 @@ fn build_prepared(
 /// the dashboard's probe button. Returns the same `{ "ok": bool, ... }` shape
 /// `execute` does; the bool mirrors `execute`'s ok hint.
 pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
-    answer_live(prepare_healthcheck(root, name, account))
+    answer_live(|| prepare_healthcheck(root, name, account))
 }
 
-/// Dispatches a prepared live call outside a run (healthcheck, playground)
-/// and shapes its answer: no journal, the same result JSON `execute` gives.
-fn answer_live(prepared: Result<Prepared, CallError>) -> (Value, bool) {
-    match prepared {
+/// Prepares and dispatches a live call outside a run (healthcheck,
+/// playground) and shapes its answer: no journal, the same result JSON
+/// `execute` gives. A read-only process refuses before `prepare` runs, so no
+/// account is picked and no secret is resolved.
+fn answer_live(prepare: impl FnOnce() -> Result<Prepared, CallError>) -> (Value, bool) {
+    if let Some(e) = read_only_refusal() {
+        return (e.to_json(), false);
+    }
+    match prepare() {
         Ok(Prepared::DryRun(v)) => (v, true),
         Ok(Prepared::Call(prepared)) => match prepared.dispatch().0 {
             Ok(ok) => (ok.to_success_json(), true),
@@ -923,15 +942,7 @@ pub fn play_call(
     dry_run: bool,
     full: bool,
 ) -> (Value, bool) {
-    answer_live(prepare_play_call(
-        root,
-        name,
-        account,
-        function_name,
-        args,
-        dry_run,
-        full,
-    ))
+    answer_live(|| prepare_play_call(root, name, account, function_name, args, dry_run, full))
 }
 
 /// Shared live-call preparation for both `healthcheck` (fixed function, no

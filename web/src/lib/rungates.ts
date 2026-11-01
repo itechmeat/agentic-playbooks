@@ -1,12 +1,21 @@
 import { pendingSupervisorFromPayload, type SupervisorEntry } from './supervisors'
 import type { PublishGate } from './publish'
-import type { PendingHostTask, ReviewRecommendation } from './api.gen'
+import type { ActionCode, NextAction, PendingHostTask, ReviewRecommendation } from './api.gen'
 import type { RunDetail } from './types'
+
+// The identity of the request a gate entry posts to: the run it belongs to
+// and the journal seq of the request, from the run's matching next action.
+// A post naming it is refused once the request was replaced or settled.
+export interface GateRequest {
+  runId: string
+  /** Absent on a payload from an older server without next actions. */
+  request?: number
+}
 
 // A pending human-review gate as the review panel renders it: one button per
 // option (a gate without options already carries the approve/reject
 // defaults), and the gate's optional guidance above them.
-export interface ReviewEntry {
+export interface ReviewEntry extends GateRequest {
   node: string
   options: string[]
   prompt?: string
@@ -18,7 +27,7 @@ export interface ReviewEntry {
 
 // A pending question as the question panel renders it. The panel always
 // answers as "human", so the server's answer_by/asked_at are not carried.
-export interface QuestionEntry {
+export interface QuestionEntry extends GateRequest {
   node: string
   question: string
   options: string[]
@@ -49,7 +58,7 @@ export interface HostTaskEntry {
 // the exact plan and posts the plan's nonce, never to the review card.
 export interface RunGates {
   reviews: ReviewEntry[]
-  publishes: PublishGate[]
+  publishes: (PublishGate & GateRequest)[]
   questions: QuestionEntry[]
   waits: string[]
   supervisor: SupervisorEntry | null
@@ -89,28 +98,41 @@ export function deadlineNote(deadline: number | null, now: number): string | nul
 export function runGates(detail: RunDetail): RunGates {
   const p = detail.progress
   if (!p) return { reviews: [], publishes: [], questions: [], waits: [], supervisor: null, tasks: [] }
+  const req = (code: ActionCode, node: string) => gateRequest(detail, code, node)
   return {
     reviews: p.pending_reviews
       .filter((r) => !r.publish)
       .map(({ node, options, prompt, recommendation }) => {
-        const entry: ReviewEntry = prompt ? { node, options, prompt } : { node, options }
+        const entry: ReviewEntry = { node, options, ...(prompt ? { prompt } : {}), ...req('decide_review', node) }
         const note = recommendationNote(recommendation)
         if (note) entry.recommendation = note
         return entry
       }),
     publishes: p.pending_reviews.flatMap(({ node, publish, prompt }) =>
-      publish ? [prompt ? { node, plan: publish, prompt } : { node, plan: publish }] : [],
+      publish
+        ? [{ node, plan: publish, ...(prompt ? { prompt } : {}), ...req('decide_publish', node) }]
+        : [],
     ),
     questions: p.pending_questions.map(({ node, question, options }) => ({
       node,
       question,
       options,
+      ...req('answer_question', node),
     })),
     waits: p.pending_waits,
     supervisor: pendingSupervisorFromPayload(p.pending_supervisor),
     // Absent on a payload from an older server.
     tasks: (p.pending_tasks ?? []).map(hostTaskEntry),
   }
+}
+
+// The request of the page's own run that a gate of `node` answers: the run
+// id, and the seq of the matching next action (same code, node and run).
+export function gateRequest(detail: RunDetail, code: ActionCode, node: string): GateRequest {
+  const actions: NextAction[] = detail.next_actions?.actions ?? []
+  const a = actions.find((x) => x.code === code && x.target.node === node && x.run_id === detail.run_id)
+  const seq = a?.target.request?.seq
+  return seq === undefined ? { runId: detail.run_id } : { runId: detail.run_id, request: seq }
 }
 
 // The review card's recommendation line: `Advisory recommendation: approve

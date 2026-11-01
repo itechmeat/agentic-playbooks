@@ -214,7 +214,7 @@ pub fn render_bounded(r: &RetroReport, max: usize) -> String {
 /// [`DEFAULT_COMPARE_LAST`] runs of its version, as text bounded by
 /// [`MAX_BYTES`]. Empty when the journal does not read.
 pub fn prompt_text(run_dir: &Path) -> String {
-    let report = match super::project_root_of(run_dir) {
+    let report = match crate::run_config::project_root_of(run_dir) {
         Some(root) => super::retro(&root, run_dir, DEFAULT_COMPARE_LAST),
         None => RetroRun::load(run_dir).map(|r| super::build(&r, &[], 0)),
     };

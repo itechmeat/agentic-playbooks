@@ -48,6 +48,9 @@ ts-rs = { version = "12", optional = true }
 
 [features]
 ts = ["dep:ts-rs"]
+# `apb_core::process_mode::testing`: runs a test body in a read-only child
+# process. Enabled by the dev-dependencies of the crates whose tests use it.
+testing = []
 
 [dev-dependencies]
 tempfile = "3.27.0"

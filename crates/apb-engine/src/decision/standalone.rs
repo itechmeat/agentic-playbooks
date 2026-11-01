@@ -25,6 +25,9 @@ use crate::redact;
 /// The log file under `<root>/.apb/`.
 pub const DECISIONS_LOG: &str = "decisions.jsonl";
 
+/// Why a read-only process skipped a decision.
+pub const READ_ONLY_SKIP: &str = "read_only";
+
 /// The tail of the log read to count today's requests.
 const MAX_LOG_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -69,6 +72,10 @@ pub struct StandaloneDecider {
     root: PathBuf,
     chain: OnceLock<(ProviderChain, Vec<apb_core::secret::Secret>)>,
     redactor: OnceLock<redact::Redactor>,
+    /// The declared secret values of the run a request speaks about
+    /// ([`StandaloneDecider::for_run`]), removed from every request whatever
+    /// `privacy.redact` says. Empty for a request about no run.
+    run_values: redact::Redactor,
 }
 
 impl std::fmt::Debug for StandaloneDecider {
@@ -107,7 +114,17 @@ impl StandaloneDecider {
             root: root.to_path_buf(),
             chain: OnceLock::new(),
             redactor: OnceLock::new(),
+            run_values: redact::Redactor::default(),
         }
+    }
+
+    /// This decider for requests about the run at `run_dir`: every request
+    /// loses the run's secret values (`crate::run_redact`), before any
+    /// clip, whatever `privacy.redact` says.
+    pub fn for_run(mut self, run_dir: &Path) -> Self {
+        self.run_values =
+            redact::Redactor::new(crate::run_redact::secret_values(run_dir), &self.root);
+        self
     }
 
     /// The use's mode now: the settings, unless the kill switch is set.
@@ -153,19 +170,35 @@ impl StandaloneDecider {
 
     /// The same secrets a run of this project redacts: the provider keys
     /// and every variable an installed connector references.
+    /// The run's secret values are applied on their own
+    /// ([`StandaloneDecider::for_run`]), so the order of `for_run` and a
+    /// first request never matters.
     fn redactor(&self) -> &redact::Redactor {
         self.redactor
             .get_or_init(|| redact::Redactor::for_workspace(&self.root, self.chain().1.clone()))
     }
 
+    /// `v` as a request carries it: [`StandaloneDecider::redact`] over its
+    /// every string.
+    fn redact_json(&self, mut v: Value) -> Value {
+        self.run_values.scrub_values_json(&mut v);
+        if self.settings.privacy.redact {
+            self.redactor().redact_value(v)
+        } else {
+            v
+        }
+    }
+
     /// `text` as a request would carry it: redacted when `privacy.redact` is
-    /// on. A caller that clips redacts first, so a cut never splits a
+    /// on, and without the run's secret values either way. A caller that
+    /// clips redacts first, so a cut never splits a
     /// secret into a shape the redactor no longer knows.
     pub fn redact(&self, text: &str) -> String {
+        let text = self.run_values.scrub_values(text);
         if self.settings.privacy.redact {
-            self.redactor().redact(text)
+            self.redactor().redact(&text)
         } else {
-            text.to_string()
+            text
         }
     }
 
@@ -264,6 +297,9 @@ impl StandaloneDecider {
 
     /// Best effort: a log that cannot be written never changes the answer.
     fn log(&self, line: &Value) {
+        if crate::read_only::active() {
+            return;
+        }
         if !self.log_path().parent().is_some_and(Path::is_dir) {
             return;
         }
@@ -275,7 +311,8 @@ impl StandaloneDecider {
     }
 
     /// Asks one decision over `state` (material class `prompt`): redacted
-    /// when `privacy.redact` is on, refused when over `max_state_bytes`
+    /// when `privacy.redact` is on, without the run's secret values either
+    /// way ([`StandaloneDecider::for_run`]), refused when over `max_state_bytes`
     /// (the caller clips), logged, capped per day.
     pub fn decide(
         &self,
@@ -284,6 +321,12 @@ impl StandaloneDecider {
         state_order: Vec<String>,
         questions: BTreeMap<String, Question>,
     ) -> StandaloneOutcome {
+        // A read-only process sends no request and logs nothing.
+        if crate::read_only::active() {
+            return StandaloneOutcome::Skipped {
+                reason: READ_ONLY_SKIP,
+            };
+        }
         let mode = self.mode_for(site);
         if mode == DecisionMode::Off {
             return StandaloneOutcome::Skipped { reason: "off" };
@@ -291,17 +334,17 @@ impl StandaloneDecider {
         if !self.settings.sends(SendClass::Prompts) {
             return StandaloneOutcome::Skipped { reason: "send" };
         }
-        let (state, questions) = if self.settings.privacy.redact {
-            // The questions carry text too (a suggestion's synopsis).
-            let questions = serde_json::to_value(&questions)
-                .ok()
-                .map(|v| self.redactor().redact_value(v))
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or(questions);
-            (self.redactor().redact_value(state), questions)
-        } else {
-            (state, questions)
+        // The questions carry text too (a suggestion's synopsis).
+        // Questions that do not survive the redaction are not sent at all:
+        // the original may hold a secret value.
+        let Some(questions) = serde_json::to_value(&questions)
+            .ok()
+            .map(|v| self.redact_json(v))
+            .and_then(|v| serde_json::from_value(v).ok())
+        else {
+            return StandaloneOutcome::Skipped { reason: "redact" };
         };
+        let state = self.redact_json(state);
         let state_bytes = serde_json::to_string(&state).map_or(0, |s| s.len());
         if state_bytes > self.settings.privacy.max_state_bytes {
             return StandaloneOutcome::Skipped {

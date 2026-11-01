@@ -21,7 +21,7 @@ pub(crate) const SESSION_ID_FILE: &str = "session.id";
 /// Records `session` as the session of the attempt whose transcript
 /// directory is `dir`, best effort.
 pub(crate) fn record_session(run_dir: &Path, dir: &Path, session: &str) {
-    let _ = apb_core::fsutil::atomic_write_under(
+    let _ = apb_core::fsutil::atomic_write_private_under(
         run_dir,
         &dir.join(SESSION_ID_FILE),
         session.as_bytes(),

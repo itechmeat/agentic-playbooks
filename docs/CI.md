@@ -13,7 +13,7 @@ read-only triage that turns a failed build's log into a three-field summary
 
 ```sh
 apb run <playbook> --detach [--version X.Y.Z] [--param k=v]... [--instruction "..."] [--worktree DIR]
-apb wait <run_id> [--timeout SECS]
+apb wait <run_id> [--timeout SECS] [--follow-auto]
 ```
 
 `apb run --detach` starts the run in a detached background process, prints
@@ -29,6 +29,33 @@ verdict in its exit code:
 | 3 | the run needs input: a question, a `human_review` gate, a supervisor decision, or host tasks of a host-mode run (`apb tasks <run>` lists them) | fail, or hand the run id to a person (see below) |
 | 4 | the run is paused or its driver is gone | fail; `apb resume <run_id>` continues it |
 | 5 | `--timeout` elapsed while the run was still going | fail, and `apb stop <run_id>` |
+
+### Following automatic progress: `--follow-auto`
+
+The default `apb wait` returns as soon as anything stops the run itself: a
+pause with `until` exits 4 even though the run resumes on its own, and a
+sub-playbook run waiting for a review keeps the wait blocked because only the
+run's own gates count. `apb wait <run_id> --follow-auto` is the form for CI:
+it keeps waiting while the run and its live sub-playbook runs go on by
+themselves (a timer `wait` node, a question that gets its default answer
+under a live driver, a pause with `until` and nothing else open, up to one
+minute past `until`; a new pause starts that minute again), and returns on
+one verdict over all of them:
+
+| `--follow-auto` exit | Meaning |
+|---|---|
+| 0 or 1 | the run finished, as for the default wait |
+| 3 | something needs a person or a host, in the run or a live child: a question without a default, a review, a publish gate, host tasks, a supervisor decision, a webhook `wait`; also a paused run that has such a gate open |
+| 4 | the run or a child is paused without `until`, by its budget, or its driver is gone, and no gate is open; or `until` passed by a minute and the run did not resume |
+| 5 | `--timeout` elapsed |
+
+Both forms print the next actions after the verdict, each with its reason, the
+`apb` command that takes it (quoted for a POSIX shell; `<...>` marks a value
+you supply, and such a line does not run as it is) and what happens without
+anyone. An answer and a decision name the request they are for
+(`apb answer --request=question:12 ...`, `apb review --request=review:7 ...`),
+so a command printed for an earlier round of a looping gate is refused
+instead of deciding the next one. The default `apb wait` keeps its exit codes.
 
 Without `--detach`, `apb run` drives the run in the foreground and exits 0 on
 success, 1 on any other outcome, 2 on an error before the run starts. The
@@ -125,7 +152,7 @@ ends; its state is on the runner's disk. On an ephemeral runner, treat exit 3 as
 a failure and design CI playbooks without gates. On a persistent runner (or a
 self-hosted machine), print the run id and let a person decide with
 `apb review <run_id> <node> --decision <option>` or `apb answer <run_id> <text>`,
-then continue with `apb wait <run_id>`.
+then continue with `apb wait <run_id> --follow-auto`, the form for CI.
 
 ## GitHub Actions
 
@@ -179,7 +206,7 @@ jobs:
           run_id=${out#run started: }
           echo "run_id=$run_id" >> "$GITHUB_ENV"
           set +e
-          apb wait "$run_id" --timeout 900
+          apb wait "$run_id" --timeout 900 --follow-auto
           code=$?
           set -e
           apb runs "$run_id"
@@ -221,13 +248,13 @@ run_id=${out#run started: }
 echo "apb run: $run_id"
 
 set +e
-apb wait "$run_id" --timeout 900
+apb wait "$run_id" --timeout 900 --follow-auto
 code=$?
 set -e
 
 case $code in
   0) echo "triage succeeded" ;;
-  3) echo "run $run_id needs input: apb review / apb answer, then apb wait $run_id" ;;
+  3) echo "run $run_id needs input: apb review / apb answer, then apb wait $run_id --follow-auto" ;;
   5) echo "timed out, stopping"; apb stop "$run_id" ;;
   *) echo "triage did not succeed (apb wait exit $code)" ;;
 esac

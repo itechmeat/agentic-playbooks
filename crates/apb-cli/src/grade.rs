@@ -160,6 +160,7 @@ fn skipped_text(why: &str) -> String {
         "send" => "privacy.send in decisions.yaml does not allow sending prompts to the decision model",
         "busy" => "the decision model is busy; try again shortly",
         "state_too_large" => "the run is too large to send whole",
+        "redact" => "the request could not be redacted, so it was not sent",
         other => return sanitize_for_terminal(other, QUESTION_TEXT_MAX),
     }
     .to_string()

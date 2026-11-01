@@ -28,6 +28,7 @@ mod playbook;
 mod problems;
 mod profile;
 mod quality;
+pub mod read_only;
 mod run;
 mod supervisor;
 
@@ -59,6 +60,8 @@ pub struct WfMcp {
     /// This server serves a background supervisor agent (see
     /// [`WfMcp::for_supervisor`]).
     supervisor_role: bool,
+    /// This server is read-only (see [`WfMcp::for_read_only`]).
+    read_only: bool,
     /// Catalog ranking answers for the server's lifetime (issue #165 Part 16).
     rank_cache: Arc<crate::catalog_rank::RankCache>,
 }
@@ -408,7 +411,20 @@ impl WfMcp {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             used_nonces: Arc::new(Mutex::new(HashSet::new())),
             supervisor_role: false,
+            read_only: false,
             rank_cache: Arc::default(),
+        }
+    }
+
+    /// Whom this server's next actions are rendered for: a read-only
+    /// caller, a supervisor session, or the host agent that drives it.
+    pub(crate) fn action_caller(&self) -> crate::tools::actions::ActionCaller {
+        if self.read_only {
+            crate::tools::actions::ActionCaller::ReadOnly
+        } else if self.supervisor_role {
+            crate::tools::actions::ActionCaller::Supervisor
+        } else {
+            crate::tools::actions::ActionCaller::Host
         }
     }
 
@@ -436,6 +452,33 @@ impl WfMcp {
         }
         server.supervisor_role = true;
         server
+    }
+
+    /// A read-only server (`apb mcp --read-only`): only the tools of
+    /// [`read_only::READ_ONLY`] are routed, so every other tool is unknown
+    /// to `tools/list` and to a direct `tools/call`. The process must have
+    /// entered read-only mode first (`apb_engine::read_only::enter`), which
+    /// guards what the remaining tools reach. Read-only wins over the
+    /// supervisor role: a read-only server never serves `supervisor_*`.
+    pub fn for_read_only(root: PathBuf) -> Self {
+        let mut server = Self::new(root);
+        let removed: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .filter(|name| !read_only::serves(name))
+            .collect();
+        for name in removed {
+            server.tool_router.remove_route(&name);
+        }
+        server.read_only = true;
+        server
+    }
+
+    /// Whether this server is read-only.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Mints a new supervisor session token (256 random bits, see
@@ -601,19 +644,38 @@ impl ServerHandler for WfMcp {
     }
 }
 
+/// Which server `serve_stdio` brings up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeMode {
+    /// The full server, or the supervisor's when the agent environment
+    /// names that role.
+    Normal,
+    /// The read-only server ([`WfMcp::for_read_only`]); the caller entered
+    /// read-only mode before anything else ran. The supervisor role does
+    /// not apply.
+    ReadOnly,
+}
+
 /// Bring up the stdio MCP server and serve until the client closes stdin.
-pub async fn serve_stdio(root: PathBuf) -> anyhow::Result<()> {
+pub async fn serve_stdio(root: PathBuf, mode: ServeMode) -> anyhow::Result<()> {
     let supervisor = std::env::var(apb_engine::adapter::MCP_ROLE_ENV).as_deref()
         == Ok(apb_engine::adapter::MCP_ROLE_SUPERVISOR);
-    let service = if supervisor {
-        WfMcp::for_supervisor(root)
-    } else {
-        WfMcp::new(root)
+    let service = match mode {
+        ServeMode::ReadOnly => {
+            // The allowlist alone is not the read-only contract: the
+            // process guard holds too, whoever calls this (idempotent).
+            apb_engine::read_only::enter();
+            WfMcp::for_read_only(root)
+        }
+        ServeMode::Normal if supervisor => WfMcp::for_supervisor(root),
+        ServeMode::Normal => WfMcp::new(root),
     };
     let server = service.serve(rmcp::transport::stdio()).await?;
     server.waiting().await?;
     Ok(())
 }
 
+#[cfg(test)]
+mod read_only_tests;
 #[cfg(test)]
 mod tests;

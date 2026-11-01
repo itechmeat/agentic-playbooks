@@ -19,7 +19,9 @@ import {
   promoteCandidate,
   fetchPlaybook,
   postAnswer,
+  postReview,
   postRunNotify,
+  resolveIntent,
   runPlaybook,
   runReportHtmlUrl,
   saveMemory,
@@ -116,6 +118,52 @@ describe('postAnswer', () => {
     await expect(postAnswer('run-1', { answer: 'left' })).rejects.toThrow(
       /invalid: no pending question to answer/,
     )
+  })
+})
+
+describe('request identity', () => {
+  it('postAnswer carries the request seq of the question the person saw', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ posted_seq: 4 }))
+    await postAnswer('child-1', { node: 'ask', answer: 'yes', request: 12 }, 'w')
+    expect(fetchMock).toHaveBeenCalledWith('/api/runs/child-1/answer?workspace=w', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ node: 'ask', answer: 'yes', request: 12 }),
+    })
+  })
+
+  it('postReview carries the nonce and the request seq when given, and neither otherwise', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ posted_seq: 5 }))
+    await postReview('r1', 'ship', 'publish', '', 'w', 'n-1', 9)
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/review?workspace=w', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ node: 'ship', decision: 'publish', note: '', nonce: 'n-1', request: 9 }),
+    })
+    await postReview('r1', 'gate', 'approve', '', '', undefined, 7)
+    expect((fetchMock.mock.calls[1][1] as RequestInit).body).toBe(
+      JSON.stringify({ node: 'gate', decision: 'approve', note: '', request: 7 }),
+    )
+    await postReview('r1', 'gate', 'approve')
+    expect((fetchMock.mock.calls[2][1] as RequestInit).body).toBe(
+      JSON.stringify({ node: 'gate', decision: 'approve', note: '' }),
+    )
+  })
+
+  it('resolveIntent posts the decision on an unknown send of its run', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'r1', intent: 'int/1', settled: 'not_sent', next: null }))
+    const res = await resolveIntent('r1', 'int/1', false, '', 'w')
+    expect(res.settled).toBe('not_sent')
+    expect(fetchMock).toHaveBeenCalledWith('/api/runs/r1/intents/int%2F1/resolve?workspace=w', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ sent: false }),
+    })
+  })
+
+  it('resolveIntent surfaces a 409 for a send that is no longer open', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'not_open', detail: 'already settled' }, 409))
+    await expect(resolveIntent('r1', 'int-1', true, 'checked')).rejects.toMatchObject({ status: 409 })
   })
 })
 

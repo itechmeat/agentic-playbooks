@@ -29,5 +29,7 @@ ts-rs = { version = "12", optional = true }
 ts = ["dep:ts-rs", "apb-engine/ts", "apb-core/ts"]
 
 [dev-dependencies]
+# `apb_core::process_mode::testing`: guard tests in a read-only child process.
+apb-core = { path = "../apb-core", features = ["testing"] }
 apb-decide = { path = "../apb-decide", features = ["testing"] }
 tempfile = "3.27.0"

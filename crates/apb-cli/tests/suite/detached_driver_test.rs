@@ -998,3 +998,44 @@ fn walk(root: &Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+// `apb run --detach --allow-shared-workdir` while another run holds the
+// workdir: the start takes no lock and hands none over, so its detached
+// driver must not wait for one either. It used to wait out the handover
+// ceiling and fail the run with "workdir busy".
+#[test]
+fn a_detached_start_that_shares_the_workdir_runs_beside_the_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("sharer", 0);
+    seed(dir.path(), "sharer", &yaml, &script);
+    // This test process holds the workdir like another live write-run.
+    let _held = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .expect("the workdir lock");
+
+    let out = crate::common::apb_std()
+        .args(["run", "sharer", "--detach"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("workdir busy"));
+
+    let out = crate::common::apb_std()
+        .args(["run", "sharer", "--detach", "--allow-shared-workdir"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let run_id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("a run id")
+        .trim()
+        .to_string();
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let status = wait_for_outcome(&run_dir, 0, "the shared run to finish");
+    assert_eq!(status, RunStatus::Succeeded);
+}

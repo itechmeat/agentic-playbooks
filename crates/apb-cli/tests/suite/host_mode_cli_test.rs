@@ -739,7 +739,10 @@ fn a_stub_mcp_host_drives_a_host_mode_run_end_to_end() {
         assert_eq!(waited["needs"], "host_task", "{waited}");
         let tasks = waited["pending_tasks"].as_array().expect("pending_tasks");
         assert!(
-            waited["next"].as_str().unwrap().contains("run_task_submit"),
+            waited["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("run_task_submit"),
             "{waited}"
         );
         for t in tasks {
@@ -940,7 +943,12 @@ fn run_wait_without_inline_prompts_hands_tasks_over_by_path() {
         fs::read_to_string(task["role_path"].as_str().unwrap()).unwrap(),
         "You plan and build."
     );
-    assert!(waited["next"].as_str().unwrap().contains("prompt_path"));
+    assert!(
+        waited["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("prompt_path")
+    );
     // The default keeps the inline texts.
     let again = mcp.call("run_wait", json!({"run_id": run_id, "timeout_ms": 30000}));
     assert!(again["pending_tasks"][0]["prompt"].is_string(), "{again}");

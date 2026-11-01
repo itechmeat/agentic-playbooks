@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -1863,7 +1863,15 @@ impl EventLog {
     }
 
     pub fn create(run_dir: &Path) -> Result<Self, EngineError> {
-        std::fs::create_dir_all(run_dir)?;
+        apb_core::process_mode::guard()?;
+        if let Some(parent) = run_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match apb_core::fsutil::create_private_dir(run_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
         Self::open(run_dir)
     }
 
@@ -1893,6 +1901,9 @@ impl EventLog {
         policy: UnknownPolicy,
         tolerate_torn_tail: bool,
     ) -> Result<Self, EngineError> {
+        // A read-only process opens no write handle: the open below would
+        // create a missing journal.
+        apb_core::process_mode::guard()?;
         let path = run_dir.join("events.jsonl");
         // Appending is deciding on the journal, so the engine's rule for
         // unknown events applies (see [`read_all`]); the next seq also clears
@@ -1906,7 +1917,7 @@ impl EventLog {
             .chain(journal.unknown.iter().map(|u| u.seq))
             .max()
             .map_or(0, |s| s + 1);
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = apb_core::fsutil::open_append_private(&path)?;
         // Unknown until the first append: another writer may have appended
         // between the read above and this open, and the length now would
         // hide it. The first append therefore settles the seq from the file
@@ -1994,6 +2005,7 @@ impl EventLog {
         build: Build<'_>,
         durable: bool,
     ) -> Result<Option<Event>, EngineError> {
+        apb_core::process_mode::guard()?;
         self.last_append = AppendMark::NotWritten;
         let file = self.file.try_clone()?;
         // A durable decision (a send intent) must not race another writer:
@@ -2102,10 +2114,7 @@ pub(crate) fn with_journal_lock<T>(
     run_dir: &Path,
     f: impl FnOnce() -> T,
 ) -> Result<T, EngineError> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run_dir.join("events.jsonl"))?;
+    let file = apb_core::fsutil::open_append_private(&run_dir.join("events.jsonl"))?;
     let _lock = JournalLock::on(&file);
     Ok(f())
 }
@@ -2810,7 +2819,10 @@ mod tests {
         log.append(EventPayload::SupervisorLost { detail: "a".into() })
             .unwrap();
         let path = dir.path().join("events.jsonl");
-        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         f.write_all(b"{\"seq\":1,\"ts\":1,\"type\":\"super")
             .unwrap();
         assert!(EventLog::open(dir.path()).is_err());
@@ -2826,7 +2838,10 @@ mod tests {
         log.append(EventPayload::SupervisorLost { detail: "a".into() })
             .unwrap();
         let path = dir.path().join("events.jsonl");
-        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         let torn = "{\"seq\":1,\"ts\":1,\"type\":\"supervisor_lost\",\"detail\":\"\u{e9}";
         f.write_all(&torn.as_bytes()[..torn.len() - 1]).unwrap();
         assert!(EventLog::open(dir.path()).is_err());
@@ -3229,7 +3244,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         torn_log(dir.path());
         let path = dir.path().join("events.jsonl");
-        let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         let held = writer.try_clone().unwrap();
         let lock = JournalLock::required(&held).unwrap();
         let reader = {

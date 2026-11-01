@@ -46,6 +46,7 @@ pub use chain::ProviderChain;
 pub use cloudflare::{CLOUDFLARE_BASE_URL, Cloudflare};
 pub use error::DecideError;
 pub use fake::FakeProvider;
+pub use http::forbid_requests;
 pub use key::ApiKey;
 pub use llm_emulation::{LlmEmulation, StructuredOutput};
 pub use openrouter_decisions::OpenRouterDecisions;

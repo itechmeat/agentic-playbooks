@@ -200,6 +200,11 @@ impl RunGuard {
             run_dir: root.join(".apb/runs").join(run_id),
         }
     }
+
+    /// Whether this guard is the one of the run at `run_dir`.
+    pub fn guards(&self, run_dir: &Path) -> bool {
+        self.run_dir == run_dir
+    }
 }
 
 impl Drop for RunGuard {

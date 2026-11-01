@@ -25,6 +25,8 @@ use serde::Serialize;
 use crate::error::EngineError;
 use crate::event::EventPayload;
 use crate::inspect::WakeEvent;
+use crate::next_action::verdict::{FollowAuto, WaitExit};
+use crate::next_action::{Observation, RunActions};
 use crate::run_view::read_events;
 use crate::state::RunStatus;
 
@@ -53,6 +55,19 @@ pub enum WaitReason {
     Stopped,
     /// The caller's timeout ran out while the run was still working.
     Timeout,
+}
+
+impl WaitReason {
+    /// The exit code of `apb wait` for this reason, the run being `status`:
+    /// 0 succeeded, 1 failed or aborted, 3 needs input, 4 stopped, 5 timeout.
+    pub fn exit(self, status: RunStatus) -> WaitExit {
+        match self {
+            WaitReason::Finished => WaitExit::of_finished(status),
+            WaitReason::NeedsInput => WaitExit::NeedsInput,
+            WaitReason::Stopped => WaitExit::Stopped,
+            WaitReason::Timeout => WaitExit::Timeout,
+        }
+    }
 }
 
 /// The gate a run is blocked on.
@@ -286,6 +301,99 @@ fn result(
         driver_alive: snap.driver_alive,
         waited: started.elapsed(),
         view,
+    }
+}
+
+/// A wait that follows a run's automatic progress (`apb wait
+/// --follow-auto`): it keeps waiting while the run and its live children
+/// go on by themselves (a timer, a question that gets its default under a
+/// live driver) or while one pause with `until` alone stops the run, up to
+/// `until` plus [`crate::next_action::verdict::UNTIL_GRACE_MS`]; it returns
+/// with the exit of the aggregated verdict otherwise (see
+/// [`crate::next_action::verdict::follow_auto`]). Unlike the default wait
+/// it stops on a live child's gate, and a paused run with an open gate
+/// needs input rather than being stopped. A non-terminal return must hold
+/// for the grace first, like the default wait.
+#[derive(Debug)]
+pub struct FollowAutoWaiter {
+    run_dir: std::path::PathBuf,
+    run_id: String,
+    grace: Duration,
+    poll: Duration,
+    started: Instant,
+    pending_since: Option<(Instant, WaitExit)>,
+}
+
+/// What [`FollowAutoWaiter::wait`] returned.
+#[derive(Debug)]
+pub struct FollowAutoResult {
+    pub exit: WaitExit,
+    /// The actions of the observation the wait decided on.
+    pub actions: RunActions,
+    pub observation: Observation,
+    pub waited: Duration,
+}
+
+impl FollowAutoWaiter {
+    pub fn new(root: &Path, run_id: &str) -> Result<Self, EngineError> {
+        Ok(Self {
+            run_dir: resolve(root, run_id)?,
+            run_id: run_id.to_string(),
+            grace: STABLE_GRACE,
+            poll: WAIT_POLL,
+            started: Instant::now(),
+            pending_since: None,
+        })
+    }
+
+    /// The waiter with explicit grace and poll step (tests).
+    #[cfg(test)]
+    pub(crate) fn with_timing(mut self, grace: Duration, poll: Duration) -> Self {
+        self.grace = grace;
+        self.poll = poll;
+        self
+    }
+
+    /// Waits up to `timeout` more.
+    pub fn wait(&mut self, timeout: Duration) -> Result<FollowAutoResult, EngineError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let observation = Observation::load(&self.run_dir, &self.run_id)?;
+            let actions = crate::next_action::next_actions(&observation);
+            let now = Instant::now();
+            let exit = match crate::next_action::verdict::follow_auto(&observation, &actions) {
+                // A finish is final: no grace.
+                FollowAuto::Return(exit @ (WaitExit::Succeeded | WaitExit::Failed)) => Some(exit),
+                FollowAuto::Return(exit) => {
+                    let since = match self.pending_since {
+                        Some((t, e)) if e == exit => t,
+                        _ => {
+                            self.pending_since = Some((now, exit));
+                            now
+                        }
+                    };
+                    (now.duration_since(since) >= self.grace).then_some(exit)
+                }
+                FollowAuto::KeepWaiting => {
+                    self.pending_since = None;
+                    None
+                }
+            };
+            let exit = exit.or_else(|| (now >= deadline).then_some(WaitExit::Timeout));
+            if let Some(exit) = exit {
+                return Ok(FollowAutoResult {
+                    exit,
+                    actions,
+                    observation,
+                    waited: self.started.elapsed(),
+                });
+            }
+            sleep(
+                self.poll
+                    .min(deadline.saturating_duration_since(now))
+                    .max(Duration::from_millis(1)),
+            );
+        }
     }
 }
 

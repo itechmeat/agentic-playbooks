@@ -229,9 +229,9 @@ fn show_lines(run_id: &str, p: &RunPublish) -> Vec<String> {
         ));
         if p.needs_a_look() {
             out.push(format!(
-                "  needs a look: check the remote, then: apb intent resolve {} {} --sent|--not-sent",
-                shell_word(run_id),
-                shell_word(&push.intent)
+                "  needs a look: check the remote, then: {}",
+                apb_engine::next_action::command::resolve_intent(run_id, Some(&push.intent), None)
+                    .line()
             ));
         }
     }
@@ -259,7 +259,7 @@ fn decide(root: &Path, run_id: &str, node: Option<&str>, d: Decision<'_>) -> Exi
         Ok(n) => n,
         Err(e) => return fail(d.command, &e),
     };
-    crate::run::review_cmd(root, run_id, &node, d.decision, d.note, d.nonce)
+    crate::run::review_cmd(root, run_id, &node, d.decision, d.note, d.nonce, None)
 }
 
 fn fail(what: &str, e: &str) -> ExitCode {

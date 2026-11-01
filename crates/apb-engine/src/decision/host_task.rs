@@ -580,6 +580,10 @@ fn standalone_refusal(reason: &'static str) -> AskOutcome {
             "busy",
             "another decision of this project holds the log lock; ask again shortly",
         ),
+        "redact" => refused(
+            "privacy",
+            "the question could not be redacted, so it is not sent",
+        ),
         _ => refused("use_off", "host-task decisions are switched off"),
     }
 }
@@ -701,14 +705,19 @@ fn ask_in_run(root: &Path, run_id: &str, req: &AskRequest) -> Result<AskOutcome,
         })
     });
     // The questions carry the asker's text too (the items and options).
-    let mut qs = questions(req);
-    if runner.settings().privacy.redact {
-        qs = serde_json::to_value(&qs)
-            .ok()
-            .map(|v| runner.redactor().redact_value(v))
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or(qs);
-    }
+    let qs = questions(req);
+    // Questions that do not survive the redaction are not sent: the
+    // original may hold a secret value.
+    let Some(qs) = serde_json::to_value(&qs)
+        .ok()
+        .map(|v| runner.outbound_value(v))
+        .and_then(|v| serde_json::from_value(v).ok())
+    else {
+        return Ok(refused(
+            "privacy",
+            "the question could not be redacted, so it is not sent",
+        ));
+    };
     let judge = |_: &BTreeMap<String, DecisionAnswer>| Judgement::default();
     let journal = RunJournalAppender {
         run_dir: run_dir.clone(),

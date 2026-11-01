@@ -339,7 +339,12 @@ pub fn add_fit(root: &Path, entries: &mut Value) {
             }
         };
         match apb_engine::fit::assess(root, &wref) {
-            Ok(report) => entry["fit"] = json!(report.summary()),
+            Ok(report) => {
+                entry["fit"] = json!(report.summary());
+                if !report.start_actions.is_empty() {
+                    entry["start_actions"] = json!(report.start_actions);
+                }
+            }
             Err(e) => entry["fit_error"] = json!(e.to_string()),
         }
     }

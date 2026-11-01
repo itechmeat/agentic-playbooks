@@ -219,6 +219,14 @@ pub struct RunExecutionManifest {
     /// later edit cannot change which runs a past run is compared with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
+    /// The names of the params declared `secret: true` when the run
+    /// started, plus any a current-run patch declared later
+    /// ([`add_secret_params`]): a value classified secret once stays secret
+    /// for the run and its children, whatever a later snapshot says. Absent
+    /// in a run started by an older apb, which falls back to its snapshot's
+    /// declarations (see `crate::run_redact`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_params: Vec<String>,
 }
 
 // --- host execution mode (0.23.0) ---
@@ -323,6 +331,7 @@ impl RunExecutionManifest {
             && !self.candidate_trial
             && self.candidate_skipped.is_none()
             && self.task_type.is_none()
+            && self.secret_params.is_empty()
     }
 
     /// Each bound node's profile and bundle digests (the supervisor's
@@ -416,25 +425,71 @@ pub fn write(run_dir: &Path, manifest: &RunExecutionManifest) -> Result<(), Engi
 }
 
 // --- 0.24.0 irreversible consent ---
-/// Replaces the consent a run's manifest records: the one exception to the
+/// Replaces the consent a run's manifest records: an exception to the
 /// write-once rule, for a resume that asked the person (a run of an
 /// irreversible tree that has no valid consent, such as one started by an
 /// older apb) or one that drops a consent it cannot honour. The rest of the
-/// manifest is kept as read. The run-origin stamp covers the manifest, so it
-/// is renewed, but only for a directory that carried a valid stamp before:
-/// a run directory apb did not create here does not become one.
+/// manifest is kept as read (see [`amend`]).
 pub fn replace_consent(
     run_dir: &Path,
     run_id: &str,
     consent: Option<crate::consent::RunConsent>,
 ) -> Result<(), EngineError> {
+    amend(run_dir, run_id, |manifest| {
+        if manifest.is_none() && consent.is_none() {
+            return false;
+        }
+        manifest.get_or_insert_with(Default::default).consent = consent;
+        true
+    })
+}
+// --- end 0.24.0 irreversible consent ---
+
+/// Adds `names` to the secret params the manifest records: the other
+/// exception to the write-once rule, for a current-run patch that declares
+/// a param secret. Names are only ever added, never removed, so a value
+/// classified secret once stays secret for the rest of the run.
+pub fn add_secret_params(
+    run_dir: &Path,
+    run_id: &str,
+    names: impl IntoIterator<Item = String>,
+) -> Result<(), EngineError> {
+    let names: Vec<String> = names.into_iter().collect();
+    amend(run_dir, run_id, |manifest| {
+        let known = manifest.as_ref().map_or(&[][..], |m| &m.secret_params[..]);
+        let new: Vec<String> = names
+            .iter()
+            .filter(|n| !known.contains(n))
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return false;
+        }
+        let m = manifest.get_or_insert_with(Default::default);
+        m.secret_params.extend(new);
+        m.secret_params.sort();
+        m.secret_params.dedup();
+        true
+    })
+}
+
+/// Rewrites a run's manifest through `change`, which says whether it
+/// changed anything. The run-origin stamp covers the manifest, so it is
+/// renewed, but only for a directory that carried a valid stamp before: a
+/// run directory apb did not create here does not become one.
+fn amend(
+    run_dir: &Path,
+    run_id: &str,
+    change: impl FnOnce(&mut Option<RunExecutionManifest>) -> bool,
+) -> Result<(), EngineError> {
     let was_local = apb_core::run_origin::verify(run_dir, run_id);
-    let existing = read(run_dir)?;
-    if existing.is_none() && consent.is_none() {
+    let mut manifest = read(run_dir)?;
+    if !change(&mut manifest) {
         return Ok(());
     }
-    let mut manifest = existing.unwrap_or_default();
-    manifest.consent = consent;
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
     let yaml = yaml_serde::to_string(&manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;
     apb_core::fsutil::atomic_write_private(&manifest_path(run_dir), yaml.as_bytes())?;
     if was_local {
@@ -442,7 +497,6 @@ pub fn replace_consent(
     }
     Ok(())
 }
-// --- end 0.24.0 irreversible consent ---
 
 /// Reads the run manifest. `Ok(None)` means there is no manifest (the
 /// executor path without profiles).

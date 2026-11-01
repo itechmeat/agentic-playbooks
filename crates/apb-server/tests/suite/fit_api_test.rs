@@ -76,3 +76,46 @@ async fn unknown_playbooks_and_scopes_are_refused() {
     let (st, _) = get(&router, "/api/playbooks/nope/fit?scope=team").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
+
+/// A start that leaves a param without a value is refused with the same
+/// start action the fit report shows for it, and nothing is written.
+#[tokio::test]
+async fn a_start_without_a_needed_param_is_refused_like_the_fit_report_says() {
+    let _sandbox = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    write_playbook(
+        &dir.path().join(".apb"),
+        "p",
+        "params:\n  - { name: target, type: text }\n",
+    );
+    let router = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let (st, fit) = get(&router, "/api/playbooks/p/fit").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(fit["setup"][0]["code"], "param_needs_value");
+    let fit_action = &fit["start_actions"][0];
+    assert_eq!(fit_action["remedy"]["remedy"], "provide_param");
+
+    let res = router
+        .clone()
+        .oneshot(
+            Request::post("/api/playbooks/p/run")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refusal["policy"], "param_needs_value", "{refusal}");
+    assert_eq!(refusal["missing"], serde_json::json!(["target"]));
+    let action = &refusal["start_actions"][0];
+    for field in ["code", "remedy", "args", "principals"] {
+        assert_eq!(action[field], fit_action[field], "{field}");
+    }
+    let runs = dir.path().join(".apb/runs");
+    assert!(!runs.exists() || fs::read_dir(&runs).unwrap().next().is_none());
+}

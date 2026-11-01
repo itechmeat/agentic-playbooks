@@ -154,11 +154,11 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
                     FitSeverity::Blocking,
                 ));
             }
-            if !scan.missing_env.is_empty() {
+            for name in &scan.missing_env {
                 setup.push(item(
                     "connector_env_missing",
-                    None,
-                    format!("unset secret env vars: {}", scan.missing_env.join(", ")),
+                    Some(name),
+                    "a secret env var a connector reads is not set".into(),
                     FitSeverity::Blocking,
                 ));
             }
@@ -193,12 +193,19 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
         });
     match remembered {
         Ok(remembered) => setup.extend(setup::input_items(&remembered)),
-        Err(e) => setup.push(item(
-            "remembered_unreadable",
-            None,
-            format!("the remembered input could not be read: {e}"),
-            FitSeverity::Note,
-        )),
+        Err(e) => {
+            setup.push(item(
+                "remembered_unreadable",
+                None,
+                format!("the remembered input could not be read: {e}"),
+                FitSeverity::Note,
+            ));
+            // The gate then counts nothing as remembered: every param
+            // without a default needs a value, said here as well.
+            setup.extend(setup::needs_value_items(
+                &crate::gate::params::without_default(&playbook.params),
+            ));
+        }
     }
 
     trust_items.extend(trust::bundle_items(&profiles.bundles, &store));
@@ -216,7 +223,7 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
             .map(|e| crate::gate::effect_str(e).to_string())
             .collect(),
     };
-    Ok(FitReport {
+    let mut report = FitReport {
         id: wref.id.clone(),
         scope: origin_scope_label(&wref.origin).to_string(),
         version: resolved.version,
@@ -227,7 +234,10 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
         setup,
         trust: trust_items,
         consent,
-    })
+        start_actions: Vec::new(),
+    };
+    report.start_actions = crate::next_action::start::from_fit(&report);
+    Ok(report)
 }
 
 fn requires_items(root: &Path, req: &apb_core::schema::Requires) -> Vec<FitItem> {

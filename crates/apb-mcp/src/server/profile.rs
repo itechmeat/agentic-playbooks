@@ -186,6 +186,12 @@ impl WfMcp {
         &self,
         Parameters(AgentsDetectArgs { refresh }): Parameters<AgentsDetectArgs>,
     ) -> CallToolResult {
+        // A refresh starts every agent's program.
+        if self.is_read_only() && refresh {
+            return to_call_tool_result(Ok(super::read_only::refused(
+                "a read-only server does not probe agents; call without refresh for what is known",
+            )));
+        }
         to_call_tool_result(crate::advisory_tools::agents_detect(refresh))
     }
 

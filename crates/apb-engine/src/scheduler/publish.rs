@@ -386,8 +386,9 @@ fn finished(
 /// The resolve hint of an unknown push.
 fn unknown_output(run_id: &str, intent: &str, why: &str) -> String {
     format!(
-        "{}: {why}; apb never pushes again on its own. Check the remote, then run `apb intent resolve {run_id} {intent} --sent` or `--not-sent`",
-        output::UNKNOWN
+        "{}: {why}; apb never pushes again on its own. Check the remote, then run `{}`",
+        output::UNKNOWN,
+        crate::next_action::command::resolve_intent(run_id, Some(intent), None).line()
     )
 }
 
@@ -564,7 +565,7 @@ fn push(
         Ok(new) => new,
         Err(admission) => return not_admitted(r, d, node, plan, admission),
     };
-    let scrubber = apb_core::scrub::Scrubber::for_workspace(r.root, Vec::new());
+    let scrubber = crate::run_redact::RunRedactor::for_run(r.root, d.run_dir).into_scrubber();
     // A shadow that cannot be made means git never started: not sent.
     let outcome = match plan.remote(input) {
         Ok(remote) => remote.push(

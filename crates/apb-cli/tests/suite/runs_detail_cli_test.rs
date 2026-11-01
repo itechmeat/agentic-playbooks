@@ -5,7 +5,7 @@
 use predicates::prelude::*;
 use std::fs;
 
-use crate::common::apb;
+use crate::common::{apb, apb_std};
 
 const JOURNAL: &str = concat!(
     r#"{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
@@ -413,4 +413,61 @@ fn runs_with_an_id_prints_one_isolation_line_per_isolated_attempt() {
         .clone();
     let text = String::from_utf8(out).unwrap();
     assert_eq!(text.matches("  isolation ").count(), 2, "{text}");
+}
+
+/// A finished run whose drive claim names a process that is gone (a
+/// sub-playbook child its parent drove in-process) is not "driver dead",
+/// neither in the table nor in the run's own view.
+#[test]
+fn a_finished_run_is_never_listed_as_driver_dead() {
+    let dir = project();
+    // A pid no live process holds: far above any pid_max.
+    fs::write(dir.path().join(".apb/runs/demo-1/driver.pid"), "2147483646").unwrap();
+    for args in [vec!["runs"], vec!["runs", "demo-1"]] {
+        apb()
+            .args(&args)
+            .current_dir(dir.path())
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("succeeded"))
+            .stdout(predicate::str::contains("driver dead").not());
+    }
+    // The control: the same claim on a run that has not finished is
+    // listed as driver dead, so the check above can see the words.
+    let open = dir.path().join(".apb/runs/open-1");
+    fs::create_dir_all(&open).unwrap();
+    let unfinished: String = JOURNAL
+        .lines()
+        .filter(|l| !l.contains("run_finished"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(open.join("events.jsonl"), unfinished).unwrap();
+    fs::write(open.join("driver.pid"), "2147483646").unwrap();
+    for args in [vec!["runs"], vec!["runs", "open-1"]] {
+        apb()
+            .args(&args)
+            .current_dir(dir.path())
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("driver dead"));
+    }
+}
+
+/// `apb runs | head` closes the pipe early: the CLI ends quietly with the
+/// status of a process `SIGPIPE` ended, never a panic on stderr.
+#[test]
+fn a_closed_stdout_ends_the_cli_quietly() {
+    let dir = project();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = apb_std()
+        .arg("runs")
+        .current_dir(dir.path())
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.code(), Some(141), "{stderr}");
 }

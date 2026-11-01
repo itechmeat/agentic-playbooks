@@ -4,7 +4,7 @@
 //! ReviewDecided event. This does not violate the single-writer rule for
 //! events: events.jsonl is still written only by drive.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
@@ -266,12 +266,31 @@ pub fn post_decision(
     cmd: ReviewCommand,
     nonce: Option<String>,
 ) -> Result<u64, EngineError> {
+    post_decision_to(run_dir, cmd, nonce, None)
+}
+
+/// [`post_decision`] naming the request it answers: `request` is the
+/// journal seq of the `review_requested` the caller was shown. Checked
+/// inside the lock that guards the append, against the journal and the
+/// queued decisions: a request a later round replaced (or one withdrawn)
+/// is refused with `Conflict`, one that already has a decision, queued or
+/// journaled, with `AlreadyAnswered`. A publish decision still carries its
+/// nonce. `None` keeps [`post_decision`]'s behaviour.
+pub fn post_decision_to(
+    run_dir: &Path,
+    cmd: ReviewCommand,
+    nonce: Option<String>,
+    request: Option<u64>,
+) -> Result<u64, EngineError> {
     crate::driver::ensure_run_dir(run_dir)?;
     // The check and the append under one lock: two posters (a person and
     // the engine's automatic decision, issue #165 Part 14.4) that both pass
     // the check would queue two decisions for one visit, and the second
     // would decide the gate's next visit unseen.
     let _lock = apb_core::fsutil::lock_dir(run_dir, "reviews.jsonl.lock")?;
+    if let Some(seq) = request {
+        check_review_request(run_dir, &cmd.node, seq)?;
+    }
     let nonce = check_review_target(run_dir, &cmd, nonce)?;
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;
@@ -280,11 +299,91 @@ pub fn post_decision(
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
     let path = run_dir.join("reviews.jsonl");
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = apb_core::fsutil::open_append_private(&path)?;
     writeln!(file, "{line}")?;
     file.flush()?;
 
     Ok(seq)
+}
+
+/// Whether the review request opened at journal seq `seq` for `node` is
+/// still the one waiting for a decision. Runs under the reviews lock.
+fn check_review_request(run_dir: &Path, node: &str, seq: u64) -> Result<(), EngineError> {
+    use crate::event::EventPayload;
+    let events = crate::event::read_all_lossy_tail(run_dir)?;
+    let requested: Vec<u64> = events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
+        )
+        .map(|e| e.seq)
+        .collect();
+    if !requested.contains(&seq) {
+        return Err(EngineError::NotFound(format!(
+            "node `{node}` requested no review at journal seq {seq}"
+        )));
+    }
+    let latest = requested.last().copied().unwrap_or(seq);
+    if latest != seq {
+        return Err(EngineError::Conflict(format!(
+            "the review of node `{node}` at seq {seq} is over; the node now asks at seq {latest}"
+        )));
+    }
+    let open = crate::event::review_open_count(&events, node);
+    let decided = crate::event::review_decided_count(&events, node);
+    if open == 0 {
+        // Closed: by a decision, or withdrawn without one.
+        let decided_last = events.iter().rev().find_map(|e| match &e.payload {
+            EventPayload::ReviewDecided { node: n, .. } if n == node => Some(true),
+            EventPayload::ReviewWithdrawn { node: n, .. } if n == node => Some(false),
+            _ => None,
+        });
+        return Err(if decided_last == Some(true) {
+            EngineError::AlreadyAnswered(format!(
+                "the review of node `{node}` at seq {seq} is already decided"
+            ))
+        } else {
+            EngineError::Conflict(format!(
+                "the review of node `{node}` at seq {seq} is no longer open"
+            ))
+        });
+    }
+    // A publish gate consumes by nonce: a decision queued for an older plan
+    // never answers the current one, so only the current plan's backlog
+    // counts; a request that already has a decision for it is answered.
+    if let Some(EventPayload::PublishPlanned {
+        nonce, plan_digest, ..
+    }) = crate::publish::latest_plan(&events, node).map(|e| &e.payload)
+    {
+        let decided_for_plan = events
+            .iter()
+            .filter(|e| {
+                matches!(&e.payload, EventPayload::ReviewDecided { node: n, plan_digest: Some(d), .. }
+                    if n == node && d == plan_digest)
+            })
+            .count();
+        let queued_for_plan = read_reviews_after(run_dir, None)?
+            .iter()
+            .filter(|e| e.cmd.node == node && e.nonce.as_deref() == Some(nonce.as_str()))
+            .count();
+        if queued_for_plan > decided_for_plan {
+            return Err(EngineError::AlreadyAnswered(format!(
+                "the review of node `{node}` at seq {seq} already has a decision queued"
+            )));
+        }
+        return Ok(());
+    }
+    let queued = read_reviews_after(run_dir, None)?
+        .iter()
+        .filter(|e| e.cmd.node == node)
+        .count()
+        .saturating_sub(decided);
+    if queued >= open {
+        return Err(EngineError::AlreadyAnswered(format!(
+            "the review of node `{node}` at seq {seq} already has a decision queued"
+        )));
+    }
+    Ok(())
 }
 
 pub fn read_reviews_after(

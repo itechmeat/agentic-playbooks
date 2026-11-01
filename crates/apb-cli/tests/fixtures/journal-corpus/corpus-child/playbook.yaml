@@ -1,0 +1,12 @@
+# The sub-playbook of the journal corpus writer.
+schema: 2
+id: corpus-child
+name: Journal corpus child
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: note, type: script, script: "scripts/note.sh", runner: sh, expected_duration: 10s }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: note }
+  - { from: note, to: done }

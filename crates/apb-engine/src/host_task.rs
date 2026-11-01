@@ -255,6 +255,26 @@ pub struct PendingHostTask {
     pub env: BTreeMap<String, String>,
     /// Milliseconds since epoch when the task was requested.
     pub requested_at: u64,
+    /// Why the prompt texts, their paths and `env` are empty: a read-only
+    /// server never returns a host task's prompt (`read_only`). Absent on a
+    /// task delivered whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub prompt_withheld: Option<String>,
+}
+
+impl PendingHostTask {
+    /// The task without its prompt: the prompt and role texts, their paths
+    /// and the environment emptied, `prompt_withheld` set to `why`. The
+    /// id, node, attempt, deadline and contract stay.
+    pub fn withhold_prompt(&mut self, why: &str) {
+        self.prompt.clear();
+        self.role_prompt = None;
+        self.prompt_path.clear();
+        self.role_path = None;
+        self.env.clear();
+        self.prompt_withheld = Some(why.to_string());
+    }
 }
 
 fn tasks_root(run_dir: &Path) -> PathBuf {
@@ -520,6 +540,7 @@ fn pending_task(run_dir: &Path, events: &[Event], task_id: &str) -> Option<Pendi
         fallback_of: record.fallback_of,
         env: record.env,
         requested_at: record.requested_ts,
+        prompt_withheld: None,
     })
 }
 

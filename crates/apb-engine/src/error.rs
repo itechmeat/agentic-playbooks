@@ -12,6 +12,10 @@ pub enum EngineError {
     /// Surfaces that map HTTP status codes treat this as 409 Conflict.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// The request an answer or a decision names already has one, queued or
+    /// journaled: a second one would answer nothing (or a later round).
+    #[error("already answered: {0}")]
+    AlreadyAnswered(String),
     #[error("workdir busy: {0}")]
     WorkdirBusy(String),
     #[error("agent adapter error: {0}")]

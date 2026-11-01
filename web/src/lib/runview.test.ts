@@ -33,6 +33,7 @@ function detail(over: Partial<RunDetail> = {}): RunDetail {
     outputs: {},
     instruction: null,
     params: {},
+    redacted_params: [],
     worktree: null,
     model: {
       id: 'pb',
@@ -56,6 +57,7 @@ function detail(over: Partial<RunDetail> = {}): RunDetail {
     unknown_events: 0,
     execution: 'cli',
     execution_fallback: false,
+    next_actions: { observed_at_ms: 0, status: 'running', stop: 'progresses_by_itself', actions: [] },
     events: [
       ev(0, 1_000, 'run_started'),
       ev(1, 1_000, 'node_started', { node: 'start', attempt: 1 }),

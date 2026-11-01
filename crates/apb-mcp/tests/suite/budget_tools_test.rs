@@ -169,7 +169,10 @@ fn run_wait_on_budget_pause_carries_instruction() {
     let res = waiter.wait(Duration::from_secs(5)).unwrap();
     let out = tools::run_wait_result(f.root(), &f.run_id, &res).unwrap();
     assert_eq!(out["reason"], "stopped");
-    assert_eq!(out["next"], tools::budget::BUDGET_PAUSE_NEXT);
+    assert_eq!(out["instruction"], tools::budget::BUDGET_PAUSE_NEXT);
+    assert!(out["next"].as_str().is_some_and(|s| !s.is_empty()), "{out}");
+    assert_eq!(out["next"], out["next_actions"][0]["reason"]);
+    assert_eq!(out["next_actions"][0]["code"], "resume_with_budget");
     assert_eq!(out["budget"]["paused"]["node"], "b");
 }
 

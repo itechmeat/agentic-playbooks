@@ -202,3 +202,24 @@ fn read_http_request(stream: &mut TcpStream) -> String {
     }
     head
 }
+
+/// A dashboard with one issued key over `root`: the key and the state.
+pub fn keyed(root: std::path::PathBuf) -> (String, apb_server::AppState) {
+    use apb_core::server_auth;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server-auth.yaml");
+    let (key, _) = server_auth::issue_into(&path).unwrap();
+    let file = server_auth::load_from(&path).unwrap();
+    let auth = std::sync::Arc::new(
+        apb_server::auth::AuthState::new(
+            None,
+            file.keys,
+            &apb_core::config::ServerConfig::default(),
+        )
+        .unwrap(),
+    );
+    (
+        key.expose_secret().to_string(),
+        apb_server::AppState::new(root).with_auth(auth),
+    )
+}

@@ -33,7 +33,7 @@ pub use check::{FAIL, OK, RunCheck, WARN};
 /// Diagnoses run `run_id` under project `root`.
 ///
 /// Returns the checks in a fixed order - run, nodes, attempts, autonomy,
-/// models, process env, tool exposure, driver, workdir lock, control backlog, supervisor actions - so two reports
+/// models, process env, tool exposure, driver, workdir lock, control backlog, supervisor actions, file modes - so two reports
 /// of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
@@ -62,7 +62,27 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     ));
     checks.push(control_check(&run_dir)?);
     checks.push(supervisor_action_check(events));
+    checks.push(file_modes_check(&run_dir));
     Ok(checks)
+}
+
+/// A run directory whose entries other users can read (one an older apb
+/// wrote): it may hold an echoed secret. Reported with the line that fixes
+/// it by hand; the next drive or resume narrows it (`crate::run_perms`).
+/// Reads only.
+fn file_modes_check(run_dir: &Path) -> RunCheck {
+    match crate::run_perms::wide(run_dir) {
+        None => RunCheck::new(OK, "files", "only the owner can read the run directory"),
+        Some(entry) => RunCheck::new(
+            WARN,
+            "files",
+            format!(
+                "`{}` is readable beyond its owner; the next resume narrows it, or run: {}",
+                entry.display(),
+                crate::run_perms::fix_line(run_dir)
+            ),
+        ),
+    }
 }
 
 /// Issue #193: one warning per attempt that ran on another model than its
@@ -504,7 +524,26 @@ mod tests {
         let run_dir = tmp.path().join(".apb/runs/r1");
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(run_dir.join("events.jsonl"), journal).unwrap();
+        crate::run_perms::narrow(&run_dir);
         (tmp, run_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wide_run_directory_warns_with_the_fix_and_is_left_as_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (tmp, run_dir) = run_root(HEALTHY);
+        // As an older apb left it: the directory and its files open to the
+        // group (below a private directory nothing is reachable).
+        let journal = run_dir.join("events.jsonl");
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o664)).unwrap();
+        std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        let files = find(&checks, "files");
+        assert_eq!(files.status, WARN);
+        assert!(files.detail.contains("chmod -R go-rwx"), "{files:?}");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&run_dir), mode(&journal)), (0o775, 0o664));
     }
 
     fn find<'a>(checks: &'a [RunCheck], subject: &str) -> &'a RunCheck {
@@ -837,6 +876,7 @@ mod tests {
             candidate_trial: false,
             candidate_skipped: None,
             task_type: None,
+            secret_params: Vec::new(),
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

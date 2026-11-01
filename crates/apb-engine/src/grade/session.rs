@@ -207,7 +207,7 @@ fn open_run(run_dir: &Path) -> Result<Arc<OpenRun>, EngineError> {
             "the run has not ended: a run is graded once it ends".into(),
         ));
     }
-    sources.redact(&super::grader::workspace_redactor(run_dir));
+    sources.redact(crate::run_redact::RunRedactor::for_run_dir(run_dir).scrubber());
     let defs: Vec<CriterionDef> = super::grader::criteria_for(&sources)
         .into_iter()
         .filter(|d| d.source == CriterionSource::Playbook)
@@ -383,12 +383,12 @@ pub fn submit(
     let mut file = load(run_dir, session)?;
     let run = open_run(run_dir)?;
     let (sources, defs) = (&run.sources, &run.defs);
-    let redactor = super::grader::workspace_redactor(run_dir);
+    let redactor = crate::run_redact::RunRedactor::for_run_dir(run_dir);
     let proposals: Vec<Proposal> = proposals
         .iter()
         .cloned()
         .map(|mut p| {
-            p.why = redactor.redact(&p.why);
+            p.why = redactor.redact_text(&p.why);
             p
         })
         .collect();

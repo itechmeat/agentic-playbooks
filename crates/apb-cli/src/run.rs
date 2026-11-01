@@ -48,8 +48,27 @@ fn gate_run(
         id: name.to_string(),
         version: version.map(str::to_string),
     };
-    let permit = apb_engine::gate::check_run(root, &wref, true, supervised)
-        .map_err(|refusal| gate_refusal_message(&refusal))?;
+    let refused = |refusal: serde_json::Value| {
+        let actions = apb_engine::next_action::start::from_refusal(
+            apb_engine::next_action::start::StartOf::of(&wref),
+            &refusal,
+        );
+        let mut message = gate_refusal_message(&refusal);
+        for line in crate::actions::start_lines(&actions) {
+            message.push_str("\n  ");
+            message.push_str(&line);
+        }
+        message
+    };
+    let permit = apb_engine::gate::check_run(root, &wref, true, supervised).map_err(refused)?;
+    let run_ref = apb_core::scope::PlaybookRef {
+        version: permit.run_version(version),
+        ..wref.clone()
+    };
+    apb_engine::gate::check_params(root, &run_ref, &opts.params).map_err(refused)?;
+    if let Some(w) = apb_engine::gate::short_secret_warning(root, &run_ref, &opts.params) {
+        eprintln!("warning: {w}");
+    }
     let granted = match permit.consent_need() {
         Some(need) => {
             let granted = crate::consent::obtain(&need, how)?;
@@ -139,6 +158,11 @@ fn gate_refusal_message(refusal: &serde_json::Value) -> String {
                 missing.join(", ")
             )
         }
+        apb_engine::gate::PARAM_NEEDS_VALUE => format!(
+            "run refused ({policy}): param(s) without a value: {}. Pass each with `--param \
+             <name>=<value>`, then re-run.",
+            strings("missing").join(", ")
+        ),
         p if p == apb_engine::consent::REFUSAL_POLICY => crate::consent::refusal_message(refusal),
         other => format!("run refused ({other}): {refusal}"),
     }
@@ -358,6 +382,9 @@ pub(crate) struct RunArgs {
     /// key=value, repeatable
     #[arg(long = "param", value_name = "K=V")]
     pub params: Vec<String>,
+    /// Run beside a write-run that holds the workdir: this run takes no
+    /// workdir lock (its detached driver none either), so both write the
+    /// same tree at once
     #[arg(long)]
     pub allow_shared_workdir: bool,
     /// Run in the background under supervision: the engine spawns a
@@ -696,7 +723,10 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         // The detached child has no terminal, so the consent is obtained
         // here, against the same gate the child runs, and forwarded with the
         // nonce of the tree it was given for.
-        let mut probe = RunOptions::default();
+        let mut probe = RunOptions {
+            params: parsed.clone(),
+            ..Default::default()
+        };
         let (granted, start_version) = match gate_run(root, name, version, true, &mut probe, &how) {
             Ok(g) => g,
             Err(msg) => {
@@ -1191,7 +1221,7 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
     }
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {
-            println!("no runs yet");
+            say!("no runs yet");
             ExitCode::SUCCESS
         }
         Ok(runs) => {
@@ -1203,35 +1233,40 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
                 .map(|r| crate::run_mode::list_mode(root, &r.run_id))
                 .collect();
             let show_mode = modes.iter().any(Option::is_some);
+            // Each row redacted with its own run's values (and its
+            // ancestors'); the workspace's connector secrets resolved once.
+            let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
             for (r, mode) in runs.into_iter().zip(modes) {
-                // The status column stays exactly as it always has (a script
-                // parsing it must keep working); a dead driver and events a
-                // newer apb wrote are called out as appended markers rather
-                // than a rewrite of that text (#85 finding 4).
-                let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
-                if show_mode {
-                    line.push('\t');
-                    line.push_str(mode.as_deref().unwrap_or("cli"));
-                }
-                if let Some(p) = &r.pause {
-                    line.push('\t');
-                    line.push_str(&crate::pause::marker(p));
-                }
-                if r.driver_dead {
-                    line.push_str("\tdriver dead");
-                }
-                if let Some(n) = &r.needs_look {
-                    line.push_str(&format!("\tneeds a look: {}", n.line()));
-                }
-                if let Some(t) = &r.candidate_trial {
-                    line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
-                }
-                if r.unknown_events > 0 {
-                    line.push('\t');
-                    line.push_str(&unknown_events_note(r.unknown_events));
-                }
-                println!("{line}");
-                print_waiting_on_question(r.progress.as_ref());
+                crate::util::with_run_redaction(redaction.run(&r.run_id), || {
+                    // The status column stays exactly as it always has (a script
+                    // parsing it must keep working); a dead driver and events a
+                    // newer apb wrote are called out as appended markers rather
+                    // than a rewrite of that text (#85 finding 4).
+                    let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                    if show_mode {
+                        line.push('\t');
+                        line.push_str(mode.as_deref().unwrap_or("cli"));
+                    }
+                    if let Some(p) = &r.pause {
+                        line.push('\t');
+                        line.push_str(&crate::pause::marker(p));
+                    }
+                    if r.driver_dead {
+                        line.push_str("\tdriver dead");
+                    }
+                    if let Some(n) = &r.needs_look {
+                        line.push_str(&format!("\tneeds a look: {}", n.line()));
+                    }
+                    if let Some(t) = &r.candidate_trial {
+                        line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
+                    }
+                    if r.unknown_events > 0 {
+                        line.push('\t');
+                        line.push_str(&unknown_events_note(r.unknown_events));
+                    }
+                    say!("{line}");
+                    print_waiting_on_question(r.progress.as_ref());
+                });
             }
             ExitCode::SUCCESS
         }
@@ -1262,9 +1297,13 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
         return ExitCode::from(2);
     }
     if json {
-        return match apb_mcp::tools::run::run_status(root, run_id) {
+        return match apb_mcp::tools::run::run_status_as(
+            root,
+            run_id,
+            apb_mcp::tools::actions::ActionCaller::Person,
+        ) {
             Ok(v) => {
-                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                say!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -1273,8 +1312,21 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             }
         };
     }
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    crate::util::with_run_redaction(redaction.run_dir(&run_dir), || {
+        run_detail_text(&redaction, run_id, &run_dir)
+    })
+}
+
+/// The text of `apb runs <run_id>`, printed inside the run's redaction.
+fn run_detail_text(
+    redaction: &apb_engine::run_redact::WorkspaceRedaction,
+    run_id: &str,
+    run_dir: &Path,
+) -> ExitCode {
+    let run_dir = run_dir.to_path_buf();
     let view = match apb_engine::run_view::RunView::load(&run_dir, run_id) {
-        Ok(v) => v,
+        Ok(v) => std::sync::Arc::new(v),
         Err(e) => {
             eprintln!("runs failed: {e}");
             return ExitCode::from(2);
@@ -1290,22 +1342,22 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
             _ => None,
         })
         .unwrap_or_default();
-    println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
-    println!(
+    say!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    say!(
         "  execution: {}",
         sanitize_for_terminal(
             &crate::run_mode::detail_line(&run_dir, &view.events),
             QUESTION_TEXT_MAX
         )
     );
-    if view.driver_alive == Some(false) {
-        println!("  driver dead");
+    if view.driver_dead() {
+        say!("  driver dead");
     }
     if let Some(p) = view.pause() {
         crate::pause::print_block(p);
     }
     for (node, status) in view.nodes() {
-        println!("  {node}\t{status}");
+        say!("  {node}\t{status}");
     }
     // Issue #193: the model each attempt actually ran on.
     for a in apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events) {
@@ -1322,21 +1374,21 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
                 a.expected.as_deref().unwrap_or("?")
             ));
         }
-        println!(
+        say!(
             "  model {}",
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
     // What each isolated attempt's isolation held and did not.
     for row in view.isolation() {
-        println!(
+        say!(
             "  isolation {}",
             sanitize_for_terminal(&row.line(), OUTCOME_LINE_MAX)
         );
     }
     // Issue #195: fork branch-failure policies and refused joins.
     for b in apb_engine::fork_view::entries(&view.events) {
-        println!(
+        say!(
             "  {} {}: {}",
             b.kind,
             sanitize_for_terminal(&b.node, QUESTION_TEXT_MAX),
@@ -1344,36 +1396,36 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
         );
     }
     if let Some(reason) = view.failure_reason() {
-        println!(
+        say!(
             "  failure: {}",
             sanitize_for_terminal(&reason, QUESTION_TEXT_MAX)
         );
     }
     if let Some(u) = view.usage() {
-        println!("  usage: {}", usage_line(&u));
+        say!("  usage: {}", usage_line(&u));
     }
     if let Some(b) = view.budget(&run_dir) {
         for line in crate::budget::status_lines(&b) {
-            println!("  {line}");
+            say!("  {line}");
         }
     }
     if let Some(n) = apb_mcp::tools::notify::run_block(&run_dir, &view.events) {
         for line in crate::notify::block_lines(&n) {
-            println!("  {line}");
+            say!("  {line}");
         }
     }
     for loss in view.output_losses() {
-        println!(
+        say!(
             "  output cut: {}",
             sanitize_for_terminal(&loss.line(), QUESTION_TEXT_MAX)
         );
     }
     if let Some(d) = view.decisions() {
-        println!("  decisions: {}", d.line());
+        say!("  decisions: {}", d.line());
     }
     if let Some(t) = apb_engine::candidate::trial_of(&run_dir, &view.events) {
         let reason = t.reason.map(|r| format!(": {r}")).unwrap_or_default();
-        println!(
+        say!(
             "  candidate trial: {} {}{}",
             t.version,
             t.verdict,
@@ -1381,17 +1433,17 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
         );
     }
     if let Some(why) = apb_engine::candidate::skipped_of(&run_dir) {
-        println!(
+        say!(
             "  candidate skipped: {}",
             sanitize_for_terminal(&why, QUESTION_TEXT_MAX)
         );
     }
     for line in crate::grade::run_lines(&run_dir) {
-        println!("  grade {line}");
+        say!("  grade {line}");
     }
     // --- 0.23.0: run outcome blocks (C1, C7) ---
     if let Some(goal) = view.goal(&run_dir) {
-        println!(
+        say!(
             "  goal: {} ({})",
             sanitize_for_terminal(&goal.statement, QUESTION_TEXT_MAX),
             goal.line()
@@ -1402,7 +1454,7 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
                 .as_deref()
                 .map(|d| format!(": {d}"))
                 .unwrap_or_default();
-            println!(
+            say!(
                 "    [{}] {} ({}){}",
                 c.status,
                 sanitize_for_terminal(&c.description, QUESTION_TEXT_MAX),
@@ -1412,7 +1464,7 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
         }
     }
     for line in apb_engine::run_outcome::commit_lines(&view.commits(), run_id) {
-        println!(
+        say!(
             "  commit {}",
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
@@ -1421,7 +1473,7 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     // (`apb publish show` prints the full plan).
     for p in view.publish() {
         for line in apb_engine::run_outcome::publish::lines(&p) {
-            println!(
+            say!(
                 "  publish {}",
                 sanitize_for_terminal(&line, QUESTION_TEXT_MAX * 2)
             );
@@ -1432,9 +1484,13 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     // them), findings, warnings, the baseline and the agent's own summary.
     print_outcome(&view.outcome(&run_dir));
     if !view.unknown.is_empty() {
-        println!("  {}", unknown_events_note(view.unknown.len()));
+        say!("  {}", unknown_events_note(view.unknown.len()));
     }
     print_waiting_on_question(view.progress.as_ref());
+    print_next_actions(&apb_engine::next_action::for_surface(
+        redaction,
+        &apb_engine::next_action::Observation::from_view(&run_dir, run_id, view),
+    ));
     ExitCode::SUCCESS
 }
 
@@ -1447,7 +1503,7 @@ const OUTCOME_LINE_MAX: usize = 2000;
 /// terminal.
 fn print_outcome(outcome: &apb_engine::run_outcome::OutcomeSummary) {
     for line in outcome_text(outcome.lines()) {
-        println!("{line}");
+        say!("{line}");
     }
 }
 
@@ -1510,7 +1566,7 @@ fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
 /// A no-op otherwise, so a run not parked on a question prints nothing extra.
 fn print_waiting_on_question(progress: Option<&apb_engine::ProgressSummary>) {
     if let Some(pq) = progress.and_then(|p| p.pending_question.as_ref()) {
-        println!(
+        say!(
             "  waiting on question (node `{}`): {}",
             pq.node,
             sanitize_for_terminal(&pq.question, QUESTION_TEXT_MAX)
@@ -1664,88 +1720,176 @@ pub(crate) fn resume_all_cmd(root: &Path) -> ExitCode {
 /// `apb wait`: blocks on the run with no model in the loop and reports why it
 /// returned. The exit code carries the verdict so a shell caller needs no
 /// parsing: 0 succeeded, 1 failed/aborted, 3 needs input, 4 stopped, 5 timeout.
-pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> ExitCode {
-    use apb_engine::run_wait::{NeedsInput, WaitReason, wait_run};
+pub(crate) fn wait_cmd(
+    root: &Path,
+    run_id: &str,
+    timeout_secs: Option<u64>,
+    follow_auto: bool,
+) -> ExitCode {
+    use apb_engine::run_wait::wait_run;
     // No limit by default: an agent runs this as one background command and is
     // notified when it exits. A century is "no limit" without overflow.
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(100 * 365 * 24 * 3600));
+    if follow_auto {
+        return follow_auto_cmd(root, run_id, timeout);
+    }
     let res = match wait_run(root, run_id, timeout) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("wait failed: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(apb_engine::next_action::verdict::WaitExit::Error.code());
         }
     };
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let actions = apb_engine::next_action::for_surface(
+        &redaction,
+        &apb_engine::next_action::Observation::from_view(&run_dir, run_id, res.view.clone()),
+    );
+    crate::util::with_run_redaction(redaction.run_dir(&run_dir), || {
+        let exit = wait_report(root, run_id, &res, &actions);
+        print_next_actions(&actions);
+        exit
+    })
+}
+
+/// `apb wait --follow-auto`: waits through what the run and its live
+/// children do by themselves and returns on the aggregated verdict (see
+/// [`apb_engine::run_wait::FollowAutoWaiter`]).
+fn follow_auto_cmd(root: &Path, run_id: &str, timeout: Duration) -> ExitCode {
+    use apb_engine::next_action::verdict::WaitExit;
+    let res = match apb_engine::run_wait::FollowAutoWaiter::new(root, run_id)
+        .and_then(|mut w| w.wait(timeout))
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wait failed: {e}");
+            return ExitCode::from(WaitExit::Error.code());
+        }
+    };
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let actions = apb_engine::next_action::for_surface(&redaction, &res.observation);
+    crate::util::with_run_redaction(redaction.run_dir(&run_dir), || {
+        let status = actions.status.as_str();
+        match res.exit {
+            WaitExit::Succeeded | WaitExit::Failed => say!("run {run_id} finished: {status}"),
+            WaitExit::NeedsInput => say!(
+                "run {run_id} needs input ({status}): {}",
+                crate::actions::primary_hint(&actions)
+                    .unwrap_or_else(|| "see the next actions".into())
+            ),
+            WaitExit::Stopped => say!("run {run_id} stopped ({status})"),
+            WaitExit::Timeout => say!("run {run_id} still {status} after the timeout"),
+            WaitExit::Error => {}
+        }
+        print_next_actions(&actions);
+        ExitCode::from(res.exit.code())
+    })
+}
+
+/// The next actions of a run, one block, inside its redaction.
+fn print_next_actions(actions: &apb_engine::next_action::RunActions) {
+    for line in crate::actions::lines(actions) {
+        say!("  {line}");
+    }
+}
+
+/// What `apb wait` prints for the wait's result, and its exit code.
+fn wait_report(
+    root: &Path,
+    run_id: &str,
+    res: &apb_engine::run_wait::RunWaitResult,
+    actions: &apb_engine::next_action::RunActions,
+) -> ExitCode {
+    use apb_engine::run_wait::{NeedsInput, WaitReason};
     let status = res.status.as_str();
+    let exit = ExitCode::from(res.reason.exit(res.status).code());
     let decisions = res.view.decisions();
     let print_decisions = || {
         if let Some(d) = &decisions {
-            println!("  decisions: {}", d.line());
+            say!("  decisions: {}", d.line());
         }
     };
     match res.reason {
         WaitReason::Finished => {
-            println!("run {run_id} finished: {status}");
+            say!("run {run_id} finished: {status}");
             print_decisions();
-            if res.status == RunStatus::Succeeded {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
+            exit
         }
         WaitReason::NeedsInput => {
+            // The gate's own command line from its next action (its node,
+            // its request), else the generic form.
+            use apb_engine::next_action::ActionCode;
+            let line = |codes: &[ActionCode], generic: String| {
+                crate::actions::command_of(actions, run_id, codes).unwrap_or(generic)
+            };
             let how = match res.needs {
-                Some(NeedsInput::Question) => {
-                    format!("a question is pending: `apb answer {run_id} <text>`")
-                }
+                Some(NeedsInput::Question) => format!(
+                    "a question is pending: `{}`",
+                    line(
+                        &[ActionCode::AnswerQuestion],
+                        format!("apb answer {run_id} <text>")
+                    )
+                ),
                 Some(NeedsInput::Review) => format!(
-                    "a human review is pending: `apb review {run_id} <node> --decision <option>`"
+                    "a human review is pending: `{}`",
+                    line(
+                        &[ActionCode::DecideReview, ActionCode::DecidePublish],
+                        format!("apb review {run_id} <node> --decision <option>")
+                    )
                 ),
                 Some(NeedsInput::HostTask) => format!(
-                    "host tasks wait for a host to execute them: `apb tasks {run_id}` lists them, `apb tasks submit {run_id} <task> --status succeeded --output-file <reply>` answers one"
+                    "host tasks wait for a host to execute them: `apb tasks {run_id}` lists them, `{}` answers one",
+                    line(
+                        &[ActionCode::SubmitHostTask],
+                        format!(
+                            "apb tasks submit {run_id} <task> --status succeeded --output-file <reply>"
+                        )
+                    )
                 ),
                 Some(NeedsInput::Supervisor) | None => {
                     "a supervisor decision is pending".to_string()
                 }
             };
-            println!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
+            say!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
             print_decisions();
-            ExitCode::from(3)
+            exit
         }
         WaitReason::Stopped if res.pause().is_some() => {
             let p = res.pause().expect("guarded");
             let how = match res.view.budget(&root.join(".apb/runs").join(run_id)) {
                 Some(b) if b.paused.is_some() => {
                     for line in crate::budget::status_lines(&b) {
-                        println!("{line}");
+                        say!("{line}");
                     }
                     crate::budget::resume_hint(run_id, &b)
                 }
                 _ => format!("`apb resume {run_id}` continues it"),
             };
-            println!(
+            say!(
                 "run {run_id} stopped ({status}): {}; {how}",
                 crate::pause::marker(p)
             );
             print_open_gates(&res.view);
             print_decisions();
-            ExitCode::from(4)
+            exit
         }
         WaitReason::Stopped => {
             if res.driver_alive == Some(false) {
-                println!(
+                say!(
                     "run {run_id} stopped ({status}): its driver is dead; `apb resume {run_id}` continues it"
                 );
             } else {
-                println!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
+                say!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
             }
             print_decisions();
-            ExitCode::from(4)
+            exit
         }
         WaitReason::Timeout => {
-            println!("run {run_id} still {status} after the timeout");
+            say!("run {run_id} still {status} after the timeout");
             print_decisions();
-            ExitCode::from(5)
+            exit
         }
     }
 }
@@ -1757,22 +1901,25 @@ fn print_open_gates(view: &apb_engine::run_view::RunView) {
         return;
     };
     if let Some(q) = &p.pending_question {
-        println!(
+        say!(
             "  open: question (node `{}`): {}",
             q.node,
             sanitize_for_terminal(&q.question, QUESTION_TEXT_MAX)
         );
     }
     if let Some(r) = &p.pending_review {
-        println!(
+        say!(
             "  open: human review (node `{}`): {}",
-            r.node, r.how_to_decide
+            r.node,
+            r.how_to_decide
         );
     }
     for t in &p.pending_tasks {
-        println!(
+        say!(
             "  open: host task `{}` (node `{}`): `apb tasks {}` lists it",
-            t.task_id, t.node, t.run_id
+            t.task_id,
+            t.node,
+            t.run_id
         );
     }
 }
@@ -1846,8 +1993,29 @@ pub(crate) fn review_cmd(
     decision: &str,
     note: &str,
     nonce: Option<&str>,
+    request: Option<crate::actions::RequestArg>,
 ) -> ExitCode {
-    match apb_mcp::tools::review_decide(root, run_id, node_id, decision, note, nonce) {
+    use apb_engine::next_action::RequestKind;
+    let request = match request
+        .map(|r| r.seq_for(&[RequestKind::Review, RequestKind::Publish]))
+        .transpose()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("review failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if is_safe_segment(run_id)
+        && let Some(refusal) = [decision, note]
+            .into_iter()
+            .find_map(|v| unfilled_refusal(&run_dir, run_id, v))
+    {
+        eprintln!("review failed: {refusal}");
+        return ExitCode::from(2);
+    }
+    match apb_mcp::tools::review_decide(root, run_id, node_id, decision, note, nonce, request) {
         Ok(v) => {
             println!(
                 "review posted for {run_id}/{node_id}: {decision} (seq {})",
@@ -1883,7 +2051,38 @@ pub(crate) fn review_cmd(
 /// leans on for that. Without it an unknown or path-traversing run id would
 /// fall through to `post_answer`'s "no pending question" error instead of a
 /// clear "not found".
-pub(crate) fn answer_cmd(root: &Path, run_id: &str, node: Option<&str>, text: &str) -> ExitCode {
+/// Why `value` is refused: it is exactly a placeholder of a command line
+/// printed for the run's next actions (pasted before it was filled in).
+/// `None` for any other value, or when the run cannot be read.
+fn unfilled_refusal(run_dir: &Path, run_id: &str, value: &str) -> Option<String> {
+    let obs = apb_engine::next_action::Observation::load(run_dir, run_id).ok()?;
+    let actions = apb_engine::next_action::next_actions(&obs).actions;
+    apb_engine::next_action::command::is_unfilled(&actions, value).then(|| {
+        format!(
+            "`{}` is a placeholder of the printed command; replace it with your value",
+            sanitize_for_terminal(value, QUESTION_TEXT_MAX)
+        )
+    })
+}
+
+pub(crate) fn answer_cmd(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+    text: &str,
+    request: Option<crate::actions::RequestArg>,
+) -> ExitCode {
+    use apb_engine::next_action::RequestKind;
+    let request = match request
+        .map(|r| r.seq_for(&[RequestKind::Question]))
+        .transpose()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("answer failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
     if !is_safe_segment(run_id) {
         eprintln!("answer failed: run `{run_id}` not found");
         return ExitCode::from(2);
@@ -1893,7 +2092,11 @@ pub(crate) fn answer_cmd(root: &Path, run_id: &str, node: Option<&str>, text: &s
         eprintln!("answer failed: run `{run_id}` not found");
         return ExitCode::from(2);
     }
-    match apb_engine::post_answer(&run_dir, node, text, "human") {
+    if let Some(refusal) = unfilled_refusal(&run_dir, run_id, text) {
+        eprintln!("answer failed: {refusal}");
+        return ExitCode::from(2);
+    }
+    match apb_engine::question::post_answer_to(&run_dir, node, text, "human", request) {
         Ok(seq) => {
             println!("answer posted for {run_id} (seq {seq})");
             ExitCode::SUCCESS

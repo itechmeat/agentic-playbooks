@@ -20,6 +20,7 @@ pub fn reexec_exe() -> io::Result<PathBuf> {
 /// holds that handle until its own `exec`. The window is short but real on a
 /// loaded host; any other error is returned at once.
 pub fn spawn_when_not_busy(cmd: &mut std::process::Command) -> io::Result<std::process::Child> {
+    crate::process_mode::guard()?;
     const ATTEMPTS: u32 = 40;
     const STEP: std::time::Duration = std::time::Duration::from_millis(50);
     let mut attempt = 1;
@@ -52,6 +53,7 @@ fn live_exe_path(exe: PathBuf) -> PathBuf {
 /// [`io::ErrorKind::Unsupported`], which callers map to their own domain
 /// error rather than each re-deciding what an absent symlink API means.
 pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+    crate::process_mode::guard()?;
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link)
@@ -79,6 +81,7 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
 /// [`io::ErrorKind::InvalidInput`] rather than opened. Off unix a symlink
 /// fails with [`io::ErrorKind::Unsupported`] (see [`symlink`]).
 pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    crate::process_mode::guard()?;
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -200,6 +203,7 @@ pub fn read_prefix_capped<R: io::Read + io::Seek>(
 /// again before it is written. A symlink in the source is copied as a
 /// symlink (never followed), and never over an existing entry.
 pub fn copy_tree_no_follow(src: &Path, anchor: &Path, dst: &Path) -> io::Result<()> {
+    crate::process_mode::guard()?;
     ensure_no_symlink_below(anchor, dst)?;
     copy_no_follow_inner(src, dst)
 }
@@ -274,6 +278,7 @@ fn copy_no_follow_inner(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Control files are always written this way: temp + fsync + atomic rename (spec 4.3).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::process_mode::guard()?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -289,6 +294,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// workspace was removed) therefore never brings the deleted tree back, which
 /// the `create_dir_all` in [`atomic_write`] did.
 pub fn atomic_write_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::process_mode::guard()?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -300,6 +306,7 @@ pub fn atomic_write_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Resul
 /// itself or anything above it: `NotFound` when `anchor` is missing, an error
 /// when `dir` is not inside `anchor`. See [`atomic_write_under`].
 pub fn create_dir_under(anchor: &Path, dir: &Path) -> io::Result<()> {
+    crate::process_mode::guard()?;
     if !anchor.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -325,9 +332,89 @@ pub fn create_dir_under(anchor: &Path, dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// [`atomic_write_under`] whose file is created 0600 (owner read and
+/// write) before it appears at the target path: run content an agent may
+/// have echoed a secret into (a transcript, a node output).
+pub fn atomic_write_private_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::process_mode::guard()?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent"))?;
+    create_dir_under(anchor, dir)?;
+    write_via_temp(dir, path, bytes, create_private)
+}
+
+/// `path` opened for appending, created 0600 when missing (an existing
+/// file keeps its mode): a run's journal and its question, answer and
+/// review logs.
+pub fn open_append_private(path: &Path) -> io::Result<File> {
+    crate::process_mode::guard()?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    narrow_open(&file);
+    Ok(file)
+}
+
+/// Clears the group and other bits of an open file, through its handle (so
+/// a path swapped for a link after the open is not followed). A mode given
+/// at open applies only to a file the open creates: one an older apb left
+/// readable beyond its owner keeps its mode otherwise. Best effort; nothing
+/// off unix.
+pub fn narrow_open(file: &File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = file.metadata() {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                let _ = file.set_permissions(fs::Permissions::from_mode(mode & !0o077));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+}
+
+/// Creates the directory `dir` (its parent must exist) with mode 0700 on
+/// unix: a run directory, whose content only its owner may read.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    crate::process_mode::guard()?;
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
 /// Temp + fsync + rename inside `dir`, which must exist.
 fn write_into_existing_dir(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_via_temp(dir, path, bytes, |tmp| File::create(tmp))
+}
+
+/// A new file at `tmp`, created 0600 on unix: no window with default
+/// permissions before a later chmod.
+fn create_private(tmp: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp)
+    }
+    #[cfg(not(unix))]
+    {
+        File::create(tmp)
+    }
 }
 
 /// A temp name in `dir` for writing `path`, unique per write: the pid and
@@ -360,6 +447,7 @@ fn write_via_temp(
     bytes: &[u8],
     create: impl FnOnce(&Path) -> io::Result<File>,
 ) -> io::Result<()> {
+    crate::process_mode::guard()?;
     let tmp = unique_temp(dir, path);
     let res = (|| {
         let mut f = create(&tmp)?;
@@ -379,27 +467,12 @@ fn write_via_temp(
 /// (trust.json, projects.json, suggestions.json), which may contain data that is
 /// privacy-sensitive. Permissions are left untouched on non-unix.
 pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::process_mode::guard()?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
     fs::create_dir_all(dir)?;
-    // The file is created with 0600 permissions right away (on unix): no
-    // window with default permissions before a later chmod.
-    write_via_temp(dir, path, bytes, |tmp| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(tmp)
-        }
-        #[cfg(not(unix))]
-        {
-            File::create(tmp)
-        }
-    })
+    write_via_temp(dir, path, bytes, create_private)
 }
 
 /// RAII lock for a state directory (`<dir>/<lock_name>`), tagged with a unique
@@ -461,6 +534,7 @@ fn lock_dir_stale_after(
     lock_name: &str,
     stale_ms: u128,
 ) -> io::Result<(DirLock, bool)> {
+    crate::process_mode::guard()?;
     fs::create_dir_all(dir)?;
     let path = dir.join(lock_name);
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());

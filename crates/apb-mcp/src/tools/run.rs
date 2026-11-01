@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::actions::ActionCaller;
 use super::{ToolError, resolve_run_dir};
 use apb_engine::control::Control;
 use apb_engine::run_config::ChildExpectation;
@@ -110,10 +111,24 @@ pub fn playbook_run_background(
 
 pub fn runs_list(root: &Path) -> Result<Value, ToolError> {
     let runs = list_runs(root)?;
-    serde_json::to_value(runs).map_err(|e| ToolError::Engine(e.to_string()))
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let runs = runs
+        .into_iter()
+        .map(|run| {
+            let mut v = serde_json::to_value(&run).map_err(|e| ToolError::Engine(e.to_string()))?;
+            redaction.run(&run.run_id).redact_json(&mut v);
+            Ok(v)
+        })
+        .collect::<Result<Vec<Value>, ToolError>>()?;
+    Ok(Value::Array(runs))
 }
 
 pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    run_status_as(root, run_id, ActionCaller::Host)
+}
+
+/// [`run_status`] with the next actions rendered for `caller`.
+pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     // The run view every status surface reports from (`apb runs`, `apb wait`,
     // the dashboard): the pure fold is replayable from the journal alone, and
@@ -121,8 +136,10 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // parent-drive markers) at request time. A live open attempt or a run
     // parked on a wait with a live driver reads `running`, a dead attempt
     // pid `lost`, a dead driver `interrupted`.
-    let view = apb_engine::run_view::RunView::load(&dir, run_id)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let view = std::sync::Arc::new(
+        apb_engine::run_view::RunView::load(&dir, run_id)
+            .map_err(|e| ToolError::Engine(e.to_string()))?,
+    );
     let node_times = apb_engine::liveness::node_times(&view.events);
     let progress = view.progress.as_ref();
     let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
@@ -143,7 +160,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "run_status": view.run_status.as_str(),
         "nodes": view.nodes(),
         "node_times": node_times,
-        "driver_alive": view.driver_alive,
+        "driver_alive": view.driver_alive_json(),
         // The run's working tree (issue #67 item 8): where its agent and
         // script nodes run and what its busy lock covers; null means the
         // project root.
@@ -202,7 +219,10 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     if !branch_failures.is_empty() {
         out["branch_failures"] = json!(branch_failures);
     }
-    Ok(out)
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let actions = super::actions::of_view(&redaction, &dir, run_id, view);
+    super::actions::add_to(&mut out, &actions, caller);
+    Ok(super::redacted_with(&redaction, &dir, out))
 }
 
 /// Issue #192: the candidate trial this run was, with its verdict, the
@@ -474,6 +494,19 @@ pub fn run_wait_result(
     run_id: &str,
     res: &apb_engine::run_wait::RunWaitResult,
 ) -> Result<Value, ToolError> {
+    run_wait_result_as(root, run_id, res, ActionCaller::Host)
+}
+
+/// [`run_wait_result`] with the next actions rendered for `caller`. `next`
+/// is the primary action's reason; without any action, the wait's own
+/// line, which otherwise stays as `instruction` (how to act on it here:
+/// relay a plan, ask the person about a budget, run a host task).
+pub fn run_wait_result_as(
+    root: &Path,
+    run_id: &str,
+    res: &apb_engine::run_wait::RunWaitResult,
+    caller: ActionCaller,
+) -> Result<Value, ToolError> {
     use apb_engine::run_wait::WaitReason;
     // Built from the observation the wait decided on, not a second read: a
     // gate decided in between must not leave `reason: needs_input` without
@@ -509,17 +542,28 @@ pub fn run_wait_result(
             "still running: call run_wait again with the same arguments; do not poll run_status"
         }
     };
+    let dir = resolve_run_dir(root, run_id)?;
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let actions = super::actions::of_view(&redaction, &dir, run_id, res.view.clone());
+    // `next` is the primary action's reason (the same line every surface
+    // leads with); the wait's own instruction for this caller stays beside
+    // it when it says more.
+    let instruction = next;
+    let next = actions.primary().map_or(instruction, |a| a.reason.as_str());
     let mut out = json!({
         "run_id": run_id,
         "reason": res.reason,
         // The status the wait decided on, not a second read's: a run that
         // stopped on a dead driver must never come back as `running`.
         "run_status": res.status.as_str(),
-        "driver_alive": res.driver_alive,
+        "driver_alive": res.view.driver_alive_json(),
         "waited_ms": res.waited.as_millis() as u64,
         "nodes": counts,
         "next": next,
     });
+    if instruction != next {
+        out["instruction"] = json!(instruction);
+    }
     // Which answer channel a `needs_input` is about (`question`, `review`,
     // `supervisor`, `host_task`), as the docs and the tool description name it.
     if res.reason == WaitReason::NeedsInput
@@ -531,7 +575,6 @@ pub fn run_wait_result(
         out["pause"] = json!(p);
     }
     let progress = view.progress.as_ref();
-    let dir = resolve_run_dir(root, run_id)?;
     let fields = [
         (
             "pending_question",
@@ -564,7 +607,8 @@ pub fn run_wait_result(
         }
     }
     super::budget::add_run_blocks(&mut out, &dir, view);
-    Ok(out)
+    super::actions::add_to(&mut out, &actions, caller);
+    Ok(super::redacted_with(&redaction, &dir, out))
 }
 
 pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Value, ToolError> {
@@ -572,12 +616,16 @@ pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Va
     let events = read_events(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let from = from_seq.unwrap_or(0);
     let filtered: Vec<&_> = events.iter().filter(|e| e.seq >= from).collect();
-    Ok(
-        json!({ "events": serde_json::to_value(filtered).map_err(|e| ToolError::Engine(e.to_string()))? }),
-    )
+    let answer = json!({ "events": serde_json::to_value(filtered).map_err(|e| ToolError::Engine(e.to_string()))? });
+    Ok(super::redacted_answer(root, &dir, answer))
 }
 
 pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    run_report_as(root, run_id, ActionCaller::Host)
+}
+
+/// [`run_report`] with the next actions rendered for `caller`.
+pub fn run_report_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<Value, ToolError> {
     // There is no supervisor agent in Phase 3: the report is a light state
     // summary. The full supervisor report is Phase 4. events.jsonl is read once
     // and the playbook snapshot parsed once here; a failing events read
@@ -587,8 +635,10 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // The same run view `run_status` reports from, so the two tools never
     // disagree about one run: status and nodes with the liveness overlay,
     // progress with the pending question and child credit.
-    let view = apb_engine::run_view::RunView::load(&dir, run_id)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let view = std::sync::Arc::new(
+        apb_engine::run_view::RunView::load(&dir, run_id)
+            .map_err(|e| ToolError::Engine(e.to_string()))?,
+    );
     let events = &view.events;
     let readout = view.readout(&dir);
     let pb = readout.playbook.as_ref();
@@ -629,8 +679,11 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         );
     }
     super::notify::add_run_block(&mut base, &dir, events);
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let actions = super::actions::of_view(&redaction, &dir, run_id, view.clone());
+    super::actions::add_to(&mut base, &actions, caller);
 
-    Ok(base)
+    Ok(super::redacted_with(&redaction, &dir, base))
 }
 
 /// The file `run_report` with format html writes, inside the run's
@@ -830,13 +883,17 @@ pub fn run_answer(
     node: Option<&str>,
     answer: &str,
     answered_by: &str,
+    request: Option<u64>,
 ) -> Result<Value, ToolError> {
     let run_dir = resolve_run_dir(root, run_id)?;
-    let seq = apb_engine::post_answer(&run_dir, node, answer, answered_by)?;
+    let seq = apb_engine::question::post_answer_to(&run_dir, node, answer, answered_by, request)?;
     Ok(json!({ "posted_seq": seq }))
 }
 
 /// A gate decision: writes a command into the run's reviews.jsonl channel.
+/// `request` is the journal seq of the review request the decision answers
+/// (a next action's `request`): a request a later round replaced is refused
+/// as a conflict, one already decided too.
 /// For a `publish` node, `nonce` is the nonce of the plan the person saw
 /// (`pending_review.publish.nonce`); the engine refuses a stale or missing
 /// one for `publish`, and stamps a `skip` without one with the open plan's.
@@ -848,9 +905,10 @@ pub fn review_decide(
     decision: &str,
     note: &str,
     nonce: Option<&str>,
+    request: Option<u64>,
 ) -> Result<Value, ToolError> {
     let run_dir = resolve_run_dir(root, run_id)?;
-    let seq = apb_engine::review::post_decision(
+    let seq = apb_engine::review::post_decision_to(
         &run_dir,
         apb_engine::ReviewCommand {
             node: node.to_string(),
@@ -858,6 +916,7 @@ pub fn review_decide(
             note: note.to_string(),
         },
         nonce.map(str::to_string),
+        request,
     )?;
     Ok(json!({ "posted_seq": seq }))
 }

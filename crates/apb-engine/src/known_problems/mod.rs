@@ -79,8 +79,11 @@ pub fn observe(root: &Path, run_dir: &Path) -> Result<usize, EngineError> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let scrubber = Scrubber::for_workspace(root, Vec::new());
-    let mut seen = extract::sightings(&run_id, &events, &scrubber);
+    // The run's own secret values (and its ancestors') go with the
+    // workspace's: a sighting is stored beyond the run and read later.
+    let redactor = crate::run_redact::RunRedactor::for_run(root, run_dir);
+    let scrubber = redactor.scrubber();
+    let mut seen = extract::sightings(&run_id, &events, scrubber);
     if seen.is_empty() {
         // Nothing to add: the store is left as it is (no file per run).
         return Ok(0);
@@ -98,7 +101,7 @@ pub fn observe(root: &Path, run_dir: &Path) -> Result<usize, EngineError> {
                     &o.scope,
                     manifest.as_ref(),
                     snapshot.as_ref(),
-                    &scrubber,
+                    scrubber,
                 )
             })
             .clone();
@@ -839,5 +842,5 @@ fn person_word_close(
 /// The root a run directory belongs to, for the hooks that only know the
 /// directory.
 pub(crate) fn root_of(run_dir: &Path) -> PathBuf {
-    crate::run_retro::project_root_of(run_dir).unwrap_or_else(|| run_dir.to_path_buf())
+    crate::run_config::project_root_of(run_dir).unwrap_or_else(|| run_dir.to_path_buf())
 }

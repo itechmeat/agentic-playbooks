@@ -29,8 +29,9 @@ use serde::{Deserialize, Serialize};
 pub use key::{MemoryError, MemoryKey};
 pub use schema::{Incompat, check_value, params_schema_digest};
 
+use crate::run_params::Sensitive;
 use crate::schema::Param;
-use crate::token_shape::{looks_like_credential, name_looks_secret};
+use crate::token_shape::looks_like_credential;
 use store::MemoryFile;
 
 /// Where the instruction a start would use comes from.
@@ -277,16 +278,14 @@ fn refusal(params: &[Param], name: &str, value: &str) -> Option<String> {
     let Some(p) = params.iter().find(|p| p.name == name) else {
         return Some("unknown_param".to_string());
     };
-    if p.secret {
-        return Some("secret_param".to_string());
-    }
-    if name_looks_secret(name) {
-        return Some("param_looks_secret".to_string());
+    let why = crate::run_params::sensitive(p.secret, name, value);
+    if let Some(s @ (Sensitive::Declared | Sensitive::Named)) = why {
+        return Some(s.as_str().to_string());
     }
     if let Err(reason) = check_value(p, value) {
         return Some(reason.as_str().to_string());
     }
-    looks_like_credential(value).then(|| "value_looks_secret".to_string())
+    why.map(|s| s.as_str().to_string())
 }
 
 /// Removes what `what` names from `key`'s memory (the file goes once it
@@ -462,5 +461,51 @@ pub fn apply(
         params,
         instruction,
         remembered,
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    fn params() -> Vec<Param> {
+        yaml_serde::from_str(
+            "- { name: message, type: text, secret: true }\n- { name: api_key, type: text }\n- { name: count, type: int }\n- { name: note, type: text }\n",
+        )
+        .unwrap()
+    }
+
+    /// A credential-shaped value, built at run time.
+    fn token() -> String {
+        format!("ghp_{}", "Zq8vR2kM".repeat(5))
+    }
+
+    #[test]
+    fn the_refusal_codes_are_the_shared_rules_in_their_old_order() {
+        let p = params();
+        assert_eq!(
+            refusal(&p, "missing", "x").as_deref(),
+            Some("unknown_param")
+        );
+        assert_eq!(
+            refusal(&p, "message", "garden").as_deref(),
+            Some("secret_param")
+        );
+        assert_eq!(
+            refusal(&p, "api_key", "garden").as_deref(),
+            Some("param_looks_secret")
+        );
+        assert_eq!(
+            refusal(&p, "note", &token()).as_deref(),
+            Some("value_looks_secret")
+        );
+        // An invalid value names its check before the credential shape.
+        let count = p.iter().find(|x| x.name == "count").unwrap();
+        let invalid = check_value(count, &token()).unwrap_err();
+        assert_eq!(
+            refusal(&p, "count", &token()).as_deref(),
+            Some(invalid.as_str())
+        );
+        assert_eq!(refusal(&p, "note", "garden"), None);
     }
 }

@@ -511,9 +511,12 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
     // The lock covers the run's working tree when preparation resolved one
     // (issue #67 item 8): the journal already names it, and the parent handed
     // over exactly that tree's lock.
+    //
+    // A start that shares the workdir (`--allow-shared-workdir`) took no lock
+    // and handed none over, so its driver takes none either.
     let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let tree = state.worktree.as_deref().map(Path::new);
-    let mut guard = if is_write {
+    let mut guard = if is_write && !cfg.shared_workdir {
         let wait = cfg
             .workdir_queue_wait_ms
             .map(Duration::from_millis)

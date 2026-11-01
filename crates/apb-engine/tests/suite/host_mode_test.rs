@@ -1820,3 +1820,60 @@ fn an_allowlist_profile_in_host_mode_journals_nothing_and_doctor_warns() {
         "{checks:?}"
     );
 }
+
+/// A host-task decision asked inside a run whose `message` param is
+/// declared secret, its question holding that value: the provider never
+/// receives the value, with `privacy.redact` off as well as on.
+#[test]
+fn a_host_task_decision_never_sends_a_declared_secret_of_its_run() {
+    const SECRET: &str = "violet hedgehog";
+    for redact in [false, true] {
+        let h = Host::new(
+            &one_node("").replace(
+                "defaults:\n",
+                "params:\n  - { name: message, type: text, secret: true }\ndefaults:\n",
+            ),
+            &[],
+        );
+        let stub = StubServer::start_with_fallback(vec![], choice_reply("sans"));
+        h.decisions(
+            &stub.base_url,
+            &format!("privacy: {{ send: [prompts], redact: {redact} }}\n"),
+        );
+        let _lock = common::env_lock();
+        let _env = h.env();
+        let run_id = run_background(
+            h.root.path(),
+            "h",
+            None,
+            RunOptions {
+                params: [("message".to_string(), SECRET.to_string())].into(),
+                execution: ExecutionRequest {
+                    client: Some("test-host".into()),
+                    ..HOST
+                },
+                allow_shared_workdir: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let task = h.task(&run_id, "w");
+        let asked = h.ask_about(Some(&run_id), &format!("a client named {SECRET}"));
+        assert!(
+            matches!(asked, AskOutcome::Answered(_)),
+            "not answered (redact: {redact})"
+        );
+        let requests = stub.requests();
+        assert!(!requests.is_empty());
+        assert!(
+            requests.iter().all(|r| !r.contains(SECRET)),
+            "the declared value reached the provider (redact: {redact})"
+        );
+        assert!(
+            requests.iter().any(|r| r.contains("[redacted]")),
+            "the question did not carry the echo (redact: {redact})"
+        );
+        h.submit(&run_id, &task.task_id, SubmitStatus::Succeeded, "done");
+        assert_eq!(h.finish(&run_id).0, RunStatus::Succeeded);
+    }
+}

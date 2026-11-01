@@ -2,6 +2,7 @@
 //! rmcp plumbing in [`crate::server`]. One module per domain; this file holds
 //! the shared error type and the two lookups every domain starts from.
 
+pub mod actions;
 pub mod budget;
 pub mod candidate;
 pub mod capture;
@@ -79,6 +80,7 @@ impl From<EngineError> for ToolError {
             EngineError::NotFound(m) => ToolError::NotFound(m),
             EngineError::Registry(RegistryError::NotFound(w)) => ToolError::NotFound(w),
             EngineError::Conflict(m) => ToolError::Conflict(m),
+            m @ EngineError::AlreadyAnswered(_) => ToolError::Conflict(m.to_string()),
             // A workdir held by another live write-run is a retry-actionable
             // conflict, not a hard failure (#102.5): the caller can try again
             // shortly instead of treating this like any other engine error.
@@ -128,6 +130,33 @@ pub(crate) fn scope_parent(
 
 fn open(root: &Path) -> Result<Registry, ToolError> {
     Registry::open(root).map_err(ToolError::from)
+}
+
+/// A run surface's answer about the run at `dir` as it leaves apb: every
+/// secret value of the run, its ancestors and the workspace replaced, the
+/// host tasks it delivers to the executor kept
+/// ([`apb_engine::run_redact::RunRedactor::redact_answer`]).
+pub(crate) fn redacted_answer(
+    root: &Path,
+    dir: &Path,
+    answer: serde_json::Value,
+) -> serde_json::Value {
+    redacted_with(
+        &apb_engine::run_redact::WorkspaceRedaction::new(root),
+        dir,
+        answer,
+    )
+}
+
+/// [`redacted_answer`] through a workspace redaction the caller already
+/// resolved (and used for the answer's next actions).
+pub(crate) fn redacted_with(
+    redaction: &apb_engine::run_redact::WorkspaceRedaction,
+    dir: &Path,
+    mut answer: serde_json::Value,
+) -> serde_json::Value {
+    redaction.run_dir(dir).redact_answer(&mut answer);
+    answer
 }
 
 /// Resolves the run directory, uniformly rejecting an unsafe run_id (path traversal)

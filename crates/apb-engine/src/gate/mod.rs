@@ -14,7 +14,10 @@
 //! ignore the knob on every surface (secret egress).
 
 pub mod isolation;
+pub(crate) mod params;
 pub(crate) mod trust_scan;
+
+pub use params::{PARAM_NEEDS_VALUE, check_params, short_secret_warning};
 
 use std::path::Path;
 

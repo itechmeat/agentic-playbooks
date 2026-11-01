@@ -88,11 +88,11 @@ impl ListRun<'_, '_, '_> {
         let stem = item_hash(&item.id);
         let path = dir.join(format!("{stem}.json"));
         let text = serde_json::to_string(&item.value).unwrap_or_default();
-        apb_core::fsutil::atomic_write_under(run_dir, &path, text.as_bytes())?;
+        apb_core::fsutil::atomic_write_private_under(run_dir, &path, text.as_bytes())?;
         let output = match output {
             Some(o) => {
                 let p = dir.join(format!("{stem}.output.json"));
-                apb_core::fsutil::atomic_write_under(run_dir, &p, o.as_bytes())?;
+                apb_core::fsutil::atomic_write_private_under(run_dir, &p, o.as_bytes())?;
                 Some(p)
             }
             None => None,

@@ -9,8 +9,6 @@
     fetchRunGrades,
     fetchRunReport,
     gradeRun,
-    postAnswer,
-    postReview,
     reopenRunGrading,
     runReportHtmlUrl,
     type GraderChoice,
@@ -20,7 +18,8 @@
   import { interventionJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
   import { listProgressByNode } from '../lib/listprogress'
-  import { runGates } from '../lib/rungates'
+  import { runGates, type QuestionEntry } from '../lib/rungates'
+  import { postDecision, postReply, type PostTarget } from '../lib/runposts'
   import { formatCost, formatTokens, runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import {
     currentStage,
@@ -42,6 +41,7 @@
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
   import FitTop from '../lib/FitTop.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
+  import NextActionsPanel from '../lib/NextActionsPanel.svelte'
   import PublishPanel from '../lib/PublishPanel.svelte'
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
@@ -67,7 +67,8 @@
   import * as Tabs from '$lib/components/ui/tabs'
   import { isTerminalRunStatus, runStatusClass, showsDriverDead } from '../lib/status'
   import { statusColor } from '../lib/profilecolor'
-  import { pauseLine } from '../lib/pause'
+  import { canResume, pauseLine } from '../lib/pause'
+  import { pageControls } from '../lib/nextactions'
   import { toast } from 'svelte-sonner'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
 
@@ -105,6 +106,11 @@
   const pending = $derived(gates?.reviews ?? [])
   const publishes = $derived(gates?.publishes ?? [])
   const questions = $derived(gates?.questions ?? [])
+  // The waits the page already has a control for, so the next-actions
+  // panel shows each one's controls only once.
+  const controls = $derived(
+    detail && gates ? pageControls(gates, canResume(detail.run_status, detail.driver_alive === false)) : [],
+  )
   const waiting = $derived(gates?.waits ?? [])
   const supervisor = $derived(gates?.supervisor ?? null)
   const hostTasks = $derived(gates?.tasks ?? [])
@@ -254,31 +260,44 @@
     return () => clearInterval(t)
   })
 
-  // `nonce` answers a publish gate: the nonce of the plan shown.
-  async function decide(node: string, decision: string, nonce?: string) {
-    deciding = `${node}:${decision}`
+  // A gate decision, posted to the gate's own run and naming its request
+  // (`runposts`, shared with the next actions panel); a publish gate's
+  // target carries the nonce of the plan shown.
+  async function decide(target: PostTarget, decision: string) {
+    const nonce = target.nonce
+    deciding = `${target.node}:${decision}`
     try {
-      await postReview(id, node, decision, '', workspace, nonce)
+      await postDecision(target, decision, workspace)
       await load()
     } catch (e) {
-      // A publish decision fails when the plan moved on (a stale nonce): load
-      // the run again so the panel shows the current plan and its nonce.
+      // A publish decision fails when the plan moved on (a stale nonce), and
+      // any decision when its request was replaced: load the run again so
+      // the page shows what holds now.
       toast.error(nonce ? 'Publish decision failed' : 'Review failed', {
         description: String(e),
       })
-      if (nonce) await load().catch(() => {})
+      await load().catch(() => {})
     } finally {
       deciding = null
     }
   }
 
-  async function answer(node: string, value: string) {
+  // The publish panel names a gate by its node and the nonce it shows.
+  function decidePublish(node: string, decision: string, nonce: string) {
+    const gate = publishes.find((g) => g.node === node)
+    const target: PostTarget = { runId: gate?.runId ?? id, node, nonce }
+    if (gate?.request !== undefined) target.request = gate.request
+    return decide(target, decision)
+  }
+
+  async function answer(question: QuestionEntry, value: string) {
     answering = true
     try {
-      await postAnswer(id, { node, answer: value }, workspace)
+      await postReply(question, value, workspace)
       await load()
     } catch (e) {
       toast.error('Answer failed', { description: String(e) })
+      await load().catch(() => {})
     } finally {
       answering = false
     }
@@ -667,7 +686,7 @@
         <QuestionPanel question={q} posting={answering} onAnswer={answer} />
       {/each}
 
-      <PublishPanel runId={id} views={detail.publish} gates={publishes} posting={deciding} onDecide={decide} />
+      <PublishPanel runId={id} views={detail.publish} gates={publishes} posting={deciding} onDecide={decidePublish} />
 
       {#if pending.length}
         <section class="box glow flex flex-col gap-3 px-4 pt-4 pb-3" style:--k="var(--c-amber)">
@@ -687,7 +706,7 @@
                     variant="outline"
                     size="sm"
                     class="h-7"
-                    onclick={() => decide(pr.node, opt)}
+                    onclick={() => decide(pr, opt)}
                     disabled={deciding === `${pr.node}:${opt}`}
                   >
                     {opt}
@@ -733,6 +752,14 @@
         </section>
       {/if}
 
+      <NextActionsPanel
+        actions={detail.next_actions}
+        runId={detail.run_id}
+        playbook={detail.playbook}
+        {workspace}
+        {controls}
+        onchange={load}
+      />
       <RunVerdictPanel outcome={detail.outcome} />
       {#key `${workspace}/${id}`}
         <ListProgressPanel lists={detail.lists} />

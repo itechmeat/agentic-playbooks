@@ -107,7 +107,7 @@ fn run_remember_keeps_the_input_for_the_next_start() {
 fn runs_command_lists_the_run() {
     let dir = seeded();
     playbook()
-        .args(["run", "noagent"])
+        .args(["run", "noagent", "--param", "who=world"])
         .current_dir(dir.path())
         .assert()
         .success();
