@@ -1654,6 +1654,13 @@ impl AnswerBy {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Edge {
+    /// An optional authored id (`[a-z0-9][a-z0-9_-]*`, at most 64
+    /// characters, unique among the playbook's edges; validator V121). It
+    /// gives the edge a stable address (`id:<id>`, see
+    /// [`crate::edge_address`]); an edge without one is addressed by its ends
+    /// and its position among the id-less edges with those ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub from: String,
     pub to: String,
     #[serde(default)]

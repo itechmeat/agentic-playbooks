@@ -254,14 +254,15 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                         Severity::Warning => "warning",
                     };
                     println!(
-                        "{id}: {sev} {} {}{}",
+                        "{id}: {sev} {} {}{}{}",
                         issue.code,
                         issue.message,
                         issue
                             .node
                             .as_ref()
                             .map(|n| format!(" (node `{n}`)"))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        apb_core::validate::edges_segment(&issue.edges)
                     );
                 }
                 // The local preflight (requires, connectors): warnings, since

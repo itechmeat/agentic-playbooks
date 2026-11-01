@@ -1,0 +1,561 @@
+{
+  "cases": [
+    {
+      "name": "plain fan-out",
+      "edges": [
+        {
+          "from": "start",
+          "to": "a"
+        },
+        {
+          "from": "a",
+          "to": "b"
+        },
+        {
+          "from": "a",
+          "to": "c"
+        }
+      ],
+      "expected": [
+        {
+          "address": {
+            "kind": "derived",
+            "from": "start",
+            "to": "a",
+            "ordinal": 1
+          },
+          "rendered": "e:start>a#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a",
+            "to": "b",
+            "ordinal": 1
+          },
+          "rendered": "e:a>b#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a",
+            "to": "c",
+            "ordinal": 1
+          },
+          "rendered": "e:a>c#1",
+          "rank": 1,
+          "check": {
+            "kind": "parallel"
+          }
+        }
+      ]
+    },
+    {
+      "name": "duplicate pair",
+      "edges": [
+        {
+          "from": "gate",
+          "to": "discard",
+          "condition": {
+            "type": "output_field",
+            "node": "gate",
+            "field": "verdict",
+            "equals": "drop"
+          }
+        },
+        {
+          "from": "gate",
+          "to": "keep",
+          "condition": {
+            "type": "output_field",
+            "node": "gate",
+            "field": "verdict",
+            "equals": "keep"
+          }
+        },
+        {
+          "from": "gate",
+          "to": "discard",
+          "fallback": true
+        }
+      ],
+      "expected": [
+        {
+          "address": {
+            "kind": "derived",
+            "from": "gate",
+            "to": "discard",
+            "ordinal": 1
+          },
+          "rendered": "e:gate>discard#1",
+          "rank": 0,
+          "check": {
+            "kind": "ordered",
+            "n": 1
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "gate",
+            "to": "keep",
+            "ordinal": 1
+          },
+          "rendered": "e:gate>keep#1",
+          "rank": 1,
+          "check": {
+            "kind": "ordered",
+            "n": 2
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "gate",
+            "to": "discard",
+            "ordinal": 2
+          },
+          "rendered": "e:gate>discard#2",
+          "rank": 2,
+          "check": {
+            "kind": "fallback"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fallback declared first",
+      "edges": [
+        {
+          "from": "a",
+          "to": "z",
+          "fallback": true
+        },
+        {
+          "from": "a",
+          "to": "x",
+          "condition": {
+            "type": "node_status",
+            "node": "a",
+            "equals": "success"
+          }
+        },
+        {
+          "from": "a",
+          "to": "y",
+          "condition": {
+            "type": "node_status",
+            "node": "a",
+            "equals": "failure"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a",
+            "to": "z",
+            "ordinal": 1
+          },
+          "rendered": "e:a>z#1",
+          "rank": 0,
+          "check": {
+            "kind": "fallback"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a",
+            "to": "x",
+            "ordinal": 1
+          },
+          "rendered": "e:a>x#1",
+          "rank": 1,
+          "check": {
+            "kind": "ordered",
+            "n": 1
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a",
+            "to": "y",
+            "ordinal": 1
+          },
+          "rendered": "e:a>y#1",
+          "rank": 2,
+          "check": {
+            "kind": "ordered",
+            "n": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "authored ids",
+      "edges": [
+        {
+          "id": "retry",
+          "from": "check",
+          "to": "fix",
+          "condition": {
+            "type": "node_status",
+            "node": "a",
+            "equals": "failure"
+          },
+          "max_traversals": 3
+        },
+        {
+          "from": "check",
+          "to": "fix",
+          "fallback": true
+        },
+        {
+          "id": "done-1",
+          "from": "check",
+          "to": "fin",
+          "condition": {
+            "type": "node_status",
+            "node": "a",
+            "equals": "success"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "address": {
+            "kind": "authored",
+            "id": "retry"
+          },
+          "rendered": "id:retry",
+          "rank": 0,
+          "check": {
+            "kind": "ordered",
+            "n": 1
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "check",
+            "to": "fix",
+            "ordinal": 1
+          },
+          "rendered": "e:check>fix#1",
+          "rank": 1,
+          "check": {
+            "kind": "fallback"
+          }
+        },
+        {
+          "address": {
+            "kind": "authored",
+            "id": "done-1"
+          },
+          "rendered": "id:done-1",
+          "rank": 2,
+          "check": {
+            "kind": "ordered",
+            "n": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "awkward node ids",
+      "edges": [
+        {
+          "from": "a->b",
+          "to": "c"
+        },
+        {
+          "from": "a",
+          "to": "b->c"
+        },
+        {
+          "from": "b#2",
+          "to": "x%y"
+        },
+        {
+          "from": "b#2",
+          "to": "x%y"
+        },
+        {
+          "from": "étape",
+          "to": "fin"
+        },
+        {
+          "from": "with space",
+          "to": "fin"
+        }
+      ],
+      "expected": [
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a->b",
+            "to": "c",
+            "ordinal": 1
+          },
+          "rendered": "e:a-%3Eb>c#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "a",
+            "to": "b->c",
+            "ordinal": 1
+          },
+          "rendered": "e:a>b-%3Ec#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "b#2",
+            "to": "x%y",
+            "ordinal": 1
+          },
+          "rendered": "e:b%232>x%25y#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "b#2",
+            "to": "x%y",
+            "ordinal": 2
+          },
+          "rendered": "e:b%232>x%25y#2",
+          "rank": 1,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "étape",
+            "to": "fin",
+            "ordinal": 1
+          },
+          "rendered": "e:%C3%A9tape>fin#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        },
+        {
+          "address": {
+            "kind": "derived",
+            "from": "with space",
+            "to": "fin",
+            "ordinal": 1
+          },
+          "rendered": "e:with%20space>fin#1",
+          "rank": 0,
+          "check": {
+            "kind": "parallel"
+          }
+        }
+      ]
+    }
+  ],
+  "strings": [
+    {
+      "address": {
+        "kind": "derived",
+        "from": "start",
+        "to": "a",
+        "ordinal": 1
+      },
+      "rendered": "e:start>a#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a",
+        "to": "b",
+        "ordinal": 1
+      },
+      "rendered": "e:a>b#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a",
+        "to": "c",
+        "ordinal": 1
+      },
+      "rendered": "e:a>c#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "gate",
+        "to": "discard",
+        "ordinal": 1
+      },
+      "rendered": "e:gate>discard#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "gate",
+        "to": "keep",
+        "ordinal": 1
+      },
+      "rendered": "e:gate>keep#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "gate",
+        "to": "discard",
+        "ordinal": 2
+      },
+      "rendered": "e:gate>discard#2"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a",
+        "to": "z",
+        "ordinal": 1
+      },
+      "rendered": "e:a>z#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a",
+        "to": "x",
+        "ordinal": 1
+      },
+      "rendered": "e:a>x#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a",
+        "to": "y",
+        "ordinal": 1
+      },
+      "rendered": "e:a>y#1"
+    },
+    {
+      "address": {
+        "kind": "authored",
+        "id": "retry"
+      },
+      "rendered": "id:retry"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "check",
+        "to": "fix",
+        "ordinal": 1
+      },
+      "rendered": "e:check>fix#1"
+    },
+    {
+      "address": {
+        "kind": "authored",
+        "id": "done-1"
+      },
+      "rendered": "id:done-1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a->b",
+        "to": "c",
+        "ordinal": 1
+      },
+      "rendered": "e:a-%3Eb>c#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "a",
+        "to": "b->c",
+        "ordinal": 1
+      },
+      "rendered": "e:a>b-%3Ec#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "b#2",
+        "to": "x%y",
+        "ordinal": 1
+      },
+      "rendered": "e:b%232>x%25y#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "b#2",
+        "to": "x%y",
+        "ordinal": 2
+      },
+      "rendered": "e:b%232>x%25y#2"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "étape",
+        "to": "fin",
+        "ordinal": 1
+      },
+      "rendered": "e:%C3%A9tape>fin#1"
+    },
+    {
+      "address": {
+        "kind": "derived",
+        "from": "with space",
+        "to": "fin",
+        "ordinal": 1
+      },
+      "rendered": "e:with%20space>fin#1"
+    }
+  ],
+  "invalid": [
+    "",
+    "id:",
+    "e:a>b",
+    "e:a>b#0",
+    "e:a>b#01",
+    "e:a>b#x",
+    "e:>b#1",
+    "e:a>#1",
+    "e:a%3eb>c#1",
+    "e:%61>b#1",
+    "e:a b>c#1",
+    "e:a%3>c#1",
+    "x:a",
+    "id:a b"
+  ]
+}

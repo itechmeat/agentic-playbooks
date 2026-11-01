@@ -164,6 +164,7 @@ pub(crate) fn advise(runner: &DecisionRunner, journal: &dyn DecisionJournal, f: 
     let outcome = runner.decide(
         journal,
         DecisionCall {
+            edge_addresses: BTreeMap::new(),
             site: UseSite::RetryAdvice,
             node: Some(f.node),
             attempt: Some(f.attempt),

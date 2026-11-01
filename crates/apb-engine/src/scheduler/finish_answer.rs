@@ -126,6 +126,7 @@ mod tests {
             by: None,
             explicit,
             launch: None,
+            definition: None,
         }
     }
 

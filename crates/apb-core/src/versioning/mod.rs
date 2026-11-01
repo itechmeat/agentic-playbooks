@@ -30,7 +30,7 @@ mod imported;
 mod sidecar;
 
 pub use crate::candidate::policy::{PromotePolicy, promote_policy};
-pub use diff::{VersionDiff, diff_definitions, line_diff};
+pub use diff::{EdgeCorrespondence, EdgeOrderChange, VersionDiff, diff_definitions, line_diff};
 pub use error::VersioningError;
 pub use imported::{
     BundleOrigin, ImportProvenance, MAX_FILE_NAME, ScriptEntry, sanitize_file_name,
@@ -713,14 +713,12 @@ pub(crate) fn create_patch_version_with(
         return Err(VersioningError::NotFound(format!("{id}@{base_version}")));
     }
     if !matches!(classification, "improvement" | "workaround") {
-        return Err(VersioningError::Validation(vec![Issue {
-            code: "classification",
-            severity: Severity::Error,
-            message: format!(
-                "classification `{classification}` must be `improvement` or `workaround`"
-            ),
-            node: None,
-        }]));
+        return Err(VersioningError::Validation(vec![Issue::new::<String>(
+            "classification",
+            Severity::Error,
+            None,
+            format!("classification `{classification}` must be `improvement` or `workaround`"),
+        )]));
     }
     if parse_version(base_version).is_none() {
         return Err(VersioningError::Conflict(format!(

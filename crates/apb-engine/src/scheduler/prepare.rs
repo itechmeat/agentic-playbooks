@@ -173,6 +173,7 @@ fn prep_try_unstarted<T, E: Into<EngineError>>(
         let _ = log.append(EventPayload::RunStarted {
             playbook: u.playbook.into(),
             version: u.version.into(),
+            definition: None,
         });
         let _ = apb_core::run_origin::stamp(u.run_dir, u.run_id);
         finalize_prepare_failure(log, e.into())
@@ -843,6 +844,10 @@ pub(crate) fn prepare_run_target(
     } else {
         loaded.yaml.clone()
     };
+    // The exact bytes this start executes, kept as the run's first stored
+    // definition; their digest is journaled on `run_started` below, the
+    // journal's own evidence of what the start executes (surfaces only).
+    let definition = crate::run_definitions::store_best_effort(&run_dir, snapshot_yaml.as_bytes());
     prep_try_unstarted(
         &mut log,
         &unstarted,
@@ -1061,6 +1066,7 @@ pub(crate) fn prepare_run_target(
     log.append(EventPayload::RunStarted {
         playbook: id.into(),
         version: loaded.version.clone(),
+        definition: Some(definition),
     })?;
     // Run provenance (spec 3): the definition scope, content fingerprint,
     // execution root, and profiles used. A separate event right after

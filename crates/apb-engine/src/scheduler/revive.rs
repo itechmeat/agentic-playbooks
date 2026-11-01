@@ -405,6 +405,7 @@ edges:
             to: to.into(),
             via_policy: false,
             uncounted: true,
+            edges: Vec::new(),
         }
     }
 
@@ -546,6 +547,7 @@ edges:
         let mut run = Run::new(vec![EventPayload::RunStarted {
             playbook: "r".into(),
             version: "1.0.0".into(),
+            definition: None,
         }]);
         let r = rebuild(&p, &mut run, &["start"]);
         assert!(r.revivals.is_empty() && r.records.is_empty());
@@ -608,6 +610,7 @@ edges:
             by: None,
             explicit: true,
             launch: None,
+            definition: None,
         });
         events.push(revived_record("j", &["c2"], "c"));
         let mut run = Run::new(events);

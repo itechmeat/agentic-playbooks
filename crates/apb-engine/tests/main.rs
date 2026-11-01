@@ -221,6 +221,9 @@ mod decision_uses_test;
 mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]
 mod digest_binding_test;
+#[cfg(unix)]
+#[path = "suite/edge_route_test.rs"]
+mod edge_route_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
 #[cfg(unix)]

@@ -139,6 +139,7 @@ fn wake_from_asked_question_still_reaches_supervisor_wait_event_after_answer() {
     log.append(EventPayload::RunStarted {
         playbook: "p".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log.append(EventPayload::NodeStarted {

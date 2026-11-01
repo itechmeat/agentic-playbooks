@@ -107,11 +107,33 @@ Per playbook version:
   graded run has no quality rows, and `apb grade` (or the dashboard's run
   page) is how a run gets graded.
 
-Per node: the runs it ran in; first pass (its first result was a success on
-attempt 1, with no retry, fallback or later re-entry); retries, fallbacks and
-re-entries; the median duration (`node_started` to `node_finished`) and, when
-the node declares `expected_duration`, how many executions took longer; the
-models its attempts ran on and `model_mismatch`.
+Per node: its executions, counted from the journal's order rather than from
+`node_started` alone. Execution `n` of a node is the work its `n`-th
+`node_finished` ended; it begins at the first `node_started` after the
+previous finish, or at the finish itself when the node wrote none (a finish
+node without a prompt). The figures:
+
+- `executions`: executions begun, a `join: any` race loser left out;
+  `completed` the ones that ended, `open` the ones still running, paused
+  (a quota pause included) or cut short, and `failed` the completed ones
+  that ended `failed` or `timed_out`;
+- `cancelled`: race losers, counted apart;
+- `runs`: the runs with at least one execution counted in `executions`;
+- `re-entries`: `executions - runs`, the executions after the first in the
+  same run, never negative;
+- `in_runs`: the runs whose definition contains the node. Every node of a
+  run's definition has a row, so a node no run executed shows as `not
+  executed in N of M runs` with zero executions.
+
+Then first pass (its first result was a success on attempt 1, with no retry,
+fallback or later re-entry); retries and fallbacks; the median duration
+(`node_started` to `node_finished`) and, when the node declares
+`expected_duration`, how many executions took longer; the models its
+attempts ran on and `model_mismatch`.
+
+Changed meaning since 1.0.0-beta.2: a race loser no longer counts in `runs`
+(it was a run the node "started in"), and a finish without a prompt now
+counts as executed.
 
 Every rate is printed with its count (`7/9 (78%)`), and a version with fewer
 than 10 runs carries a note: small samples mislead.

@@ -723,6 +723,7 @@ fn ask_in_run(root: &Path, run_id: &str, req: &AskRequest) -> Result<AskOutcome,
         run_dir: run_dir.clone(),
     };
     let call = DecisionCall {
+        edge_addresses: BTreeMap::new(),
         site: UseSite::HostTask,
         node,
         attempt,

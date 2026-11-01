@@ -702,7 +702,7 @@ fn a_judge_self_edge_loops_to_its_cap_then_takes_the_fallback() {
     let counted = events
         .iter()
         .filter(|e| {
-            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, via_policy: false, uncounted: false }
+            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, via_policy: false, uncounted: false, .. }
                 if from == "review" && to == "review")
         })
         .count();

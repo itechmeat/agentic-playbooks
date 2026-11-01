@@ -150,6 +150,7 @@ fn run_started() -> EventPayload {
     EventPayload::RunStarted {
         playbook: "lin".into(),
         version: "1.0.0".into(),
+        definition: None,
     }
 }
 
@@ -350,6 +351,7 @@ fn run_resumed_serializes_with_snake_case_tag() {
         by: None,
         explicit: false,
         launch: None,
+        definition: None,
     };
     let json = serde_json::to_string(&payload).unwrap();
     assert!(
@@ -409,6 +411,7 @@ fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
             EventPayload::RunStarted {
                 playbook: "rloop".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
             EventPayload::NodeStarted {
                 node: "start".into(),
@@ -420,6 +423,7 @@ fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
                 to: "check".into(),
                 via_policy: false,
                 uncounted: true,
+                edges: Vec::new(),
             },
             EventPayload::NodeStarted {
                 node: "check".into(),
@@ -431,6 +435,7 @@ fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
                 to: "tick".into(),
                 via_policy: false,
                 uncounted: true,
+                edges: Vec::new(),
             },
             // The single counted record: `uncounted: false` and
             // `via_policy: false` are both the ordinary case, so
@@ -442,6 +447,7 @@ fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
                 to: "tick".into(),
                 via_policy: false,
                 uncounted: false,
+                edges: Vec::new(),
             },
         ],
     );

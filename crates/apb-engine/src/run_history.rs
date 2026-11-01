@@ -34,7 +34,9 @@ pub fn started(run_dir: &Path) -> Option<RunHead> {
         .map_while(Result::ok)
         .filter_map(|l| serde_json::from_str::<Event>(&l).ok())
         .find_map(|e| match e.payload {
-            EventPayload::RunStarted { playbook, version } => Some(RunHead {
+            EventPayload::RunStarted {
+                playbook, version, ..
+            } => Some(RunHead {
                 playbook,
                 version,
                 ts: e.ts,

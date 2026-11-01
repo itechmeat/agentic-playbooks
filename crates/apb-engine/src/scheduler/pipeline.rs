@@ -176,12 +176,16 @@ pub(crate) fn reoffer_joins(
             }
             journal_dead_inputs(log, playbook, s, &state, &active)?;
             if e.max_traversals.is_some() {
-                log.append(EventPayload::EdgeTraversed {
-                    from: m.clone(),
-                    to: s.clone(),
-                    via_policy: false,
-                    uncounted: false,
-                })?;
+                let addresses = apb_core::edge_address::edge_addresses(playbook);
+                let chosen = parallel::selected_edges(playbook, m, &state);
+                let edges = playbook
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.to == *s && chosen.iter().any(|y| std::ptr::eq(*y, *x)))
+                    .map(|(i, _)| addresses[i].rendered.clone())
+                    .collect();
+                log.append(EventPayload::hop(m, s, false, false, edges))?;
             }
             frontier.push(s.clone());
         }

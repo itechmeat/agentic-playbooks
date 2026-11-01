@@ -115,13 +115,22 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
                 .or_else(|| judge_fields.get(id))
         })
     };
-    let report = |owner: Option<&str>, source: &str, field: &str, r: &mut ValidationReport| {
+    let report = |owner: Option<&str>,
+                  source: &str,
+                  field: &str,
+                  edge: Option<&crate::schema::Edge>,
+                  r: &mut ValidationReport| {
         if let Some(fields) = declared(source)
             && !fields.iter().any(|f| f == field)
         {
-            r.warn(
+            // Raised from an `output_field` edge: that edge; from a
+            // template: no edge.
+            let edges: Vec<&crate::schema::Edge> = edge.into_iter().collect();
+            r.warn_edges(
+                playbook,
                 "V46",
                 owner,
+                &edges,
                 format!(
                     "reads field `{field}` of `{source}`, which declares only outputs.fields [{}]",
                     fields.join(", ")
@@ -142,13 +151,13 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
             if let ["nodes", source, "output" | "report", field] =
                 cap.split('.').collect::<Vec<&str>>().as_slice()
             {
-                report(owner, source, field, r);
+                report(owner, source, field, None, r);
             }
         }
     }
     for edge in &playbook.edges {
         if let Some(EdgeCondition::OutputField { node, field, .. }) = &edge.condition {
-            report(Some(&edge.from), node, field, r);
+            report(Some(&edge.from), node, field, Some(edge), r);
         }
     }
 }

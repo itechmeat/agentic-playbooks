@@ -1133,6 +1133,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1159,6 +1160,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1192,6 +1194,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1252,6 +1255,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1275,6 +1279,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1299,6 +1304,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1363,6 +1369,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1410,6 +1417,7 @@ edges:
                     EventPayload::RunStarted {
                         playbook: "p".into(),
                         version: "1.0.0".into(),
+                        definition: None,
                     },
                 ),
                 ev(
@@ -1462,6 +1470,7 @@ edges:
             EventPayload::RunStarted {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
             requested("r1"),
             requested("r2"),
@@ -1504,6 +1513,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1533,6 +1543,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1597,6 +1608,7 @@ edges:
             EventPayload::RunStarted {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         )];
         let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
@@ -1634,6 +1646,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             Event {
@@ -1672,6 +1685,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1714,6 +1728,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1766,6 +1781,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1821,6 +1837,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1866,6 +1883,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -1895,6 +1913,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             )];
             events.extend(extra);
@@ -1961,6 +1980,7 @@ edges:
                     by: None,
                     explicit: false,
                     launch: None,
+                    definition: None,
                 },
             ),
             at(
@@ -2022,6 +2042,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -2126,6 +2147,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -2220,6 +2242,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -2342,6 +2365,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(
@@ -2386,6 +2410,7 @@ edges:
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             ev(

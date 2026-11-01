@@ -371,6 +371,7 @@ mod tests {
                 by: None,
                 explicit: false,
                 launch: None,
+                definition: None,
             },
         )
     }

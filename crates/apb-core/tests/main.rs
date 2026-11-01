@@ -47,6 +47,8 @@ mod discover_test;
 mod discover_walk_test;
 #[path = "suite/doctor_test.rs"]
 mod doctor_test;
+#[path = "suite/edge_address_test.rs"]
+mod edge_address_test;
 #[path = "suite/fsutil_test.rs"]
 mod fsutil_test;
 #[path = "suite/history_fixture.rs"]

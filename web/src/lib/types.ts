@@ -37,11 +37,20 @@ export interface PlaybookNode {
   [key: string]: unknown
 }
 
+// One edge as written. The canvas model keeps every key of the YAML edge
+// (an authored `id`, `join`, `max_traversals`, `require` and any key this
+// dashboard does not know), so nothing is lost on the way through it.
 export interface PlaybookEdge {
+  /** An authored edge id: the edge's address is then `id:<id>`. */
+  id?: string
   from: string
   to: string
   condition?: { type: string; [key: string]: unknown } | null
   fallback?: boolean
+  join?: string
+  max_traversals?: number
+  require?: unknown
+  [key: string]: unknown
 }
 
 export interface LayoutNode { id: string; x: number; y: number }
@@ -62,6 +71,16 @@ export interface PlaybookParam {
   options?: string[] | null
   default?: unknown
   secret?: boolean
+}
+
+// One validation issue of a playbook. `edges` holds the rendered addresses
+// of the edges it is about; an older server does not send it.
+export interface ValidationIssue {
+  code: string
+  severity: string
+  message: string
+  node?: string | null
+  edges?: string[]
 }
 
 export interface PlaybookDetail {
@@ -88,7 +107,7 @@ export interface PlaybookDetail {
   // policy uses; absent from an older server.
   effective_effects?: string[]
   layout: WfLayout | null
-  validation: { code: string; severity: string; message: string; node?: string | null }[]
+  validation: ValidationIssue[]
   frozen: boolean
 }
 
@@ -129,14 +148,8 @@ export interface WfEvent {
   [key: string]: unknown
 }
 
-export interface VersionDiff {
-  nodes_added: string[]
-  nodes_removed: string[]
-  nodes_changed: string[]
-  edges_added: string[]
-  edges_removed: string[]
-  yaml_diff: string
-}
+// The diff of two versions, generated from the Rust type.
+export type { VersionDiff } from './api.gen'
 
 export interface WriteResult {
   id: string

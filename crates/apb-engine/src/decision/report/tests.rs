@@ -57,6 +57,7 @@ fn decision_event(seq: u64, p: Option<f64>, regex_flag: bool, output_chars: u64)
             cost_estimated: false,
             cached: false,
             error: (!answered).then(|| "timeout".to_string()),
+            edge_addresses: Default::default(),
         },
     }
 }
@@ -116,6 +117,7 @@ fn run(id: &str, f: &Fixture) -> RunJournal {
             EventPayload::RunStarted {
                 playbook: "pb".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         ),
         node(1, "a", None),
@@ -625,6 +627,7 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
                 cost_estimated: false,
                 cached: false,
                 error: None,
+                edge_addresses: Default::default(),
             },
         );
         RunJournal {

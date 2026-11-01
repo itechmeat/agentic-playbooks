@@ -133,6 +133,12 @@ describe('executor digests', () => {
   const node = (name: string, digests: ReturnType<typeof group>[]) => ({
     node: name,
     runs: 2,
+    in_runs: 2,
+    executions: 2,
+    completed: 2,
+    open: 0,
+    failed: 0,
+    cancelled: 0,
     first_pass: { count: 2, of: 2, rate: 1 },
     retries: 0,
     fallbacks: 0,

@@ -288,6 +288,15 @@ fn render_types() -> String {
         apb_core::versioning::current::EntryKind::decl(&cfg),
         apb_core::versioning::current::HistoryEntry::decl(&cfg),
         apb_core::versioning::current::History::decl(&cfg),
+        // Edge addresses, the issues that name them and the version diff's
+        // edge correspondence.
+        apb_core::edge_address::EdgeAddress::decl(&cfg),
+        apb_core::edge_address::CheckOrder::decl(&cfg),
+        apb_core::edge_address::AddressedEdge::decl(&cfg),
+        apb_core::validate::IssueView::decl(&cfg),
+        apb_core::versioning::EdgeCorrespondence::decl(&cfg),
+        apb_core::versioning::EdgeOrderChange::decl(&cfg),
+        apb_core::versioning::VersionDiff::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"

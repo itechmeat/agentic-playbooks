@@ -462,9 +462,9 @@ fn run_end(events: &[Event]) -> (Option<String>, Option<u128>) {
 
 fn run_started(events: &[Event]) -> Option<(u128, String, String)> {
     events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunStarted { playbook, version } => {
-            Some((e.ts, playbook.clone(), version.clone()))
-        }
+        EventPayload::RunStarted {
+            playbook, version, ..
+        } => Some((e.ts, playbook.clone(), version.clone())),
         _ => None,
     })
 }

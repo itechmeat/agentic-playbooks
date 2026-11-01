@@ -44,6 +44,7 @@ fn started() -> Event {
         EventPayload::RunStarted {
             playbook: "p".into(),
             version: "1.0.0".into(),
+            definition: None,
         },
     )
 }
@@ -416,6 +417,7 @@ fn a_notification_that_failed_as_the_run_ended_is_reported_as_given_up() {
             by: None,
             explicit: false,
             launch: None,
+            definition: None,
         },
     ));
     let view = RunNotify::from_events(&events, NOW).unwrap();

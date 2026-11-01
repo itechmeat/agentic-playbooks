@@ -182,6 +182,9 @@ pub(crate) struct DecisionCall<'a> {
     pub(crate) join_from: Option<&'a JoinFrom<'a>>,
     /// The use's enforce path, if it has one.
     pub(crate) enforce: Option<Enforce<'a>>,
+    /// For judge edges: each question id with its edge's rendered address,
+    /// journaled for display.
+    pub(crate) edge_addresses: BTreeMap<String, String>,
 }
 
 /// What a caller needs besides the answers: who answered and whether the
@@ -780,6 +783,7 @@ impl DecisionRunner {
             error: None,
             enforce_refused: None,
             join: call.join.clone(),
+            edge_addresses: call.edge_addresses.clone(),
         };
         let Some(slot) = self.reserve_request() else {
             let mut event = base;
@@ -1026,6 +1030,7 @@ impl DecisionRunner {
             error: None,
             enforce_refused: None,
             join: BTreeMap::from([("excluded".to_string(), Value::from(reason))]),
+            edge_addresses: BTreeMap::new(),
         });
     }
 
@@ -1486,6 +1491,7 @@ mod tests {
                     refused: None,
                     acts: &acts,
                 }),
+                edge_addresses: BTreeMap::new(),
             },
         )
     }

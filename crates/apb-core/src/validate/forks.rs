@@ -131,9 +131,11 @@ pub(crate) fn check_join_requires(playbook: &Playbook, r: &mut ValidationReport)
         let synchronizes = incoming.len() >= 2
             && (mode.is_some() || is_acyclic_fan_in(&adj, e.to.as_str(), &sources));
         if !synchronizes {
-            r.error(
+            r.error_edges(
+                playbook,
                 "V79",
                 Some(&e.to),
+                &[e],
                 format!(
                     "edge `{}` -> `{}` has `require: all_succeeded`, but `{}` is not a join: \
                      it needs two or more incoming edges outside its own cycle, or a `join`",
@@ -141,9 +143,11 @@ pub(crate) fn check_join_requires(playbook: &Playbook, r: &mut ValidationReport)
                 ),
             );
         } else if mode == Some(JoinMode::Any) {
-            r.error(
+            r.error_edges(
+                playbook,
                 "V79",
                 Some(&e.to),
+                &[e],
                 format!(
                     "edge `{}` -> `{}` has `require: all_succeeded` on a `join: any`: the first \
                      arrival cannot also wait for every branch to succeed",

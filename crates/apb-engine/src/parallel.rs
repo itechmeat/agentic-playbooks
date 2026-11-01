@@ -256,31 +256,189 @@ fn select_edges<'a>(
     state: &RunState,
     available: impl Fn(&Edge) -> bool,
 ) -> Vec<&'a Edge> {
-    if state.route_suppressed.contains(from) {
-        return Vec::new();
+    evaluate_route(playbook, from, state, available)
+        .chosen
+        .into_iter()
+        .map(|i| &playbook.edges[i])
+        .collect()
+}
+
+/// How a routing decision went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteMode {
+    /// A fork's branch-failure policy decided against routing this node.
+    Suppressed,
+    /// The available unconditional edges were all taken.
+    FanOut,
+    /// One conditional or fallback edge was taken.
+    OneOf,
+    /// Nothing matched and no fallback was available.
+    DeadEnd,
+}
+
+/// What one outgoing edge did in a routing decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckResult {
+    /// The edge was taken.
+    Matched,
+    /// Its condition was checked and did not match.
+    NotMatched,
+    /// A bounded edge at its `max_traversals` cap.
+    Exhausted,
+    /// Never checked: an earlier edge decided, or the edge's kind was not
+    /// consulted in this decision.
+    NotReached,
+    /// A judge edge without an answer for this execution, whose
+    /// `on_unavailable` does not take it.
+    JudgeUnavailable,
+    /// A judge edge whose answer was recorded but not applied (shadow), and
+    /// whose `on_unavailable` does not take it.
+    Shadowed,
+}
+
+/// One outgoing edge of a routing decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeCheck {
+    /// The position in the playbook's `edges`.
+    pub index: usize,
+    /// The position among the source's outgoing edges.
+    pub rank: usize,
+    pub result: CheckResult,
+}
+
+/// One routing decision out of a node: every outgoing edge with what it did,
+/// and the edges taken (indices into the playbook's `edges`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteEvaluation {
+    pub mode: RouteMode,
+    pub checks: Vec<EdgeCheck>,
+    pub chosen: Vec<usize>,
+}
+
+/// Why a judge edge did not match: no applied answer for the latest
+/// execution means either nothing came back or only a shadow answer did.
+fn judge_miss(state: &RunState, from: &str) -> CheckResult {
+    let shadow = state
+        .judge_edges
+        .get(from)
+        .is_some_and(|a| !a.applied && state.finished_counts.get(from) == Some(&a.execution));
+    match shadow {
+        true => CheckResult::Shadowed,
+        false => CheckResult::JudgeUnavailable,
     }
-    let out: Vec<&Edge> = playbook.edges.iter().filter(|e| e.from == from).collect();
-    let refused = state.refused_joins.contains(from);
-    let unconditional: Vec<&Edge> = out
+}
+
+/// The routing rule itself: all available unconditional edges; else the
+/// first available conditional edge that matches, in declaration order; else
+/// the first available fallback wherever it is declared; else nothing. A node
+/// whose routing a fork's branch-failure policy decided against
+/// (`state.route_suppressed`, issue #195) selects nothing, and a join that
+/// refused under `require: all_succeeded` (`state.refused_joins`) selects only
+/// a conditional or fallback route, never an unconditional edge.
+///
+/// `available` decides whether a bounded edge may still be taken (the live
+/// decision and the re-derivation of a finished execution differ only there).
+/// The checks are what the decision saw, edge by edge; they never change what
+/// it chose.
+pub fn evaluate_route(
+    playbook: &Playbook,
+    from: &str,
+    state: &RunState,
+    available: impl Fn(&Edge) -> bool,
+) -> RouteEvaluation {
+    let out: Vec<(usize, &Edge)> = playbook
+        .edges
         .iter()
-        .copied()
-        .filter(|e| e.condition.is_none() && !e.fallback && available(e))
+        .enumerate()
+        .filter(|(_, e)| e.from == from)
         .collect();
+    let mut checks: Vec<EdgeCheck> = out
+        .iter()
+        .enumerate()
+        .map(|(rank, (index, _))| EdgeCheck {
+            index: *index,
+            rank,
+            result: CheckResult::NotReached,
+        })
+        .collect();
+    if state.route_suppressed.contains(from) {
+        return RouteEvaluation {
+            mode: RouteMode::Suppressed,
+            checks,
+            chosen: Vec::new(),
+        };
+    }
+    let refused = state.refused_joins.contains(from);
+    let mut unconditional: Vec<usize> = Vec::new();
+    for (rank, (index, e)) in out.iter().enumerate() {
+        if e.condition.is_none() && !e.fallback {
+            match available(e) {
+                true => unconditional.push(*index),
+                false => checks[rank].result = CheckResult::Exhausted,
+            }
+        }
+    }
     if !unconditional.is_empty() && !refused {
-        return unconditional;
+        for c in checks.iter_mut() {
+            if unconditional.contains(&c.index) {
+                c.result = CheckResult::Matched;
+            }
+        }
+        return RouteEvaluation {
+            mode: RouteMode::FanOut,
+            checks,
+            chosen: unconditional,
+        };
     }
-    if let Some((_, e)) = out.iter().copied().enumerate().find(|(i, e)| {
-        !e.fallback
-            && e.condition.is_some()
-            && available(e)
-            && edge_matches_at(e, Some(*i), from, state)
-    }) {
-        return vec![e];
+    for (rank, (index, e)) in out.iter().enumerate() {
+        if e.fallback || e.condition.is_none() {
+            continue;
+        }
+        if !available(e) {
+            checks[rank].result = CheckResult::Exhausted;
+            continue;
+        }
+        if edge_matches_at(e, Some(rank), from, state) {
+            checks[rank].result = CheckResult::Matched;
+            return RouteEvaluation {
+                mode: RouteMode::OneOf,
+                checks,
+                chosen: vec![*index],
+            };
+        }
+        checks[rank].result = match &e.condition {
+            Some(EdgeCondition::Judge { .. }) if judge_edge_p(state, from, rank).is_none() => {
+                judge_miss(state, from)
+            }
+            _ => CheckResult::NotMatched,
+        };
     }
-    if let Some(e) = out.iter().copied().find(|e| e.fallback && available(e)) {
-        return vec![e];
+    let mut chosen = Vec::new();
+    for (rank, (index, e)) in out.iter().enumerate() {
+        if !e.fallback {
+            continue;
+        }
+        if !available(e) {
+            checks[rank].result = CheckResult::Exhausted;
+        } else if chosen.is_empty() {
+            checks[rank].result = CheckResult::Matched;
+            chosen.push(*index);
+        }
     }
-    Vec::new()
+    RouteEvaluation {
+        mode: match chosen.is_empty() {
+            true => RouteMode::DeadEnd,
+            false => RouteMode::OneOf,
+        },
+        checks,
+        chosen,
+    }
+}
+
+/// [`evaluate_route`] with the live decision's availability: the decision
+/// [`selected_edges`] makes, with its checks.
+pub fn evaluate_live_route(playbook: &Playbook, from: &str, state: &RunState) -> RouteEvaluation {
+    evaluate_route(playbook, from, state, |e| edge_available(e, state))
 }
 
 /// Successors of node `from`. Several UNCONDITIONAL outgoing edges = parallel
@@ -1207,6 +1365,7 @@ edges:
     /// An `output_field` edge from `w` reading `verdict`, against an output.
     fn output_field_matches(output: Option<&str>, equals: &str) -> bool {
         let edge = Edge {
+            id: None,
             from: "w".into(),
             to: "next".into(),
             condition: Some(EdgeCondition::OutputField {
@@ -1314,5 +1473,271 @@ edges:
             JoinReadiness::ReadySuccess,
             "a delivered input must not be un-delivered by its condition's source re-running"
         );
+    }
+}
+
+#[cfg(test)]
+mod route_eval_tests {
+    //! `evaluate_route` holds the routing rule: on generated graphs and
+    //! states it chooses exactly what the rule chose before it existed, with
+    //! both availability predicates, and the check order agrees with it.
+    use super::*;
+    use apb_core::edge_address::{CheckOrder, edge_addresses};
+    use apb_core::schema::Playbook;
+
+    /// The routing rule as 1.0.0-beta.1 wrote it, kept verbatim as the
+    /// reference.
+    fn reference<'a>(
+        playbook: &'a Playbook,
+        from: &str,
+        state: &RunState,
+        available: impl Fn(&Edge) -> bool,
+    ) -> Vec<&'a Edge> {
+        if state.route_suppressed.contains(from) {
+            return Vec::new();
+        }
+        let out: Vec<&Edge> = playbook.edges.iter().filter(|e| e.from == from).collect();
+        let refused = state.refused_joins.contains(from);
+        let unconditional: Vec<&Edge> = out
+            .iter()
+            .copied()
+            .filter(|e| e.condition.is_none() && !e.fallback && available(e))
+            .collect();
+        if !unconditional.is_empty() && !refused {
+            return unconditional;
+        }
+        if let Some((_, e)) = out.iter().copied().enumerate().find(|(i, e)| {
+            !e.fallback
+                && e.condition.is_some()
+                && available(e)
+                && edge_matches_at(e, Some(*i), from, state)
+        }) {
+            return vec![e];
+        }
+        if let Some(e) = out.iter().copied().find(|e| e.fallback && available(e)) {
+            return vec![e];
+        }
+        Vec::new()
+    }
+
+    /// A small deterministic generator.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % n
+        }
+    }
+
+    fn generated(rng: &mut Lcg) -> (Playbook, RunState) {
+        let targets = ["a", "b", "c"];
+        let mut edges = String::new();
+        let count = 1 + rng.next(6);
+        for _ in 0..count {
+            let to = targets[rng.next(3) as usize];
+            let cond = match rng.next(6) {
+                0 | 1 => String::new(),
+                2 => ", condition: { type: node_status, node: s, equals: success }".into(),
+                3 => ", condition: { type: node_status, node: s, equals: failure }".into(),
+                4 => format!(
+                    ", condition: {{ type: output_field, node: s, field: v, equals: x{} }}",
+                    rng.next(2)
+                ),
+                _ => format!(
+                    ", condition: {{ type: judge, question: q, min_p: 0.5, on_unavailable: {} }}",
+                    rng.next(2) == 1
+                ),
+            };
+            let fallback = if rng.next(4) == 0 {
+                ", fallback: true"
+            } else {
+                ""
+            };
+            let cap = if rng.next(3) == 0 {
+                format!(", max_traversals: {}", 1 + rng.next(2))
+            } else {
+                String::new()
+            };
+            edges.push_str(&format!(
+                "  - {{ from: s, to: {to}{cond}{fallback}{cap} }}\n"
+            ));
+        }
+        let yaml = format!(
+            "schema: 2\nid: g\nname: g\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: s, type: prompt, prompt: s }}\n  - {{ id: a, type: finish, outcome: success }}\n  - {{ id: b, type: finish, outcome: success }}\n  - {{ id: c, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: s }}\n{edges}"
+        );
+        let pb = Playbook::from_yaml(&yaml).unwrap();
+        let mut s = RunState::default();
+        s.nodes.insert(
+            "s".into(),
+            [NodeStatus::Succeeded, NodeStatus::Failed][rng.next(2) as usize],
+        );
+        s.outputs
+            .insert("s".into(), format!("{{\"v\":\"x{}\"}}", rng.next(2)));
+        // `s` started at seq 10; a journaled hop is of its latest run
+        // (after it) or of an earlier one, so both branches of the as-run
+        // predicate are exercised.
+        s.seqs.started.insert("s".into(), 10);
+        for to in targets {
+            let n = rng.next(3) as u32;
+            if n > 0 {
+                s.edge_counts.insert(("s".into(), to.into()), n);
+            }
+            if rng.next(2) == 0 {
+                s.journaled_hops.insert(("s".into(), to.into()));
+                let seq = if rng.next(2) == 0 { 5 } else { 15 };
+                s.seqs.hops.insert(("s".into(), to.into()), seq);
+            }
+        }
+        if rng.next(8) == 0 {
+            s.route_suppressed.insert("s".into());
+        }
+        if rng.next(6) == 0 {
+            s.refused_joins.insert("s".into());
+        }
+        s.finished_counts.insert("s".into(), 1);
+        if rng.next(2) == 0 {
+            let mut p = std::collections::BTreeMap::new();
+            for i in 0..pb.edges.len() {
+                p.insert(format!("edge_{i}"), rng.next(100) as f64 / 100.0);
+            }
+            s.judge_edges.insert(
+                "s".into(),
+                crate::state::JudgeEdgeAnswers {
+                    execution: 1,
+                    applied: rng.next(2) == 0,
+                    p,
+                },
+            );
+        }
+        (pb, s)
+    }
+
+    fn indices(pb: &Playbook, edges: &[&Edge]) -> Vec<usize> {
+        edges
+            .iter()
+            .map(|e| pb.edges.iter().position(|x| std::ptr::eq(x, *e)).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn both_predicates_choose_what_the_rule_chose_before() {
+        let mut rng = Lcg(7);
+        let (mut earlier, mut latest) = (0, 0);
+        for _ in 0..3000 {
+            let (pb, s) = generated(&mut rng);
+            for pair in s.seqs.hops.keys() {
+                match s.hop_of_latest_run(&pair.0, &pair.1) {
+                    true => latest += 1,
+                    false => earlier += 1,
+                }
+            }
+            let live = |e: &Edge| edge_available(e, &s);
+            let as_run = |e: &Edge| {
+                edge_available(e, &s)
+                    || s.hop_of_latest_run(&e.from, &e.to)
+                        && s.journaled_hops.contains(&(e.from.clone(), e.to.clone()))
+            };
+            assert_eq!(
+                evaluate_route(&pb, "s", &s, live).chosen,
+                indices(&pb, &reference(&pb, "s", &s, live))
+            );
+            assert_eq!(
+                evaluate_route(&pb, "s", &s, as_run).chosen,
+                indices(&pb, &reference(&pb, "s", &s, as_run))
+            );
+            assert_eq!(
+                indices(&pb, &selected_edges(&pb, "s", &s)),
+                indices(&pb, &reference(&pb, "s", &s, live))
+            );
+            assert_eq!(
+                indices(&pb, &selected_edges_as_run(&pb, "s", &s)),
+                indices(&pb, &reference(&pb, "s", &s, as_run))
+            );
+        }
+        assert!(earlier > 0 && latest > 0, "{earlier} {latest}");
+    }
+
+    #[test]
+    fn the_check_order_agrees_with_the_choice() {
+        let mut rng = Lcg(11);
+        for _ in 0..2000 {
+            let (pb, s) = generated(&mut rng);
+            let eval = evaluate_live_route(&pb, "s", &s);
+            let addresses = edge_addresses(&pb);
+            match eval.mode {
+                RouteMode::FanOut => assert!(
+                    eval.chosen
+                        .iter()
+                        .all(|i| addresses[*i].check == CheckOrder::Parallel)
+                ),
+                RouteMode::OneOf => {
+                    let i = eval.chosen[0];
+                    assert!(matches!(
+                        addresses[i].check,
+                        CheckOrder::Ordered(_) | CheckOrder::Fallback
+                    ));
+                    // No earlier-checked conditional edge was taken instead.
+                    if let CheckOrder::Ordered(n) = addresses[i].check {
+                        for c in &eval.checks {
+                            if let CheckOrder::Ordered(m) = addresses[c.index].check
+                                && m < n
+                            {
+                                assert_ne!(c.result, CheckResult::Matched);
+                            }
+                        }
+                    }
+                }
+                RouteMode::DeadEnd | RouteMode::Suppressed => assert!(eval.chosen.is_empty()),
+            }
+        }
+    }
+
+    /// The rank a judge answer is kept under (`EdgeCheck::rank`) and the
+    /// edge index are the ones `apb_core::edge_address` gives the edge, so
+    /// `decision_made.edge_addresses` and route records name the edge
+    /// routing read.
+    #[test]
+    fn check_ranks_and_indexes_are_the_edge_addresses_ones() {
+        let mut rng = Lcg(23);
+        for _ in 0..500 {
+            let (pb, s) = generated(&mut rng);
+            let eval = evaluate_live_route(&pb, "s", &s);
+            let mine: Vec<(usize, usize)> = edge_addresses(&pb)
+                .into_iter()
+                .filter(|a| pb.edges[a.index].from == "s")
+                .map(|a| (a.index, a.rank))
+                .collect();
+            let checked: Vec<(usize, usize)> =
+                eval.checks.iter().map(|c| (c.index, c.rank)).collect();
+            assert_eq!(checked, mine);
+        }
+    }
+
+    #[test]
+    fn re_deriving_after_the_last_allowed_traversal_keeps_the_edge_taken() {
+        let yaml = "schema: 2\nid: g\nname: g\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: s, type: prompt, prompt: s }\n  - { id: a, type: finish, outcome: success }\n  - { id: z, type: finish, outcome: success }\nedges:\n  - { from: start, to: s }\n  - { from: s, to: a, condition: { type: node_status, node: s, equals: success }, max_traversals: 1 }\n  - { from: s, to: z, fallback: true }\n";
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let mut s = RunState::default();
+        s.nodes.insert("s".into(), NodeStatus::Succeeded);
+        // The latest execution of `s` took `s -> a`, spending its only
+        // allowance.
+        s.edge_counts.insert(("s".into(), "a".into()), 1);
+        s.journaled_hops.insert(("s".into(), "a".into()));
+        let live = selected_edges(&pb, "s", &s);
+        assert_eq!(
+            live.iter().map(|e| e.to.as_str()).collect::<Vec<_>>(),
+            ["z"]
+        );
+        let as_run = selected_edges_as_run(&pb, "s", &s);
+        assert_eq!(
+            as_run.iter().map(|e| e.to.as_str()).collect::<Vec<_>>(),
+            ["a"]
+        );
+        let live_eval = evaluate_live_route(&pb, "s", &s);
+        assert_eq!(live_eval.checks[0].result, CheckResult::Exhausted);
+        assert_eq!(live_eval.checks[1].result, CheckResult::Matched);
     }
 }

@@ -227,6 +227,7 @@ fn resume_all_leaves_a_run_the_launch_policy_refuses() {
         by: Some(apb_engine::pause::PauseBy::Operator),
         explicit: false,
         launch: None,
+        definition: None,
     })
     .unwrap();
     log.append(EventPayload::RunPaused {

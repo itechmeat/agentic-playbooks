@@ -631,16 +631,32 @@ pub fn lock_dir_with_lifetime(
     lock_dir_stale_after(dir, lock_name, stale_after.as_millis())
 }
 
+/// [`lock_dir`] without waiting: one attempt, then a stale lock (by the
+/// same staleness rule) is stolen and a live one is `WouldBlock` at once.
+/// For a writer on a hot path that would rather drop its write than wait.
+pub fn try_lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
+    lock_dir_attempts(dir, lock_name, LOCK_STALE_MS, 1).map(|(lock, _)| lock)
+}
+
 fn lock_dir_stale_after(
     dir: &Path,
     lock_name: &str,
     stale_ms: u128,
 ) -> io::Result<(DirLock, bool)> {
+    lock_dir_attempts(dir, lock_name, stale_ms, LOCK_ATTEMPTS)
+}
+
+fn lock_dir_attempts(
+    dir: &Path,
+    lock_name: &str,
+    stale_ms: u128,
+    attempts: u32,
+) -> io::Result<(DirLock, bool)> {
     crate::process_mode::guard()?;
     fs::create_dir_all(dir)?;
     let path = dir.join(lock_name);
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
-    for _ in 0..LOCK_ATTEMPTS {
+    for attempt in 0..attempts {
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -651,7 +667,9 @@ fn lock_dir_stale_after(
                 return Ok((DirLock { path, token }, false));
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                std::thread::sleep(std::time::Duration::from_millis(LOCK_STEP_MS));
+                if attempt + 1 < attempts {
+                    std::thread::sleep(std::time::Duration::from_millis(LOCK_STEP_MS));
+                }
             }
             Err(e) => return Err(e),
         }

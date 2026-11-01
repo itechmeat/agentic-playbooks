@@ -28,6 +28,7 @@ pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), E
             EventPayload::RunStarted {
                 playbook,
                 version: v,
+                ..
             } => {
                 id = Some(playbook.clone());
                 version = Some(v.clone());

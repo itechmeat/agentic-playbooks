@@ -48,6 +48,33 @@ describe('parsePlaybook', () => {
     expect(edges).toHaveLength(2)
   })
 
+  // The canvas model keeps every key of an edge: an authored id decides the
+  // edge's address, and the edge panel shows `join` and `max_traversals`.
+  it('keeps every edge key, the unknown ones included', () => {
+    const { model } = parsePlaybook(`schema: 2
+id: p
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task }
+  - { id: f, type: finish }
+edges:
+  - { id: kick, from: s, to: a, join: all, max_traversals: 3, require: { files: [x] }, x_note: keep }
+  - { from: a, to: f, condition: null, fallback: null }
+  - { from: a, to: f, fallback: true }
+`)
+    expect(model!.edges[0]).toEqual({
+      id: 'kick',
+      from: 's',
+      to: 'a',
+      join: 'all',
+      max_traversals: 3,
+      require: { files: ['x'] },
+      x_note: 'keep',
+    })
+    expect(model!.edges[1]).toEqual({ from: 'a', to: 'f' })
+    expect(model!.edges[2]).toEqual({ from: 'a', to: 'f', fallback: true })
+  })
+
   it('returns error for broken YAML', () => {
     const { model, error } = parsePlaybook('nodes:\n  - id: [unclosed')
     expect(model).toBeUndefined()

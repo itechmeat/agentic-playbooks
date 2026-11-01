@@ -152,12 +152,7 @@ fn failure_detail(out: &str) -> String {
 /// go" (`parallel::routed_targets`) for free, and `via_policy` keeps the record
 /// honest about there being no such edge.
 fn journal_policy_route(log: &mut EventLog, from: &str, to: &str) -> Result<(), EngineError> {
-    log.append(EventPayload::EdgeTraversed {
-        from: from.to_string(),
-        to: to.to_string(),
-        via_policy: true,
-        uncounted: false,
-    })?;
+    log.append(EventPayload::hop(from, to, true, false, Vec::new()))?;
     Ok(())
 }
 
@@ -2608,9 +2603,13 @@ fn drive_inner(
                 let fallback = playbook
                     .edges
                     .iter()
-                    .find(|e| e.from == current && e.fallback);
+                    .position(|e| e.from == current && e.fallback);
                 match fallback {
-                    Some(e) => {
+                    Some(index) => {
+                        let e = &playbook.edges[index];
+                        let address = apb_core::edge_address::rendered_at(&playbook, index)
+                            .into_iter()
+                            .collect();
                         // The budget-exhausted condition node jumps over its
                         // `fallback` edge without going through
                         // `advance_frontier`, so nothing in the journal
@@ -2619,12 +2618,10 @@ fn drive_inner(
                         // is still not counted here, which is pre-existing and
                         // deliberately left alone rather than silently fixed in
                         // this change.
-                        log.append(EventPayload::EdgeTraversed {
-                            from: current.clone(),
-                            to: e.to.clone(),
-                            via_policy: false,
-                            uncounted: true,
-                        })?;
+                        log.append(EventPayload::hop(&current, &e.to, false, true, address))?;
+                        crate::diagnostics::route::record_loop_exit(
+                            log, &playbook, &current, index,
+                        );
                         current = e.to.clone();
                         continue;
                     }

@@ -305,6 +305,7 @@ fn call<'a>(
     judge: &'a dyn Fn(&BTreeMap<String, crate::event::DecisionAnswer>) -> Judgement,
 ) -> DecisionCall<'a> {
     DecisionCall {
+        edge_addresses: BTreeMap::new(),
         enforce: None,
         join: BTreeMap::new(),
         join_from: None,
@@ -664,12 +665,20 @@ pub(crate) fn decide_edges(
             })
         }),
     };
+    let addresses = apb_core::edge_address::edge_addresses(playbook);
+    let edge_addresses: BTreeMap<String, String> = addresses
+        .iter()
+        .filter(|a| playbook.edges[a.index].from == node_id)
+        .filter(|a| edges.iter().any(|(rank, ..)| *rank == a.rank))
+        .map(|a| (format!("edge_{}", a.rank), a.rendered.clone()))
+        .collect();
     let outcome = runner.decide_routed(
         journal,
         DecisionCall {
             enforce: None,
             join: BTreeMap::new(),
             join_from: None,
+            edge_addresses,
             site: UseSite::JudgeEdge,
             node: Some(node_id),
             attempt: Some(execution),
@@ -702,4 +711,188 @@ pub(crate) fn decide_edges(
         outcome.0,
         DecisionOutcome::Skipped { reason: "off" }
     ))
+}
+
+// --- the judge patch refusal -----------------------------------------------
+
+/// The reason a patch is refused because it would move an answer a judge
+/// edge already has, or `None`.
+///
+/// Routing reads a judge edge's answer by the edge's rank among its source's
+/// outgoing edges. A patch that adds, removes, reorders or changes any
+/// outgoing edge of a node whose latest execution has judge-edge answers
+/// (applied or shadow) that routing has not used yet could make a stored
+/// rank point at another edge. Routing has used them once the drive moved
+/// past that execution's routing: a declared-edge hop it routed, or a later
+/// `node_started` or `run_finished` (a dead end writes no hop). It is refused unless
+/// `continue_from` runs that node again, which asks again. An older apb
+/// applying a patch keeps its own behaviour.
+pub(crate) fn patch_refusal(
+    running: &Playbook,
+    patched: &Playbook,
+    events: &[Event],
+    continue_from: &str,
+) -> Option<String> {
+    let outgoing = |pb: &Playbook, node: &str| -> Vec<serde_json::Value> {
+        pb.edges
+            .iter()
+            .filter(|e| e.from == node)
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect()
+    };
+    let index = crate::identity::index(events);
+    let mut pending: Vec<&str> = running
+        .nodes
+        .iter()
+        .map(|n| n.id.as_str())
+        .filter(|node| *node != continue_from)
+        .filter(|node| outgoing(running, node) != outgoing(patched, node))
+        .filter(|node| {
+            let Some(latest) = index.executions(node).iter().rev().find(|x| !x.is_open()) else {
+                return false;
+            };
+            let Some(decided) = events
+                .iter()
+                .filter(|e| {
+                    matches!(&e.payload, EventPayload::DecisionMade { use_site, node: Some(n), attempt: Some(a), .. }
+                        if use_site == "judge_edge" && n == node && *a == latest.ordinal)
+                })
+                .map(|e| e.seq)
+                .max()
+            else {
+                return false;
+            };
+            // Routing ran for that execution once the drive moved past it:
+            // a hop over a declared edge it routed (a policy hop reads no
+            // answer), or any later start of a node or end of the run, which
+            // the drive writes only after routing what finished (a dead end
+            // included). A pause or a crash in between leaves them pending.
+            let consumed = events.iter().filter(|e| e.seq > decided).any(|e| match &e.payload {
+                EventPayload::EdgeTraversed {
+                    from, via_policy, ..
+                } if from == node && !via_policy => index
+                    .routed_by(node, e.seq)
+                    .is_some_and(|x| x.ordinal == latest.ordinal),
+                EventPayload::NodeStarted { .. } | EventPayload::RunFinished { .. } => true,
+                _ => false,
+            });
+            !consumed
+        })
+        .collect();
+    pending.sort_unstable();
+    pending.dedup();
+    if pending.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "judge_edge_answers_pending: the patch changes the outgoing edges of [{}], whose judge-edge answers routing has not used yet; those answers are kept by edge position, so apply the patch with continue_from on that node to ask again",
+        pending.join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod patch_refusal_tests {
+    use super::*;
+
+    const RUNNING: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: review, type: script, script: s, runner: sh }\n  - { id: fix, type: finish, outcome: success }\n  - { id: ship, type: finish, outcome: success }\nedges:\n  - { from: start, to: review }\n  - { from: review, to: fix, condition: { type: judge, question: q, min_p: 0.7, on_unavailable: false } }\n  - { from: review, to: ship, fallback: true }\n";
+
+    fn pb(yaml: &str) -> Playbook {
+        Playbook::from_yaml(yaml).unwrap()
+    }
+
+    /// The running playbook with an edge inserted before the judge edge.
+    fn inserted() -> Playbook {
+        pb(&RUNNING.replace(
+            "  - { from: review, to: fix, condition",
+            "  - { from: review, to: ship, condition: { type: node_status, node: review, equals: failure } }\n  - { from: review, to: fix, condition",
+        ))
+    }
+
+    fn ev(seq: u64, body: serde_json::Value) -> Event {
+        let mut v = body;
+        v["seq"] = seq.into();
+        v["ts"] = 0.into();
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn answered(applied: bool) -> Vec<Event> {
+        vec![
+            ev(
+                1,
+                serde_json::json!({"type": "node_started", "node": "review", "attempt": 1}),
+            ),
+            ev(
+                2,
+                serde_json::json!({"type": "node_finished", "node": "review", "status": "succeeded", "attempt": 1, "output": "", "artifacts": []}),
+            ),
+            ev(
+                3,
+                serde_json::json!({"type": "decision_made", "use_site": "judge_edge", "node": "review", "attempt": 1, "applied": applied, "answers": {"edge_0": {"value": "true", "p": 0.9}}}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_unconsumed_answer_refuses_an_edge_change_applied_or_shadow() {
+        for applied in [true, false] {
+            let events = answered(applied);
+            let reason = patch_refusal(&pb(RUNNING), &inserted(), &events, "start").unwrap();
+            assert!(reason.contains("judge_edge_answers_pending"), "{reason}");
+            assert!(reason.contains("[review]"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn continue_from_the_source_asks_again_and_lifts_the_refusal() {
+        let events = answered(true);
+        assert!(patch_refusal(&pb(RUNNING), &inserted(), &events, "review").is_none());
+    }
+
+    #[test]
+    fn a_consumed_answer_or_an_unchanged_edge_list_is_no_refusal() {
+        let mut events = answered(true);
+        assert!(patch_refusal(&pb(RUNNING), &pb(RUNNING), &events, "start").is_none());
+        events.push(ev(
+            4,
+            serde_json::json!({"type": "edge_traversed", "from": "review", "to": "fix", "uncounted": true}),
+        ));
+        assert!(patch_refusal(&pb(RUNNING), &inserted(), &events, "start").is_none());
+    }
+
+    #[test]
+    fn a_dead_end_or_a_later_start_consumes_and_a_policy_hop_or_a_pause_does_not() {
+        let with = |body: serde_json::Value| {
+            let mut events = answered(true);
+            events.push(ev(4, body));
+            patch_refusal(&pb(RUNNING), &inserted(), &events, "start")
+        };
+        // A dead end ended the run: routing ran, nothing to move.
+        assert!(with(serde_json::json!({"type": "run_finished", "outcome": "failed"})).is_none());
+        // The drive went on to another node after routing.
+        assert!(
+            with(serde_json::json!({"type": "node_started", "node": "ship", "attempt": 1}))
+                .is_none()
+        );
+        // A policy hop reads no judge answer.
+        assert!(
+            with(serde_json::json!({"type": "edge_traversed", "from": "review", "to": "ship", "via_policy": true, "uncounted": true}))
+                .is_some()
+        );
+        // A pause between the answer and routing leaves it pending.
+        assert!(with(serde_json::json!({"type": "run_paused", "reason": "operator"})).is_some());
+    }
+
+    #[test]
+    fn an_answer_of_an_earlier_execution_is_not_pending() {
+        let mut events = answered(true);
+        events.push(ev(
+            4,
+            serde_json::json!({"type": "node_started", "node": "review", "attempt": 1}),
+        ));
+        events.push(ev(
+            5,
+            serde_json::json!({"type": "node_finished", "node": "review", "status": "failed", "attempt": 1, "output": "", "artifacts": []}),
+        ));
+        assert!(patch_refusal(&pb(RUNNING), &inserted(), &events, "start").is_none());
+    }
 }

@@ -72,6 +72,7 @@ impl Fx {
         log.append(EventPayload::RunStarted {
             playbook: "p".into(),
             version: "1.0.0".into(),
+            definition: None,
         })
         .unwrap();
         let run = Run { dir, log };

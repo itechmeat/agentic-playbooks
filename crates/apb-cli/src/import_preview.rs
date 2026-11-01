@@ -6,6 +6,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use apb_core::bundle::ImportPreview;
+use apb_core::versioning::VersionDiff;
 
 use crate::util::sanitize_for_terminal;
 
@@ -14,6 +15,44 @@ fn names(list: &[String]) -> String {
         .map(|s| sanitize_for_terminal(s, 128))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// An edge address as the terminal shows it, `-` for no edge.
+fn address(a: Option<&apb_core::edge_address::EdgeAddress>) -> String {
+    a.map_or_else(
+        || "-".to_string(),
+        |a| sanitize_for_terminal(&a.render(), 200),
+    )
+}
+
+/// One `edges changed` line per corresponding edge whose attributes or
+/// address changed, then one `edge order changed` line per one-of source
+/// whose edges are checked in another order.
+fn edge_lines(d: &VersionDiff) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in d.edges.iter().filter(|r| !r.changed.is_empty()) {
+        out.push(format!(
+            "edges changed: {} -> {} ({})",
+            address(row.before.as_ref()),
+            address(row.after.as_ref()),
+            row.changed.join(", ")
+        ));
+    }
+    for change in &d.edge_order_changed {
+        let list = |l: &[apb_core::edge_address::EdgeAddress]| {
+            l.iter()
+                .map(|a| address(Some(a)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        out.push(format!(
+            "edge order changed at {}: [{}] -> [{}]",
+            sanitize_for_terminal(&change.node, 128),
+            list(&change.before),
+            list(&change.after)
+        ));
+    }
+    out
 }
 
 /// Prints the preview of an import.
@@ -55,6 +94,9 @@ pub(crate) fn print_preview(p: &ImportPreview) {
             if !list.is_empty() {
                 println!("{label}: {}", names(list));
             }
+        }
+        for line in edge_lines(d) {
+            println!("{line}");
         }
         // The line diff keeps the common lines as context: the definition is
         // the same when no line was added or removed.
@@ -121,5 +163,41 @@ pub(crate) fn print_approval_hint(root: &Path, id: &str, version: &str) {
              `apb trust approve {safe_id} --version {safe_version}`, \
              or confirm it for one run with `apb run {safe_id} --version {safe_version}`"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_edges_and_order_changes_get_their_lines() {
+        let pb = |edges: &str| {
+            format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: s, type: start }}\n  - {{ id: a, type: prompt, prompt: a }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: s, to: a }}\n{edges}"
+            )
+        };
+        let ok = "condition: { type: node_status, node: a, equals: success }";
+        let fail = "condition: { type: node_status, node: a, equals: failure }";
+        let d = apb_core::versioning::diff_definitions(
+            &pb(&format!(
+                "  - {{ from: a, to: done, {ok} }}\n  - {{ from: a, to: done, {fail} }}\n"
+            )),
+            &pb(&format!(
+                "  - {{ from: a, to: done, {fail} }}\n  - {{ from: a, to: done, {ok} }}\n"
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            edge_lines(&d),
+            vec![
+                "edges changed: e:a>done#2 -> e:a>done#1 (address)",
+                "edges changed: e:a>done#1 -> e:a>done#2 (address)",
+                "edge order changed at a: [e:a>done#1, e:a>done#2] -> [e:a>done#2, e:a>done#1]",
+            ]
+        );
+        let same = pb("  - { from: a, to: done }\n");
+        let d = apb_core::versioning::diff_definitions(&same, &same).unwrap();
+        assert!(edge_lines(&d).is_empty());
     }
 }

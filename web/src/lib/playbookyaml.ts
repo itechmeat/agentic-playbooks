@@ -47,11 +47,17 @@ export function parsePlaybook(text: string): { model?: PlaybookModel; error?: st
     if (typeof e.from !== 'string' || typeof e.to !== 'string') {
       return { error: 'each edge needs from and to' }
     }
+    // Every key is kept (an authored `id`, `join`, `max_traversals`,
+    // `require` and keys this dashboard does not know): the canvas and the
+    // edge panel read them, and an edge's address depends on its `id`. A
+    // null condition or fallback is the same as none.
+    const { condition, fallback, ...rest } = e
     edges.push({
+      ...rest,
       from: e.from,
       to: e.to,
-      ...(e.condition != null ? { condition: e.condition as PlaybookModel['edges'][number]['condition'] } : {}),
-      ...(e.fallback != null ? { fallback: e.fallback as boolean } : {}),
+      ...(condition != null ? { condition: condition as PlaybookModel['edges'][number]['condition'] } : {}),
+      ...(fallback != null ? { fallback: fallback as boolean } : {}),
     })
   }
 

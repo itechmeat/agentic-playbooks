@@ -31,7 +31,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120; `nodes` also holds V68, ids that start with `@`
+  V116-V120, `edges` for edge ids, pairs and judge values V121-V125; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -124,7 +124,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
   agent registry (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
-  shared by the validator and the engine (`graphutil.rs`), content/bundle digests
+  shared by the validator and the engine (`graphutil.rs`), the address of one
+  edge in one definition with its rank and check order (`edge_address.rs`,
+  shared with the dashboard's port through
+  `tests/fixtures/edge_addresses.json`), content/bundle digests
   (`content.rs`), the sealed type of every resolved secret with its
   constant-time comparison and labelled redaction (`secret.rs`), trust store
   (`trust.rs`), atomic state IO, symlinks and dir
@@ -261,7 +264,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   section and the supervisor line),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
-  the immutable write-once run manifest (`manifest.rs`), invocation resolution
+  the immutable write-once run manifest (`manifest.rs`), the diagnostics sidecar (`diagnostics/`: `writer` the one
+  writer that never fails a run, scrubs before it clips and drops a record
+  rather than wait on its lock, `reader` the
+  tolerant reader, `index` the dedup keys, `route` the `route_evaluated`
+  records, `mismatch` the `definition_mismatch` records), execution, list
+  visit and attempt identity from event order (`identity.rs`), the
+  definitions a run executed and the segments they cover
+  (`run_definitions.rs`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/command`
   the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
   included, and `adapter/spawn_env`
@@ -433,6 +443,25 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `Host`, no forwarding header) and never takes or returns a path.
   `rules/1` still reads tool facts from claude sessions only (codex facts
   are deferred to a `rules/2`, see `docs/QUALITY.md`).
+
+- **Edge addresses and route facts** (spec
+  `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge
+  has an address in its definition (`id:<id>` or `e:<from>><to>#<n>`,
+  `apb_core::edge_address`), carried by validation issues (`Issue.edges`),
+  the version diff's correspondence, `edge_traversed.edges` and the judge
+  edges' `decision_made.edge_addresses` (display only; routing never reads
+  them) and the editor. Diagnostics live in `runs/<id>/diagnostics.jsonl`,
+  never in the journal, and never steer a run (an equal-journals test
+  guards it); execution code only hands the writer a finished value.
+  Every drive journals the digest of the `playbook.yaml` it executes
+  (`run_started.definition`, `run_resumed.definition`,
+  `patch_applied.definition`) and stores those bytes under
+  `runs/<id>/definitions/<sha256>.yaml`; a segment is `Known` only when its
+  own journaled digest matches stored bytes, never on the sidecar. A resume
+  that finds a `playbook.yaml` no journaled digest accounts for records
+  `definition_mismatch` as detail and executes it as before; a detached
+  driver refuses one. A patch that would move a judge-edge answer routing
+  has not used yet is refused unless `continue_from` re-runs its source.
 
 - A **profile** is the single executor binding for an `agent_task` node: agent +
   model + ordered fallbacks + SOUL (role prompt) + skills, with a scope

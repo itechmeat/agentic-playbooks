@@ -4234,7 +4234,23 @@ pub(crate) fn advance_frontier(
     // Computed from the same `state`, so it agrees with the `runnable` set
     // above EXCEPT where the `join: any` race just narrowed it - hence the
     // `raced_out` filter in phase 1.
-    let selected = parallel::selected_edges(playbook, node, state);
+    let evaluation = parallel::evaluate_live_route(playbook, node, state);
+    let selected: Vec<&apb_core::schema::Edge> = evaluation
+        .chosen
+        .iter()
+        .map(|i| &playbook.edges[*i])
+        .collect();
+    // The addresses of the selected edges, by target: one decision record
+    // per target names every selected edge that delivers into it.
+    let addresses = apb_core::edge_address::edge_addresses(playbook);
+    let into = |target: &str| -> Vec<String> {
+        evaluation
+            .chosen
+            .iter()
+            .filter(|i| playbook.edges[**i].to == target)
+            .map(|i| addresses[*i].rendered.clone())
+            .collect()
+    };
     // Phase 1, the ROUTING DECISION: journaled for every target the routing
     // selected, including a target already on the frontier and a barrier that
     // is not ready yet. Those two are dropped from `runnable`, but the hop into
@@ -4250,11 +4266,16 @@ pub(crate) fn advance_frontier(
     // written twice, while every loop round writes its own, because routing
     // reads only the hops of a node's latest execution
     // (`RunState::hop_of_latest_run`). The counted record below is
-    // deliberately NOT deduped.
+    // deliberately NOT deduped. One record per target: two selected edges
+    // with the same ends are one hop, and its record names both
+    // (`journaled_hops` is a set, so the fold reads exactly what it read
+    // when each edge wrote its own identical record).
+    let mut recorded: Vec<&str> = Vec::new();
     for e in &selected {
-        if raced_out.contains(&e.to) {
+        if raced_out.contains(&e.to) || recorded.contains(&e.to.as_str()) {
             continue;
         }
+        recorded.push(&e.to);
         if state
             .journaled_hops
             .contains(&(node.to_string(), e.to.clone()))
@@ -4262,12 +4283,7 @@ pub(crate) fn advance_frontier(
         {
             continue;
         }
-        log.append(EventPayload::EdgeTraversed {
-            from: node.to_string(),
-            to: e.to.clone(),
-            via_policy: false,
-            uncounted: true,
-        })?;
+        log.append(EventPayload::hop(node, &e.to, false, true, into(&e.to)))?;
     }
     // Phase 2, the frontier pushes and the bounded COUNT: same condition, same
     // site, same one-per-actual-push semantics as before. Two records can
@@ -4289,16 +4305,12 @@ pub(crate) fn advance_frontier(
                 .iter()
                 .any(|e| e.to == s && e.max_traversals.is_some())
             {
-                log.append(EventPayload::EdgeTraversed {
-                    from: node.to_string(),
-                    to: s.clone(),
-                    via_policy: false,
-                    uncounted: false,
-                })?;
+                log.append(EventPayload::hop(node, &s, false, false, into(&s)))?;
             }
             frontier.push(s);
         }
     }
+    crate::diagnostics::route::record_decision(log, playbook, node, state, &evaluation);
     Ok(())
 }
 

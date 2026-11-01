@@ -652,6 +652,7 @@ fn supervisor_wait_event_returns_a_cursor_and_clips_huge_details() {
     log.append(EventPayload::RunStarted {
         playbook: "w".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     let detail = format!("{}FATAL: the real error", "x".repeat(100_000));
@@ -697,6 +698,7 @@ fn run_inspect_elides_long_event_texts_unless_asked() {
     log.append(EventPayload::RunStarted {
         playbook: "w".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     let big = "y".repeat(20_000);

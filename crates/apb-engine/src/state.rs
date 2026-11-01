@@ -667,6 +667,7 @@ impl RunState {
                     to,
                     via_policy,
                     uncounted,
+                    ..
                 } => {
                     s.journaled_hops.insert((from.clone(), to.clone()));
                     s.seqs.hops.insert((from.clone(), to.clone()), e.seq);

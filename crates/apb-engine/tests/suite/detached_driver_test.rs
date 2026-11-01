@@ -165,6 +165,46 @@ fn drive_run_from_dir_completes_a_prepared_but_undriven_run() {
     );
 }
 
+// The start journals the digest of the snapshot it prepared and stores the
+// bytes; a detached driver that finds another snapshot drives nothing.
+#[test]
+fn drive_run_from_dir_refuses_a_snapshot_its_start_did_not_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let prepared =
+        prepare_supervised_background(dir.path(), "slowscript", None, RunOptions::default())
+            .unwrap();
+    let run_id = prepared.run_id().to_string();
+    drop(prepared);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let yaml = fs::read(run_dir.join("playbook.yaml")).unwrap();
+    let digest = apb_engine::run_definitions::digest(&yaml);
+    let started = read_all(&run_dir)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.payload {
+            apb_engine::event::EventPayload::RunStarted { definition, .. } => definition,
+            _ => None,
+        });
+    assert_eq!(started.as_deref(), Some(digest.as_str()));
+    assert_eq!(
+        apb_engine::run_definitions::read_stored(&run_dir, &digest).unwrap(),
+        yaml
+    );
+
+    let mut changed = yaml.clone();
+    changed.extend_from_slice(b"# edited after the start\n");
+    fs::write(run_dir.join("playbook.yaml"), &changed).unwrap();
+    let err = drive_run_from_dir(dir.path(), &run_id).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("not the definition its start journaled"),
+        "{err}"
+    );
+    let state = RunState::fold(&read_all(&run_dir).unwrap());
+    assert!(state.nodes.is_empty(), "nothing ran: {:?}", state.nodes);
+}
+
 // Scenario 3: `drive_run_from_dir` is a one-shot for a run that has not been
 // driven yet. Driving an already-driven run again would replay nodes against a
 // journal that has moved on, so a second call is refused rather than silently

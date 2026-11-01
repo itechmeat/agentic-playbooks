@@ -268,6 +268,7 @@ fn child_run_wake_surfaces_on_parent_wait_wake() {
         .append(EventPayload::RunStarted {
             playbook: "parent".into(),
             version: "1.0.0".into(),
+            definition: None,
         })
         .unwrap();
     parent_log
@@ -292,6 +293,7 @@ fn child_run_wake_surfaces_on_parent_wait_wake() {
         .append(EventPayload::RunStarted {
             playbook: "child".into(),
             version: "1.0.0".into(),
+            definition: None,
         })
         .unwrap();
 

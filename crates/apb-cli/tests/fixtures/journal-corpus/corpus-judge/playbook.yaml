@@ -1,0 +1,24 @@
+# Journal corpus writer with judge edges (journal_corpus_test.rs, row 11):
+# `work` routes on two judge edges answered by a fake provider, so the new
+# writer journals a judge-edge decision with its edge addresses before the
+# run waits at a human_review gate for an older binary to resume. `fixit`
+# is an agent node on the branch never taken: decisions are asked only in a
+# run with agent nodes, and no agent ever starts.
+schema: 2
+id: corpus-judge
+name: Journal corpus judge edges
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh }
+  - { id: fixit, type: agent_task, prompt: "Fix the defect.", profile: corpus }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: fixit, condition: { type: judge, question: "Does the output report a defect?", min_p: 0.7, on_unavailable: false } }
+  - { from: work, to: gate, condition: { type: judge, question: "Is the output ready?", min_p: 0.7, on_unavailable: false } }
+  - { from: fixit, to: no }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }

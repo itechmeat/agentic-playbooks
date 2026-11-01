@@ -36,6 +36,7 @@ fn seed_question(root: &Path) -> (String, u64) {
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "iq".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     apb_engine::question::post_question(&run_dir, "ask", 1, "which way", vec!["left".into()])
@@ -172,6 +173,7 @@ edges:
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "rv".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     let seq = log

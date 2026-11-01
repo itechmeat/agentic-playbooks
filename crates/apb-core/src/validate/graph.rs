@@ -60,9 +60,11 @@ pub(crate) fn check_edges_exist(playbook: &Playbook, r: &mut ValidationReport) {
     for e in &playbook.edges {
         for id in [&e.from, &e.to] {
             if playbook.node(id).is_none() {
-                r.error(
+                r.error_edges(
+                    playbook,
                     "V06",
                     Some(id),
+                    &[e],
                     format!("edge references unknown node `{id}`"),
                 );
             }
@@ -348,9 +350,11 @@ pub(crate) fn check_joins(playbook: &Playbook, r: &mut ValidationReport) {
         if let Some(join) = &e.join
             && crate::schema::JoinMode::parse(join).is_none()
         {
-            r.error(
+            r.error_edges(
+                playbook,
                 "V36",
                 Some(&e.to),
+                &[e],
                 format!(
                     "edge `{}` -> `{}` has join `{join}`, expected `all` or `any`",
                     e.from, e.to
@@ -523,7 +527,13 @@ pub(crate) fn must_have_finished(playbook: &Playbook) -> HashMap<&str, HashSet<&
 pub(crate) fn check_edges(playbook: &Playbook, r: &mut ValidationReport) {
     for e in &playbook.edges {
         if e.max_traversals == Some(0) {
-            r.error("V30", None, "max_traversals must be at least 1".to_string());
+            r.error_edges(
+                playbook,
+                "V30",
+                None,
+                &[e],
+                "max_traversals must be at least 1".to_string(),
+            );
         }
     }
     check_duplicate_route_edges(playbook, r);
@@ -592,9 +602,14 @@ pub(crate) fn check_duplicate_route_edges(playbook: &Playbook, r: &mut Validatio
             .collect();
         if has_unconditional && !shadowed.is_empty() {
             let targets: Vec<&str> = shadowed.iter().map(|e| e.to.as_str()).collect();
-            r.error(
+            // The unconditional edges and the ones they shadow.
+            let concerned: Vec<&crate::schema::Edge> =
+                outs.iter().copied().filter(|e| !e.fallback).collect();
+            r.error_edges(
+                playbook,
                 "V34",
                 Some(from),
+                &concerned,
                 format!(
                     "unconditional edge from `{from}` makes conditional edge(s) to [{}] unreachable under first-match routing",
                     targets.join(", ")
@@ -603,25 +618,27 @@ pub(crate) fn check_duplicate_route_edges(playbook: &Playbook, r: &mut Validatio
         }
 
         // Identical first-match keys with different targets.
-        let mut groups: HashMap<RouteKey<'_>, Vec<&str>> = HashMap::new();
+        let mut groups: HashMap<RouteKey<'_>, Vec<&crate::schema::Edge>> = HashMap::new();
         for e in &outs {
             let Some(key) = route_key(e) else {
                 // Unconditional non-fallback: parallel fan-out, not first-match.
                 continue;
             };
-            groups.entry(key).or_default().push(e.to.as_str());
+            groups.entry(key).or_default().push(e);
         }
-        for (key, targets) in groups {
-            let mut unique: Vec<&str> = targets.clone();
+        for (key, group) in groups {
+            let mut unique: Vec<&str> = group.iter().map(|e| e.to.as_str()).collect();
             unique.sort_unstable();
             unique.dedup();
             if unique.len() <= 1 {
                 // Same target (or a single edge): redundant at worst, not contradictory.
                 continue;
             }
-            r.error(
+            r.error_edges(
+                playbook,
                 "V34",
                 Some(from),
+                &group,
                 format!(
                     "contradictory edges from `{from}` with identical condition ({}) to different targets: [{}]",
                     describe_route_key(&key),

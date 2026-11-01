@@ -171,6 +171,7 @@ fn synthetic_run(root: &Path, run_id: &str) -> EventLog {
     log.append(EventPayload::RunStarted {
         playbook: "w".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log

@@ -144,7 +144,9 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
         return Ok(());
     }
     let Some((id, version)) = events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunStarted { playbook, version } => Some((playbook.clone(), version.clone())),
+        EventPayload::RunStarted {
+            playbook, version, ..
+        } => Some((playbook.clone(), version.clone())),
         _ => None,
     }) else {
         return Ok(());

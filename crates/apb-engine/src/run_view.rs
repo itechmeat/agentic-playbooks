@@ -543,6 +543,7 @@ mod decision_tests {
                 cost_estimated: !cached && answered,
                 cached,
                 error: error.map(str::to_string),
+                edge_addresses: Default::default(),
             },
         }
     }
@@ -559,6 +560,7 @@ mod decision_tests {
             payload: EventPayload::RunStarted {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         }];
         assert_eq!(json(&events), None);
@@ -696,6 +698,7 @@ mod tests {
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
                 EventPayload::NodeStarted {
                     node: "script".into(),
@@ -746,6 +749,7 @@ mod tests {
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
                 EventPayload::RunFinished {
                     outcome: "succeeded".into(),

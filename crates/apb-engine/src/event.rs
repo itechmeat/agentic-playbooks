@@ -48,6 +48,18 @@ pub enum EventPayload {
     RunStarted {
         playbook: String,
         version: String,
+        /// The digest of the exact `playbook.yaml` bytes this start
+        /// executes (`crate::run_definitions`; the bytes are stored under
+        /// `runs/<id>/definitions/<digest>.yaml` when the store succeeds).
+        /// The journal's own evidence of the definition in force from here
+        /// on. Absent in logs written before it existed and on a start that
+        /// failed before it ran anything. Additive; read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        definition: Option<String>,
     },
     /// Origin and execution location of the run (spec 3). Written right
     /// after `RunStarted`. A separate event (rather than fields on
@@ -364,6 +376,16 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         launch: Option<apb_core::launch::LaunchRecord>,
+        /// The digest of the exact `playbook.yaml` bytes this resume
+        /// executes (`crate::run_definitions`), stored before it is
+        /// journaled when the store succeeds. Absent in older journals.
+        /// Additive; read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        definition: Option<String>,
     },
     RunFinished {
         outcome: String,
@@ -409,6 +431,16 @@ pub enum EventPayload {
         version: String,
         classification: String,
         continue_from: String,
+        /// The digest of the definition the patch put in force, stored
+        /// before `playbook.yaml` was replaced when the store succeeds
+        /// (`crate::run_definitions`). Read by surfaces only; absent when an
+        /// older apb applied the patch. Read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        definition: Option<String>,
     },
     PatchRejected {
         reason: String,
@@ -696,6 +728,16 @@ pub enum EventPayload {
         /// (`list:`). Absent everywhere else. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        /// For the judge edges of a node: each question id (`edge_<rank>`)
+        /// with the rendered address of its edge in the definition that
+        /// asked. Display only: routing reads the answers by rank, as every
+        /// binary does. A shape this binary cannot read decodes as empty.
+        #[serde(
+            default,
+            skip_serializing_if = "std::collections::BTreeMap::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        edge_addresses: std::collections::BTreeMap<String, String>,
     },
     /// An explicit cycle-progress report (spec 2026-07-17): the current
     /// iteration `done` of `total` for the cycle group anchored at `node_id`.
@@ -1261,6 +1303,18 @@ pub enum EventPayload {
         /// before, and omitted from the wire whenever false.
         #[serde(default, skip_serializing_if = "is_false")]
         uncounted: bool,
+        /// The rendered addresses (`apb_core::edge_address`) of every
+        /// selected edge that delivered into `to` in this decision: usually
+        /// one, two or more for identical edges, the fallback's for a
+        /// `max_loops` exit, empty for a policy hop. Display only: no fold
+        /// and no routing reads it. Absent in logs written before it existed;
+        /// a shape this binary cannot read decodes as empty.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        edges: Vec<String>,
     },
     /// A join proceeded WITHOUT one or more of its declared inputs, because no
     /// node the run can still execute reaches them (spec 2026-08-05, Task 4).
@@ -2564,6 +2618,24 @@ impl EventPayload {
                 | EventPayload::RunAborted { .. }
         )
     }
+
+    /// An [`EventPayload::EdgeTraversed`]: the hop `from -> to` over the
+    /// edges named by `edges` (rendered addresses, empty for a policy hop).
+    pub fn hop(
+        from: impl Into<String>,
+        to: impl Into<String>,
+        via_policy: bool,
+        uncounted: bool,
+        edges: Vec<String>,
+    ) -> Self {
+        EventPayload::EdgeTraversed {
+            from: from.into(),
+            to: to.into(),
+            via_policy,
+            uncounted,
+            edges,
+        }
+    }
 }
 
 /// The whole journal, for the engine: any unparsable line at all is an error,
@@ -3489,5 +3561,90 @@ mod tests {
         // Neither is a checkpoint: each is safe to skip up to the next one.
         let raw = serde_json::from_str::<Event>(r#"{"seq":4,"ts":1,"type":"budget_set"}"#);
         assert!(!raw.unwrap().payload.is_checkpoint());
+    }
+}
+
+#[cfg(test)]
+mod edge_address_field_tests {
+    use super::*;
+
+    fn decode(line: &str) -> Event {
+        serde_json::from_str(line).unwrap()
+    }
+
+    #[test]
+    fn hop_edges_decode_absent_valid_and_malformed() {
+        let base =
+            r#"{"seq":1,"ts":1,"type":"edge_traversed","from":"a","to":"b","uncounted":true"#;
+        for (tail, want) in [
+            ("}", Vec::<String>::new()),
+            (
+                r#","edges":["e:a>b#1","id:x"]}"#,
+                vec!["e:a>b#1".into(), "id:x".into()],
+            ),
+            (r#","edges":5}"#, Vec::new()),
+            (r#","edges":[1]}"#, Vec::new()),
+            (r#","edges":null}"#, Vec::new()),
+        ] {
+            let ev = decode(&format!("{base}{tail}"));
+            let EventPayload::EdgeTraversed {
+                edges, uncounted, ..
+            } = ev.payload
+            else {
+                panic!("an edge_traversed")
+            };
+            assert!(uncounted);
+            assert_eq!(edges, want, "{tail}");
+        }
+        // Absent edges stay absent on the wire.
+        let line = format!("{base}}}");
+        assert_eq!(serde_json::to_string(&decode(&line)).unwrap(), line);
+    }
+
+    #[test]
+    fn judge_edge_addresses_decode_absent_valid_and_malformed() {
+        let base = r#"{"seq":1,"ts":1,"type":"decision_made","use_site":"judge_edge","node":"a","attempt":1"#;
+        for (tail, want) in [
+            ("}", 0usize),
+            (r#","edge_addresses":{"edge_0":"e:a>b#1"}}"#, 1),
+            (r#","edge_addresses":"x"}"#, 0),
+            (r#","edge_addresses":{"edge_0":5}}"#, 0),
+        ] {
+            let ev = decode(&format!("{base}{tail}"));
+            let EventPayload::DecisionMade { edge_addresses, .. } = ev.payload else {
+                panic!("a decision_made")
+            };
+            assert_eq!(edge_addresses.len(), want, "{tail}");
+        }
+    }
+
+    #[test]
+    fn definition_digests_decode_absent_valid_and_malformed_on_every_boundary() {
+        let bases = [
+            r#"{"seq":1,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0""#,
+            r#"{"seq":1,"ts":1,"type":"run_resumed","from_node":"a""#,
+            r#"{"seq":1,"ts":1,"type":"patch_applied","version":"1.0.1","classification":"improvement","continue_from":"a""#,
+        ];
+        let definition = |p: &EventPayload| match p {
+            EventPayload::RunStarted { definition, .. }
+            | EventPayload::RunResumed { definition, .. }
+            | EventPayload::PatchApplied { definition, .. } => definition.clone(),
+            other => panic!("not a boundary: {other:?}"),
+        };
+        for base in bases {
+            for (tail, want) in [
+                ("}", None),
+                (r#","definition":"abc"}"#, Some("abc")),
+                (r#","definition":null}"#, None),
+                (r#","definition":5}"#, None),
+                (r#","definition":{"digest":"x"}}"#, None),
+            ] {
+                let ev = decode(&format!("{base}{tail}"));
+                assert_eq!(definition(&ev.payload).as_deref(), want, "{base}{tail}");
+            }
+            // An absent digest stays absent on the wire.
+            let line = format!("{base}}}");
+            assert_eq!(serde_json::to_string(&decode(&line)).unwrap(), line);
+        }
     }
 }

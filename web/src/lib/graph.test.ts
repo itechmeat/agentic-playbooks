@@ -1,11 +1,14 @@
 import dagre from '@dagrejs/dagre'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  dragFromHandle,
   edgeTone,
+  exitHandleAddress,
   expectedText,
   failureEffect,
   isUserArranged,
   nodeExits,
+  PLAIN_HANDLE,
   profileModelMap,
   toFlow,
   withProfileModels,
@@ -34,7 +37,9 @@ describe('toFlow', () => {
     expect(nodes[2].data.title).toBe('done')
     expect(edges).toHaveLength(2)
     expect(edges[1]).toMatchObject({ source: 'a', target: 'done' })
-    expect(edges[1].label).toContain('success')
+    // A conditional edge leaves from its own exit, which carries the caption.
+    expect(edges[1].sourceHandle).toBe(`edge:${edges[1].id}`)
+    expect(nodes[1].data.exits?.list[0].label).toContain('success')
   })
 
   it('uses stored layout positions when present', () => {
@@ -54,7 +59,7 @@ describe('toFlow', () => {
 
   it('annotates nodes with run status when provided', () => {
     const statuses = { start: 'succeeded', a: 'running', done: 'pending' }
-    const { nodes } = toFlow(playbook, null, statuses)
+    const { nodes } = toFlow(playbook, { statuses })
     expect(nodes.find((n) => n.id === 'a')!.data.status).toBe('running')
     expect(nodes.find((n) => n.id === 'start')!.data.status).toBe('succeeded')
   })
@@ -65,7 +70,7 @@ describe('toFlow', () => {
   })
 
   it('flags nodes present in cachedIds', () => {
-    const { nodes } = toFlow(playbook, null, undefined, new Set(['a']))
+    const { nodes } = toFlow(playbook, { cachedIds: new Set(['a']) })
     expect(nodes.find((n) => n.id === 'a')!.data.cached).toBe(true)
     expect(nodes.find((n) => n.id === 'start')!.data.cached).toBe(false)
   })
@@ -280,26 +285,63 @@ describe('nodeExits', () => {
     expect(exits?.list[1].title).toContain('Is `output` broken?')
   })
 
-  it('says nothing about a node with one exit', () => {
-    expect(nodeExits(pb([status('success', 'a')]), 'work')).toBeNull()
+  it('says nothing about a node with no edge or a single unconditional one', () => {
+    expect(nodeExits(pb([{ from: 'work', to: 'a' }]), 'work')).toBeNull()
     expect(nodeExits(pb([]), 'work')).toBeNull()
+  })
+
+  // A single conditional edge used to sit on the anonymous dot, its condition
+  // halfway along the line; it now has its exit like any other.
+  it('names the exit of a single conditional edge', () => {
+    const exits = nodeExits(pb([status('success', 'a')]), 'work')
+    expect(exits?.list.map((e) => e.label)).toEqual(['success'])
+    expect(exits?.list[0].id).toBe('edge:e:work>a#1')
+    expect(exits?.parallel).toBe(0)
   })
 
   it('numbers conditional exits in the order the engine checks them', () => {
     const exits = nodeExits(pb([status('success', 'a'), status('failure', 'b')]), 'work')
     expect(exits?.mode).toBe('one-of')
     expect(exits?.list.map((e) => e.label)).toEqual(['1 success', '2 failure'])
-    expect(exits?.list.map((e) => e.id)).toEqual(['out-0', 'out-1'])
+    expect(exits?.list.map((e) => e.id)).toEqual(['edge:e:work>a#1', 'edge:e:work>b#1'])
     expect(exits?.list.map((e) => e.tone)).toEqual(['success', 'failure'])
     expect(exits?.list[1].title).toContain('checked 2 of 2 in order')
     expect(exits?.list[1].title).toContain('goes to b')
   })
 
-  it('calls an unconditional fan-out what it is, with no ordering implied', () => {
+  it('numbers a fallback declared first last, as else', () => {
+    const exits = nodeExits(
+      pb([{ from: 'work', to: 'c', fallback: true }, status('success', 'a'), status('failure', 'b')]),
+      'work',
+    )
+    expect(exits?.list.map((e) => e.label)).toEqual(['1 success', '2 failure', '3 else'])
+    expect(exits?.list.map((e) => e.address)).toEqual(['e:work>a#1', 'e:work>b#1', 'e:work>c#1'])
+  })
+
+  it('keeps an unconditional fan-out on the plain handle, with no ordering implied', () => {
     const exits = nodeExits(pb([{ from: 'work', to: 'a' }, { from: 'work', to: 'b' }]), 'work')
     expect(exits?.mode).toBe('all')
-    expect(exits?.list.map((e) => e.label)).toEqual(['a', 'b'])
-    expect(exits?.list[0].title).toContain('in parallel')
+    expect(exits?.list).toEqual([])
+    expect(exits?.parallel).toBe(2)
+  })
+
+  it('names the conditional exits of a mixed node and counts the unconditional ones', () => {
+    const exits = nodeExits(pb([{ from: 'work', to: 'a' }, status('failure', 'b')]), 'work')
+    expect(exits?.mode).toBe('all')
+    expect(exits?.parallel).toBe(1)
+    expect(exits?.list.map((e) => e.label)).toEqual(['failure'])
+  })
+
+  it('gives two exits with one authored id (a validation error) two handles', () => {
+    const exits = nodeExits(
+      pb([
+        { id: 'x', ...status('success', 'a') },
+        { id: 'x', ...status('failure', 'b') },
+      ]),
+      'work',
+    )
+    const ids = exits?.list.map((e) => e.id) ?? []
+    expect(new Set(ids).size).toBe(2)
   })
 
   it('names a fallback `else` and a foreign status by its node', () => {
@@ -343,10 +385,10 @@ describe('nodeExits', () => {
     const exits = nodeExits(
       pb(
         [
-          { from: 'work', to: 'lock_scope_alpha' },
-          { from: 'work', to: 'lock_scope_omega' },
+          { from: 'work', to: 'a', condition: { type: 'review_status', equals: 'lock_scope_alpha_x' } },
+          { from: 'work', to: 'b', condition: { type: 'review_status', equals: 'lock_scope_omega_x' } },
         ],
-        ['work', 'lock_scope_alpha', 'lock_scope_omega'],
+        ['work', 'a', 'b'],
       ),
       'work',
     )
@@ -356,18 +398,58 @@ describe('nodeExits', () => {
     expect(exits?.list[0].title).toContain('lock_scope_alpha')
   })
 
-  it('gives every edge its own handle and drops the now-duplicated edge label', () => {
+  it('gives every conditional edge its own handle, by address, and drops the duplicated label', () => {
     const model = pb([status('success', 'a'), status('failure', 'b')])
     const { nodes, edges } = toFlow(model, null)
     expect(nodes.find((n) => n.id === 'work')?.data.exits?.list).toHaveLength(2)
-    expect(edges.map((e) => e.sourceHandle)).toEqual(['out-0', 'out-1'])
+    expect(edges.map((e) => e.id)).toEqual(['e:work>a#1', 'e:work>b#1'])
+    expect(edges.map((e) => e.sourceHandle)).toEqual(['edge:e:work>a#1', 'edge:e:work>b#1'])
     expect(edges.map((e) => e.label)).toEqual([undefined, undefined])
   })
 
-  it('leaves a single-exit node on the anonymous handle with its edge label', () => {
-    const { edges } = toFlow(pb([status('success', 'a')]), null)
-    expect(edges[0].sourceHandle).toBeUndefined()
-    expect(edges[0].label).toBe('work: success')
+  it('puts a single conditional edge on its own exit, not the anonymous dot', () => {
+    const { nodes, edges } = toFlow(pb([status('success', 'a')]), null)
+    expect(edges[0].sourceHandle).toBe('edge:e:work>a#1')
+    expect(edges[0].label).toBeUndefined()
+    expect(nodes.find((n) => n.id === 'work')?.data.exits?.list).toHaveLength(1)
+  })
+
+  it('leaves unconditional edges on the plain handle and ids duplicates by ordinal', () => {
+    const { edges } = toFlow(pb([{ from: 'work', to: 'a' }, { from: 'work', to: 'a' }, { id: 'kick', from: 'work', to: 'b' }]), null)
+    // No named exit: the plain handle is the node's only source handle.
+    expect(edges.map((e) => e.sourceHandle)).toEqual([undefined, undefined, undefined])
+    expect(edges.map((e) => e.id)).toEqual(['e:work>a#1', 'e:work>a#2', 'id:kick'])
+    expect(edges.map((e) => e.data.address)).toEqual(['e:work>a#1', 'e:work>a#2', 'id:kick'])
+  })
+
+  it('draws an unconditional edge from the named plain handle when the node has named exits', () => {
+    // Without a handle id the canvas would draw it from the first source
+    // handle in the node, which is exit 1.
+    const { edges } = toFlow(
+      pb([{ from: 'work', to: 'a' }, status('success', 'b'), { from: 'work', to: 'c', fallback: true }]),
+      null,
+    )
+    expect(edges.map((e) => e.sourceHandle)).toEqual([PLAIN_HANDLE, 'edge:e:work>b#1', 'edge:e:work>c#1'])
+    expect(exitHandleAddress(PLAIN_HANDLE)).toBeNull()
+  })
+
+  it('adds an edge only on a drag from the plain handle', () => {
+    expect(dragFromHandle(PLAIN_HANDLE)).toEqual({ add: true })
+    expect(dragFromHandle(null)).toEqual({ add: true })
+    expect(dragFromHandle(undefined)).toEqual({ add: true })
+    expect(dragFromHandle('edge:e:work>b#1')).toEqual({ add: false, exit: 'e:work>b#1' })
+  })
+
+  it('keeps canvas ids unique when an authored id is used twice', () => {
+    const { edges } = toFlow(pb([{ id: 'x', from: 'work', to: 'a' }, { id: 'x', from: 'work', to: 'b' }]), null)
+    expect(new Set(edges.map((e) => e.id)).size).toBe(2)
+    expect(edges.map((e) => e.data.address)).toEqual(['id:x', 'id:x'])
+  })
+
+  it('takes the stored layout as the options argument', () => {
+    const model = pb([status('success', 'a')])
+    const { nodes } = toFlow(model, { layout: { nodes: [{ id: 'a', x: 5, y: 6 }] } })
+    expect(nodes.find((n) => n.id === 'a')?.position).toEqual({ x: 5, y: 6 })
   })
 })
 
@@ -532,7 +614,7 @@ describe('toFlow forceAuto', () => {
         { id: 'done', x: 9999, y: 9999 },
       ],
     }
-    const { nodes } = toFlow(fanOutPlaybook, stored, undefined, undefined, true)
+    const { nodes } = toFlow(fanOutPlaybook, { layout: stored, forceAuto: true })
     // Every position must come from the auto pass, so none of the sentinel
     // 9999 stored values should leak through.
     for (const n of nodes) {

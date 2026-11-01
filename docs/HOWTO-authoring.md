@@ -155,6 +155,22 @@ graph page and read the rendered branches back, the way a human reviewer
 would. This is advisory only, no code path depends on `agent-browser`; a
 plain manual look is equally valid.
 
+### Edges in the editor
+
+The editor works on edges by their address (see "Edge ids and edge
+addresses" below), so deleting one of two edges with the same ends removes
+exactly that one, and every other key of the remaining edge is kept. It
+never adds ids to existing edges; when it creates an edge whose ends repeat
+an id-less edge's, it gives the new edge a generated id.
+
+Routing checks the outgoing edges of a node in a fixed order, and the
+editor numbers a node's exits the same way: conditional edges in
+declaration order, then the fallback, wherever it is declared. A node shows
+named exits as soon as it has one conditional or fallback edge. Dragging
+from a named exit creates nothing: the exit already leads to its target, and
+conditions are edited in the YAML. The edge panel shows the address, the
+condition in words, `max_traversals` and `join`.
+
 ## The current version
 
 Every save makes a new immutable version; the `current` pointer says which
@@ -2400,6 +2416,39 @@ under `on_needs_look: fail`, a bounded edge routes to a fix, the fix routes
 back to the list, and only the reviewers still open review again
 (examples/playbooks/review-panel-list.yaml). `rerun: not_passed` on a node
 that sits in no cycle has no effect, and the validator warns (V93).
+
+## Edge ids and edge addresses
+
+Every edge field: `from`, `to`, and the optional `id`, `condition`,
+`fallback`, `join`, `max_traversals` and `require`.
+
+An edge may carry an `id` (`[a-z0-9][a-z0-9_-]*`, at most 64 characters,
+unique among the playbook's edges):
+
+```yaml
+edges:
+  - { id: retry, from: review, to: fix, condition: { type: node_status, node: review, equals: failure }, max_traversals: 3 }
+```
+
+apb names each edge of a definition by an address. An edge with an `id` is
+`id:<id>`; any other edge is `e:<from>><to>#<n>`, where `n` counts the edges
+without an id that have exactly those ends, in the order they are written
+(characters outside letters, digits, `_`, `.` and `-` in a node id are
+written as `%XX`). Validation issues about an edge name its address, and
+the version diff says which edge of one version corresponds to which edge
+of the other. A derived address moves when an edge with the same ends is
+added, removed or reordered, so give an `id` to an edge you want to keep
+pointing at across versions.
+
+The validator checks edges as individual things too:
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V121 | error | an edge `id` is malformed or used by two edges |
+| V122 | warning | edges with the same two ends carry different `max_traversals`: the traversal count belongs to the pair, so every traversal of either edge counts toward both caps, and each edge stops at its own cap |
+| V123 | warning | a fallback edge of a node that routes to one edge (it has a conditional or fallback edge and no plain one) is not that node's last outgoing edge; a fallback is only tried after everything else, so write it last |
+| V124 | warning | such a node has two edges without `max_traversals` with the same target, condition and fallback flag; only the first can ever be taken (plain fan-out edges and bounded edges are not checked) |
+| V125 | warning | an `output_field` edge compares a judge node's field with a value it never writes: a choice question writes one of its options, a noul question `true` or `false`, a score question with bands a band name and one without bands nothing under its own name (only `<id>_score`), and `decided_by` is `default`, `unavailable`, `<provider>/<model>` or `emulated:<provider>` |
 
 ## expected_duration (progress estimates)
 

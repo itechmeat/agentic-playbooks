@@ -229,12 +229,7 @@ fn reference_issue(
     node: &str,
     message: String,
 ) -> crate::validate::Issue {
-    crate::validate::Issue {
-        code,
-        severity,
-        message,
-        node: Some(node.to_string()),
-    }
+    crate::validate::Issue::new(code, severity, Some(node), message)
 }
 
 fn unresolved_profiles(

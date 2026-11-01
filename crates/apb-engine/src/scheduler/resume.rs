@@ -958,6 +958,14 @@ fn resume_inner_checked(
     // apb wrote) that no checkpoint settles; one that is settled is skipped,
     // and said so once.
     let mut log = EventLog::open(&run_dir)?;
+    // The bytes this resume executes are stored and their digest goes on
+    // `run_resumed`, the journal's own evidence of the definition in force
+    // from there on. A `playbook.yaml` no journaled digest accounts for is
+    // recorded for the surfaces too; the resume executes it all the same.
+    let definition = match read_all(&run_dir) {
+        Ok(events) => crate::run_definitions::on_resume(&run_dir, &events, yaml.as_bytes()),
+        Err(_) => crate::run_definitions::store_best_effort(&run_dir, yaml.as_bytes()),
+    };
     warn_skipped_unknown_events(&run_dir, run_id);
     for ev in drift_events {
         log.append(ev)?;
@@ -1069,6 +1077,7 @@ fn resume_inner_checked(
             by: Some(by),
             explicit: decision.reason == ResumeReason::ExplicitFromNode,
             launch: None,
+            definition: Some(definition),
         },
     )?;
     // A budget set on a run that started without one needs the run's
@@ -1143,6 +1152,7 @@ mod tests {
         log.append(EventPayload::RunStarted {
             playbook: "p".into(),
             version: "1.0.0".into(),
+            definition: None,
         })
         .unwrap();
         log.append(
