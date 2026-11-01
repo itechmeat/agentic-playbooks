@@ -219,3 +219,48 @@ impl Drop for RunGuard {
         }
     }
 }
+
+/// Runs `apb <args>` on a fresh pseudo-terminal (util-linux `script`) in
+/// `dir` with the config dir `cfg`, typing `answer` into the terminal for
+/// the question it asks; returns the exit status and what the terminal
+/// showed. `None` where `script` is missing (the caller skips).
+#[cfg(target_os = "linux")]
+pub fn on_a_terminal(
+    dir: &Path,
+    cfg: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    answer: &[u8],
+) -> Option<(i32, String)> {
+    use std::io::Write as _;
+    let script = ["/usr/bin/script", "/bin/script"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())?;
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let line = std::iter::once(apb_bin().display().to_string())
+        .chain(args.iter().map(|a| a.to_string()))
+        .map(|a| quote(&a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut cmd = std::process::Command::new(script);
+    cmd.args(["-qec", &line, "/dev/null"])
+        .current_dir(dir)
+        .env("APB_CONFIG_DIR", cfg)
+        .env_remove("APB_RUN_ID")
+        .env_remove("APB_HOST_TASK")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().ok()?;
+    // The answer waits in the terminal until the question reads it.
+    child.stdin.take().unwrap().write_all(answer).unwrap();
+    let out = child.wait_with_output().unwrap();
+    Some((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
+}

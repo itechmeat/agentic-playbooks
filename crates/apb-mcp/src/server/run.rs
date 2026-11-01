@@ -24,15 +24,36 @@ impl WfMcp {
     )]
     pub(crate) async fn playbook_trial(
         &self,
+        args: Parameters<PlaybookTrialArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let client = ctx.peer.peer_info().map(|i| i.client_info.name.clone());
+        self.playbook_trial_for(args, client)
+    }
+
+    /// [`Self::playbook_trial`] for the MCP client named `client`.
+    pub(crate) fn playbook_trial_for(
+        &self,
         Parameters(PlaybookTrialArgs {
             id,
             version,
             params,
             instruction,
             scope,
+            confirm_launch,
+            launch_version,
+            launch_choice,
         }): Parameters<PlaybookTrialArgs>,
+        client: Option<String>,
     ) -> CallToolResult {
         let scope = scope.as_deref().unwrap_or("project");
+        let launch = super::mcp_launch(
+            client,
+            apb_engine::gate::launch::LaunchKind::Trial,
+            confirm_launch,
+            launch_version,
+            launch_choice,
+        );
         to_call_tool_result(tools::playbook_trial(
             &self.root,
             &id,
@@ -40,6 +61,7 @@ impl WfMcp {
             params,
             instruction,
             scope,
+            &launch,
         ))
     }
 
@@ -116,6 +138,9 @@ impl WfMcp {
             acknowledge_untrusted,
             confirm_irreversible,
             budget,
+            confirm_launch,
+            launch_version,
+            launch_choice,
         }): Parameters<PlaybookExecutePlanArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -158,11 +183,19 @@ impl WfMcp {
             id: payload.id.clone(),
             version: Some(payload.version.clone()),
         };
+        let launch = super::mcp_launch(
+            client.clone(),
+            apb_engine::gate::launch::LaunchKind::ExecutePlan,
+            confirm_launch,
+            launch_version,
+            launch_choice,
+        );
         let permit = match crate::policy::check_run(
             &root_b,
             &wref,
             acknowledge_untrusted == Some(true),
             false,
+            &launch,
         ) {
             Ok(p) => p,
             Err(refusal) => {
@@ -267,6 +300,7 @@ impl WfMcp {
             params: payload.params.clone(),
             expected_digest: Some(payload.digest.clone()),
             expected_profile_bundles: Some(expected_bundles),
+            launch: permit.launch,
             expected_children: Some(permit.children),
             consent,
             budget,
@@ -333,6 +367,9 @@ impl WfMcp {
             budget,
             remember,
             notify,
+            confirm_launch,
+            launch_version,
+            launch_choice,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -405,11 +442,26 @@ impl WfMcp {
         // (autonomous / supervise:"self") does not spawn an external
         // supervisor agent -> supervised: false (matches the manifest, where
         // neither mode is RunMode::AgentSupervised).
+        let launch_kind = match &continued_from {
+            Some(pred) => apb_engine::gate::launch::LaunchKind::ContinueFrom {
+                run_id: pred.clone(),
+                node: String::new(),
+            },
+            None => apb_engine::gate::launch::LaunchKind::Start,
+        };
+        let launch = super::mcp_launch(
+            execution.client.clone(),
+            launch_kind,
+            confirm_launch,
+            launch_version,
+            launch_choice,
+        );
         let permit = match crate::policy::check_run(
             &self.root,
             &wref,
             acknowledge_untrusted == Some(true),
             false,
+            &launch,
         ) {
             Ok(p) => p,
             Err(refusal) => {
@@ -521,6 +573,7 @@ impl WfMcp {
             });
         }
         let start = tools::StartArgs {
+            launch: permit.launch,
             params,
             instruction,
             expected_digest: Some(permit.playbook_digest),
@@ -877,6 +930,9 @@ impl WfMcp {
             workspace,
             budget,
             confirm_budget,
+            confirm_launch,
+            launch_version,
+            launch_choice,
         }): Parameters<RunResumeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -891,6 +947,9 @@ impl WfMcp {
                 workspace,
                 budget,
                 confirm_budget,
+                confirm_launch,
+                launch_version,
+                launch_choice,
             },
             client,
         )
@@ -907,6 +966,9 @@ impl WfMcp {
             workspace,
             budget,
             confirm_budget,
+            confirm_launch,
+            launch_version,
+            launch_choice,
         }: RunResumeArgs,
         client: Option<String>,
     ) -> CallToolResult {
@@ -923,6 +985,31 @@ impl WfMcp {
         {
             return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
         }
+        // The launch policy of a run never authorized (one an older apb
+        // started): the decision table on its own snapshot and child tree.
+        // An authorized run passes; its grant reaches the driver.
+        let launch = super::mcp_launch(
+            client.clone(),
+            apb_engine::gate::launch::LaunchKind::Resume {
+                run_id: run_id.clone(),
+            },
+            confirm_launch,
+            launch_version,
+            launch_choice,
+        );
+        let grant = match apb_engine::resume_launch::check_resume_launch(&root, &run_id, &launch) {
+            Ok(g) => g,
+            Err(refusal) => {
+                let of = apb_engine::next_action::start::StartOf {
+                    playbook: refusal["id"].as_str().unwrap_or(&run_id),
+                    version: None,
+                };
+                return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                    of,
+                    refusal.clone(),
+                )));
+            }
+        };
         // A budget change over MCP needs a person: the first call returns a
         // nonce to show them the change with, the second applies it.
         if let Some(b) = &budget
@@ -953,6 +1040,7 @@ impl WfMcp {
                 from_node.as_deref(),
                 allow_environment_drift,
                 budget.as_ref(),
+                grant.as_ref(),
             )),
             note,
         )

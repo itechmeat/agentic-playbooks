@@ -3454,28 +3454,6 @@ pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> Result<bool, EngineE
     ))
 }
 
-/// The parent run's definition origin (from its RunProvenance event), used to
-/// resolve a child's `scope: auto` the same way the policy gate does (parent
-/// origin first, then global). Defaults to Project when the label is absent.
-pub(crate) fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
-    use apb_core::scope::Origin;
-    let events = read_all(run_dir).unwrap_or_default();
-    for e in &events {
-        if let EventPayload::RunProvenance {
-            origin: Some(label),
-            ..
-        } = &e.payload
-        {
-            return if label == "global" {
-                Origin::Global
-            } else {
-                Origin::Project { workspace_id: None }
-            };
-        }
-    }
-    Origin::Project { workspace_id: None }
-}
-
 /// Builds the child run's [`RunOptions`] from the (optional) verified pin. A
 /// gated run carries a pin (`Some`) and threads every anti-TOCTOU `expected_*`
 /// map through verbatim, including the child's own verified connector permit
@@ -3505,6 +3483,25 @@ fn child_run_options(
             .unwrap_or_default(),
         ..Default::default()
     }
+}
+
+/// Persists `pin`'s own child pins as the `expected_children` of the child
+/// run `child_run` when it has none, so a reattached child (started by an
+/// older apb) spawns exactly the descendants its parent's gate verified.
+fn install_child_pins(
+    root: &Path,
+    child_run: &str,
+    pin: &crate::run_config::ChildExpectation,
+) -> Result<(), String> {
+    let child_dir = root.join(".apb/runs").join(child_run);
+    let mut cfg = crate::run_config::read_run_config(&child_dir)
+        .map_err(|e| format!("child run `{child_run}`: its configuration does not read: {e}"))?;
+    if cfg.expected_children.is_some() {
+        return Ok(());
+    }
+    cfg.expected_children = Some(pin.children.clone());
+    crate::run_config::write_run_config(&child_dir, &cfg)
+        .map_err(|e| format!("child run `{child_run}`: cannot pin its children: {e}"))
 }
 
 // --- 0.24.0 irreversible consent ---
@@ -3574,6 +3571,21 @@ pub(crate) fn run_playbook_node(
     if let Some(existing) = latest_child_run(&events, node_id)
         && !run_is_terminal(root, &existing)?
     {
+        // A child without an authorization of its own continues only when it
+        // is exactly the verified pin of this node (launch policy, design
+        // 3.1 item 9): the parent's record never covers an unverified child.
+        let pin = cfg.expected_children.as_ref().and_then(|m| m.get(node_id));
+        if let Err(why) = crate::gate::launch::child_covered(root, run_dir, pin, &existing) {
+            return Ok((NodeStatus::Failed, why));
+        }
+        // A child started without pins of its own (by an older apb) runs on
+        // under this node's verified pin: its descendants are the pinned ones
+        // from here on, never resolved live again.
+        if let Some(p) = pin
+            && let Err(why) = install_child_pins(root, &existing, p)
+        {
+            return Ok((NodeStatus::Failed, why));
+        }
         let res = resume_inner(
             root,
             &existing,
@@ -3715,6 +3727,13 @@ pub(crate) fn run_playbook_node(
     opts.execution = super::host::child_execution_request(run_dir)?;
     // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
     opts.consent = inherited_consent(run_dir, run_id, node_id);
+    // The launch authorization: a child spawned under its verified pin
+    // records its parent's, so a later resume of the child alone needs no
+    // check of its own. A child resolved live inherits nothing.
+    opts.launch = pin.and_then(|_| {
+        crate::gate::launch::run_authorization(run_dir)
+            .map(|parent| crate::gate::launch::LaunchGrant::child(run_id, &parent))
+    });
     // The publish step (decision record 0010): a child of a run held to
     // `publish_only` is held to it too, and a child started after its
     // parent ran an acting node pins nothing (its tree may have been

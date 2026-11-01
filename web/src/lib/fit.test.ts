@@ -6,6 +6,9 @@ import {
   consentSummary,
   fitBadges,
   itemLine,
+  launchDetail,
+  launchRecordLine,
+  launchSummary,
   setupSummary,
   trustLine,
   trustSummary,
@@ -23,6 +26,7 @@ const report = (over: Partial<FitReport> = {}): FitReport => ({
   trust: [],
   consent: { irreversible: [], effects: [] },
   start_actions: [],
+  launch: { policy: 'allow', sources: ['default'] },
   ...over,
 })
 
@@ -102,5 +106,34 @@ describe('itemLine', () => {
   it('leads with the subject when there is one', () => {
     expect(itemLine({ code: 'x', subject: 'dev', detail: 'missing', severity: 'blocking' })).toBe('dev: missing')
     expect(itemLine({ code: 'x', subject: null, detail: 'missing', severity: 'note' })).toBe('missing')
+  })
+})
+
+describe('launch', () => {
+  it('says what an agent may do under each policy', () => {
+    expect(launchSummary(report().launch)).toBe('an agent may launch it')
+    expect(launchSummary({ policy: 'ask', sources: [] })).toContain('after a person confirms')
+    expect(launchSummary({ policy: 'deny', sources: [] })).toBe('only a person launches it')
+  })
+  it('puts a problem before the policy', () => {
+    const l = { policy: 'deny' as const, sources: [], problem: 'policy_file_invalid: bad key' }
+    expect(launchSummary(l)).toContain('refused until this is fixed')
+  })
+  it('names the sources and the floor', () => {
+    const l = { policy: 'ask' as const, sources: ['launch floor of `p`'], floor: 'ask' as const }
+    expect(launchDetail(l)).toBe('from launch floor of `p`; launch floor ask')
+    expect(launchDetail({ policy: 'allow', sources: [] })).toBe('no launch floor')
+  })
+  it('reads a run record without a nonce', () => {
+    const line = launchRecordLine({
+      kind: 'resume_all',
+      initiator: 'agent_mcp',
+      confirmation: 'host_relayed',
+      policy: 'ask',
+      sources: ['machine policy.yaml launch.agent'],
+    })
+    expect(line).toBe(
+      'resume all by agent mcp, confirmed by host relayed; policy ask (machine policy.yaml launch.agent)',
+    )
   })
 })

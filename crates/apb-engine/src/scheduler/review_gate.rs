@@ -212,7 +212,11 @@ fn inherited_effects(
     let cfg = crate::run_config::read_run_config(run_dir).ok()?;
     let set = match &cfg.expected_children {
         Some(pins) => crate::gate::pinned_tree_effects(root, playbook, pins)?,
-        None => crate::gate::tree_effects(root, playbook, &node::parent_run_origin(run_dir))?,
+        None => crate::gate::tree_effects(
+            root,
+            playbook,
+            &crate::run_origin::parent_run_origin(run_dir),
+        )?,
     };
     Some(set.into_iter().collect())
 }

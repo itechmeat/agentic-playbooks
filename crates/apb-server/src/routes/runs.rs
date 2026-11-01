@@ -117,6 +117,12 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub known_problems: Option<apb_engine::known_problems::RunKnownProblems>,
+    /// The run's launch authorization: who launched it, how an `ask` or
+    /// `deny` launch was confirmed, the policy and its sources. Absent for a
+    /// run an older apb started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub launch: Option<apb_core::launch::LaunchRecord>,
     /// The run's pause (issue #200): who paused it, why, since and until
     /// when, and `pausing` while a live driver drains toward a queued
     /// pause. Absent for a run that is neither paused nor pausing.
@@ -394,6 +400,7 @@ pub(crate) async fn get_run_handler(
         goal,
         candidate_trial,
         known_problems,
+        launch: apb_engine::gate::launch::run_authorization(&run_dir),
         pause,
         budget,
         notify,
@@ -709,6 +716,11 @@ pub(crate) struct ResumeBody {
     /// run is refused (409 `budget_paused`, with the run's budget).
     #[serde(default)]
     budget: Option<super::estimate::ResumeBudgetBody>,
+    /// A dashboard without keys resumes a never-authorized `ask` run only
+    /// with the `launch_nonce` of its 409 refusal (see
+    /// `routes::playbooks::dashboard_launch`).
+    #[serde(default)]
+    confirm_launch: Option<String>,
 }
 
 /// POST /api/runs/{id}/resume: the dashboard's Resume button, for a paused,
@@ -742,6 +754,20 @@ pub(crate) async fn post_resume_handler(
         };
         return (status, Json(refusal)).into_response();
     }
+    // The launch policy of a run never authorized: the click is the
+    // person's launch with keys, the CLI without a terminal's without; the
+    // grant reaches the detached driver.
+    let launch = super::playbooks::dashboard_launch(
+        &state.auth,
+        apb_engine::gate::launch::LaunchKind::Resume { run_id: id.clone() },
+        body.confirm_launch.clone(),
+        None,
+        None,
+    );
+    let grant = match apb_engine::resume_launch::check_resume_launch(&root, &id, &launch) {
+        Ok(g) => g,
+        Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
+    };
     let deprecation = match apb_engine::gate::check_resume_consent(
         &root,
         &id,
@@ -771,6 +797,7 @@ pub(crate) async fn post_resume_handler(
         from_node,
         allow_environment_drift: body.allow_environment_drift,
         budget: budget.as_ref(),
+        launch: grant.as_ref(),
         ..apb_engine::ResumeRequest::operator()
     };
     match apb_engine::resume_detached_req(&root, &id, &req) {

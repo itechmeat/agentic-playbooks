@@ -90,6 +90,9 @@ mod profile_cli_test;
 mod projects_cli_test;
 // Unix-only: a shell script stands in for git on PATH.
 #[cfg(unix)]
+#[path = "suite/launch_cli_test.rs"]
+mod launch_cli_test;
+#[cfg(unix)]
 #[path = "suite/publish_cli_test.rs"]
 mod publish_cli_test;
 #[cfg(unix)]

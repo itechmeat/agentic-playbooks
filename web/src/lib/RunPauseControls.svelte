@@ -12,6 +12,7 @@
   // no estimate, or let the paused node run once.
   import { toast } from 'svelte-sonner'
   import { ApiError, pauseRun, resumeRun } from './api'
+  import { launchQuestion, launchStep } from './launch'
   import { consentStep } from './irreversibleconsent'
   import IrreversibleRunDialog from './IrreversibleRunDialog.svelte'
   import {
@@ -112,18 +113,35 @@
   // only: any other outcome drops it, so a later plain Resume never carries
   // an old change.
   let lastBudget: ResumeBudget | undefined
+  // The launch nonce the same resume carried, for its consent retry.
+  let lastLaunchNonce: string | undefined
 
-  async function resume(consentNonce?: string, change?: ResumeBudget) {
+  async function resume(consentNonce?: string, change?: ResumeBudget, launchNonce?: string) {
     busy = true
     lastBudget = undefined
     try {
-      const res = await resumeRun(id, workspace, { consentNonce, budget: change })
+      const res = await resumeRun(id, workspace, { consentNonce, budget: change, launchNonce })
       closeBudgetForm()
       toast.success(res.resumed_early ? 'Resumed before its until time' : 'Run resumed')
       onchange()
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
+      // A never-authorized run of an `ask` playbook on a dashboard without
+      // keys: resumed only with its refusal's nonce, once confirmed here.
+      const sent = launchNonce ? { nonce: launchNonce } : undefined
+      const launchNext = e instanceof ApiError ? launchStep(e.body, sent) : null
+      if (launchNext?.kind === 'confirm') {
+        busy = false
+        if (window.confirm(launchQuestion(launchNext))) {
+          const nonce = launchNext.confirmation.nonce
+          queueMicrotask(() => void resume(consentNonce, change, nonce))
+        }
+        return
+      }
+      if (launchNext) {
+        toast.error('Resume refused', { description: launchNext.message })
+      } else if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
         lastBudget = change
+        lastLaunchNonce = launchNonce
         const step = consentStep(e.body, consentNonce)
         if (step.kind === 'stop') {
           toast.error('Resume refused', { description: step.message })
@@ -314,7 +332,7 @@
   {playbookId}
   sources={irreversibleSources}
   action="resume"
-  onconfirm={() => resume(irreversibleNonce, lastBudget)}
+  onconfirm={() => resume(irreversibleNonce, lastBudget, lastLaunchNonce)}
 />
 
 <style>

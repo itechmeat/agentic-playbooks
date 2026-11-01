@@ -3,6 +3,7 @@
 //! the next start runs it (the gate picks and pins it), and the trial's
 //! outcome promotes or rejects it, journaled right before `run_finished`.
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::path::Path;
 
@@ -107,7 +108,14 @@ fn start_as_is(root: &Path, ack: bool) -> ((String, RunStatus, Option<String>), 
         id: ID.into(),
         version: None,
     };
-    let permit = apb_engine::gate::check_run(root, &wref, ack, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        root,
+        &wref,
+        ack,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     let skipped = permit.candidate_skipped.clone();
     let chosen = permit.candidate.clone();
     let version = permit.run_version(None);
@@ -435,7 +443,14 @@ fn a_candidate_of_an_untrusted_base_is_skipped_on_every_surface() {
         id: ID.into(),
         version: None,
     };
-    let refusal = apb_engine::gate::check_run(root, &wref, false, false).unwrap_err();
+    let refusal = apb_engine::gate::check_run(
+        root,
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
     assert_eq!(refusal["candidate_skipped"], "untrusted");
     assert!(refusal.get("candidate_trial").is_none());
@@ -445,7 +460,14 @@ fn a_candidate_of_an_untrusted_base_is_skipped_on_every_surface() {
     // Once the base is approved, the candidate inherits its trust: even an
     // MCP start without acknowledgement runs it.
     approve_base(root);
-    let permit = apb_engine::gate::check_run(root, &wref, false, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        root,
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     assert_eq!(permit.candidate.as_deref(), Some("1.0.1"));
     assert_eq!(permit.candidate_skipped, None);
 }
@@ -560,4 +582,92 @@ fn a_forward_patch_may_not_change_decision_opt_ins_or_the_worktree() {
         "{err}"
     );
     assert_eq!(pointer(root, "candidate"), None);
+}
+
+/// The launch policy's fixed choice: a retry with the refusal's version and
+/// choice makes no draw, so the candidate it named runs on every retry, with
+/// the trust it inherits from `current`; another version with the old nonce
+/// is refused, and so is a retry after the pointer moved, with a fresh
+/// nonce.
+#[test]
+fn a_launch_retry_with_a_fixed_choice_reaches_the_same_candidate_every_time() {
+    use apb_engine::gate::launch::{Initiator, LaunchConfirmation, LaunchContext, LaunchKind};
+    let _lock = crate::common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _var = crate::common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let policy = "    trial_candidates: { share: 0.5 }";
+    seed(root, policy);
+    let (first, _, _) = start(root);
+    let version = forward(root, &first, &playbook(policy, "also-ok.sh"));
+    // From now on an agent's launch asks the person.
+    fs::write(cfg.path().join("policy.yaml"), "launch:\n  agent: ask\n").unwrap();
+    let wref = PlaybookRef {
+        origin: Origin::Project { workspace_id: None },
+        id: ID.into(),
+        version: None,
+    };
+    let agent = || LaunchContext::new(Initiator::AgentMcp { client: None }, LaunchKind::Start);
+    let check = |ctx: &LaunchContext| apb_engine::gate::check_run(root, &wref, false, false, ctx);
+    let refusal = (0..200)
+        .map(|_| check(&agent()).unwrap_err())
+        .find(|r| r["launch_choice"] == "candidate")
+        .expect("a draw names the candidate within 200 tries");
+    assert_eq!(refusal["launch_version"], version.as_str());
+    let retry = |v: &str| {
+        agent()
+            .fixed(Some(v.into()), Some("candidate"))
+            .confirmed(Some(LaunchConfirmation::HostRelayed {
+                nonce: refusal["launch_nonce"].as_str().unwrap().into(),
+            }))
+    };
+    for _ in 0..100 {
+        let permit = check(&retry(&version)).unwrap();
+        assert_eq!(permit.candidate.as_deref(), Some(version.as_str()));
+    }
+    let forged = check(&retry("1.0.0")).unwrap_err();
+    assert_eq!(forged["policy"], "launch_requires_confirmation", "{forged}");
+    // The pointer moves: the retry gets a fresh refusal.
+    fs::remove_file(root.join(".apb/playbooks").join(ID).join("candidate")).unwrap();
+    let moved = check(&retry(&version)).unwrap_err();
+    assert_eq!(moved["launch_choice_changed"], true, "{moved}");
+    assert_ne!(moved["launch_nonce"], refusal["launch_nonce"]);
+}
+
+/// A forward patch is an agent channel: from a run of a `deny` playbook it
+/// may not drop or loosen `agent_launch` (`launch_policy_changed`, before
+/// the floor's own `launch_policy_loosened` would), and no candidate is
+/// written.
+#[test]
+fn a_forward_patch_may_not_loosen_the_launch_policy() {
+    let _lock = crate::common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _var = crate::common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let policy = "    promote_supervisor_patches: manual";
+    seed(root, policy);
+    let deny = |p1: &str| {
+        playbook(policy, p1).replace("version: 1.0.0\n", "version: 1.0.0\nagent_launch: deny\n")
+    };
+    fs::write(
+        root.join(".apb/playbooks")
+            .join(ID)
+            .join("1.0.0/playbook.yaml"),
+        deny("ok.sh"),
+    )
+    .unwrap();
+    let (first, outcome, _) = start(root);
+    assert_eq!(outcome, RunStatus::Succeeded);
+    for loose in [
+        playbook(policy, "also-ok.sh"),
+        deny("also-ok.sh").replace("agent_launch: deny", "agent_launch: ask"),
+    ] {
+        let err = forward_err(root, &first, &loose);
+        assert!(err.contains("launch_policy_changed"), "{err}");
+    }
+    assert_eq!(pointer(root, "candidate"), None);
+    // The same patch keeping `deny` is made.
+    assert_eq!(forward(root, &first, &deny("also-ok.sh")), "1.0.1");
 }

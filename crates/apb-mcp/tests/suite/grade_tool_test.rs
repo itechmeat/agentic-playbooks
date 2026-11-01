@@ -5,6 +5,7 @@
 //! of a playbook without a candidate touches nothing of the playbook. The
 //! comparison itself is the engine's (`candidate_quality_test`).
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -87,7 +88,14 @@ fn start(root: &Path) -> String {
         id: ID.into(),
         version: None,
     };
-    let permit = apb_engine::gate::check_run(root, &wref, true, false).unwrap();
+    let permit = apb_engine::gate::check_run(
+        root,
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     let version = permit.run_version(None);
     let mut opts = RunOptions::default();
     permit.apply(&mut opts);

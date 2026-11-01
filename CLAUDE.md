@@ -36,8 +36,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   narrowing, a run's request, the outcome classes and the journal names of
   a filtered `finished` (`Coverage`), and `precedence` combining them),
   the settings file `policy.yaml` of the machine and the project
-  (`policy_file.rs`: the strict reader of its `notify:` filters and the
-  doctor line; nothing in apb writes it), the run
+  (`policy_file.rs`: the strict reader of its `notify:` filters and its
+  `launch:` section, and the doctor line; nothing in apb writes it), the
+  launch policy of agents (`launch.rs`: `resolve` and `EffectivePolicy`
+  over a run's tree, the `LaunchRecord` a run keeps; `launch/policy.rs` the
+  three policies, a leaf the schema and the settings reader share;
+  `launch/floor.rs`: the `FloorKey` of the owning workspace (its id
+  registered at that root in the projects registry, `projects::bind_id`
+  and `registered_id`) or the global store, the `launch-floors.json` store
+  under its lock with its directory synced, the scan of a key with no
+  record (its store and the id's trash entries), `hold` the lock a start's
+  final recheck keeps until its manifest is written, and `publish`, the
+  raise, loosening and editor-lowering check every version publication runs
+  before its rename), the run
   budget's schema,
   the precedence of a run argument over the playbook's block and the amount
   parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
@@ -277,10 +288,22 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   send ledger: `identity` what makes two sends the same, `ledger` the fold
   and the admission table, `stamp` the key and the marker, `reconcile` the
   lookup of a marker send; `effect` what a call says about its effect), background
-  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
+  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the
+  definition origin a run was started from (`run_origin.rs`), the launch
+  check of a resume, one rule for every resume path, with its commit under
+  the run's event lock and the pins of a run that had none
+  (`resume_launch.rs`), the
+  handoff file a checked launch crosses a detached spawn in
+  (`launch_handoff.rs`: `Supervise`, `Eval` and `Resume`, private,
+  single-use, written by the receiver's parent), the run
   policy gate every launch surface calls (`gate/`, with `trust_scan` the
-  connector and profile-bundle trust facts collected before any refusal and
-  `isolation` the `isolation_unavailable` refusal, and `params` the
+  connector and profile-bundle trust facts collected before any refusal,
+  `isolation` the `isolation_unavailable` refusal, `launch` the launch
+  check: the explicit `Initiator`, `LaunchConfirmation` and `LaunchKind`,
+  the decision table, `effective_for` and its refusal of a redirected config
+  dir that hides stricter settings, the canonical permit digest and the
+  nonce, the fixed choice of a retry, the `LaunchGrant` the engine rechecks, a run's
+  authorization and `child_covered` for a reattached child, and `params` the
   `param_needs_value` refusal every launch surface checks after the gate,
   with the start warning about a declared secret value too short to scrub),
   the "will it fit here?" report (`fit/`: compatibility, `setup`, `trust` and
@@ -333,6 +356,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   <id>`, `candidate.rs` is `apb candidate`, `problems.rs` is `apb
   problems`, `discover.rs` is `apb discover`, `actions.rs` prints next
   actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
+  `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
+  `apb eval`, the terminal question and `apb launch floor`,
   `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
@@ -426,6 +451,28 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   MCP, the dashboard and the CLI all call it; they differ only in
   `acknowledge_untrusted` (a person clicking Run or typing `apb run` is the
   confirmation, MCP asks the user first). `apb_mcp::policy` re-exports it.
+- The **launch policy** (`docs/GUARDRAILS.md` "Launch policy for agents"):
+  a playbook's `agent_launch: allow | ask | deny`, held up by its launch
+  floor and narrowed by the `launch:` sections of `policy.yaml`, is decided
+  in that one gate for every start, trial, plan execution, eval and resume
+  of a run never authorized, with an explicit initiator (a run step is
+  never a person; the CLI is a person only through a terminal question or a
+  nonce) ([decision record 0011](docs/adr/0011-an-agent-launches-only-what-the-launch-policy-allows.md)).
+  An `ask` refusal carries a nonce over the canonical permit and the fixed
+  version choice; the grant is rechecked by the engine before it writes
+  `manifest.launch` or `RunResumed.launch`, and that record covers the run
+  for its lifetime. Every version publication raises the floor first under
+  the floor lock; an agent channel's loosening save is refused
+  (`launch_policy_loosened`); only a lowering a person confirmed in the
+  editor of a dashboard with keys and `apb launch floor --lower-to` at a
+  terminal lower it. A dashboard without keys is decided like the CLI
+  without a terminal and never lowers a floor. A run step or a CLI without a
+  terminal whose config dir is redirected away from the default one is
+  refused (`policy_file_invalid`) when that hides stricter settings (an
+  eval case keeps its handed config dir), and a workspace id keys a floor
+  or an exact machine entry only when registered at that root. A decision
+  crosses a detached spawn only in a handoff file in the project's
+  `.apb/handoff`, never on argv.
 - Import approval: a version `apb import` wrote with scripts records its
   import (`VersionProvenance.imported`) and runs only after an approval that
   names its exact trust digest (`versioning::approval::approve_version`,

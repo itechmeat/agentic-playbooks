@@ -1269,6 +1269,35 @@ pause?: PauseInfo,
  */
 needs_look?: NeedsLook, };
 
+export type LaunchPolicy = "allow" | "ask" | "deny";
+
+export type LaunchRecord = { 
+/**
+ * What was launched: `start`, `trial`, `execute_plan`, `eval`,
+ * `resume`, `resume_all`, `continue_from` or `child`.
+ */
+kind: string, 
+/**
+ * Who launched it: `agent_mcp`, `agent_mcp:<client>`, `run_step:mcp`,
+ * `run_step:cli`, `cli_terminal`, `cli`, `dashboard`, `engine:<by>`,
+ * or for a child `child_of:<run id>`.
+ */
+initiator: string, 
+/**
+ * How an `ask` or `deny` launch was confirmed: `terminal_prompt`,
+ * `cli_flag`, `host_relayed`, `dashboard`, `forwarded:<kind>`;
+ * absent for an `allow` launch.
+ */
+confirmation?: string, 
+/**
+ * The effective policy when it was admitted.
+ */
+policy: LaunchPolicy, 
+/**
+ * The settings that produced it.
+ */
+sources: Array<string>, };
+
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
  * Why a failed run ended (`node \`x\`: reason`); null unless failed.
@@ -1354,6 +1383,12 @@ candidate_trial?: CandidateTrial,
  * absent for a run whose playbook shows none.
  */
 known_problems?: RunKnownProblems, 
+/**
+ * The run's launch authorization: who launched it, how an `ask` or
+ * `deny` launch was confirmed, the policy and its sources. Absent for a
+ * run an older apb started.
+ */
+launch?: LaunchRecord, 
 /**
  * The run's pause (issue #200): who paused it, why, since and until
  * when, and `pausing` while a live driver drains toward a queued
@@ -1573,7 +1608,7 @@ primary?: number,
  */
 children_truncated?: boolean, };
 
-export type StartActionCode = "confirm_irreversible_start" | "fix_requirement" | "acknowledge_untrusted";
+export type StartActionCode = "confirm_irreversible_start" | "fix_requirement" | "acknowledge_untrusted" | "confirm_launch" | "launch_by_person";
 
 export type Remedy = { "remedy": "approve_digest", kind: string, digest: string, } | { "remedy": "provide_param", name: string, } | { "remedy": "install_agent", agent: string, } | { "remedy": "set_env", name: string, } | { "remedy": "run_doctor" } | { "remedy": "manual", detail: string, };
 
@@ -1613,6 +1648,18 @@ irreversible: Array<string>,
  */
 effects: Array<string>, };
 
+export type LaunchView = { policy: LaunchPolicy, sources: Array<string>, 
+/**
+ * The strictest declaration any saved version had, kept outside the
+ * definition; absent when no version declared one.
+ */
+floor?: LaunchPolicy, 
+/**
+ * Why the policy could not be read (a damaged settings or floor file,
+ * an unresolved tree); an agent's launch is refused then.
+ */
+problem?: string, };
+
 export type FitReport = { id: string, 
 /**
  * `project` or `global`.
@@ -1632,7 +1679,11 @@ trusted: boolean, needs_consent: boolean, compatibility: Array<FitItem>, setup: 
  * ([`crate::next_action::start::from_fit`]); the consent itself comes
  * with the gate's refusal, which carries its nonce.
  */
-start_actions: Array<StartAction>, };
+start_actions: Array<StartAction>, 
+/**
+ * The launch policy for an agent (see [`LaunchView`]).
+ */
+launch: LaunchView, };
 
 export type FitSummary = { ready: boolean, 
 /**

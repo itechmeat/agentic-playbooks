@@ -1,3 +1,4 @@
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::path::Path;
 
 use apb_core::registry::init_project;
@@ -53,7 +54,14 @@ fn capture_creates_draft_with_provenance() {
         id: "cleanup".into(),
         version: None,
     };
-    let refusal = check_run(proj.path(), &wref, false, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "draft_requires_trial");
 }
 
@@ -427,4 +435,58 @@ fn unknown_kind_or_scope_is_rejected() {
         },
     );
     assert!(err.is_err());
+}
+
+/// A capture and a discovery save are agent channels: over an id whose
+/// floor outlived its playbook they may not declare looser
+/// (`launch_policy_loosened`), and the MCP trash restore of a looser copy is
+/// refused the same way.
+#[test]
+fn capture_discover_save_and_trash_restore_never_loosen_a_floor() {
+    use apb_core::launch::LaunchPolicy;
+    use apb_mcp::tools::capture::{CaptureOrigin, CaptureRequest, capture_draft};
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    let root = proj.path();
+    init_project(root).unwrap();
+    let deny =
+        good_yaml("keep").replace("version: 1.0.0\n", "version: 1.0.0\nagent_launch: deny\n");
+    apb_core::versioning::save_definition(root, "keep", &deny, None, true).unwrap();
+    apb_core::versioning::delete_playbook(root, "keep", 1).unwrap();
+    let synopsis = json!({ "title": "Keep", "trigger": { "when": ["keep it"] } });
+    let e = playbook_capture(root, &synopsis, "project", &good_yaml("keep")).unwrap_err();
+    assert!(e.to_string().contains("launch_policy_loosened"), "{e}");
+    let e = capture_draft(
+        root,
+        CaptureRequest {
+            synopsis: &synopsis,
+            scope: "project",
+            yaml: &good_yaml("keep"),
+            origin: CaptureOrigin::Discover {
+                pattern: "p",
+                result: "r",
+                edited: false,
+            },
+        },
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("launch_policy_loosened"), "{e}");
+    assert!(!root.join(".apb/playbooks/keep").exists());
+
+    // A trash entry whose current is looser than the floor a later version
+    // raised: the MCP restore is refused.
+    apb_core::versioning::save_definition(root, "loose", &good_yaml("loose"), None, true).unwrap();
+    let trashed = apb_core::versioning::delete_playbook(root, "loose", 2).unwrap();
+    apb_core::launch::floor::set_by_person(
+        &apb_core::launch::floor::FloorKey::project_of(root, "loose").unwrap(),
+        LaunchPolicy::Ask,
+    )
+    .unwrap();
+    let name = trashed.file_name().unwrap().to_string_lossy().into_owned();
+    let e = apb_mcp::tools::playbook_trash_restore(root, &name).unwrap_err();
+    assert!(e.to_string().contains("launch_policy_loosened"), "{e}");
+    assert!(!root.join(".apb/playbooks/loose").exists());
 }

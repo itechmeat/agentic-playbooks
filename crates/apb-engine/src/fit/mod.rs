@@ -33,7 +33,7 @@ use apb_core::run_memory::{MemoryKey, recall};
 use apb_core::scope::{Origin, PlaybookRef, origin_scope_label};
 use apb_core::trust::{Lifecycle, TrustStore, read_lifecycle};
 
-pub use report::{ConsentView, FitItem, FitReport, FitSeverity, FitSummary, TrustItem};
+pub use report::{ConsentView, FitItem, FitReport, FitSeverity, FitSummary, LaunchView, TrustItem};
 pub use setup::{ProfileFinding, UNTRUSTED, profile_findings};
 
 /// Why no report could be made.
@@ -235,9 +235,53 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
         trust: trust_items,
         consent,
         start_actions: Vec::new(),
+        launch: launch_view(root, playbook, &wref.origin, children.as_ref()),
     };
     report.start_actions = crate::next_action::start::from_fit(&report);
     Ok(report)
+}
+
+/// The launch policy an agent's start would meet, read without writing
+/// anything (a key without a record reads its store's scan).
+fn launch_view(
+    root: &Path,
+    playbook: &apb_core::schema::Playbook,
+    origin: &apb_core::scope::Origin,
+    children: Option<&std::collections::BTreeMap<String, crate::run_config::ChildExpectation>>,
+) -> report::LaunchView {
+    let empty = std::collections::BTreeMap::new();
+    let tree = crate::gate::launch::Tree {
+        root,
+        playbook,
+        origin,
+        children: children.unwrap_or(&empty),
+        require_pins: children.is_some(),
+    };
+    let floor = crate::gate::launch::own_floor(root, playbook, origin);
+    match crate::gate::launch::effective(tree, false) {
+        Ok((e, _)) => report::LaunchView {
+            policy: e.policy,
+            sources: e.sources,
+            floor,
+            problem: None,
+        },
+        Err(v) => {
+            let tolerant = crate::gate::launch::effective(tree, true).ok();
+            let (policy, sources) = tolerant
+                .map(|(e, _)| (e.policy, e.sources))
+                .unwrap_or((apb_core::launch::LaunchPolicy::Deny, Vec::new()));
+            report::LaunchView {
+                policy,
+                sources,
+                floor,
+                problem: Some(format!(
+                    "{}: {}",
+                    v["policy"].as_str().unwrap_or("launch_refused"),
+                    v["detail"].as_str().unwrap_or_default()
+                )),
+            }
+        }
+    }
 }
 
 fn requires_items(root: &Path, req: &apb_core::schema::Requires) -> Vec<FitItem> {

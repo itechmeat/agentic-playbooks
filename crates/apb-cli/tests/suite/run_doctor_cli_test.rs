@@ -248,6 +248,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         candidate_skipped: None,
         task_type: None,
         secret_params: Vec::new(),
+        launch: None,
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 

@@ -354,6 +354,16 @@ pub enum EventPayload {
         /// Additive.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         explicit: bool,
+        /// The launch authorization this resume admitted the run with (see
+        /// `crate::gate::launch`): present only on the resume of a run that
+        /// had none, which from then on counts as authorized. Never a nonce.
+        /// Absent in older journals. Additive; read leniently.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        launch: Option<apb_core::launch::LaunchRecord>,
     },
     RunFinished {
         outcome: String,

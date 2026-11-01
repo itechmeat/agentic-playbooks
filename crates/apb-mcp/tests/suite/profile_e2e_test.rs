@@ -6,6 +6,7 @@
 //! Unix-only: the former `#![cfg(unix)]` inner attribute now lives as an
 //! outer `#[cfg(unix)]` on this module's `mod` declaration in `../main.rs`.
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -100,7 +101,14 @@ fn write_profile_then_run_then_skill_edit_untrusts() {
     };
     // The gate lets it through: the playbook is active/trusted, the profile bundle is auto-approved.
     assert!(
-        apb_mcp::policy::check_run(root, &wref, false, false).is_ok(),
+        apb_mcp::policy::check_run(
+            root,
+            &wref,
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok(),
         "freshly written profile must be trusted"
     );
 
@@ -116,15 +124,28 @@ fn write_profile_then_run_then_skill_edit_untrusts() {
 
     // Editing the skill on disk changes the bundle -> the gate refuses without acknowledge.
     fs::write(root.join(".agents/skills/cs/SKILL.md"), "v2 changed").unwrap();
-    let refusal = apb_mcp::policy::check_run(root, &wref, false, false)
-        .expect_err("edited skill must untrust the bundle");
+    let refusal = apb_mcp::policy::check_run(
+        root,
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect_err("edited skill must untrust the bundle");
     assert_eq!(
         refusal["policy"],
         serde_json::json!("untrusted_profile_requires_acknowledge")
     );
     // With acknowledge - passes.
     assert!(
-        apb_mcp::policy::check_run(root, &wref, true, false).is_ok(),
+        apb_mcp::policy::check_run(
+            root,
+            &wref,
+            true,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok(),
         "acknowledge must cover it"
     );
 }
@@ -173,7 +194,14 @@ fn permit_bundle_map_is_enforced_against_skill_drift() {
         version: None,
     };
     // The permit captures bundle A for skill v1.
-    let permit = apb_mcp::policy::check_run(root, &wref, false, false).expect("gate ok");
+    let permit = apb_mcp::policy::check_run(
+        root,
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("gate ok");
 
     // The skill drifts to v2 AFTER the permit is captured.
     fs::write(root.join(".agents/skills/cs/SKILL.md"), "v2 drift").unwrap();

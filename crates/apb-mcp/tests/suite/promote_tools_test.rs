@@ -225,6 +225,7 @@ fn move_profiles_copies_profiles_but_never_ones_with_project_skills() {
         variant: Some(Variant::Keep),
         move_profiles: true,
         dry_run: false,
+        by_agent: false,
     };
     let out = make_global(root.path(), "rel", with_profiles).unwrap();
     assert_eq!(out["applied"], true, "{out}");
@@ -293,6 +294,7 @@ fn a_failed_step_undoes_the_earlier_ones() {
         variant: Some(Variant::Trash),
         move_profiles: true,
         dry_run: false,
+        by_agent: false,
     };
     assert!(make_global(root.path(), "rel", with_profiles).is_err());
     assert!(!global_parent().join("playbooks/rel").exists());
@@ -469,5 +471,37 @@ fn an_undone_move_restores_the_memory_as_it_was() {
             .unwrap()
             .values
             .is_empty()
+    );
+}
+
+/// Making a playbook global is a publication into the global store: asked
+/// by an agent it may not bring a looser launch policy than the global
+/// key's floor (`launch_policy_loosened`) and nothing is applied; a person's
+/// make-global keeps the floor.
+#[test]
+fn an_agents_make_global_never_loosens_the_global_floor() {
+    use apb_core::launch::LaunchPolicy;
+    use apb_core::launch::floor::{self, FloorKey};
+    let _cfg = crate::common::config_sandbox();
+    let root = project_with("rel", &playbook("rel", ""));
+    floor::set_by_person(&FloorKey::global("rel"), LaunchPolicy::Deny).unwrap();
+    let by_agent = MakeGlobalOpts {
+        variant: Some(Variant::Keep),
+        by_agent: true,
+        ..Default::default()
+    };
+    let e = make_global(root.path(), "rel", by_agent).unwrap_err();
+    assert!(e.to_string().contains("launch_policy_loosened"), "{e}");
+    assert!(!global_parent().join("playbooks/rel").exists());
+    assert_eq!(
+        floor::read().unwrap().get("global/rel"),
+        Some(&LaunchPolicy::Deny)
+    );
+    let out = make_global(root.path(), "rel", opts(Some(Variant::Keep))).unwrap();
+    assert_eq!(out["applied"], true, "{out}");
+    assert_eq!(
+        floor::read().unwrap().get("global/rel"),
+        Some(&LaunchPolicy::Deny),
+        "a person's copy raises, never lowers"
     );
 }

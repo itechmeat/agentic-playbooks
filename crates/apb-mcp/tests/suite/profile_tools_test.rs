@@ -1,4 +1,5 @@
 use apb_core::profile::AgentEnvironment;
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::path::Path;
 
@@ -451,13 +452,27 @@ fn write_autoapproves_bundle_and_skill_edit_untrusts_next_run() {
     };
     // The profile was just created by the profile tool -> its bundle is auto-approved.
     assert!(
-        check_run(proj.path(), &wref, false, false).is_ok(),
+        check_run(
+            proj.path(),
+            &wref,
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok(),
         "trusted profile should pass"
     );
 
     // Edit the skill -> the bundle changes -> the next run is untrusted.
     fs::write(proj.path().join(".agents/skills/cs/SKILL.md"), "v2 changed").unwrap();
-    let refusal = check_run(proj.path(), &wref, false, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &wref,
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_profile_requires_acknowledge");
 }
 

@@ -1,3 +1,4 @@
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::path::Path;
 
 use apb_core::registry::init_project;
@@ -64,7 +65,14 @@ fn draft_playbook_is_refused() {
     approve(&y, "d"); // even approved, but draft - does not run directly
     write_lifecycle(&proj.path().join(".apb/playbooks/d"), Lifecycle::Draft).unwrap();
 
-    let refusal = check_run(proj.path(), &wref("d"), false, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &wref("d"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "draft_requires_trial");
 }
 
@@ -81,16 +89,41 @@ fn untrusted_needs_acknowledge_and_digest_drift_revokes() {
     let y = seed_project(proj.path(), "u", "");
     approve(&y, "u");
     // Approved active - passes.
-    assert!(check_run(proj.path(), &wref("u"), false, false).is_ok());
+    assert!(
+        check_run(
+            proj.path(),
+            &wref("u"),
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok()
+    );
 
     // Digest drift: edit the version file on disk -> digest shifts -> untrusted.
     let vpath = proj.path().join(".apb/playbooks/u/1.0.0/playbook.yaml");
     let drifted = format!("{y}# drift\n");
     std::fs::write(&vpath, drifted).unwrap();
-    let refusal = check_run(proj.path(), &wref("u"), false, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &wref("u"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
     // With acknowledge - passes.
-    assert!(check_run(proj.path(), &wref("u"), true, false).is_ok());
+    assert!(
+        check_run(
+            proj.path(),
+            &wref("u"),
+            true,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -111,7 +144,14 @@ fn cross_workspace_is_refused() {
         id: "x".into(),
         version: None,
     };
-    let refusal = check_run(proj.path(), &foreign, true, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &foreign,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "cross_workspace_requires_plan");
 }
 
@@ -127,7 +167,14 @@ fn requires_preflight_reports_missing() {
 
     let y = seed_project(proj.path(), "r", "requires:\n  files: [\"Cargo.toml\"]\n");
     approve(&y, "r");
-    let refusal = check_run(proj.path(), &wref("r"), false, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &wref("r"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "requires_unmet");
     assert!(
         refusal["missing"]
@@ -151,7 +198,14 @@ fn requires_unsafe_path_is_rejected() {
     // `../` in requires.files must not turn into an existence oracle.
     let y = seed_project(proj.path(), "esc", "requires:\n  files: [\"../secret\"]\n");
     approve(&y, "esc");
-    let refusal = check_run(proj.path(), &wref("esc"), false, false).unwrap_err();
+    let refusal = check_run(
+        proj.path(),
+        &wref("esc"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "requires_unsafe_path");
 }
 
@@ -167,7 +221,14 @@ fn check_run_returns_verified_digest() {
 
     let y = seed_project(proj.path(), "d2", "");
     approve(&y, "d2");
-    let permit = check_run(proj.path(), &wref("d2"), false, false).unwrap();
+    let permit = check_run(
+        proj.path(),
+        &wref("d2"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap();
     assert_eq!(permit.playbook_digest, digest_str(&y));
 }
 
@@ -193,9 +254,25 @@ fn approval_does_not_cover_other_or_changed_scripts() {
     seed_scripted(a.path(), "echo reviewed\n");
     seed_scripted(b.path(), "echo never-reviewed\n");
     apb_mcp::tools::playbook_approve(a.path(), "s", None, "project", None).unwrap();
-    assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
+    assert!(
+        check_run(
+            a.path(),
+            &wref("s"),
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok()
+    );
 
-    let refusal = check_run(b.path(), &wref("s"), false, false).unwrap_err();
+    let refusal = check_run(
+        b.path(),
+        &wref("s"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
 
     std::fs::write(
@@ -203,7 +280,14 @@ fn approval_does_not_cover_other_or_changed_scripts() {
         "echo changed\n",
     )
     .unwrap();
-    let refusal = check_run(a.path(), &wref("s"), false, false).unwrap_err();
+    let refusal = check_run(
+        a.path(),
+        &wref("s"),
+        false,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
 }
 
@@ -224,7 +308,14 @@ fn undigestable_scripts_still_load_but_never_run() {
     let reg = apb_core::registry::Registry::open(a.path()).unwrap();
     let loaded = reg.load("s", None).unwrap();
     assert!(loaded.trust_digest().is_err());
-    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    let refusal = check_run(
+        a.path(),
+        &wref("s"),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "definition_unreadable", "{refusal}");
 }
 
@@ -250,7 +341,14 @@ fn imported_scripts_need_an_approval_by_digest_even_with_acknowledge() {
     let a = tempfile::tempdir().unwrap();
     let version = import_scripted(a.path(), "echo imported\n");
 
-    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    let refusal = check_run(
+        a.path(),
+        &wref("s"),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "imported_scripts_require_approval");
     assert_eq!(refusal["version"], version.as_str());
     assert_eq!(refusal["scripts"][0]["path"], "lint.sh");
@@ -263,7 +361,16 @@ fn imported_scripts_need_an_approval_by_digest_even_with_acknowledge() {
         Err(ApproveError::DigestMismatch { .. })
     ));
     approve_version(&def_parent, "s", None, Some(&digest), kind).unwrap();
-    assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
+    assert!(
+        check_run(
+            a.path(),
+            &wref("s"),
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok()
+    );
 
     std::fs::write(
         a.path()
@@ -273,7 +380,14 @@ fn imported_scripts_need_an_approval_by_digest_even_with_acknowledge() {
         "echo changed\n",
     )
     .unwrap();
-    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    let refusal = check_run(
+        a.path(),
+        &wref("s"),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "imported_scripts_require_approval");
 }
 
@@ -292,7 +406,14 @@ fn playbook_approve_needs_the_digest_of_imported_scripts() {
     assert_eq!(asked["scripts"][0]["path"], "lint.sh");
     let digest = asked["digest"].as_str().unwrap().to_string();
     assert_eq!(
-        check_run(a.path(), &wref("s"), true, false).unwrap_err()["policy"],
+        check_run(
+            a.path(),
+            &wref("s"),
+            true,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .unwrap_err()["policy"],
         "imported_scripts_require_approval"
     );
 
@@ -303,5 +424,14 @@ fn playbook_approve_needs_the_digest_of_imported_scripts() {
     let ok = playbook_approve(a.path(), "s", None, "project", Some(&digest)).unwrap();
     assert_eq!(ok["trusted"], true, "{ok}");
     assert_eq!(ok["digest"], digest.as_str());
-    assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
+    assert!(
+        check_run(
+            a.path(),
+            &wref("s"),
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok()
+    );
 }

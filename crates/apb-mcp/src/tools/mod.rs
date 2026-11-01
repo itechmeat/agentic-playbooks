@@ -98,6 +98,9 @@ impl From<VersioningError> for ToolError {
                 ToolError::Engine(render_validation_issues(&issues))
             }
             VersioningError::Conflict(m) => ToolError::Conflict(m),
+            // The message starts with its code and names the person's next
+            // action (the dashboard editor, or `apb launch floor`).
+            VersioningError::Launch(e) => ToolError::Conflict(e.to_string()),
             other => ToolError::Engine(other.to_string()),
         }
     }

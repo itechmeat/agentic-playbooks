@@ -4,6 +4,7 @@
 //! refusal twin that runs everywhere: where the claim cannot be enforced,
 //! `full` refuses and nothing runs.
 
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -359,7 +360,14 @@ fn full_refuses_where_the_sandbox_is_unavailable() {
         version: None,
         origin: apb_core::scope::Origin::Project { workspace_id: None },
     };
-    let refusal = apb_engine::gate::check_run(&f.root, &wref, true, false).unwrap_err();
+    let refusal = apb_engine::gate::check_run(
+        &f.root,
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .unwrap_err();
     assert_eq!(refusal["policy"], "isolation_unavailable", "{refusal}");
     assert_eq!(refusal["nodes"][0]["node"], "work");
     assert_eq!(refusal["nodes"][0]["reasons"][0]["code"], "disabled");

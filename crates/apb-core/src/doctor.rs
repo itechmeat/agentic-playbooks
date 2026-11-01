@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::config::{GlobalConfig, program_in_path};
+use crate::launch::floor;
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::registry::Registry;
@@ -118,6 +119,23 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         "policy",
         policy_detail,
     );
+
+    // The launch floors of this project's playbooks, and the other apb
+    // binaries a person could run here: an older one ignores every launch
+    // setting.
+    let (floors_ok, floors_detail) = launch_floors_line(root);
+    r.push(
+        if floors_ok {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        "launch floors",
+        floors_detail,
+    );
+    if let Some(other) = crate::launch::other_binaries_line() {
+        r.push(CheckStatus::Warn, "launch policy", other);
+    }
 
     let reg = match Registry::open(root) {
         Ok(reg) => reg,
@@ -355,4 +373,44 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     }
 
     r
+}
+
+/// The launch floors line of `apb doctor`: `(ok, detail)`, not ok when the
+/// floor file does not read. Names the floor of each playbook of the
+/// project at `root` that has one (its record, else its store's scan).
+fn launch_floors_line(root: &Path) -> (bool, String) {
+    let records = match floor::read() {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                false,
+                format!("{e}; agent launches are refused until it is fixed"),
+            );
+        }
+    };
+    let store = crate::versioning::playbooks_dir(root);
+    let mut ids: Vec<String> = std::fs::read_dir(&store)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|id| crate::registry::is_safe_segment(id))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    let floors: Vec<String> = ids
+        .iter()
+        .filter_map(|id| {
+            let key = floor::FloorKey::read_project(root, id);
+            floor::floor_in(&records, key.as_ref(), Some(&store.join(id)))
+                .map(|p| format!("{id}: {p}"))
+        })
+        .collect();
+    let detail = if floors.is_empty() {
+        "no playbook here has a launch floor".to_string()
+    } else {
+        floors.join(", ")
+    };
+    (true, detail)
 }

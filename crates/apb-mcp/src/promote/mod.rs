@@ -77,6 +77,9 @@ pub struct MakeGlobalOpts {
     pub move_profiles: bool,
     /// Only report the plan.
     pub dry_run: bool,
+    /// An agent asked (MCP): the copy may not bring a looser launch policy
+    /// than the global key's floor (`launch_policy_loosened`).
+    pub by_agent: bool,
 }
 
 fn engine<E: std::fmt::Display>(e: E) -> ToolError {
@@ -116,9 +119,26 @@ pub fn make_global(root: &Path, id: &str, opts: MakeGlobalOpts) -> Result<Value,
     let mut undo = Undo::default();
 
     let project_dir = project_playbooks.join(id);
-    let global_dir =
-        apb_core::scope_move::copy_playbook_to(&project_dir, &global_parent, id, "project")
-            .map_err(engine)?;
+    // The copy carries the project key's launch floor to the machine-wide
+    // global key, both named here and never derived from a path.
+    let channel = if opts.by_agent {
+        apb_core::launch::floor::SaveChannel::Agent
+    } else {
+        apb_core::launch::floor::SaveChannel::Person
+    };
+    let floors = apb_core::scope_move::CopyFloors::project_to_global(
+        &apb_core::projects::bind_id(root).map_err(engine)?,
+        id,
+        channel,
+    );
+    let global_dir = apb_core::scope_move::copy_playbook_to(
+        &project_dir,
+        &global_parent,
+        id,
+        "project",
+        &floors,
+    )
+    .map_err(engine)?;
     undo.global_dir = Some(global_dir);
     let copy = Registry::open_dir(&global_parent).and_then(|reg| reg.load(id, None));
     let refusal = match copy

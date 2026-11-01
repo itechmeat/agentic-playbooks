@@ -43,6 +43,7 @@ import type {
   RootInfo,
 } from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
+import { launchFields, type LaunchConfirmation } from '../launch'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
 
 export const fetchProjects = () => getJson<Project[]>('/api/projects')
@@ -371,7 +372,7 @@ export interface ResumeBudget {
 export const resumeRun = (
   id: string,
   workspace = '',
-  opts: { consentNonce?: string; budget?: ResumeBudget } = {},
+  opts: { consentNonce?: string; budget?: ResumeBudget; launchNonce?: string } = {},
 ) =>
   requestJson<{
     run_id: string
@@ -385,6 +386,9 @@ export const resumeRun = (
     body: JSON.stringify({
       ...(opts.consentNonce ? { confirm_irreversible: opts.consentNonce } : {}),
       ...(opts.budget ? { budget: opts.budget } : {}),
+      // A dashboard without keys resumes a never-authorized `ask` run only
+      // with the nonce of its refusal.
+      ...(opts.launchNonce ? { confirm_launch: opts.launchNonce } : {}),
     }),
   })
 
@@ -406,18 +410,37 @@ export const postAnswer = (
     body: JSON.stringify(body),
   })
 
-export const createPlaybook = (id: string, yaml: string, workspace = '') =>
+// `confirmLowerFloor` is the launch floor lowering the person confirmed
+// after a 409 `launch_floor_lowering_unconfirmed` (a dashboard with keys).
+export const createPlaybook = (
+  id: string,
+  yaml: string,
+  workspace = '',
+  confirmLowerFloor?: string,
+) =>
   requestJson<WriteResult>(`/api/playbooks${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({ id, yaml }),
+    body: JSON.stringify({
+      id,
+      yaml,
+      ...(confirmLowerFloor ? { confirm_lower_floor: confirmLowerFloor } : {}),
+    }),
   })
 
-export const updatePlaybook = (id: string, yaml: string, workspace = '') =>
+export const updatePlaybook = (
+  id: string,
+  yaml: string,
+  workspace = '',
+  confirmLowerFloor?: string,
+) =>
   requestJson<WriteResult>(`${pb(id)}${qs({ workspace })}`, {
     method: 'PUT',
     headers: jsonHeaders,
-    body: JSON.stringify({ yaml }),
+    body: JSON.stringify({
+      yaml,
+      ...(confirmLowerFloor ? { confirm_lower_floor: confirmLowerFloor } : {}),
+    }),
   })
 
 export const deletePlaybook = (id: string, workspace = '') =>
@@ -498,13 +521,19 @@ export interface RunStarted {
 export const runPlaybook = (
   id: string,
   workspace = '',
-  opts: { consentNonce?: string; budget?: RunBudget; input?: RunInput } = {},
+  opts: {
+    consentNonce?: string
+    budget?: RunBudget
+    input?: RunInput
+    launch?: LaunchConfirmation
+  } = {},
 ) =>
   requestJson<RunStarted>(`${pb(id)}/run${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify({
       ...(opts.consentNonce ? { confirm_irreversible: opts.consentNonce } : {}),
+      ...launchFields(opts.launch),
       ...(opts.budget ? { budget: opts.budget } : {}),
       ...(opts.input?.params && Object.keys(opts.input.params).length
         ? { params: opts.input.params }

@@ -440,47 +440,119 @@ pub fn touch(root: &Path) {
     let Ok(workspace_id) = crate::workspace::ensure_id(root) else {
         return;
     };
-    let fingerprint = crate::workspace::fingerprint(root);
-    let path = root.to_string_lossy().into_owned();
-    // The compatibility fields, computed as 0.20.x/0.21.x did at registration.
-    let name = workspace_name(root);
-    let playbook_count = count_playbooks(root);
     let now = crate::clock::now_ms_u64();
 
     let _ = with_registry(Access::Write, |file| {
         apply_time_transitions(file, &cfg);
-        // An id already registered to ANOTHER directory that still holds it
-        // (a copied checkout, a second clone that kept the file) is not
-        // re-pointed here: the last checkout to run a command would otherwise
-        // capture every request for that id. A real move leaves the old
-        // directory without the id, so the entry follows the workspace.
-        if let Some(existing) = file.entries.get(&workspace_id) {
-            let old = Path::new(&existing.path);
-            let same_dir = std::fs::canonicalize(old).ok() == std::fs::canonicalize(root).ok();
-            if !same_dir && is_reachable(&workspace_id, old) {
-                return;
-            }
-        }
-        // Fields another build stored on this entry survive re-registration.
-        let extra = file
-            .entries
-            .get(&workspace_id)
-            .map(|e| e.extra.clone())
-            .unwrap_or_default();
-        file.entries.insert(
-            workspace_id.clone(),
-            StoredEntry {
-                workspace_id: workspace_id.clone(),
-                fingerprint: fingerprint.clone(),
-                path: path.clone(),
-                name: name.clone(),
-                last_seen_ms: now,
-                playbook_count,
-                state: State::Active,
-                extra,
-            },
-        );
+        register_in(file, &workspace_id, root, now);
     });
+}
+
+/// Inserts (or refreshes) the entry of `workspace_id` at `root`, unless the
+/// id is registered to ANOTHER directory that still holds it (a copied
+/// checkout, a second clone that kept the file): the last checkout to run a
+/// command would otherwise capture every request for that id. A real move
+/// leaves the old directory without the id, so the entry follows the
+/// workspace. Fields another build stored on the entry survive. Returns
+/// whether the id is registered at `root` afterwards.
+fn register_in(file: &mut ProjectsFile, workspace_id: &str, root: &Path, now: u64) -> bool {
+    if let Some(existing) = file.entries.get(workspace_id) {
+        let old = Path::new(&existing.path);
+        let same_dir = std::fs::canonicalize(old).ok() == std::fs::canonicalize(root).ok();
+        if !same_dir && is_reachable(workspace_id, old) {
+            return false;
+        }
+    }
+    let extra = file
+        .entries
+        .get(workspace_id)
+        .map(|e| e.extra.clone())
+        .unwrap_or_default();
+    file.entries.insert(
+        workspace_id.to_string(),
+        StoredEntry {
+            workspace_id: workspace_id.to_string(),
+            fingerprint: crate::workspace::fingerprint(root),
+            path: root.to_string_lossy().into_owned(),
+            // The compatibility fields, computed as 0.20.x/0.21.x did.
+            name: workspace_name(root),
+            last_seen_ms: now,
+            playbook_count: count_playbooks(root),
+            state: State::Active,
+            extra,
+        },
+    );
+    true
+}
+
+/// Whether `entry` names the directory `canon` (already canonical).
+fn entry_at(entry: &StoredEntry, canon: &Path) -> bool {
+    std::fs::canonicalize(&entry.path).ok().as_deref() == Some(canon)
+}
+
+/// The workspace id of `root` as the launch floors and the machine's exact
+/// `launch:` entries key it: the id in `.apb/workspace.local` only when it
+/// has the shape apb mints and the projects registry under the config dir
+/// has it registered at this very root. A file in the project tree alone
+/// never names another project's id. `None` otherwise.
+pub fn registered_id(root: &Path) -> Option<String> {
+    registered_id_in(crate::config::config_dir().as_deref(), root)
+}
+
+/// [`registered_id`] against the registry of the config dir `config_dir`.
+pub fn registered_id_in(config_dir: Option<&Path>, root: &Path) -> Option<String> {
+    let id = crate::workspace::read_id(root)?;
+    if !crate::workspace::is_well_formed_id(&id) {
+        return None;
+    }
+    let canon = std::fs::canonicalize(root).ok()?;
+    let file = match read_file(&config_dir?.join("projects.json")) {
+        Loaded::Writable(file) => file,
+        Loaded::ReadOnly { view, .. } => view,
+    };
+    file.entries
+        .get(&id)
+        .is_some_and(|e| entry_at(e, &canon))
+        .then_some(id)
+}
+
+/// [`registered_id`], registering the workspace at `root` first when it is
+/// not yet (whatever the listing opt-out says: a floor needs its owner
+/// bound): what a writer of a launch floor keys it by. Refused when the id
+/// is not one apb minted, when another live directory holds the same id,
+/// or when the registry cannot be written.
+pub fn bind_id(root: &Path) -> std::io::Result<String> {
+    let id = crate::workspace::ensure_id(root)?;
+    if !crate::workspace::is_well_formed_id(&id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "`{}` holds `{id}`, which is not a workspace id apb minted; delete the file so apb mints one",
+                root.join(".apb/workspace.local").display()
+            ),
+        ));
+    }
+    if registered_id(root).as_deref() == Some(id.as_str()) {
+        return Ok(id);
+    }
+    if projects_path().is_none() {
+        return Err(std::io::Error::other(
+            "no config dir to register the workspace in",
+        ));
+    }
+    let now = crate::clock::now_ms_u64();
+    let bound = with_registry(Access::Write, |file| register_in(file, &id, root, now))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    if !bound {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "workspace id `{id}` in `{}` is registered to another project that still holds it; delete the file here so apb mints this checkout its own",
+                root.join(".apb/workspace.local").display()
+            ),
+        ));
+    }
+    Ok(id)
 }
 
 /// Active and unreachable entries (excluding tombstoned), each reconciled

@@ -285,6 +285,8 @@ mod judge_test;
 #[cfg(unix)]
 #[path = "suite/known_problems_test.rs"]
 mod known_problems_test;
+#[path = "suite/launch_policy_test.rs"]
+mod launch_policy_test;
 #[path = "suite/lineage_test.rs"]
 mod lineage_test;
 #[cfg(unix)]

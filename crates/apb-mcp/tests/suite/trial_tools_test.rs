@@ -1,3 +1,4 @@
+use apb_engine::gate::launch::{LaunchContext, LaunchKind};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -128,6 +129,7 @@ fn trial_of_fs_writing_playbook_runs_in_worktree_and_reports_diff() {
         Default::default(),
         None,
         "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
     )
     .unwrap();
     assert_eq!(res["status"], "succeeded", "trial result: {res}");
@@ -217,6 +219,7 @@ fn a_trial_never_runs_a_program_the_tree_names() {
         Default::default(),
         None,
         "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
     )
     .unwrap();
     assert_eq!(res["status"], "succeeded", "trial result: {res}");
@@ -252,7 +255,14 @@ fn approve_activates_and_unlocks_run() {
         version: None,
     };
     assert_eq!(
-        check_run(proj.path(), &wref, false, false).unwrap_err()["policy"],
+        check_run(
+            proj.path(),
+            &wref,
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .unwrap_err()["policy"],
         "draft_requires_trial"
     );
 
@@ -261,7 +271,16 @@ fn approve_activates_and_unlocks_run() {
     assert_eq!(res["trusted"], true);
 
     // After approve - the gate lets it through.
-    assert!(check_run(proj.path(), &wref, false, false).is_ok());
+    assert!(
+        check_run(
+            proj.path(),
+            &wref,
+            false,
+            false,
+            &LaunchContext::dashboard(LaunchKind::Start)
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -283,6 +302,7 @@ fn irreversible_effects_forbid_trial() {
         Default::default(),
         None,
         "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
     )
     .unwrap();
     assert_eq!(res["rejected"], "trial_forbidden_irreversible");
@@ -303,6 +323,7 @@ fn irreversible_effects_forbid_trial() {
         Default::default(),
         None,
         "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
     )
     .unwrap();
     assert_eq!(res["rejected"], "trial_forbidden_irreversible", "{res}");
@@ -328,7 +349,16 @@ fn global_draft_can_be_trialed_and_approved() {
     write_lifecycle(&cfg.path().join("playbooks/g"), Lifecycle::Draft).unwrap();
 
     // trial of a global draft (scope=global) runs in the current project.
-    let res = playbook_trial(proj.path(), "g", None, Default::default(), None, "global").unwrap();
+    let res = playbook_trial(
+        proj.path(),
+        "g",
+        None,
+        Default::default(),
+        None,
+        "global",
+        &LaunchContext::dashboard(LaunchKind::Trial),
+    )
+    .unwrap();
     assert_eq!(res["status"], "succeeded", "global trial result: {res}");
 
     // approve of a global draft.
@@ -435,6 +465,7 @@ fn trial_instruction_reaches_a_node_prompt_of_run_instruction() {
         Default::default(),
         Some("PING".to_string()),
         "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
     )
     .unwrap();
     assert_eq!(res["status"], "succeeded", "trial result: {res}");
@@ -483,6 +514,7 @@ fn an_unapproved_imported_version_is_not_trialed() {
         Default::default(),
         None,
         "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
     )
     .unwrap();
     assert_eq!(

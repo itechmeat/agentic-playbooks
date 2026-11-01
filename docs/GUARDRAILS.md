@@ -57,17 +57,102 @@ policy to the host agent and its administrators (see "Host agent settings" below
 | Connector grants, `functions: read_only`, `max_calls` | 3 Tool and environment | Enforced | A node can call only the connector functions it is granted, read-only when so declared, within a per-attempt call budget. Secrets never reach the agent. |
 | `model_policy` (global config) | 3 Tool and environment | Enforced | Models outside the policy are refused at validation and run start. Lives only in the global config, out of a project's reach. |
 | `isolation` | 3 Tool and environment | Enforced (Linux) | An unprivileged bubblewrap sandbox per attempt: own process namespaces, only the node's tree and declared paths visible, the repository's git config and hooks read-only, `.apb` masked, the environment forced to the allowlist, `network: none` or the host network. `full` refuses to run where the sandbox cannot be built (`isolation_unavailable`: no bubblewrap, macOS, an agent without declared sandbox needs, host mode); `best_effort` runs without it and records why. Every attempt lists its limits (the host uid, the open network, the agent's own login, scripts outside the sandbox). See ISOLATION.md. |
+| `agent_launch`, launch floor, `launch:` in `policy.yaml` | 4 Gates | Enforced (run gate) | Whether an agent may launch a playbook: `allow` (the default), `ask` (only with the nonce of the refusal, after the host asked the person) or `deny` (only a person, from the dashboard or an interactive terminal). The run's policy is the strictest over its tree of the playbook's declaration held up by its launch floor, the machine settings and the project settings. Every start, trial, plan execution, eval and resume of a run never authorized goes through the one run gate; a run authorized once stays authorized for its lifetime. See "Launch policy for agents" below. |
 | `human_review` | 4 Gates | Enforced | The run waits for a person's decision; nothing is preselected. |
 | `judge` nodes and edges | 4 Gates | Model-decided | A decision model answers typed questions and routes; thresholds are declared, failures take `on_unavailable`. |
 | Trust digests (playbook, profile bundle, connector, account) | 4 Gates | Enforced | A changed playbook, profile, skill or connector drops its approval; MCP starts are refused until a person approves or acknowledges. |
 | Run gate (`lifecycle`, `requires`) | 4 Gates | Enforced | Drafts are refused, requirements must be met, sub-playbook pins must match. |
 | `goal.criteria` | 4 Gates | Reported, enforce opt-in | At the finish node, `script` criteria (under the version's `scripts/`, run in the run's working tree, exit 0 passes; a run-directory copy changed after the start is not run and reads as `error`) and `marker` criteria (a literal string in the finish answer or any node's latest output) are checked and journaled as `goal_checked`; `manual` criteria are listed as a checklist for a person. With `goal.enforce: true` a failed script or marker criterion fails the run. |
-| `effects: [irreversible]` (playbook, node, any sub-playbook, or a granted connector function flagged `irreversible: true`) | 5 Release | Enforced (engine, at run start; patch and resume guarded) | A run whose tree declares `irreversible` (the playbook's own effects, its nodes', every sub-playbook's recursively, and every connector function flagged `irreversible: true` that a node is granted) starts only with an explicit consent, recorded in the run manifest as `consent: { irreversible: true, by: ..., sources: [...] }`. Who consents: an MCP host that passes `confirm_irreversible` on `playbook_run`, `playbook_execute_plan` or `run_resume` after asking the person (`by: mcp` or `mcp:<client>`); a person answering `y` to the `[y/N]` question `apb run` asks at an interactive terminal (`cli`) or a script author writing `--confirm-irreversible=<consent_nonce>` (`cli_flag`); a person confirming the dashboard's Run dialog (`dashboard`). A CLI start from inside a run (`APB_RUN_ID` set, as in an agent or script step) cannot consent at all: the terminal question is not asked and the flag is refused, since a step that read the refusal could echo its nonce; the refusal names the parent run and points at the host (MCP `confirm_irreversible` after asking the person). No apb path forwards a consent to a nested start through the environment; `apb run --supervise` hands its own consent to its drive process as arguments, outside any run. Without it the start is refused before anything is written (`irreversible_requires_confirmation`, with the `sources` and a `consent_nonce`). The consent is bound to what was shown: the confirmation echoes the nonce (a hash of the trust digests of the playbook and every pinned sub-playbook, and the sorted sources), and a tree that changed since, a sub-playbook included, is refused again; a bare `true` (and, on MCP, `acknowledge_untrusted: true` alone) is accepted for one release with a deprecation note. `acknowledge_untrusted` answers trust only; a trust refusal of an irreversible tree names its irreversible sources and nonce too, so the host asks one question. Every start path checks it (the engine again in run preparation, so no start skips it); a supervisor patch may not add a source the run's consent does not cover or point a consented sub-playbook node at another playbook (`patch_rejected`, `irreversible_requires_confirmation`); the engine refuses a resume of an irreversible run whose manifest records no covering consent, whatever starts it; a resume asks once for a run with no valid consent (one an older apb started, or a directory apb did not create here), and the consent is then written into its manifest. A sub-playbook inherits its parent's consent (`inherited_from`) only for a node that consent covered. The dashboard API trusts its authenticated caller: any holder of the dashboard token can send `confirm_irreversible`, so a trigger or an event bridge is refused only because it does not. A shipping-looking step that declares nothing is V90 (a warning), not a consent source. `apb eval` never runs such a playbook at all (V81, docs/EVALS.md), and `playbook_trial` refuses it (`trial_forbidden_irreversible`). |
+| `effects: [irreversible]` (playbook, node, any sub-playbook, or a granted connector function flagged `irreversible: true`) | 5 Release | Enforced (engine, at run start; patch and resume guarded) | A run whose tree declares `irreversible` (the playbook's own effects, its nodes', every sub-playbook's recursively, and every connector function flagged `irreversible: true` that a node is granted) starts only with an explicit consent, recorded in the run manifest as `consent: { irreversible: true, by: ..., sources: [...] }`. Who consents: an MCP host that passes `confirm_irreversible` on `playbook_run`, `playbook_execute_plan` or `run_resume` after asking the person (`by: mcp` or `mcp:<client>`); a person answering `y` to the `[y/N]` question `apb run` asks at an interactive terminal (`cli`) or a script author writing `--confirm-irreversible=<consent_nonce>` (`cli_flag`); a person confirming the dashboard's Run dialog (`dashboard`). A CLI start from inside a run (`APB_RUN_ID` set, as in an agent or script step) cannot consent at all: the terminal question is not asked and the flag is refused, since a step that read the refusal could echo its nonce; the refusal names the parent run and points at the host (MCP `confirm_irreversible` after asking the person). No apb path forwards a consent to a nested start through the environment; `apb run --supervise` hands its own consent to its drive process in a private, single-use handoff file (never on its command line), outside any run. Without it the start is refused before anything is written (`irreversible_requires_confirmation`, with the `sources` and a `consent_nonce`). The consent is bound to what was shown: the confirmation echoes the nonce (a hash of the trust digests of the playbook and every pinned sub-playbook, and the sorted sources), and a tree that changed since, a sub-playbook included, is refused again; a bare `true` (and, on MCP, `acknowledge_untrusted: true` alone) is accepted for one release with a deprecation note. `acknowledge_untrusted` answers trust only; a trust refusal of an irreversible tree names its irreversible sources and nonce too, so the host asks one question. Every start path checks it (the engine again in run preparation, so no start skips it); a supervisor patch may not add a source the run's consent does not cover or point a consented sub-playbook node at another playbook (`patch_rejected`, `irreversible_requires_confirmation`); the engine refuses a resume of an irreversible run whose manifest records no covering consent, whatever starts it; a resume asks once for a run with no valid consent (one an older apb started, or a directory apb did not create here), and the consent is then written into its manifest. A sub-playbook inherits its parent's consent (`inherited_from`) only for a node that consent covered. The dashboard API trusts its authenticated caller: any holder of the dashboard token can send `confirm_irreversible`, so a trigger or an event bridge is refused only because it does not. A shipping-looking step that declares nothing is V90 (a warning), not a consent source. `apb eval` never runs such a playbook at all (V81, docs/EVALS.md), and `playbook_trial` refuses it (`trial_forbidden_irreversible`). |
 | `publish` node | 5 Release | Enforced | The only push apb makes: the remote is pinned before agents run, a read-only plan (URL, branch, commits, the remote's state) is shown, a person consents to exactly that plan by its nonce (`apb publish approve`, MCP `review_decide` with `nonce`, the dashboard's "Publish exactly this"), the push is recorded in the send ledger before it leaves and runs under an exact lease, and an unknown result is never repeated on its own. A dashboard without keys refuses the consent (anything on the machine reaches it) and shows the CLI command. It guarantees that nothing else pushed only when every agent node is `isolation: full` (`publish_only` makes that an error to break and holds sub-playbook runs to it); otherwise V119 warns and the plan flags commits already on the remote. See PUBLISH.md. |
 | `auto_decide` refusal (V73) | 5 Release | Enforced | An automatic review decision is refused where the playbook declares `irreversible` or `secrets` effects, a downstream node declares `effects: [irreversible]`, a downstream node binds a connector function flagged `irreversible: true`, or a downstream step looks like a merge, push, deploy or publish by name. Downstream write connector functions give a warning; a downstream connector whose manifest does not load warns at validation and refuses at run time (effects unknown). `auto_decide_ok: true` is the author's explicit override. |
 | Journal (`events.jsonl`), run manifest | 6 Provenance | Recorded | Every attempt, gate decision, retry, supervisor action and decision is journaled; the manifest snapshots what the run was started with. |
 | `APB_RUN_ID`, `{{run.id}}`, `Apb-Run:` trailer, `artifacts_committed` | 6 Provenance | Recorded | Links commits to runs in both directions (see HOWTO-authoring.md "Linking runs, commits and tracker records"). |
 | `apb stats`, `apb decisions report` | 6 Measurement | Read-only | Cross-run metrics from journals only, and the accuracy of each decision-model use against labels the journals hold. |
+
+## Launch policy for agents
+
+A playbook can say how far an agent may launch it on its own, with
+`agent_launch: allow | ask | deny` (HOWTO-authoring.md "Launch policy"). The
+run gate decides it for every launch surface, on the exact permit the run
+will use:
+
+| Effective policy | Agent over MCP | Run step (MCP or CLI) | CLI at a terminal | CLI without a terminal | Dashboard with keys | Dashboard without keys | Engine (waker, quota probe, `resume --all`) |
+|---|---|---|---|---|---|---|---|
+| `allow` | runs | runs | runs | runs | runs | runs | runs |
+| `ask` | runs with the refusal's nonce (`confirm_launch`), else refused | refused | asks the person, or `--confirm-launch` | `--confirm-launch` only | runs | runs after the dashboard confirms the refusal's nonce | refused |
+| `deny` | refused | refused | asks the person | refused | runs | refused | refused |
+
+A dashboard without keys counts as the CLI without a terminal, since
+anything on the machine can reach its port: issue a key with `apb server key
+issue` and sign in to start a `deny` playbook from the dashboard. A run step
+or a CLI without a terminal whose config dir was redirected (`APB_CONFIG_DIR`,
+`XDG_CONFIG_HOME`, `HOME`) away from the default one, `~/.config/apb` of the
+real user, is refused with `policy_file_invalid` when the default one holds
+stricter launch settings or floors; `apb eval` hands its cases the config dir
+it read, and that one is accepted. A project's floors and the machine's exact
+`<workspace id>/<id>` entries use only a workspace id registered at that
+project's root in `<config dir>/projects.json`, never what
+`.apb/workspace.local` alone says.
+
+A refusal carries a start action: `confirm_launch` with the nonce, the version
+and how it was chosen, or `launch_by_person`. The nonce covers the execution
+workspace, the playbook and the chosen version, a digest of the whole permit
+(the definition, verified profile bundles with their skills, connectors,
+accounts and every pinned sub-playbook with its own maps), the effective
+policy with its sources and the launch kind; anything that changes after the
+refusal needs a fresh one. The engine column applies only to a run that holds
+no authorization.
+
+**The guarantee.** An agent that uses apb's documented agent channels (MCP,
+or the CLI inside a run step or without a terminal) cannot start, trial,
+evaluate or resume a playbook whose effective policy is `deny`, and cannot do
+so for `ask` without passing the nonce of the refusal; the CLI at an
+interactive terminal asks the person. An agent channel cannot loosen a
+playbook's declared policy. Outside this guarantee: proof that a person
+answered (a process that controls a terminal, signs in to a dashboard with a
+key, edits the machine files or forges apb's internal handoff file is not
+stopped); the project file, which anything that writes the project tree can
+change and which only narrows; a new playbook an agent writes under a new id,
+which has no floor of its own and falls under the machine and project
+defaults (set the machine default to `ask` to cover it); and older apb
+binaries on the same machine, which ignore every launch setting.
+
+**The launch floor.** Every saved version of a playbook raises its floor, the
+strictest `agent_launch` any version of it declared, kept outside the
+definition in `<config dir>/launch-floors.json`. A save from an agent channel
+that would declare less is refused (`launch_policy_loosened`); deleting the
+key, deleting and recreating the playbook, restoring it from the trash or
+copying it to global scope keeps the floor (a playbook deleted before its
+floor was recorded is read from its trash entries). A person lowers it by
+confirming the lowering in the editor of a dashboard with keys, or with `apb
+launch floor <id> [--global] --lower-to <policy>` at an interactive
+terminal; the editor of a dashboard without keys never lowers it. A floor is
+written, durably, before the version it covers becomes visible, so a crash
+leaves the floor stricter than the store, never looser.
+
+**Lifetime.** A run records its authorization once (`launch` in its
+manifest, or on the `run_resumed` that authorized it): who launched it, how
+an `ask` or `deny` launch was confirmed, the policy and its sources, never a
+nonce. Pauses, the waker, the quota probe and every later resume continue it
+without another question, even after the policy was tightened. A run an
+older apb started holds no authorization: its first resume is checked on its
+own snapshot and pinned children, and a run without pins gets the child tree
+that check verified persisted as its pins.
+
+**Fail closed.** A `policy.yaml` that does not read (an unknown section, key
+or value, named in the error) refuses agent launches with
+`policy_file_invalid`, and a damaged `launch-floors.json` refuses agent
+launches and agent saves with `launch_floor_invalid`; the dashboard and a
+terminal still launch, with a warning, and `apb doctor` names the file. A
+later release that adds a section to `policy.yaml` makes this release refuse
+agent launches on a machine whose file uses it, until apb is upgraded.
+
+**Older binaries.** An apb older than this release ignores `agent_launch`,
+the floors and `policy.yaml`: it reads and resumes the new records, and runs
+every playbook as `allow`. The policy holds only while every apb on the
+machine is this release or newer; `apb doctor` warns when another apb is on
+`PATH`.
 
 ## Choosing where a rule goes
 

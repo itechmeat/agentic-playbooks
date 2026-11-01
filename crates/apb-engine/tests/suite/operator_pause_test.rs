@@ -753,6 +753,7 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
         from_node: "s".into(),
         by: Some(PauseBy::Operator),
         explicit: false,
+        launch: None,
     })
     .unwrap();
     log.append(EventPayload::AttemptStarted {
@@ -819,6 +820,7 @@ fn resume_all_waits_out_a_busy_workdir_and_reports_a_run_it_cannot_mark() {
         from_node: "s".into(),
         by: Some(PauseBy::Operator),
         explicit: false,
+        launch: None,
     })
     .unwrap();
     drop(log);
@@ -877,13 +879,13 @@ fn the_engine_resume_of_a_replaced_pause_journals_nothing() {
     else {
         panic!("a paused run is updated in place");
     };
-    let err = apb_engine::scheduler::resume_pause(root, &run_id, first).unwrap_err();
+    let err = apb_engine::scheduler::resume_pause(root, &run_id, first, None).unwrap_err();
     assert!(
         matches!(&err, EngineError::Conflict(m) if m == apb_engine::scheduler::PAUSE_SUPERSEDED),
         "{err:?}"
     );
     assert!(resumed_by(&events(root, &run_id)).is_none());
-    let res = apb_engine::scheduler::resume_pause(root, &run_id, second).unwrap();
+    let res = apb_engine::scheduler::resume_pause(root, &run_id, second, None).unwrap();
     assert_eq!(res.outcome, RunStatus::Succeeded);
     assert_eq!(resumed_by(&events(root, &run_id)), Some(PauseBy::Engine));
 }
@@ -911,7 +913,7 @@ fn the_engine_resume_of_a_replaced_pause_refuses_before_any_other_check() {
     let first = latest_pause_seq(&events(root, &run_id));
     request_pause(root, &run_id, &operator(PauseMode::Drain)).unwrap();
     let held = acquire_tree(root, None, false).unwrap();
-    let err = apb_engine::scheduler::resume_pause(root, &run_id, first).unwrap_err();
+    let err = apb_engine::scheduler::resume_pause(root, &run_id, first, None).unwrap_err();
     assert!(superseded(&err), "{err:?}");
     drop(held);
 
@@ -920,7 +922,7 @@ fn the_engine_resume_of_a_replaced_pause_refuses_before_any_other_check() {
     let seq = latest_pause_seq(&events(root, &stopped));
     stop_run(root, &stopped).unwrap();
     let before = events(root, &stopped).len();
-    let err = apb_engine::scheduler::resume_pause(root, &stopped, seq).unwrap_err();
+    let err = apb_engine::scheduler::resume_pause(root, &stopped, seq, None).unwrap_err();
     assert!(superseded(&err), "{err:?}");
     assert_eq!(events(root, &stopped).len(), before, "nothing journaled");
 }
@@ -961,6 +963,7 @@ fn two_racing_resumes_journal_one_run_resumed() {
             from_node: "s".into(),
             by: Some(PauseBy::Engine),
             explicit: false,
+            launch: None,
         })
         .unwrap();
     drop(event_lock);
@@ -1006,7 +1009,7 @@ fn a_replaced_engine_resume_gives_a_kept_lock_back() {
     let (tx, rx) = mpsc::channel();
     let (r, id) = (root.to_path_buf(), run_id.clone());
     std::thread::spawn(move || {
-        let _ = tx.send(apb_engine::scheduler::resume_pause(&r, &id, seq));
+        let _ = tx.send(apb_engine::scheduler::resume_pause(&r, &id, seq, None));
     });
     poll_until("the engine resume to take the parked lock", || {
         (lock_owner(&lock_file) == Some(LockOwner::Pid(std::process::id()))).then_some(())

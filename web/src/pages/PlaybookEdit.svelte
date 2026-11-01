@@ -3,6 +3,7 @@
   import { untrack } from 'svelte'
   import '@xyflow/svelte/dist/style.css'
   import {
+    ApiError,
     createPlaybook,
     fetchPlaybook,
     fetchVersions,
@@ -27,6 +28,7 @@
   import NodePanel from '../lib/NodePanel.svelte'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
+  import { floorQuestion, floorStep } from '../lib/launch'
   import { takeDraftYaml } from '../lib/playbookdupe'
   import {
     addEdge,
@@ -404,7 +406,7 @@
     return null
   }
 
-  async function save() {
+  async function save(confirmLowerFloor?: string) {
     const idErr = isNew ? validateIdInput() : null
     if (idErr) return toast.error(idErr)
     if (isNew && !targetWorkspace) return toast.error('Select a project')
@@ -413,13 +415,24 @@
       const targetId = isNew ? idInput.trim() : id
       const ws = isNew ? targetWorkspace : workspace
       const result = isNew
-        ? await createPlaybook(targetId, yamlText, ws)
-        : await updatePlaybook(targetId, yamlText, ws)
+        ? await createPlaybook(targetId, yamlText, ws, confirmLowerFloor)
+        : await updatePlaybook(targetId, yamlText, ws, confirmLowerFloor)
       const notice = saveNotice(result, isNew)
       toast[notice.kind](notice.title, { description: notice.description })
       location.hash = `#/playbook/${encodeURIComponent(ws)}/${encodeURIComponent(result.id)}`
     } catch (e) {
-      toast.error('Save failed', { description: String(e) })
+      // A save that lowers the launch floor: shown and confirmed here (a
+      // dashboard with keys), or only possible at a terminal.
+      const step = e instanceof ApiError ? floorStep(e.code, e.body) : null
+      if (step?.kind === 'confirm' && !confirmLowerFloor) {
+        saving = false
+        const declared = step.declared
+        if (window.confirm(floorQuestion(step))) queueMicrotask(() => void save(declared))
+        else toast.info('Not saved: the launch floor stays', { description: step.message })
+        return
+      }
+      if (step) toast.error('Save refused', { description: step.message })
+      else toast.error('Save failed', { description: String(e) })
     } finally {
       saving = false
     }
@@ -500,7 +513,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    <Button size="sm" onclick={save} disabled={saving || loadFailed}>
+    <Button size="sm" onclick={() => save()} disabled={saving || loadFailed}>
       {#if saving}<Spinner data-icon="inline-start" />{/if}
       {saving ? 'Saving...' : 'Save'}
     </Button>

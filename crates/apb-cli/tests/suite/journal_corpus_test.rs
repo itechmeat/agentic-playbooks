@@ -27,8 +27,13 @@
 //! order, in the same project path: the run's journal names its execution
 //! root, so a copy elsewhere would not be the same run.
 //!
-//! Rows 1 to 6 are runs real writers produced; rows 7 and 8 are synthetic
+//! Rows 1 to 6 and 9 are runs real writers produced; rows 7 and 8 are synthetic
 //! journals that test readers and resumers only, and say so in their names.
+//!
+//! Rows 3 and 4 start an `agent_launch: ask` playbook through the launch
+//! refusal's nonce, so the manifest holds a launch record; rows 6 and 9
+//! resume a run an old binary started, so `run_resumed` holds one. The old
+//! readers read and resume those records; they do not enforce them.
 //!
 //! Rows 3 and 4 run with a real notification subscription the new writer
 //! takes at start: a filtered end-of-run notice (`finished:failed`) and the
@@ -586,6 +591,23 @@ impl Case {
         sink.count() - before
     }
 
+    /// Declares `agent_launch: <policy>` in the seeded writer playbook.
+    fn declare_launch(&self, policy: &str) {
+        let path = self
+            .root()
+            .join(".apb/playbooks")
+            .join(PLAYBOOK)
+            .join("1.0.0/playbook.yaml");
+        let yaml = fs::read_to_string(&path).unwrap();
+        let yaml = yaml.replacen(
+            "version: 1.0.0\n",
+            &format!("version: 1.0.0\nagent_launch: {policy}\n"),
+            1,
+        );
+        assert!(yaml.contains("agent_launch:"), "{}: declared", self.name);
+        fs::write(path, yaml).unwrap();
+    }
+
     // ----------------------------------------------------- writers
 
     /// [`Case::write_waiting_at_review`] by the new binary, with the run's
@@ -597,18 +619,29 @@ impl Case {
         self.seed(&new);
         self.install_sink(&new, sink);
         let via = format!("--notify-via={SINK}/me:notify_person");
-        let ran = self.run(
-            &new,
-            &[
-                "run",
-                PLAYBOOK,
-                "--detach",
-                "--notify-on=finished,host_task",
-                "--notify-finished=failed",
-                &via,
-                "--notify-to=42",
-            ],
+        let mut args = vec![
+            "run",
+            PLAYBOOK,
+            "--detach",
+            "--notify-on=finished,host_task",
+            "--notify-finished=failed",
+            &via,
+            "--notify-to=42",
+        ];
+        // The writer playbook asks before an agent launches it: the start
+        // without a terminal is refused with the launch nonce, and the
+        // retry that echoes it is admitted with a `cli_flag` record.
+        self.declare_launch("ask");
+        let refused = self.run(&new, &args);
+        assert!(
+            !refused.ok() && refused.stderr.contains("launch_requires_confirmation"),
+            "{}: an `ask` start without a terminal is refused: {refused:?}",
+            self.name
         );
+        let confirm = launch_flags(&refused.stderr)
+            .unwrap_or_else(|| panic!("{}: no launch flags in {refused:?}", self.name));
+        args.extend(confirm.iter().map(String::as_str));
+        let ran = self.run(&new, &args);
         assert!(
             ran.ok(),
             "{}: apb run --detach --notify: {ran:?}",
@@ -629,6 +662,23 @@ impl Case {
             Self::notify_on(&journal),
             Some(FILTERED_ON.iter().map(|s| s.to_string()).collect()),
             "{}: the new writer journals the exact names",
+            self.name
+        );
+        let manifest = fs::read_to_string(self.run_dir(&run).join("manifest.yaml")).unwrap();
+        assert!(
+            manifest.contains("launch:")
+                && manifest.contains("policy: ask")
+                && manifest.contains("confirmation: cli_flag"),
+            "{}: the new writer records the launch authorization: {manifest}",
+            self.name
+        );
+        let nonce = confirm
+            .iter()
+            .find_map(|f| f.strip_prefix("--confirm-launch="))
+            .unwrap_or_else(|| panic!("{}: no nonce in {confirm:?}", self.name));
+        assert!(
+            !manifest.contains(nonce),
+            "{}: the record holds no nonce: {manifest}",
             self.name
         );
         self.kill_driver(&run);
@@ -753,6 +803,27 @@ fn rewrite_journal(run_dir: &Path, edit: impl FnOnce(Vec<Value>) -> Vec<Value>) 
         text.push('\n');
     }
     fs::write(run_dir.join("events.jsonl"), text).unwrap();
+}
+
+/// The `--confirm-launch`, `--launch-version` and `--launch-choice` flags a
+/// launch refusal prints.
+fn launch_flags(stderr: &str) -> Option<Vec<String>> {
+    ["--confirm-launch=", "--launch-version=", "--launch-choice="]
+        .into_iter()
+        .map(|flag| {
+            let at = stderr.find(flag)?;
+            let value: String = stderr[at + flag.len()..]
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+            (!value.is_empty()).then(|| format!("{flag}{value}"))
+        })
+        .collect()
+}
+
+/// The `launch` of the latest `run_resumed`, read without any apb type.
+fn resumed_launch(journal: &[Value]) -> Option<Value> {
+    last_of(journal, "run_resumed").and_then(|e| e.get("launch").cloned())
 }
 
 fn future_record(ts: &Value) -> Value {
@@ -935,6 +1006,12 @@ fn row6_beta1_starts_new_resumes_beta1_reads() {
         Some(&"run_resumed"),
         "row 6: the new binary's first record is its resume: {added:?}"
     );
+    // beta.1 recorded no launch authorization, so the new binary's resume
+    // checks one and journals it on `run_resumed`, persisting the child pins
+    // it checked; beta.1 reads both below.
+    let launch = resumed_launch(&journal).expect("row 6: the resume records its launch");
+    assert_eq!(launch["kind"], "resume", "row 6: {launch}");
+    assert_eq!(launch["policy"], "allow", "row 6: {launch}");
     for kind in [
         "node_started",
         "child_run_started",
@@ -963,6 +1040,29 @@ fn row6_beta1_starts_new_resumes_beta1_reads() {
     assert!(
         sub_line.contains("succeeded"),
         "row 6: beta.1 reads the new binary's records too: {ran:?}"
+    );
+}
+
+/// Row 9: 0.25.0 writes a run waiting at review, without a launch record
+/// or child pins; the new binary approves and resumes it to its end, which
+/// journals `run_resumed.launch` and persists the pins it checked; 0.25.0
+/// then reads the whole journal without skipping anything.
+#[test]
+fn row9_v025_writer_new_resumes_v025_reads_the_launch_record() {
+    let mut case = Case::new("row 9");
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let run = case.write_waiting_at_review(&v025);
+    case.approve_and_resume(&new_binary(), &run);
+    let launch = resumed_launch(&case.journal(&run))
+        .expect("row 9: the new binary's resume records its launch");
+    assert_eq!(launch["kind"], "resume", "row 9: {launch}");
+    case.save();
+    let ran = case.read(&v025, &run);
+    assert!(
+        !ran.stdout.contains("unknown event"),
+        "row 9: 0.25.0 reads `run_resumed` with its launch record: {ran:?}"
     );
 }
 

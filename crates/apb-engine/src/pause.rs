@@ -26,7 +26,9 @@ pub use interrupt::{DEFAULT_GRACE, GRACE_ENV};
 pub use kind::{PauseBy, PauseCause, PauseMode};
 pub use probe::{WakeProbe, probe_before_wake};
 pub use request::{PauseOutcome, request_pause};
-pub use resume_all::{ResumeAllAction, ResumeAllEntry, ResumeCause, resume_all};
+pub use resume_all::{
+    LaunchAsk, ResumeAllAction, ResumeAllEntry, ResumeCause, resume_all, resume_all_as,
+};
 pub use waker::{WakeOutcome, run_waker, spawn_waker};
 
 use crate::event::{Event, EventPayload};
@@ -368,6 +370,7 @@ mod tests {
                 from_node: "a".into(),
                 by: None,
                 explicit: false,
+                launch: None,
             },
         )
     }

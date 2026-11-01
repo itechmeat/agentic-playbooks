@@ -125,6 +125,7 @@ mod tests {
             from_node: "done".into(),
             by: None,
             explicit,
+            launch: None,
         }
     }
 

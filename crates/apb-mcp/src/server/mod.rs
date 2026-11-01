@@ -304,6 +304,26 @@ fn mcp_confirmation(
     }
 }
 
+/// The launch context of an MCP call: an agent, or a run step when the
+/// server runs inside one (`APB_RUN_ID`, `APB_HOST_TASK`), with the host's
+/// relayed confirmation and the refusal's fixed version and choice.
+pub(crate) fn mcp_launch(
+    client: Option<String>,
+    kind: apb_engine::gate::launch::LaunchKind,
+    confirm_launch: Option<String>,
+    launch_version: Option<String>,
+    launch_choice: Option<String>,
+) -> apb_engine::gate::launch::LaunchContext {
+    use apb_engine::gate::launch::{Initiator, LaunchConfirmation, LaunchContext};
+    LaunchContext::new(Initiator::mcp(client), kind)
+        .confirmed(
+            confirm_launch
+                .filter(|n| !n.trim().is_empty())
+                .map(|nonce| LaunchConfirmation::HostRelayed { nonce }),
+        )
+        .fixed(launch_version, launch_choice.as_deref())
+}
+
 /// Checks an MCP confirmation against a start's permit: the consent to pass
 /// to the engine (`by: mcp[:<client>]`) and the deprecation note to return,
 /// or the structured refusal.

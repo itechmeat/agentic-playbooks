@@ -49,6 +49,26 @@ pub struct ConsentView {
     pub effects: Vec<String>,
 }
 
+/// The launch policy a start would meet, for an agent: the effective
+/// policy over the tree with its sources, and the playbook's own launch
+/// floor.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LaunchView {
+    pub policy: apb_core::launch::LaunchPolicy,
+    pub sources: Vec<String>,
+    /// The strictest declaration any saved version had, kept outside the
+    /// definition; absent when no version declared one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub floor: Option<apb_core::launch::LaunchPolicy>,
+    /// Why the policy could not be read (a damaged settings or floor file,
+    /// an unresolved tree); an agent's launch is refused then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub problem: Option<String>,
+}
+
 /// The fit of one playbook in one project.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,6 +91,8 @@ pub struct FitReport {
     /// ([`crate::next_action::start::from_fit`]); the consent itself comes
     /// with the gate's refusal, which carries its nonce.
     pub start_actions: Vec<crate::next_action::start_action::StartAction>,
+    /// The launch policy for an agent (see [`LaunchView`]).
+    pub launch: LaunchView,
 }
 
 /// The short form of a report, for a list.

@@ -69,6 +69,33 @@ pub(crate) fn start_lines(actions: &[StartAction]) -> Vec<String> {
                 "a start from this terminal acknowledges it".into()
             }
             (StartActionCode::FixRequirement, None) => continue,
+            (StartActionCode::ConfirmLaunch, None) => {
+                let arg = |n: &str| {
+                    a.args
+                        .iter()
+                        .find(|x| x.name == n)
+                        .and_then(|x| match &x.value {
+                            apb_engine::next_action::ArgValue::Given { value } => {
+                                Some(value.clone())
+                            }
+                            _ => None,
+                        })
+                };
+                let mut flags = format!(
+                    "a person confirms at the terminal, or pass --confirm-launch={}",
+                    arg("confirm_launch").unwrap_or_default()
+                );
+                if let Some(v) = arg("launch_version") {
+                    flags.push_str(&format!(" --launch-version={v}"));
+                }
+                if let Some(c) = arg("launch_choice") {
+                    flags.push_str(&format!(" --launch-choice={c}"));
+                }
+                flags
+            }
+            (StartActionCode::LaunchByPerson, None) => {
+                "a person starts it from the dashboard or from an interactive terminal".into()
+            }
         };
         out.push(format!("  {how}"));
     }

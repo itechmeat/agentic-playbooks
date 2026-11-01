@@ -45,6 +45,33 @@ pub struct ChildExpectation {
     pub children: BTreeMap<String, ChildExpectation>,
 }
 
+impl ChildExpectation {
+    /// The definition this pin names, at its pinned version; `None` when it
+    /// no longer resolves or no longer matches the pinned digest.
+    pub fn load(&self, root: &std::path::Path) -> Option<apb_core::schema::Playbook> {
+        use apb_core::profile::ProfileScope;
+        use apb_core::scope::{Origin, PlaybookRef};
+        let origin = match self.scope {
+            ProfileScope::Global => Origin::Global,
+            _ => Origin::Project { workspace_id: None },
+        };
+        let cref = PlaybookRef {
+            origin,
+            id: self.id.clone(),
+            version: Some(self.version.clone()),
+        };
+        let resolved = apb_core::store::resolve(root, &cref).ok()?;
+        if resolved.digest != self.playbook_digest {
+            return None;
+        }
+        apb_core::registry::Registry::open_dir(&resolved.definition_parent)
+            .ok()?
+            .load(&resolved.id, Some(&resolved.version))
+            .ok()
+            .map(|l| l.playbook)
+    }
+}
+
 /// Run-level cache policy (spec 2026-07-19-node-cache-design). Overrides,
 /// never widens, a node's own `cache` declaration: `Off`/`Refresh` apply to
 /// the whole run regardless of what individual nodes declare.

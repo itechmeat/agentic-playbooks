@@ -61,6 +61,8 @@ mod interactive_howto_example_test;
 mod isolation_contract_test;
 #[path = "suite/known_problems_test.rs"]
 mod known_problems_test;
+#[path = "suite/launch_floor_test.rs"]
+mod launch_floor_test;
 #[path = "suite/list_schema_test.rs"]
 mod list_schema_test;
 #[path = "suite/migration_test.rs"]

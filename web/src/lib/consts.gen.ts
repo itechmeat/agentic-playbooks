@@ -16,7 +16,10 @@ export const DEFAULT_REVIEW_OPTIONS = ['approve', 'reject'] as const
 export const ACTION_CODES = ['answer_question', 'decide_review', 'decide_publish', 'submit_host_task', 'supervisor_retry_node', 'supervisor_continue_from', 'supervisor_abort', 'resume_run', 'resume_with_budget', 'resolve_intent', 'wait_again', 'read_report'] as const
 
 /** Every start-action code a refused start may carry. */
-export const START_ACTION_CODES = ['confirm_irreversible_start', 'fix_requirement', 'acknowledge_untrusted'] as const
+export const START_ACTION_CODES = ['confirm_irreversible_start', 'fix_requirement', 'acknowledge_untrusted', 'confirm_launch', 'launch_by_person'] as const
+
+/** Every launch policy, from the loosest. */
+export const LAUNCH_POLICIES = ['allow', 'ask', 'deny'] as const
 
 /** Every run transition a person can be notified about, in report order. */
 export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished', 'host_task', 'supervisor'] as const

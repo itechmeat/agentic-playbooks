@@ -4,17 +4,21 @@
 use std::path::Path;
 
 use super::{ToolError, open};
+use apb_core::launch::floor::SaveChannel;
 use apb_core::profile::QualifiedProfileRef;
 use apb_core::registry::{LoadedPlaybook, is_safe_segment};
 use apb_core::schema::NodeKind;
 use apb_core::validate::{Severity, ValidationContext, validate};
-use apb_core::versioning::{delete_playbook, list_trash, restore_from_trash, save_definition};
+use apb_core::versioning::{
+    delete_playbook, list_trash, restore_from_trash_by, save_definition_by,
+};
 use serde_json::{Value, json};
 
 /// Creates a new playbook or a new minor version of an existing one, through
 /// the one save path (`save_definition`), which also approves the saved digest.
+/// An agent's save: it may not loosen the launch policy (the launch floor).
 pub fn playbook_create(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolError> {
-    let saved = save_definition(root, id, yaml, None, true)?;
+    let saved = save_definition_by(root, id, yaml, None, true, SaveChannel::Agent)?;
     Ok(saved.answer(id))
 }
 
@@ -28,7 +32,7 @@ pub fn playbook_update(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolE
     if !dir.is_dir() {
         return Err(ToolError::NotFound(id.to_string()));
     }
-    let saved = save_definition(root, id, yaml, None, true)?;
+    let saved = save_definition_by(root, id, yaml, None, true, SaveChannel::Agent)?;
     Ok(saved.answer(id))
 }
 
@@ -48,7 +52,7 @@ pub fn playbook_trash_list(root: &Path) -> Result<Value, ToolError> {
 /// Restores a trash entry (or a playbook id's latest deletion) through the one
 /// core path; a playbook that exists again under the id is a `Conflict`.
 pub fn playbook_trash_restore(root: &Path, name: &str) -> Result<Value, ToolError> {
-    let restored = restore_from_trash(root, name)?;
+    let restored = restore_from_trash_by(root, name, SaveChannel::Agent)?;
     serde_json::to_value(restored).map_err(|e| ToolError::Engine(e.to_string()))
 }
 

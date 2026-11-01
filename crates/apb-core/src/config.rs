@@ -458,6 +458,55 @@ pub fn config_dir() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".config/apb"))
 }
 
+/// The config dir this user's apb uses when nothing redirects it:
+/// `<home>/.config/apb`, the home taken from the password database for the
+/// real user id (never `HOME`, `XDG_CONFIG_HOME` or `APB_CONFIG_DIR`, which
+/// a caller sets). `None` off unix or when the user has no entry.
+pub fn default_config_dir() -> Option<PathBuf> {
+    real_home().map(|h| h.join(".config/apb"))
+}
+
+#[cfg(unix)]
+fn real_home() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: getpwuid_r writes into `pwd` and `buf`, both owned here and
+    // alive for the call; `result` is checked before `pwd` is read.
+    unsafe {
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = libc::getpwuid_r(
+            libc::getuid(),
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        );
+        if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+            return None;
+        }
+        let dir = CStr::from_ptr(pwd.pw_dir).to_bytes();
+        (!dir.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+    }
+}
+
+#[cfg(not(unix))]
+fn real_home() -> Option<PathBuf> {
+    None
+}
+
+/// Whether [`config_dir`] is not [`default_config_dir`]: a variable
+/// redirected it. Compared by canonical path where both exist.
+pub fn config_dir_redirected() -> bool {
+    let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    match (config_dir(), default_config_dir()) {
+        (Some(a), Some(b)) => canon(a) != canon(b),
+        (None, None) => false,
+        _ => true,
+    }
+}
+
 impl GlobalConfig {
     /// Loads config from `<config_dir>/config.yaml`. A missing directory or
     /// file - empty default (the config-less path remains functional). A

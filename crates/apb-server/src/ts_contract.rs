@@ -162,6 +162,9 @@ fn render_types() -> String {
         crate::routes::notify::MachineNotify::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
+        // The launch policy of agents.
+        apb_core::launch::LaunchPolicy::decl(&cfg),
+        apb_core::launch::LaunchRecord::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),
         apb_core::versioning::TrashEntry::decl(&cfg),
         apb_core::versioning::RestoredPlaybook::decl(&cfg),
@@ -193,6 +196,7 @@ fn render_types() -> String {
         apb_engine::fit::FitItem::decl(&cfg),
         apb_engine::fit::TrustItem::decl(&cfg),
         apb_engine::fit::ConsentView::decl(&cfg),
+        apb_engine::fit::LaunchView::decl(&cfg),
         apb_engine::fit::FitReport::decl(&cfg),
         apb_engine::fit::FitSummary::decl(&cfg),
         // Remembered run input.
@@ -330,6 +334,14 @@ fn render_consts() -> String {
     out.push_str(&format!(
         "\n/** Every start-action code a refused start may carry. */\nexport const START_ACTION_CODES = {}\n",
         ts_string_array(&start_codes)
+    ));
+    let policies: Vec<&str> = apb_core::launch::LaunchPolicy::ALL
+        .iter()
+        .map(|p| p.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every launch policy, from the loosest. */\nexport const LAUNCH_POLICIES = {}\n",
+        ts_string_array(&policies)
     ));
     let transitions: Vec<&str> = apb_core::notify::Transition::ALL
         .iter()

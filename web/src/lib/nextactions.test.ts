@@ -98,8 +98,12 @@ describe('start actions', () => {
       trust: [],
       consent: { irreversible: [], effects: [] },
       start_actions: [start({ reason: 'the param target has no value', remedy: { remedy: 'provide_param', name: 'target' } })],
+      launch: { policy: 'ask', sources: ['playbook `p` declares agent_launch'], floor: 'deny' },
     }
     const { body } = render(FitCard, { props: { report } })
+    expect(body).toContain('data-testid="fit-launch"')
+    expect(body).toContain('only after a person confirms')
+    expect(body).toContain('launch floor deny')
     expect(body).toContain('data-testid="fit-start-actions"')
     expect(body).toContain('the param target has no value')
     expect(body).toContain('provide a value for the param target')

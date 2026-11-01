@@ -35,6 +35,8 @@ mod fit_api_test;
 mod inbox_api_test;
 #[path = "suite/ingest_test.rs"]
 mod ingest_test;
+#[path = "suite/launch_api_test.rs"]
+mod launch_api_test;
 #[path = "suite/memory_api_test.rs"]
 mod memory_api_test;
 #[path = "suite/meta_api_test.rs"]

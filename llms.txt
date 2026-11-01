@@ -93,12 +93,12 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
-apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
+apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --confirm-launch: a person's confirmation of a playbook that asks before an agent launches it; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
 apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item; --html <path|->: the report as one self-contained page)
 apb notify          the machine's notify target, a run's notifications or a person's change of them (--on[=LIST], --off, --via, --to; refused inside a run step); apb notify test sends a test message
 apb wait <run>      block until a run finishes, needs input or stops
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
-apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
+apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting; --confirm-launch for a run never authorized)
 apb stop <run>      stop a run
 apb intent          list a run's send intents, or resolve one whose outcome is not known (--sent | --not-sent)
 apb review          decide a pending human_review or publish node (--nonce: the plan's nonce, publish only)
@@ -116,6 +116,7 @@ apb detect          detect installed coding agents
 apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
 apb memory          show or clear the remembered run input of a playbook in this project
 apb make-global     make a project playbook available in every project (--variant trash|retire|keep, --dry-run)
+apb launch floor <id>  print a playbook's launch floor (--global); --lower-to <policy> lowers it, a person at an interactive terminal only
 apb subscriptions   view or declare agent subscriptions
 apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2
@@ -129,7 +130,7 @@ apb candidate <id>  a playbook's candidate compared with current by quality (--p
 apb version list|use|history <id>  the versions and the current one; use moves current (--expect <version>, --reason <text>, --scope project|global)
 apb problems <id>   a playbook's known problems (--json); confirm|dismiss|reopen <pid> [--reason]; close <pid> --quote; recheck [<pid>] [--holds|--model]; scan [--last N]
 apb discover        step sequences past agent sessions repeat, as drafts (--project <ws|dir>, --all-projects, --root <name>, --sessions <dir> --agent claude-code|codex, --since 30d, --json); list; show <id> [--paths]; save <id> <slug> [--scope]; dismiss <id> <slug> [--hard] [--global]
-apb eval <id>       run a playbook's eval cases in scratch repositories, store and compare pass counts
+apb eval <id>       run a playbook's eval cases in scratch repositories, store and compare pass counts (--yes approves the suite only; --confirm-launch confirms the launch)
 apb projects        list or manage the workspace registry
 apb dashboard       web UI on port 7321
 apb ingest          only the inbound webhook listener (headless)

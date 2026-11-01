@@ -150,7 +150,16 @@ pub fn capture_draft(root: &Path, req: CaptureRequest<'_>) -> Result<Value, Tool
     } else {
         apb_core::profile_store::PlaybookOrigin::Project
     };
-    let version = match apb_core::versioning::create_draft_in(&parent, &id, yaml, store_origin) {
+    // A capture offers a definition an agent or a discovery drafted: it may
+    // not declare a looser launch policy than a floor the id kept from an
+    // earlier playbook (`launch_policy_loosened`).
+    let version = match apb_core::versioning::create_draft_in_by(
+        &parent,
+        &id,
+        yaml,
+        store_origin,
+        apb_core::launch::floor::SaveChannel::Agent,
+    ) {
         Ok(v) => v,
         Err(apb_core::versioning::VersioningError::Conflict(_)) => {
             return Ok(json!({ "rejected": "duplicate_id", "id": id }));

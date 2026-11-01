@@ -41,6 +41,8 @@ pub struct StartArgs {
     pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
     /// The run's notification request, checked by `notify::start_check`.
     pub notify: Option<apb_core::notify::NotifyRequest>,
+    /// The launch check's grant from the permit, recorded by the engine.
+    pub launch: Option<apb_engine::gate::launch::LaunchGrant>,
 }
 
 /// The engine options of an MCP start in `mode`. Fail-fast on a busy
@@ -66,6 +68,7 @@ pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
         budget: a.budget,
         estimate: a.estimate,
         notify: a.notify,
+        launch: a.launch,
         ..RunOptions::default()
     }
 }
@@ -225,6 +228,15 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     Ok(super::redacted_with(&redaction, &dir, out))
 }
 
+/// The run's launch authorization (who launched it, how an `ask` or `deny`
+/// launch was confirmed, the policy and its sources); absent for a run an
+/// older apb started. Added before the surface's final redaction.
+fn add_launch(out: &mut Value, dir: &Path) {
+    if let Some(record) = apb_engine::gate::launch::run_authorization(dir) {
+        out["launch"] = json!(record);
+    }
+}
+
 /// Issue #192: the candidate trial this run was, with its verdict, the
 /// run's grades and its known problems; each absent when there is none.
 fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
@@ -234,6 +246,7 @@ fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, d
     if let Some(why) = apb_engine::candidate::skipped_of(dir) {
         out["candidate_skipped"] = json!(why);
     }
+    add_launch(out, dir);
     // Run quality: the latest grade of each grader, criterion by level;
     // absent for a run nobody graded. `run_grades` returns the grades whole.
     let grades = super::grade::grade_lines(dir);
@@ -653,6 +666,7 @@ pub fn run_report_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     });
     add_journal_extras(&mut base, &view);
     add_outcome_blocks(&mut base, &view, &dir, &readout, ListItems::All);
+    add_launch(&mut base, &dir);
 
     // duration_table is always present (empty when there is no snapshot), as
     // before; it is now built from the single events read above.
@@ -713,6 +727,7 @@ pub fn run_resume(
     from_node: Option<&str>,
     allow_environment_drift: bool,
     budget: Option<&apb_engine::budget::BudgetResume>,
+    launch: Option<&apb_engine::gate::launch::LaunchGrant>,
 ) -> Result<Value, ToolError> {
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
@@ -742,6 +757,7 @@ pub fn run_resume(
         from_node,
         allow_environment_drift,
         budget,
+        launch,
         ..apb_engine::ResumeRequest::operator()
     };
     match apb_engine::resume_detached_req(root, run_id, &req) {
