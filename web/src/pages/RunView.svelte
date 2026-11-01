@@ -380,14 +380,12 @@
       loadError = null
       now = Date.now()
       if (d.model) {
-        const flow = toFlow(
-          d.model,
-          d.layout,
-          d.nodes,
-          cachedNodeIds(d.events),
-          false,
-          listProgressByNode(d.lists),
-        )
+        const flow = toFlow(d.model, {
+          layout: d.layout,
+          statuses: d.nodes,
+          cachedIds: cachedNodeIds(d.events),
+          listProgress: listProgressByNode(d.lists),
+        })
         flowNodes = flow.nodes
         flowEdges = flow.edges
       }

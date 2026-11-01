@@ -784,16 +784,44 @@ export type ExecutorChange = { node: string, base_profile: string, against_profi
 
 export type NodeStats = { node: string, 
 /**
- * Runs the node started in.
+ * Runs with at least one execution of the node that was not cancelled
+ * (an open one included). A finish without a prompt is an execution;
+ * a `join: any` race loser is not counted here ([`NodeStats::cancelled`]).
  */
 runs: number, 
+/**
+ * Runs whose definition contains the node, executed or not: a node no
+ * run executed has a row with zero executions.
+ */
+in_runs: number, 
+/**
+ * Executions begun, race losers left out (`crate::identity`).
+ */
+executions: number, 
+/**
+ * Of those, the ones that ended.
+ */
+completed: number, 
+/**
+ * Of those, the ones still open: running, paused, or cut short.
+ */
+open: number, 
+/**
+ * Completed executions that ended `failed` or `timed_out`.
+ */
+failed: number, 
+/**
+ * Executions a `join: any` race cancelled, counted apart.
+ */
+cancelled: number, 
 /**
  * Runs where the node's first result was a success on attempt 1, with
  * no retry, fallback or later re-entry.
  */
 first_pass: Rate, retries: number, fallbacks: number, 
 /**
- * Starts after the first in the same run (a loop back into it).
+ * Executions after the first in the same run (a loop back into it):
+ * `executions - runs`, never negative.
  */
 reentries: number, duration: Waits, 
 /**
@@ -2346,3 +2374,78 @@ incomplete: boolean,
  * A move was interrupted and waits for recovery.
  */
 pending: boolean, };
+
+export type EdgeAddress = { "kind": "authored", id: string, } | { "kind": "derived", from: string, to: string, ordinal: number, };
+
+export type CheckOrder = { "kind": "parallel" } | { "kind": "ordered", "n": number } | { "kind": "fallback" };
+
+export type AddressedEdge = { address: EdgeAddress, 
+/**
+ * [`EdgeAddress::render`] of `address`, for a flat key.
+ */
+rendered: string, 
+/**
+ * The position in the playbook's `edges`.
+ */
+index: number, 
+/**
+ * The position among the source's outgoing edges (the rank a judge
+ * edge's answer is kept under).
+ */
+rank: number, check: CheckOrder, };
+
+export type IssueView = { code: string, 
+/**
+ * `error` or `warning`.
+ */
+severity: string, message: string, node?: string, edges: Array<string>, };
+
+export type EdgeCorrespondence = { 
+/**
+ * Its address in the old definition; `None` for an added edge.
+ */
+before: EdgeAddress | null, 
+/**
+ * Its address in the new definition; `None` for a removed edge.
+ */
+after: EdgeAddress | null, 
+/**
+ * What differs between the two when both exist: `id`, `from`, `to`,
+ * `condition`, `fallback`, `join`, `max_traversals`, `require`, and
+ * `address` when the rendered addresses differ. Empty otherwise.
+ */
+changed: Array<string>, };
+
+export type EdgeOrderChange = { node: string, 
+/**
+ * The corresponding conditional edges in the old check order, by old
+ * address.
+ */
+before: Array<EdgeAddress>, 
+/**
+ * The same edges in the new check order, still by old address, so the
+ * two lists read as one set reordered.
+ */
+after: Array<EdgeAddress>, };
+
+export type VersionDiff = { nodes_added: Array<string>, nodes_removed: Array<string>, nodes_changed: Array<string>, 
+/**
+ * `from->to` pairs with an edge in the new definition only.
+ */
+edges_added: Array<string>, 
+/**
+ * `from->to` pairs with an edge in the old definition only.
+ */
+edges_removed: Array<string>, 
+/**
+ * One row per edge of either definition ([`edge_correspondence`]):
+ * first every edge of the new definition in declaration order, with the
+ * old edge it corresponds to if any, then every old edge nothing
+ * corresponds to, in the old declaration order.
+ */
+edges: Array<EdgeCorrespondence>, 
+/**
+ * The one-of sources whose corresponding edges are checked in another
+ * order, sorted by node id.
+ */
+edge_order_changed: Array<EdgeOrderChange>, yaml_diff: string, };

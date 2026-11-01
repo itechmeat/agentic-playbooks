@@ -163,6 +163,7 @@ mod tests {
                 EventPayload::RunStarted {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
+                    definition: None,
                 },
             ),
             asked(1, 1_000),

@@ -223,7 +223,7 @@ fn valid_patch_migrates_run_and_promotes_improvement() {
     let events = read_all(&run_dir).unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.payload,
-        EventPayload::PatchApplied { version: applied, classification, continue_from }
+        EventPayload::PatchApplied { version: applied, classification, continue_from, .. }
             if applied == &version && classification == "improvement" && continue_from == "p1"
     )));
     assert!(events.iter().any(|event| matches!(

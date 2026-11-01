@@ -27,8 +27,17 @@
 //! order, in the same project path: the run's journal names its execution
 //! root, so a copy elsewhere would not be the same run.
 //!
-//! Rows 1 to 6 and 9 are runs real writers produced; rows 7 and 8 are synthetic
-//! journals that test readers and resumers only, and say so in their names.
+//! Rows 1 to 6, 9, 10 and 11 are runs real writers produced; rows 7 and 8
+//! are synthetic journals that test readers and resumers only, and rows 12
+//! and 13 apply a synthetic patch (no binary takes a patch from the command
+//! line), as does row 14; each says so in its name.
+//!
+//! Rows 10 to 13 cover edge addresses: a bounded duplicate pair, judge edges
+//! and patched runs, asserting the hops, the counted traversals and the
+//! nodes reached explicitly. Row 14 covers the definition digests every
+//! drive journals (`run_started`, `run_resumed`, `patch_applied`) across a
+//! crashed patch, a resume and a later patch. The parts of rows 13 and 14
+//! that need no old binary run without one.
 //!
 //! Rows 3 and 4 start an `agent_launch: ask` playbook through the launch
 //! refusal's nonce, so the manifest holds a launch record; rows 6 and 9
@@ -295,6 +304,8 @@ impl Case {
             .env_remove("APB_RUN_ID")
             .env_remove("APB_HOST_TASK")
             .env_remove("APB_ATTEMPT_TOKEN")
+            // Only a case that writes a decisions.yaml (row 11) uses it.
+            .env("APB_DECISIONS_ALLOW_FAKE", "1")
             .stdin(Stdio::null());
         cmd
     }
@@ -692,6 +703,44 @@ impl Case {
     fn write_waiting_at_review(&mut self, writer: &Path) -> String {
         self.seed(writer);
         let run = self.start(writer);
+        self.wait_journal(&run, "the review gate", |j| {
+            j.iter().any(|e| e["type"] == "review_requested")
+        });
+        self.kill_driver(&run);
+        self.save();
+        run
+    }
+
+    /// The writer runs the corpus fixture `id` to its review gate; the
+    /// state saved is that run waiting at the gate with its driver gone.
+    fn write_playbook_waiting_at_review(&mut self, writer: &Path, id: &str) -> String {
+        self.write_playbook_waiting_at_review_with(writer, id, |_| {})
+    }
+
+    /// [`Case::write_playbook_waiting_at_review`] with `prepare` run on the
+    /// project after the seed and before the start.
+    fn write_playbook_waiting_at_review_with(
+        &mut self,
+        writer: &Path,
+        id: &str,
+        prepare: impl FnOnce(&Path),
+    ) -> String {
+        self.seed(writer);
+        prepare(&self.root());
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/journal-corpus");
+        let pdir = self.root().join(".apb/playbooks").join(id);
+        copy_tree(&fixtures.join(id), &pdir.join("1.0.0"));
+        fs::write(pdir.join("current"), "1.0.0").unwrap();
+        let ran = self.run(writer, &["run", id, "--detach"]);
+        assert!(ran.ok(), "{}: apb run {id} --detach: {ran:?}", self.name);
+        let run = ran
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("run started: "))
+            .unwrap_or_else(|| panic!("{}: no run id in {ran:?}", self.name))
+            .trim()
+            .to_string();
+        self.guards.push(RunGuard::new(&self.root(), &run));
         self.wait_journal(&run, "the review gate", |j| {
             j.iter().any(|e| e["type"] == "review_requested")
         });
@@ -1134,5 +1183,373 @@ fn row8_synthetic_unknown_record_then_checkpoint_of_another_node() {
     });
     for reader in [new_binary(), beta1] {
         case.approve_and_resume(&reader, &run);
+    }
+}
+
+// ------------------------------------------------- edge addresses (17a)
+
+/// The `edge_traversed` records `from -> to` as (uncounted, edges).
+fn hops_of(journal: &[Value], from: &str, to: &str) -> Vec<(bool, Value)> {
+    journal
+        .iter()
+        .filter(|e| e["type"] == "edge_traversed" && e["from"] == from && e["to"] == to)
+        .map(|e| {
+            (
+                e["uncounted"].as_bool().unwrap_or(false),
+                e.get("edges").cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect()
+}
+
+/// Counted traversals `from -> to`: neither a policy hop nor `uncounted`.
+fn counted(journal: &[Value], from: &str, to: &str) -> usize {
+    journal
+        .iter()
+        .filter(|e| {
+            e["type"] == "edge_traversed"
+                && e["from"] == from
+                && e["to"] == to
+                && !e["uncounted"].as_bool().unwrap_or(false)
+                && !e["via_policy"].as_bool().unwrap_or(false)
+        })
+        .count()
+}
+
+/// How many times `node` finished.
+fn finished(journal: &[Value], node: &str) -> usize {
+    journal
+        .iter()
+        .filter(|e| e["type"] == "node_finished" && e["node"] == node)
+        .count()
+}
+
+/// Row 10: the new binary writes a run through a bounded duplicate pair
+/// (`work -> dup` twice, `max_traversals: 1`) and leaves it at the review
+/// gate. Its journal names both addresses on one decision record and on the
+/// one counted record. beta.1 and 0.25.0 each read it, resume it to the end
+/// and stop it; after the resume the pair was still counted once, `dup` ran
+/// once and the run reached `ok`.
+#[test]
+fn row10_new_writer_bounded_duplicate_pair_old_binaries() {
+    let mut case = Case::new("row 10");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let run = case.write_playbook_waiting_at_review(&new_binary(), "corpus-routes");
+    let both = serde_json::json!(["e:work>dup#1", "e:work>dup#2"]);
+    assert_eq!(
+        hops_of(&case.journal(&run), "work", "dup"),
+        vec![(true, both.clone()), (false, both)],
+        "row 10: one decision record and one counted record, both naming the pair"
+    );
+    for reader in [beta1, v025] {
+        case.read_resume_stop(&reader, &run);
+        case.approve_and_resume(&reader, &run);
+        let journal = case.journal(&run);
+        assert_eq!(
+            counted(&journal, "work", "dup"),
+            1,
+            "row 10: {}",
+            label(&reader)
+        );
+        assert_eq!(finished(&journal, "dup"), 1, "row 10: {}", label(&reader));
+        assert_eq!(finished(&journal, "ok"), 1, "row 10: {}", label(&reader));
+        assert_eq!(finished(&journal, "no"), 0, "row 10: {}", label(&reader));
+    }
+}
+
+const JUDGE_DECISIONS: &str = "version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      edge_0: { type: noul, noul: 0.1 }\n      edge_1: { type: noul, noul: 0.9 }\nuses:\n  judge_edge: { mode: enforce }\n";
+
+/// Row 11: the new binary routes `work` on two judge edges answered by a
+/// fake provider (`fixit` no, `gate` yes; neither edge is taken without an
+/// answer) and leaves the run at the review gate. Its judge-edge decision
+/// names the edges' addresses. beta.1 and 0.25.0 each read, resume to the
+/// end and stop: the routing out of `work` is not asked again, `fixit`
+/// never runs and the run reaches `ok`.
+#[test]
+fn row11_new_writer_judge_edges_old_binaries() {
+    let mut case = Case::new("row 11");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let profile = case.root().join(".apb/profiles/corpus");
+    let decisions = case.dir.path().join("home/.config/apb/decisions.yaml");
+    fs::create_dir_all(decisions.parent().unwrap()).unwrap();
+    fs::write(&decisions, JUDGE_DECISIONS).unwrap();
+    let run = case.write_playbook_waiting_at_review_with(&new_binary(), "corpus-judge", |root| {
+        fs::create_dir_all(root.join(".apb/profiles/corpus")).unwrap();
+        fs::write(
+            root.join(".apb/profiles/corpus/profile.yaml"),
+            "name: corpus\ndescription: never started\nexecutor:\n  agent: claude-code\n  model: haiku\n",
+        )
+        .unwrap();
+        fs::write(root.join(".apb/profiles/corpus/SOUL.md"), "").unwrap();
+    });
+    assert!(profile.join("profile.yaml").is_file());
+    // The old binaries never ask again; no provider is configured for them.
+    fs::remove_file(&decisions).unwrap();
+    let journal = case.journal(&run);
+    let decision = journal
+        .iter()
+        .find(|e| e["type"] == "decision_made" && e["use_site"] == "judge_edge")
+        .unwrap_or_else(|| panic!("row 11: the judge edges were asked"));
+    assert_eq!(
+        decision["edge_addresses"],
+        serde_json::json!({"edge_0": "e:work>fixit#1", "edge_1": "e:work>gate#1"})
+    );
+    assert_eq!(
+        hops_of(&journal, "work", "gate"),
+        vec![(true, serde_json::json!(["e:work>gate#1"]))]
+    );
+    for reader in [beta1, v025] {
+        case.read_resume_stop(&reader, &run);
+        case.approve_and_resume(&reader, &run);
+        let journal = case.journal(&run);
+        assert_eq!(
+            hops_of(&journal, "work", "gate").len(),
+            1,
+            "row 11: {}",
+            label(&reader)
+        );
+        assert_eq!(finished(&journal, "fixit"), 0, "row 11: {}", label(&reader));
+        assert!(
+            !journal.iter().any(|e| e["type"] == "attempt_started"),
+            "row 11: {}: no agent started",
+            label(&reader)
+        );
+        assert_eq!(finished(&journal, "ok"), 1, "row 11: {}", label(&reader));
+    }
+}
+
+/// The routes playbook with `patched` (a condition node) between the
+/// approved gate and `ok`, as version 1.0.1.
+fn patched_routes() -> String {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/journal-corpus/corpus-routes/playbook.yaml");
+    let yaml = fs::read_to_string(fixtures).unwrap();
+    let yaml = yaml
+        .replace("version: 1.0.0", "version: 1.0.1")
+        .replace(
+            "  - { id: ok, type: finish, outcome: success }",
+            "  - { id: patched, type: condition }\n  - { id: ok, type: finish, outcome: success }",
+        )
+        .replace(
+            "  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }",
+            "  - { from: gate, to: patched, condition: { type: review_status, equals: approved } }\n  - { from: patched, to: ok }",
+        );
+    assert!(yaml.contains("to: patched"));
+    yaml
+}
+
+/// Applies a patch to the saved run the way a binary writes one: the new
+/// snapshot replaces `playbook.yaml`, then `patch_applied` and
+/// `run_migrated` are journaled. `with_definition`: the new binary stores
+/// the definition first and journals its digest; an older one does neither.
+fn synthetic_patch(case: &Case, run: &str, with_definition: bool) {
+    synthetic_patch_to(case, run, &patched_routes(), "1.0.0", with_definition);
+}
+
+/// [`synthetic_patch`] to `yaml` (whose version is in the yaml) from the
+/// version `from`.
+fn synthetic_patch_to(case: &Case, run: &str, yaml: &str, from: &str, with_definition: bool) {
+    let dir = case.saved().join(run);
+    let to = yaml
+        .lines()
+        .find_map(|l| l.strip_prefix("version: "))
+        .unwrap()
+        .trim()
+        .to_string();
+    let definition =
+        with_definition.then(|| apb_engine::run_definitions::store(&dir, yaml.as_bytes()).unwrap());
+    fs::write(dir.join("playbook.yaml"), yaml).unwrap();
+    rewrite_journal(&dir, |mut records| {
+        let ts = records.last().unwrap()["ts"].clone();
+        let mut applied = serde_json::json!({
+            "type": "patch_applied", "ts": ts, "version": to,
+            "classification": "improvement", "continue_from": "gate"
+        });
+        if let Some(d) = &definition {
+            applied["definition"] = Value::from(d.clone());
+        }
+        records.push(applied);
+        records.push(serde_json::json!({
+            "type": "run_migrated", "ts": ts, "from_version": from,
+            "to_version": to, "continue_from": "gate"
+        }));
+        records
+    });
+}
+
+/// Row 12 (synthetic patch): the new binary's run waits at the gate, then
+/// a patch is applied as the new binary writes one (definition stored,
+/// digest journaled). beta.1 and 0.25.0 read it, resume it on the current
+/// `playbook.yaml` (the run passes `patched`) and stop it.
+#[test]
+fn row12_synthetic_new_patch_old_binaries_run_the_current_definition() {
+    let mut case = Case::new("row 12");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let run = case.write_playbook_waiting_at_review(&new_binary(), "corpus-routes");
+    synthetic_patch(&case, &run, true);
+    for reader in [beta1, v025] {
+        case.read_resume_stop(&reader, &run);
+        case.approve_and_resume(&reader, &run);
+        let journal = case.journal(&run);
+        assert_eq!(
+            finished(&journal, "patched"),
+            1,
+            "row 12: {}",
+            label(&reader)
+        );
+        assert_eq!(
+            counted(&journal, "work", "dup"),
+            1,
+            "row 12: {}",
+            label(&reader)
+        );
+    }
+}
+
+/// Row 13 (synthetic patch): the new binary starts the run, a patch is
+/// applied as beta.1 writes one (no stored definition, no digest), and the
+/// new binary resumes it: it executes the current `playbook.yaml` (the run
+/// passes `patched`) and records a `definition_mismatch` against that
+/// patch. beta.1 reads the result.
+#[test]
+fn row13_synthetic_old_patch_new_resume_records_the_mismatch() {
+    let mut case = Case::new("row 13");
+    let run = case.write_playbook_waiting_at_review(&new_binary(), "corpus-routes");
+    synthetic_patch(&case, &run, false);
+    case.approve_and_resume(&new_binary(), &run);
+    let journal = case.journal(&run);
+    assert_eq!(
+        finished(&journal, "patched"),
+        1,
+        "row 13: the current definition ran"
+    );
+    let sidecar = fs::read_to_string(case.run_dir(&run).join("diagnostics.jsonl")).unwrap();
+    assert!(
+        sidecar.contains("\"definition_mismatch\"") && sidecar.contains("patch_without_definition"),
+        "row 13: the mismatch is recorded: {sidecar}"
+    );
+    // Only the read needs the old binary; everything above runs without it.
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let ran = case.run(&beta1, &["runs", &run]);
+    assert!(ran.ok(), "row 13: beta.1 reads the resumed run: {ran:?}");
+}
+
+/// The digest each drive of `run` journaled, in journal order: the start's,
+/// every resume's and every patch's (`null` where none was journaled).
+fn journaled_definitions(journal: &[Value]) -> Vec<(String, Value)> {
+    journal
+        .iter()
+        .filter(|e| {
+            matches!(
+                e["type"].as_str(),
+                Some("run_started" | "run_resumed" | "patch_applied")
+            )
+        })
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap().to_string(),
+                e["definition"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// Row 14 (synthetic patches): the new binary starts the run on A and it
+/// waits at the gate; a patch to B stores B and replaces the snapshot, then
+/// "crashes" before `patch_applied`; the new binary resumes it, executing
+/// B, and parks at the gate again; a later patch to C is applied as the new
+/// binary writes one; the diagnostics sidecar is deleted. The journal alone
+/// says the resumed segment ran B, never A. beta.1 and 0.25.0 then read,
+/// resume and stop the journal with the new `definition` fields.
+#[test]
+fn row14_synthetic_crashed_patch_resume_patch_definitions_from_the_journal() {
+    use apb_engine::run_definitions::{DefinitionsInForce, Resolved, digest};
+    let mut case = Case::new("row 14");
+    let new = new_binary();
+    let run = case.write_playbook_waiting_at_review(&new, "corpus-routes");
+    let a = digest(&fs::read(case.run_dir(&run).join("playbook.yaml")).unwrap());
+    // The crashed patch, on the live run.
+    let b_yaml = patched_routes();
+    let b = apb_engine::run_definitions::store(&case.run_dir(&run), b_yaml.as_bytes()).unwrap();
+    fs::write(case.run_dir(&run).join("playbook.yaml"), &b_yaml).unwrap();
+    // The new binary resumes it in the foreground; it waits at the gate
+    // (the request stands, so nothing more is journaled) and is killed there.
+    let before = case.journal(&run).len();
+    let resume = case.spawn(&new, &["resume", &run]);
+    case.wait_journal(&run, "the resume to journal run_resumed", |j| {
+        j.len() > before && j[before..].iter().any(|e| e["type"] == "run_resumed")
+    });
+    drop(resume);
+    case.forget_driver(&run);
+    case.save();
+    // The later patch to C, as the new binary writes one.
+    let c_yaml = b_yaml
+        .replace("version: 1.0.1", "version: 1.0.2")
+        .replace("patched", "later");
+    synthetic_patch_to(&case, &run, &c_yaml, "1.0.1", true);
+    let c = digest(c_yaml.as_bytes());
+    let _ = fs::remove_file(case.saved().join(&run).join("diagnostics.jsonl"));
+    case.restore();
+
+    let journal = case.journal(&run);
+    assert_eq!(
+        journaled_definitions(&journal),
+        vec![
+            ("run_started".to_string(), Value::from(a.clone())),
+            ("run_resumed".to_string(), Value::from(b.clone())),
+            ("patch_applied".to_string(), Value::from(c.clone())),
+        ],
+        "row 14: every drive journaled what it executed"
+    );
+    let events = apb_engine::event::read_all(&case.run_dir(&run)).unwrap();
+    let defs = DefinitionsInForce::load(&case.run_dir(&run), &events);
+    let known: Vec<Option<String>> = defs
+        .segments
+        .iter()
+        .map(|s| match &s.resolved {
+            Resolved::Known { digest, .. } => Some(digest.clone()),
+            Resolved::Unknown(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        known,
+        vec![Some(a), Some(b), Some(c)],
+        "row 14: the resumed segment reads B, without the sidecar"
+    );
+
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        case.read_resume_stop(&reader, &run);
+        case.approve_and_resume(&reader, &run);
+        let journal = case.journal(&run);
+        assert_eq!(finished(&journal, "later"), 1, "row 14: {}", label(&reader));
+        assert_eq!(
+            finished(&journal, "patched"),
+            0,
+            "row 14: {}",
+            label(&reader)
+        );
     }
 }

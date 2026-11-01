@@ -307,12 +307,7 @@ pub struct LoadedSuite {
 }
 
 fn issue(code: &'static str, severity: Severity, message: String) -> Issue {
-    Issue {
-        code,
-        severity,
-        message,
-        node: None,
-    }
+    Issue::new::<String>(code, severity, None, message)
 }
 
 /// `<playbook_dir>/evals`.

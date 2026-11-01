@@ -65,6 +65,7 @@ fn signs(sources: &RunSources) -> Vec<Vec<String>> {
                 to,
                 via_policy: false,
                 uncounted: false,
+                ..
             } = &e.payload
             {
                 counted.entry((from, to)).or_default().push(e.seq);

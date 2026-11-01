@@ -88,7 +88,7 @@ fn count_traversals(events: &[Event], from_id: &str, to_id: &str) -> usize {
     events
         .iter()
         .filter(|e| {
-            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, via_policy, uncounted } if from == from_id && to == to_id && !via_policy && !uncounted)
+            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, via_policy, uncounted, .. } if from == from_id && to == to_id && !via_policy && !uncounted)
         })
         .count()
 }

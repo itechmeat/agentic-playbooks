@@ -39,6 +39,7 @@ fn fold(evs: &[Ev]) -> RunState {
                     to: (*to).into(),
                     via_policy: false,
                     uncounted: true,
+                    edges: Vec::new(),
                 },
                 Revived(from, nodes) => EventPayload::NodesRevived {
                     from_node: (*from).into(),

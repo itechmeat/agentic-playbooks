@@ -514,6 +514,18 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
     // read-only historical record, and the shared parser is the one that
     // tolerates every snapshot shape the engine has written (see `resume`).
     let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
+    // The start journaled the digest of the bytes it prepared, the journal's
+    // evidence of what this drive executes: a snapshot that changed since is
+    // not the run the parent's permit admitted, and is never driven.
+    let journaled = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunStarted { definition, .. } => definition.clone(),
+        _ => None,
+    });
+    if journaled.is_some_and(|d| d != crate::run_definitions::digest(yaml.as_bytes())) {
+        return Err(EngineError::Conflict(format!(
+            "run `{run_id}`: playbook.yaml is not the definition its start journaled"
+        )));
+    }
     let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
     let cfg = read_run_config(&run_dir)?;
     let mut log = EventLog::open(&run_dir)?;

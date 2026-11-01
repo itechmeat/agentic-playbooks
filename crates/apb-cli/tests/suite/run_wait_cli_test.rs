@@ -95,6 +95,7 @@ fn wait_times_out_with_its_own_exit_code() {
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "rev".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     let started = Instant::now();

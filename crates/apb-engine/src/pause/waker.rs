@@ -262,6 +262,7 @@ mod tests {
             EventPayload::RunStarted {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         );
         let events = vec![started.clone(), ev(1, paused(Some(500)))];
@@ -285,6 +286,7 @@ mod tests {
                     by: Some(PauseBy::Operator),
                     explicit: false,
                     launch: None,
+                    definition: None,
                 },
             ),
         ];

@@ -5,7 +5,7 @@
   import OctagonX from '@lucide/svelte/icons/octagon-x'
   import CornerDownRight from '@lucide/svelte/icons/corner-down-right'
   import { accentVar, isTerminalNodeKind, nodeKindColor } from './profilecolor'
-  import type { FlowNodeData } from './graph'
+  import { hasExitRow, PLAIN_HANDLE, type FlowNodeData } from './graph'
 
   // One card on the graph, shared by the playbook view, the editor and the run
   // view. The data contract (playbook fields from `toFlow`, optional run
@@ -23,13 +23,18 @@
   // start - entry point, must have no incoming edge;
   // finish - terminal, must have no outgoing edge.
   const hasTarget = $derived(data.kind !== 'start')
-  // One anonymous dot at the bottom, which is also what an editor drags a new
-  // edge from. A node with named exits draws one dot per exit instead.
-  const hasSource = $derived(data.kind !== 'finish' && !data.exits)
+  // The plain dot at the bottom: unconditional edges leave from it, and it is
+  // what an editor drags a new edge from, so every node but a finish has it.
+  // A conditional edge or a fallback has its own dot under its caption.
+  const hasSource = $derived(data.kind !== 'finish' || (data.exits?.parallel ?? 0) > 0)
+  const exitRow = $derived(hasExitRow(data.exits))
+  // In the caption row the plain dot takes the first slot.
+  const slots = $derived((data.exits?.list.length ?? 0) + (hasSource ? 1 : 0))
+  const plainLeft = $derived(exitRow && hasSource ? `left: ${((0.5 / slots) * 100).toFixed(2)}%` : undefined)
 
   // Start and finish are small muted pills, unless they carry named exits,
   // which need the card's caption row.
-  const pill = $derived(isTerminalNodeKind(data.kind) && !data.exits)
+  const pill = $derived(isTerminalNodeKind(data.kind) && !exitRow)
 
   // The node color: the profile's for agent tasks, green for a judge, amber
   // for a human review, muted for start and finish.
@@ -39,7 +44,8 @@
 
   const modeBadge = $derived.by(() => {
     if (!data.exits) return null
-    const n = data.exits.list.length
+    const n = data.exits.list.length + data.exits.parallel
+    if (n < 2) return null
     return data.exits.mode === 'all'
       ? { text: `all ${n}`, title: `All ${n} exits are taken: the branches run in parallel.` }
       : {
@@ -159,7 +165,7 @@
     {#if data.status && data.status !== 'succeeded' && data.status !== 'pending'}
       <span class="sr-only">{data.status}</span>
     {/if}
-    {#if hasSource}<Handle type="source" position={Position.Bottom} />{/if}
+    {#if hasSource}<Handle type="source" id={PLAIN_HANDLE} position={Position.Bottom} />{/if}
   </div>
 {:else}
   <div
@@ -247,10 +253,21 @@
       </div>
     {/if}
 
-    {#if data.exits}
+    {#if data.exits && exitRow}
       <!-- One dot per exit, each under its own caption, so no two lines share a
-           point and every line says on the node itself why it is taken. -->
+           point and every line says on the node itself why it is taken. The
+           plain dot comes first: the unconditional edges, and new ones. -->
       <div class="-mx-1 mt-1.5 flex items-start border-t border-line pt-1">
+        {#if hasSource}
+          <span
+            class="exit-plain"
+            title={data.exits.parallel > 0
+              ? `always taken: ${data.exits.parallel} unconditional ${data.exits.parallel === 1 ? 'edge' : 'edges'}`
+              : 'unconditional edges leave from here'}
+          >
+            {data.exits.parallel > 0 ? 'always' : ''}
+          </span>
+        {/if}
         {#each data.exits.list as exit, i (exit.id)}
           <span
             class={cn('flex-1 px-0.5 text-center text-[9px] leading-tight', exitTone[exit.tone])}
@@ -262,12 +279,12 @@
             type="source"
             id={exit.id}
             position={Position.Bottom}
-            style={`left: ${(((i + 0.5) / data.exits.list.length) * 100).toFixed(2)}%`}
+            style={`left: ${(((i + (hasSource ? 1 : 0) + 0.5) / slots) * 100).toFixed(2)}%`}
           />
         {/each}
       </div>
     {/if}
-    {#if hasSource}<Handle type="source" position={Position.Bottom} />{/if}
+    {#if hasSource}<Handle type="source" id={PLAIN_HANDLE} position={Position.Bottom} style={plainLeft} />{/if}
   </div>
 {/if}
 
@@ -278,5 +295,14 @@
     color: var(--c-fg-2);
     font-size: 10px;
     line-height: 14px;
+  }
+  /* The caption slot of the plain dot, the same width as an exit's. */
+  .exit-plain {
+    flex: 1;
+    padding: 0 2px;
+    text-align: center;
+    font-size: 9px;
+    line-height: 1.25;
+    color: var(--muted-foreground);
   }
 </style>

@@ -50,6 +50,19 @@ pub struct ChildObservation {
 }
 
 impl Observation {
+    /// The executions of every node, derived from the journal this
+    /// observation already read (never a second read).
+    pub fn identity(&self) -> crate::identity::ExecutionIndex {
+        crate::identity::index(&self.view.events)
+    }
+
+    /// The definition in force for every segment of the journal this
+    /// observation already read, resolved against the run's stored
+    /// definitions. Read-only.
+    pub fn definitions(&self) -> crate::run_definitions::DefinitionsInForce {
+        crate::run_definitions::DefinitionsInForce::load(&self.run_dir, &self.view.events)
+    }
+
     /// Reads run `run_id` at `run_dir` and its live children once.
     pub fn load(run_dir: &Path, run_id: &str) -> Result<Self, EngineError> {
         let view = Arc::new(RunView::load(run_dir, run_id)?);

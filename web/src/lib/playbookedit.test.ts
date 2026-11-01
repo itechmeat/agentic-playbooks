@@ -246,9 +246,9 @@ describe('addEdge', () => {
 })
 
 describe('removeEdge', () => {
-  it('removes the matching edge by from+to', () => {
+  it('removes the edge its address names', () => {
     const doc = docOf(FULL_YAML)
-    const next = removeEdge(doc, 'plan', 'done')
+    const next = removeEdge(doc, 'e:plan>done#1')
     const es = items(next, 'edges')
     expect(es.find((e) => e.get('from') === 'plan' && e.get('to') === 'done')).toBeUndefined()
     // the other edges are still in place
@@ -257,15 +257,139 @@ describe('removeEdge', () => {
 
   it('preserves all other top-level fields', () => {
     const doc = docOf(FULL_YAML)
-    const next = removeEdge(doc, 'plan', 'done')
+    const next = removeEdge(doc, 'e:plan>done#1')
     for (const f of TOP_FIELDS) expect(topKeys(next)).toContain(f)
   })
 
   it('does not mutate the input document', () => {
     const doc = docOf(FULL_YAML)
     const before = doc.toString()
-    removeEdge(doc, 'plan', 'done')
+    removeEdge(doc, 'e:plan>done#1')
     expect(doc.toString()).toBe(before)
+  })
+
+  const DUPES = `schema: 2
+id: p
+nodes:
+  - { id: gate, type: agent_task }
+  - { id: discard, type: finish }
+  - { id: keep, type: finish }
+edges:
+  # drop on a bad verdict
+  - { from: gate, to: discard, condition: { type: output_field, node: gate, field: verdict, equals: drop } }
+  - { from: gate, to: keep, x_note: stays }
+  # anything else is dropped too
+  - { from: gate, to: discard, fallback: true, max_traversals: 2 }
+  - { id: again, from: gate, to: discard, join: any }
+`
+
+  it('removes exactly the one duplicate its address names', () => {
+    const next = removeEdge(docOf(DUPES), 'e:gate>discard#2')
+    const es = items(next, 'edges')
+    expect(es).toHaveLength(3)
+    expect(es.some((e) => e.get('fallback') === true)).toBe(false)
+    expect(es[0].has('condition')).toBe(true)
+    const text = next.toString()
+    expect(text).toContain('# drop on a bad verdict')
+    expect(text).toContain('x_note: stays')
+    expect(text).toContain('id: again')
+    expect(text).toContain('join: any')
+  })
+
+  it('removes the first duplicate and leaves the second, its keys intact', () => {
+    const next = removeEdge(docOf(DUPES), 'e:gate>discard#1')
+    const es = items(next, 'edges')
+    expect(es).toHaveLength(3)
+    expect(es.filter((e) => e.has('condition'))).toHaveLength(0)
+    expect(es.find((e) => e.get('fallback') === true)?.get('max_traversals')).toBe(2)
+  })
+
+  it('removes an edge by its authored id and keeps the id-less duplicates', () => {
+    const next = removeEdge(docOf(DUPES), { kind: 'authored', id: 'again' })
+    const es = items(next, 'edges')
+    expect(es).toHaveLength(3)
+    expect(es.filter((e) => e.get('to') === 'discard')).toHaveLength(2)
+  })
+
+  it('takes the edge at the given position only while it has that address', () => {
+    // The fallback is e:gate>discard#2 at position 2.
+    const next = removeEdge(docOf(DUPES), 'e:gate>discard#2', 2)
+    expect(items(next, 'edges').some((e) => e.get('fallback') === true)).toBe(false)
+    const doc = docOf(DUPES)
+    expect(removeEdge(doc, 'e:gate>discard#2', 0).toString()).toBe(doc.toString())
+    expect(removeEdge(doc, 'e:gate>discard#2', 9).toString()).toBe(doc.toString())
+  })
+
+  it('changes nothing for an address that names no edge', () => {
+    const doc = docOf(DUPES)
+    expect(removeEdge(doc, 'e:gate>discard#3').toString()).toBe(doc.toString())
+    expect(removeEdge(doc, 'not an address').toString()).toBe(doc.toString())
+  })
+})
+
+describe('addEdge ids and order', () => {
+  const SRC = `schema: 2
+id: p
+nodes:
+  - { id: a, type: agent_task }
+  - { id: b, type: agent_task }
+  - { id: c, type: finish }
+edges:
+  - { from: a, to: b, condition: { type: node_status, node: a, equals: success } }
+  - { from: a, to: c, fallback: true }
+  - { from: b, to: c }
+`
+
+  it('gives an edge that duplicates an existing pair an id', () => {
+    const next = addEdge(docOf(SRC), 'b', 'c')
+    const added = items(next, 'edges').at(-1)!
+    expect(added.get('id')).toMatch(/^e-b-c-[0-9a-f]{6}$/)
+    expect(added.get('from')).toBe('b')
+    // The id leads the edge.
+    expect(next.toString()).toMatch(/- id: e-b-c-[0-9a-f]{6}\n\s+from: b/)
+  })
+
+  it('gives a new pair no id', () => {
+    const next = addEdge(docOf(SRC), 'b', 'a')
+    expect(items(next, 'edges').at(-1)!.has('id')).toBe(false)
+  })
+
+  it('never gives an existing id-less duplicate an id', () => {
+    const doc = docOf(SRC + '  - { from: b, to: c }\n')
+    const next = addEdge(doc, 'a', 'b')
+    const bc = items(next, 'edges').filter((e) => e.get('from') === 'b' && e.get('to') === 'c')
+    expect(bc.map((e) => e.has('id'))).toEqual([false, false])
+  })
+
+  it('takes a fresh id when the first one is taken', () => {
+    const once = addEdge(docOf(SRC), 'b', 'c')
+    const twice = addEdge(once, 'b', 'c')
+    const ids = items(twice, 'edges')
+      .map((e) => e.get('id'))
+      .filter(Boolean)
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it("inserts a conditional edge before its source's first fallback", () => {
+    const next = addEdge(docOf(SRC), 'a', 'a', { type: 'node_status', node: 'a', equals: 'failure' })
+    const es = items(next, 'edges')
+    expect(es.map((e) => `${e.get('from')}>${e.get('to')}`)).toEqual(['a>b', 'a>a', 'a>c', 'b>c'])
+  })
+
+  it('appends an unconditional edge even when the source has a fallback', () => {
+    const next = addEdge(docOf(SRC), 'a', 'a')
+    expect(items(next, 'edges').map((e) => `${e.get('from')}>${e.get('to')}`)).toEqual(['a>b', 'a>c', 'b>c', 'a>a'])
+  })
+
+  it('gives a new edge no id when every edge of its pair already has one', () => {
+    const AUTHORED = SRC.replace(
+      '- { from: a, to: b, condition: { type: node_status, node: a, equals: success } }',
+      '- { id: ab, from: a, to: b, condition: { type: node_status, node: a, equals: success } }',
+    )
+    const next = addEdge(docOf(AUTHORED), 'a', 'b')
+    const added = items(next, 'edges').find((e) => e.get('from') === 'a' && e.get('to') === 'b' && !e.has('condition'))
+    expect(added?.has('id')).toBe(false)
   })
 })
 
@@ -331,7 +455,7 @@ describe('suggestNodeId', () => {
 describe('round-trip field preservation', () => {
   it('parse -> addNode -> serialize keeps every top-level field', () => {
     const doc = docOf(FULL_YAML)
-    const next = addNode(removeEdge(doc, 'plan', 'done'), 'condition', 'check')
+    const next = addNode(removeEdge(doc, 'e:plan>done#1'), 'condition', 'check')
     const text = next.toString()
     const reparsed = docOf(text)
     for (const f of TOP_FIELDS) {

@@ -250,6 +250,7 @@ pub(crate) fn check(
     let outcome = runner.decide(
         journal,
         DecisionCall {
+            edge_addresses: BTreeMap::new(),
             site: UseSite::CompletionCheck,
             node: Some(attempt.node),
             attempt: Some(attempt.attempt),

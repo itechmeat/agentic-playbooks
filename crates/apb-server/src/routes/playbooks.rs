@@ -682,17 +682,13 @@ pub(crate) async fn get_playbook(
                     &loaded.playbook,
                 )
                 .into_iter()
-                .map(|i| apb_core::validate::Issue {
-                    severity: Severity::Warning,
-                    ..i
+                .map(|mut i| {
+                    i.severity = Severity::Warning;
+                    i
                 }),
             );
-            let validation: Vec<serde_json::Value> = report.issues.iter().map(|i| serde_json::json!({
-                "code": i.code,
-                "severity": match i.severity { Severity::Error => "error", Severity::Warning => "warning" },
-                "message": i.message,
-                "node": i.node,
-            })).collect();
+            let validation: Vec<apb_core::validate::IssueView> =
+                report.issues.iter().map(Into::into).collect();
             Json(serde_json::json!({
                 "id": id,
                 "version": loaded.version,
@@ -704,6 +700,9 @@ pub(crate) async fn get_playbook(
                 "effective_effects": apb_core::effects::effective(&loaded.playbook),
                 "layout": loaded.layout,
                 "validation": validation,
+                // The address of every edge of the shown definition, aligned
+                // with `playbook.edges`.
+                "edge_addresses": apb_core::edge_address::edge_addresses(&loaded.playbook),
                 "frozen": reg.is_frozen(&id),
             }))
             .into_response()

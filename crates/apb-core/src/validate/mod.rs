@@ -11,6 +11,7 @@ mod baseline;
 mod budget;
 mod connectors;
 mod decisions;
+mod edges;
 mod forks;
 mod graph;
 mod isolation;
@@ -29,7 +30,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
-    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, NodeKind,
+    CacheMode, CacheSpec, Edge, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, NodeKind,
     Playbook, SuccessCheck,
 };
 
@@ -69,11 +70,87 @@ pub struct Issue {
     pub severity: Severity,
     pub message: String,
     pub node: Option<String>,
+    /// The rendered addresses ([`crate::edge_address`]) of the existing
+    /// edges the issue is about, in declaration order; empty when it
+    /// concerns no edge. An address is never made up for an edge that does
+    /// not exist.
+    pub edges: Vec<String>,
+}
+
+impl Issue {
+    /// An issue about no edge.
+    pub fn new<N: Into<String>>(
+        code: &'static str,
+        severity: Severity,
+        node: Option<N>,
+        message: String,
+    ) -> Self {
+        Self {
+            code,
+            severity,
+            message,
+            node: node.map(Into::into),
+            edges: Vec::new(),
+        }
+    }
+
+    /// The same issue about the edges at these rendered addresses.
+    pub fn with_edges(mut self, edges: Vec<String>) -> Self {
+        self.edges = edges;
+        self
+    }
+}
+
+/// One issue as every surface shows it (the dashboard's playbook view, MCP
+/// `playbook_validate`, a refused save): `node` is left out when the issue
+/// has none, `edges` is always present.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueView {
+    pub code: String,
+    /// `error` or `warning`.
+    pub severity: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub node: Option<String>,
+    #[serde(default)]
+    pub edges: Vec<String>,
+}
+
+impl From<&Issue> for IssueView {
+    fn from(i: &Issue) -> Self {
+        Self {
+            code: i.code.to_string(),
+            severity: severity_word(i.severity).to_string(),
+            message: i.message.clone(),
+            node: i.node.clone(),
+            edges: i.edges.clone(),
+        }
+    }
+}
+
+/// `error` or `warning`.
+pub fn severity_word(s: Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
+}
+
+/// The `` (edges `a`, `b`)`` segment of an issue line, empty without edges.
+pub fn edges_segment(edges: &[String]) -> String {
+    if edges.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = edges.iter().map(|e| format!("`{e}`")).collect();
+    format!(" (edges {})", list.join(", "))
 }
 
 /// Renders a validation failure as `validation failed:` followed by one line
-/// per issue: `- <code> <severity> (node \`<id>\`): <message>`, omitting the
-/// `(node ...)` segment when the issue has no node. This is the single
+/// per issue: `- <code> <severity> (node \`<id>\`) (edges \`<a>\`): <message>`,
+/// omitting the `(node ...)` segment when the issue has no node and the
+/// `(edges ...)` segment when it concerns no edge. This is the single
 /// canonical rendering for a `Vec<Issue>` becoming user-facing text:
 /// `VersioningError::Validation`'s `Display` goes through it (so every
 /// transitive wrapper - `BundleError`, `EngineError`, ... - renders the same
@@ -82,19 +159,16 @@ pub struct Issue {
 pub fn render_issues(issues: &[Issue]) -> String {
     let mut out = String::from("validation failed:");
     for issue in issues {
-        let severity = match issue.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
         out.push_str("\n- ");
         out.push_str(issue.code);
         out.push(' ');
-        out.push_str(severity);
+        out.push_str(severity_word(issue.severity));
         if let Some(node) = &issue.node {
             out.push_str(" (node `");
             out.push_str(node);
             out.push_str("`)");
         }
+        out.push_str(&edges_segment(&issue.edges));
         out.push_str(": ");
         out.push_str(&issue.message);
     }
@@ -111,21 +185,69 @@ impl ValidationReport {
         !self.issues.iter().any(|i| i.severity == Severity::Error)
     }
     fn error(&mut self, code: &'static str, node: Option<&str>, msg: String) {
-        self.issues.push(Issue {
-            code,
-            severity: Severity::Error,
-            message: msg,
-            node: node.map(String::from),
-        });
+        self.issues
+            .push(Issue::new(code, Severity::Error, node, msg));
     }
     fn warn(&mut self, code: &'static str, node: Option<&str>, msg: String) {
-        self.issues.push(Issue {
-            code,
-            severity: Severity::Warning,
-            message: msg,
-            node: node.map(String::from),
-        });
+        self.issues
+            .push(Issue::new(code, Severity::Warning, node, msg));
     }
+    /// An error about these edges of `playbook` (each one of its own
+    /// `edges`, found by identity).
+    fn error_edges(
+        &mut self,
+        playbook: &Playbook,
+        code: &'static str,
+        node: Option<&str>,
+        edges: &[&Edge],
+        msg: String,
+    ) {
+        let rendered = rendered_edges(playbook, edges);
+        self.issues
+            .push(Issue::new(code, Severity::Error, node, msg).with_edges(rendered));
+    }
+    /// A warning about these edges of `playbook`.
+    fn warn_edges(
+        &mut self,
+        playbook: &Playbook,
+        code: &'static str,
+        node: Option<&str>,
+        edges: &[&Edge],
+        msg: String,
+    ) {
+        let rendered = rendered_edges(playbook, edges);
+        self.issues
+            .push(Issue::new(code, Severity::Warning, node, msg).with_edges(rendered));
+    }
+}
+
+/// The rendered addresses of `edges`, each found in `playbook.edges` by
+/// identity, without repeats and in declaration order. An edge that is not one
+/// of the playbook's own gets no address.
+fn rendered_edges(playbook: &Playbook, edges: &[&Edge]) -> Vec<String> {
+    let mut indexes: Vec<usize> = edges
+        .iter()
+        .filter_map(|e| playbook.edges.iter().position(|x| std::ptr::eq(x, *e)))
+        .collect();
+    indexes.sort_unstable();
+    indexes.dedup();
+    if indexes.is_empty() {
+        return Vec::new();
+    }
+    let addressed = crate::edge_address::edge_addresses(playbook);
+    let mut out: Vec<String> = Vec::new();
+    for i in indexes {
+        // Two edges sharing one id (V121) share its address: named once. An
+        // address that does not parse back (a malformed authored id, V121)
+        // is left out: an issue never carries a made-up address.
+        if let Some(a) = addressed.get(i)
+            && !out.contains(&a.rendered)
+            && crate::edge_address::EdgeAddress::parse(&a.rendered).is_ok()
+        {
+            out.push(a.rendered.clone());
+        }
+    }
+    out
 }
 
 #[derive(Debug, Default)]
@@ -189,6 +311,10 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     quality::check_quality(playbook, &mut r); // V102-V107
     known_problems::check_known_problems(playbook, &mut r); // V108-V111
     publish::check_publish(playbook, &mut r); // V116-V120
+    edges::check_edge_ids(playbook, &mut r); // V121
+    edges::check_pair_caps(playbook, &mut r); // V122
+    edges::check_one_of_order(playbook, &mut r); // V123, V124
+    edges::check_judge_values(playbook, &mut r); // V125
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

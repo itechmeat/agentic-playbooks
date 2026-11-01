@@ -1,4 +1,4 @@
-import { Document, YAMLSeq } from 'yaml'
+import { Document, isAlias, isMap as isYamlMap, visit, YAMLMap, YAMLSeq, type Alias } from 'yaml'
 
 // Structural mutations of the playbook model. The source of truth is the YAML
 // text, so edits go through the `yaml` package's AST (Document): this preserves
@@ -7,6 +7,15 @@ import { Document, YAMLSeq } from 'yaml'
 // document (immutable from the caller's point of view) and returns a new copy.
 
 import type { NodeType } from './consts.gen'
+import {
+  duplicateEdgeId,
+  edgeAddresses,
+  renderAddress,
+  resolveAddress,
+  type AddressableEdge,
+  type EdgeAddress,
+  type IssueView,
+} from './edgeaddress'
 import { judgeSkeleton } from './judgefields'
 import { publishSkeleton, type SourceNode } from './publish'
 
@@ -124,7 +133,52 @@ export function updateNode(doc: Document, id: string, patch: Record<string, unkn
   return next
 }
 
-/** Adds an edge from->to (with an optional condition). Returns a new document. */
+/** One edge item of the YAML `edges` with its position in the sequence. */
+interface DocEdge extends AddressableEdge {
+  /** The position of the item in the `edges` sequence. */
+  item: number
+}
+
+/**
+ * The edges of a document as the address rules read them, each with its
+ * position in the sequence. An alias item (`- *e`) is the edge it names, as
+ * the parsed playbook reads it, so positions and addresses here match the
+ * canvas. An item that is not a map with a string `from` and `to` (a
+ * half-edited draft) has no address and is left out.
+ */
+function docEdges(doc: Document, seq: YAMLSeq): DocEdge[] {
+  const out: DocEdge[] = []
+  seq.items.forEach((item, at) => {
+    const node = isAlias(item) ? item.resolve(doc) : item
+    if (!isYamlMap(node)) return
+    const plain = node.toJSON() as Record<string, unknown>
+    if (typeof plain.from !== 'string' || typeof plain.to !== 'string') return
+    out.push({ item: at, id: plain.id, from: plain.from, to: plain.to, condition: plain.condition, fallback: plain.fallback })
+  })
+  return out
+}
+
+/**
+ * The id a new edge from `from` to `to` needs, or undefined: an edge that
+ * would be a second id-less edge with both ends of an existing one gets an
+ * id, so its address does not depend on its position. When every edge of
+ * the pair already carries an authored id, the new one is the pair's only
+ * id-less edge and needs none. Existing duplicates keep what they have.
+ */
+function idForPair(edges: DocEdge[], from: string, to: string): string | undefined {
+  const idless = edges.filter((e) => e.from === from && e.to === to && typeof e.id !== 'string')
+  if (idless.length === 0) return undefined
+  const taken = new Set(edges.map((e) => e.id).filter((id): id is string => typeof id === 'string'))
+  return duplicateEdgeId(from, to, idless.length + 1, taken)
+}
+
+/**
+ * Adds an edge from->to (with an optional condition). An unconditional edge
+ * is appended; a conditional one goes right before its source's first
+ * fallback edge when there is one, so it is checked before the fallback is
+ * taken. An edge that shares both ends with an existing one gets an `id`.
+ * Returns a new document.
+ */
 export function addEdge(
   doc: Document,
   from: string,
@@ -132,26 +186,69 @@ export function addEdge(
   condition?: Record<string, unknown>,
 ): Document {
   const next = doc.clone()
-  const edges = ensureEdges(next)
-  const edge: Record<string, unknown> = { from, to }
+  const seq = ensureEdges(next)
+  const existing = docEdges(next, seq)
+  const edge: Record<string, unknown> = {}
+  const id = idForPair(existing, from, to)
+  if (id) edge.id = id
+  edge.from = from
+  edge.to = to
   if (condition) edge.condition = condition
-  edges.add(next.createNode(edge))
+  const node = next.createNode(edge)
+  const fallback = condition ? existing.find((e) => e.from === from && e.fallback === true) : undefined
+  if (fallback) seq.items.splice(fallback.item, 0, node)
+  else seq.add(node)
   return next
 }
 
-/** Removes the edge from->to. Returns a new document. */
-export function removeEdge(doc: Document, from: string, to: string): Document {
-  const next = doc.clone()
-  const edges = next.get('edges')
-  if (edges instanceof YAMLSeq) {
-    edges.items = edges.items.filter(
-      (e) =>
-        !(
-          (e as { get: (k: string) => unknown }).get('from') === from &&
-          (e as { get: (k: string) => unknown }).get('to') === to
-        ),
-    )
+/**
+ * The position in the `edges` sequence of the edge `address` names, or -1.
+ * With `index` (the edge's position in the playbook's `edges`, which is its
+ * position in the sequence of a document that parses), the edge there is
+ * taken only when it still has that address: two edges sharing an authored
+ * id (a validation error) are told apart by it, and a document that changed
+ * under a selection removes nothing.
+ */
+function itemOf(doc: Document, seq: YAMLSeq, address: EdgeAddress | string, index?: number): number {
+  const edges = docEdges(doc, seq)
+  if (index === undefined) {
+    const at = resolveAddress(edges, address)
+    return at < 0 ? -1 : edges[at].item
   }
+  const at = edges.findIndex((e) => e.item === index)
+  if (at < 0) return -1
+  const want = typeof address === 'string' ? address : renderAddress(address)
+  return edgeAddresses(edges)[at].rendered === want ? index : -1
+}
+
+/**
+ * Removes exactly the one edge `address` names (an address or its string
+ * form), resolved on this document; every other edge, its keys and the
+ * comments stay as they are. `index`, the position of the selected edge in
+ * the playbook's `edges`, pins the edge when the address alone is
+ * ambiguous; see `itemOf`. An address that names no edge changes nothing.
+ * An edge other items alias (`&e` ... `*e`) is moved to the first alias
+ * before it goes, so they keep their meaning. Returns a new document.
+ */
+export function removeEdge(doc: Document, address: EdgeAddress | string, index?: number): Document {
+  const next = doc.clone()
+  const seq = next.get('edges')
+  if (!(seq instanceof YAMLSeq)) return next
+  const item = itemOf(next, seq, address, index)
+  if (item < 0) return next
+  const removed = seq.items[item]
+  const anchor = isYamlMap(removed) ? removed.anchor : undefined
+  if (anchor) {
+    let moved = false
+    visit(next, {
+      Alias(_, alias: Alias) {
+        if (moved || alias.source !== anchor) return undefined
+        moved = true
+        return removed as YAMLMap
+      },
+    })
+  }
+  seq.items.splice(item, 1)
   return next
 }
 
@@ -168,6 +265,25 @@ export function suggestNodeId(doc: Document, kind: string): string {
   let n = 1
   while (existing.has(`${kind}-${n}`)) n++
   return `${kind}-${n}`
+}
+
+/**
+ * The validation issues of a refused save (`{ error: "validation", codes,
+ * issues }`); an older server sends only the codes, and then there are none.
+ */
+export function refusedIssues(body: unknown): IssueView[] {
+  if (!isMap(body) || body.error !== 'validation' || !Array.isArray(body.issues)) return []
+  return body.issues.filter(
+    (i): i is IssueView => isMap(i) && typeof i.code === 'string' && typeof i.message === 'string',
+  )
+}
+
+/** One issue as a line: its code, message, node and the addresses of its edges. */
+export function issueLine(issue: { code: string; message: string; node?: string | null; edges?: string[] }): string {
+  const where = [issue.node ? `node ${issue.node}` : '', issue.edges?.length ? `edges ${issue.edges.join(', ')}` : '']
+    .filter(Boolean)
+    .join('; ')
+  return `${issue.code}: ${issue.message}${where ? ` (${where})` : ''}`
 }
 
 /** What the editor tells the user after a save (issue #67 item 9). */

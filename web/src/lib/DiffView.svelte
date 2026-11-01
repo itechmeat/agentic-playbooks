@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fetchDiff } from './api'
-  import { formatDiff } from './difffmt'
+  import { diffEdgeChanges, diffOrderChanges, formatDiff } from './difffmt'
   import type { VersionDiff } from './types'
   import { Button } from '$lib/components/ui/button'
   import { Spinner } from '$lib/components/ui/spinner'
@@ -17,6 +17,10 @@
   let error = $state<string | null>(null)
 
   const lines = $derived(diff ? formatDiff(diff.yaml_diff) : [])
+  // The edges present in both versions whose attributes changed, and the
+  // sources whose edges are checked in a different order.
+  const edgeChanges = $derived(diffEdgeChanges(diff))
+  const orderChanges = $derived(diffOrderChanges(diff))
 
   $effect(() => {
     if (versions.length >= 2) {
@@ -113,6 +117,35 @@
           <ul class="pl-3.5">{#each diff.edges_removed as e (e)}<li class="text-red">- {e}</li>{/each}</ul>
         </div>
       {/if}
+      {#if edgeChanges.length}
+        <section class="edge-list" data-testid="diff-edges-changed">
+          <h4>Edges changed</h4>
+          <ul>
+            {#each edgeChanges as c, i (i)}
+              <li>
+                <span class="addr">{c.before}</span>
+                {#if c.after !== c.before}<span class="arrow">→</span><span class="addr">{c.after}</span>{/if}
+                <span class="what">{c.changed.join(', ')}</span>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
+      {#if orderChanges.length}
+        <section class="edge-list" data-testid="diff-order-changed">
+          <h4>Order changed</h4>
+          <ul>
+            {#each orderChanges as c, i (i)}
+              <li>
+                <span class="node">{c.node}</span>
+                <span class="addr">{c.before.join(', ')}</span>
+                <span class="arrow">→</span>
+                <span class="addr">{c.after.join(', ')}</span>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
     </div>
 
     <pre
@@ -120,3 +153,38 @@
           class={lineClass(line.kind)}>{line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}{line.text}{'\n'}</span>{/each}</pre>
   {/if}
 </div>
+
+<style>
+  /* Plain CSS over the app's variables. */
+  .edge-list h4 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: normal;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  .edge-list ul {
+    margin: 0;
+    padding-left: 14px;
+    list-style: none;
+  }
+  .edge-list li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 6px;
+    color: var(--c-amber);
+    overflow-wrap: anywhere;
+  }
+  .addr {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .arrow,
+  .what {
+    color: var(--muted-foreground);
+  }
+  .node {
+    font-weight: 600;
+  }
+</style>

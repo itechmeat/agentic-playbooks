@@ -105,6 +105,11 @@ pub(crate) fn apply_patch(
     if let Some(reason) = super::baseline::patch_refusal(playbook, &loaded.playbook, &events) {
         return append_patch_rejected(log, reason);
     }
+    if let Some(reason) =
+        super::judge::patch_refusal(playbook, &loaded.playbook, &events, &continue_from)
+    {
+        return append_patch_rejected(log, reason);
+    }
 
     let from_version = playbook.version.clone();
     let base = playbook.clone();
@@ -126,11 +131,17 @@ pub(crate) fn apply_patch(
             ),
         );
     }
+    // Store the definition, replace the snapshot, journal: in this order,
+    // so a journaled digest names stored bytes whenever the store worked.
+    // The digest is for surfaces only; a resume executes `playbook.yaml`
+    // whatever it says.
+    let definition = crate::run_definitions::store_best_effort(run_dir, loaded.yaml.as_bytes());
     snapshot_playbook(run_dir, &loaded.yaml)?;
     log.append(EventPayload::PatchApplied {
         version: version.clone(),
         classification: classification.clone(),
         continue_from: continue_from.clone(),
+        definition: Some(definition),
     })?;
     log.append(EventPayload::RunMigrated {
         from_version,
@@ -268,4 +279,139 @@ pub(crate) fn promote_applied_patch(
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RUNNING: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: review, type: script, script: s, runner: sh }\n  - { id: fix, type: finish, outcome: success }\n  - { id: ship, type: finish, outcome: success }\nedges:\n  - { from: start, to: review }\n  - { from: review, to: fix, condition: { type: judge, question: q, min_p: 0.7, on_unavailable: false } }\n  - { from: review, to: ship, fallback: true }\n";
+
+    /// The running definition with an edge inserted before the judge edge,
+    /// so the judge edge's rank moves.
+    fn patched() -> String {
+        RUNNING
+            .replace("version: 1.0.0", "version: 1.0.1")
+            .replace(
+                "  - { from: review, to: fix, condition",
+                "  - { from: review, to: ship, condition: { type: node_status, node: review, equals: failure } }\n  - { from: review, to: fix, condition",
+            )
+    }
+
+    /// A project with both versions and a run held between the judge-edge
+    /// answer of `review` and its routing.
+    fn held_run() -> (tempfile::TempDir, PathBuf, EventLog) {
+        let root = tempfile::tempdir().unwrap();
+        apb_core::registry::init_project(root.path()).unwrap();
+        for (version, yaml) in [("1.0.0", RUNNING.to_string()), ("1.0.1", patched())] {
+            let dir = root.path().join(format!(".apb/playbooks/p/{version}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("playbook.yaml"), yaml).unwrap();
+        }
+        std::fs::write(root.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+        let run_dir = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"), RUNNING).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        for body in [
+            serde_json::json!({"type": "run_started", "playbook": "p", "version": "1.0.0"}),
+            serde_json::json!({"type": "node_started", "node": "start", "attempt": 1}),
+            serde_json::json!({"type": "node_finished", "node": "start", "status": "succeeded", "attempt": 1, "output": "", "artifacts": []}),
+            serde_json::json!({"type": "edge_traversed", "from": "start", "to": "review", "uncounted": true}),
+            serde_json::json!({"type": "node_started", "node": "review", "attempt": 1}),
+            serde_json::json!({"type": "node_finished", "node": "review", "status": "succeeded", "attempt": 1, "output": "", "artifacts": []}),
+            serde_json::json!({"type": "decision_made", "use_site": "judge_edge", "node": "review", "attempt": 1, "applied": true, "answers": {"edge_0": {"value": "true", "p": 0.9}}}),
+        ] {
+            let mut v = body;
+            v["seq"] = 0.into();
+            v["ts"] = 0.into();
+            log.append(serde_json::from_value::<Event>(v).unwrap().payload)
+                .unwrap();
+        }
+        (root, run_dir, log)
+    }
+
+    fn patch(
+        root: &Path,
+        run_dir: &Path,
+        log: &mut EventLog,
+        continue_from: &str,
+    ) -> (PatchResult, Playbook) {
+        let mut playbook = Playbook::from_yaml(RUNNING).unwrap();
+        let mut current = "review".to_string();
+        let result = apply_patch(
+            root,
+            run_dir,
+            log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            PatchCommand {
+                version: "1.0.1".into(),
+                classification: "improvement".into(),
+                continue_from: continue_from.into(),
+            },
+        )
+        .unwrap();
+        (result, playbook)
+    }
+
+    #[test]
+    fn a_pending_judge_answer_refuses_the_patch_and_changes_nothing() {
+        let (root, run_dir, mut log) = held_run();
+        let (result, playbook) = patch(root.path(), &run_dir, &mut log, "start");
+        assert!(matches!(result, PatchResult::Rejected));
+        let events = read_all(&run_dir).unwrap();
+        let last = events.last().unwrap();
+        assert!(
+            matches!(&last.payload, EventPayload::PatchRejected { reason } if reason.starts_with("judge_edge_answers_pending") && reason.contains("[review]")),
+            "{last:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::PatchApplied { .. }))
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("playbook.yaml")).unwrap(),
+            RUNNING
+        );
+        assert!(!run_dir.join(crate::run_definitions::DIR).exists());
+        assert_eq!(playbook.version, "1.0.0");
+    }
+
+    #[test]
+    fn continue_from_the_judged_node_applies_the_patch_in_order() {
+        let (root, run_dir, mut log) = held_run();
+        let (result, playbook) = patch(root.path(), &run_dir, &mut log, "review");
+        assert!(matches!(result, PatchResult::Applied(_)));
+        let events = read_all(&run_dir).unwrap();
+        let definition = events.iter().find_map(|e| match &e.payload {
+            EventPayload::PatchApplied { definition, .. } => definition.clone(),
+            _ => None,
+        });
+        let want = crate::run_definitions::digest(patched().as_bytes());
+        assert_eq!(definition.as_deref(), Some(want.as_str()));
+        // Stored, then the snapshot replaced, then journaled.
+        assert_eq!(
+            crate::run_definitions::read_stored(&run_dir, &want).unwrap(),
+            patched().as_bytes()
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("playbook.yaml")).unwrap(),
+            patched()
+        );
+        assert_eq!(playbook.version, "1.0.1");
+    }
+
+    #[test]
+    fn a_dead_end_after_the_answer_lets_the_patch_through() {
+        let (root, run_dir, mut log) = held_run();
+        log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        })
+        .unwrap();
+        let (result, _) = patch(root.path(), &run_dir, &mut log, "start");
+        assert!(matches!(result, PatchResult::Applied(_)));
+    }
 }

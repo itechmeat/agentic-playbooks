@@ -243,6 +243,7 @@ pub(crate) fn route(runner: &DecisionRunner, journal: &dyn DecisionJournal, s: S
     let outcome = runner.decide(
         journal,
         DecisionCall {
+            edge_addresses: BTreeMap::new(),
             site: UseSite::Routing,
             node: Some(s.node),
             attempt: Some(1),

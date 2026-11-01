@@ -4,6 +4,7 @@ import { profileModelKey, profileToField, usesDefaultProfile, type ProfileScope 
 
 export { profileModelKey }
 import { listBadge } from './listprogress'
+import { edgeAddresses, type AddressedEdge } from './edgeaddress'
 
 /**
  * What a graph card (PlaybookNode.svelte) shows. `toFlow` fills the playbook
@@ -74,14 +75,31 @@ export type EdgeTone = 'plain' | 'cond' | 'fail' | 'else'
 export type FlowEdgeData = {
   tone: EdgeTone
   state?: 'walked' | 'active' | 'idle'
+  /**
+   * The edge's rendered address (`apb_core::edge_address`), which is also
+   * its canvas id unless an id used twice (a validation error) made the id
+   * take a suffix.
+   */
+  address?: string
+  /**
+   * The edge's position in the playbook's `edges`: with the address it pins
+   * one edge even when an authored id is used twice.
+   */
+  index?: number
 }
 
 export interface FlowEdge {
+  /** The edge's rendered address: a canvas shows one definition. */
   id: string
   source: string
   target: string
   label?: string
-  /** The named exit this edge leaves from; absent when the node has one exit. */
+  /**
+   * The named exit this edge leaves from (`edge:<address>`), or
+   * `PLAIN_HANDLE` for an unconditional edge of a node that also has named
+   * exits; absent on a node without named exits, whose plain handle is its
+   * only source handle.
+   */
   sourceHandle?: string
   data: FlowEdgeData
 }
@@ -96,6 +114,11 @@ const EXIT_ROW_H = 24
 /** Start and finish render as small pills (see PlaybookNode.svelte). */
 const PILL_W = 110
 const PILL_H = 30
+
+/** Whether a card draws the row of exit captions. */
+export function hasExitRow(exits: NodeExits | null | undefined): boolean {
+  return !!exits && exits.list.length > 0
+}
 
 /**
  * Layout box of one card. A node with named exits is taller by its caption
@@ -154,10 +177,43 @@ export function edgeLabel(e: PlaybookEdgeModel): string | undefined {
   return c.type
 }
 
+/**
+ * The id of a node's plain source handle, where its unconditional edges
+ * leave. Named explicitly: an edge without a `sourceHandle` would be drawn
+ * from the node's first source handle, which is a named exit when it has
+ * one.
+ */
+export const PLAIN_HANDLE = 'plain'
+
+/** The handle id of the named exit of the edge with this rendered address. */
+export function exitHandleId(address: string): string {
+  return `edge:${address}`
+}
+
+/** The rendered address of an exit handle id, or null for the plain handle. */
+export function exitHandleAddress(handle: string | null | undefined): string | null {
+  return handle && handle.startsWith('edge:') ? handle.slice('edge:'.length) : null
+}
+
+/**
+ * What a drag from a source handle adds: from the plain handle (`PLAIN_HANDLE`,
+ * or none on a node without named exits) a new unconditional edge; from a
+ * named exit nothing, since that exit is an edge that already has its
+ * target (`exit` is its address).
+ */
+export function dragFromHandle(handle: string | null | undefined): { add: true } | { add: false; exit: string } {
+  const exit = exitHandleAddress(handle)
+  return exit === null ? { add: true } : { add: false, exit }
+}
+
 /** One named way out of a node, in the order the engine considers it. */
 export interface NodeExit {
-  /** Handle id, referenced by the edge's `sourceHandle`. */
+  /** Handle id, `edge:<address>`, referenced by the edge's `sourceHandle`. */
   id: string
+  /** The rendered address of the edge this exit is. */
+  address: string
+  /** The edge's position in the playbook's `edges`. */
+  index: number
   /** Short caption under the dot. */
   label: string
   /** The unabbreviated meaning, for the tooltip. */
@@ -172,7 +228,13 @@ export interface NodeExits {
    * condition matches, which is why the captions are numbered.
    */
   mode: 'all' | 'one-of'
+  /**
+   * The named exits in the order the engine checks them: the conditional
+   * edges by their check order, then the fallback, captioned `else`.
+   */
   list: NodeExit[]
+  /** How many unconditional edges leave together from the plain handle. */
+  parallel: number
 }
 
 /**
@@ -268,31 +330,71 @@ function exitCaption(
   return { label: String(c.type), title: `${c.type}, goes to ${e.to}`, tone: 'default' }
 }
 
+/** When an edge is taken, in words (the edge panel and an exit's tooltip). */
+export function edgeConditionText(e: PlaybookEdgeModel): string {
+  return exitCaption(e, e.from).title
+}
+
+/** Sort key of a check order: unconditional first, then conditions, then fallbacks. */
+function checkRank(a: AddressedEdge): number {
+  if (a.check.kind === 'parallel') return 0
+  if (a.check.kind === 'ordered') return a.check.n
+  return Number.MAX_SAFE_INTEGER
+}
+
+/** The outgoing edges of a node with their addresses, in the order the engine considers them. */
+function outgoing(
+  playbook: PlaybookModel,
+  nodeId: string,
+  addressed: AddressedEdge[],
+): { edge: PlaybookEdgeModel; at: AddressedEdge }[] {
+  return playbook.edges
+    .map((edge, i) => ({ edge, at: addressed[i] }))
+    .filter((x) => x.edge.from === nodeId)
+    .sort((x, y) => checkRank(x.at) - checkRank(y.at) || x.at.rank - y.at.rank)
+}
+
 /**
- * The named exits of a node, or null when it has fewer than two and one
- * anonymous dot at the bottom says everything there is to say.
+ * The exits of a node, or null when one anonymous dot at the bottom says
+ * everything there is to say (no edge, or a single unconditional one).
  *
  * Several edges leaving one point hide two opposite meanings: unconditional
  * edges all run, conditional ones pick exactly one. They also hide that the
  * pick is first-match, so declaration order decides the route. Both become
- * visible here: a mode, and a numbered caption per exit.
+ * visible here: a mode, and a numbered caption per conditional exit, in its
+ * check order, with a fallback last as `else` wherever it is declared. A
+ * node shows its named exits as soon as one edge has a condition or is a
+ * fallback; unconditional edges share the plain handle.
  */
-export function nodeExits(playbook: PlaybookModel, nodeId: string): NodeExits | null {
-  const out = playbook.edges.filter((e) => e.from === nodeId)
-  if (out.length < 2) return null
+export function nodeExits(
+  playbook: PlaybookModel,
+  nodeId: string,
+  addressed: AddressedEdge[] = edgeAddresses(playbook.edges),
+): NodeExits | null {
+  const out = outgoing(playbook, nodeId, addressed)
+  const named = out.filter((x) => x.at.check.kind !== 'parallel')
+  const parallel = out.length - named.length
+  if (named.length === 0 && parallel < 2) return null
   // Mirrors the engine's edge selection: any unconditional edge is taken
   // regardless of status, so its presence makes the whole set a fan-out.
-  const mode: NodeExits['mode'] = out.some((e) => !e.condition && !e.fallback) ? 'all' : 'one-of'
+  const mode: NodeExits['mode'] = parallel > 0 ? 'all' : 'one-of'
+  const numbered = named.length > 1
+  // An id used twice (a validation error) still gets two handles.
+  const handles = new Set<string>()
   return {
     mode,
-    list: out.map((e, i) => {
-      const { label, title, tone } = exitCaption(e, nodeId)
-      const ordinal = mode === 'one-of' ? `${i + 1} ` : ''
+    parallel,
+    list: named.map(({ edge, at }, i) => {
+      const { label, title, tone } = exitCaption(edge, nodeId)
+      const ordinal = numbered ? `${i + 1} ` : ''
+      const handle = handles.has(at.rendered) ? `${at.rendered}@${at.index}` : at.rendered
+      handles.add(handle)
       return {
-        id: `out-${i}`,
+        id: exitHandleId(handle),
+        address: at.rendered,
+        index: at.index,
         label: ordinal + truncate(label, EXIT_LABEL_MAX - ordinal.length),
-        title:
-          mode === 'one-of' ? `checked ${i + 1} of ${out.length} in order: ${title}` : title,
+        title: numbered ? `checked ${i + 1} of ${named.length} in order: ${title}` : title,
         tone,
       }
     }),
@@ -307,7 +409,7 @@ export function nodeExits(playbook: PlaybookModel, nodeId: string): NodeExits | 
 // KNOWN GAP: a join node also fails when an upstream branch fails, whatever its
 // own kind, so a `condition` used as a join is left unmarked here even though
 // the policy does handle its failure. Closing that needs the edge `join` field,
-// which the editor's client-side parse does not carry today.
+// which the canvas model carries but this marker does not read yet.
 // A `judge` fails when no answer comes back and its on_unavailable is `fail`.
 // A `publish` fails on a refused plan, a push not sent or one whose result
 // is unknown.
@@ -376,7 +478,10 @@ export function isUserArranged(layout: WfLayout | null): boolean {
  * only apply between distinct successors of the same source; dagre ignores
  * a constraint whose endpoints land in different ranks.
  */
-function fanoutConstraints(playbook: PlaybookModel): { left: string; right: string }[] {
+function fanoutConstraints(
+  playbook: PlaybookModel,
+  addressed: AddressedEdge[],
+): { left: string; right: string }[] {
   const constraints: { left: string; right: string }[] = []
   // left -> rights already constrained. Two sources can declare the same pair
   // of successors in opposite order (A exits to x then y, B to y then x); a
@@ -407,8 +512,7 @@ function fanoutConstraints(playbook: PlaybookModel): { left: string; right: stri
   for (const node of playbook.nodes) {
     const seen = new Set<string>()
     const distinct: string[] = []
-    for (const e of playbook.edges) {
-      if (e.from !== node.id) continue
+    for (const { edge: e } of outgoing(playbook, node.id, addressed)) {
       if (seen.has(e.to)) continue
       seen.add(e.to)
       distinct.push(e.to)
@@ -432,7 +536,7 @@ function dagreLayout(
   g.setGraph({ rankdir: 'TB', nodesep: 30, ranksep: 70 })
   g.setDefaultEdgeLabel(() => ({}))
   const ids = new Set(playbook.nodes.map((n) => n.id))
-  for (const n of playbook.nodes) g.setNode(n.id, nodeSize(n.type, !!exits.get(n.id)))
+  for (const n of playbook.nodes) g.setNode(n.id, nodeSize(n.type, hasExitRow(exits.get(n.id))))
   // An edge to a node that does not exist (a draft being edited) would make
   // graphlib invent a node without a size, so it is left out of the layout.
   for (const e of playbook.edges) if (ids.has(e.from) && ids.has(e.to)) g.setEdge(e.from, e.to)
@@ -496,8 +600,12 @@ function gridLayout(playbook: PlaybookModel): Map<string, Pos> {
  * throws with the fan-out ordering constraints it is retried without them,
  * and if it still throws a plain grid is used.
  */
-function autoLayout(playbook: PlaybookModel, exits: Map<string, NodeExits | null>): Map<string, Pos> {
-  const constraints = fanoutConstraints(playbook)
+function autoLayout(
+  playbook: PlaybookModel,
+  exits: Map<string, NodeExits | null>,
+  addressed: AddressedEdge[],
+): Map<string, Pos> {
+  const constraints = fanoutConstraints(playbook, addressed)
   try {
     return dagreLayout(playbook, exits, constraints)
   } catch {
@@ -513,14 +621,38 @@ function autoLayout(playbook: PlaybookModel, exits: Map<string, NodeExits | null
   return gridLayout(playbook)
 }
 
+/** What `toFlow` draws besides the playbook itself. */
+export interface ToFlowOptions {
+  /** Stored positions; nodes without one are laid out automatically. */
+  layout?: WfLayout | null
+  /** Node status per node id, in a run. */
+  statuses?: Record<string, string>
+  /** Nodes whose result came from the cache, in a run. */
+  cachedIds?: Set<string>
+  /** Ignore the stored layout and lay everything out again. */
+  forceAuto?: boolean
+  /** A list node's items processed of its total, in a run. */
+  listProgress?: Record<string, { processed: number; total: number }>
+}
+
+const OPTION_KEYS = ['layout', 'statuses', 'cachedIds', 'forceAuto', 'listProgress']
+
+/** The options of a call, which may pass a bare stored layout in their place. */
+function flowOptions(arg: ToFlowOptions | WfLayout | null | undefined): ToFlowOptions {
+  if (!arg) return {}
+  return OPTION_KEYS.some((k) => k in arg) ? (arg as ToFlowOptions) : { layout: arg as WfLayout }
+}
+
+/**
+ * The canvas of one playbook definition: a card per node and an edge per
+ * edge, the edge's id its rendered address. The second argument is the
+ * options, or just the stored layout.
+ */
 export function toFlow(
   playbook: PlaybookModel,
-  layout: WfLayout | null,
-  statuses?: Record<string, string>,
-  cachedIds?: Set<string>,
-  forceAuto?: boolean,
-  listProgress?: Record<string, { processed: number; total: number }>,
+  options?: ToFlowOptions | WfLayout | null,
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
+  const { layout, statuses, cachedIds, forceAuto, listProgress } = flowOptions(options)
   // `forceAuto` is the topbar "Re-layout" button: it ignores any stored
   // arrangement (manual or otherwise) and recomputes from scratch, so the
   // result is auto again and can be persisted without the userArranged marker.
@@ -529,14 +661,15 @@ export function toFlow(
     for (const n of layout?.nodes ?? []) stored.set(n.id, { x: n.x, y: n.y })
   }
 
+  const addressed = edgeAddresses(playbook.edges)
   const exits = new Map<string, NodeExits | null>(
-    playbook.nodes.map((n) => [n.id, nodeExits(playbook, n.id)]),
+    playbook.nodes.map((n) => [n.id, nodeExits(playbook, n.id, addressed)]),
   )
 
   const needAuto = forceAuto || playbook.nodes.some((n) => !stored.has(n.id))
   const auto = new Map<string, { x: number; y: number }>()
   if (needAuto) {
-    for (const [id, pos] of autoLayout(playbook, exits)) auto.set(id, pos)
+    for (const [id, pos] of autoLayout(playbook, exits, addressed)) auto.set(id, pos)
   }
 
   // Agent tasks and answering finish nodes without their own profile run on
@@ -569,22 +702,28 @@ export function toFlow(
     }
   })
 
-  // Each edge leaves from its own named exit when the node has several, in the
-  // same order `nodeExits` numbered them.
-  const seen = new Map<string, number>()
+  // A conditional edge or a fallback leaves from its own named exit; an
+  // unconditional one from the plain handle, named whenever the node has
+  // named exits too (else the first exit would be used). The id is the edge's address;
+  // only an id used twice (a validation error) gets a suffix, so the canvas
+  // still draws both.
+  const ids = new Set<string>()
   const edges: FlowEdge[] = playbook.edges.map((e, i) => {
-    const index = seen.get(e.from) ?? 0
-    seen.set(e.from, index + 1)
+    const at = addressed[i]
     const named = exits.get(e.from)
+    const exit = named?.list.find((x) => x.index === i)
+    const sourceHandle = exit ? exit.id : named && named.list.length > 0 ? PLAIN_HANDLE : undefined
+    const id = ids.has(at.rendered) ? `${at.rendered}@${i}` : at.rendered
+    ids.add(id)
     return {
-      id: `e${i}-${e.from}-${e.to}`,
+      id,
       source: e.from,
       target: e.to,
-      // The condition is written under its exit now, so repeating it halfway
+      // The condition is written under its exit, so repeating it halfway
       // along the line would only add clutter.
-      label: named ? undefined : edgeLabel(e),
-      ...(named ? { sourceHandle: named.list[index]?.id } : {}),
-      data: { tone: edgeTone(e) },
+      label: exit ? undefined : edgeLabel(e),
+      ...(sourceHandle ? { sourceHandle } : {}),
+      data: { tone: edgeTone(e), address: at.rendered, index: i },
     }
   })
 

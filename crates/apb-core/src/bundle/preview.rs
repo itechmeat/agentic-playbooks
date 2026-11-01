@@ -110,12 +110,12 @@ pub fn preview(
             playbook.id = id.to_string();
             validation_errors(root, &playbook)?
         }
-        Err(e) => vec![Issue {
-            code: "schema",
-            severity: Severity::Error,
-            message: e.to_string(),
-            node: None,
-        }],
+        Err(e) => vec![Issue::new::<String>(
+            "schema",
+            Severity::Error,
+            None,
+            e.to_string(),
+        )],
     };
     Ok(ImportPreview {
         id: id.to_string(),

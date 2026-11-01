@@ -8,7 +8,7 @@ use apb_core::launch::floor::SaveChannel;
 use apb_core::profile::QualifiedProfileRef;
 use apb_core::registry::{LoadedPlaybook, is_safe_segment};
 use apb_core::schema::NodeKind;
-use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_core::validate::{ValidationContext, validate};
 use apb_core::versioning::{
     delete_playbook, list_trash, restore_from_trash_by, save_definition_by,
 };
@@ -211,6 +211,9 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
                 "has_condition": e.condition.is_some(),
                 "fallback": e.fallback,
             });
+            if let Some(id) = &e.id {
+                o["id"] = json!(id);
+            }
             if let Some(join) = &e.join {
                 o["join"] = json!(join);
             }
@@ -294,11 +297,6 @@ pub fn playbook_validate(root: &Path, id: &str) -> Result<Value, ToolError> {
             &reg.version_dir(id, &loaded.version),
             &loaded.playbook,
         ));
-    let issues: Vec<Value> = report.issues.iter().map(|i| json!({
-        "code": i.code,
-        "severity": match i.severity { Severity::Error => "error", Severity::Warning => "warning" },
-        "message": i.message,
-        "node": i.node,
-    })).collect();
+    let issues: Vec<apb_core::validate::IssueView> = report.issues.iter().map(Into::into).collect();
     Ok(json!({ "valid": report.is_valid(), "issues": issues }))
 }

@@ -111,6 +111,22 @@ async fn playbook_detail_includes_model_and_validation() {
         vec![("V91", "warning"), ("V92", "warning")],
         "{json}"
     );
+    // Every issue carries its edges, and the detail the address of every
+    // edge of the shown definition.
+    assert!(
+        json["validation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["edges"].is_array()),
+        "{json}"
+    );
+    let addresses = json["edge_addresses"].as_array().expect("edge_addresses");
+    assert_eq!(
+        addresses.len(),
+        json["playbook"]["edges"].as_array().unwrap().len()
+    );
+    assert_eq!(addresses[0]["rendered"], "e:start>plan#1");
 }
 
 #[tokio::test]
@@ -458,6 +474,40 @@ async fn post_playbook_invalid_yaml_is_400() {
     );
 }
 
+/// A refused save keeps its `codes` and carries every issue, with the
+/// addresses of the edges it is about.
+#[tokio::test]
+async fn a_refused_save_names_the_edges_of_its_issues() {
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let invalid = VALID.replace(
+        "  - { from: fix, to: lint }",
+        "  - { from: fix, to: lint }\n  - { from: fix, to: nowhere }",
+    );
+    let (status, json) = json_request(
+        app,
+        "POST",
+        "/api/playbooks",
+        serde_json::json!({ "id": "implement-task", "yaml": invalid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"], "validation", "{json}");
+    assert!(
+        json["codes"].as_array().unwrap().iter().any(|c| c == "V06"),
+        "{json}"
+    );
+    let v06 = json["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["code"] == "V06")
+        .unwrap_or_else(|| panic!("no V06 issue: {json}"));
+    assert_eq!(v06["node"], "nowhere");
+    assert_eq!(v06["severity"], "error");
+    assert_eq!(v06["edges"], serde_json::json!(["e:fix>nowhere#1"]));
+}
+
 #[tokio::test]
 async fn get_versions_returns_provenance() {
     let dir = seed();
@@ -701,6 +751,7 @@ async fn the_shell_carries_a_strict_content_security_policy() {
         assert_eq!(directive("object-src"), ["'none'"], "{uri}: {csp}");
         assert_eq!(directive("base-uri"), ["'none'"], "{uri}: {csp}");
         assert_eq!(directive("frame-ancestors"), ["'none'"], "{uri}: {csp}");
+        assert_eq!(directive("font-src"), ["'self'"], "{uri}: {csp}");
         assert!(!csp.contains("unsafe-eval"), "{uri}: {csp}");
         assert!(!csp.contains("'unsafe-inline'"), "{uri}: {csp}");
         // The only style attribute admitted is the empty one (its SHA-256).
@@ -739,6 +790,65 @@ async fn the_shell_carries_a_strict_content_security_policy() {
     nonces.sort();
     nonces.dedup();
     assert_eq!(nonces.len(), 3, "a nonce is never reused: {nonces:?}");
+}
+
+/// Every font the shell's style sheets name is a file the server serves:
+/// `font-src 'self'` admits nothing else, so an inlined `data:` font would
+/// be blocked and logged in the console on every load.
+#[tokio::test]
+async fn the_shell_loads_its_fonts_from_the_server() {
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = raw_get(app.clone(), "/").await;
+    let html =
+        String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let sheets: Vec<String> = html
+        .split("<link")
+        .skip(1)
+        .filter_map(|t| t.split('>').next())
+        .filter(|t| t.contains("stylesheet"))
+        .filter_map(|t| {
+            t.split("href=\"")
+                .nth(1)?
+                .split('"')
+                .next()
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(!sheets.is_empty(), "the shell links a style sheet: {html}");
+    let mut fonts = 0;
+    for sheet in &sheets {
+        let res = raw_get(app.clone(), sheet).await;
+        assert_eq!(res.status(), StatusCode::OK, "{sheet}");
+        let css = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        for face in css.split("@font-face").skip(1) {
+            let face = face.split('}').next().unwrap_or_default();
+            for url in face.split("url(").skip(1) {
+                let url = url
+                    .split(')')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                assert!(!url.starts_with("data:"), "{sheet}: an inlined font");
+                // Relative to the sheet, which lives in `assets/`.
+                let path = match url.strip_prefix("./") {
+                    Some(rest) => format!("/assets/{rest}"),
+                    None if url.starts_with('/') => url.to_string(),
+                    None => format!("/assets/{url}"),
+                };
+                let res = raw_get(app.clone(), &path).await;
+                assert_eq!(res.status(), StatusCode::OK, "{sheet}: {path}");
+                assert_eq!(
+                    header(&res, "content-type"),
+                    Some("font/woff2"),
+                    "{sheet}: {path}"
+                );
+                fonts += 1;
+            }
+        }
+    }
+    assert!(fonts > 0, "the dashboard names its fonts: {sheets:?}");
 }
 
 /// The dashboard's Trust view over HTTP: the listing shows every approval, a

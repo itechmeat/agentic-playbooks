@@ -20,6 +20,7 @@ pub mod discover;
 pub mod dismiss;
 pub mod doctor;
 pub mod duration;
+pub mod edge_address;
 pub mod effects;
 // --- 0.24.0 eval suites ---
 pub mod eval;

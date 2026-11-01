@@ -42,7 +42,9 @@
     PlaybookParam,
     VersionInfo,
     PlaybookNode as PlaybookNodeType,
+    ValidationIssue,
   } from '../lib/types'
+  import { issueLine } from '../lib/playbookedit'
   import type {
     CandidateQualityView,
     FitReport,
@@ -101,9 +103,7 @@
   let edges = $state.raw<FlowEdge[]>([])
   let name = $state<string>(untrack(() => id))
   let version = $state<string>('')
-  let validation = $state<
-    { code: string; severity: string; message: string; node?: string | null }[]
-  >([])
+  let validation = $state<ValidationIssue[]>([])
   let versions = $state<VersionInfo[]>([])
   // The candidate on trial and how it compares with current, read with the
   // version list; a person's decision on it in flight.
@@ -442,7 +442,7 @@
   const warnings = $derived(validation.length - errors.length)
   const issuesTitle = $derived(
     validation
-      .map((v) => `${v.severity} ${v.code}: ${v.message}${v.node ? ` (${v.node})` : ''}`)
+      .map((v) => `${v.severity} ${issueLine(v)}`)
       .join('\n'),
   )
 
@@ -985,7 +985,7 @@
           <ul class="mt-3 flex flex-col gap-1 border-t border-line pt-2 text-xs">
             {#each validation as v, i (i)}
               <li class={v.severity === 'error' ? 'text-red' : 'text-amber'}>
-                {v.code}<span class="prose-text text-fg-2">: {v.message}{v.node ? ` (${v.node})` : ''}</span>
+                {v.code}<span class="prose-text text-fg-2">: {v.message}{v.node ? ` (${v.node})` : ''}{v.edges?.length ? ` (edges ${v.edges.join(', ')})` : ''}</span>
               </li>
             {/each}
           </ul>

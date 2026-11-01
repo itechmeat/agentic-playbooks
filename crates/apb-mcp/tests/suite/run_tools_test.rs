@@ -478,6 +478,7 @@ fn run_stop_finalizes_a_run_whose_driver_is_gone() {
     log.append(EventPayload::RunStarted {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log.append(EventPayload::NodeStarted {
@@ -532,6 +533,7 @@ fn pause_run_pauses_a_driverless_run_and_run_status_reports_it() {
     log.append(EventPayload::RunStarted {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     drop(log);
@@ -584,6 +586,7 @@ fn pause_run_pauses_a_driverless_run_and_run_status_reports_it() {
     log.append(EventPayload::RunStarted {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log.append(EventPayload::RunFinished {
@@ -1119,6 +1122,7 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
     log.append(EventPayload::RunStarted {
         playbook: "gated".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log.append(EventPayload::ReviewRequested {
@@ -1474,6 +1478,7 @@ fn run_resume_refuses_a_busy_workdir() {
             EventPayload::RunStarted {
                 playbook: "scripted".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
             EventPayload::NodeStarted {
                 node: "start".into(),

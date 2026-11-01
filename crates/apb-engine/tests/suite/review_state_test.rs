@@ -17,6 +17,7 @@ fn fold_records_review_decision() {
             EventPayload::RunStarted {
                 playbook: "apb".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         ),
         ev(

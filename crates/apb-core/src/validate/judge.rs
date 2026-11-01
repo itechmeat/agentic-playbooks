@@ -34,14 +34,14 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-type JudgeParts<'a> = (
+pub(super) type JudgeParts<'a> = (
     &'a OrderedMap<String>,
     &'a JudgeQuestions,
     &'a OrderedMap<JudgeThreshold>,
     Option<&'a JudgeFallback>,
 );
 
-fn judge_parts(kind: &NodeKind) -> Option<JudgeParts<'_>> {
+pub(super) fn judge_parts(kind: &NodeKind) -> Option<JudgeParts<'_>> {
     match kind {
         NodeKind::Judge {
             state,

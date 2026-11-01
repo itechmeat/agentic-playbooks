@@ -17,6 +17,8 @@
   import CodeEditor from '../lib/CodeEditor.svelte'
   import DiffView from '../lib/DiffView.svelte'
   import {
+    edgeConditionText,
+    dragFromHandle,
     toFlow,
     isUserArranged,
     profileModelMap,
@@ -24,6 +26,8 @@
     type FlowEdge,
     type FlowNode,
   } from '../lib/graph'
+  import { checkOrderText, edgeAddresses } from '../lib/edgeaddress'
+  import type { Connection } from '@xyflow/svelte'
   import FitTop from '../lib/FitTop.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
@@ -35,6 +39,8 @@
     addNode,
     EDITOR_NODE_KINDS,
     removeEdge,
+    issueLine,
+    refusedIssues,
     removeNode,
     saveNotice,
     suggestNodeId,
@@ -84,7 +90,12 @@
   let storedLayout = $state<WfLayout | null>(null)
 
   let selectedNodeId = $state<string | null>(null)
-  let selectedEdge = $state<{ from: string; to: string } | null>(null)
+  // The selected edge: its rendered address, which names exactly one edge
+  // of the definition being edited even among two with the same ends, and
+  // its position in the model's `edges`, which tells apart two edges that
+  // share an authored id (a validation error). Cleared on any YAML edit, so
+  // it never rebinds to another edge.
+  let selectedEdge = $state<{ address: string; index: number } | null>(null)
   let showDiff = $state(false)
   // The YAML source is the playbook's ground truth, but it is not what you look
   // at while wiring a graph: like `diff`, it takes over the canvas on demand
@@ -133,6 +144,16 @@
   )
   const canEditStruct = $derived(!parseError && !!lastValidModel)
 
+  // The selected edge as written, with its address and check order; null once
+  // the edge at its position no longer has its address.
+  const selectedEdgeView = $derived.by(() => {
+    if (!selectedEdge || !lastValidModel) return null
+    const at = edgeAddresses(lastValidModel.edges)[selectedEdge.index]
+    if (!at || at.rendered !== selectedEdge.address) return null
+    const edge = lastValidModel.edges[at.index]
+    return { edge, at, when: edgeConditionText(edge), order: checkOrderText(at.check) }
+  })
+
   // Each profile's model, shown on the cards (`profile · model`). Only for
   // display, so a failed fetch just leaves the model off.
   let profileList = $state.raw<ProfileSummary[]>([])
@@ -168,6 +189,9 @@
 
   function onYamlChange(v: string) {
     yamlText = v
+    // A hand edit may move or remove the selected edge: the selection never
+    // follows its address onto another one.
+    selectedEdge = null
     clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
       debouncedYaml = v
@@ -325,12 +349,30 @@
     selectedEdge = null
   }
   function onEdgeClick({ edge }: { edge: FlowEdge }) {
-    selectedEdge = { from: edge.source, to: edge.target }
+    const address = edge.data?.address
+    const index = edge.data?.index
+    selectedEdge = address !== undefined && index !== undefined ? { address, index } : null
     selectedNodeId = null
   }
-  function onConnect(conn: { source: string; target: string }) {
-    if (!conn.source || !conn.target) return
-    applyMutation((d) => addEdge(d, conn.source, conn.target))
+  // A new connection becomes YAML first and the canvas is redrawn from it,
+  // so the canvas never adds the edge itself (the handler returns null). From
+  // the plain dot it is a new unconditional edge. From a named exit it adds
+  // nothing: that exit is an edge that already has its target, and its
+  // condition is edited in the YAML.
+  function onBeforeConnect(conn: Connection): null {
+    if (!conn.source || !conn.target) return null
+    const drag = dragFromHandle(conn.sourceHandle)
+    if (!drag.add) {
+      const at = lastValidModel ? edgeAddresses(lastValidModel.edges).find((a) => a.rendered === drag.exit) : undefined
+      const target = at && lastValidModel ? lastValidModel.edges[at.index].to : undefined
+      toast.info(target ? `This exit already leads to ${target}` : 'This exit already leads to its target', {
+        description: 'Conditions are edited in the YAML. Drag from the plain dot to add an unconditional edge.',
+      })
+      return null
+    }
+    const { source, target } = conn
+    applyMutation((d) => addEdge(d, source, target))
+    return null
   }
   function onPaneClick() {
     selectedNodeId = null
@@ -347,11 +389,14 @@
     selectedNodeId = null
     applyMutation((d) => removeNode(d, target))
   }
+  // Deletes the edge the panel shows: resolved on the YAML at the position
+  // and address the panel read from the model, and refused while the YAML
+  // does not parse (the panel may then show an older graph).
   function onDeleteEdge() {
-    if (!selectedEdge) return
-    const target = selectedEdge
+    if (!selectedEdge || !selectedEdgeView || !canEditStruct) return
+    const { address, index } = selectedEdge
     selectedEdge = null
-    applyMutation((d) => removeEdge(d, target.from, target.to))
+    applyMutation((d) => removeEdge(d, address, index))
   }
   function onNodeDragStop() {
     if (isNew || !loadedVersion) return
@@ -379,7 +424,7 @@
   // playbook path, which has nothing to discard).
   function onRelayout() {
     if (!lastValidModel) return
-    const flow = toFlow(lastValidModel, null, undefined, undefined, true)
+    const flow = toFlow(lastValidModel, { forceAuto: true })
     nodes = withProfileModels(flow.nodes, models)
     edges = flow.edges
     if (isNew || !loadedVersion) return
@@ -431,7 +476,11 @@
         else toast.info('Not saved: the launch floor stays', { description: step.message })
         return
       }
+      // A refused definition: its issues, each with the addresses of the
+      // edges it is about, when the server sends them.
+      const issues = e instanceof ApiError ? refusedIssues(e.body) : []
       if (step) toast.error('Save refused', { description: step.message })
+      else if (issues.length) toast.error('Save refused', { description: issues.map(issueLine).join('\n') })
       else toast.error('Save failed', { description: String(e) })
     } finally {
       saving = false
@@ -574,16 +623,37 @@
           </div>
         </div>
       </div>
-    {:else if selectedEdge && !overlayOpen}
+    {:else if selectedEdgeView && !overlayOpen}
+      {@const view = selectedEdgeView}
       <div
         class="box absolute right-2 top-4 z-[6] flex w-60 flex-col gap-2 px-3 pt-4 pb-3 text-sm"
       >
         <span class="box-cap">edge</span>
-        <span class="text-xs">{selectedEdge.from} → {selectedEdge.to}</span>
+        <span class="edge-ends">{view.edge.from} → {view.edge.to}</span>
+        <dl class="edge-facts">
+          <dt>address</dt>
+          <dd class="edge-address" data-testid="edge-address">{view.at.rendered}</dd>
+          <dt>taken</dt>
+          <dd>{view.when}</dd>
+          {#if view.at.check.kind !== 'parallel'}
+            <dt>order</dt>
+            <dd>{view.order}</dd>
+          {/if}
+          {#if view.edge.max_traversals !== undefined}
+            <dt>max traversals</dt>
+            <dd>{String(view.edge.max_traversals)}</dd>
+          {/if}
+          {#if view.edge.join !== undefined}
+            <dt>join</dt>
+            <dd>{String(view.edge.join)}</dd>
+          {/if}
+        </dl>
         <Button
           variant="outline"
           size="sm"
           class="self-start text-muted-foreground hover:text-destructive"
+          disabled={!canEditStruct}
+          title={canEditStruct ? undefined : 'Fix the YAML first'}
           onclick={onDeleteEdge}
         >
           delete
@@ -632,7 +702,7 @@
       elementsSelectable={!overlayOpen}
       onnodeclick={onNodeClick}
       onedgeclick={onEdgeClick}
-      onconnect={onConnect}
+      onbeforeconnect={onBeforeConnect}
       onnodedragstop={onNodeDragStop}
       onpaneclick={onPaneClick}
     >
@@ -644,3 +714,30 @@
 </div>
 
 <StatusBar items={statusItems} />
+
+<style>
+  /* Plain CSS over the app's variables. */
+  .edge-ends {
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .edge-facts {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 8px;
+    margin: 0;
+    font-size: 11px;
+  }
+  .edge-facts dt {
+    color: var(--muted-foreground);
+  }
+  .edge-facts dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--c-fg-2);
+  }
+  .edge-address {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+</style>

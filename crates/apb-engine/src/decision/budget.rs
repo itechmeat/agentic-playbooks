@@ -196,6 +196,7 @@ mod tests {
             error: None,
             enforce_refused: None,
             join: Default::default(),
+            edge_addresses: Default::default(),
         }
     }
 }

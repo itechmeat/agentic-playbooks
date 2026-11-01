@@ -125,12 +125,27 @@ pub fn render_text(r: &StatsReport) -> String {
             out.push_str(&format!("  {line}\n"));
         }
         for n in &v.nodes {
+            if n.executions == 0 && n.cancelled == 0 {
+                out.push_str(&format!(
+                    "  node {}: not executed in {} of {} runs\n",
+                    n.node, n.in_runs, v.runs
+                ));
+                continue;
+            }
             let mut line = format!(
-                "  node {}: {} runs, first pass {}",
+                "  node {}: executed {} times in {} of {} runs ({} completed, {} open, {} failed), first pass {}",
                 n.node,
+                n.executions,
                 n.runs,
+                v.runs,
+                n.completed,
+                n.open,
+                n.failed,
                 n.first_pass.text()
             );
+            if n.cancelled > 0 {
+                line.push_str(&format!(", {} cancelled by a race", n.cancelled));
+            }
             if n.retries + n.fallbacks + n.reentries > 0 {
                 line.push_str(&format!(
                     ", {} retries, {} fallbacks, {} re-entries",

@@ -43,6 +43,7 @@ fn seed_with_pending_question() -> (tempfile::TempDir, String) {
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "iq".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
 

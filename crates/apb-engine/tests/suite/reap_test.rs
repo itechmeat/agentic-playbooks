@@ -336,6 +336,7 @@ fn a_fork_with_two_dead_attempts_reaps_both_and_finishes() {
             EventPayload::RunStarted {
                 playbook: "reapfork".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
             EventPayload::NodeFinished {
                 node: "start".into(),

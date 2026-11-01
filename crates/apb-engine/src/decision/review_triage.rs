@@ -138,6 +138,7 @@ pub(crate) fn recommend(
     let outcome = runner.decide(
         journal,
         DecisionCall {
+            edge_addresses: BTreeMap::new(),
             site: UseSite::ReviewTriage,
             node: Some(g.node),
             attempt: Some(g.visit),

@@ -225,9 +225,10 @@ pub(crate) fn versioning_error(e: VersioningError) -> Response {
         VersioningError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
         VersioningError::Validation(issues) => {
             let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+            let views: Vec<apb_core::validate::IssueView> = issues.iter().map(Into::into).collect();
             (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "validation", "codes": codes })),
+                Json(serde_json::json!({ "error": "validation", "codes": codes, "issues": views })),
             )
                 .into_response()
         }

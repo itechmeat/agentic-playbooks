@@ -922,3 +922,164 @@ fn no_grade_means_no_quality_field() {
     assert!(json["versions"][0].get("quality").is_none());
     assert!(!render_text(&r).contains("quality"));
 }
+
+// --- executions per node (identity-based) ----------------------------------
+
+fn node_of<'a>(r: &'a StatsReport, node: &str) -> &'a NodeStats {
+    r.versions[0]
+        .nodes
+        .iter()
+        .find(|n| n.node == node)
+        .unwrap_or_else(|| panic!("no row for {node}"))
+}
+
+#[test]
+fn a_running_node_is_one_open_execution() {
+    let r = build(
+        &[run(
+            "r1",
+            "1.0.0",
+            Some(SNAPSHOT),
+            &[(1_100, started("work"))],
+        )],
+        &StatsFilter::default(),
+    );
+    let w = node_of(&r, "work");
+    assert_eq!((w.runs, w.executions, w.completed, w.open), (1, 1, 0, 1));
+    assert_eq!(w.reentries, 0);
+}
+
+#[test]
+fn a_quota_paused_first_execution_has_no_reentry() {
+    use serde_json::json;
+    // Paused by its quota, resumed, started again and finished: one
+    // execution, though the node started twice.
+    let r = build(
+        &[run(
+            "r1",
+            "1.0.0",
+            Some(SNAPSHOT),
+            &[
+                (1_100, started("work")),
+                (
+                    1_200,
+                    json!({"type": "attempt_started", "node": "work", "attempt": 1, "agent": "a"}),
+                ),
+                (
+                    1_300,
+                    json!({"type": "attempt_finished", "node": "work", "attempt": 1, "status": "interrupted", "duration_ms": 1}),
+                ),
+                (1_400, json!({"type": "run_paused", "reason": "quota"})),
+                (1_500, json!({"type": "run_resumed", "from_node": "work"})),
+                (1_600, started("work")),
+                (1_700, finished("work", "succeeded", 1)),
+            ],
+        )],
+        &StatsFilter::default(),
+    );
+    let w = node_of(&r, "work");
+    assert_eq!(
+        (w.runs, w.executions, w.completed, w.reentries),
+        (1, 1, 1, 0)
+    );
+}
+
+#[test]
+fn reentries_are_executions_less_runs_across_runs() {
+    let r = build(
+        &[
+            run(
+                "r1",
+                "1.0.0",
+                Some(SNAPSHOT),
+                &[
+                    (1_100, started("work")),
+                    (1_200, finished("work", "failed", 1)),
+                    (1_300, edge("work", "work")),
+                    (1_400, started("work")),
+                    (1_500, finished("work", "succeeded", 1)),
+                ],
+            ),
+            run(
+                "r2",
+                "1.0.0",
+                Some(SNAPSHOT),
+                &[
+                    (2_100, started("work")),
+                    (2_200, finished("work", "succeeded", 1)),
+                ],
+            ),
+        ],
+        &StatsFilter::default(),
+    );
+    let w = node_of(&r, "work");
+    assert_eq!((w.runs, w.executions, w.completed), (2, 3, 3));
+    assert_eq!(w.reentries, 1);
+}
+
+#[test]
+fn a_finished_execution_and_an_open_one_are_one_reentry() {
+    let r = build(
+        &[run(
+            "r1",
+            "1.0.0",
+            Some(SNAPSHOT),
+            &[
+                (1_100, started("work")),
+                (1_200, finished("work", "failed", 1)),
+                (1_300, edge("work", "work")),
+                (1_400, started("work")),
+            ],
+        )],
+        &StatsFilter::default(),
+    );
+    let w = node_of(&r, "work");
+    assert_eq!((w.executions, w.completed, w.open), (2, 1, 1));
+    assert_eq!((w.failed, w.reentries), (1, 1));
+}
+
+#[test]
+fn a_race_loser_is_counted_apart() {
+    let r = build(
+        &[run(
+            "r1",
+            "1.0.0",
+            Some(SNAPSHOT),
+            &[
+                (1_100, started("work")),
+                (1_100, finished("work", "cancelled", 1)),
+            ],
+        )],
+        &StatsFilter::default(),
+    );
+    let w = node_of(&r, "work");
+    assert_eq!((w.runs, w.executions, w.cancelled), (0, 0, 1));
+}
+
+#[test]
+fn a_finish_without_a_prompt_counts_and_unexecuted_nodes_have_zero_rows() {
+    let r = build(
+        &[run(
+            "r1",
+            "1.0.0",
+            Some(SNAPSHOT),
+            &[
+                (1_100, started("start")),
+                (1_200, finished("start", "succeeded", 1)),
+                (1_300, edge("start", "done")),
+                (1_400, finished("done", "succeeded", 1)),
+                (1_500, end("succeeded")),
+            ],
+        )],
+        &StatsFilter::default(),
+    );
+    let done = node_of(&r, "done");
+    assert_eq!((done.runs, done.executions, done.completed), (1, 1, 1));
+    let work = node_of(&r, "work");
+    assert_eq!((work.in_runs, work.runs, work.executions), (1, 0, 0));
+    let text = render::render_text(&r);
+    assert!(
+        text.contains("node work: not executed in 1 of 1 runs"),
+        "{text}"
+    );
+}

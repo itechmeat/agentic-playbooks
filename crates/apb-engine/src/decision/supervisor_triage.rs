@@ -198,6 +198,7 @@ pub(crate) fn triage(runner: &DecisionRunner, journal: &dyn DecisionJournal, p: 
     let outcome = runner.decide(
         journal,
         DecisionCall {
+            edge_addresses: BTreeMap::new(),
             site: UseSite::SupervisorTriage,
             node: Some(p.node),
             attempt: Some(p.attempt),

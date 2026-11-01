@@ -13,6 +13,7 @@ fn run_started(playbook: &str) -> EventPayload {
     EventPayload::RunStarted {
         playbook: playbook.into(),
         version: "1.0.0".into(),
+        definition: None,
     }
 }
 
@@ -24,6 +25,7 @@ fn folds_finished_run() {
             EventPayload::RunStarted {
                 playbook: "w".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         ),
         ev(
@@ -110,6 +112,7 @@ fn open_attempt_marks_interrupted() {
             EventPayload::RunStarted {
                 playbook: "w".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         ),
         ev(
@@ -158,6 +161,7 @@ fn run_resumed_folds_to_running() {
                 by: None,
                 explicit: false,
                 launch: None,
+                definition: None,
             },
         ),
     ];
@@ -261,6 +265,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
             EventPayload::RunStarted {
                 playbook: "w".into(),
                 version: "1.0.0".into(),
+                definition: None,
             },
         ),
         ev(
@@ -406,6 +411,7 @@ fn a_policy_route_folds_separately_from_a_declared_edge_traversal() {
                 to: "tick".into(),
                 via_policy: false,
                 uncounted: false,
+                edges: Vec::new(),
             },
         ),
         ev(
@@ -415,6 +421,7 @@ fn a_policy_route_folds_separately_from_a_declared_edge_traversal() {
                 to: "handler".into(),
                 via_policy: true,
                 uncounted: false,
+                edges: Vec::new(),
             },
         ),
     ];
@@ -450,6 +457,7 @@ fn edge_traversed_flags_decide_counting_and_every_record_is_a_hop() {
                 to: "b".into(),
                 via_policy: false,
                 uncounted: false,
+                edges: Vec::new(),
             },
         ),
         ev(
@@ -459,6 +467,7 @@ fn edge_traversed_flags_decide_counting_and_every_record_is_a_hop() {
                 to: "d".into(),
                 via_policy: false,
                 uncounted: true,
+                edges: Vec::new(),
             },
         ),
         ev(
@@ -468,6 +477,7 @@ fn edge_traversed_flags_decide_counting_and_every_record_is_a_hop() {
                 to: "f".into(),
                 via_policy: true,
                 uncounted: false,
+                edges: Vec::new(),
             },
         ),
         ev(
@@ -477,6 +487,7 @@ fn edge_traversed_flags_decide_counting_and_every_record_is_a_hop() {
                 to: "h".into(),
                 via_policy: true,
                 uncounted: true,
+                edges: Vec::new(),
             },
         ),
     ];
@@ -529,6 +540,7 @@ fn revival_journal() -> Vec<EventPayload> {
         to: to.into(),
         via_policy: false,
         uncounted,
+        edges: Vec::new(),
     };
     let mut e = vec![run_started("p")];
     e.extend(finished("b", "succeeded"));
@@ -726,6 +738,7 @@ fn a_loop_round_reads_only_the_latest_execution() {
         to: to.into(),
         via_policy: false,
         uncounted: true,
+        edges: Vec::new(),
     };
     let round_one = [
         started("gate"),

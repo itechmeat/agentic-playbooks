@@ -125,6 +125,7 @@ fn seed_gate_run_yaml(
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "gated".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     for p in payloads {
@@ -1280,6 +1281,7 @@ fn seed_open_attempt_run(root: &std::path::Path, run_id: &str, pid: u32) {
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::NodeStarted {
@@ -1473,6 +1475,7 @@ async fn run_detail_reports_a_working_child_run_as_running() {
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
+        definition: None,
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::ChildRunStarted {

@@ -170,6 +170,7 @@ version = "1.0.0-beta.2"
 dependencies = [
  "apb-core",
  "apb-decide",
+ "apb-engine",
  "base64 0.23.1",
  "imap",
  "imap-proto 0.17.0",

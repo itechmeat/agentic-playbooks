@@ -183,9 +183,9 @@ impl RunSources {
     /// The playbook id and version the run started.
     pub fn started(&self) -> Option<(String, String)> {
         self.run.events.iter().find_map(|e| match &e.payload {
-            EventPayload::RunStarted { playbook, version } => {
-                Some((playbook.clone(), version.clone()))
-            }
+            EventPayload::RunStarted {
+                playbook, version, ..
+            } => Some((playbook.clone(), version.clone())),
             _ => None,
         })
     }

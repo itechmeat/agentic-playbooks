@@ -118,14 +118,30 @@ pub struct GoalStats {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct NodeStats {
     pub node: String,
-    /// Runs the node started in.
+    /// Runs with at least one execution of the node that was not cancelled
+    /// (an open one included). A finish without a prompt is an execution;
+    /// a `join: any` race loser is not counted here ([`NodeStats::cancelled`]).
     pub runs: usize,
+    /// Runs whose definition contains the node, executed or not: a node no
+    /// run executed has a row with zero executions.
+    pub in_runs: usize,
+    /// Executions begun, race losers left out (`crate::identity`).
+    pub executions: usize,
+    /// Of those, the ones that ended.
+    pub completed: usize,
+    /// Of those, the ones still open: running, paused, or cut short.
+    pub open: usize,
+    /// Completed executions that ended `failed` or `timed_out`.
+    pub failed: usize,
+    /// Executions a `join: any` race cancelled, counted apart.
+    pub cancelled: usize,
     /// Runs where the node's first result was a success on attempt 1, with
     /// no retry, fallback or later re-entry.
     pub first_pass: Rate,
     pub retries: usize,
     pub fallbacks: usize,
-    /// Starts after the first in the same run (a loop back into it).
+    /// Executions after the first in the same run (a loop back into it):
+    /// `executions - runs`, never negative.
     pub reentries: usize,
     pub duration: Waits,
     /// The declared `expected_duration`, in seconds.
@@ -391,6 +407,12 @@ struct RunFacts {
 #[derive(Default)]
 struct NodeAcc {
     runs: usize,
+    in_runs: usize,
+    executions: usize,
+    completed: usize,
+    open: usize,
+    failed: usize,
+    cancelled: usize,
     first_pass: usize,
     retries: usize,
     fallbacks: usize,
@@ -517,16 +539,40 @@ fn run_facts(
             _ => {}
         }
     }
-    for (node, n) in &started {
-        let acc = nodes.entry((*node).to_string()).or_default();
+    // Executions come from the identity index, not from `node_started`: a
+    // finish without a prompt writes none, and a race loser writes one but
+    // never ran.
+    let index = crate::identity::index(ev);
+    for (node, execs) in index.nodes() {
+        let begun: Vec<&crate::identity::Execution> =
+            execs.iter().filter(|x| !x.cancelled).collect();
+        let acc = nodes.entry(node.to_string()).or_default();
+        acc.cancelled += execs.len() - begun.len();
+        if begun.is_empty() {
+            continue;
+        }
+        let n = begun.len();
         acc.runs += 1;
+        acc.executions += n;
+        acc.completed += begun.iter().filter(|x| !x.is_open()).count();
+        acc.open += begun.iter().filter(|x| x.is_open()).count();
+        acc.failed += begun
+            .iter()
+            .filter(|x| matches!(x.status.as_deref(), Some("failed" | "timed_out")))
+            .count();
         acc.reentries += n - 1;
         let r = retried.get(node).copied().unwrap_or(0);
         let fb = fell_back.get(node).copied().unwrap_or(0);
         acc.retries += r;
         acc.fallbacks += fb;
-        if *n == 1 && r == 0 && fb == 0 && first_result.get(node) == Some(&(true, 1)) {
+        if n == 1 && r == 0 && fb == 0 && first_result.get(node) == Some(&(true, 1)) {
             acc.first_pass += 1;
+        }
+    }
+    // Every node of the run's definition gets a row, executed or not.
+    if let Some(pb) = &run.snapshot {
+        for n in &pb.nodes {
+            nodes.entry(n.id.clone()).or_default().in_runs += 1;
         }
     }
     (f.gate_waits, f.question_waits) = spans::human_waits(ev);
@@ -626,6 +672,12 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
             NodeStats {
                 first_pass: Rate::new(a.first_pass, a.runs),
                 runs: a.runs,
+                in_runs: a.in_runs,
+                executions: a.executions,
+                completed: a.completed,
+                open: a.open,
+                failed: a.failed,
+                cancelled: a.cancelled,
                 retries: a.retries,
                 fallbacks: a.fallbacks,
                 reentries: a.reentries,

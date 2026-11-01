@@ -631,6 +631,7 @@ mod tests {
             by: None,
             explicit: false,
             launch: None,
+            definition: None,
         };
         let waits = vec![
             at(
@@ -1050,6 +1051,7 @@ mod tests {
             by: None,
             explicit,
             launch: None,
+            definition: None,
         };
         let first = events(&[paused.clone(), resumed(false)]);
         assert!(

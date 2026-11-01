@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDiff } from './difffmt'
+import { diffEdgeChanges, diffOrderChanges, formatDiff } from './difffmt'
 
 describe('formatDiff', () => {
   it('classifies add/del/context lines', () => {
@@ -38,5 +38,32 @@ describe('formatDiff', () => {
   it('treats plain non-diff lines as context', () => {
     const lines = formatDiff('just text')
     expect(lines[0]).toEqual({ kind: 'ctx', text: 'just text' })
+  })
+})
+
+describe('diff edge lists', () => {
+  const d = (from: string, to: string, ordinal: number) => ({ kind: 'derived' as const, from, to, ordinal })
+
+  it('lists only the edges whose attributes changed, before and after', () => {
+    const rows = diffEdgeChanges({
+      edges: [
+        { before: d('a', 'b', 1), after: d('a', 'b', 1), changed: [] },
+        { before: d('a', 'c', 2), after: { kind: 'authored', id: 'retry' }, changed: ['id', 'condition'] },
+        { before: null, after: d('a', 'd', 1), changed: [] },
+      ],
+    })
+    expect(rows).toEqual([{ before: 'e:a>c#2', after: 'id:retry', changed: ['id', 'condition'] }])
+  })
+
+  it('lists the sources whose edges are checked in another order', () => {
+    const rows = diffOrderChanges({
+      edge_order_changed: [{ node: 'gate', before: [d('gate', 'x', 1), d('gate', 'y', 1)], after: [d('gate', 'y', 1), d('gate', 'x', 1)] }],
+    })
+    expect(rows).toEqual([{ node: 'gate', before: ['e:gate>x#1', 'e:gate>y#1'], after: ['e:gate>y#1', 'e:gate>x#1'] }])
+  })
+
+  it('lists nothing for a diff from an older server', () => {
+    expect(diffEdgeChanges({})).toEqual([])
+    expect(diffOrderChanges(null)).toEqual([])
   })
 })
