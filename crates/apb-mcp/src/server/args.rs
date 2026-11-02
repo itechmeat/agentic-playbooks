@@ -390,6 +390,18 @@ pub struct RunResumeArgs {
     pub run_id: String,
     /// Node to resume from (determined automatically by default).
     pub from_node: Option<String>,
+    /// retry_now - start a deferred retry now instead of at its due time
+    /// (a `retry_now` next action). On a run a live driver holds the retry
+    /// starts at once and nothing else happens; a released or paused run is
+    /// resumed with the retry due. Refused with no_deferred_retry when
+    /// nothing waits to retry. Not with from_node.
+    #[serde(default)]
+    pub retry_now: bool,
+    /// node - with retry_now: only this node's waiting retry (default:
+    /// every waiting retry of the run). Refused with node_without_retry_now
+    /// without retry_now.
+    #[serde(default)]
+    pub node: Option<String>,
     /// Continue despite environment drift: an agent executable recorded in the
     /// run manifest changed on disk since the run started. By default resume
     /// refuses this and returns the drift error inline; set true to override

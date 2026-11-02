@@ -133,6 +133,7 @@ fn attempt_started(node: &str) -> EventPayload {
         transcript: None,
         token: None,
         isolation: None,
+        exec: None,
     }
 }
 
@@ -346,13 +347,7 @@ fn resume_failed_terminal_no_successor_is_refused_without_journaling() {
 /// `"type":"run_resumed"` - guards against a `rename_all` regression.
 #[test]
 fn run_resumed_serializes_with_snake_case_tag() {
-    let payload = EventPayload::RunResumed {
-        from_node: "a".into(),
-        by: None,
-        explicit: false,
-        launch: None,
-        definition: None,
-    };
+    let payload = EventPayload::resumed("a", None, false);
     let json = serde_json::to_string(&payload).unwrap();
     assert!(
         json.contains(r#""type":"run_resumed""#),

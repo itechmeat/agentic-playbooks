@@ -294,6 +294,14 @@ fn run_item(run: &ListRun<'_, '_, '_>, fold: &ListFold, id: &str) -> Result<Ran,
                 run.node.id
             )));
         }
+        // A list node's item retries are never delayed (`retry_delay` is
+        // refused on a list node).
+        AttemptOutcome::Deferred { .. } => {
+            return Err(EngineError::Invalid(format!(
+                "list item `{id}` of node `{}` cannot defer its retry (`retry_delay` is refused on a list node)",
+                run.node.id
+            )));
+        }
     })
 }
 

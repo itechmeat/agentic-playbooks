@@ -23,6 +23,7 @@ pub(crate) mod nodes;
 mod params;
 mod publish;
 mod quality;
+mod retry;
 mod templates;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -315,6 +316,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     edges::check_pair_caps(playbook, &mut r); // V122
     edges::check_one_of_order(playbook, &mut r); // V123, V124
     edges::check_judge_values(playbook, &mut r); // V125
+    retry::check_retry_delay(playbook, &mut r); // V126-V130
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

@@ -1078,6 +1078,7 @@ pub(crate) fn prepare_run_target(
         scripts_digest,
         profiles: profiles_prov,
         remembered,
+        apb: crate::event::apb_version(),
     })?;
     // The known problems this run shows its agents, rechecked where their
     // source changed, journaled once (only for a playbook whose

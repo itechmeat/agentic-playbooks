@@ -236,6 +236,7 @@ fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
         transcript: None,
         token: None,
         isolation: None,
+        exec: None,
     }
 }
 

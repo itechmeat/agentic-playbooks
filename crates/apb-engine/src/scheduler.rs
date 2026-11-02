@@ -47,6 +47,7 @@ mod cache;
 mod continuation;
 mod control_apply;
 mod deadline;
+pub mod deferred;
 mod dispatch;
 mod entry;
 mod finish_answer;
@@ -110,11 +111,11 @@ use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
 use prepare::*;
 pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
-pub(crate) use resume::resume_detached_pause;
+pub(crate) use resume::resume_detached_held;
 pub use resume::{
-    PAUSE_SUPERSEDED, RESUME_SUPERSEDED, ResumeRequest, record_run_error, resume, resume_by,
-    resume_detached, resume_detached_by, resume_detached_req, resume_detached_with, resume_pause,
-    resume_req, resume_with,
+    PAUSE_SUPERSEDED, RELEASE_SUPERSEDED, RESUME_SUPERSEDED, ResumeRequest, RetryNow,
+    record_run_error, resume, resume_by, resume_detached, resume_detached_by, resume_detached_req,
+    resume_detached_with, resume_held, resume_pause, resume_req, resume_with,
 };
 pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
@@ -187,6 +188,7 @@ fn stop_on_unhandled_failure(
             artifacts: Vec::new(),
         })?;
     }
+    deferred::cancel_open(log)?;
     log.append(EventPayload::RunError {
         node: Some(node.to_string()),
         reason: failure_detail(output),
@@ -313,10 +315,24 @@ fn drive(
     );
     // The drive's last word on the run: a pause, its end or its failure is
     // news to a person who subscribed (see `crate::notify`).
+    // A send that sweep could not make waits for a sweep no driver runs
+    // any more: the notify waker retries it.
     let notify_after = || {
         crate::notify::send::Notifier::new(root, run_dir, &run_id_for_failure).sweep_now();
+        if crate::notify::retry::retry_ahead(root, run_dir, &run_id_for_failure) {
+            crate::waker::spawn_notify_waker(root, &run_id_for_failure);
+        }
     };
     match result {
+        // A released run frees its lock and arms its waker first: a
+        // retry-now or a resume that comes in meanwhile does not wait for
+        // the sweep. Two sweeps of one journal never send twice (each send
+        // is decided in the send ledger under the journal lock).
+        Ok(r) if r.outcome == RunStatus::Running => {
+            crate::pause::request::after_release(root, run_dir, &r.run_id, lock);
+            notify_after();
+            Ok(r)
+        }
         Ok(r) => {
             // The last sweep runs while this is still the run's one driver:
             // once the lock is released and the waker armed, a resume may
@@ -342,6 +358,7 @@ fn drive(
                 node: None,
                 reason: e.to_string(),
             });
+            let _ = deferred::cancel_open(log);
             finish_hooks::finish_hooks(log, run_dir, false);
             let _ = log.append(EventPayload::RunFinished {
                 outcome: "failed".into(),
@@ -682,6 +699,28 @@ fn drive_inner(
             })?;
             state = RunState::fold(&read_all(run_dir)?);
         }
+        // Deferred retries (`deferred`): a node whose delayed retry is not due
+        // yet is never admitted. With nothing else to run the drive waits
+        // here, the control scan at the top running every tick.
+        let now = apb_core::clock::now_ms();
+        let held = deferred::held(&state, &events, now);
+        if let Some(due_at) = deferred::hold(&held, &mut current, &mut frontier) {
+            // A long wait frees the run instead: `drive` releases its lock
+            // and leaves a waker for `due_at`.
+            // Journaled under the run's event lock, and only while no
+            // control or expedite came in since this turn's look: what did
+            // is applied at the next turn instead.
+            if deferred::may_release(cfg, mode, due_at, now)
+                && deferred::try_release(run_dir, log, control_cursor, now)?.is_some()
+            {
+                return Ok(RunResult {
+                    run_id,
+                    outcome: RunStatus::Running,
+                });
+            }
+            std::thread::sleep(deferred::sleep_for(due_at, now));
+            continue;
+        }
         // Where agent_task and script nodes without their own `workdir` run:
         // the run's working tree once it is resolved (issue #67 item 8), else
         // the execution root. Taken from the fold on every iteration, because
@@ -903,6 +942,9 @@ fn drive_inner(
             {
                 promote_applied_patch(root, run_dir, log, &playbook, applied)?;
             }
+            // The first finish reached ends the run: a retry still deferred
+            // on another branch never runs.
+            deferred::cancel_open(log)?;
             finish_hooks::finish_hooks(log, run_dir, outcome == RunStatus::Succeeded);
             log.append(EventPayload::RunFinished { outcome: s.into() })?;
             return Ok(RunResult { run_id, outcome });
@@ -951,7 +993,7 @@ fn drive_inner(
         if is_batchable(&playbook, &current) {
             let mut batch: Vec<String> = vec![current.clone()];
             for n in &frontier {
-                if is_batchable(&playbook, n) && !batch.contains(n) {
+                if is_batchable(&playbook, n) && !batch.contains(n) && !held.contains_key(n) {
                     batch.push(n.clone());
                 }
             }
@@ -1050,6 +1092,9 @@ fn drive_inner(
                     // when it started): it gets commit attribution, and nothing
                     // is admitted beside it.
                     let mut solo: Option<String> = None;
+                    // Members whose retry waits, and when each is due.
+                    let mut waiting_members: BTreeSet<String> = BTreeSet::new();
+                    let mut member_due: BTreeMap<String, u64> = BTreeMap::new();
                     let body = (|| -> Result<(), EngineError> {
                         loop {
                             // Admission. `cancel` is snapshotted before
@@ -1105,19 +1150,30 @@ fn drive_inner(
                                     queue.clear();
                                     break;
                                 }
+                                // The state as it stands now: a member admitted
+                                // mid-batch renders the outputs of the members
+                                // that ended before it.
+                                let mut state_now = RunState::fold(&read_all(run_dir)?);
+                                // A member whose delayed retry is due continues
+                                // its open execution: no new start, no cache.
+                                let cont = state_now
+                                    .deferred
+                                    .get(n.as_str())
+                                    .map(deferred::RetryContinuation::of);
                                 // Started before the cache lookup, exactly as in
                                 // the sequential arm: a hit is a node that ran,
                                 // it just ran once before. The lookup, the
                                 // artifact restore and the store stay on this
                                 // (the drive) thread.
-                                journal.append(EventPayload::NodeStarted {
-                                    node: n.clone(),
-                                    attempt: 1,
-                                })?;
-                                // The state as it stands now: a member admitted
-                                // mid-batch renders the outputs of the members
-                                // that ended before it.
-                                let state_now = RunState::fold(&read_all(run_dir)?);
+                                if cont.is_none() {
+                                    journal.append(EventPayload::NodeStarted {
+                                        node: n.clone(),
+                                        attempt: 1,
+                                    })?;
+                                    // The cache lookup and the member's run
+                                    // see it started, as they did before.
+                                    state_now = RunState::fold(&read_all(run_dir)?);
+                                }
                                 // A member admitted mid-batch takes its workspace
                                 // fingerprint now, against the tree it starts on,
                                 // as a sequential node does; admission still
@@ -1127,24 +1183,30 @@ fn drive_inner(
                                     Some(_) => None,
                                     None => cache::pre_fingerprint(&playbook, &n, &workdir, cfg),
                                 };
-                                let probe = cache::probe(
-                                    &playbook,
-                                    &n,
-                                    run_dir,
-                                    &workdir,
-                                    &run_id,
-                                    &state_now,
-                                    cfg,
-                                    cache::ProbeContext {
-                                        pre_fingerprint: pre_fps
-                                            .get(n.as_str())
-                                            .or(late_fp.as_ref())
-                                            .map(String::as_str),
-                                        batch_member: true,
-                                        store_root: Some(root),
-                                        declared_key: None,
+                                let probe = match cont {
+                                    Some(_) => cache::CacheProbe::Miss {
+                                        ctx: None,
+                                        events: Vec::new(),
                                     },
-                                )?;
+                                    None => cache::probe(
+                                        &playbook,
+                                        &n,
+                                        run_dir,
+                                        &workdir,
+                                        &run_id,
+                                        &state_now,
+                                        cfg,
+                                        cache::ProbeContext {
+                                            pre_fingerprint: pre_fps
+                                                .get(n.as_str())
+                                                .or(late_fp.as_ref())
+                                                .map(String::as_str),
+                                            batch_member: true,
+                                            store_root: Some(root),
+                                            declared_key: None,
+                                        },
+                                    )?,
+                                };
                                 match probe {
                                     cache::CacheProbe::Hit {
                                         output,
@@ -1198,6 +1260,7 @@ fn drive_inner(
                                         let scrub_c = env_scrub.clone();
                                         let journal_ref = &journal;
                                         let decisions_ref = decisions.as_ref();
+                                        let cont_c = cont.clone();
                                         running += 1;
                                         scope.spawn(move || {
                                             // A panic becomes an error the drive
@@ -1228,6 +1291,7 @@ fn drive_inner(
                                                         ExecOptions {
                                                             override_prompt: op,
                                                             track_provenance: alone,
+                                                            continuation: cont_c,
                                                             ..ExecOptions::default()
                                                         },
                                                     )
@@ -1250,11 +1314,54 @@ fn drive_inner(
                                     }
                                     continue;
                                 }
-                                let (node, res) = rx.recv().map_err(|_| {
-                                    EngineError::Invalid(
-                                        "a batch member ended without reporting".into(),
-                                    )
-                                })?;
+                                // A member whose retry waits is not in flight:
+                                // the wait for the next result ends in time to
+                                // admit it again once it is due.
+                                // One already due (expedited since it was
+                                // last looked at) is admitted at once.
+                                let now = apb_core::clock::now_ms();
+                                let wait = waiting_members
+                                    .iter()
+                                    .map(|m| {
+                                        member_due.get(m).map_or(
+                                            if halt.load(Ordering::SeqCst) {
+                                                deferred::WAIT_TICK
+                                            } else {
+                                                Duration::ZERO
+                                            },
+                                            |at| deferred::sleep_for(*at, now),
+                                        )
+                                    })
+                                    .min();
+                                let received = match wait {
+                                    None => {
+                                        rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                                    }
+                                    Some(w) => rx.recv_timeout(w),
+                                };
+                                let (node, res) = match received {
+                                    Ok(r) => r,
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                        member_due = deferred::held_now(run_dir)?;
+                                        if !halt.load(Ordering::SeqCst) {
+                                            let ready: Vec<String> = waiting_members
+                                                .iter()
+                                                .filter(|m| !member_due.contains_key(*m))
+                                                .cloned()
+                                                .collect();
+                                            for m in ready {
+                                                waiting_members.remove(&m);
+                                                queue.push_back(m);
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        return Err(EngineError::Invalid(
+                                            "a batch member ended without reporting".into(),
+                                        ));
+                                    }
+                                };
                                 running -= 1;
                                 reserved.release(&node);
                                 if solo.as_deref() == Some(node.as_str()) {
@@ -1287,6 +1394,16 @@ fn drive_inner(
                                         }
                                         journal::post_engine_pause(run_dir, pause)?;
                                         halt.store(true, Ordering::SeqCst);
+                                        continue;
+                                    }
+                                    // Its retry waits: no `node_finished`, and
+                                    // it rejoins the queue once it is due.
+                                    AttemptOutcome::Deferred { events } => {
+                                        for ev in events {
+                                            journal.append(ev)?;
+                                        }
+                                        member_due = deferred::held_now(run_dir)?;
+                                        waiting_members.insert(node);
                                         continue;
                                     }
                                 };
@@ -1443,6 +1560,14 @@ fn drive_inner(
                     body
                 });
                 scoped?;
+                // A member whose retry still waits goes back to the frontier,
+                // held there until it is due.
+                let after_batch = RunState::fold(&read_all(run_dir)?);
+                for m in &batch {
+                    if after_batch.deferred.contains_key(m) && !frontier.contains(m) {
+                        frontier.push(m.clone());
+                    }
+                }
                 rebuild_context_md(run_dir)?;
                 // Attribute progress the members posted while the batch was in
                 // flight, before the tail can return terminally. The batch can
@@ -2208,6 +2333,12 @@ fn drive_inner(
                                 timeout_ms: live_timeout_ms,
                             }),
                             track_provenance: true,
+                            // A delayed retry that is due continues its
+                            // execution (the hold above admits no other).
+                            continuation: state
+                                .deferred
+                                .get(&current)
+                                .map(deferred::RetryContinuation::of),
                             ..ExecOptions::default()
                         },
                     )?
@@ -2336,6 +2467,14 @@ fn drive_inner(
                         journal::post_engine_pause(run_dir, pause)?;
                         continue;
                     }
+                    // Its retry waits: the hold at the top of the loop keeps
+                    // it back until it is due.
+                    AttemptOutcome::Deferred { events } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        continue;
+                    }
                     // An interactive node is never a list node (V85).
                     AttemptOutcome::Halted { .. } => {
                         return Err(EngineError::Invalid(format!(
@@ -2346,29 +2485,44 @@ fn drive_inner(
             }
         } else {
             steps += 1;
-            log.append(EventPayload::NodeStarted {
-                node: current.clone(),
-                attempt: 1,
-            })?;
+            // A delayed retry that is due continues its open execution: no
+            // new start and no cache lookup (the hold above admits no other).
+            let continuation = state
+                .deferred
+                .get(&current)
+                .map(deferred::RetryContinuation::of);
+            if continuation.is_none() {
+                log.append(EventPayload::NodeStarted {
+                    node: current.clone(),
+                    attempt: 1,
+                })?;
+            }
             // Node cache (spec 2026-07-19), through the per-node unit both drive
             // arms share (`cache::probe` / `cache::settle`, spec 2026-08-05
             // section 1.4). `probe` returns a plain `Miss { ctx: None }` for any
             // non-cacheable node, in which case this collapses to the plain
             // execute path. On a hit we skip execution entirely; on a miss we
             // execute and then let `settle` decide whether the result is stored.
-            let (cache_ctx, hit) = match cache::probe(
-                &playbook,
-                &current,
-                run_dir,
-                &workdir,
-                &run_id,
-                &state,
-                cfg,
-                cache::ProbeContext {
-                    store_root: Some(root),
-                    ..Default::default()
+            let probe = match continuation {
+                Some(_) => cache::CacheProbe::Miss {
+                    ctx: None,
+                    events: Vec::new(),
                 },
-            )? {
+                None => cache::probe(
+                    &playbook,
+                    &current,
+                    run_dir,
+                    &workdir,
+                    &run_id,
+                    &state,
+                    cfg,
+                    cache::ProbeContext {
+                        store_root: Some(root),
+                        ..Default::default()
+                    },
+                )?,
+            };
+            let (cache_ctx, hit) = match probe {
                 cache::CacheProbe::Hit {
                     output,
                     artifacts,
@@ -2424,6 +2578,7 @@ fn drive_inner(
                             max_parallel: resolved_max_parallel(&playbook, cfg),
                             control_after: control_cursor,
                             budget: Some(&gate),
+                            continuation,
                             ..ExecOptions::default()
                         },
                     )?
@@ -2452,7 +2607,9 @@ fn drive_inner(
                     }
                     // A list node stopped between items for a pause: no
                     // `node_finished`; the control scan applies the pause.
-                    AttemptOutcome::Halted { events } => {
+                    // A retry that waits: the hold at the top of the loop
+                    // keeps the node back until it is due.
+                    AttemptOutcome::Halted { events } | AttemptOutcome::Deferred { events } => {
                         for ev in events {
                             log.append(ev)?;
                         }
@@ -2628,6 +2785,7 @@ fn drive_inner(
                     None => {
                         // No fallback path - the run fails without waiting for
                         // the hard max_steps limit.
+                        deferred::cancel_open(log)?;
                         finish_hooks::finish_hooks(log, run_dir, false);
                         log.append(EventPayload::RunFinished {
                             outcome: "failed".into(),

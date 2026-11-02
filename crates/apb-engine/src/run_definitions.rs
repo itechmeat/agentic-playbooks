@@ -22,7 +22,7 @@
 //! and its absence (a sidecar that was lost, full, or never written by an
 //! older apb) proves nothing.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use apb_core::schema::Playbook;
 
@@ -32,24 +32,21 @@ use crate::event::{Event, EventPayload};
 /// The directory of stored definitions inside a run directory.
 pub const DIR: &str = "definitions";
 
+/// The store of the run's definitions.
+const STORE: crate::run_store::RunStore = crate::run_store::RunStore {
+    dir: DIR,
+    ext: "yaml",
+};
+
 /// The digest a definition is stored and journaled under: sha256 of its
 /// exact bytes, lower-case hex.
 pub fn digest(bytes: &[u8]) -> String {
-    let prefixed = apb_core::content::sha256_hex(bytes);
-    prefixed
-        .strip_prefix("sha256:")
-        .unwrap_or(&prefixed)
-        .to_string()
+    crate::run_store::digest(bytes)
 }
 
-fn stored_path(run_dir: &Path, digest: &str) -> PathBuf {
-    run_dir.join(DIR).join(format!("{digest}.yaml"))
-}
-
-fn is_hex_digest(d: &str) -> bool {
-    d.len() == 64
-        && d.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+#[cfg(test)]
+fn stored_path(run_dir: &Path, digest: &str) -> std::path::PathBuf {
+    STORE.path(run_dir, digest)
 }
 
 /// Stores `yaml` as one of the run's definitions and returns its digest.
@@ -57,33 +54,7 @@ fn is_hex_digest(d: &str) -> bool {
 /// a `definitions` entry that is not a real directory (a link included) and
 /// a stored entry that is not a regular file.
 pub fn store(run_dir: &Path, yaml: &[u8]) -> std::io::Result<String> {
-    let digest = digest(yaml);
-    let dir = run_dir.join(DIR);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if !meta.file_type().is_dir() => {
-            return Err(std::io::Error::other(
-                "the run's definitions entry is not a directory",
-            ));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            apb_core::fsutil::create_dir_under(run_dir, &dir)?;
-        }
-        Err(e) => return Err(e),
-    }
-    let path = stored_path(run_dir, &digest);
-    match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.file_type().is_file() => return Ok(digest),
-        Ok(_) => {
-            return Err(std::io::Error::other(
-                "a stored definition entry is not a regular file",
-            ));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    apb_core::fsutil::atomic_write_private_under(run_dir, &path, yaml)?;
-    Ok(digest)
+    STORE.store(run_dir, yaml)
 }
 
 /// [`store`] for an execution path: returns the digest to journal whether
@@ -97,18 +68,7 @@ pub(crate) fn store_best_effort(run_dir: &Path, yaml: &[u8]) -> String {
 /// The bytes stored under `digest`, when they are there, regular, and hash
 /// to `digest`.
 pub fn read_stored(run_dir: &Path, digest: &str) -> Option<Vec<u8>> {
-    use std::io::Read;
-    if !is_hex_digest(digest) {
-        return None;
-    }
-    let dir = run_dir.join(DIR);
-    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_dir()) {
-        return None;
-    }
-    let mut file = apb_core::fsutil::open_regular_no_follow(&stored_path(run_dir, digest)).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    (self::digest(&bytes) == digest).then_some(bytes)
+    STORE.read(run_dir, digest)
 }
 
 /// Where the definition in force changes or is journaled again: the start,

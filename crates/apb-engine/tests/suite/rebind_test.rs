@@ -297,3 +297,120 @@ fn rebind_with_drifted_bundle_is_refused_and_pinning_holds() {
         "a refused rebind must not write an overlay"
     );
 }
+
+/// Every attempt names the binding snapshot it ran on: two attempts under
+/// one binding share one snapshot file, and each rebind writes a new one
+/// that its attempts name, so a later rebind never changes what an earlier
+/// attempt is recorded to have run on.
+#[test]
+fn each_attempt_names_the_binding_snapshot_it_ran_on() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let wf = WF_SUPERVISED.replace(
+        "{ id: work, type: agent_task, prompt: \"do\" }",
+        "{ id: work, type: agent_task, prompt: \"do\", max_retries: 1 }",
+    );
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/rebindflow/1.0.0/playbook.yaml"),
+        wf,
+    )
+    .unwrap();
+    seed_profile_with_soul(dir.path(), "mid", "MID-SOUL-MARKER");
+    let prog = soul_gated_agent(dir.path());
+    let _env = common::env_lock();
+    // Restored on drop, a failing assertion included.
+    let _cmd = common::EnvVar::set("APB_AGENT_CMD", &prog);
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let run_id = run_background(dir.path(), "rebindflow", None, opts).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let wakes = |n: usize| {
+        poll_until(&format!("{n} WakeRaised events"), || {
+            let events = read_all(&run_dir).ok()?;
+            (events
+                .iter()
+                .filter(|e| matches!(e.payload, EventPayload::WakeRaised { .. }))
+                .count()
+                >= n)
+                .then_some(())
+        })
+    };
+    let rebind_and_retry = |profile: &str| {
+        let r = QualifiedProfileRef {
+            name: profile.into(),
+            scope: ProfileScope::Auto,
+        };
+        let (_loaded, _pairs, bundle) =
+            compute_bundle(dir.path(), PlaybookOrigin::Project, &r).unwrap();
+        for cmd in [
+            Control::Rebind {
+                node: "work".into(),
+                profile: profile.into(),
+                scope: ProfileScope::Auto,
+                bundle,
+                reason: None,
+            },
+            Control::Retry {
+                node: "work".into(),
+                prompt_override: None,
+            },
+        ] {
+            post_supervisor_command(dir.path(), &run_id, cmd).unwrap();
+        }
+    };
+    // `main` fails twice (one retry), `mid` fails twice, `backup` succeeds.
+    wakes(1);
+    rebind_and_retry("mid");
+    wakes(2);
+    rebind_and_retry("backup");
+    let events = wait_for_run_status(&run_dir, RunStatus::Succeeded);
+    drop(_cmd);
+    drop(_env);
+
+    let steps: Vec<apb_engine::execution_identity::ExecStep> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AttemptStarted { node, exec, .. } if node == "work" => Some(
+                exec.clone()
+                    .expect("an agent_task attempt records its step"),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        steps.len(),
+        5,
+        "two under main, two under mid, one under backup"
+    );
+    let names: Vec<String> = steps
+        .iter()
+        .map(|s| {
+            apb_engine::execution_identity::read_binding(&run_dir, &s.binding)
+                .expect("the named snapshot is stored")
+                .name
+        })
+        .collect();
+    assert_eq!(names, ["main", "main", "mid", "mid", "backup"]);
+    assert_eq!(steps[0].binding, steps[1].binding);
+    assert_eq!(steps[2].binding, steps[3].binding);
+    assert_ne!(steps[0].binding, steps[2].binding);
+    assert_ne!(steps[2].binding, steps[4].binding);
+    for s in &steps {
+        assert_eq!(s.step, 0);
+        assert_eq!(
+            s.source,
+            apb_engine::execution_identity::StepSource::Primary
+        );
+        assert_eq!(
+            s.executed_by,
+            apb_engine::execution_identity::EXECUTED_BY_CLI
+        );
+    }
+    let stored = fs::read_dir(run_dir.join(apb_engine::execution_identity::BINDINGS_DIR))
+        .unwrap()
+        .count();
+    assert_eq!(stored, 3, "an unchanged binding reuses its snapshot");
+}

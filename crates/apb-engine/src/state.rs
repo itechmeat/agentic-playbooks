@@ -18,6 +18,9 @@ pub enum NodeStatus {
     Interrupted,
     Skipped,
     Cancelled,
+    /// A failed attempt's ordinary retry waits out its `retry_delay`
+    /// (`retry_deferred` is open). Folded only, never journaled as a status.
+    RetryWaiting,
 }
 
 impl NodeStatus {
@@ -33,6 +36,7 @@ impl NodeStatus {
             NodeStatus::Interrupted => "interrupted",
             NodeStatus::Skipped => "skipped",
             NodeStatus::Cancelled => "cancelled",
+            NodeStatus::RetryWaiting => "retry_waiting",
         }
     }
     /// Whether this status represents a node that has completed one execution
@@ -84,6 +88,7 @@ impl NodeStatus {
             "interrupted" => NodeStatus::Interrupted,
             "skipped" => NodeStatus::Skipped,
             "cancelled" => NodeStatus::Cancelled,
+            "retry_waiting" => NodeStatus::RetryWaiting,
             _ => NodeStatus::Unknown,
         }
     }
@@ -248,6 +253,43 @@ pub struct RunState {
     /// ([`RunState::join_consumed`]): the earlier rounds' results stay in
     /// `nodes` and `journaled_hops`.
     pub seqs: NodeSeqs,
+    /// The open deferred retries by node: a `retry_deferred` not yet closed
+    /// by the node's next `attempt_started`, its `node_finished`, a revival
+    /// of the node or a `run_aborted`.
+    pub deferred: BTreeMap<String, DeferredRetry>,
+    /// Set while the run's driver is released: the latest `drive_released`
+    /// with no drive event after it (a node or attempt start, a pause, a
+    /// resume, a stop or the end).
+    pub released: Option<Released>,
+}
+
+/// One open deferred retry (see [`RunState::deferred`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeferredRetry {
+    /// The seq and the timestamp of its `retry_deferred`.
+    pub seq: u64,
+    pub ts: u128,
+    /// The attempt id of the failed attempt it follows.
+    pub after_attempt: u64,
+    /// The display number of that attempt; the delayed attempt continues it.
+    pub attempt: u32,
+    pub retry: u32,
+    pub step: u32,
+    pub binding: String,
+    pub delay_ms: u64,
+    pub failure_kind: Option<String>,
+    /// A `retry_expedited` asked for it to start now.
+    pub expedited: bool,
+}
+
+/// A released driver (see [`RunState::released`]).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Released {
+    /// The seq of its `drive_released`.
+    pub seq: u64,
+    pub wake_at_ms: u64,
+    pub nodes: Vec<String>,
 }
 
 /// The journal positions behind [`RunState::seqs`].
@@ -384,6 +426,63 @@ impl RunState {
         self.settle_revivals();
     }
 
+    /// The deferred retries and the released driver one event changes. A
+    /// deferral closes exactly where the event log's guard tracker closes
+    /// it (`crate::event::close_deferrals`): both read one rule.
+    fn fold_deferral(&mut self, e: &Event) {
+        match &e.payload {
+            EventPayload::RetryDeferred {
+                node,
+                after_attempt,
+                retry,
+                step,
+                binding,
+                delay_ms,
+                failure_kind,
+            } if !node.is_empty() => {
+                let attempt = self.attempts.get(node).copied().unwrap_or(0);
+                self.deferred.insert(
+                    node.clone(),
+                    DeferredRetry {
+                        seq: e.seq,
+                        ts: e.ts,
+                        after_attempt: *after_attempt,
+                        attempt,
+                        retry: *retry,
+                        step: *step,
+                        binding: binding.clone(),
+                        delay_ms: *delay_ms,
+                        failure_kind: failure_kind.clone(),
+                        expedited: false,
+                    },
+                );
+            }
+            EventPayload::RetryExpedited { node, .. } => {
+                if let Some(d) = self.deferred.get_mut(node) {
+                    d.expedited = true;
+                }
+            }
+            other => crate::event::close_deferrals(&mut self.deferred, other.deferral_change()),
+        }
+        match &e.payload {
+            EventPayload::DriveReleased { wake_at_ms, nodes } => {
+                self.released = Some(Released {
+                    seq: e.seq,
+                    wake_at_ms: *wake_at_ms,
+                    nodes: nodes.clone(),
+                });
+            }
+            EventPayload::NodeStarted { .. }
+            | EventPayload::AttemptStarted { .. }
+            | EventPayload::RunPaused { .. }
+            | EventPayload::RunResumed { .. }
+            | EventPayload::RunAborted { .. }
+            | EventPayload::RunFinished { .. }
+            | EventPayload::RetryDeferred { .. } => self.released = None,
+            _ => {}
+        }
+    }
+
     /// A node started or finished again: it leaves every revival, and the
     /// hops of its earlier pass are dropped for good.
     fn ran_again(&mut self, node: &str) {
@@ -424,6 +523,17 @@ impl RunState {
         self.settle_revivals();
     }
 
+    /// The run ended with a retry still waiting (a stop of a released run
+    /// journals only `run_aborted`): its deferral closed with the run, so
+    /// the node waits no more.
+    fn settle_waiting(&mut self) {
+        for status in self.nodes.values_mut() {
+            if *status == NodeStatus::RetryWaiting {
+                *status = NodeStatus::Cancelled;
+            }
+        }
+    }
+
     pub fn fold(events: &[Event]) -> RunState {
         let mut s = RunState::default();
         // Open attempts by (node, item). Closed by attempt_finished, and every
@@ -433,6 +543,7 @@ impl RunState {
         // "resume from X" }` marker, which never meant a pause.
         let mut legacy_marker = false;
         for e in events {
+            s.fold_deferral(e);
             match &e.payload {
                 EventPayload::RunStarted { .. } => s.run_status = RunStatus::Running,
                 EventPayload::RunProvenance { .. } => {}
@@ -508,11 +619,13 @@ impl RunState {
                         _ => RunStatus::Failed,
                     };
                     s.end_owed_revivals();
+                    s.settle_waiting();
                 }
                 EventPayload::RetryStarted { .. } | EventPayload::FallbackTriggered { .. } => {}
                 EventPayload::RunAborted { .. } => {
                     s.run_status = RunStatus::Aborted;
                     s.end_owed_revivals();
+                    s.settle_waiting();
                 }
                 EventPayload::WakeRaised { .. } => {}
                 // A question and its answer are audit-only channel mirrors
@@ -655,6 +768,16 @@ impl RunState {
                 // The notification subscription; `crate::notify::NotifyState`
                 // folds it.
                 EventPayload::NotifySet { .. } => {}
+                // Deferred retries and a released driver: folded by
+                // `fold_deferral` above.
+                EventPayload::RetryDeferred { node, .. } => {
+                    if !node.is_empty() {
+                        s.nodes.insert(node.clone(), NodeStatus::RetryWaiting);
+                    }
+                }
+                EventPayload::DeferredRetryGuard { .. }
+                | EventPayload::DriveReleased { .. }
+                | EventPayload::RetryExpedited { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a

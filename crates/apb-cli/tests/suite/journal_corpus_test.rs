@@ -44,6 +44,16 @@
 //! resume a run an old binary started, so `run_resumed` holds one. The old
 //! readers read and resume those records; they do not enforce them.
 //!
+//! Rows D1 to D8 cover deferred retries (`retry_delay`): the new writer runs
+//! `corpus-deferred` with a stub agent (`APB_AGENT_CMD`) that fails its
+//! first calls, and leaves a deferral open behind a sibling's checkpoint and
+//! its guard (D1), released (D2), paused (D3), cut inside the guard's write
+//! (D4, synthetic), crashed before any checkpoint (D5) or closed (D6, D8);
+//! in D7 beta.1 starts the run and the new binary resumes it; in D9 the new
+//! binary's driver dies during the delay and the new binary resumes it. D8's
+//! `review_decided.decided_by` and `attempt_isolation.tree` belong to later
+//! features and are not in these journals yet.
+//!
 //! Rows 3 and 4 run with a real notification subscription the new writer
 //! takes at start: a filtered end-of-run notice (`finished:failed`) and the
 //! `host_task` transition, sent through a connector of the case's config
@@ -253,6 +263,9 @@ struct Case {
     guards: Vec<RunGuard>,
     dir: tempfile::TempDir,
     name: &'static str,
+    /// Extra environment every command of the case gets (a stub agent, a
+    /// release threshold), in order; a later entry wins.
+    env: Vec<(&'static str, String)>,
 }
 
 impl Case {
@@ -272,6 +285,7 @@ impl Case {
             guards: Vec::new(),
             dir,
             name,
+            env: Vec::new(),
         }
     }
 
@@ -307,6 +321,9 @@ impl Case {
             // Only a case that writes a decisions.yaml (row 11) uses it.
             .env("APB_DECISIONS_ALLOW_FAKE", "1")
             .stdin(Stdio::null());
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
         cmd
     }
 
@@ -1578,4 +1595,786 @@ fn row14_synthetic_crashed_patch_resume_patch_definitions_from_the_journal() {
             label(&reader)
         );
     }
+}
+
+// ------------------------------------------------- deferred retries (19a)
+
+/// The writer playbook of rows D1 to D8 (`corpus-deferred`).
+const DEFERRED: &str = "corpus-deferred";
+
+/// A release threshold no row reaches: the writer's driver keeps the run.
+const NO_RELEASE: &str = "3600000";
+
+/// This binary's version, as it records it on `run_provenance` and
+/// `run_resumed`.
+const THIS_APB: &str = env!("CARGO_PKG_VERSION");
+
+impl Case {
+    /// Seeds the deferred writer with the new binary: the fixture with its
+    /// `retry_delay` set to `delay` and `max_retries` to `retries`, the
+    /// profile it names and a stub agent that fails its first `fails` calls.
+    /// A call `n` waits while `agent.hold.<n>` exists in the case directory.
+    fn seed_deferred(&mut self, delay: &str, retries: u32, fails: u32, writer: &Path) {
+        self.seed(writer);
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/journal-corpus");
+        let pdir = self.root().join(".apb/playbooks").join(DEFERRED);
+        copy_tree(&fixtures.join(DEFERRED), &pdir.join("1.0.0"));
+        fs::write(pdir.join("current"), "1.0.0").unwrap();
+        let yaml_path = pdir.join("1.0.0/playbook.yaml");
+        let yaml = fs::read_to_string(&yaml_path)
+            .unwrap()
+            .replace("initial: 10m", &format!("initial: {delay}"))
+            .replace("max_retries: 1", &format!("max_retries: {retries}"));
+        fs::write(&yaml_path, yaml).unwrap();
+        let profile = self.root().join(".apb/profiles/corpus");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("profile.yaml"),
+            "name: corpus\ndescription: the stub agent\nexecutor:\n  agent: claude-code\n  model: haiku\n",
+        )
+        .unwrap();
+        fs::write(profile.join("SOUL.md"), "").unwrap();
+        let d = self.dir.path().display().to_string();
+        let stub = self.dir.path().join("agent.sh");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf x >> '{d}/calls'\nn=$(wc -c < '{d}/calls' | tr -d ' ')\n: > '{d}/call.'$n\nwhile [ -f '{d}/agent.hold.'$n ]; do sleep 0.05; done\nif [ \"$n\" -le {fails} ]; then echo 'the agent made a mistake' 1>&2; exit 1; fi\necho ok\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        self.env.push(("APB_AGENT_CMD", stub.display().to_string()));
+        self.env.push(("APB_WAKER_POLL_MS", "100".to_string()));
+    }
+
+    /// Starts the deferred writer detached with `work` held, and waits for
+    /// `flaky`'s retry to be deferred. Returns the run id.
+    fn start_deferred(&mut self, writer: &Path) -> String {
+        fs::write(self.root().join("hold"), "").unwrap();
+        let ran = self.run(writer, &["run", DEFERRED, "--detach"]);
+        assert!(ran.ok(), "{}: apb run {DEFERRED}: {ran:?}", self.name);
+        let run = ran
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("run started: "))
+            .unwrap_or_else(|| panic!("{}: no run id in {ran:?}", self.name))
+            .trim()
+            .to_string();
+        self.guards.push(RunGuard::new(&self.root(), &run));
+        self.wait_journal(&run, "flaky's retry to be deferred", |j| {
+            j.iter()
+                .any(|e| e["type"] == "retry_deferred" && e["node"] == "flaky")
+        });
+        run
+    }
+
+    /// Lets `work` finish while the deferral is open and waits for its
+    /// `node_finished` and the guard written with it.
+    fn finish_sibling(&self, run: &str) {
+        fs::remove_file(self.root().join("hold")).unwrap();
+        self.wait_journal(run, "work's finish and its guard", |j| {
+            j.iter().any(|e| e["type"] == "deferred_retry_guard")
+        });
+    }
+
+    /// The new binary writes a run whose deferral is open with a sibling's
+    /// `node_finished` and its guard after it; the driver is then killed
+    /// (D1, D4).
+    fn write_deferral_open(&mut self) -> String {
+        let new = new_binary();
+        self.env
+            .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+        self.seed_deferred("10m", 1, 1, &new);
+        let run = self.start_deferred(&new);
+        self.finish_sibling(&run);
+        self.kill_driver(&run);
+        let journal = self.journal(&run);
+        assert_guard_follows_last_checkpoint(&journal, self.name);
+        self.save();
+        run
+    }
+
+    /// The journal bytes of `run` now.
+    fn journal_bytes(&self, run: &str) -> Vec<u8> {
+        fs::read(self.run_dir(run).join("events.jsonl")).unwrap()
+    }
+
+    /// `apb resume <run>` by `reader` on the saved state is refused as a
+    /// journal a newer apb wrote, naming `kind`, and writes nothing.
+    fn resume_refused(&self, reader: &Path, run: &str, kind: &str) {
+        self.restore();
+        let before = self.journal_bytes(run);
+        let ran = self.run(reader, &["resume", run]);
+        assert!(
+            !ran.ok() && ran.stderr.contains("written by a newer apb") && ran.stderr.contains(kind),
+            "{}: {} refuses to resume, naming `{kind}`: {ran:?}",
+            self.name,
+            label(reader)
+        );
+        assert_eq!(
+            self.journal_bytes(run),
+            before,
+            "{}: {} wrote nothing",
+            self.name,
+            label(reader)
+        );
+    }
+
+    /// Kills every `apb __pause-waker` of `run` (Linux `/proc`; elsewhere
+    /// nothing to find), so no waker of a saved state acts on a later copy.
+    fn kill_wakers(&self, run: &str) {
+        let Ok(procs) = fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in procs.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|p| p.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+            let has = |s: &str| args.contains(&s.as_bytes());
+            if has("__pause-waker") && has(run) {
+                crate::common::sig::kill_pid(pid);
+            }
+        }
+    }
+}
+
+/// One line per record: its seq, type, node and status, for a failure
+/// message.
+fn summary(journal: &[Value]) -> String {
+    journal
+        .iter()
+        .map(|e| format!("{} {} {} {}", e["seq"], e["type"], e["node"], e["status"]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether the record is a checkpoint (`EventPayload::is_checkpoint`).
+fn is_checkpoint(e: &Value) -> bool {
+    matches!(
+        e["type"].as_str(),
+        Some("node_finished" | "run_paused" | "run_finished" | "run_aborted")
+    )
+}
+
+/// The record right after the journal's last checkpoint is the guard of
+/// the open deferral of `flaky`.
+fn assert_guard_follows_last_checkpoint(journal: &[Value], name: &str) {
+    let at = journal
+        .iter()
+        .rposition(is_checkpoint)
+        .unwrap_or_else(|| panic!("{name}: a checkpoint"));
+    let next = journal.get(at + 1);
+    assert_eq!(
+        next.map(|e| (e["type"].clone(), e["open"].clone())),
+        Some((
+            Value::from("deferred_retry_guard"),
+            serde_json::json!(["flaky"])
+        )),
+        "{name}: the guard follows the last checkpoint in the same write: {:?}",
+        &journal[at..]
+    );
+}
+
+/// The nodes that finished after record `from`, with their status, and
+/// the hops taken: what a resume routed.
+fn routing(journal: &[Value], from: usize) -> Vec<String> {
+    journal[from..]
+        .iter()
+        .filter_map(|e| match e["type"].as_str() {
+            Some("node_finished") => Some(format!("{} {}", e["node"], e["status"])),
+            Some("edge_traversed") => Some(format!("{} -> {}", e["from"], e["to"])),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The project tree of a case as (path, bytes), to prove a read wrote
+/// nothing.
+fn tree_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                out.push((path.clone(), Vec::new()));
+                stack.push(path);
+            } else if kind.is_file() {
+                out.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Row D1: the new binary leaves a deferral open with a sibling's
+/// `node_finished` and its guard. beta.1 and 0.25.0 read the run (the
+/// unknown records counted), refuse to resume it with the newer-apb
+/// message, and stop it; the new binary then reads it aborted. The new
+/// doctor names the guarded deferral.
+#[test]
+fn d1_open_deferral_old_binaries_read_refuse_and_stop() {
+    let mut case = Case::new("row D1");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let run = case.write_deferral_open();
+    let new = new_binary();
+    case.restore();
+    let doctor = case.run(&new, &["doctor", "--run", &run]);
+    assert!(
+        doctor.stdout.contains("retry 1 of `flaky` deferred") && doctor.stdout.contains("guarded"),
+        "row D1: the doctor names the guarded deferral: {doctor:?}"
+    );
+    for reader in [beta1, v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row D1: {} counts what it skipped: {ran:?}",
+            label(&reader)
+        );
+        case.restore();
+        let listed = case.run(&reader, &["runs"]);
+        assert!(
+            listed.ok() && listed.stdout.contains(&run),
+            "row D1: {} lists the run: {listed:?}",
+            label(&reader)
+        );
+        case.resume_refused(&reader, &run, "deferred_retry_guard");
+        case.stop(&reader, &run);
+        let shown = case.run(&new, &["runs", &run]);
+        assert!(
+            shown.ok() && shown.stdout.contains("aborted"),
+            "row D1: the new binary reads the run {} stopped: {shown:?}",
+            label(&reader)
+        );
+    }
+}
+
+/// Row D2: the new binary's driver releases the run (nothing but the
+/// deferred retry left, due in ten minutes) and exits. An old `apb resume
+/// --all` passes over it and writes nothing, and an old `apb resume`
+/// refuses it. Once the retry is due, the new `apb resume --all` resumes
+/// it: the retry runs, `flaky` succeeds and the run reaches the gate.
+#[test]
+fn d2_released_run_old_resume_all_writes_nothing_new_resumes_when_due() {
+    let mut case = Case::new("row D2");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let new = new_binary();
+    case.seed_deferred("10m", 1, 1, &new);
+    let run = case.start_deferred(&new);
+    fs::remove_file(case.root().join("hold")).unwrap();
+    case.wait_journal(&run, "the driver to release the run", |j| {
+        j.last().is_some_and(|e| e["type"] == "drive_released")
+    });
+    if let Some(pid) = apb_engine::driver::read_driver_pid(&case.run_dir(&run)) {
+        let start = Instant::now();
+        while crate::common::sig::alive(pid) {
+            assert!(start.elapsed() < DEADLINE, "row D2: the driver exits");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    case.forget_driver(&run);
+    case.kill_wakers(&run);
+    case.save();
+    for reader in [beta1, v025] {
+        case.restore();
+        let before = case.journal_bytes(&run);
+        let ran = case.run(&reader, &["resume", "--all"]);
+        assert!(
+            !ran.stdout.contains("resumed"),
+            "row D2: {} resumes nothing: {ran:?}",
+            label(&reader)
+        );
+        assert_eq!(
+            case.journal_bytes(&run),
+            before,
+            "row D2: {} wrote nothing",
+            label(&reader)
+        );
+        case.resume_refused(&reader, &run, "drive_released");
+    }
+    // Due now: the release's wake moved to the deferral's own time, the
+    // delay down to its floor (what is left of it the drive waits out).
+    rewrite_journal(&case.saved().join(&run), |records| {
+        let at = records
+            .iter()
+            .find(|e| e["type"] == "retry_deferred")
+            .map(|e| e["ts"].as_u64().unwrap())
+            .unwrap();
+        records
+            .into_iter()
+            .map(|mut r| {
+                if r["type"] == "retry_deferred" {
+                    r["delay_ms"] = Value::from(1000);
+                }
+                if r["type"] == "drive_released" {
+                    r["wake_at_ms"] = Value::from(at);
+                }
+                r
+            })
+            .collect()
+    });
+    case.restore();
+    let ran = case.run(&new, &["resume", "--all"]);
+    assert!(
+        ran.ok() && ran.stdout.contains("resumed (retry_due)"),
+        "row D2: new resume --all: {ran:?}"
+    );
+    case.guards.push(RunGuard::new(&case.root(), &run));
+    let journal = case.wait_journal(&run, "the resumed run to reach the gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    case.kill_driver(&run);
+    let resumed = journal
+        .iter()
+        .position(|e| e["type"] == "run_resumed")
+        .unwrap_or_else(|| panic!("row D2: resumed: {journal:?}"));
+    assert_eq!(
+        journal[resumed]["apb"],
+        Value::from(THIS_APB),
+        "row D2: the resume records its binary"
+    );
+    let tries: Vec<&Value> = journal
+        .iter()
+        .filter(|e| e["type"] == "attempt_started" && e["node"] == "flaky")
+        .collect();
+    assert_eq!(tries.len(), 2, "row D2: the deferred retry ran once");
+    assert!(
+        journal.iter().any(|e| e["type"] == "node_finished"
+            && e["node"] == "flaky"
+            && e["status"] == "succeeded"),
+        "row D2: flaky succeeded on its retry: {}",
+        summary(&journal)
+    );
+}
+
+/// Row D3: an operator pause while the deferral is open (`run_paused` and
+/// its guard). Old resumes refuse; the new resume continues what is left of
+/// the delay (it releases the run again, the wake no earlier than the
+/// deferral's own due time) and starts no attempt early.
+#[test]
+fn d3_paused_with_open_deferral_old_refuse_new_continues_the_delay() {
+    let mut case = Case::new("row D3");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let new = new_binary();
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    case.seed_deferred("10m", 1, 1, &new);
+    let run = case.start_deferred(&new);
+    case.finish_sibling(&run);
+    let ran = case.run(&new, &["pause", &run]);
+    assert!(ran.ok(), "row D3: pause: {ran:?}");
+    let journal = case.wait_journal(&run, "the pause and its guard", |j| {
+        j.iter().any(|e| e["type"] == "run_paused")
+            && j.last()
+                .is_some_and(|e| e["type"] == "deferred_retry_guard")
+    });
+    assert_guard_follows_last_checkpoint(&journal, "row D3");
+    if let Some(pid) = apb_engine::driver::read_driver_pid(&case.run_dir(&run)) {
+        let start = Instant::now();
+        while crate::common::sig::alive(pid) {
+            assert!(start.elapsed() < DEADLINE, "row D3: the driver exits");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    case.forget_driver(&run);
+    case.save();
+    for reader in [beta1, v025] {
+        case.resume_refused(&reader, &run, "deferred_retry_guard");
+    }
+    // The new resume, with the ordinary release threshold.
+    case.env.retain(|(k, _)| *k != "APB_RELEASE_AFTER_MS");
+    case.restore();
+    let before = case.journal(&run).len();
+    let ran = case.run(&new, &["resume", &run]);
+    // A resume that releases the run again ends with exit 4, as a wait
+    // that left the run to its waker.
+    assert!(
+        ran.code == Some(4) && ran.stdout.contains("released"),
+        "row D3: new resume: {ran:?}"
+    );
+    case.kill_wakers(&run);
+    let journal = case.journal(&run);
+    let added: Vec<&str> = journal[before..]
+        .iter()
+        .filter_map(|e| e["type"].as_str())
+        .collect();
+    assert_eq!(added.first(), Some(&"run_resumed"), "row D3: {added:?}");
+    assert!(
+        !added.contains(&"attempt_started"),
+        "row D3: no attempt before the delay is over: {added:?}"
+    );
+    let deferred = journal
+        .iter()
+        .find(|e| e["type"] == "retry_deferred")
+        .unwrap();
+    let due = deferred["ts"].as_u64().unwrap() + deferred["delay_ms"].as_u64().unwrap();
+    let released = last_of(&journal, "drive_released")
+        .unwrap_or_else(|| panic!("row D3: the resume released the run: {added:?}"));
+    assert!(
+        released["wake_at_ms"].as_u64().unwrap() >= due,
+        "row D3: the remaining delay continues: {released} against due {due}"
+    );
+}
+
+/// Row D4 (synthetic fault): the guard's line of D1's two-line write is cut
+/// short, as a crash inside that one write leaves it. Every binary's resume
+/// refuses the torn tail and writes nothing; the read-only `apb runs` of
+/// all three reads the rest; the new doctor names the torn line.
+#[test]
+fn d4_synthetic_torn_guard_every_resume_refuses_reads_go_on() {
+    let mut case = Case::new("row D4");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let run = case.write_deferral_open();
+    let path = case.saved().join(&run).join("events.jsonl");
+    let text = fs::read_to_string(&path).unwrap();
+    // The crash stops the write inside the guard's line: nothing after it
+    // reached the file.
+    let guard = text
+        .find("\"type\":\"deferred_retry_guard\"")
+        .expect("row D4: the guard");
+    let line = text[..guard].rfind('\n').unwrap() + 1;
+    let end = line + text[line..].find('\n').unwrap();
+    let torn = &text[..line + (end - line) / 2];
+    fs::write(&path, torn).unwrap();
+    let lines = torn.lines().count();
+    let new = new_binary();
+    for reader in [new.clone(), beta1, v025] {
+        case.read(&reader, &run);
+        case.restore();
+        let before = case.journal_bytes(&run);
+        let ran = case.run(&reader, &["resume", &run]);
+        assert!(
+            !ran.ok(),
+            "row D4: {} refuses the torn tail: {ran:?}",
+            label(&reader)
+        );
+        assert_eq!(
+            case.journal_bytes(&run),
+            before,
+            "row D4: {} wrote nothing",
+            label(&reader)
+        );
+    }
+    case.restore();
+    let doctor = case.run(&new, &["doctor", "--run", &run]);
+    assert!(
+        doctor
+            .stdout
+            .contains(&format!("line {lines} is a write that did not finish")),
+        "row D4: the doctor names the torn line: {doctor:?}"
+    );
+}
+
+/// Row D5: the new binary's driver dies right after `retry_deferred`, with
+/// no checkpoint after it (`work` still runs). The old resumes refuse
+/// under the existing rule, naming `retry_deferred`.
+#[test]
+fn d5_crash_after_retry_deferred_old_resumes_refuse() {
+    let mut case = Case::new("row D5");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let new = new_binary();
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    case.seed_deferred("10m", 1, 1, &new);
+    let run = case.start_deferred(&new);
+    case.kill_driver(&run);
+    fs::remove_file(case.root().join("hold")).unwrap();
+    let journal = case.journal(&run);
+    let checkpoint = journal.iter().rposition(is_checkpoint).unwrap();
+    let deferred = journal
+        .iter()
+        .position(|e| e["type"] == "retry_deferred")
+        .unwrap();
+    assert!(deferred > checkpoint, "row D5: no checkpoint after it");
+    case.save();
+    for reader in [beta1, v025] {
+        case.resume_refused(&reader, &run, "retry_deferred");
+        case.stop(&reader, &run);
+    }
+}
+
+/// Row D9: the new binary's driver is killed while a retry waits out its
+/// delay, and the new binary resumes the run: the delayed attempt is the
+/// node's last (`max_retries: 1`, so two attempts in all), never a fresh
+/// retry budget. No old binary is needed.
+#[test]
+fn d9_killed_during_the_delay_new_resume_keeps_max_retries() {
+    let mut case = Case::new("row D9");
+    let new = new_binary();
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    // The stub agent fails every call.
+    case.seed_deferred("3s", 1, 100, &new);
+    let run = case.start_deferred(&new);
+    case.kill_driver(&run);
+    assert!(
+        !case
+            .journal(&run)
+            .iter()
+            .any(|e| e["type"] == "retry_started"),
+        "row D9: killed during the delay"
+    );
+    fs::remove_file(case.root().join("hold")).unwrap();
+    // The resume parks at the review gate once both branches ended; it is
+    // killed there.
+    let resume = case.spawn(&new, &["resume", &run]);
+    let journal = case.wait_journal(&run, "the review gate after flaky's end", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    drop(resume);
+    case.forget_driver(&run);
+    let of_flaky = |kind: &str| {
+        journal
+            .iter()
+            .filter(|e| e["type"] == kind && e["node"] == "flaky")
+            .count()
+    };
+    assert_eq!(
+        of_flaky("attempt_started"),
+        2,
+        "row D9: one attempt and its one retry:\n{}",
+        summary(&journal)
+    );
+    assert_eq!(of_flaky("retry_deferred"), 1, "row D9: one deferral");
+    let calls = fs::read_to_string(case.dir.path().join("calls")).unwrap_or_default();
+    assert_eq!(calls.len(), 2, "row D9: the agent ran twice");
+    let finished = last_of(&journal, "node_finished")
+        .filter(|e| e["node"] == "flaky")
+        .map(|e| e["status"].clone());
+    assert_eq!(
+        finished,
+        Some(Value::from("failed")),
+        "row D9: {}",
+        summary(&journal)
+    );
+}
+
+/// Rows D6 and D8: the new binary runs the deferral to its end (`flaky`
+/// fails, waits three seconds while `work` finishes, then succeeds), so
+/// the journal holds `retry_deferred`, the guard after `work`'s finish,
+/// `flaky`'s finish with no guard, `attempt_started.exec`,
+/// `run_provenance.apb`, and a new `run_resumed.apb`. beta.1 and 0.25.0
+/// read it, approve and resume it to the end with the same routing as the
+/// new binary, and stop it. After beta.1's resume the new `apb doctor
+/// --run` lists both binaries and a downgrade, and writes nothing.
+#[test]
+fn d6_d8_closed_deferral_old_binaries_resume_with_the_same_routing() {
+    let mut case = Case::new("row D6");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let Some(v025) = old_binary(V025, &case) else {
+        return;
+    };
+    let new = new_binary();
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    case.seed_deferred("3s", 1, 1, &new);
+    let run = case.start_deferred(&new);
+    case.finish_sibling(&run);
+    case.wait_journal(&run, "the gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    case.kill_driver(&run);
+    // A resume by the new binary, so `run_resumed.apb` is in the journal:
+    // it parks at the gate again and is killed there.
+    let before = case.journal(&run).len();
+    let resume = case.spawn(&new, &["resume", &run]);
+    case.wait_journal(&run, "the new resume", |j| {
+        j.len() > before && j[before..].iter().any(|e| e["type"] == "run_resumed")
+    });
+    drop(resume);
+    case.forget_driver(&run);
+    case.save();
+
+    let journal = case.journal(&run);
+    let guard = journal
+        .iter()
+        .rposition(|e| e["type"] == "deferred_retry_guard")
+        .expect("row D6: a guard");
+    assert_eq!(journal[guard - 1]["type"], "node_finished");
+    assert_eq!(journal[guard - 1]["node"], "work");
+    let flaky_done = journal
+        .iter()
+        .position(|e| e["type"] == "node_finished" && e["node"] == "flaky")
+        .expect("row D6: flaky finished");
+    assert!(
+        flaky_done > guard,
+        "row D6: the deferral closed after the guard"
+    );
+    assert_ne!(
+        journal.get(flaky_done + 1).map(|e| e["type"].clone()),
+        Some(Value::from("deferred_retry_guard")),
+        "row D6: no guard once the deferral closed"
+    );
+    assert_eq!(
+        last_of(&journal, "run_provenance").map(|e| e["apb"].clone()),
+        Some(Value::from(THIS_APB))
+    );
+    assert_eq!(
+        last_of(&journal, "run_resumed").map(|e| e["apb"].clone()),
+        Some(Value::from(THIS_APB))
+    );
+    assert!(
+        journal
+            .iter()
+            .filter(|e| e["type"] == "attempt_started" && e["node"] == "flaky")
+            .all(|e| e["exec"].is_object()),
+        "row D8: every attempt records its chain step"
+    );
+
+    let from = journal.len();
+    case.approve_and_resume(&new, &run);
+    let expected = routing(&case.journal(&run), from);
+    for reader in [beta1.clone(), v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row D6: {} skips the deferral records: {ran:?}",
+            label(&reader)
+        );
+        case.approve_and_resume(&reader, &run);
+        assert_eq!(
+            routing(&case.journal(&run), from),
+            expected,
+            "row D6: {} routes as the new binary",
+            label(&reader)
+        );
+        case.stop(&reader, &run);
+    }
+
+    // E10: after beta.1's resume, the doctor names both and writes nothing.
+    case.approve_and_resume(&beta1, &run);
+    let before = tree_snapshot(&case.root());
+    let doctor = case.run(&new, &["doctor", "--run", &run]);
+    assert_eq!(
+        tree_snapshot(&case.root()),
+        before,
+        "row D6: the doctor wrote nothing"
+    );
+    assert!(
+        doctor.stdout.contains(&format!(
+            "driven by apb {THIS_APB}, resumed by apb {THIS_APB}, an older apb (no version recorded)"
+        )) && doctor.stdout.contains("downgrade"),
+        "row D6: the doctor lists both binaries: {doctor:?}"
+    );
+    let shown = case.run(&new, &["runs", &run]);
+    assert!(
+        shown.stdout.contains(&format!("driven by apb {THIS_APB}")),
+        "row D6: the run detail names the binaries: {shown:?}"
+    );
+}
+
+/// Row D7: beta.1 starts the deferred playbook (it drops `retry_delay`):
+/// `flaky` fails and beta.1 retries it at once; its driver dies inside that
+/// retry. The new binary resumes it: `flaky` runs again, fails, and its
+/// next retry waits the delay. The delay applies to the gaps after the
+/// resume only.
+#[test]
+fn d7_beta1_starts_new_applies_the_delay_to_later_gaps_only() {
+    let mut case = Case::new("row D7");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let new = new_binary();
+    case.seed_deferred("1s", 3, 3, &beta1);
+    fs::write(case.dir.path().join("agent.hold.2"), "").unwrap();
+    let ran = case.run(&beta1, &["run", DEFERRED, "--detach"]);
+    assert!(ran.ok(), "row D7: beta.1 starts: {ran:?}");
+    let run = ran
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .unwrap_or_else(|| panic!("row D7: no run id in {ran:?}"))
+        .trim()
+        .to_string();
+    case.guards.push(RunGuard::new(&case.root(), &run));
+    let start = Instant::now();
+    while !case.dir.path().join("call.2").exists() {
+        assert!(start.elapsed() < DEADLINE, "row D7: beta.1 retries flaky");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    case.kill_driver(&run);
+    fs::remove_file(case.dir.path().join("agent.hold.2")).unwrap();
+    let by_beta1 = case.journal(&run);
+    assert!(
+        !by_beta1.iter().any(|e| e["type"] == "retry_deferred"),
+        "row D7: beta.1 does not defer"
+    );
+    assert_eq!(
+        by_beta1
+            .iter()
+            .filter(|e| e["type"] == "attempt_started" && e["node"] == "flaky")
+            .count(),
+        2,
+        "row D7: beta.1 retried at once"
+    );
+
+    let resume = case.spawn(&new, &["resume", &run]);
+    let journal = case.wait_journal(&run, "the new resume to reach the gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    drop(resume);
+    case.forget_driver(&run);
+    let after = &journal[by_beta1.len()..];
+    let deferrals: Vec<&Value> = after
+        .iter()
+        .filter(|e| e["type"] == "retry_deferred")
+        .collect();
+    assert_eq!(deferrals.len(), 1, "row D7: one delayed gap: {after:?}");
+    let d = deferrals[0];
+    let due = d["ts"].as_u64().unwrap() + d["delay_ms"].as_u64().unwrap();
+    let next = after
+        .iter()
+        .skip_while(|e| e["type"] != "retry_deferred")
+        .find(|e| e["type"] == "attempt_started" && e["node"] == "flaky")
+        .expect("row D7: the delayed attempt");
+    assert!(
+        next["ts"].as_u64().unwrap() >= due,
+        "row D7: the delayed attempt waited: {next} against due {due}"
+    );
+    assert!(
+        after.iter().any(|e| e["type"] == "node_finished"
+            && e["node"] == "flaky"
+            && e["status"] == "succeeded"),
+        "row D7: flaky succeeded: {}",
+        summary(after)
+    );
 }

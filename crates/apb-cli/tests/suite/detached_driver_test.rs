@@ -503,31 +503,41 @@ fn a_dashboard_run_survives_the_dashboard_being_killed() {
 }
 
 /// A global `apb dashboard` on a free loopback port, killed on drop.
-struct Dashboard {
+pub(crate) struct Dashboard {
     child: Child,
     port: u16,
 }
 
 impl Dashboard {
     fn start(config_dir: &Path) -> Self {
+        Self::start_with(config_dir, &[])
+    }
+
+    /// [`Dashboard::start`] with extra environment for the dashboard and
+    /// the drivers it spawns.
+    pub(crate) fn start_with(config_dir: &Path, env: &[(&str, &Path)]) -> Self {
         // A port probed free can be taken by another test's listener before
         // the dashboard binds it; the dashboard then exits on the bind error,
         // and a fresh port is tried. Three attempts bound it.
         for _ in 0..3 {
-            if let Some(dashboard) = Self::try_start(config_dir) {
+            if let Some(dashboard) = Self::try_start(config_dir, env) {
                 return dashboard;
             }
         }
         panic!("the dashboard failed to bind a free port three times");
     }
 
-    fn try_start(config_dir: &Path) -> Option<Self> {
+    fn try_start(config_dir: &Path, env: &[(&str, &Path)]) -> Option<Self> {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        let child = crate::common::apb_std()
+        let mut cmd = crate::common::apb_std();
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd
             .args(["dashboard", "--no-open", "--port", &port.to_string()])
             .env("APB_CONFIG_DIR", config_dir)
             .stdin(Stdio::null())
@@ -565,27 +575,35 @@ impl Dashboard {
 
     /// `POST /api/playbooks/{id}/run` and the run id it answers with.
     fn start_run(&mut self, id: &str, workspace: &str) -> String {
+        let json = self.post(
+            &format!("/api/playbooks/{id}/run?workspace={workspace}"),
+            "{}",
+        );
+        json["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no run_id in: {json}"))
+            .to_string()
+    }
+
+    /// `POST <path>` with the JSON `body`, and the JSON it answers with.
+    pub(crate) fn post(&self, path: &str, body: &str) -> serde_json::Value {
         let mut conn = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         conn.set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
         write!(
             conn,
-            "POST /api/playbooks/{id}/run?workspace={workspace} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
-            self.port
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            self.port,
+            body.len()
         )
         .unwrap();
         let mut response = String::new();
         std::io::Read::read_to_string(&mut conn, &mut response).unwrap();
-        let body = response
+        let answer = response
             .split_once("\r\n\r\n")
             .map(|(_, body)| body)
             .unwrap_or_default();
-        let json: serde_json::Value = serde_json::from_str(body)
-            .unwrap_or_else(|_| panic!("the run start answered: {response}"));
-        json["run_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("no run_id in: {response}"))
-            .to_string()
+        serde_json::from_str(answer).unwrap_or_else(|_| panic!("{path} answered: {response}"))
     }
 
     fn kill(&mut self) {
@@ -783,7 +801,7 @@ fn mcp_background_run_starts_after_the_binary_is_replaced() {
 /// A live `apb mcp` child spoken to over stdio, with the initialize handshake
 /// already done. `call` issues one `tools/call` and returns the tool's own
 /// (double-encoded) JSON body.
-struct McpSession {
+pub(crate) struct McpSession {
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<String>,
@@ -794,7 +812,7 @@ impl McpSession {
         Self::start_with(root, crate::common::apb_std())
     }
 
-    fn start_with(root: &Path, mut cmd: std::process::Command) -> Self {
+    pub(crate) fn start_with(root: &Path, mut cmd: std::process::Command) -> Self {
         cmd.arg("mcp")
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -862,7 +880,7 @@ impl McpSession {
             .to_string()
     }
 
-    fn call(&mut self, id: u32, params: &str) -> serde_json::Value {
+    pub(crate) fn call(&mut self, id: u32, params: &str) -> serde_json::Value {
         writeln!(
             self.stdin,
             r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{params}}}"#

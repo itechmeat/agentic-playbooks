@@ -261,12 +261,22 @@ also be the user whose config directory holds the keys from step 1.
 ### Resuming runs after a reboot (optional)
 
 A reboot kills the drivers of running runs and the wakers of paused runs that
-have an `until`. `apb resume --all` finds what was left waiting in a workspace:
-runs reading `running` with no live driver and paused runs whose `until` has
-passed. It resumes them (sub-playbook children follow their parent) and
+have an `until`. It also kills the wakers of released runs: a run whose only
+work left is a retry that waits out its `retry_delay` frees its driver and
+its working tree while it waits (when the wait is longer than a minute), and
+a small waker process resumes it when the retry is due. `apb resume --all`
+finds what was left waiting in a workspace: runs reading `running` with no
+live driver, paused runs whose `until` has passed, and released runs whose
+retry is due. It resumes them (sub-playbook children follow their parent) and
 journals a run it cannot resume as `paused (driverless)`, so `apb runs` shows
-the state instead of a false `running`. A run whose working tree another run
-holds busy is left as it is; the next pass, or `apb resume`, continues it. To run it at boot, add a systemd user
+the state instead of a false `running`. A released run whose retry is not due
+yet, and a paused run whose `until` is still ahead, get a new waker instead,
+so they continue on time after the reboot; a wait whose waker is still alive
+keeps that one waker (each waker holds a lease on its wait under
+`.apb/runs/<id>/wakers/`). A run whose working tree another run
+holds busy is left as it is; the next pass, or `apb resume`, continues it. An
+ended run whose last notification is still due a retry (its waker died too)
+gets one sweep, which sends it. To run it at boot, add a systemd user
 unit for the user that owns the runs, started from the project directory
 (the workspace is the current directory):
 
@@ -294,6 +304,21 @@ loginctl enable-linger "$USER"   # start user units at boot without a login
 ```
 
 Use one unit per workspace, or run the command from a script that visits each.
+
+### Deferred retries and older apb binaries
+
+While a node's retry waits out its `retry_delay`, every checkpoint apb writes
+to the run's journal is followed by a guard record that an older apb (0.25.0,
+1.0.0-beta.1) does not know, so such a binary refuses to resume the run
+instead of running the node again at once with a fresh retry budget; it can
+still list and stop it. Both lines go out in one write, which a crash of the
+process cannot split. A crash of the machine can cut that write right after
+the checkpoint: the next apb of this version that opens the run adds the
+missing guard before anything else, and `apb doctor --run <id>` reports a
+checkpoint with a deferred retry and no guard after it. Until then, an older
+binary would resume such a run. After a machine crash, run this version
+(`apb resume --all` at boot does) before any older apb touches the
+workspace's runs.
 
 ## 5. Verify that authentication is actually on
 

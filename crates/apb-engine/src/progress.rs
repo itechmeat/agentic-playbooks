@@ -1972,17 +1972,7 @@ edges:
                 },
             ),
             at(1, 2_000, crate::pause::engine_paused("x")),
-            at(
-                2,
-                2_000 + 2 * hour,
-                EventPayload::RunResumed {
-                    from_node: "w".into(),
-                    by: None,
-                    explicit: false,
-                    launch: None,
-                    definition: None,
-                },
-            ),
+            at(2, 2_000 + 2 * hour, EventPayload::resumed("w", None, false)),
             at(
                 3,
                 5_000 + 2 * hour,

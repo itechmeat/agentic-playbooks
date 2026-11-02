@@ -217,6 +217,12 @@ mod decision_test;
 #[cfg(unix)]
 #[path = "suite/decision_uses_test.rs"]
 mod decision_uses_test;
+#[cfg(unix)]
+#[path = "suite/deferred_retry_test.rs"]
+mod deferred_retry_test;
+#[cfg(unix)]
+#[path = "suite/deferred_wake_test.rs"]
+mod deferred_wake_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]

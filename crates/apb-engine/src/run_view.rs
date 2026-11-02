@@ -157,6 +157,9 @@ pub struct RunView {
     /// no process probe, so its view keeps the journal's statuses, has no
     /// `driver_alive`, and reports liveness as unknown.
     pub liveness_checked: bool,
+    /// The run's release is long overdue and no waker holds it
+    /// ([`crate::pause::release_lost`]).
+    release_lost: bool,
 }
 
 /// Token usage summed over a run's own agent attempts that reported it (see
@@ -255,13 +258,22 @@ impl RunView {
         let crate::event::JournalRead { events, unknown } = crate::event::read_journal(run_dir)?;
         let progress = crate::progress::from_run_dir(run_dir, &events);
         let liveness_checked = !crate::read_only::active();
-        let (driver_alive, run_status) = if liveness_checked {
+        let state = RunState::fold(&events);
+        let (driver_alive, run_status, release_lost) = if liveness_checked {
             let driver_alive = crate::liveness::driver_alive(run_dir, run_id);
             let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
             let status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
-            (driver_alive, status)
+            // A release nothing will wake: the run reads interrupted, and
+            // its driver dead, like any run whose driver is gone.
+            let lost = status == RunStatus::Running
+                && driver_alive != Some(true)
+                && state.released.as_ref().is_some_and(|r| {
+                    crate::pause::release_lost(run_dir, r, apb_core::clock::now_ms_u64())
+                });
+            let status = if lost { RunStatus::Interrupted } else { status };
+            (driver_alive, status, lost)
         } else {
-            (None, RunState::fold(&events).run_status)
+            (None, state.run_status, false)
         };
         // A control file a surface cannot read only hides the `pausing`
         // overlay; it never fails the view.
@@ -274,7 +286,8 @@ impl RunView {
             crate::pause::pause_info(&events, run_status, pending_pause.as_ref(), driver_alive);
         Ok(Self {
             pause,
-            state: RunState::fold(&events),
+            state,
+            release_lost,
             events,
             unknown,
             progress,
@@ -291,7 +304,24 @@ impl RunView {
     /// exited after writing the outcome) is never reported. The one "driver
     /// dead" predicate of every surface.
     pub fn driver_dead(&self) -> bool {
-        self.driver_alive == Some(false) && !self.run_status.is_terminal()
+        self.driver_alive != Some(true)
+            && !self.run_status.is_terminal()
+            && (self.release_lost
+                || (self.driver_alive == Some(false) && self.released().is_none()))
+    }
+
+    /// The release that holds a run nobody drives on purpose: its driver
+    /// let go while only deferred retries were left, and a waker resumes it
+    /// at `wake_at_ms`. `None` while a driver is live, and for a run that is
+    /// paused or ended. Surfaces say "waiting to retry" instead of "driver
+    /// dead" for it.
+    pub fn released(&self) -> Option<&crate::state::Released> {
+        self.state.released.as_ref().filter(|_| {
+            !self.release_lost
+                && self.driver_alive != Some(true)
+                && !self.run_status.is_terminal()
+                && self.run_status != RunStatus::Paused
+        })
     }
 
     /// The run's pause: the latest `run_paused` of a paused run, or the
@@ -299,6 +329,12 @@ impl RunView {
     /// that is neither. The one pause accessor every surface reports from.
     pub fn pause(&self) -> Option<&crate::pause::PauseInfo> {
         self.pause.as_ref()
+    }
+
+    /// "driven by apb X, resumed by Y" from the journal's recorded binary
+    /// versions (`crate::run_binaries`); `None` when no drive recorded one.
+    pub fn driven_by(&self) -> Option<String> {
+        crate::run_binaries::RunBinaries::from_events(&self.events).line()
     }
 
     /// Per-node status for live reporting (`lost` for a dead attempt,
@@ -684,6 +720,55 @@ mod tests {
         .unwrap();
     }
 
+    /// A released run whose wake time passed long ago with no waker holding
+    /// its lease and no driver is not "waiting to retry": nothing will
+    /// resume it, so it reads interrupted with its driver dead. One whose
+    /// wake is ahead still waits.
+    #[test]
+    fn a_release_long_overdue_with_no_waker_reads_driver_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = apb_core::clock::now_ms_u64();
+        for (id, wake_at_ms, lost) in [
+            ("late", now - 600_000, true),
+            ("ahead", now + 600_000, false),
+        ] {
+            let run_dir = tmp.path().join(".apb/runs").join(id);
+            write_run(
+                &run_dir,
+                &[
+                    EventPayload::RunStarted {
+                        playbook: "p".into(),
+                        version: "1.0.0".into(),
+                        definition: None,
+                    },
+                    EventPayload::RetryDeferred {
+                        node: "work".into(),
+                        after_attempt: 1,
+                        retry: 1,
+                        step: 0,
+                        binding: "b".repeat(64),
+                        delay_ms: 1_000,
+                        failure_kind: None,
+                    },
+                    EventPayload::DriveReleased {
+                        wake_at_ms,
+                        nodes: vec!["work".into()],
+                    },
+                ],
+                reaped_pid(),
+            );
+            let view = RunView::load(&run_dir, id).unwrap();
+            assert_eq!(view.released().is_none(), lost, "{id}");
+            assert_eq!(view.driver_dead(), lost, "{id}");
+            let status = if lost {
+                RunStatus::Interrupted
+            } else {
+                RunStatus::Running
+            };
+            assert_eq!(view.run_status, status, "{id}");
+        }
+    }
+
     /// A node whose work no process journaled a pid for (a script node, or an
     /// attempt whose spawn recorded none) reads like the run once the driver
     /// is provably dead: `interrupted`, never `running` under an
@@ -722,6 +807,7 @@ mod tests {
                     transcript: None,
                     token: None,
                     isolation: None,
+                    exec: None,
                 },
             ],
             reaped_pid(),

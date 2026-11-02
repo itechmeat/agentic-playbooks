@@ -623,7 +623,8 @@ fn seed_journal(root: &Path, run_id: &str, extra: &[EventPayload]) -> PathBuf {
 
 /// `resume_all`: a due paused run is resumed, a driverless run the gate
 /// refuses is marked paused (driverless), a run paused into the future is
-/// left alone, and a sub-playbook child is skipped.
+/// re-armed (listed `rearmed`; this test binary is not `apb`, so no waker
+/// process starts), and a sub-playbook child is skipped.
 #[cfg(unix)]
 #[test]
 fn resume_all_picks_due_and_driverless_runs_and_skips_children() {
@@ -692,7 +693,13 @@ fn resume_all_picks_due_and_driverless_runs_and_skips_children() {
         ),
         "{entries:?}"
     );
-    assert_eq!(action(&later), Some(ResumeAllAction::LeftPaused));
+    assert_eq!(
+        action(&later),
+        Some(ResumeAllAction::Rearmed {
+            wake_at_ms: now + 3_600_000
+        }),
+        "{entries:?}"
+    );
     assert!(
         matches!(
             action("r-orphan"),
@@ -750,14 +757,8 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
     gone.wait().unwrap();
     let run_dir = root.join(".apb/runs").join(&run_id);
     let mut log = EventLog::open(&run_dir).unwrap();
-    log.append(EventPayload::RunResumed {
-        from_node: "s".into(),
-        by: Some(PauseBy::Operator),
-        explicit: false,
-        launch: None,
-        definition: None,
-    })
-    .unwrap();
+    log.append(EventPayload::resumed("s", Some(PauseBy::Operator), false))
+        .unwrap();
     log.append(EventPayload::AttemptStarted {
         item: None,
         node: "s".into(),
@@ -772,6 +773,7 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
         transcript: None,
         token: None,
         isolation: None,
+        exec: None,
     })
     .unwrap();
     drop(log);
@@ -818,14 +820,8 @@ fn resume_all_waits_out_a_busy_workdir_and_reports_a_run_it_cannot_mark() {
     // A real run whose driver is gone after a resume: it reads running.
     let busy_run = pause_script_run(root, false);
     let mut log = EventLog::open(&root.join(".apb/runs").join(&busy_run)).unwrap();
-    log.append(EventPayload::RunResumed {
-        from_node: "s".into(),
-        by: Some(PauseBy::Operator),
-        explicit: false,
-        launch: None,
-        definition: None,
-    })
-    .unwrap();
+    log.append(EventPayload::resumed("s", Some(PauseBy::Operator), false))
+        .unwrap();
     drop(log);
     // A hand-written driverless run the gate refuses, whose journal cannot
     // be written.
@@ -962,13 +958,7 @@ fn two_racing_resumes_journal_one_run_resumed() {
     // Another resume wins the race.
     EventLog::open(&run_dir)
         .unwrap()
-        .append(EventPayload::RunResumed {
-            from_node: "s".into(),
-            by: Some(PauseBy::Engine),
-            explicit: false,
-            launch: None,
-            definition: None,
-        })
+        .append(EventPayload::resumed("s", Some(PauseBy::Engine), false))
         .unwrap();
     drop(event_lock);
 

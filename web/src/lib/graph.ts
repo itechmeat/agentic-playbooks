@@ -58,6 +58,8 @@ export type FlowNodeData = {
   runCount?: { badge: string | null; title: string }
   /** Run view: why the node did not run, as a tooltip (`notRunTitle`). */
   notRun?: { word: string; title: string }
+  /** Run view: the node's retry waits out its delay (`retryBadge`). */
+  retryWait?: { text: string; title: string; frozen: boolean }
   /** Run view: a judge node's latest answers (`judgeCard`). */
   judge?: { lines: string[]; more: number; routed: string[]; shadow: boolean; title: string }
   /** A layer line under the card (the playbook page's counts layer). */

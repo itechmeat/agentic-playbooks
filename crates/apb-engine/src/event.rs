@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 
+mod deferral_guard;
+pub(crate) use deferral_guard::close as close_deferrals;
+use deferral_guard::{Change, DeferralTracker};
+mod survey;
+pub use survey::{BadLine, DeferralGuardState, JournalSurvey, survey};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeTrigger {
@@ -87,6 +93,11 @@ pub enum EventPayload {
         /// project's remembered input.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remembered: Vec<String>,
+        /// The version of the apb binary that started the run (display
+        /// only: `apb doctor --run` and the run detail name the binaries
+        /// that drove a run). Absent in older journals. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        apb: Option<String>,
     },
     NodeStarted {
         node: String,
@@ -159,6 +170,17 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         isolation: Option<AttemptIsolation>,
+        /// Where in its executor binding the attempt ran: the binding
+        /// snapshot, the chain step and how the step was reached
+        /// (`crate::execution_identity`). `None` for old logs and for
+        /// attempts outside an agent_task's chain; a shape a newer apb wrote
+        /// reads as absent.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        exec: Option<crate::execution_identity::ExecStep>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -386,6 +408,11 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         definition: Option<String>,
+        /// The version of the apb binary that resumed the run (display
+        /// only, like `RunProvenance.apb`). Absent in older journals.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        apb: Option<String>,
     },
     RunFinished {
         outcome: String,
@@ -1815,6 +1842,75 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         problem: Option<String>,
     },
+    /// An ordinary retry of `node` waits `delay_ms` of active run time
+    /// before it starts (`retry_delay`). Written right after the failed
+    /// attempt's events. The deferral stays open until the node's next
+    /// `AttemptStarted`, its `NodeFinished`, or `RunAborted`; while any is
+    /// open, every `NodeFinished` and `RunPaused` is followed by a
+    /// [`EventPayload::DeferredRetryGuard`] in the same write (see
+    /// [`EventLog`]). Not a checkpoint. Additive.
+    RetryDeferred {
+        #[serde(default)]
+        node: String,
+        /// The attempt id (the seq of its `AttemptStarted`) of the failed
+        /// attempt the retry follows.
+        #[serde(default)]
+        after_attempt: u64,
+        /// The retry number the delayed attempt runs as, 1-based within its
+        /// chain step.
+        #[serde(default)]
+        retry: u32,
+        /// The chain step the delayed attempt runs on (0-based index into
+        /// the binding's chain).
+        #[serde(default)]
+        step: u32,
+        /// The digest of the binding snapshot the delayed attempt runs on
+        /// (`runs/<id>/bindings/<digest>.json`).
+        #[serde(default)]
+        binding: String,
+        #[serde(default)]
+        delay_ms: u64,
+        /// The failed attempt's `failure_kind`, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
+    },
+    /// The nodes whose retry is still deferred, written in the same write
+    /// right after a checkpoint while any deferral is open. An apb that does
+    /// not know it finds an unknown event after the last checkpoint and
+    /// refuses to continue the run, so no binary that cannot honour the
+    /// deferral re-runs the node at once. Not a checkpoint. Additive.
+    DeferredRetryGuard {
+        #[serde(default)]
+        open: Vec<String>,
+    },
+    /// The driver stopped with only deferred retries left and freed the
+    /// run's busy lock; a waker resumes the run at `wake_at_ms` (epoch
+    /// milliseconds). The run stays `running`. Not a checkpoint. Additive.
+    DriveReleased {
+        #[serde(default)]
+        wake_at_ms: u64,
+        /// The nodes whose retry is deferred.
+        #[serde(default)]
+        nodes: Vec<String>,
+    },
+    /// A deferred retry of `node` was told to start now instead of at its
+    /// due time. Display only. Not a checkpoint. Additive.
+    RetryExpedited {
+        #[serde(default)]
+        node: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        by: Option<crate::resume_kind::ExpediteBy>,
+    },
+}
+
+/// The version of this apb binary, as `RunProvenance.apb` and
+/// `RunResumed.apb` record it.
+pub fn apb_version() -> Option<String> {
+    Some(env!("CARGO_PKG_VERSION").to_string())
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -1904,6 +2000,13 @@ pub struct EventLog {
     /// How far this handle's latest append got into the file, so a caller
     /// whose append failed knows whether its line is there.
     last_append: AppendMark,
+    /// The run's open deferred retries, kept in step with the file so every
+    /// checkpoint appended while one is open carries its guard.
+    deferrals: DeferralTracker,
+    /// Test seam: the next append leaves this many bytes at the end of its
+    /// buffer unwritten and fails, as a writer that dies mid-write would.
+    #[cfg(test)]
+    fault_write_short: Option<usize>,
 }
 
 /// How far an append got into `events.jsonl`.
@@ -1972,8 +2075,9 @@ impl EventLog {
         // Appending is deciding on the journal, so the engine's rule for
         // unknown events applies (see [`read_all`]); the next seq also clears
         // the skipped ones, so an appended event never reuses their seq.
-        let journal = read_journal_with(run_dir, tolerate_torn_tail)?;
+        let (journal, whole_len) = read_journal_snapshot(run_dir, tolerate_torn_tail)?;
         settle_unknown(&journal, policy)?;
+        let deferrals = DeferralTracker::new(fold_open_deferrals(&journal.events), whole_len);
         let next_seq = journal
             .events
             .iter()
@@ -1987,13 +2091,46 @@ impl EventLog {
         // hide it. The first append therefore settles the seq from the file
         // under the lock.
         let known_len = u64::MAX;
-        Ok(Self {
+        let unguarded = missing_guard(&journal.events).is_some();
+        let mut log = Self {
             path,
             file,
             next_seq,
             known_len,
             last_append: AppendMark::NotWritten,
-        })
+            deferrals,
+            #[cfg(test)]
+            fault_write_short: None,
+        };
+        // A checkpoint with a deferral open and no guard after it: the
+        // writer died between the two lines of one append (only a machine
+        // crash can split that write). The guard goes in first, before this
+        // writer appends anything, so an apb that does not know deferrals
+        // refuses the run again. The stop path only ends the run and needs
+        // none. Not after a torn tail (a foreign opener forgives one): the
+        // guard would merge with it into one bad line mid-journal, while the
+        // torn tail alone already keeps every apb from continuing the run.
+        let torn = std::fs::metadata(&log.path).is_ok_and(|m| m.len() != whole_len);
+        if unguarded && !torn && matches!(policy, UnknownPolicy::Refuse) {
+            log.repair_guard();
+        }
+        Ok(log)
+    }
+
+    /// Appends the guard of the open deferrals when the journal's last
+    /// checkpoint has none after it, decided under the append lock (two
+    /// writers opening at once append one). Best effort: a failure leaves
+    /// the journal as it was, which `apb doctor --run` reports.
+    fn repair_guard(&mut self) {
+        let build = |events: &[Event]| {
+            missing_guard(events).map(|open| EventPayload::DeferredRetryGuard { open })
+        };
+        if let Err(e) = self.append_inner(Build::Decided(Box::new(build)), true) {
+            eprintln!(
+                "apb: warning: {}: a deferred retry has no guard after the last checkpoint, and it could not be added: {e}",
+                self.path.display()
+            );
+        }
     }
 
     /// How far this handle's latest append got into the file: after a
@@ -2103,26 +2240,142 @@ impl EventLog {
         {
             self.resync_seq()?;
         }
+        // Fold what other writers appended since this handle last looked,
+        // so the guard below names every deferral open in the file. That
+        // holds only while the lock does: on a file system without `flock`
+        // another writer can append between this fold and the write below,
+        // and `apb doctor --run` reports a checkpoint left unguarded so.
+        self.catch_up_deferrals()?;
+        debug_assert!(
+            !(matches!(payload, EventPayload::RunFinished { .. }) && self.deferrals.any_open()),
+            "a run never finishes with a deferred retry open"
+        );
+        let ts = apb_core::clock::now_ms();
         let event = Event {
             seq: self.next_seq,
-            ts: apb_core::clock::now_ms(),
+            ts,
             payload,
         };
-        let mut buf = serde_json::to_vec(&event).map_err(|e| EngineError::Yaml(e.to_string()))?;
-        buf.push(b'\n');
+        let mut lines = vec![event];
+        // While a deferral stays open, a checkpoint is never the journal's
+        // last event: its guard follows in the same write, so an apb that
+        // cannot honour the deferral refuses to continue the run.
+        if lines[0].payload.is_guarded_checkpoint()
+            && let Some(open) = self
+                .deferrals
+                .open_after(lines[0].payload.deferral_change())
+        {
+            lines.push(Event {
+                seq: self.next_seq + 1,
+                ts,
+                payload: EventPayload::DeferredRetryGuard { open },
+            });
+        }
+        let mut buf = Vec::new();
+        for line in &lines {
+            serde_json::to_writer(&mut buf, line).map_err(|e| EngineError::Yaml(e.to_string()))?;
+            buf.push(b'\n');
+        }
         self.last_append = AppendMark::Torn;
-        self.file.write_all(&buf)?;
+        self.write_buffer(&buf)?;
         self.file.flush()?;
-        // The line is in the file: keep this handle in step with it even
-        // when the sync below fails.
+        // The lines are in the file: keep this handle in step with them
+        // even when the sync below fails.
         self.last_append = AppendMark::Whole;
-        self.next_seq += 1;
+        self.next_seq += lines.len() as u64;
         self.known_len = self.file.metadata().map_or(0, |m| m.len());
+        for line in &lines {
+            self.deferrals.apply(line.payload.deferral_change());
+        }
+        self.deferrals.set_folded_to(self.known_len);
+        let event = lines.swap_remove(0);
         if durable {
             self.file.sync_data()?;
         }
         Ok(Some(event))
     }
+}
+
+impl EventLog {
+    /// The nodes whose deferred retry is open, as of this handle's last
+    /// append (or its open).
+    #[cfg(test)]
+    pub(crate) fn open_deferrals(&self) -> &std::collections::BTreeSet<String> {
+        self.deferrals.open()
+    }
+
+    /// Folds the lines other writers appended since the open deferrals were
+    /// last folded. Called under the journal's append lock, where every
+    /// line is whole. A line this binary cannot decode (a newer event type)
+    /// changes nothing.
+    fn catch_up_deferrals(&mut self) -> Result<(), EngineError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let len = self.file.metadata()?.len();
+        if len == self.deferrals.folded_to() {
+            return Ok(());
+        }
+        if len < self.deferrals.folded_to() {
+            self.deferrals.reset();
+        }
+        let from = self.deferrals.folded_to();
+        let mut reader = File::open(&self.path)?;
+        reader.seek(SeekFrom::Start(from))?;
+        let mut bytes = Vec::new();
+        reader.take(len - from).read_to_end(&mut bytes)?;
+        let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        for line in bytes[..whole].split(|b| *b == b'\n') {
+            if let Ok(event) = serde_json::from_slice::<Event>(line) {
+                self.deferrals.apply(event.payload.deferral_change());
+            }
+        }
+        self.deferrals.set_folded_to(from + whole as u64);
+        Ok(())
+    }
+
+    /// Writes one append's buffer with one `write_all`.
+    fn write_buffer(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(short) = self.fault_write_short.take() {
+            self.file
+                .write_all(&buf[..buf.len().saturating_sub(short)])?;
+            return Err(std::io::Error::other("injected fault mid-write"));
+        }
+        self.file.write_all(buf)
+    }
+}
+
+/// The events of a journal as the deferral guard reads them.
+fn guard_steps(events: &[Event]) -> impl Iterator<Item = deferral_guard::Step<'_>> {
+    events.iter().map(|e| deferral_guard::Step {
+        seq: e.seq,
+        checkpoint: e.payload.is_checkpoint(),
+        // Every record of the deferral family is one an apb that knows no
+        // deferrals refuses to continue past, so each guards like the guard.
+        guard: matches!(
+            e.payload,
+            EventPayload::DeferredRetryGuard { .. }
+                | EventPayload::RetryDeferred { .. }
+                | EventPayload::DriveReleased { .. }
+                | EventPayload::RetryExpedited { .. }
+        ),
+        change: e.payload.deferral_change(),
+    })
+}
+
+/// Whether the last checkpoint of `events` has a deferral open and no guard
+/// after it, with the deferrals open at the end.
+fn missing_guard(events: &[Event]) -> Option<Vec<String>> {
+    let (open, unguarded) = deferral_guard::unguarded(guard_steps(events));
+    unguarded.map(|_| open.into_iter().collect())
+}
+
+/// The nodes whose deferred retry is open after `events`, in journal order.
+pub fn fold_open_deferrals(events: &[Event]) -> std::collections::BTreeSet<String> {
+    let mut open = std::collections::BTreeSet::new();
+    for e in events {
+        deferral_guard::apply(&mut open, e.payload.deferral_change());
+    }
+    open
 }
 
 /// What an append writes: a fixed payload, or the one a decision over the
@@ -2619,6 +2872,55 @@ impl EventPayload {
         )
     }
 
+    /// What the event does to the run's open deferred retries: a
+    /// `retry_deferred` opens its node; the node's next `attempt_started` or
+    /// its `node_finished` closes it, and so does a `nodes_revived` naming
+    /// it; a `run_aborted` or a `run_finished` closes every one. The one rule of the event
+    /// log's guard and of the run state.
+    pub(crate) fn deferral_change(&self) -> Change<'_> {
+        match self {
+            // A record that names no node (a shape read leniently) opens
+            // nothing: no event could ever close it.
+            EventPayload::RetryDeferred { node, .. } if !node.is_empty() => Change::Open(node),
+            EventPayload::AttemptStarted { node, .. } | EventPayload::NodeFinished { node, .. } => {
+                Change::Close(node)
+            }
+            EventPayload::NodesRevived { nodes, .. } => Change::CloseEach(nodes),
+            // A run never finishes with one open (the append checks it in
+            // a debug build); a journal that does reads none open after it.
+            EventPayload::RunAborted { .. } | EventPayload::RunFinished { .. } => Change::CloseAll,
+            _ => Change::None,
+        }
+    }
+
+    /// A checkpoint that carries a [`EventPayload::DeferredRetryGuard`] in
+    /// its own write while a deferral stays open. `run_aborted` closes every
+    /// deferral, and `run_finished` never occurs with one open.
+    fn is_guarded_checkpoint(&self) -> bool {
+        matches!(
+            self,
+            EventPayload::NodeFinished { .. } | EventPayload::RunPaused { .. }
+        )
+    }
+
+    /// A [`EventPayload::RunResumed`] with no launch record, no definition
+    /// digest and no binary version: the shape of a resume in an older
+    /// journal.
+    pub fn resumed(
+        from_node: impl Into<String>,
+        by: Option<crate::pause::kind::PauseBy>,
+        explicit: bool,
+    ) -> Self {
+        EventPayload::RunResumed {
+            from_node: from_node.into(),
+            by,
+            explicit,
+            launch: None,
+            definition: None,
+            apb: None,
+        }
+    }
+
     /// An [`EventPayload::EdgeTraversed`]: the hop `from -> to` over the
     /// edges named by `edges` (rendered addresses, empty for a policy hop).
     pub fn hop(
@@ -2766,10 +3068,27 @@ pub fn read_journal(run_dir: &Path) -> Result<JournalRead, EngineError> {
 }
 
 fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<JournalRead, EngineError> {
+    read_journal_snapshot(run_dir, tolerate_torn_tail).map(|(journal, _)| journal)
+}
+
+/// [`read_journal_with`], with the length in bytes of the whole lines the
+/// snapshot held (up to and including its last newline): a torn tail is
+/// not counted, so a reader that continues from there starts on a line
+/// boundary.
+fn read_journal_snapshot(
+    run_dir: &Path,
+    tolerate_torn_tail: bool,
+) -> Result<(JournalRead, u64), EngineError> {
     let path = run_dir.join("events.jsonl");
     if !path.is_file() {
-        return Ok(JournalRead::default());
+        return Ok((JournalRead::default(), 0));
     }
+    let whole = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i as u64 + 1)
+    };
     let bytes = std::fs::read(&path)?;
     match parse_journal(&bytes, tolerate_torn_tail) {
         // A strict reader outside the append lock can catch another writer
@@ -2779,9 +3098,13 @@ fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Journal
         // writer that died mid-line, and stays an error.
         Err(Unreadable::Tail(_)) => {
             let bytes = with_journal_lock(run_dir, || std::fs::read(&path))??;
-            parse_journal(&bytes, false).map_err(Unreadable::into_error)
+            parse_journal(&bytes, false)
+                .map(|j| (j, whole(&bytes)))
+                .map_err(Unreadable::into_error)
         }
-        other => other.map_err(Unreadable::into_error),
+        other => other
+            .map(|j| (j, whole(&bytes)))
+            .map_err(Unreadable::into_error),
     }
 }
 
@@ -3032,6 +3355,7 @@ mod tests {
             transcript: None,
             token: None,
             isolation: None,
+            exec: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"spawn_ms\":37"), "got {s}");
@@ -3645,6 +3969,390 @@ mod edge_address_field_tests {
             // An absent digest stays absent on the wire.
             let line = format!("{base}}}");
             assert_eq!(serde_json::to_string(&decode(&line)).unwrap(), line);
+        }
+    }
+}
+
+/// The deferred retry events, the guard the log writes with them and the
+/// binary versions on provenance and resume.
+#[cfg(test)]
+mod deferral_tests {
+    use super::*;
+
+    /// The binary version on `run_provenance` and `run_resumed`: an older
+    /// line without it reads as absent and writes back byte for byte; a
+    /// present one round-trips.
+    #[test]
+    fn apb_versions_are_additive_on_provenance_and_resume() {
+        let decode = |line: &str| serde_json::from_str::<Event>(line).unwrap();
+        for old in [
+            r#"{"seq":1,"ts":5,"type":"run_provenance"}"#,
+            r#"{"seq":2,"ts":5,"type":"run_resumed","from_node":"a"}"#,
+        ] {
+            assert_eq!(serde_json::to_string(&decode(old)).unwrap(), old);
+        }
+        let line = r#"{"seq":2,"ts":5,"type":"run_resumed","from_node":"a","apb":"1.0.0"}"#;
+        match decode(line).payload {
+            EventPayload::RunResumed { apb, .. } => assert_eq!(apb.as_deref(), Some("1.0.0")),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&decode(line)).unwrap(), line);
+        assert_eq!(apb_version().as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// The deferral events decode from their bare tag (every field has a
+    /// default), are none of them checkpoints, and round-trip.
+    #[test]
+    fn deferral_events_decode_leniently_and_are_not_checkpoints() {
+        for kind in [
+            "retry_deferred",
+            "deferred_retry_guard",
+            "drive_released",
+            "retry_expedited",
+        ] {
+            let p: EventPayload =
+                serde_json::from_value(serde_json::json!({ "type": kind })).unwrap();
+            assert!(!p.is_checkpoint(), "{kind}");
+            assert!(is_known_kind(kind));
+        }
+        let line = r#"{"seq":3,"ts":5,"type":"retry_deferred","node":"n","after_attempt":2,"retry":1,"step":0,"binding":"ab","delay_ms":60000,"failure_kind":"agent"}"#;
+        let ev: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&ev).unwrap(), line);
+        let expedited = r#"{"seq":4,"ts":5,"type":"retry_expedited","node":"n","by":"martian"}"#;
+        match serde_json::from_str::<Event>(expedited).unwrap().payload {
+            EventPayload::RetryExpedited { by, .. } => assert_eq!(by, None),
+            other => panic!("{other:?}"),
+        }
+        // A bare `retry_deferred` (a newer apb's shape this one reads
+        // leniently) names no node: it opens nothing in the guard or the
+        // run state, so nothing waits forever on node "".
+        let bare: EventPayload =
+            serde_json::from_value(serde_json::json!({ "type": "retry_deferred" })).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        log.append(bare).unwrap();
+        log.append(EventPayload::NodeFinished {
+            node: "x".into(),
+            status: "succeeded".into(),
+            attempt: 1,
+            output: String::new(),
+            artifacts: Vec::new(),
+        })
+        .unwrap();
+        let events = read_all(dir.path()).unwrap();
+        assert_eq!(events.len(), 2, "no guard follows the checkpoint");
+        assert!(crate::state::RunState::fold(&events).deferred.is_empty());
+    }
+
+    mod deferral_guard_log {
+        use super::*;
+        use std::collections::BTreeSet;
+
+        fn deferred(node: &str) -> EventPayload {
+            EventPayload::RetryDeferred {
+                node: node.into(),
+                after_attempt: 1,
+                retry: 1,
+                step: 0,
+                binding: "b".repeat(64),
+                delay_ms: 60_000,
+                failure_kind: Some("agent".into()),
+            }
+        }
+
+        fn finished(node: &str) -> EventPayload {
+            EventPayload::NodeFinished {
+                node: node.into(),
+                status: "succeeded".into(),
+                attempt: 0,
+                output: String::new(),
+                artifacts: Vec::new(),
+            }
+        }
+
+        fn started(node: &str) -> EventPayload {
+            serde_json::from_value(serde_json::json!({
+                "type": "attempt_started", "node": node, "attempt": 1, "agent": "fake"
+            }))
+            .unwrap()
+        }
+
+        fn paused() -> EventPayload {
+            crate::pause::engine_paused("x")
+        }
+
+        fn raw_lines(dir: &Path) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(dir.join("events.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        fn kinds(dir: &Path) -> Vec<String> {
+            raw_lines(dir)
+                .iter()
+                .map(|v| v["type"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        /// Every checkpoint appended while a deferral is open is followed by
+        /// the guard, written in the same append (one write of one buffer: the
+        /// file grows by both lines at once); seqs stay dense.
+        #[test]
+        fn a_checkpoint_with_a_deferral_open_is_followed_by_its_guard() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("flaky")).unwrap();
+            let before = std::fs::metadata(dir.path().join("events.jsonl"))
+                .unwrap()
+                .len();
+            let ev = log.append(finished("sibling")).unwrap();
+            assert_eq!(ev.seq, 1, "the append returns the checkpoint");
+            let bytes = std::fs::read(dir.path().join("events.jsonl")).unwrap();
+            let added = std::str::from_utf8(&bytes[before as usize..]).unwrap();
+            let pair: Vec<serde_json::Value> = added
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            assert_eq!(pair.len(), 2, "both lines in one append: {added}");
+            assert_eq!(pair[0]["type"], "node_finished");
+            assert_eq!(pair[1]["type"], "deferred_retry_guard");
+            assert_eq!(pair[1]["open"], serde_json::json!(["flaky"]));
+            log.append(paused()).unwrap();
+            assert_eq!(
+                kinds(dir.path()),
+                [
+                    "retry_deferred",
+                    "node_finished",
+                    "deferred_retry_guard",
+                    "run_paused",
+                    "deferred_retry_guard"
+                ]
+            );
+            let seqs: Vec<u64> = raw_lines(dir.path())
+                .iter()
+                .map(|v| v["seq"].as_u64().unwrap())
+                .collect();
+            assert_eq!(seqs, [0, 1, 2, 3, 4]);
+            assert_eq!(log.peek_next_seq(), 5);
+            let events = read_all(dir.path()).unwrap();
+            assert_eq!(
+                fold_open_deferrals(&events),
+                BTreeSet::from(["flaky".to_string()])
+            );
+        }
+
+        /// The deferral closes on the node's next attempt, on its own
+        /// `node_finished` and on `run_aborted`; a checkpoint after that carries
+        /// no guard. Other events and checkpoints leave it open.
+        #[test]
+        fn no_guard_once_every_deferral_closed() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("a")).unwrap();
+            log.append(deferred("b")).unwrap();
+            log.append(started("a")).unwrap();
+            log.append(finished("x")).unwrap();
+            assert_eq!(
+                raw_lines(dir.path()).last().unwrap()["open"],
+                serde_json::json!(["b"])
+            );
+            // The deferred node's own `node_finished` closes it: nothing is
+            // left open, so no guard follows.
+            log.append(finished("b")).unwrap();
+            assert_eq!(kinds(dir.path()).last().unwrap(), "node_finished");
+            assert!(log.open_deferrals().is_empty());
+            log.append(deferred("c")).unwrap();
+            log.append(
+                serde_json::from_value(serde_json::json!({
+                    "type": "run_aborted", "reason": "stop"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(log.open_deferrals().is_empty());
+            assert_eq!(kinds(dir.path()).last().unwrap(), "run_aborted");
+        }
+
+        /// A handle opened on a journal with an open deferral knows it, and one
+        /// that another handle appended to catches up before its next append.
+        #[test]
+        fn open_and_foreign_appends_keep_the_set_in_step() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut first = EventLog::create(dir.path()).unwrap();
+            first.append(deferred("a")).unwrap();
+            let mut reopened = EventLog::open(dir.path()).unwrap();
+            assert_eq!(reopened.open_deferrals().len(), 1);
+            // Another writer opens a second deferral and closes the first.
+            first.append(deferred("b")).unwrap();
+            first.append(started("a")).unwrap();
+            reopened.append(paused()).unwrap();
+            assert_eq!(
+                raw_lines(dir.path()).last().unwrap()["open"],
+                serde_json::json!(["b"])
+            );
+            assert_eq!(
+                reopened.open_deferrals(),
+                &BTreeSet::from(["b".to_string()])
+            );
+        }
+
+        /// A writer that dies inside the two-line write leaves a torn tail: the
+        /// strict read every resumer uses refuses the journal, while a
+        /// read-only surface still reads everything before it.
+        #[test]
+        fn a_fault_inside_the_pair_leaves_a_torn_tail_the_strict_read_refuses() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("flaky")).unwrap();
+            // Cut inside the guard line: the checkpoint is whole, the guard is
+            // not.
+            log.fault_write_short = Some(10);
+            assert!(log.append(finished("sibling")).is_err());
+            assert_eq!(log.last_append(), AppendMark::Torn);
+            let err = read_all(dir.path()).unwrap_err();
+            assert!(!err.to_string().is_empty());
+            assert!(EventLog::open(dir.path()).is_err(), "no writer continues");
+            let lossy = read_all_lossy_tail(dir.path()).unwrap();
+            assert_eq!(lossy.len(), 2, "the deferral and the checkpoint read");
+            assert!(read_journal(dir.path()).is_ok());
+            // A writer outside the drive forgives a torn tail but adds no
+            // guard after it: written there, it would merge with the torn
+            // line into one bad line in the middle of the journal.
+            let before = std::fs::read(dir.path().join("events.jsonl")).unwrap();
+            drop(EventLog::open_foreign(dir.path()).unwrap());
+            let after = std::fs::read(dir.path().join("events.jsonl")).unwrap();
+            assert_eq!(after, before, "nothing appended after the torn tail");
+        }
+
+        /// A re-run that revives a waiting node closes its deferral in the
+        /// event log exactly as in the run state: no guard follows a later
+        /// checkpoint, and the run may finish (the debug assertion holds).
+        #[test]
+        fn a_revival_closes_the_deferral_like_the_run_state() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("b")).unwrap();
+            log.append(
+                serde_json::from_value(serde_json::json!({
+                    "type": "nodes_revived", "from_node": "a", "nodes": ["a", "b"]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(log.open_deferrals().is_empty());
+            let events = read_all(dir.path()).unwrap();
+            assert!(crate::state::RunState::fold(&events).deferred.is_empty());
+            assert!(fold_open_deferrals(&events).is_empty());
+            // A fresh handle folds the same from the file.
+            let mut reopened = EventLog::open(dir.path()).unwrap();
+            assert!(reopened.open_deferrals().is_empty());
+            reopened.append(finished("a")).unwrap();
+            assert_eq!(kinds(dir.path()).last().unwrap(), "node_finished");
+            reopened
+                .append(EventPayload::RunFinished {
+                    outcome: "success".into(),
+                })
+                .unwrap();
+            let bytes = std::fs::read(dir.path().join("events.jsonl")).unwrap();
+            assert_eq!(survey(&bytes).deferrals(), DeferralGuardState::default());
+        }
+
+        /// A journal whose last checkpoint has a deferral open and no guard
+        /// after it (a write cut between the two lines by a machine crash)
+        /// gets the guard as soon as a writer opens it, before anything
+        /// else; a second open adds none, and the stop path adds none.
+        #[test]
+        fn opening_a_journal_with_an_unguarded_checkpoint_adds_the_guard() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("flaky")).unwrap();
+            // Cut exactly after the checkpoint's newline.
+            let line = serde_json::to_string(&Event {
+                seq: 1,
+                ts: 5,
+                payload: finished("sibling"),
+            })
+            .unwrap();
+            let path = dir.path().join("events.jsonl");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.extend_from_slice(line.as_bytes());
+            bytes.push(b'\n');
+            std::fs::write(&path, &bytes).unwrap();
+            let bare = std::fs::read(&path).unwrap();
+            assert_eq!(survey(&bare).deferrals().unguarded_checkpoint, Some(1));
+
+            drop(EventLog::open_for_stop(dir.path()).unwrap());
+            assert_eq!(kinds(dir.path()).last().unwrap(), "node_finished");
+
+            let mut reopened = EventLog::open(dir.path()).unwrap();
+            assert_eq!(
+                kinds(dir.path()),
+                ["retry_deferred", "node_finished", "deferred_retry_guard"]
+            );
+            assert_eq!(
+                raw_lines(dir.path()).last().unwrap()["open"],
+                serde_json::json!(["flaky"])
+            );
+            let fixed = std::fs::read(&path).unwrap();
+            assert_eq!(survey(&fixed).deferrals().unguarded_checkpoint, None);
+            drop(EventLog::open(dir.path()).unwrap());
+            assert_eq!(kinds(dir.path()).len(), 3, "one guard");
+            // The handle goes on with the seq after the guard.
+            assert_eq!(reopened.append(paused()).unwrap().seq, 3);
+        }
+
+        /// Any record of the deferral family after the last checkpoint keeps
+        /// an older apb off the run as a guard does (it knows none of them):
+        /// such a journal is not reported unguarded, and opening it adds no
+        /// guard.
+        #[test]
+        fn a_deferral_record_after_the_checkpoint_guards_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("flaky")).unwrap();
+            let path = dir.path().join("events.jsonl");
+            let mut bytes = std::fs::read(&path).unwrap();
+            for (seq, payload) in [
+                (1, finished("sibling")),
+                (
+                    2,
+                    EventPayload::DriveReleased {
+                        wake_at_ms: 60_000,
+                        nodes: vec!["flaky".into()],
+                    },
+                ),
+            ] {
+                let line = serde_json::to_string(&Event {
+                    seq,
+                    ts: 5,
+                    payload,
+                })
+                .unwrap();
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(survey(&bytes).deferrals().unguarded_checkpoint, None);
+            drop(EventLog::open(dir.path()).unwrap());
+            assert_eq!(
+                kinds(dir.path()),
+                ["retry_deferred", "node_finished", "drive_released"]
+            );
+        }
+
+        /// `run_finished` is never appended while a deferral is open.
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "never finishes with a deferred retry open")]
+        fn run_finished_with_an_open_deferral_is_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            log.append(deferred("flaky")).unwrap();
+            let _ = log.append(EventPayload::RunFinished {
+                outcome: "success".into(),
+            });
         }
     }
 }

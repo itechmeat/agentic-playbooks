@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { showsDriverDead } from './status'
+import { driverDead, showsDriverDead } from './status'
 
 describe('showsDriverDead', () => {
   it('marks a run that still reads running but has no live driver', () => {
@@ -16,5 +16,14 @@ describe('showsDriverDead', () => {
     expect(showsDriverDead('succeeded', true)).toBe(false)
     expect(showsDriverDead('failed', true)).toBe(false)
     expect(showsDriverDead('aborted', true)).toBe(false)
+  })
+})
+
+describe('driverDead', () => {
+  it('reads a run with no live driver as dead, but not one released while a retry waits', () => {
+    expect(driverDead({ driver_alive: false })).toBe(true)
+    expect(driverDead({ driver_alive: false, released: { seq: 9, wake_at_ms: 1, nodes: ['w'] } })).toBe(false)
+    expect(driverDead({ driver_alive: true })).toBe(false)
+    expect(driverDead({ driver_alive: null })).toBe(false)
   })
 })

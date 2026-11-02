@@ -63,7 +63,11 @@ pub(crate) fn pipeline_member(
     slots: BatchSlots<'_>,
     admit: bool,
 ) -> Result<bool, EngineError> {
-    let state = RunState::fold(&read_all(run_dir)?);
+    let events = read_all(run_dir)?;
+    let state = RunState::fold(&events);
+    // Read now, not at the batch's start: a retry-now or a delay that ran
+    // out while the batch ran admits its node at once.
+    let held = super::deferred::held(&state, &events, apb_core::clock::now_ms());
     let any_join = parallel::selected_edges(playbook, node, &state)
         .iter()
         .any(|e| {
@@ -107,7 +111,9 @@ pub(crate) fn pipeline_member(
         .collect();
     let ready: Vec<String> = frontier
         .iter()
-        .filter(|n| is_batchable(playbook, n) && !slots.batch.contains(*n))
+        .filter(|n| {
+            is_batchable(playbook, n) && !slots.batch.contains(*n) && !held.contains_key(*n)
+        })
         .filter(|n| {
             let reach = apb_core::graphutil::reachable(playbook, &[n.as_str()]);
             !pending.iter().any(|m| reach.contains(m.as_str()))

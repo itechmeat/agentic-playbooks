@@ -925,6 +925,11 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     }
     match run(root, name, version, opts) {
         Ok(res) => {
+            if res.outcome == RunStatus::Running {
+                let exit = released_exit(root, &res.run_id);
+                print_recalled(root, &res.run_id);
+                return exit;
+            }
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
             print_recalled(root, &res.run_id);
             match res.outcome {
@@ -1222,7 +1227,10 @@ pub(crate) struct DriveRunArgs<'a> {
     pub(crate) resume: bool,
     pub(crate) allow_environment_drift: bool,
     pub(crate) by: Option<&'a str>,
-    pub(crate) pause_seq: Option<u64>,
+    /// The engine's resume of one pause or release.
+    pub(crate) hold: Option<apb_engine::pause::WakeHold>,
+    /// `--retry-now`: the waiting retries the resume starts now.
+    pub(crate) retry_now: Option<apb_engine::scheduler::RetryNow<'a>>,
     pub(crate) budget_json: Option<&'a str>,
     pub(crate) launch_handoff: Option<&'a Path>,
 }
@@ -1243,7 +1251,8 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
         resume,
         allow_environment_drift,
         by,
-        pause_seq,
+        hold,
+        retry_now,
         budget_json,
         launch_handoff,
     } = *args;
@@ -1270,8 +1279,8 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
         Some(Ok(b)) => Ok(Some(b)),
         None => Ok(None),
     };
-    let res = if resume && let Some(seq) = pause_seq {
-        apb_engine::scheduler::resume_pause(root, run_id, seq, launch.as_ref())
+    let res = if resume && let Some(hold) = hold {
+        apb_engine::scheduler::resume_held(root, run_id, hold, launch.as_ref())
     } else if resume {
         let by = by
             .and_then(apb_engine::pause::PauseBy::parse)
@@ -1286,6 +1295,7 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
                     by,
                     budget: budget.as_ref(),
                     launch: launch.as_ref(),
+                    retry_now,
                 },
             )
         })
@@ -1307,6 +1317,7 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
         // marker that supervisor wakes and reports read as an action.
         Err(apb_engine::error::EngineError::Conflict(why))
             if why == apb_engine::scheduler::PAUSE_SUPERSEDED
+                || why == apb_engine::scheduler::RELEASE_SUPERSEDED
                 || why == apb_engine::scheduler::RESUME_SUPERSEDED =>
         {
             ExitCode::SUCCESS
@@ -1330,12 +1341,33 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
     }
 }
 
+/// Which wait a `__pause-waker` belongs to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WakerFor {
+    /// The `run_paused` at this journal sequence.
+    Pause(u64),
+    /// The `drive_released` at this journal sequence.
+    Release(u64),
+    /// The notifications the drive's last sweep could not send.
+    Notify,
+}
+
 /// Body of the hidden `__pause-waker` subcommand (issue #200): sleeps until
-/// the pause at journal sequence `seq` reaches its `until`, then resumes the
-/// run if that pause still holds it. Stdio is nulled by the spawner; the exit
-/// code says what happened (0 resumed or nothing to do, 1 refused, 2 error).
-pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, seq: u64) -> ExitCode {
-    match apb_engine::pause::run_waker(root, run_id, seq) {
+/// the pause at journal sequence `seq` reaches its `until`, or the release
+/// reaches its wake time, then resumes the run if that pause or release
+/// still holds it; or retries the run's unsent notifications. Stdio is
+/// nulled by the spawner; the exit code says what happened (0 resumed,
+/// swept or nothing to do, 1 refused, 2 error).
+pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, waker: WakerFor) -> ExitCode {
+    let woke = match waker {
+        WakerFor::Pause(seq) => apb_engine::pause::run_waker(root, run_id, seq),
+        WakerFor::Release(seq) => apb_engine::pause::run_release_waker(root, run_id, seq),
+        // Retrying notifications resumes nothing: it ends like a waker
+        // with nothing to do.
+        WakerFor::Notify => apb_engine::notify::retry::run_retry_waker(root, run_id)
+            .map(|_| apb_engine::pause::WakeOutcome::Superseded),
+    };
+    match woke {
         Ok(apb_engine::pause::WakeOutcome::Refused(why)) => {
             eprintln!("waker of run `{run_id}`: resume refused: {why}");
             ExitCode::from(1)
@@ -1386,6 +1418,10 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
                     }
                     if r.driver_dead {
                         line.push_str("\tdriver dead");
+                    }
+                    if let Some(rel) = &r.released {
+                        line.push('\t');
+                        line.push_str(&apb_engine::retry_wait::released_line(rel));
                     }
                     if let Some(n) = &r.needs_look {
                         line.push_str(&format!("\tneeds a look: {}", n.line()));
@@ -1486,6 +1522,9 @@ fn run_detail_text(
     if view.driver_dead() {
         say!("  driver dead");
     }
+    if let Some(r) = view.released() {
+        say!("  released: {}", apb_engine::retry_wait::released_line(r));
+    }
     if let Some(l) = apb_engine::gate::launch::run_authorization(&run_dir) {
         let how = l
             .confirmation
@@ -1503,8 +1542,15 @@ fn run_detail_text(
     if let Some(p) = view.pause() {
         crate::pause::print_block(p);
     }
+    let waits = apb_engine::retry_wait::of_view(&view, apb_core::clock::now_ms_u64());
     for (node, status) in view.nodes() {
-        say!("  {node}\t{status}");
+        match waits.iter().find(|w| w.node == node) {
+            Some(w) => say!(
+                "  {node}\t{status}\t{}",
+                apb_engine::retry_wait::wait_line(w)
+            ),
+            None => say!("  {node}\t{status}"),
+        }
     }
     say!("  route:");
     for line in view.graph(&run_dir).lines() {
@@ -1641,6 +1687,9 @@ fn run_detail_text(
     // The human outcome: done, verified, not verified (inbox gaps among
     // them), findings, warnings, the baseline and the agent's own summary.
     print_outcome(&view.outcome(&run_dir));
+    if let Some(line) = view.driven_by() {
+        say!("  {line}");
+    }
     if !view.unknown.is_empty() {
         say!("  {}", unknown_events_note(view.unknown.len()));
     }
@@ -1732,10 +1781,89 @@ fn print_waiting_on_question(progress: Option<&apb_engine::ProgressSummary>) {
     }
 }
 
+/// `apb resume --retry-now [--node <id>]`: start a deferred retry now.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetryNowArg<'a> {
+    /// Only this node's waiting retry; every one when `None`.
+    pub node: Option<&'a str>,
+}
+
+/// What `apb run` and `apb resume` in the foreground print for a run whose
+/// driver released it while a deferred retry waits, and the exit code they
+/// return for it: 4, the code `apb wait` gives a released run. A drive that
+/// returned with the run still going is always such a release; when the run
+/// is no longer released by the time it is read, the line says where it
+/// went instead.
+fn released_exit(root: &Path, run_id: &str) -> ExitCode {
+    let stopped = ExitCode::from(apb_engine::next_action::verdict::WaitExit::Stopped.code());
+    let released =
+        apb_engine::run_view::RunView::load(&root.join(".apb/runs").join(run_id), run_id)
+            .ok()
+            .and_then(|view| view.released().cloned());
+    match released {
+        Some(released) => println!(
+            "run {run_id} released: {}; `apb resume {run_id} --retry-now` starts it now",
+            apb_engine::retry_wait::released_line(&released)
+        ),
+        // A resume, a retry-now or a stop got to the run between its release
+        // and this read: it is still going, just not here.
+        None => println!(
+            "run {run_id} continues outside this process; follow it with `apb wait {run_id}`"
+        ),
+    }
+    stopped
+}
+
+/// The retry-now half of `apb resume --retry-now`: refused when nothing
+/// waits to retry; on a run a live driver holds, the expedite is the whole
+/// action (`Ok(Some(exit))`); otherwise the resume goes on (`Ok(None)`) and
+/// expedites the retry with its `run_resumed`, once every check passed.
+fn retry_now_live(
+    root: &Path,
+    run_id: &str,
+    arg: RetryNowArg<'_>,
+) -> Result<Option<ExitCode>, ExitCode> {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let plan = apb_engine::retry_wait::plan_retry_now(&run_dir, run_id, arg.node).map_err(|r| {
+        eprintln!("resume refused ({}): {}", r.error, r.detail);
+        ExitCode::from(2)
+    })?;
+    if !plan.live {
+        return Ok(None);
+    }
+    // Decided under the run's event lock: a driver that let go of the run
+    // meanwhile leaves the retry to the resume below.
+    match apb_engine::scheduler::deferred::expedite_live(
+        &run_dir,
+        run_id,
+        arg.node,
+        apb_engine::scheduler::deferred::ExpediteBy::Operator,
+    ) {
+        Ok(Some(nodes)) => {
+            println!(
+                "retry of {} starts now: the run's live driver picks it up",
+                nodes
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            Ok(Some(ExitCode::SUCCESS))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => {
+            eprintln!("resume failed: cannot start the retry now: {e}");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resume_cmd(
     root: &Path,
     run_id: &str,
     from_node: Option<&str>,
+    retry_now: Option<RetryNowArg<'_>>,
     allow_environment_drift: bool,
     confirm_irreversible: Option<String>,
     budget: &crate::budget::ResumeBudgetFlags,
@@ -1748,6 +1876,20 @@ pub(crate) fn resume_cmd(
             return ExitCode::from(2);
         }
     };
+    if let Some(arg) = retry_now {
+        match retry_now_live(root, run_id, arg) {
+            Ok(Some(exit)) => {
+                if budget.is_some() || allow_environment_drift || confirm_irreversible.is_some() {
+                    eprintln!(
+                        "note: the run's live driver took the retry; the other resume flags were not applied (`apb resume {run_id}` with them once the run pauses)"
+                    );
+                }
+                return exit;
+            }
+            Err(exit) => return exit,
+            Ok(None) => {}
+        }
+    }
     // The launch policy of a run never authorized (one an older apb
     // started): the CLI's own decision table, separate from the origin and
     // trust checks `apb resume` keeps not making.
@@ -1770,6 +1912,12 @@ pub(crate) fn resume_cmd(
         allow_environment_drift,
         budget: budget.as_ref(),
         launch: grant.as_ref(),
+        // The waiting retry is due with `run_resumed`, once every check of
+        // the resume passed.
+        retry_now: retry_now.map(|a| apb_engine::scheduler::RetryNow {
+            node: a.node,
+            by: apb_engine::scheduler::deferred::ExpediteBy::Operator,
+        }),
         ..apb_engine::ResumeRequest::operator()
     };
     // 0.24.0 irreversible consent: a run of an irreversible tree with no
@@ -1829,6 +1977,9 @@ pub(crate) fn resume_cmd(
     }
     match apb_engine::resume_req(root, run_id, &req) {
         Ok(res) => {
+            if res.outcome == RunStatus::Running {
+                return released_exit(root, &res.run_id);
+            }
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());
             if pending_stop && res.outcome == RunStatus::Aborted {
                 println!(
@@ -1893,6 +2044,10 @@ pub(crate) fn resume_all_cmd(root: &Path, launch: &crate::launch::LaunchFlags) -
                         format!("left as is, the workdir is busy: {detail}")
                     }
                     ResumeAllAction::LeftPaused => "left paused".to_string(),
+                    ResumeAllAction::Rearmed { wake_at_ms } => format!(
+                        "waits until {}, a waker is armed",
+                        apb_core::clock::iso_utc(*wake_at_ms)
+                    ),
                     ResumeAllAction::LaunchRefused { detail } => {
                         format!("left: launch policy: {detail}")
                     }
@@ -2063,6 +2218,15 @@ fn wait_report(
                 crate::pause::marker(p)
             );
             print_open_gates(&res.view);
+            print_decisions();
+            exit
+        }
+        WaitReason::Stopped if res.view.released().is_some() => {
+            let r = res.view.released().expect("guarded");
+            say!(
+                "run {run_id} stopped ({status}): released, {}; `apb resume {run_id} --retry-now` starts it now",
+                apb_engine::retry_wait::released_line(r)
+            );
             print_decisions();
             exit
         }

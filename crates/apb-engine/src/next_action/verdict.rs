@@ -7,13 +7,14 @@
 //! 2. any open wait needs a person, a host or the supervisor (anything but
 //!    an assured successful auto outcome under a live driver, and every
 //!    wait whose auto outcome is a failure): `needs_input`;
-//! 3. otherwise the run or a live child is paused or has a dead driver:
-//!    `stopped`;
+//! 3. otherwise the run or a live child is paused, has a dead driver or is
+//!    released while a deferred retry waits: `stopped`;
 //! 4. otherwise: `progresses_by_itself`.
 //!
 //! Several open waits never hide each other: the primary is chosen by kind
 //! (publish, review, question without a default, supervisor, host task,
-//! webhook wait, question with a default, timer wait, resume), then by the
+//! webhook wait, question with a default, timer wait, resume, deferred
+//! retry), then by the
 //! request seq, then by run (the parent before its children, children in
 //! start order).
 
@@ -22,10 +23,11 @@ use serde::Serialize;
 use super::deadlines::{self, Clock};
 use super::observation::Observation;
 use super::types::{
-    ActionArg, ActionCode, ActionTarget, ArgValue, NextAction, Principal, RequestKind, RequestRef,
-    RunActions, StopVerdict,
+    ActionArg, ActionCode, ActionTarget, ArgValue, AutoOutcome, AutoProgress, NextAction,
+    Principal, RequestKind, RequestRef, RunActions, StopVerdict,
 };
 use crate::event::{Event, EventPayload};
+use crate::retry_wait::RetryDue;
 use crate::state::RunStatus;
 
 /// The order of the primary action, earliest first.
@@ -40,6 +42,7 @@ enum Kind {
     QuestionWithDefault,
     Timer,
     Resume,
+    RetryWait,
     Intent,
     Report,
 }
@@ -77,6 +80,7 @@ pub(super) fn collect(obs: &Observation) -> Vec<Wait> {
             cx.gates(&mut out);
             cx.host_tasks(&runs, &mut tasks_seen, &mut out);
             cx.resume(&mut out);
+            cx.retry_waits(&mut out);
         }
     }
     // Seqs are per journal: they order waits within one run only.
@@ -97,14 +101,17 @@ pub(super) fn stop_verdict(obs: &Observation, waits: &[Wait]) -> StopVerdict {
     }
 }
 
-/// A run stopped only by one pause with `until`: no other run is stopped
-/// and nothing but its resume, and timers that finish by themselves once it
-/// resumes, is open.
+/// A run stopped only by one pause with `until`, or by one release whose
+/// waker resumes it at its wake time: no other run is stopped and nothing
+/// but its resume, its deferred retries, and timers that finish by
+/// themselves once it resumes, is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedPause {
     pub run_id: String,
-    /// The journal seq of the `run_paused`; a new pause is a new seq.
+    /// The journal seq of the `run_paused` or the `drive_released`; a new
+    /// pause or release is a new seq.
     pub seq: u64,
+    /// The pause's `until`, or the release's wake time.
     pub until_ms: u64,
 }
 
@@ -114,7 +121,7 @@ pub const UNTIL_GRACE_MS: u64 = 60_000;
 /// The pause with `until` that alone stops `obs`, if that is the case.
 pub fn sole_timed_pause(obs: &Observation, actions: &RunActions) -> Option<TimedPause> {
     let by_itself = |a: &NextAction| {
-        a.code == ActionCode::ResumeRun
+        matches!(a.code, ActionCode::ResumeRun | ActionCode::RetryNow)
             || (a.code == ActionCode::WaitAgain && a.auto.is_some_and(|p| p.outcome().is_success()))
     };
     if actions.stop != StopVerdict::Stopped || !actions.actions.iter().all(by_itself) {
@@ -124,6 +131,13 @@ pub fn sole_timed_pause(obs: &Observation, actions: &RunActions) -> Option<Timed
     let [run] = runs.iter().filter(|r| r.stopped()).collect::<Vec<_>>()[..] else {
         return None;
     };
+    if let Some(released) = run.view.released() {
+        return Some(TimedPause {
+            run_id: run.run_id.clone(),
+            seq: released.seq,
+            until_ms: released.wake_at_ms,
+        });
+    }
     Some(TimedPause {
         run_id: run.run_id.clone(),
         seq: run.pause_seq?,
@@ -175,8 +189,9 @@ pub enum FollowAuto {
 }
 
 /// The follow rule: keep waiting while the run progresses by itself, or
-/// while one pause with `until` alone stops it, up to `until` plus
-/// [`UNTIL_GRACE_MS`] for that pause; otherwise return with the exit of the
+/// while one pause with `until` or one release alone stops it, up to
+/// `until` (the release's wake time) plus [`UNTIL_GRACE_MS`] for that pause
+/// or release; otherwise return with the exit of the
 /// aggregated verdict: 0 or 1 when finished, 3 when it needs input (a
 /// paused run with an open gate included), 4 when stopped.
 pub fn follow_auto(obs: &Observation, actions: &RunActions) -> FollowAuto {
@@ -601,17 +616,106 @@ impl RunCx<'_> {
             a.principals = vec![Principal::Person, Principal::Operator];
             a
         } else {
+            let released = self.run.view.released();
             let line = if self.run.status() == RunStatus::Paused {
                 "the run is paused; resume it".to_string()
+            } else if let Some(r) = released {
+                format!(
+                    "the run is released, {}",
+                    crate::retry_wait::released_line(r)
+                )
             } else {
                 "the run's driver is gone; resume it".to_string()
             };
             let mut a = self.action(ActionCode::ResumeRun, ActionTarget::default(), line);
             a.principals = vec![Principal::Person, Principal::Operator, Principal::Host];
-            a.auto = deadlines::pause_until(pause.and_then(|p| p.until));
+            a.auto = deadlines::pause_until(
+                released
+                    .map(|r| r.wake_at_ms)
+                    .or_else(|| pause.and_then(|p| p.until)),
+            );
             a
         };
         self.push(out, Kind::Resume, self.run.pause_seq.unwrap_or(0), false, a);
+    }
+}
+
+impl RunCx<'_> {
+    /// The deferred retries of this run: each starts by itself when its
+    /// delay passed (assured under a live driver, frozen while paused, by
+    /// the waker of a released run), or now on request.
+    fn retry_waits(&self, out: &mut Vec<Wait>) {
+        let released = self.run.view.released();
+        for w in crate::retry_wait::of_view(&self.run.view, self.clock.now_ms) {
+            let seq = self
+                .run
+                .view
+                .state
+                .deferred
+                .get(&w.node)
+                .map_or(0, |d| d.seq);
+            let at = |at_ms| AutoProgress::At {
+                at_ms,
+                outcome: AutoOutcome::RetryAttempt,
+                assured: released.is_none() && self.clock.driver_alive,
+            };
+            let (auto, line) = match (w.due, released) {
+                (RetryDue::Frozen { remaining_ms }, _) => (
+                    Some(AutoProgress::Frozen {
+                        remaining_ms,
+                        outcome: AutoOutcome::RetryAttempt,
+                    }),
+                    format!(
+                        "node `{}` waits to retry; its delay is frozen while the run is paused",
+                        w.node
+                    ),
+                ),
+                (due, Some(r)) => (
+                    Some(at(match due {
+                        RetryDue::At { at_ms } => at_ms,
+                        _ => r.wake_at_ms,
+                    })),
+                    format!(
+                        "node `{}` waits to retry while the run is released; a waker resumes it, or start the retry now",
+                        w.node
+                    ),
+                ),
+                (due, None) if self.clock.driver_alive => (
+                    Some(at(match due {
+                        RetryDue::At { at_ms } => at_ms,
+                        _ => self.clock.now_ms,
+                    })),
+                    format!(
+                        "node `{}` waits to retry; it starts by itself, or start it now",
+                        w.node
+                    ),
+                ),
+                // Nothing drives the run: nothing starts the retry by itself.
+                (_, None) => (
+                    None,
+                    format!(
+                        "node `{}` waits to retry but the run's driver is gone; resume the run or start the retry now",
+                        w.node
+                    ),
+                ),
+            };
+            let mut a = self.action(
+                ActionCode::RetryNow,
+                ActionTarget {
+                    node: Some(w.node.clone()),
+                    ..ActionTarget::default()
+                },
+                line,
+            );
+            a.args = vec![given("node", &w.node)];
+            a.principals = vec![
+                Principal::Person,
+                Principal::Operator,
+                Principal::Supervisor,
+            ];
+            a.auto = auto;
+            self.push(out, Kind::RetryWait, seq, false, a);
+        }
     }
 }
 

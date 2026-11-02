@@ -626,13 +626,7 @@ mod tests {
     #[test]
     fn wait_and_question_clocks_leave_out_paused_time() {
         let hour: u128 = 3_600_000;
-        let resumed = || EventPayload::RunResumed {
-            from_node: "w".into(),
-            by: None,
-            explicit: false,
-            launch: None,
-            definition: None,
-        };
+        let resumed = || EventPayload::resumed("w", None, false);
         let waits = vec![
             at(
                 1_000,
@@ -739,6 +733,7 @@ mod tests {
                     transcript: None,
                     token: None,
                     isolation: None,
+                    exec: None,
                 },
             )
         };
@@ -824,6 +819,7 @@ mod tests {
                         transcript: None,
                         token: None,
                         isolation: None,
+                        exec: None,
                     },
                 ),
                 at(
@@ -885,6 +881,7 @@ mod tests {
                     transcript: None,
                     token: None,
                     isolation: None,
+                    exec: None,
                 },
             ),
             at(
@@ -941,6 +938,7 @@ mod tests {
                 transcript: transcript.map(Into::into),
                 token: None,
                 isolation: None,
+                exec: None,
             },
         )
     }
@@ -1016,6 +1014,7 @@ mod tests {
                         transcript: None,
                         token: None,
                         isolation: None,
+                        exec: None,
                     },
                 ),
                 at(
@@ -1046,13 +1045,7 @@ mod tests {
             v
         };
         let paused = crate::pause::engine_paused("x");
-        let resumed = |explicit| EventPayload::RunResumed {
-            from_node: "work".into(),
-            by: None,
-            explicit,
-            launch: None,
-            definition: None,
-        };
+        let resumed = |explicit| EventPayload::resumed("work", None, explicit);
         let first = events(&[paused.clone(), resumed(false)]);
         assert!(
             paused_attempt_session(Path::new("/nonexistent"), &first, ExecKey::node("work"))

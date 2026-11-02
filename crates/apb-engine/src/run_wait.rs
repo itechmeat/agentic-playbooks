@@ -99,6 +99,10 @@ pub struct RunSnapshot {
     pub status: RunStatus,
     pub needs: Option<NeedsInput>,
     pub driver_alive: Option<bool>,
+    /// The run is released while a deferred retry waits: nobody drives it
+    /// until its waker resumes it, so a wait stops on it like on a pause
+    /// with `until`.
+    pub released: bool,
 }
 
 impl RunSnapshot {
@@ -119,6 +123,7 @@ impl RunSnapshot {
         }
         match self.status {
             RunStatus::Interrupted if self.driver_alive != Some(true) => Some(WaitReason::Stopped),
+            RunStatus::Running if self.released => Some(WaitReason::Stopped),
             _ => None,
         }
     }
@@ -194,6 +199,7 @@ fn snapshot_of(view: &crate::run_view::RunView) -> RunSnapshot {
         status: view.run_status,
         needs,
         driver_alive: view.driver_alive,
+        released: view.released().is_some(),
     }
 }
 

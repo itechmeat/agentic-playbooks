@@ -305,3 +305,123 @@ async fn a_keyless_dashboard_refuses_a_send_decision_and_points_at_the_cli() {
     }
     assert_eq!(fs::read(&journal).unwrap(), before, "nothing was recorded");
 }
+
+/// A run whose `work` retry waits an hour, driven by this process (a live
+/// driver).
+fn seed_deferred(root: &Path) -> String {
+    let run_id = "run-defer-1".to_string();
+    let dir = root.join(".apb/runs").join(&run_id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), INTERACTIVE_WF).unwrap();
+    let now = apb_core::clock::now_ms_u64();
+    let lines = [
+        serde_json::json!({"seq":0,"ts":now,"type":"run_started","playbook":"iq","version":"1.0.0"}),
+        serde_json::json!({"seq":1,"ts":now,"type":"node_started","node":"ask","attempt":1}),
+        serde_json::json!({"seq":2,"ts":now,"type":"retry_deferred","node":"ask","after_attempt":1,"retry":1,"step":0,"binding":"b","delay_ms":3_600_000}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(dir.join("events.jsonl"), text).unwrap();
+    fs::write(
+        apb_engine::driver::driver_pid_path(&dir),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    run_id
+}
+
+/// `retry_now` on a run a live driver holds: the run detail shows the
+/// waiting retry and its action, the resume route journals the expedite
+/// and starts no driver. Refusals come in MCP `run_resume`'s order (see
+/// `server::tests::run_resume_retry_now_expedites_a_live_run` in apb-mcp)
+/// with its codes: the arguments (400), then the run gate, then a node with
+/// nothing waiting (409).
+#[tokio::test]
+async fn retry_now_expedites_a_live_run_and_refuses_a_node_with_nothing_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let run_id = seed_deferred(dir.path());
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, detail) = call(app.clone(), "GET", &format!("/api/runs/{run_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["nodes"]["ask"], "retry_waiting", "{detail}");
+    assert_eq!(detail["retry_waits"][0]["node"], "ask");
+    assert_eq!(detail["retry_waits"][0]["due"]["kind"], "at");
+    let actions = &detail["next_actions"];
+    assert_eq!(actions["stop"], "progresses_by_itself");
+    assert_eq!(actions["actions"][0]["code"], "retry_now");
+    assert_eq!(
+        actions["actions"][0]["command"],
+        format!("apb resume --retry-now --node=ask {run_id}")
+    );
+
+    let uri = format!("/api/runs/{run_id}/resume");
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    // On a run directory this machine did not create: the arguments are
+    // refused first, then the run gate refuses before anything about the
+    // run's retries is told, and nothing is journaled.
+    let cases = [
+        (
+            serde_json::json!({ "retry_now": true, "node": "ask", "from_node": "ask" }),
+            StatusCode::BAD_REQUEST,
+            "retry_now_with_from_node",
+        ),
+        (
+            serde_json::json!({ "node": "ask" }),
+            StatusCode::BAD_REQUEST,
+            "node_without_retry_now",
+        ),
+        (
+            serde_json::json!({ "retry_now": true, "node": "nope" }),
+            StatusCode::CONFLICT,
+            "run_not_created_locally",
+        ),
+        (
+            serde_json::json!({ "retry_now": true, "node": "ask" }),
+            StatusCode::CONFLICT,
+            "run_not_created_locally",
+        ),
+    ];
+    for (body, want_status, code) in cases {
+        let (status, out) = call(app.clone(), "POST", &uri, Some(body.clone())).await;
+        assert_eq!(status, want_status, "{body}: {out}");
+        let got = out["error"].as_str().or(out["policy"].as_str());
+        assert_eq!(got, Some(code), "{body}: {out}");
+    }
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    assert_eq!(events.len(), 3, "nothing journaled");
+    apb_core::run_origin::ensure_key().unwrap();
+    apb_core::run_origin::stamp(&run_dir, &run_id).unwrap();
+
+    let (status, out) = call(
+        app.clone(),
+        "POST",
+        &uri,
+        Some(serde_json::json!({ "retry_now": true, "node": "nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{out}");
+    assert_eq!(out["error"], "no_deferred_retry");
+
+    let (status, out) = call(
+        app.clone(),
+        "POST",
+        &uri,
+        Some(serde_json::json!({ "retry_now": true, "node": "ask", "allow_environment_drift": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["retry_now"], serde_json::json!(["ask"]));
+    assert_eq!(out["live"], true);
+    // The expedite is the whole action: a resume argument it cannot apply
+    // is named, never dropped in silence.
+    assert_eq!(
+        out["not_applied"],
+        serde_json::json!(["allow_environment_drift"])
+    );
+    let events = apb_engine::event::read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    let last = serde_json::to_value(&events.last().unwrap().payload).unwrap();
+    assert_eq!(
+        last,
+        serde_json::json!({"type": "retry_expedited", "node": "ask", "by": "operator"})
+    );
+}

@@ -1315,3 +1315,189 @@ fn a_host_never_widens_the_outcome_filter_and_keeps_it_through_off_and_on() {
     // A success under `[failed]`: only the review was sent.
     assert_eq!(server.requests().len(), 1);
 }
+
+// --- The retry of the last notifications (the notify waker) ---------------
+
+/// The outcomes of every notification try of the run at `run_dir`, in order.
+fn try_outcomes(run_dir: &Path) -> Vec<String> {
+    let events = read_all(run_dir).unwrap();
+    notify_intents(&events)
+        .iter()
+        .filter_map(|(intent, _)| settlement(&events, intent).map(|(outcome, _)| outcome))
+        .collect()
+}
+
+/// A short retry gap for the waker tests.
+fn short_gap() -> EnvVar {
+    EnvVar::set(apb_engine::notify::transitions::RETRY_GAP_ENV, "100")
+}
+
+/// The notify waker retries a refused last notification, and three tries
+/// in all is the cap: a fourth refusal is never asked for.
+#[test]
+fn the_notify_waker_caps_a_refused_end_at_three_tries() {
+    let refused = || Reply::Respond(400, r#"{"error":"later"}"#.into());
+    let server = spawn_script(vec![refused(), refused(), refused(), refused()]);
+    let env = Env::new(FINISH_ONLY, &server);
+    let _gap = short_gap();
+    let res = run(env.root(), "p", None, Env::options(&[Transition::Finished])).unwrap();
+    let run_dir = env.root().join(".apb/runs").join(&res.run_id);
+    assert_eq!(try_outcomes(&run_dir), ["not_sent"]);
+
+    let sweeps = apb_engine::notify::retry::run_retry_waker(env.root(), &res.run_id).unwrap();
+    assert_eq!(sweeps, 2, "two retries after the drive's own try");
+    assert_eq!(try_outcomes(&run_dir), ["not_sent", "not_sent", "not_sent"]);
+    assert_eq!(server.requests().len(), 3);
+    // Nothing is due any more: a later waker does nothing.
+    assert_eq!(
+        apb_engine::notify::retry::run_retry_waker(env.root(), &res.run_id).unwrap(),
+        0
+    );
+    assert_eq!(server.requests().len(), 3);
+}
+
+/// A waker that finds a live driver on the run leaves the sweep to it but
+/// does not go away: the driver may end after that check with a send that
+/// failed, and its own waker is not spawned while this one holds the lease.
+/// Once the driver is gone, the waker retries.
+#[test]
+fn a_notify_waker_that_saw_a_live_driver_retries_once_it_is_gone() {
+    let refused = || Reply::Respond(400, r#"{"error":"later"}"#.into());
+    let server = spawn_script(vec![refused(), refused(), refused()]);
+    let env = Env::new(FINISH_ONLY, &server);
+    let _gap = short_gap();
+    let res = run(env.root(), "p", None, Env::options(&[Transition::Finished])).unwrap();
+    let run_dir = env.root().join(".apb/runs").join(&res.run_id);
+    assert_eq!(try_outcomes(&run_dir), ["not_sent"]);
+    // A drive of this process claims the run while the waker starts.
+    apb_engine::driver::publish_driver_pid(&run_dir, std::process::id());
+    let root = env.root().to_path_buf();
+    let run_id = res.run_id.clone();
+    let waker =
+        std::thread::spawn(move || apb_engine::notify::retry::run_retry_waker(&root, &run_id));
+    // Several retry gaps with the driver alive: the waker saw it.
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(
+        try_outcomes(&run_dir),
+        ["not_sent"],
+        "a live driver sweeps itself"
+    );
+    std::fs::remove_file(apb_engine::driver::driver_pid_path(&run_dir)).unwrap();
+
+    let sweeps = waker.join().unwrap().unwrap();
+    assert_eq!(sweeps, 2, "the two retries left after the driver went");
+    assert_eq!(try_outcomes(&run_dir), ["not_sent", "not_sent", "not_sent"]);
+}
+
+/// A notification the trust gate retired is never retried: the waker
+/// sweeps nothing and nothing leaves.
+#[test]
+fn the_notify_waker_never_retries_a_send_the_gate_retired() {
+    let server = spawn_script(vec![]);
+    let env = Env::new(WITH_GATE, &server);
+    let _gap = short_gap();
+    let mut bg = env.run_in_background(&[Transition::Finished]);
+    let run_dir = env.run_dir();
+    wait_for_review(&run_dir);
+    env.change_connector();
+    decide(&run_dir);
+    assert_eq!(bg.finish(), RunStatus::Succeeded);
+    let run_id = run_dir.file_name().unwrap().to_string_lossy().into_owned();
+    std::thread::sleep(Duration::from_millis(150));
+
+    let sweeps = apb_engine::notify::retry::run_retry_waker(env.root(), &run_id).unwrap();
+    assert_eq!(sweeps, 0);
+    assert_eq!(try_outcomes(&run_dir), ["not_sent"]);
+    assert!(server.requests().is_empty());
+}
+
+/// A sub-playbook's review notification the trust gate refused under its
+/// parent's subscription is retired as well: a waker finds no retry ahead
+/// and ends at once, never sweeping for it.
+#[test]
+fn the_notify_waker_never_retries_an_inherited_send_the_gate_retired() {
+    let server = spawn_script(vec![]);
+    let env = Env::new(PARENT, &server);
+    env.add_playbook(
+        "child",
+        &HOLD_THEN_GATE.replace("id: p\nname: P", "id: child\nname: Child"),
+        &[("hold.sh", env.hold_script())],
+    );
+    let _gap = short_gap();
+    let mut bg = env.run_in_background(&[Transition::Review]);
+    let parent_dir = env.run_dir();
+    let child_id = poll("the child run", || {
+        read_all(&parent_dir)
+            .ok()?
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::ChildRunStarted { run_id, .. } => Some(run_id.clone()),
+                _ => None,
+            })
+    });
+    let child_dir = env.root().join(".apb/runs").join(&child_id);
+    poll("the child's inherited subscription", || {
+        read_all(&child_dir)
+            .ok()?
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::NotifySet { source, .. } if source == "parent" => Some(()),
+                _ => None,
+            })
+    });
+    env.change_connector();
+    env.release_hold();
+    let refused = poll("the child's refused review notification", || {
+        let events = read_all(&child_dir).ok()?;
+        let (intent, _) = notify_intents(&events).into_iter().next()?;
+        settled(&events, &intent)
+    });
+    assert_eq!(refused.1, "gate");
+
+    let (tx, rx) = mpsc::channel();
+    let root = env.root().to_path_buf();
+    let id = child_id.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(apb_engine::notify::retry::run_retry_waker(&root, &id));
+    });
+    let sweeps = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the waker ends at once")
+        .unwrap();
+    assert_eq!(sweeps, 0);
+    decide(&child_dir);
+    assert_eq!(bg.finish(), RunStatus::Succeeded);
+    assert_eq!(try_outcomes(&child_dir), ["not_sent"]);
+    assert!(server.requests().is_empty());
+}
+
+/// `apb resume --all` sweeps a finished run whose notification is due a
+/// retry once (its waker died with the machine), and lists nothing for it;
+/// while a notify waker holds the run's lease, it leaves the run to it.
+#[test]
+fn resume_all_sweeps_a_finished_run_with_a_due_notification() {
+    let server = spawn_script(vec![
+        Reply::Respond(400, r#"{"error":"later"}"#.into()),
+        Reply::Respond(200, r#"{"id":"m-2"}"#.into()),
+    ]);
+    let env = Env::new(FINISH_ONLY, &server);
+    let _gap = short_gap();
+    let res = run(env.root(), "p", None, Env::options(&[Transition::Finished])).unwrap();
+    let run_dir = env.root().join(".apb/runs").join(&res.run_id);
+    assert_eq!(try_outcomes(&run_dir), ["not_sent"]);
+    std::thread::sleep(Duration::from_millis(150));
+
+    // A live notify waker owns the run's retries: the pass leaves it be.
+    let lease = apb_engine::waker::Lease::try_take(&run_dir, apb_engine::waker::WakerFor::Notify)
+        .unwrap()
+        .expect("free");
+    let listed = apb_engine::pause::resume_all::resume_all(env.root()).unwrap();
+    assert!(listed.is_empty(), "{listed:?}");
+    assert_eq!(try_outcomes(&run_dir), ["not_sent"]);
+    drop(lease);
+
+    let listed = apb_engine::pause::resume_all::resume_all(env.root()).unwrap();
+    assert!(listed.is_empty(), "{listed:?}");
+    assert_eq!(try_outcomes(&run_dir), ["not_sent", "confirmed"]);
+    assert_eq!(server.requests().len(), 2);
+}

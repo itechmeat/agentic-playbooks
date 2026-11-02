@@ -136,6 +136,7 @@ fn auto_line(auto: &AutoProgress) -> String {
         AutoOutcome::AttemptFails => "the attempt fails",
         AutoOutcome::WaitTimesOut => "the wait times out and fails",
         AutoOutcome::ResumeAttempt => "apb tries to resume the run",
+        AutoOutcome::RetryAttempt => "the node's retry starts",
     };
     match auto {
         AutoProgress::At { at_ms, assured, .. } => format!(
@@ -143,8 +144,16 @@ fn auto_line(auto: &AutoProgress) -> String {
             apb_core::clock::iso_utc(*at_ms),
             if *assured { "" } else { " (not assured)" }
         ),
-        AutoProgress::Frozen { remaining_ms, .. } => format!(
-            "timer frozen while paused, {} left: then {what}",
+        AutoProgress::Frozen {
+            remaining_ms,
+            outcome,
+        } => format!(
+            "{} frozen while paused, {} left: then {what}",
+            if *outcome == AutoOutcome::RetryAttempt {
+                "delay"
+            } else {
+                "timer"
+            },
             duration_words(*remaining_ms)
         ),
     }
@@ -502,6 +511,16 @@ mod tests {
         let parsed = round_trip(&budget, &chosen(&[("raise_budget_tokens", "20k")]));
         assert!(
             matches!(&parsed, Command::Resume { run_id: Some(r), budget, .. } if r == run && budget.raise_tokens.as_deref() == Some("20k"))
+        );
+        let mut retry = action(ActionCode::RetryNow, run, Some("-w"), vec![]);
+        retry.args = vec![ActionArg {
+            name: "node".into(),
+            value: ArgValue::Given { value: "-w".into() },
+            required: true,
+        }];
+        let parsed = round_trip(&retry, &BTreeMap::new());
+        assert!(
+            matches!(&parsed, Command::Resume { run_id: Some(r), retry_now: true, node: Some(n), .. } if r == run && n == "-w")
         );
         let parsed = round_trip(
             &action(ActionCode::WaitAgain, run, None, vec![]),

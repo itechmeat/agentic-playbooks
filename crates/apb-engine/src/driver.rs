@@ -236,7 +236,10 @@ pub struct DriverArgs<'a> {
     pub resume: bool,
     pub allow_environment_drift: bool,
     pub by: Option<crate::pause::PauseBy>,
-    pub pause_seq: Option<u64>,
+    /// The engine's resume of one pause or release.
+    pub hold: Option<crate::resume_kind::WakeHold>,
+    /// The waiting retries the resume starts now.
+    pub retry_now: Option<crate::resume_kind::RetryNow<'a>>,
     /// The resume's budget change, as the JSON the child reads back.
     pub budget_json: Option<&'a str>,
     /// The path of the handoff file holding the resume's launch grant
@@ -255,9 +258,12 @@ pub struct DriverArgs<'a> {
 /// drift writes its `EnvironmentDriftAccepted` events instead of refusing.
 /// `by` (issue #200) names who resumes the run; it is forwarded as `--by` and
 /// journaled on the child's `run_resumed`. Only meaningful with `resume`.
-/// `pause_seq` (the engine's resume of one pause) is forwarded as
-/// `--pause-seq`: the child journals `run_resumed` only while that pause
-/// still holds the run. `budget` is forwarded as `--budget-json`: the child
+/// `hold` (the engine's resume of one pause or release) is forwarded as
+/// `--pause-seq` or `--release-seq`: the child journals `run_resumed` only
+/// while that pause or release still holds the run. `retry_now` is
+/// forwarded as `--retry-now` (with `--retry-now-node` and
+/// `--retry-now-by`): the child expedites those retries with its
+/// `run_resumed`. `budget` is forwarded as `--budget-json`: the child
 /// journals it next to its `run_resumed`, so a refused resume leaves none.
 pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -> io::Result<u32> {
     let DriverArgs {
@@ -265,7 +271,8 @@ pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -
         resume,
         allow_environment_drift,
         by,
-        pause_seq,
+        hold,
+        retry_now,
         budget_json,
         launch_handoff,
     } = *args;
@@ -292,8 +299,22 @@ pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -
         if let Some(by) = by {
             cmd.arg("--by").arg(by.as_str());
         }
-        if let Some(seq) = pause_seq {
-            cmd.arg("--pause-seq").arg(seq.to_string());
+        match hold {
+            Some(crate::resume_kind::WakeHold::Pause(seq)) => {
+                cmd.arg("--pause-seq").arg(seq.to_string());
+            }
+            Some(crate::resume_kind::WakeHold::Release(seq)) => {
+                cmd.arg("--release-seq").arg(seq.to_string());
+            }
+            None => {}
+        }
+        if let Some(r) = retry_now {
+            cmd.arg("--retry-now")
+                .arg("--retry-now-by")
+                .arg(r.by.as_str());
+            if let Some(node) = r.node {
+                cmd.arg("--retry-now-node").arg(node);
+            }
         }
         if let Some(b) = budget_json {
             cmd.arg("--budget-json").arg(b);

@@ -12,9 +12,11 @@ use std::path::Path;
 use super::*;
 use apb_core::registry::is_safe_segment;
 
+pub use crate::resume_kind::RetryNow;
+
 use crate::error::EngineError;
 use crate::event::read_all;
-use crate::pause::PauseBy;
+use crate::pause::{PauseBy, WakeHold};
 use crate::state::{NodeStatus, RunState, RunStatus};
 
 /// How `drive` treats the start node of a resume.
@@ -49,6 +51,10 @@ pub enum ResumeReason {
     /// frontier reconstruction re-admits the others; no finished node runs
     /// again.
     PausedParallelRestart,
+    /// No interrupted work, and a node's ordinary retry is deferred
+    /// (`retry_delay`): the drive continues that execution once the delay
+    /// passed, on its recorded chain step and binding.
+    DeferredRetry,
 }
 
 impl ResumeReason {
@@ -59,6 +65,7 @@ impl ResumeReason {
             ResumeReason::ParallelFallback => "parallel_fallback",
             ResumeReason::ExplicitFromNode => "explicit_from_node",
             ResumeReason::PausedParallelRestart => "paused_parallel_restart",
+            ResumeReason::DeferredRetry => "deferred_retry",
         }
     }
 }
@@ -157,6 +164,23 @@ pub fn plan_resume(
             start_node: owed.clone(),
             mode: StartMode::Rerun,
             reason: ResumeReason::InterruptedRestart,
+        });
+    }
+
+    // A deferred retry is owed work too: the drive holds it until it is due
+    // and continues its execution then, never from scratch. The oldest one
+    // starts the drive; the frontier rebuild puts every other one back.
+    if interrupted.is_empty()
+        && let Some(node) = state
+            .deferred
+            .iter()
+            .min_by_key(|(_, d)| d.seq)
+            .map(|(n, _)| n)
+    {
+        return Ok(ResumeDecision {
+            start_node: node.clone(),
+            mode: StartMode::Rerun,
+            reason: ResumeReason::DeferredRetry,
         });
     }
 
@@ -375,8 +399,7 @@ pub fn resume_detached_by(
             from_node,
             allow_environment_drift,
             by,
-            budget: None,
-            launch: None,
+            ..ResumeRequest::operator()
         },
     )
 }
@@ -396,6 +419,10 @@ pub struct ResumeRequest<'a> {
     /// is then. `None` for an authorized run, and for an unchecked resume,
     /// which continues only a run whose policy is `allow`.
     pub launch: Option<&'a crate::gate::launch::LaunchGrant>,
+    /// Start these waiting retries now: their `retry_expedited` is
+    /// journaled with `run_resumed`, under the same lock and checks, so a
+    /// refused resume waives no delay.
+    pub retry_now: Option<RetryNow<'a>>,
 }
 
 impl ResumeRequest<'_> {
@@ -407,6 +434,7 @@ impl ResumeRequest<'_> {
             by: PauseBy::Operator,
             budget: None,
             launch: None,
+            retry_now: None,
         }
     }
 }
@@ -421,14 +449,14 @@ pub fn resume_detached_req(
     resume_detached_inner(root, run_id, req, None)
 }
 
-/// The engine's resume of a paused run (the waker, `apb resume --all`): a
-/// detached driver that journals its `run_resumed` only while the run is
-/// still paused by the `run_paused` at journal sequence `pause_seq`, checked
-/// under the run's event lock (see [`resume_pause`]).
-pub(crate) fn resume_detached_pause(
+/// The engine's resume of a paused or released run (the waker, `apb resume
+/// --all`): a detached driver that journals its `run_resumed` only while
+/// `hold` (the pause or the release it was for) still holds the run,
+/// checked under the run's event lock (see [`resume_held`]).
+pub(crate) fn resume_detached_held(
     root: &Path,
     run_id: &str,
-    pause_seq: u64,
+    hold: WakeHold,
     launch: Option<&crate::gate::launch::LaunchGrant>,
 ) -> Result<u32, EngineError> {
     let req = ResumeRequest {
@@ -436,14 +464,14 @@ pub(crate) fn resume_detached_pause(
         launch,
         ..ResumeRequest::operator()
     };
-    resume_detached_inner(root, run_id, &req, Some(pause_seq))
+    resume_detached_inner(root, run_id, &req, Some(hold))
 }
 
 fn resume_detached_inner(
     root: &Path,
     run_id: &str,
     req: &ResumeRequest<'_>,
-    pause_seq: Option<u64>,
+    hold: Option<WakeHold>,
 ) -> Result<u32, EngineError> {
     let ResumeRequest {
         from_node,
@@ -451,6 +479,7 @@ fn resume_detached_inner(
         by,
         budget,
         launch,
+        retry_now,
     } = *req;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -506,7 +535,8 @@ fn resume_detached_inner(
             resume: true,
             allow_environment_drift,
             by: Some(by),
-            pause_seq,
+            hold,
+            retry_now,
             budget_json: budget_json.as_deref(),
             launch_handoff: handoff.as_deref(),
         },
@@ -641,8 +671,7 @@ pub fn resume_by(
             from_node,
             allow_environment_drift,
             by,
-            budget: None,
-            launch: None,
+            ..ResumeRequest::operator()
         },
     )
 }
@@ -659,20 +688,32 @@ pub fn resume_req(
 }
 
 /// The engine's resume of the pause at journal sequence `pause_seq` (issue
-/// #200): what the detached driver of [`resume_detached_pause`] runs.
-/// `run_resumed` is journaled only while that pause still holds the run,
-/// checked under the run's event lock, the lock `request_pause` and
-/// `stop_run` journal under: a pause, resume or stop that came after the
-/// waker's own check makes this a `Conflict` that journals nothing.
+/// #200): [`resume_held`] of that pause.
 pub fn resume_pause(
     root: &Path,
     run_id: &str,
     pause_seq: u64,
     launch: Option<&crate::gate::launch::LaunchGrant>,
 ) -> Result<RunResult, EngineError> {
-    // A superseded pause ends here, before any check that could journal a
-    // refusal (a consent, a busy workdir, a resume plan after a stop).
-    pause_still_holds(root, run_id, pause_seq)?;
+    resume_held(root, run_id, WakeHold::Pause(pause_seq), launch)
+}
+
+/// The engine's resume of a pause or a release (`hold`): what the detached
+/// driver of [`resume_detached_held`] runs. `run_resumed` is journaled only
+/// while `hold` still holds the run, checked under the run's event lock,
+/// the lock `request_pause` and `stop_run` journal under: a pause, resume
+/// or stop that came after the waker's own check makes this a `Conflict`
+/// that journals nothing.
+pub fn resume_held(
+    root: &Path,
+    run_id: &str,
+    hold: WakeHold,
+    launch: Option<&crate::gate::launch::LaunchGrant>,
+) -> Result<RunResult, EngineError> {
+    // A superseded pause or release ends here, before any check that could
+    // journal a refusal (a consent, a busy workdir, a resume plan after a
+    // stop).
+    still_holds(root, run_id, hold)?;
     require_resume_consent(root, run_id)?;
     crate::budget::check_resume(root, run_id, None, PauseBy::Engine)?;
     let req = ResumeRequest {
@@ -680,27 +721,39 @@ pub fn resume_pause(
         launch,
         ..ResumeRequest::operator()
     };
-    resume_inner_checked(root, run_id, &req, false, Some(pause_seq))
+    resume_inner_checked(root, run_id, &req, false, Some(hold))
 }
 
-/// The error [`resume_pause`] returns when the pause it was for no longer
+/// The error [`resume_held`] returns when the pause it was for no longer
 /// holds the run.
 pub const PAUSE_SUPERSEDED: &str = "the pause this resume was for no longer holds the run";
+
+/// The error [`resume_held`] returns when the release it was for no longer
+/// holds the run (a person resumed, paused or stopped it first).
+pub const RELEASE_SUPERSEDED: &str = "the release this resume was for no longer holds the run";
 
 /// The error a resume returns when another pause, resume or stop changed the
 /// run between its plan and its `run_resumed`: nothing was journaled.
 pub const RESUME_SUPERSEDED: &str = "another pause, resume or stop changed the run while this resume was starting; nothing was resumed";
 
-/// `Conflict(PAUSE_SUPERSEDED)` unless the run is paused by the `run_paused`
-/// at journal sequence `seq`. A run that does not exist passes, so the
-/// caller's own not-found error reports it.
-fn pause_still_holds(root: &Path, run_id: &str, seq: u64) -> Result<(), EngineError> {
+/// The `Conflict` text of a `hold` that no longer holds the run.
+fn superseded(hold: WakeHold) -> &'static str {
+    match hold {
+        WakeHold::Pause(_) => PAUSE_SUPERSEDED,
+        WakeHold::Release(_) => RELEASE_SUPERSEDED,
+    }
+}
+
+/// `Conflict` unless `hold` (a pause or a release) still holds the run. A
+/// run that does not exist passes, so the caller's own not-found error
+/// reports it.
+fn still_holds(root: &Path, run_id: &str, hold: WakeHold) -> Result<(), EngineError> {
     if !is_safe_segment(run_id) {
         return Ok(());
     }
     let run_dir = root.join(".apb/runs").join(run_id);
-    if run_dir.is_dir() && !crate::pause::holds(&read_all(&run_dir)?, seq) {
-        return Err(EngineError::Conflict(PAUSE_SUPERSEDED.into()));
+    if run_dir.is_dir() && !hold.holds(&read_all(&run_dir)?) {
+        return Err(EngineError::Conflict(superseded(hold).into()));
     }
     Ok(())
 }
@@ -759,9 +812,11 @@ struct ResumeJournal<'a> {
     run_id: &'a str,
     /// The lifecycle the resume planned against.
     planned: Option<u64>,
-    /// The engine resume of the pause at this journal sequence.
-    pause_seq: Option<u64>,
+    /// The engine resume of this pause or release.
+    hold: Option<WakeHold>,
     by: PauseBy,
+    /// The waiting retries to start now, expedited with `run_resumed`.
+    retry_now: Option<RetryNow<'a>>,
     budget: Option<&'a crate::budget::BudgetResume>,
     /// The launch grant to commit with `run_resumed`.
     launch: Option<&'a crate::gate::launch::LaunchGrant>,
@@ -777,8 +832,8 @@ fn try_journal_resumed(
 ) -> Result<bool, EngineError> {
     let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)?;
     let events = read_all(run_dir)?;
-    let refusal = match plan.pause_seq {
-        Some(seq) if !crate::pause::holds(&events, seq) => Some(PAUSE_SUPERSEDED),
+    let refusal = match plan.hold {
+        Some(hold) if !hold.holds(&events) => Some(superseded(hold)),
         _ if lifecycle_seq(&events) != plan.planned => Some(RESUME_SUPERSEDED),
         _ => None,
     };
@@ -800,6 +855,16 @@ fn try_journal_resumed(
     let changed = !budget.is_empty();
     for e in budget {
         log.append(e)?;
+    }
+    // A retry-now resume waives the delay only here, once every check
+    // passed: a refused resume leaves the retry waiting as it was.
+    if let Some(r) = plan.retry_now {
+        for node in super::deferred::waiting(&events, r.node) {
+            log.append(EventPayload::RetryExpedited {
+                node,
+                by: Some(r.by),
+            })?;
+        }
     }
     log.append(payload)?;
     Ok(changed)
@@ -898,21 +963,19 @@ pub(crate) fn resume_inner(
         from_node,
         allow_environment_drift,
         by,
-        budget: None,
-        launch: None,
+        ..ResumeRequest::operator()
     };
     resume_inner_checked(root, run_id, &req, allow_shared_workdir, None)
 }
 
-/// [`resume_inner`], journaling `run_resumed` only while the run is still
-/// paused by the `run_paused` at journal sequence `pause_seq` when one is
-/// given (see [`resume_pause`]).
+/// [`resume_inner`], journaling `run_resumed` only while `hold` (a pause or
+/// a release) still holds the run when one is given (see [`resume_held`]).
 fn resume_inner_checked(
     root: &Path,
     run_id: &str,
     req: &ResumeRequest<'_>,
     allow_shared_workdir: bool,
-    pause_seq: Option<u64>,
+    hold: Option<WakeHold>,
 ) -> Result<RunResult, EngineError> {
     let ResumeRequest {
         from_node,
@@ -920,6 +983,7 @@ fn resume_inner_checked(
         by,
         budget,
         launch,
+        retry_now,
     } = *req;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -928,10 +992,10 @@ fn resume_inner_checked(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    // An engine resume of a pause that no longer holds the run stops before
-    // it journals or locks anything.
-    if let Some(seq) = pause_seq {
-        pause_still_holds(root, run_id, seq)?;
+    // An engine resume of a pause or release that no longer holds the run
+    // stops before it journals or locks anything.
+    if let Some(hold) = hold {
+        still_holds(root, run_id, hold)?;
     }
     // Anti-drift: agent binary must not silently change between start and resume.
     let drift_events = check_environment_drift(&run_dir, allow_environment_drift)?;
@@ -1043,8 +1107,8 @@ fn resume_inner_checked(
     // instead of journaling a resume that dies on the spot. An engine resume
     // checks its pause once more first, so a pause that replaced it in the
     // meantime keeps the lock it parked.
-    if let Some(seq) = pause_seq {
-        pause_still_holds(root, run_id, seq)?;
+    if let Some(hold) = hold {
+        still_holds(root, run_id, hold)?;
     }
     let mut guard = match resume_lock_tree(&playbook, &run_dir)? {
         Some(tree) => {
@@ -1062,8 +1126,9 @@ fn resume_inner_checked(
             root,
             run_id,
             planned,
-            pause_seq,
+            hold,
             by,
+            retry_now,
             budget,
             launch,
             // A child reattached by its parent's resume is covered by the
@@ -1078,6 +1143,7 @@ fn resume_inner_checked(
             explicit: decision.reason == ResumeReason::ExplicitFromNode,
             launch: None,
             definition: Some(definition),
+            apb: crate::event::apb_version(),
         },
     )?;
     // A budget set on a run that started without one needs the run's

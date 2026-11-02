@@ -131,6 +131,7 @@ fn open_attempt_marks_interrupted() {
                 transcript: None,
                 token: None,
                 isolation: None,
+                exec: None,
             },
         ),
     ];
@@ -154,16 +155,7 @@ fn run_resumed_folds_to_running() {
                 attempt: 1,
             },
         ),
-        ev(
-            2,
-            EventPayload::RunResumed {
-                from_node: "a".into(),
-                by: None,
-                explicit: false,
-                launch: None,
-                definition: None,
-            },
-        ),
+        ev(2, EventPayload::resumed("a", None, false)),
     ];
     let s = RunState::fold(&events);
     assert_eq!(s.run_status, RunStatus::Running);
@@ -230,6 +222,7 @@ fn a_legacy_resume_marker_followed_by_a_crash_reads_interrupted() {
                 transcript: None,
                 token: None,
                 isolation: None,
+                exec: None,
             },
         ),
     ];
@@ -284,6 +277,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 transcript: None,
                 token: None,
                 isolation: None,
+                exec: None,
             },
         ),
         ev(
@@ -327,6 +321,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 transcript: None,
                 token: None,
                 isolation: None,
+                exec: None,
             },
         ),
     ];
@@ -806,4 +801,43 @@ fn numbered(payloads: &[EventPayload]) -> Vec<Event> {
         .enumerate()
         .map(|(i, p)| ev(i as u64, p.clone()))
         .collect()
+}
+
+/// A retry that waits when the run is stopped (or, in a release build, a
+/// run that ends with it open) waits no more: the node reads cancelled and
+/// no deferral stays open in the fold.
+#[test]
+fn a_run_end_settles_a_node_whose_retry_waits() {
+    let deferred = EventPayload::RetryDeferred {
+        node: "work".into(),
+        after_attempt: 1,
+        retry: 1,
+        step: 0,
+        binding: "b".repeat(64),
+        delay_ms: 3_600_000,
+        failure_kind: None,
+    };
+    let released = EventPayload::DriveReleased {
+        wake_at_ms: 3_600_000,
+        nodes: vec!["work".into()],
+    };
+    for end in [
+        EventPayload::RunAborted {
+            reason: "stop".into(),
+            by: None,
+        },
+        EventPayload::RunFinished {
+            outcome: "failed".into(),
+        },
+    ] {
+        let events = vec![
+            ev(0, run_started("p")),
+            ev(1, deferred.clone()),
+            ev(2, released.clone()),
+            ev(3, end),
+        ];
+        let state = RunState::fold(&events);
+        assert_eq!(state.nodes.get("work"), Some(&NodeStatus::Cancelled));
+        assert!(state.deferred.is_empty());
+    }
 }

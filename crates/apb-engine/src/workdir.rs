@@ -154,9 +154,17 @@ pub fn release_paused(root: &Path, run_id: &str) {
 
 /// Takes the busy lock of `tree` for the paused run `run_id` and parks it
 /// under the run (a `--keep-lock` pause of a run no process drives). Refuses
-/// with `WorkdirBusy` while another live write-run holds it.
-pub fn park_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<(), EngineError> {
-    match acquire_at(tree_lock_path(root, tree), Some(run_id))? {
+/// with `WorkdirBusy` while another live write-run holds it. `departing` is
+/// the pid of the run's own driver on its way out after a release: the lock
+/// it still holds is the run's, parked over it (its guard then leaves the
+/// parked lock alone).
+pub fn park_for(
+    root: &Path,
+    tree: Option<&Path>,
+    run_id: &str,
+    departing: Option<u32>,
+) -> Result<(), EngineError> {
+    match acquire_at(tree_lock_path(root, tree), Some(run_id), departing)? {
         Some(guard) => guard.park(run_id),
         None => Ok(()),
     }
@@ -279,7 +287,7 @@ pub fn acquire_tree(
     if allow_shared {
         return Ok(None);
     }
-    acquire_at(tree_lock_path(root, tree), None)
+    acquire_at(tree_lock_path(root, tree), None, None)
 }
 
 /// [`acquire_tree`] for the resume of run `run_id`: a lock that run parked
@@ -293,28 +301,31 @@ pub fn acquire_tree_for(
     if allow_shared {
         return Ok(None);
     }
-    acquire_at(tree_lock_path(root, tree), Some(run_id))
+    acquire_at(tree_lock_path(root, tree), Some(run_id), None)
 }
 
 /// Why the lock at `lock_path` is not free for `claimant`, or `None` when it
-/// is (no lock, a stale one, or one `claimant` itself parked).
+/// is (no lock, a stale one, one `claimant` itself parked, or one the
+/// `departing` driver of `claimant` holds).
 ///
 /// The hint names what the caller can do: a new run (`claimant` is `None`)
 /// can take its own worktree or `--allow-shared-workdir`; an existing run
 /// (its resume, or a `--keep-lock` pause of it) has neither option on any
 /// surface, so it is told to wait for the other run or stop it.
-fn busy_reason(lock_path: &Path, claimant: Option<&str>) -> Option<String> {
+fn busy_reason(lock_path: &Path, claimant: Option<&str>, departing: Option<u32>) -> Option<String> {
     let existing = claimant.is_some();
     match lock_owner(lock_path) {
-        Some(LockOwner::Pid(pid)) if pid_alive(pid) => Some(if existing {
-            format!(
-                "another write-run holds the workdir (pid {pid}); try again once it finishes, or stop it first"
-            )
-        } else {
-            format!(
-                "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
-            )
-        }),
+        Some(LockOwner::Pid(pid)) if pid_alive(pid) && departing != Some(pid) => {
+            Some(if existing {
+                format!(
+                    "another write-run holds the workdir (pid {pid}); try again once it finishes, or stop it first"
+                )
+            } else {
+                format!(
+                    "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
+                )
+            })
+        }
         Some(LockOwner::PausedRun(id))
             if claimant != Some(id.as_str()) && paused_run_holds(lock_path, &id) =>
         {
@@ -338,7 +349,7 @@ fn busy_reason(lock_path: &Path, claimant: Option<&str>) -> Option<String> {
 /// a detached driver calls it so the caller sees the refusal instead of a
 /// driver that dies right after the resume reported success.
 pub fn check_free_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<(), EngineError> {
-    match busy_reason(&tree_lock_path(root, tree), Some(run_id)) {
+    match busy_reason(&tree_lock_path(root, tree), Some(run_id), None) {
         Some(msg) => Err(EngineError::WorkdirBusy(msg)),
         None => Ok(()),
     }
@@ -347,6 +358,7 @@ pub fn check_free_for(root: &Path, tree: Option<&Path>, run_id: &str) -> Result<
 fn acquire_at(
     lock_path: PathBuf,
     claimant: Option<&str>,
+    departing: Option<u32>,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
     // The check and the write are one step under a short mutex, so two
     // claimants of a free, stale or parked lock never both take it (the
@@ -357,7 +369,7 @@ fn acquire_at(
         std::io::ErrorKind::WouldBlock => EngineError::WorkdirBusy(e.to_string()),
         _ => EngineError::Io(e),
     })?;
-    if let Some(msg) = busy_reason(&lock_path, claimant) {
+    if let Some(msg) = busy_reason(&lock_path, claimant, departing) {
         return Err(EngineError::WorkdirBusy(msg));
     }
     let took_parked = matches!(
@@ -502,7 +514,7 @@ fn wait_for_workdir(
                 took_parked: false,
             }));
         }
-        match acquire_at(lock_path.clone(), None) {
+        match acquire_at(lock_path.clone(), None, None) {
             Err(EngineError::WorkdirBusy(msg)) => {
                 if let LockWait::Queue { stopped } = &mut mode
                     && (*stopped)()

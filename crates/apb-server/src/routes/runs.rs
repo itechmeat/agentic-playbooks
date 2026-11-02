@@ -144,6 +144,20 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub pause: Option<apb_engine::pause::PauseInfo>,
+    /// The nodes whose retry waits out its `retry_delay`, each with when it
+    /// is due (an absolute time, or frozen while the run is paused); empty
+    /// when none waits.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::retry_wait::RetryWait>>", optional)
+    )]
+    pub retry_waits: Vec<apb_engine::retry_wait::RetryWait>,
+    /// The run's driver let go while only deferred retries were left: a
+    /// waker resumes it at `wake_at_ms`. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub released: Option<apb_engine::state::Released>,
     /// The run's budget: limits, spent and left per dimension, and the node
     /// a budget pause holds it before. Absent for a run without a budget.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +208,11 @@ pub struct RunDetail {
     /// Events of a type this binary does not know (a newer apb wrote them),
     /// left out of `events`; 0 for a journal read in full.
     pub unknown_events: usize,
+    /// "driven by apb X, resumed by apb Y": the binaries that drove the run,
+    /// from the versions its journal recorded; absent when none did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub driven_by: Option<String>,
     // --- host execution mode (0.23.0) ---
     /// Who executes the run's agent steps, from its manifest: `cli` (the
     /// profiles' CLIs) or `host` (the host session's subagents). Read-only.
@@ -358,6 +377,8 @@ pub(crate) async fn get_run_handler(
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
     let known_problems = apb_mcp::tools::problems::run_block(&view.events);
     let pause = view.pause().cloned();
+    let retry_waits = apb_engine::retry_wait::of_view(&view, apb_core::clock::now_ms_u64());
+    let released = view.released().cloned();
     let nodes = view.nodes();
     let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
     let execution = manifest
@@ -380,6 +401,7 @@ pub(crate) async fn get_run_handler(
     let (run_status, driver_alive) = (view.run_status, view.driver_alive);
     let worktree = view.state.worktree.clone();
     let unknown_events = view.unknown.len();
+    let driven_by = view.driven_by();
     // The journal, the outputs and the progress move into the answer when
     // this handler holds the one view the actions were read from (the
     // observation is gone), and are copied from that same view otherwise.
@@ -424,12 +446,15 @@ pub(crate) async fn get_run_handler(
         known_problems,
         launch: apb_engine::gate::launch::run_authorization(&run_dir),
         pause,
+        retry_waits,
+        released,
         budget,
         notify,
         estimate,
         usage,
         decisions,
         unknown_events,
+        driven_by,
         execution,
         execution_fallback,
         progress,
@@ -743,6 +768,56 @@ pub(crate) struct ResumeBody {
     /// `routes::playbooks::dashboard_launch`).
     #[serde(default)]
     confirm_launch: Option<String>,
+    /// Start a deferred retry now (the `retry_now` next action): on a run a
+    /// live driver holds the retry starts at once and nothing else happens;
+    /// a released or paused run is resumed with the retry due. 409
+    /// `no_deferred_retry` when nothing waits to retry.
+    #[serde(default)]
+    retry_now: bool,
+    /// With `retry_now`: only this node's waiting retry (400
+    /// `node_without_retry_now` without it).
+    #[serde(default)]
+    node: Option<String>,
+}
+
+/// The retry-now half of a resume request, after the run gate passed:
+/// `Err` with the answer when the request ends here (nothing waits to
+/// retry, or expedited on a run a live driver holds), else the nodes the
+/// resume then starts now. `unused` names the resume arguments a live
+/// expedite, being the whole action, leaves unapplied. It reads and folds
+/// the journal and may wait on the run's event lock, so it runs off the
+/// async runtime.
+fn retry_now_first(
+    root: &std::path::Path,
+    id: &str,
+    node: Option<&str>,
+    unused: &[(&str, bool)],
+) -> Result<Vec<String>, Box<axum::response::Response>> {
+    let by = apb_engine::scheduler::deferred::ExpediteBy::Operator;
+    match apb_mcp::tools::run::retry_now_plan(root, id, node) {
+        Err(e) => Err(Box::new(crate::state::tool_refusal(e))),
+        Ok(Err(refusal)) => {
+            let status = if refusal["error"] == "not_found" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::CONFLICT
+            };
+            Err(Box::new((status, Json(refusal)).into_response()))
+        }
+        // A driver that let go of the run meanwhile leaves the retry to the
+        // resume.
+        Ok(Ok(plan)) if plan.live => {
+            match apb_mcp::tools::run::retry_now_live(root, id, node, by) {
+                Ok(Some(mut v)) => {
+                    apb_mcp::tools::run::note_not_applied(&mut v, unused);
+                    Err(Box::new(Json(v).into_response()))
+                }
+                Ok(None) => Ok(plan.nodes),
+                Err(e) => Err(Box::new(crate::state::tool_refusal(e))),
+            }
+        }
+        Ok(Ok(plan)) => Ok(plan.nodes),
+    }
 }
 
 /// POST /api/runs/{id}/resume: the dashboard's Resume button, for a paused,
@@ -768,6 +843,17 @@ pub(crate) async fn post_resume_handler(
         Err(e) => return e,
     };
     let body = body.map(|Json(b)| b).unwrap_or_default();
+    // The order of refusals is MCP `run_resume`'s: the arguments, then the
+    // run gate, then "nothing waits to retry".
+    if let Some(refusal) = apb_mcp::tools::run::retry_now_arg_refusal(
+        body.retry_now,
+        body.from_node.is_some(),
+        body.node.is_some(),
+    ) {
+        return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+    }
+    // The run gate first, for a live retry-now too: it writes to the run's
+    // journal like any resume.
     if let Err(refusal) = apb_engine::gate::check_resume(&root, &id, true) {
         let status = if refusal["policy"] == "not_found" {
             StatusCode::NOT_FOUND
@@ -776,6 +862,26 @@ pub(crate) async fn post_resume_handler(
         };
         return (status, Json(refusal)).into_response();
     }
+    let expedited = if body.retry_now {
+        let unused = [
+            ("budget", body.budget.is_some()),
+            ("confirm_launch", body.confirm_launch.is_some()),
+            ("confirm_irreversible", body.confirm_irreversible.is_some()),
+            ("allow_environment_drift", body.allow_environment_drift),
+        ];
+        let (root, id, node) = (root.clone(), id.clone(), body.node.clone());
+        let first = tokio::task::spawn_blocking(move || {
+            retry_now_first(&root, &id, node.as_deref(), &unused)
+        })
+        .await;
+        match first {
+            Ok(Ok(nodes)) => Some(nodes),
+            Ok(Err(answer)) => return *answer,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    } else {
+        None
+    };
     // The launch policy of a run never authorized: the click is the
     // person's launch with keys, the CLI without a terminal's without; the
     // grant reaches the detached driver.
@@ -820,6 +926,12 @@ pub(crate) async fn post_resume_handler(
         allow_environment_drift: body.allow_environment_drift,
         budget: budget.as_ref(),
         launch: grant.as_ref(),
+        // The waiting retry is due with `run_resumed`, once every check of
+        // the resume passed.
+        retry_now: expedited.as_ref().map(|_| apb_engine::scheduler::RetryNow {
+            node: body.node.as_deref(),
+            by: apb_engine::scheduler::deferred::ExpediteBy::Operator,
+        }),
         ..apb_engine::ResumeRequest::operator()
     };
     match apb_engine::resume_detached_req(&root, &id, &req) {
@@ -830,6 +942,9 @@ pub(crate) async fn post_resume_handler(
                 "reason": decision.reason.as_str(),
                 "detached": true,
             });
+            if let Some(nodes) = expedited {
+                answer["retry_now"] = serde_json::json!(nodes);
+            }
             if let Some(until) = early_until {
                 answer["resumed_early"] = serde_json::json!(true);
                 answer["pause_until"] = serde_json::json!(until);

@@ -129,6 +129,9 @@ fn render_types() -> String {
         apb_engine::pause::PauseMode::decl(&cfg),
         apb_engine::pause::PauseCause::decl(&cfg),
         apb_engine::pause::PauseInfo::decl(&cfg),
+        apb_engine::retry_wait::RetryDue::decl(&cfg),
+        apb_engine::retry_wait::RetryWait::decl(&cfg),
+        apb_engine::state::Released::decl(&cfg),
         // The run budget and the run estimate.
         apb_core::budget::OnNoEstimate::decl(&cfg),
         apb_core::budget::BudgetLimit::decl(&cfg),

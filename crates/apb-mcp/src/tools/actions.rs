@@ -84,10 +84,21 @@ pub(crate) fn tool_of(code: ActionCode) -> &'static str {
         ActionCode::SupervisorRetryNode => "supervisor_node_retry",
         ActionCode::SupervisorContinueFrom => "supervisor_run_continue_from",
         ActionCode::SupervisorAbort => "supervisor_run_abort",
-        ActionCode::ResumeRun | ActionCode::ResumeWithBudget => "run_resume",
+        ActionCode::ResumeRun | ActionCode::ResumeWithBudget | ActionCode::RetryNow => "run_resume",
         ActionCode::ResolveIntent => "run_intent_resolve",
         ActionCode::WaitAgain => "run_wait",
         ActionCode::ReadReport => "run_report",
+    }
+}
+
+/// The tool `caller` takes `code` through: a supervisor session starts a
+/// waiting retry with `supervisor_node_retry` (its sessions have no
+/// `run_resume`), everyone else through [`tool_of`].
+fn tool_for(code: ActionCode, caller: ActionCaller) -> &'static str {
+    if code == ActionCode::RetryNow && caller == ActionCaller::Supervisor {
+        "supervisor_node_retry"
+    } else {
+        tool_of(code)
     }
 }
 
@@ -142,7 +153,7 @@ fn known_arguments(a: &NextAction, caller: ActionCaller) -> Map<String, Value> {
         ActionCode::SupervisorRetryNode
             | ActionCode::SupervisorContinueFrom
             | ActionCode::SupervisorAbort
-    ) || (a.code == ActionCode::AnswerQuestion
+    ) || (matches!(a.code, ActionCode::AnswerQuestion | ActionCode::RetryNow)
         && caller == ActionCaller::Supervisor);
     // A supervisor tool names its run by the session token, which an
     // action never carries; every other tool by the run id.
@@ -155,6 +166,10 @@ fn known_arguments(a: &NextAction, caller: ActionCaller) -> Map<String, Value> {
     );
     if node_tools && let Some(node) = &a.target.node {
         out.insert("node".into(), json!(node));
+    }
+    // `run_resume` starts a waiting retry only when asked to.
+    if a.code == ActionCode::RetryNow && !supervised {
+        out.insert("retry_now".into(), json!(true));
     }
     if let Some(task) = &a.target.task_id {
         out.insert("task_id".into(), json!(task));
@@ -228,7 +243,7 @@ pub fn render(a: &NextAction, caller: ActionCaller) -> Value {
     let mut out = json!({
         "code": a.code,
         "run_id": a.run_id,
-        "tool": tool_of(a.code),
+        "tool": tool_for(a.code, caller),
         "arguments": arguments,
         "fill": fill,
         "principals": a.principals,

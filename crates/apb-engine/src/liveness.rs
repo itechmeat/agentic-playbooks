@@ -738,9 +738,15 @@ pub fn reported_run_status(
     driver_alive: Option<bool>,
 ) -> crate::state::RunStatus {
     use crate::state::RunStatus;
-    let pure = RunState::fold(events).run_status;
+    let state = RunState::fold(events);
+    let pure = state.run_status;
     if pure.is_terminal() || pure == RunStatus::Paused {
         return pure;
+    }
+    // A released driver let go on purpose: the run waits for its deferred
+    // retry, it was not interrupted.
+    if state.released.is_some() && driver_alive != Some(true) {
+        return RunStatus::Running;
     }
     if driver_alive == Some(false) {
         return RunStatus::Interrupted;
@@ -826,6 +832,7 @@ mod tests {
             transcript: None,
             token: None,
             isolation: None,
+            exec: None,
         }
     }
 

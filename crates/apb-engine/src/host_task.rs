@@ -1106,16 +1106,7 @@ mod tests {
         r.deadline_ms = Some(61_000);
         let events = vec![
             at(11_000, crate::pause::engine_paused("x")),
-            at(
-                11_000 + 2 * hour,
-                EventPayload::RunResumed {
-                    from_node: "a".into(),
-                    by: None,
-                    explicit: false,
-                    launch: None,
-                    definition: None,
-                },
-            ),
+            at(11_000 + 2 * hour, EventPayload::resumed("a", None, false)),
         ];
         let now = 21_000 + 2 * hour;
         assert_eq!(

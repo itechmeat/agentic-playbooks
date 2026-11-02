@@ -10,7 +10,15 @@
 //!    for a later pass;
 //! 2. a paused run whose `until` has passed is resumed (the waker that would
 //!    have done it died with the machine);
-//! 3. any other paused run is left alone.
+//! 3. a released run (`drive_released`, only deferred retries left) whose
+//!    wake time has passed is resumed;
+//! 4. a released run whose wake time is ahead, and a paused run whose
+//!    `until` is ahead, get a new waker, since the one they had may have
+//!    died with the machine;
+//! 5. any other paused run is left alone.
+//!
+//! A finished run with a notification due a retry gets one sweep
+//! (`crate::notify::retry`); it is not listed.
 //!
 //! Before either resume (and before a due quota pause's probe) each run
 //! goes through the launch check of a resume (`crate::gate::launch`): an
@@ -25,6 +33,7 @@ use crate::event::{EventLog, read_all};
 use crate::state::{RunState, RunStatus};
 
 use super::{PauseBy, PauseRequest};
+use crate::waker::Lease;
 
 /// The reason journaled on a driverless run the gate would not resume.
 pub const DRIVERLESS_REASON: &str = "driverless";
@@ -36,6 +45,8 @@ pub enum ResumeCause {
     Driverless,
     /// It was paused with an `until` that has passed.
     Due,
+    /// It was released and the deferred retry it waits for is due.
+    RetryDue,
 }
 
 impl ResumeCause {
@@ -43,6 +54,7 @@ impl ResumeCause {
         match self {
             ResumeCause::Driverless => "driverless",
             ResumeCause::Due => "due",
+            ResumeCause::RetryDue => "retry_due",
         }
     }
 }
@@ -55,14 +67,20 @@ pub enum ResumeAllAction {
     /// A driverless run the gate refused: journaled paused (`driverless`).
     MarkedDriverless { detail: String },
     /// A due paused run the gate refused: it stays paused. Also a driverless
-    /// run that could not be journaled paused.
+    /// run that could not be journaled paused, and a due run whose waker's
+    /// lease could not be taken.
     Refused { detail: String },
     /// Another run holds the busy lock of the run's tree, or the run's event
     /// lock stayed busy while a wake-up probe's outcome waited to be
     /// journaled: left as it is, a later pass (or `apb resume`) continues it.
     Busy { detail: String },
-    /// A paused run whose `until` has not passed, or that has none.
+    /// A paused run with no `until`, or one whose wake-up probe paused it
+    /// again or found it superseded.
     LeftPaused,
+    /// A released run whose wake time, or a paused run whose `until`, is
+    /// still ahead: a new waker was spawned for it (none starts when this
+    /// process is not `apb`).
+    Rearmed { wake_at_ms: u64 },
     /// The launch policy refused the caller for a run never authorized: left
     /// as it is, not marked driverless.
     LaunchRefused { detail: String },
@@ -125,7 +143,33 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
         let Ok(events) = read_all(&run_dir) else {
             continue;
         };
-        let status = RunState::fold(&events).run_status;
+        let state = RunState::fold(&events);
+        let status = state.run_status;
+        // A finished run whose notify waker died with the machine: one
+        // sweep sends what is due (nothing is listed for it).
+        if status.is_terminal() {
+            crate::notify::retry::sweep_finished(root, &run_dir, &run_id, &events);
+            continue;
+        }
+        // A released run's own driver exited on purpose: its waker resumes
+        // it, or this pass does once its time came (at once when one of its
+        // retries was expedited). A live waker is left to it.
+        let release = state
+            .released
+            .as_ref()
+            .filter(|_| status == RunStatus::Running)
+            .and_then(|r| super::release_wake(&events, r.seq).map(|at| (r.seq, at)));
+        if let Some((seq, wake_at_ms)) = release
+            && crate::liveness::driver_alive(&run_dir, &run_id) != Some(true)
+            && u128::from(wake_at_ms) > now
+        {
+            super::waker::spawn_release_waker(root, &run_id, seq);
+            out.push(ResumeAllEntry {
+                run_id,
+                action: ResumeAllAction::Rearmed { wake_at_ms },
+            });
+            continue;
+        }
         let due = match status {
             RunStatus::Paused => super::waker::latest_pause(&events)
                 .and_then(|(seq, _, until)| until.map(|u| (seq, u)))
@@ -142,13 +186,50 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
         };
         if !candidate {
             if status == RunStatus::Paused {
-                out.push(ResumeAllEntry {
-                    run_id,
-                    action: ResumeAllAction::LeftPaused,
-                });
+                // A pause with an `until` still ahead gets its waker back.
+                let action = match super::waker::latest_pause(&events) {
+                    Some((seq, _, Some(until))) => {
+                        super::waker::spawn_waker(root, &run_id, seq);
+                        ResumeAllAction::Rearmed { wake_at_ms: until }
+                    }
+                    _ => ResumeAllAction::LeftPaused,
+                };
+                out.push(ResumeAllEntry { run_id, action });
             }
             continue;
         }
+        // A waker that holds the wait's lease is resuming it right now: it
+        // is left to it, and this pass keeps the lease while it probes and
+        // resumes, so no waker starts a second driver or a second probe.
+        let hold = match (due, release) {
+            (Some(seq), _) => Some(super::WakeHold::Pause(seq)),
+            (None, Some((seq, _))) => Some(super::WakeHold::Release(seq)),
+            _ => None,
+        };
+        let _lease = match hold.map(|h| Lease::try_take(&run_dir, h.into())) {
+            Some(Ok(None)) => {
+                out.push(ResumeAllEntry {
+                    run_id,
+                    action: ResumeAllAction::Busy {
+                        detail: "its waker is resuming it".into(),
+                    },
+                });
+                continue;
+            }
+            Some(Ok(Some(lease))) => Some(lease),
+            // Without the lease a live waker could probe or resume beside
+            // this pass: left as it is, `apb resume <run>` continues it.
+            Some(Err(e)) => {
+                out.push(ResumeAllEntry {
+                    run_id,
+                    action: ResumeAllAction::Refused {
+                        detail: format!("its waker's lease could not be taken: {e}"),
+                    },
+                });
+                continue;
+            }
+            None => None,
+        };
         // The launch check, before any probe or resume.
         let grant = match launch_for(root, &run_id, ask) {
             Ok(g) => g,
@@ -192,7 +273,7 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
                         Ok(_) => match super::waker::try_engine_resume(
                             root,
                             &run_id,
-                            Some(seq),
+                            Some(super::WakeHold::Pause(seq)),
                             grant.as_ref(),
                         ) {
                             Ok(pid) => ResumeAllAction::Resumed {
@@ -211,9 +292,13 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
                 None => ResumeAllAction::LeftPaused,
             },
             RunStatus::Running | RunStatus::Interrupted => {
-                match super::waker::try_engine_resume(root, &run_id, None, grant.as_ref()) {
+                match super::waker::try_engine_resume(root, &run_id, hold, grant.as_ref()) {
                     Ok(pid) => ResumeAllAction::Resumed {
-                        cause: ResumeCause::Driverless,
+                        // What was resumed, not what the run once read.
+                        cause: match hold {
+                            Some(super::WakeHold::Release(_)) => ResumeCause::RetryDue,
+                            _ => ResumeCause::Driverless,
+                        },
                         pid,
                     },
                     // Busy is not a refusal: the run is resumable once the
@@ -234,6 +319,10 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
             }
             _ => continue,
         };
+        // The lease goes once the driver took the run over.
+        if let (ResumeAllAction::Resumed { pid, .. }, Some(hold)) = (&action, hold) {
+            super::waker::await_takeover(&run_dir, *pid, hold);
+        }
         out.push(ResumeAllEntry { run_id, action });
     }
     Ok(out)

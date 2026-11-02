@@ -41,6 +41,12 @@ pub(crate) enum AttemptOutcome {
     /// `node_finished`, and the control scan applies the pause; the resume
     /// continues the visit.
     Halted { events: Vec<EventPayload> },
+    /// An ordinary retry of an `agent_task` with a `retry_delay` waits:
+    /// `events` ends with the `retry_deferred`, after the failed attempt's
+    /// own events. The node gets no `node_finished`; the drive holds it
+    /// until the deferral is due and then continues the execution through
+    /// its [`super::deferred::RetryContinuation`].
+    Deferred { events: Vec<EventPayload> },
 }
 
 /// A `resume`-transport re-invocation of an interactive node (spec 2026-07-20,
@@ -91,6 +97,9 @@ pub(crate) struct ExecOptions<'a> {
     pub control_after: Option<u64>,
     /// The run's budget gate: a list node weighs it before each batch.
     pub budget: Option<&'a super::budget_gate::DriveGate>,
+    /// A delayed retry that is due: the execution continues on its recorded
+    /// chain step, retry number and binding.
+    pub continuation: Option<super::deferred::RetryContinuation>,
 }
 
 /// What every node execution runs against: the run, its state, the flag

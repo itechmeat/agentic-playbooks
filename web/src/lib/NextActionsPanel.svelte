@@ -2,7 +2,8 @@
   // What the run needs next, read only from the server's `next_actions`:
   // the actions of the run and of its live sub-playbook children, the
   // primary one marked. An action the page can take (an answer, a review or
-  // publish decision, a decision on an unknown send, a resume) gets its
+  // publish decision, a decision on an unknown send, a resume, starting a
+  // waiting retry now) gets its
   // buttons; every other one gets its `apb` command line to copy. Each post
   // goes to the action's own run (a child's request reaches the child) and
   // names the request it answers, through `runposts`, the same functions the
@@ -148,15 +149,26 @@
     )
   }
 
-  // The launch nonce the last resume carried, for its consent retry.
+  // The launch nonce and the waiting retry the last resume carried, for
+  // its consent retry.
   let resumeLaunchNonce: string | undefined
+  let resumeRetry: { node?: string } | undefined
 
-  async function resume(key: string, target: string, consentNonce?: string, launchNonce?: string) {
+  async function resume(
+    key: string,
+    target: string,
+    consentNonce?: string,
+    launchNonce?: string,
+    retryNow?: { node?: string },
+  ) {
     busy = key
     resumeLaunchNonce = launchNonce
+    resumeRetry = retryNow
     try {
-      await resumeRun(target, workspace, { consentNonce, launchNonce })
-      toast.success('Run resumed')
+      // A waiting retry started now: a live run only starts the retry, a
+      // released or paused one is resumed with it due.
+      const out = await resumeRun(target, workspace, { consentNonce, launchNonce, ...(retryNow ? { retryNow } : {}) })
+      toast.success(retryNow ? (out?.live ? 'Retry started' : 'Run resumed with the retry due') : 'Run resumed')
       void reload()
     } catch (e) {
       // A never-authorized run of an `ask` playbook on a dashboard without
@@ -166,7 +178,7 @@
       if (launchNext?.kind === 'confirm') {
         if (window.confirm(launchQuestion(launchNext))) {
           const nonce = launchNext.confirmation.nonce
-          queueMicrotask(() => void resume(key, target, consentNonce, nonce))
+          queueMicrotask(() => void resume(key, target, consentNonce, nonce, retryNow))
         }
       } else if (launchNext) {
         toast.error('Resume refused', { description: launchNext.message })
@@ -347,6 +359,18 @@
                   Resume
                 </Button>
               </div>
+            {:else if a.code === 'retry_now'}
+              <div class="buttons">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  data-testid="next-action-retry-now"
+                  disabled={!a.ready || busy !== null}
+                  onclick={() => resume(key, a.run_id, undefined, undefined, { node: givenArg(a, 'node') ?? a.target.node })}
+                >
+                  Retry now
+                </Button>
+              </div>
             {/if}
           {/if}
           {#if showsLine(a)}
@@ -385,7 +409,7 @@
   subRun={resumeTarget && resumeTarget !== runId ? resumeTarget : null}
   onconfirm={() => {
     if (resumeTarget)
-      void resume(`resume:${resumeTarget}`, resumeTarget, irreversibleNonce, resumeLaunchNonce)
+      void resume(`resume:${resumeTarget}`, resumeTarget, irreversibleNonce, resumeLaunchNonce, resumeRetry)
   }}
 />
 

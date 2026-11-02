@@ -403,6 +403,144 @@ fn a_pause_with_until_alone_is_stopped_and_followed_until_its_grace() {
     assert_eq!(fx.follow_exit("timer"), 5, "followed through the pause");
 }
 
+impl Run {
+    /// `work` failed once and its retry waits `delay_ms`.
+    fn deferred(&mut self, delay_ms: u64) -> u64 {
+        self.started("work");
+        self.ev(
+            json!({"type": "retry_deferred", "node": "work", "after_attempt": 1,
+            "retry": 1, "step": 0, "binding": "b", "delay_ms": delay_ms}),
+        )
+    }
+}
+
+/// The action that starts `work`'s waiting retry now.
+fn retry_now(a: &RunActions) -> &NextAction {
+    a.actions
+        .iter()
+        .find(|x| x.code == ActionCode::RetryNow)
+        .expect("a retry_now action")
+}
+
+#[test]
+fn a_deferred_retry_under_a_live_driver_progresses_by_itself() {
+    let fx = Fx::new();
+    let mut r = fx.run("r");
+    r.deferred(600_000);
+    let a = fx.observe("r");
+    assert_eq!(codes(&a), vec![ActionCode::RetryNow]);
+    let p = primary(&a);
+    assert_eq!(p.target.node.as_deref(), Some("work"));
+    assert_eq!(
+        p.principals,
+        vec![
+            Principal::Person,
+            Principal::Operator,
+            Principal::Supervisor
+        ]
+    );
+    assert!(matches!(
+        p.auto,
+        Some(AutoProgress::At {
+            outcome: AutoOutcome::RetryAttempt,
+            assured: true,
+            at_ms,
+        }) if at_ms > now() + 500_000
+    ));
+    assert_eq!(
+        p.command.as_deref(),
+        None,
+        "set only by for_surface; rendered below"
+    );
+    assert_eq!(
+        command::render(p, &Default::default()).unwrap().line(),
+        "apb resume --retry-now --node=work r"
+    );
+    assert_eq!(a.stop, StopVerdict::ProgressesByItself);
+    assert_eq!((fx.default_exit("r"), fx.follow_exit("r")), (5, 5));
+}
+
+/// A retry that waits under a driver that is gone starts by nothing: no
+/// automatic progress is promised, and its line says the driver is gone.
+#[test]
+fn a_deferred_retry_under_a_dead_driver_promises_no_start() {
+    let fx = Fx::new();
+    let mut r = fx.run("r");
+    r.deferred(600_000);
+    r.dead_driver();
+    let a = fx.observe("r");
+    let wait = retry_now(&a);
+    assert_eq!(wait.auto, None, "{a:?}");
+    assert!(wait.reason.contains("driver is gone"), "{}", wait.reason);
+    assert_eq!(a.stop, StopVerdict::Stopped);
+}
+
+#[test]
+fn a_deferred_retry_of_a_paused_run_is_frozen() {
+    let fx = Fx::new();
+    let mut r = fx.run("r");
+    r.deferred(600_000);
+    r.pause(None);
+    let a = fx.observe("r");
+    assert_eq!(primary(&a).code, ActionCode::ResumeRun);
+    assert!(matches!(
+        retry_now(&a).auto,
+        Some(AutoProgress::Frozen {
+            outcome: AutoOutcome::RetryAttempt,
+            remaining_ms,
+        }) if remaining_ms > 500_000 && remaining_ms <= 600_000
+    ));
+    assert_eq!(a.stop, StopVerdict::Stopped);
+    assert_eq!((fx.default_exit("r"), fx.follow_exit("r")), (4, 4));
+}
+
+#[test]
+fn a_released_run_is_stopped_and_followed_until_its_wake_time() {
+    let fx = Fx::new();
+    let mut r = fx.run("r");
+    r.deferred(3_600_000);
+    let wake = now() + 3_600_000;
+    let seq = r.ev(json!({"type": "drive_released", "wake_at_ms": wake, "nodes": ["work"]}));
+    // The driver exited on purpose: its pid file is gone.
+    std::fs::remove_file(crate::driver::driver_pid_path(&r.dir)).unwrap();
+    let obs = Observation::load(&r.dir, "r").unwrap();
+    assert_eq!(obs.status(), crate::state::RunStatus::Running);
+    assert!(!obs.view.driver_dead(), "released, not driver dead");
+    let a = next_actions(&obs);
+    let p = primary(&a);
+    assert_eq!(p.code, ActionCode::ResumeRun);
+    assert!(
+        p.reason.contains("waiting to retry `work` at"),
+        "{}",
+        p.reason
+    );
+    assert!(matches!(
+        p.auto,
+        Some(AutoProgress::At { outcome: AutoOutcome::ResumeAttempt, assured: false, at_ms })
+            if at_ms == wake
+    ));
+    assert!(matches!(
+        retry_now(&a).auto,
+        Some(AutoProgress::At {
+            outcome: AutoOutcome::RetryAttempt,
+            assured: false,
+            ..
+        })
+    ));
+    assert_eq!(a.stop, StopVerdict::Stopped);
+    let held = verdict::sole_timed_pause(&obs, &a).unwrap();
+    assert_eq!((held.seq, held.until_ms), (seq, wake));
+    assert_eq!((fx.default_exit("r"), fx.follow_exit("r")), (4, 5));
+
+    // Past the wake time plus the grace, for the same release: stopped.
+    let mut r = fx.run("late");
+    r.deferred(1_000);
+    r.ev(json!({"type": "drive_released",
+        "wake_at_ms": now() - verdict::UNTIL_GRACE_MS - 1_000, "nodes": ["work"]}));
+    std::fs::remove_file(crate::driver::driver_pid_path(&r.dir)).unwrap();
+    assert_eq!(fx.follow_exit("late"), 4);
+}
+
 #[test]
 fn a_paused_run_with_an_open_review_needs_input_when_followed() {
     let fx = Fx::new();

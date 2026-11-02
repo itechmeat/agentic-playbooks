@@ -2008,6 +2008,81 @@ resume, a supervisor retry, or the next node walks the chain from the top again
 and hits the same expired credential unless a human fixed it in between, which is
 the point: between two drives, someone may have.
 
+### Retry delay
+
+An ordinary retry (one that spends `max_retries`) starts at once by default.
+`retry_delay` on an `agent_task`, or on `defaults` for every `agent_task`
+that is not a list node, spaces those retries out, for a failure that time
+fixes (a deploy that is not live yet, a service that is restarting):
+
+```yaml
+defaults:
+  retry_delay: { initial: 30s }   # every agent_task without its own block
+nodes:
+  - id: deploy_check
+    type: agent_task
+    prompt: "check that the new version answers on /health"
+    profile: dev
+    max_retries: 4
+    retry_delay: { initial: 1m, factor: 2, max: 15m }   # wins over defaults
+```
+
+Retry `n` (counted from 1 within one step of the fallback chain) waits
+`min(initial * factor^(n-1), max)`: here 1m, 2m, 4m, 8m. When the failure
+carries a `Retry-After`, the wait is the larger of the two, still capped by
+`max`. There is no jitter. `initial` and `max` are durations (`30s`, `5m`,
+`1h30m`, or plain seconds); `factor` defaults to 2; an absent `max` means
+the ceiling of 7 days.
+
+The wait counts active run time from the moment the retry is deferred: a
+pause of the run (by a person, a budget or a quota) freezes it, and the
+remaining wait continues after the resume. While the node waits, other
+ready branches run as usual, and a join downstream of the node waits for it
+as for a running node. The delayed attempt runs on the same step of the
+fallback chain and on the same binding the failed attempt used, even when
+the node's profile was rebound in between, and it still counts against
+`max_retries`.
+
+A waiting node reads `retry_waiting` with its due time on every surface
+(`apb runs <id>`, MCP `run_status` `retry_waiting`, the run page's node
+badge), or "frozen while paused" with what is left. When nothing else is
+left to run and the retry is more than a minute away, the driver releases
+the run: it frees the working tree and exits, and a waker resumes the run
+when the retry is due; surfaces say "waiting to retry `<node>` at T" for it.
+To start a waiting retry at once: `apb resume <run> --retry-now [--node
+<id>]`, MCP `run_resume { retry_now: true, node }`, or the dashboard's
+"Retry now" button (a supervisor uses `supervisor_node_retry`). A live
+driver starts it right away; a released or paused run is resumed with the
+retry due, and a resume that is refused leaves the retry waiting as it was.
+
+What it does not delay:
+
+| Retry | With `retry_delay` |
+|-------|--------------------|
+| infrastructure backoff of a `transient` failure | unchanged, its own schedule |
+| quota pause | unchanged, a pause of the whole run |
+| the next step of the fallback chain, the host fallback | starts at once |
+| the continuation of a `require_verdict` node after its deadline | starts at once |
+| a supervisor's `node_retry` or `continue_from` | starts at once and ends the wait |
+| a new visit through a loop edge | not a retry |
+| list item retries | never delayed |
+| the finish composer | never delayed |
+| `script` nodes | they do not retry |
+
+Retry advice is asked before the wait: an advice that switches the executor
+or fails the node is applied at once. An older apb that does not know the
+field runs the playbook with immediate retries, as before.
+
+The validator checks the block on a node and on `defaults`:
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V126 | error | `initial` is not a duration, or is below 1s or above 7d |
+| V127 | error | `factor` is not between 1 and 10 |
+| V128 | error | `max` is not a duration, is below `initial` or above 7d |
+| V129 | error | a list node carries `retry_delay` |
+| V130 | warning | the delay is never used: the node's effective `max_retries` is 0, or no node `defaults.retry_delay` applies to (an `agent_task` without its own `retry_delay`, not a list node) has `max_retries` above 0 |
+
 ### Quota pause
 
 A `quota` failure never fails the node while pauses remain. A profile fallback

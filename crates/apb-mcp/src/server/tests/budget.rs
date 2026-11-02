@@ -184,6 +184,8 @@ fn resume_args(run_id: &str, confirm_budget: Option<String>) -> RunResumeArgs {
     RunResumeArgs {
         run_id: run_id.into(),
         from_node: None,
+        retry_now: false,
+        node: None,
         allow_environment_drift: false,
         acknowledge_untrusted: Some(true),
         confirm_irreversible: None,

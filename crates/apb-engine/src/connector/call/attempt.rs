@@ -313,6 +313,7 @@ mod tests {
                 transcript: None,
                 token: Some(format!("tok-{seq}")),
                 isolation: None,
+                exec: None,
             },
         )
     }

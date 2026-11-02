@@ -99,10 +99,17 @@ fn ids(events: &[Event]) -> Vec<String> {
 }
 
 fn ids_within(events: &[Event], window: KeyWindow) -> Vec<String> {
-    due(events, &NotifyState::fold(events), NOW, window, &|| false)
-        .iter()
-        .map(|t| t.id())
-        .collect()
+    due(
+        events,
+        &NotifyState::fold(events),
+        NOW,
+        window,
+        RETRY_GAP_MS,
+        &|| false,
+    )
+    .iter()
+    .map(|t| t.id())
+    .collect()
 }
 
 /// A notification try of `label`: recorded at `seq` with `mode`, by a
@@ -410,16 +417,7 @@ fn a_notification_that_failed_as_the_run_ended_is_reported_as_given_up() {
         view.problems
     );
     // A resume tries it again, so a live run reports no such problem.
-    events.push(ev(
-        5,
-        EventPayload::RunResumed {
-            from_node: "s".into(),
-            by: None,
-            explicit: false,
-            launch: None,
-            definition: None,
-        },
-    ));
+    events.push(ev(5, EventPayload::resumed("s", None, false)));
     let view = RunNotify::from_events(&events, NOW).unwrap();
     assert!(view.problems.is_empty(), "{:?}", view.problems);
 }
@@ -568,9 +566,14 @@ fn a_supervisor_wake_is_open_until_the_supervisor_acts_or_the_run_pauses() {
 fn a_filtered_end_is_due_only_for_its_outcomes() {
     let run_end = |outcome: Event, on: &[&str], needs_look: bool| {
         let events = vec![started(), subscribed(1, on), outcome];
-        due(&events, &NotifyState::fold(&events), NOW, WINDOW, &|| {
-            needs_look
-        })
+        due(
+            &events,
+            &NotifyState::fold(&events),
+            NOW,
+            WINDOW,
+            RETRY_GAP_MS,
+            &|| needs_look,
+        )
         .iter()
         .map(|t| t.id())
         .collect::<Vec<_>>()

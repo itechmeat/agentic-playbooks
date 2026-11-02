@@ -372,14 +372,24 @@ export interface ResumeBudget {
 export const resumeRun = (
   id: string,
   workspace = '',
-  opts: { consentNonce?: string; budget?: ResumeBudget; launchNonce?: string } = {},
+  opts: {
+    consentNonce?: string
+    budget?: ResumeBudget
+    launchNonce?: string
+    /** Start a deferred retry now (of `node`, or every waiting one). */
+    retryNow?: { node?: string }
+  } = {},
 ) =>
   requestJson<{
     run_id: string
-    resumed_from: string
-    detached: boolean
+    resumed_from?: string
+    detached?: boolean
     resumed_early?: boolean
     pause_until?: number
+    /** The nodes whose waiting retry was started now. */
+    retry_now?: string[]
+    /** A live driver holds the run: only the retry was started. */
+    live?: boolean
   }>(`${run(id)}/resume${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
@@ -389,6 +399,9 @@ export const resumeRun = (
       // A dashboard without keys resumes a never-authorized `ask` run only
       // with the nonce of its refusal.
       ...(opts.launchNonce ? { confirm_launch: opts.launchNonce } : {}),
+      ...(opts.retryNow
+        ? { retry_now: true, ...(opts.retryNow.node ? { node: opts.retryNow.node } : {}) }
+        : {}),
     }),
   })
 
