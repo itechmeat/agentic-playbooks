@@ -267,6 +267,16 @@
     {#if data.notRun}
       <div class="run-note" title={data.notRun.title} data-testid="node-not-run">not run · {data.notRun.word}</div>
     {/if}
+    {#if data.retryWait}
+      <div
+        class="retry-wait"
+        class:frozen={data.retryWait.frozen}
+        title={data.retryWait.title}
+        data-testid="node-retry-wait"
+      >
+        {data.retryWait.text}
+      </div>
+    {/if}
     {#if data.judge}
       <div class="judge-box" title={data.judge.title} data-testid="node-judge">
         {#each data.judge.lines as line, i (i)}<div class="judge-line">{line}</div>{/each}
@@ -406,6 +416,21 @@
     font-size: 10px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* A retry waiting out its delay: amber while it counts down, muted with a
+     dashed edge while the run is paused and the delay is frozen. */
+  .retry-wait {
+    margin-top: 3px;
+    padding: 1px 5px;
+    border: 1px solid var(--c-amber);
+    color: var(--c-amber);
+    font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  .retry-wait.frozen {
+    border-style: dashed;
+    color: var(--muted-foreground);
   }
   .judge-box {
     position: relative;

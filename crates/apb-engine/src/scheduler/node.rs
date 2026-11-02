@@ -629,7 +629,10 @@ pub(super) fn journal_missing_inputs(
 /// Executes one node: [`execute_node_kind`] plus the provenance record of a
 /// git tree's `HEAD` around it (see [`super::provenance`]). A suspended node
 /// (an interactive question) records nothing yet; it keeps the `HEAD` it
-/// started from, and its answer round records the whole span.
+/// started from, and its answer round records the whole span. A node whose
+/// retry is deferred records what it committed so far; the delayed attempt
+/// starts from `HEAD` as it then is, so a sibling's commits in between are
+/// never the node's.
 /// `track_provenance` is false for a member of a concurrent batch that
 /// shares the tree with a sibling: `HEAD` moves by both, so no commit could
 /// be attributed to one node.
@@ -665,7 +668,12 @@ pub(crate) fn execute_node(
         .flatten();
     let outcome = execute_node_kind(ctx, node_id, opts)?;
     match (tracker, &outcome) {
-        (Some(t), AttemptOutcome::Finished { .. }) => t.finish(run_dir, journal)?,
+        // A deferred retry ends the node's interval too: while it waits,
+        // other nodes run and may commit, so the delayed attempt tracks a
+        // fresh interval of its own.
+        (Some(t), AttemptOutcome::Finished { .. } | AttemptOutcome::Deferred { .. }) => {
+            t.finish(run_dir, journal)?
+        }
         (
             Some(t),
             AttemptOutcome::Suspended { .. }
@@ -701,6 +709,7 @@ fn execute_node_kind(
         resume,
         live,
         item,
+        continuation,
         ..
     } = opts;
     // The execution's key: the node, and for a list item the item.
@@ -717,6 +726,7 @@ fn execute_node_kind(
     if override_prompt.is_none()
         && resume.is_none()
         && item.is_none()
+        && continuation.is_none()
         && let Some(template) = prompt_template(&node.kind)
     {
         journal_missing_inputs(journal, run_dir, node_id, template, state)?;
@@ -908,6 +918,9 @@ fn execute_node_kind(
                 // tier), the label a host task gives `model_hint`.
                 hint_source: Option<crate::host_task::HintSource>,
                 fallback_host: bool,
+                // How the step is reached in its binding, for the
+                // attempt's `exec` record.
+                exec_source: crate::execution_identity::StepSource,
             }
 
             // A node's executor is always a profile (schema 2). We take the
@@ -924,6 +937,7 @@ fn execute_node_kind(
             if let Some(runner) = decisions
                 && resume.is_none()
                 && item.is_none()
+                && continuation.is_none()
                 && node.route == Some(apb_core::schema::RouteSetting::Auto)
             {
                 route_execution(
@@ -939,18 +953,43 @@ fn execute_node_kind(
             }
             // The EFFECTIVE binding: a mid-run rebind (issue #45 finding 5)
             // overlays the manifest for future attempts of this node.
-            let entry = effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
-                EngineError::Invalid(format!(
-                    "no manifest entry for node `{node_id}` (no profile bound)"
-                ))
-            })?;
+            // A delayed retry runs on the binding its failed attempt ran on
+            // (`retry_deferred.binding`), whatever was rebound since.
+            let entry = match &continuation {
+                Some(c) => crate::execution_identity::read_binding(run_dir, &c.binding)
+                    .ok_or_else(|| {
+                        EngineError::Invalid(format!(
+                            "node `{node_id}`: the binding snapshot `{}` its deferred retry runs on is missing or damaged",
+                            c.binding
+                        ))
+                    })?,
+                None => effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
+                    EngineError::Invalid(format!(
+                        "no manifest entry for node `{node_id}` (no profile bound)"
+                    ))
+                })?,
+            };
             // Host execution mode (0.23.0): every chain step is a host task,
             // or, for a `cli` run an MCP host session started, one host step
             // follows the chain for when none of its CLIs can start.
             let host_mode = manifest.is_host_mode()?;
+            // The binding snapshot every attempt of this execution names
+            // (`execution_identity`): written before the first attempt, once
+            // per distinct binding.
+            // A delayed retry runs on the snapshot its `retry_deferred`
+            // named: the recorded digest, never one recomputed from the read.
+            let binding_digest = match &continuation {
+                Some(c) => c.binding.clone(),
+                None => crate::execution_identity::store_binding(run_dir, &entry)?,
+            };
             // A `full` node never falls back to the host agent: the host
-            // step runs outside any sandbox apb starts.
+            // step runs outside any sandbox apb starts. Nor does a list
+            // item: host tasks are adopted by node, so items running side
+            // by side would supersede each other's tasks (the same reason
+            // host mode refuses list nodes at start). The item fails with
+            // its CLI's error.
             let host_fallback = !host_mode
+                && item.is_none()
                 && manifest.falls_back_to_host()
                 && !isolation
                     .as_ref()
@@ -965,6 +1004,10 @@ fn execute_node_kind(
                 .iter()
                 .zip(sources)
                 .map(|(ri, source)| Step {
+                    exec_source: crate::execution_identity::StepSource::of(
+                        &source,
+                        entry.ephemeral,
+                    ),
                     agent: if host_mode {
                         super::host::HOST_AGENT.to_string()
                     } else {
@@ -997,13 +1040,18 @@ fn execute_node_kind(
                         profile: entry.name.clone(),
                     }),
                     fallback_host: true,
+                    exec_source: crate::execution_identity::StepSource::HostFallback,
                 });
             }
             // Whether every CLI attempt of this execution so far failed
             // before any model turn (binary missing, not logged in): the
             // condition of the host fallback. `last_start_failure` is the
             // reason it records.
-            let mut all_unstartable = true;
+            // A delayed retry continues an execution whose earlier attempts
+            // reached a model turn (only such a failure spends an ordinary
+            // retry, and only that is delayed): it never falls back to the
+            // host.
+            let mut all_unstartable = continuation.is_none();
             let mut cli_attempted = false;
             let mut last_start_failure = String::new();
             let soul_text = Some(entry.soul.clone());
@@ -1177,7 +1225,7 @@ fn execute_node_kind(
             // the same directory. An answer round already resumes its own
             // session, so it is never a handoff.
             let mut handoff_warm = false;
-            if let (Some(source), None) = (continue_session, &resume) {
+            if let (Some(source), None, None) = (continue_session, &resume, &continuation) {
                 // Host execution mode (0.23.0): a host subagent has no
                 // session apb can see or continue, so the step starts cold.
                 let decision = if host_mode {
@@ -1219,6 +1267,7 @@ fn execute_node_kind(
             // retry would have. A host subagent has no session apb can see.
             let mut pause_session = false;
             if resume.is_none()
+                && continuation.is_none()
                 && !host_mode
                 && let Some(paused) = journaled
                     .as_deref()
@@ -1243,8 +1292,16 @@ fn execute_node_kind(
             // one continues its session (issue #136 item 3).
             let mut timeout_continuation = false;
 
-            let mut attempt: u32 = 0;
+            // A delayed retry continues the execution's attempt numbers.
+            let mut attempt: u32 = continuation.as_ref().map_or(0, |c| c.attempt);
             let mut last_msg = String::new();
+            // The ordinary retries of this node wait out its `retry_delay`
+            // (`super::deferred`), never the first attempt of a step.
+            let retry_delay = playbook.effective_retry_delay(node);
+            // The chain step a delayed retry continues on.
+            let entry_step = continuation.as_ref().map(|c| c.step as usize);
+            // The attempt id (its `attempt_started` seq) of the last attempt.
+            let started_seq: std::cell::Cell<u64> = std::cell::Cell::new(0);
             // Set once an attempt of this node ended without recording a required
             // verdict (spec 2026-08-05 section 2.2): every later attempt's prompt
             // then carries the interruption note, so the fresh agent looks for the
@@ -1307,12 +1364,20 @@ fn execute_node_kind(
             // How the last attempt closed, carried in memory to the first
             // task of the next chain step (`fallback_of`).
             let mut last_close: Option<crate::host_task::FallbackOf> = None;
-            for (idx, step) in steps.iter().enumerate().take(step_count) {
+            for (idx, step) in steps
+                .iter()
+                .enumerate()
+                .take(step_count)
+                .skip(entry_step.unwrap_or(0))
+            {
+                // A delayed retry re-enters its own step: no transition.
+                let entering = entry_step == Some(idx) && walked == 0;
                 // Host fallback (0.23.0): taken only when every CLI attempt of
                 // this execution failed before any model turn. It is not a
                 // chain fallback, so it journals `execution_fallback` instead
                 // of `fallback_triggered`.
-                if step.fallback_host {
+                if entering {
+                } else if step.fallback_host {
                     if !(cli_attempted && all_unstartable) {
                         continue;
                     }
@@ -1402,9 +1467,16 @@ fn execute_node_kind(
                 // `for try_i in 0..=retries`. `infra_used` counts the separate
                 // infrastructure budget, whose size IS the length of the backoff
                 // schedule (default two: 5 s, then 30 s).
-                let mut try_i: u32 = 0;
+                let mut try_i: u32 = match (&continuation, entering) {
+                    (Some(c), true) => c.retry,
+                    _ => 0,
+                };
                 let mut infra_used: usize = 0;
                 let backoff = crate::failure_class::backoff_schedule();
+                // Set when `try_i` just advanced for an ordinary retry; the
+                // classification of the failure it follows.
+                let mut retry_next = false;
+                let mut last_failure_kind: Option<String> = None;
                 while try_i <= retries {
                     // Set by the failure handling below when it spent an
                     // infrastructure retry instead of a node retry: the same
@@ -1419,6 +1491,25 @@ fn execute_node_kind(
                             output: "cancelled".to_string(),
                             events,
                         });
+                    }
+                    // An ordinary retry of a node with a `retry_delay` waits:
+                    // the drive holds the node and continues the execution
+                    // here, on this step and binding, once the delay passed.
+                    if std::mem::take(&mut retry_next)
+                        && let Some(policy) = retry_delay
+                    {
+                        let wait =
+                            crate::failure_class::retry_after(&last_msg, apb_core::clock::now_ms());
+                        events.push(EventPayload::RetryDeferred {
+                            node: node_id.to_string(),
+                            after_attempt: started_seq.get(),
+                            retry: try_i,
+                            step: idx as u32,
+                            binding: binding_digest.clone(),
+                            delay_ms: super::deferred::delay_ms(policy, try_i, wait),
+                            failure_kind: last_failure_kind.take(),
+                        });
+                        return Ok(AttemptOutcome::Deferred { events });
                     }
                     attempt += 1;
                     step_attempts += 1;
@@ -1712,9 +1803,20 @@ fn execute_node_kind(
                     let attempt_model = Some(step.model.clone());
                     let attempt_transcript = Some(super::transcript::relative(&key.stem(attempt)));
                     let attempt_dir = Some(attempt_workdir.display().to_string());
+                    let attempt_exec = Some(crate::execution_identity::ExecStep {
+                        binding: binding_digest.clone(),
+                        step: idx as u32,
+                        source: step.exec_source.clone(),
+                        executed_by: if step.host {
+                            crate::execution_identity::EXECUTED_BY_HOST
+                        } else {
+                            crate::execution_identity::EXECUTED_BY_CLI
+                        }
+                        .to_string(),
+                    });
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
-                        if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                        match journal.append_seq(EventPayload::AttemptStarted {
                             item: None,
                             node: node_id.to_string(),
                             attempt: cur_attempt,
@@ -1728,8 +1830,10 @@ fn execute_node_kind(
                             transcript: attempt_transcript.clone(),
                             token: attempt_policy.attempt_token.clone(),
                             isolation: place.record.clone(),
+                            exec: attempt_exec.clone(),
                         }) {
-                            *spawn_err.borrow_mut() = Some(e);
+                            Ok(seq) => started_seq.set(seq),
+                            Err(e) => *spawn_err.borrow_mut() = Some(e),
                         }
                     };
                     // Live channel observation (spec 2026-07-20, Task 11): for a
@@ -2126,7 +2230,7 @@ fn execute_node_kind(
                     // a started (pid unknown) so every attempt_finished is preceded
                     // by an attempt_started.
                     if spawn_instant.is_none() {
-                        journal.append(EventPayload::AttemptStarted {
+                        started_seq.set(journal.append_seq(EventPayload::AttemptStarted {
                             item: None,
                             node: node_id.into(),
                             attempt,
@@ -2140,7 +2244,8 @@ fn execute_node_kind(
                             transcript: attempt_transcript.clone(),
                             token: attempt_policy.attempt_token.clone(),
                             isolation: place.record.clone(),
-                        })?;
+                            exec: attempt_exec.clone(),
+                        })?);
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
                     // The attempt's verdict, read ONCE for both branches (spec
@@ -2364,6 +2469,8 @@ fn execute_node_kind(
                                             last_timed_out = false;
                                             if !infra_retry {
                                                 try_i += 1;
+                                                retry_next = true;
+                                                last_failure_kind = None;
                                             }
                                             continue;
                                         }
@@ -2877,6 +2984,7 @@ fn execute_node_kind(
                             // Retry advice and the routing cascade (issue #165
                             // Parts 9, 14.2 and 14.5): only for an agent failure
                             // that is about to spend a same-executor retry.
+                            last_failure_kind = failure_kind.map(|k| k.as_str().to_string());
                             if !infra_retry && failure_kind == Some(FailureKind::Agent) {
                                 let previous = last_agent_failure.replace(last_msg.clone());
                                 if idx < cascade {
@@ -2938,6 +3046,7 @@ fn execute_node_kind(
                     // advances here.
                     if !infra_retry {
                         try_i += 1;
+                        retry_next = true;
                     }
                 }
             }
@@ -3310,6 +3419,8 @@ pub(crate) fn execute_finish_answer(
                     transcript: None,
                     token: attempt_policy.attempt_token.clone(),
                     isolation: None,
+                    // The finish composer's chain position is not recorded.
+                    exec: None,
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -3351,6 +3462,7 @@ pub(crate) fn execute_finish_answer(
                     transcript: None,
                     token: attempt_policy.attempt_token.clone(),
                     isolation: None,
+                    exec: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);

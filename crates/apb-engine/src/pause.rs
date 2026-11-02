@@ -21,6 +21,7 @@ pub mod request;
 pub mod resume_all;
 pub mod waker;
 
+pub use crate::resume_kind::WakeHold;
 pub use cause::cause_of;
 pub use interrupt::{DEFAULT_GRACE, GRACE_ENV};
 pub use kind::{PauseBy, PauseCause, PauseMode};
@@ -29,7 +30,7 @@ pub use request::{PauseOutcome, request_pause};
 pub use resume_all::{
     LaunchAsk, ResumeAllAction, ResumeAllEntry, ResumeCause, resume_all, resume_all_as,
 };
-pub use waker::{WakeOutcome, run_waker, spawn_waker};
+pub use waker::{WakeOutcome, run_release_waker, run_waker, spawn_release_waker, spawn_waker};
 
 use crate::event::{Event, EventPayload};
 use crate::state::{RunStatus, is_legacy_resume_marker};
@@ -347,6 +348,59 @@ pub(crate) fn holds(events: &[Event], seq: u64) -> bool {
             == Some(seq)
 }
 
+impl WakeHold {
+    /// Whether this pause or release still holds the run whose journal is
+    /// `events`.
+    pub(crate) fn holds(self, events: &[Event]) -> bool {
+        match self {
+            WakeHold::Pause(seq) => holds(events, seq),
+            WakeHold::Release(seq) => release_wake(events, seq).is_some(),
+        }
+    }
+}
+
+impl From<WakeHold> for crate::waker::WakerFor {
+    fn from(hold: WakeHold) -> Self {
+        match hold {
+            WakeHold::Pause(seq) => crate::waker::WakerFor::Pause(seq),
+            WakeHold::Release(seq) => crate::waker::WakerFor::Release(seq),
+        }
+    }
+}
+
+/// When the release at journal sequence `seq` wakes the run, while that
+/// release still holds it: its `wake_at_ms`, or 0 (at once) when one of
+/// its waiting retries was expedited since. `None` once anything else
+/// (a resume, a pause, a stop, another release) replaced it.
+pub(crate) fn release_wake(events: &[Event], seq: u64) -> Option<u64> {
+    let state = crate::state::RunState::fold(events);
+    if state.run_status != RunStatus::Running {
+        return None;
+    }
+    let released = state.released.filter(|r| r.seq == seq)?;
+    if state.deferred.values().any(|d| d.expedited) {
+        return Some(0);
+    }
+    Some(released.wake_at_ms)
+}
+
+/// How long past its wake time a release may wait for its waker before a
+/// surface stops promising that one resumes it.
+pub(crate) const RELEASE_GRACE_MS: u64 = 60_000;
+
+/// Whether `released`, the release of the run at `run_dir`, was lost: its
+/// wake time passed more than [`RELEASE_GRACE_MS`] ago and no waker holds
+/// its lease (it never started, died, or the machine rebooted). Nothing
+/// resumes such a run until a person does.
+pub(crate) fn release_lost(
+    run_dir: &std::path::Path,
+    released: &crate::state::Released,
+    now_ms: u64,
+) -> bool {
+    now_ms > released.wake_at_ms.saturating_add(RELEASE_GRACE_MS)
+        && !crate::waker::Lease::held(run_dir, crate::waker::WakerFor::Release(released.seq))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,16 +418,7 @@ mod tests {
     }
 
     fn resumed(ts: u128) -> Event {
-        ev(
-            ts,
-            EventPayload::RunResumed {
-                from_node: "a".into(),
-                by: None,
-                explicit: false,
-                launch: None,
-                definition: None,
-            },
-        )
+        ev(ts, EventPayload::resumed("a", None, false))
     }
 
     fn started(ts: u128) -> Event {

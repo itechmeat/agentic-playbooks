@@ -18,6 +18,18 @@ pub const MAX_TRIES: usize = 3;
 /// The least time between two tries of one transition, in milliseconds.
 pub const RETRY_GAP_MS: u64 = 30_000;
 
+/// Overrides [`RETRY_GAP_MS`] (milliseconds). Tests shorten it.
+pub const RETRY_GAP_ENV: &str = "APB_NOTIFY_RETRY_GAP_MS";
+
+/// The retry gap in force: [`RETRY_GAP_ENV`] when set, else
+/// [`RETRY_GAP_MS`].
+pub fn retry_gap_ms() -> u64 {
+    std::env::var(RETRY_GAP_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(RETRY_GAP_MS)
+}
+
 /// What every notification label starts with. A caller's `--intent` never
 /// does (`:` is not allowed in one), so the two never collide.
 pub const LABEL_PREFIX: &str = "notify:";
@@ -216,13 +228,16 @@ pub fn finish_outcome(events: &[Event], seq: u64, needs_look: &dyn Fn() -> bool)
 /// The transitions due a notification as of `now_ms`: open, of a kind the
 /// subscription covers (for the run's end, of an outcome it covers),
 /// journaled at or after it took effect, and allowed another try. `window`
-/// is the target's [`KeyWindow`]; `needs_look` tells a success that calls
-/// for a look, asked only when the subscription filters outcomes.
+/// is the target's [`KeyWindow`]; `gap_ms` the least time between two
+/// tries ([`retry_gap_ms`], read once by the caller, so this stays a pure
+/// function of its inputs); `needs_look` tells a success that calls for a
+/// look, asked only when the subscription filters outcomes.
 pub fn due(
     events: &[Event],
     state: &NotifyState,
     now_ms: u64,
     window: KeyWindow,
+    gap_ms: u64,
     needs_look: &dyn Fn() -> bool,
 ) -> Vec<TransitionId> {
     let Some(active) = &state.active else {
@@ -244,7 +259,7 @@ pub fn due(
                 .into_iter()
                 .filter(|r| active.is_after_set(r.seq, r.ts_ms) || !retired(r, now_ms))
                 .collect();
-            may_try(&held, now_ms, window)
+            may_try(&held, now_ms, window, gap_ms)
         })
         .collect()
 }
@@ -266,14 +281,14 @@ fn retired(rec: &IntentRecord, now_ms: u64) -> bool {
 /// Whether a transition with these earlier tries may be sent now. Nothing
 /// is sent again once a try went out, is going out, or was refused by the
 /// trust gate. A try that failed, or that a passing fault kept from going
-/// out, is retried after [`RETRY_GAP_MS`], up to [`MAX_TRIES`] in all. A
+/// out, is retried after `gap_ms`, up to [`MAX_TRIES`] in all. A
 /// try whose outcome nobody knows is sent again only in `key` mode and only
 /// while the service still drops the repeat ([`KeyWindow`]).
-fn may_try(tries: &[&IntentRecord], now_ms: u64, window: KeyWindow) -> bool {
+fn may_try(tries: &[&IntentRecord], now_ms: u64, window: KeyWindow, gap_ms: u64) -> bool {
     let Some(last) = tries.last() else {
         return true;
     };
-    if tries.len() >= MAX_TRIES || now_ms < last.ts_ms.saturating_add(RETRY_GAP_MS) {
+    if tries.len() >= MAX_TRIES || now_ms < last.ts_ms.saturating_add(gap_ms) {
         return false;
     }
     match effective_state(last, now_ms) {
@@ -303,5 +318,15 @@ pub(crate) fn state_name(state: &IntentState) -> &'static str {
         IntentState::Confirmed { .. } => ledger::CONFIRMED,
         IntentState::NotSent { .. } => ledger::NOT_SENT,
         IntentState::Unknown { .. } => ledger::UNKNOWN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The documented default (docs say "about 30 s"): nothing in this
+    /// unit-test binary sets the override.
+    #[test]
+    fn a_notification_is_retried_after_thirty_seconds_by_default() {
+        assert_eq!(super::retry_gap_ms(), 30_000);
     }
 }

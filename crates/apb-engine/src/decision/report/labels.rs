@@ -773,16 +773,7 @@ mod tests {
     }
 
     fn decision_event(seq: u64) -> Event {
-        ev(
-            seq,
-            EventPayload::RunResumed {
-                from_node: "placeholder".into(),
-                by: None,
-                explicit: false,
-                launch: None,
-                definition: None,
-            },
-        )
+        ev(seq, EventPayload::resumed("placeholder", None, false))
     }
 
     fn label(events: &[Event]) -> Label {

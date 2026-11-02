@@ -20,6 +20,7 @@ mod env_duration;
 pub mod error;
 pub mod event;
 pub mod exec_key;
+pub mod execution_identity;
 // --- 0.24.0 eval suites ---
 pub mod eval;
 // --- end 0.24.0 eval suites ---
@@ -56,8 +57,11 @@ pub mod question;
 pub mod read_only;
 pub(crate) mod redact;
 pub mod report_html;
+pub mod resume_kind;
 pub mod resume_launch;
+pub mod retry_wait;
 pub mod review;
+pub mod run_binaries;
 pub mod run_config;
 pub mod run_definitions;
 pub mod run_doctor;
@@ -72,6 +76,7 @@ pub mod run_redact;
 pub mod run_retro;
 // --- end of run retrospective ---
 mod run_scripts;
+mod run_store;
 // --- 0.23.0 stats (C3) ---
 pub mod run_stats;
 // --- end of 0.23.0 stats ---
@@ -85,6 +90,7 @@ mod stall;
 pub mod state;
 pub mod stop;
 pub mod transcript;
+pub mod waker;
 pub mod workdir;
 pub mod zcode_ui_sync;
 

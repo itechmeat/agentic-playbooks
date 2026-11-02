@@ -76,9 +76,11 @@
   import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
   import { Button } from '$lib/components/ui/button'
   import * as Tabs from '$lib/components/ui/tabs'
-  import { isTerminalRunStatus, runStatusClass, showsDriverDead } from '../lib/status'
+  import { isTerminalRunStatus, runStatusClass, showsDriverDead, driverDead } from '../lib/status'
   import { statusColor } from '../lib/profilecolor'
   import { canResume, pauseLine } from '../lib/pause'
+  import { releasedLine, withRetryBadges } from '../lib/retrywait'
+  import RunDriveNotes from '../lib/RunDriveNotes.svelte'
   import { pageControls } from '../lib/nextactions'
   import { toast } from 'svelte-sonner'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
@@ -114,13 +116,14 @@
   // Every open gate comes from the server's derived progress (runGates), the
   // same view `apb wait` and MCP run_wait decide on.
   const gates = $derived(detail ? runGates(detail) : null)
+  const deadDriver = $derived(detail ? driverDead(detail) : false)
   const pending = $derived(gates?.reviews ?? [])
   const publishes = $derived(gates?.publishes ?? [])
   const questions = $derived(gates?.questions ?? [])
   // The waits the page already has a control for, so the next-actions
   // panel shows each one's controls only once.
   const controls = $derived(
-    detail && gates ? pageControls(gates, canResume(detail.run_status, detail.driver_alive === false)) : [],
+    detail && gates ? pageControls(gates, canResume(detail.run_status, deadDriver)) : [],
   )
   const waiting = $derived(gates?.waits ?? [])
   const supervisor = $derived(gates?.supervisor ?? null)
@@ -246,13 +249,13 @@
   const graphNodeData = $derived.by(() => {
     const out = new Map<string, Partial<FlowNode['data']>>()
     const g = detail ? graphOf(detail.graph) : null
-    if (!g) return out
+    if (!g) return withRetryBadges(out, detail?.retry_waits)
     for (const n of g.nodes) if (n.executions > 0) out.set(n.node, { runCount: nodeCounts(n) })
     for (const n of g.not_run) {
       out.set(n.node, { ...out.get(n.node), notRun: { word: classWord(n.class), title: notRunTitle(n) } })
     }
     for (const [node, j] of latestJudges(g.judge_nodes)) out.set(node, { ...out.get(node), judge: judgeCard(j) })
-    return out
+    return withRetryBadges(out, detail?.retry_waits)
   })
   const graphBanners = $derived.by(() => {
     if (!detail) return [] as string[]
@@ -560,8 +563,13 @@
             {#if detail.pause?.pausing}
               <span class="tag text-warning" title={pauseLine(detail.pause)} data-testid="run-pause-badge">pausing</span>
             {/if}
-            {#if showsDriverDead(detail.run_status, detail.driver_alive === false)}
+            {#if showsDriverDead(detail.run_status, deadDriver)}
               <span class="tag text-warning">needs resume</span>
+            {/if}
+            {#if detail.released}
+              <span class="tag released-tag" title={releasedLine(detail.released)} data-testid="run-released-badge"
+                >released</span
+              >
             {/if}
             {#if detail.execution === 'host'}
               <span
@@ -577,6 +585,7 @@
               >
             {/if}
           </div>
+          <RunDriveNotes released={detail.released} drivenBy={detail.driven_by} />
         </header>
 
         <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />
@@ -684,7 +693,7 @@
             status={detail.run_status}
             pause={detail.pause ?? null}
             budget={detail.budget ?? null}
-            driverDead={detail.driver_alive === false}
+            driverDead={deadDriver}
             playbookId={detail.playbook}
             onchange={load}
           />
@@ -1069,5 +1078,10 @@
     padding: 16px 16px 12px;
     font-size: 12px;
     overflow-wrap: anywhere;
+  }
+  /* A released run: its driver let go while a deferred retry waits, and a
+     waker resumes it. Not a dead driver, so amber text, no alarm. */
+  .released-tag {
+    color: var(--c-amber);
   }
 </style>

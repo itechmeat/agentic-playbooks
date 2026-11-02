@@ -924,6 +924,8 @@ impl WfMcp {
         Parameters(RunResumeArgs {
             run_id,
             from_node,
+            retry_now,
+            node,
             allow_environment_drift,
             acknowledge_untrusted,
             confirm_irreversible,
@@ -941,6 +943,8 @@ impl WfMcp {
             RunResumeArgs {
                 run_id,
                 from_node,
+                retry_now,
+                node,
                 allow_environment_drift,
                 acknowledge_untrusted,
                 confirm_irreversible,
@@ -960,6 +964,8 @@ impl WfMcp {
         RunResumeArgs {
             run_id,
             from_node,
+            retry_now,
+            node,
             allow_environment_drift,
             acknowledge_untrusted,
             confirm_irreversible,
@@ -976,15 +982,57 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        let budget = match BudgetResumeArg::request(budget.as_ref()) {
-            Ok(b) => b,
-            Err(refusal) => return to_call_tool_result(Ok(refusal)),
-        };
+        // A waiting retry to start now. A host over MCP may relay a person or
+        // act on its own, so it is recorded as the host, never as the
+        // operator. The order of refusals is the dashboard's: the arguments,
+        // then the run gate, then "nothing waits to retry".
+        let retry_by = apb_engine::scheduler::deferred::ExpediteBy::Host;
+        if let Some(refusal) =
+            tools::run::retry_now_arg_refusal(retry_now, from_node.is_some(), node.is_some())
+        {
+            return to_call_tool_result(Ok(refusal));
+        }
+        // The origin and trust checks come first, for a live retry-now too:
+        // it writes to the run's journal like any resume.
         if let Err(refusal) =
             crate::policy::check_resume(&root, &run_id, acknowledge_untrusted == Some(true))
         {
             return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
         }
+        let mut retry_nodes = None;
+        if retry_now {
+            match tools::run::retry_now_plan(&root, &run_id, node.as_deref()) {
+                Err(e) => return to_call_tool_result(Err(e)),
+                Ok(Err(refusal)) => return to_call_tool_result(Ok(refusal)),
+                Ok(Ok(plan)) => retry_nodes = Some(plan),
+            }
+        }
+        // On a live run the expedite is the whole action; on any other run
+        // (or one whose driver let go meanwhile) the resume below expedites
+        // the retry with its `run_resumed`, once every check passed.
+        if retry_nodes.as_ref().is_some_and(|p| p.live) {
+            match tools::run::retry_now_live(&root, &run_id, node.as_deref(), retry_by) {
+                Ok(Some(mut answer)) => {
+                    let unused = [
+                        ("budget", budget.is_some()),
+                        ("confirm_budget", confirm_budget.is_some()),
+                        ("confirm_launch", confirm_launch.is_some()),
+                        ("launch_version", launch_version.is_some()),
+                        ("launch_choice", launch_choice.is_some()),
+                        ("confirm_irreversible", confirm_irreversible.is_some()),
+                        ("allow_environment_drift", allow_environment_drift),
+                    ];
+                    tools::run::note_not_applied(&mut answer, &unused);
+                    return to_call_tool_result(Ok(answer));
+                }
+                Ok(None) => {}
+                Err(e) => return to_call_tool_result(Err(e)),
+            }
+        }
+        let budget = match BudgetResumeArg::request(budget.as_ref()) {
+            Ok(b) => b,
+            Err(refusal) => return to_call_tool_result(Ok(refusal)),
+        };
         // The launch policy of a run never authorized (one an older apb
         // started): the decision table on its own snapshot and child tree.
         // An authorized run passes; its grant reaches the driver.
@@ -1033,17 +1081,31 @@ impl WfMcp {
             Ok(n) => n.map(|n| acknowledge_note.unwrap_or(n)),
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
-        super::with_deprecation(
-            to_call_tool_result(tools::run_resume(
-                &root,
-                &run_id,
-                from_node.as_deref(),
-                allow_environment_drift,
-                budget.as_ref(),
-                grant.as_ref(),
-            )),
-            note,
+        let resumed = tools::run::run_resume_with(
+            &root,
+            &run_id,
+            from_node.as_deref(),
+            allow_environment_drift,
+            budget.as_ref(),
+            grant.as_ref(),
+            retry_nodes
+                .as_ref()
+                .map(|_| apb_engine::scheduler::RetryNow {
+                    node: node.as_deref(),
+                    by: retry_by,
+                }),
         )
+        .map(|mut ack| {
+            // Only a resume that went ahead started the retry; a refused one
+            // (`budget_paused` and the like) waives no delay.
+            if let Some(plan) = &retry_nodes
+                && ack["detached"] == true
+            {
+                ack["retry_now"] = json!(plan.nodes);
+            }
+            ack
+        });
+        super::with_deprecation(to_call_tool_result(resumed), note)
     }
 
     #[tool(

@@ -24,6 +24,7 @@ use crate::liveness;
 use crate::state::{RunState, RunStatus};
 
 mod check;
+mod drift;
 mod env;
 mod exposure;
 mod isolation;
@@ -32,8 +33,10 @@ pub use check::{FAIL, OK, RunCheck, WARN};
 
 /// Diagnoses run `run_id` under project `root`.
 ///
-/// Returns the checks in a fixed order - run, nodes, attempts, autonomy,
-/// models, process env, tool exposure, driver, workdir lock, control backlog, supervisor actions, file modes - so two reports
+/// Returns the checks in a fixed order - run, nodes, journal drift (the
+/// binaries, unknown and undecodable records, deferred retries), attempts,
+/// autonomy, models, process env, tool exposure, driver, workdir lock,
+/// control backlog, supervisor actions, file modes - so two reports
 /// of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
@@ -43,10 +46,50 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let view = crate::run_view::RunView::load(&run_dir, run_id)?;
+    // The drift rows, or one FAIL row when the journal is there but cannot
+    // be read at all: no row then calls its format fine.
+    let survey = drift::read(&run_dir);
+    let drift_rows = || match &survey {
+        Ok(journal) => drift::checks(journal),
+        Err(e) => vec![RunCheck::new(
+            FAIL,
+            "journal",
+            format!(
+                "the journal cannot be read: {}",
+                drift::shown(&e.to_string())
+            ),
+        )],
+    };
+    let view = match crate::run_view::RunView::load(&run_dir, run_id) {
+        Ok(view) => view,
+        // A journal no engine reader accepts is still described: the drift
+        // rows name the line, and the checks that need no events still run.
+        // The error quotes journal text, so it is shown escaped and cut.
+        Err(e) => {
+            let mut checks = vec![RunCheck::new(
+                FAIL,
+                "run",
+                format!(
+                    "the journal cannot be read: {}",
+                    drift::shown(&e.to_string())
+                ),
+            )];
+            checks.extend(drift_rows());
+            checks.push(driver_check(&run_dir, run_id));
+            // The run's own tree, from the lines the survey could decode.
+            let tree = survey
+                .as_ref()
+                .ok()
+                .and_then(|j| RunState::fold(&j.events).worktree);
+            checks.push(workdir_lock_check(root, tree.as_deref().map(Path::new)));
+            checks.push(file_modes_check(&run_dir));
+            return Ok(checks);
+        }
+    };
     let events = view.events.as_slice();
 
     let mut checks = vec![run_check(&view), nodes_check(&view)];
+    checks.extend(drift_rows());
     checks.extend(failure_reason_check(events));
     checks.extend(supervisor_wait_check(events));
     checks.extend(attempt_checks(events));
@@ -984,5 +1027,114 @@ mod tests {
             "{c:?}"
         );
         assert!(!has_failure(&checks), "{checks:?}");
+    }
+
+    /// A journal that cannot be read never earns an OK format row, and a
+    /// decode error quoting hostile journal text reaches the report escaped.
+    #[test]
+    fn an_unreadable_or_hostile_journal_never_reads_fine_or_raw() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(run_dir.join("events.jsonl")).unwrap();
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert!(
+            !checks.iter().any(|c| c.subject == "journal format"),
+            "{checks:?}"
+        );
+        assert_eq!(find(&checks, "journal").status, FAIL, "{checks:?}");
+
+        std::fs::remove_dir(run_dir.join("events.jsonl")).unwrap();
+        let hostile = format!(
+            "{}\n{}\n",
+            serde_json::json!({"seq": 0, "ts": 1, "type": "\u{1b}]52;c;Zm9v\u{7}"}),
+            serde_json::json!({"seq": 1, "ts": 1, "type": "run_started", "playbook": "p", "version": "1.0.0"})
+        );
+        std::fs::write(run_dir.join("events.jsonl"), hostile).unwrap();
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        let run = find(&checks, "run");
+        assert_eq!(run.status, FAIL, "{checks:?}");
+        assert!(!run.detail.contains('\u{1b}'), "{run:?}");
+        assert!(run.detail.len() < 400, "{run:?}");
+    }
+
+    /// The tree under `root` as (path, bytes) pairs, to prove a read wrote
+    /// nothing.
+    fn snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    out.push((path.clone(), Vec::new()));
+                    stack.push(path);
+                } else {
+                    out.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The drift rows: the binaries and a downgrade, unknown records with
+    /// their seqs, an undecodable known line with its line number (the
+    /// report still comes out), a torn tail, and a deferral whose last
+    /// checkpoint has no guard. Nothing under the project changes.
+    #[test]
+    fn the_drift_report_names_every_line_it_cannot_use_and_writes_nothing() {
+        let v = env!("CARGO_PKG_VERSION");
+        let journal = [
+            r#"{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}"#
+                .to_string(),
+            format!(r#"{{"seq":1,"ts":1000,"type":"run_provenance","apb":"{v}"}}"#),
+            r#"{"seq":2,"ts":1000,"type":"corpus_future_record"}"#.to_string(),
+            r#"{"seq":3,"ts":1000,"type":"retry_deferred","node":"a","after_attempt":1,"retry":1,"step":0,"binding":"b","delay_ms":60000}"#.to_string(),
+            r#"{"seq":4,"ts":1000,"type":"node_finished","node":"b","status":"success","attempt":1,"output":""}"#.to_string(),
+            r#"{"seq":5,"ts":1000,"type":"run_resumed","from_node":"a"}"#.to_string(),
+            r#"{"seq":6,"ts":1000,"type":"corpus_future_record"}"#.to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        let (tmp, run_dir) = run_root(&journal);
+        let before = snapshot(tmp.path());
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert_eq!(snapshot(tmp.path()), before, "the doctor wrote nothing");
+        assert!(
+            find(&checks, "binaries")
+                .detail
+                .contains(&format!("driven by apb {v}, resumed by an older apb")),
+            "{checks:?}"
+        );
+        assert!(find(&checks, "downgrade").detail.contains("seq 5"));
+        let unknown = find(&checks, "unknown records");
+        assert!(
+            unknown
+                .detail
+                .contains("`corpus_future_record` x2 (seq 2, 6)"),
+            "{unknown:?}"
+        );
+        let deferral = find(&checks, "deferred retry");
+        assert_eq!(deferral.status, WARN, "{deferral:?}");
+        assert!(deferral.detail.contains("seq 4"), "{deferral:?}");
+
+        // A known line that does not decode, then a torn tail: the engine's
+        // reader refuses the journal, the report still names both.
+        let mut broken = journal.clone();
+        broken.push_str(r#"{"seq":7,"ts":1000,"type":"node_finished","node":7}"#);
+        broken.push('\n');
+        broken.push_str(r#"{"seq":8,"ts":1000,"type":"deferred_ret"#);
+        std::fs::write(run_dir.join("events.jsonl"), &broken).unwrap();
+        let before = snapshot(tmp.path());
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert_eq!(snapshot(tmp.path()), before, "the doctor wrote nothing");
+        assert_eq!(find(&checks, "run").status, FAIL, "{checks:?}");
+        let line = find(&checks, "journal line");
+        assert!(
+            line.detail.contains("line 8 (seq 7, `node_finished`)"),
+            "{line:?}"
+        );
+        assert!(find(&checks, "torn tail").detail.contains("line 9"));
+        assert!(find(&checks, "binaries").detail.contains(v));
     }
 }

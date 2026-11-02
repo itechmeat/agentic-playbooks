@@ -11,6 +11,7 @@
 //! - [`send`] is the sweep the drive loop runs: each due transition goes out
 //!   once through the send-once ledger, under the engine site `@notify`
 //!   and the label `notify:<kind>.<seq>`.
+//! - [`retry`] retries what the drive's last sweep could not send.
 //! - [`view`] is what the run surfaces report.
 //! - [`trial`] sends one test message outside any run (`apb notify test`).
 //!
@@ -20,6 +21,7 @@
 
 pub mod notice;
 pub mod record;
+pub mod retry;
 pub(crate) mod send;
 pub mod start;
 pub mod transitions;

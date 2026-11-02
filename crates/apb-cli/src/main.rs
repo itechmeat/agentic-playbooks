@@ -350,10 +350,19 @@ enum Command {
         /// driver, paused runs whose `until` has passed); sub-playbook
         /// children follow their parent. A driverless run that cannot be
         /// resumed is marked `paused (driverless)`.
-        #[arg(long, conflicts_with_all = ["run_id", "from_node"])]
+        #[arg(long, conflicts_with_all = ["run_id", "from_node", "retry_now"])]
         all: bool,
         #[arg(long)]
         from_node: Option<String>,
+        /// Start a deferred retry now instead of at its due time: on a run a
+        /// live driver holds the retry starts at once, a released or paused
+        /// run is resumed with the retry due
+        #[arg(long, conflicts_with = "from_node")]
+        retry_now: bool,
+        /// With --retry-now: only this node's waiting retry (default: every
+        /// waiting retry of the run)
+        #[arg(long, requires = "retry_now")]
+        node: Option<String>,
         /// Continue even though an agent binary changed on disk since the run
         /// started (environment drift). The run manifest fingerprints every
         /// agent executable at start; a different fingerprint at resume means
@@ -383,15 +392,17 @@ enum Command {
     /// supervisor decision) or stops, then print why. A single call that
     /// costs an agent nothing while it blocks, unlike polling `apb runs`.
     /// Exit codes: 0 succeeded, 1 failed or aborted, 3 needs input,
-    /// 4 paused or driverless, 5 timeout, 2 error
+    /// 4 paused, driverless or released while a deferred retry waits,
+    /// 5 timeout, 2 error
     Wait {
         run_id: String,
         /// Give up after this many seconds (default: no limit)
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
         /// Keep waiting while the run and its live sub-playbook runs go on by
-        /// themselves (a timer, a question that gets its default, a pause
-        /// with `until` up to a minute past it); return when they finish (0
+        /// themselves (a timer, a question that gets its default, a
+        /// deferred retry, a pause with `until` or a release up to a minute
+        /// past its time); return when they finish (0
         /// or 1), need input, also a paused run with an open gate or a
         /// child's gate (3), or stop (4)
         #[arg(long)]
@@ -689,8 +700,24 @@ enum Command {
         /// The engine's resume of one pause (the waker, `resume --all`): the
         /// journal sequence of the `run_paused` that must still hold the run
         /// when `run_resumed` is journaled. Only meaningful with `--resume`.
-        #[arg(long = "pause-seq")]
+        #[arg(long = "pause-seq", conflicts_with_all = ["release_seq", "retry_now", "budget_json"])]
         pause_seq: Option<u64>,
+        /// The engine's resume of one release (the waker, `resume --all`):
+        /// the journal sequence of the `drive_released` that must still hold
+        /// the run when `run_resumed` is journaled. The engine's resume
+        /// takes no retry-now and no budget change.
+        #[arg(long = "release-seq", conflicts_with_all = ["retry_now", "budget_json"])]
+        release_seq: Option<u64>,
+        /// Start the waiting retries now, journaled with `run_resumed`.
+        #[arg(long = "retry-now")]
+        retry_now: bool,
+        /// With `--retry-now`: only this node's waiting retry.
+        #[arg(long = "retry-now-node", requires = "retry_now")]
+        retry_now_node: Option<String>,
+        /// With `--retry-now`: who asked (`operator`, `host`, `supervisor`,
+        /// `engine`); any other value is refused, never recorded as a person.
+        #[arg(long = "retry-now-by", requires = "retry_now", value_parser = parse_expedite_by)]
+        retry_now_by: Option<String>,
         /// The budget change of the resume, as JSON, journaled next to its
         /// `run_resumed`. Only meaningful with `--resume`.
         #[arg(long = "budget-json")]
@@ -712,8 +739,20 @@ enum Command {
         #[arg(long = "run-id")]
         run_id: String,
         /// The journal sequence of the `run_paused` this waker belongs to.
+        #[arg(
+            long,
+            required_unless_present_any = ["release", "notify"],
+            conflicts_with_all = ["release", "notify"]
+        )]
+        seq: Option<u64>,
+        /// The journal sequence of the `drive_released` this waker belongs
+        /// to, instead of a pause.
+        #[arg(long, conflicts_with = "notify")]
+        release: Option<u64>,
+        /// Retry the notifications the drive's last sweep could not send,
+        /// instead of resuming anything.
         #[arg(long)]
-        seq: u64,
+        notify: bool,
     },
     /// The live-question sidecar (spec 2026-07-20-interactive-nodes, Task 10):
     /// a stdio MCP server exposing one `ask_user` tool, injected into the
@@ -753,6 +792,13 @@ enum LaunchCmd {
 /// project, so they must not: `__drive-run` works on its `--root`, not its cwd,
 /// and `__ask-server` inherits the coding agent's cwd, which can be any
 /// directory.
+/// `--retry-now-by`: one of the names `retry_expedited.by` records.
+fn parse_expedite_by(s: &str) -> Result<String, String> {
+    apb_engine::scheduler::deferred::ExpediteBy::parse(s)
+        .map(|b| b.as_str().to_string())
+        .ok_or_else(|| format!("`{s}` is not one of operator, host, supervisor, engine"))
+}
+
 fn registers_workspace(command: Option<&Command>) -> bool {
     !matches!(
         command,
@@ -912,6 +958,8 @@ fn main() -> ExitCode {
         Some(Command::Resume {
             run_id,
             from_node,
+            retry_now,
+            node,
             allow_environment_drift,
             confirm_irreversible,
             budget,
@@ -921,6 +969,9 @@ fn main() -> ExitCode {
             &root,
             run_id.as_deref().unwrap_or_default(),
             from_node.as_deref(),
+            retry_now.then_some(run::RetryNowArg {
+                node: node.as_deref(),
+            }),
             allow_environment_drift,
             confirm_irreversible,
             &budget,
@@ -1104,6 +1155,10 @@ fn main() -> ExitCode {
             allow_environment_drift,
             by,
             pause_seq,
+            release_seq,
+            retry_now,
+            retry_now_node,
+            retry_now_by,
             budget_json,
             launch_handoff,
         }) => drive_run_child(
@@ -1114,7 +1169,19 @@ fn main() -> ExitCode {
                 resume,
                 allow_environment_drift,
                 by: by.as_deref(),
-                pause_seq,
+                hold: match (pause_seq, release_seq) {
+                    (Some(seq), _) => Some(apb_engine::pause::WakeHold::Pause(seq)),
+                    (None, Some(seq)) => Some(apb_engine::pause::WakeHold::Release(seq)),
+                    (None, None) => None,
+                },
+                retry_now: retry_now.then(|| apb_engine::scheduler::RetryNow {
+                    node: retry_now_node.as_deref(),
+                    // Validated by `parse_expedite_by`; absent means a person.
+                    by: retry_now_by
+                        .as_deref()
+                        .and_then(apb_engine::scheduler::deferred::ExpediteBy::parse)
+                        .unwrap_or(apb_engine::scheduler::deferred::ExpediteBy::Operator),
+                }),
                 budget_json: budget_json.as_deref(),
                 launch_handoff: launch_handoff.as_deref(),
             },
@@ -1123,7 +1190,17 @@ fn main() -> ExitCode {
             root: run_root,
             run_id,
             seq,
-        }) => pause_waker_cmd(&run_root, &run_id, seq),
+            release,
+            notify,
+        }) => pause_waker_cmd(
+            &run_root,
+            &run_id,
+            match (seq, release) {
+                _ if notify => crate::run::WakerFor::Notify,
+                (_, Some(r)) => crate::run::WakerFor::Release(r),
+                (s, None) => crate::run::WakerFor::Pause(s.unwrap_or_default()),
+            },
+        ),
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
         None => match resolve_bind(None) {
             Ok(addr) => dashboard(addr, resolve_port(None), false),

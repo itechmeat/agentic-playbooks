@@ -342,6 +342,8 @@ fn resume_args(run_id: &str, confirm: Option<&Value>) -> RunResumeArgs {
     RunResumeArgs {
         run_id: run_id.to_string(),
         from_node: Some("note".into()),
+        retry_now: false,
+        node: None,
         allow_environment_drift: false,
         acknowledge_untrusted: Some(true),
         confirm_irreversible: None,

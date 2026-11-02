@@ -251,9 +251,18 @@ question (a CLI agent's `ask_user`, a host task's question) sweeps from its
 own poll loop, at most once a second and for at most 5 seconds, after the
 question timeout is enforced, so a question is sent while it is still
 open. The driver's last sweep runs when the run pauses, ends or
-fails. A notification that fails in that last sweep is tried again only by
-a later driver: a resume of a paused run sends it, but a run that has ended
-has none, so the run's notify block lists it as given up.
+fails. When a notification that failed in that last sweep has tries left,
+the driver leaves a small detached waker behind (`apb __pause-waker
+--notify`): it waits out the 30 seconds, sweeps the run once, and keeps
+doing so while a retry is ahead; each notification still gets at most
+three tries. It takes no busy lock
+(only its one-per-run lease under `.apb/runs/<id>/wakers/notify`, so a
+second notify waker of the run exits at once), resumes nothing, and stops as soon as a driver runs the run again (a resume of a
+paused run sweeps on its own). A notification the trust gate refused is
+never retried. A reboot loses the waker; `apb resume --all` then sweeps
+each ended run with a notification due once. A notification that is still
+not sent after its last try is listed as given up in the run's notify
+block.
 
 Since the Slack `send_message` and the Zulip send functions now declare
 `idempotency: none`, a send through them whose outcome is not known (the

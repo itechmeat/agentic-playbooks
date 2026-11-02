@@ -49,6 +49,8 @@ mod grade_cli_test;
 #[cfg(unix)]
 #[path = "suite/host_mode_cli_test.rs"]
 mod host_mode_cli_test;
+#[path = "suite/http_service.rs"]
+mod http_service;
 #[path = "suite/ingest_cli_test.rs"]
 mod ingest_cli_test;
 #[path = "suite/intent_cli_test.rs"]

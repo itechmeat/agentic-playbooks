@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 
 use super::notice::Notice;
 use super::record::NotifyTargetRecord;
-use super::transitions::{GATE, KeyWindow, REFUSED, TransitionId, due, tries};
+use super::transitions::{GATE, KeyWindow, REFUSED, TransitionId, due, retry_gap_ms, tries};
 use super::{Active, NotifyState};
 use crate::connector::call::{CallContext, CallRequest, LiveTarget, TargetPins};
 use crate::connector::intent::{
@@ -96,21 +96,10 @@ impl Notifier {
     /// the target.
     fn sweep_within(&self, events: &[Event], budget: Duration) {
         let now_ms = apb_core::clock::now_ms_u64();
-        // The cheap check first, over the run's own journal. An inherited
-        // subscription is checked as if its parent had just been set up
-        // again, which lifts every trust refusal: at most what may be due.
-        let mut own = NotifyState::fold(events);
-        if let Some(a) = own
-            .active
-            .as_mut()
-            .filter(|a| a.source == NotifySource::Parent.as_str())
-        {
-            a.set_at_ms = u64::MAX;
-        }
-        let needs_look = || crate::run_outcome::NeedsLook::for_run(&self.run_dir, events).is_some();
-        if due(events, &own, now_ms, KeyWindow::OPEN, &needs_look).is_empty() {
+        if !self.may_be_due(events, now_ms) {
             return;
         }
+        let needs_look = || crate::run_outcome::NeedsLook::for_run(&self.run_dir, events).is_some();
         let state = NotifyState::in_force(&self.run_dir, events);
         let Some(active) = &state.active else {
             return;
@@ -131,7 +120,7 @@ impl Notifier {
             )
         });
         let started = Instant::now();
-        for t in due(events, &state, now_ms, window, &needs_look) {
+        for t in due(events, &state, now_ms, window, retry_gap_ms(), &needs_look) {
             let left = budget.saturating_sub(started.elapsed()).as_secs();
             if left == 0 {
                 break;
@@ -144,6 +133,51 @@ impl Notifier {
                 left.min(SEND_TIMEOUT_SECS),
             );
         }
+    }
+
+    /// The cheap check, over the run's own journal: whether anything may be
+    /// due a send at `at_ms`. An inherited subscription is checked as if
+    /// its parent had just been set up again, which lifts every trust
+    /// refusal, and the target's deduplication window counts as open: at
+    /// most what may be due.
+    fn may_be_due(&self, events: &[Event], at_ms: u64) -> bool {
+        let mut own = NotifyState::fold(events);
+        if let Some(a) = own
+            .active
+            .as_mut()
+            .filter(|a| a.source == NotifySource::Parent.as_str())
+        {
+            a.set_at_ms = u64::MAX;
+        }
+        let needs_look = || crate::run_outcome::NeedsLook::for_run(&self.run_dir, events).is_some();
+        !due(
+            events,
+            &own,
+            at_ms,
+            KeyWindow::OPEN,
+            retry_gap_ms(),
+            &needs_look,
+        )
+        .is_empty()
+    }
+
+    /// Whether a send of the run as its journal reads now may be due once
+    /// the retry gap has passed: a try that failed or was refused for a
+    /// passing reason, with tries left. A send the trust gate retired, or
+    /// one that went out, never is.
+    /// The exact check, not [`Notifier::may_be_due`]: an inherited
+    /// subscription keeps its parent's real set time, so a send the gate
+    /// refused stays retired and no waker sweeps for it.
+    pub(crate) fn retry_ahead(&self) -> bool {
+        let gap = retry_gap_ms();
+        let at = apb_core::clock::now_ms_u64().saturating_add(gap);
+        let Ok(events) = crate::event::read_all_lossy_tail(&self.run_dir) else {
+            return false;
+        };
+        let state = NotifyState::in_force(&self.run_dir, &events);
+        let needs_look =
+            || crate::run_outcome::NeedsLook::for_run(&self.run_dir, &events).is_some();
+        !due(&events, &state, at, KeyWindow::OPEN, gap, &needs_look).is_empty()
     }
 
     /// [`Notifier::sweep`] over the journal as it reads now: the drive's

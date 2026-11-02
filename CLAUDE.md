@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120, `edges` for edge ids, pairs and judge values V121-V125; `nodes` also holds V68, ids that start with `@`
+  V116-V120, `edges` for edge ids, pairs and judge values V121-V125, `retry` for `retry_delay` V126-V130; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -167,7 +167,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   findings and warnings, `attempt_notes` their journal entry,
   `attempt_memory` the retry briefing on what earlier attempts did, `baseline` the
   before and after snapshots and comparisons, `resume`,
-  `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `handoff` the warm
+  `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `deferred` the
+  deferred retries of `retry_delay` (the delay, the due time on the
+  paused-interval clock, the continuation and the hold of a waiting node),
+  `handoff` the warm
   session handoff between nodes, `node_workdir` a node's templated working
   directory, `skills_copy` the shared per-profile skills copy, `transcript`
   per-attempt output, `worktree` the run's working tree and its lock move,
@@ -219,7 +222,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   duration goes through (`pause.rs`; `pause/`: `kind` the journal-facing
   types, `request` the one pause entry point and what a paused drive leaves
   behind, `interrupt` the graceful kill registry of a `--now` pause,
-  `waker` the detached resume at `until`, `resume_all` behind
+  `waker` the body of the pause waker (`--seq`, the resume at `until`) and
+  of the release waker (`--release`, the resume of a released run when its
+  deferred retry is due), each resuming only while its pause or release
+  (`WakeHold`) still holds the run, `resume_all` behind
   `apb resume --all`, `operator` the request built from surface arguments,
   `display` the one text line of a pause, `quota` the quota pause policy and
   schedule, `probe` the wake-up probe of a quota pause, run by
@@ -239,7 +245,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `transitions` the pure list of transitions due, `notice` the message,
   `send` the drive's sweep through the send ledger under `@notify`, `view`
   the block every surface reports, `trial` the test message of `apb notify
-  test`), the text apb writes for people (`people/`: `brief` the writing
+  test`, `retry` the notify waker's body (`--notify`) and the one sweep
+  `apb resume --all` gives an ended run), the detached `apb __pause-waker`
+  processes (`waker.rs`: spawning the pause, release and notify wakers and
+  the OS-locked lease that keeps one waker per wait under
+  `runs/<id>/wakers/`), what every surface shows of a deferred retry, a
+  released run's line and the one retry-now check (`retry_wait.rs`; the
+  retry-now, wake-hold and expedite-actor types sit in the leaf module
+  `resume_kind.rs`), the text apb writes for people (`people/`: `brief` the writing
   brief and where it applies, `instruction` the review and supervisor
   instructions, `link` a run's dashboard link), the run report as one
   self-contained HTML page (`report_html/`), run quality (`grade/`:
@@ -283,7 +296,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   records, `mismatch` the `definition_mismatch` records), execution, list
   visit and attempt identity from event order (`identity.rs`), the
   definitions a run executed and the segments they cover
-  (`run_definitions.rs`), invocation resolution
+  (`run_definitions.rs`, over the write-once content-addressed run files of
+  `run_store.rs`), the chain position of an attempt (`execution_identity.rs`:
+  `ExecStep` on `attempt_started` and the binding snapshots under
+  `runs/<id>/bindings/`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/command`
   the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
   included, and `adapter/spawn_env`
@@ -300,10 +316,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   one agent step and its `agent_env_applied` event (`agent_env.rs`; the
   per-step wiring in `scheduler/node/step_env`), the per-run doctor
   (`run_doctor.rs`, `run_doctor/env` the process env rows, `run_doctor/exposure`
-  the tool exposure rows, `run_doctor/isolation` the isolation rows), the paid agent probe behind `apb doctor
+  the tool exposure rows, `run_doctor/isolation` the isolation rows, `run_doctor/drift` the journal
+  format drift: the binaries that drove the run, a downgrade, unknown,
+  undecodable and torn lines, open deferrals and their guard; the binaries
+  themselves in `run_binaries.rs`), the paid agent probe behind `apb doctor
   --probe-agent` (`agent_probe.rs`), the expected tools of an attempt and its
   `tool_exposure_mismatch` (`scheduler/node/exposure`), the append-only event log
-  (`event.rs`), connector execution (`connector/`, with `call/` split into
+  (`event.rs`, with `event/survey` the reader that classifies every line
+  without failing and the guard state of its deferrals; `event/deferral_guard`
+  the open deferred retries, the one closing rule the run state shares, and
+  the guard written with every checkpoint while one is open, added on open
+  when a crash left it out), connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping, `attempt` the
   call's attempt binding, `target` the snapshot grant or the live
   trust-gated target a call resolves first, and `send_once` the send-once
@@ -767,12 +790,23 @@ dependency change, regenerate and commit it; CI and the release test gate run
   cohesion, complexity, and SOLID/DRY/KISS.
 - **Before code is considered ready for release:** run `cargo clippy --release`.
   Fix every error in the logs; also clean up warnings as far as practical.
-- Commit only after the owner approves. Do not commit or push on your own
-  initiative.
-- **Never upload, publish, or send any file to any server or external service
-  without the owner's explicit per-action approval** (git push, artifacts,
-  deploys, package registries, file sharing - any network destination). Local
-  writes are fine; anything leaving the machine needs an approval first.
+- **Authorized product development** means a task the owner assigned for
+  delivery. For such a task, commits on a local feature branch are permitted;
+  never commit on the shared main branch.
+- Once the change passes every gate in this section and its review has
+  converged, push the branch and create or update its pull request without
+  asking. The review is the cycle the review skill in use defines, or else
+  the project's review process. It has converged when the cycle ended with no
+  open blocking finding and every finding has a recorded disposition (fixed,
+  or rejected with a reason).
+- Merging follows the policy the owner sets per project. For this repository:
+  ask before merging, unless the owner pre-approved the series the change
+  belongs to.
+- Research or design-only tasks stay local and uncommitted unless the owner
+  promotes them to delivery.
+- Unrelated uploads, deployments, package publication and file sharing still
+  require explicit authorization. A product-delivery push/PR grant is not a
+  blanket permission to send other files or change infrastructure.
 
 ## Conventions
 

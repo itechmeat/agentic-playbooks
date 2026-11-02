@@ -605,13 +605,7 @@ edges:
     fn a_revived_write_off_is_not_revived_twice() {
         let p = report("");
         let mut events = failed_pass();
-        events.push(EventPayload::RunResumed {
-            from_node: "c".into(),
-            by: None,
-            explicit: true,
-            launch: None,
-            definition: None,
-        });
+        events.push(EventPayload::resumed("c", None, true));
         events.push(revived_record("j", &["c2"], "c"));
         let mut run = Run::new(events);
         assert!(rebuild(&p, &mut run, &["c"]).records.is_empty());

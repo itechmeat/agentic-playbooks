@@ -138,6 +138,7 @@ impl Run {
             transcript: None,
             token: Some(token.clone()),
             isolation: None,
+            exec: None,
         });
         *self.current.lock().unwrap() = AttemptClaim {
             item: None,
@@ -1215,6 +1216,7 @@ impl Run {
             transcript: None,
             token: Some(token.clone()),
             isolation: None,
+            exec: None,
         });
         *self.current.lock().unwrap() = AttemptClaim {
             item: Some(item.into()),

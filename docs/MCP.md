@@ -91,7 +91,7 @@ Mutations (destructive):
 | `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
 | `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save when it has no scripts. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
 | `trust_revoke` | Revoke approvals: `target` is a digest (exactly that approval) or an id (every approval under it; `kind` narrows it). Returns what was revoked. The same path as `apb trust revoke` and the dashboard's Trust view |
-| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true`; a run its budget paused needs `budget` (see Run budget below) |
+| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true`; a run its budget paused needs `budget` (see Run budget below); `retry_now: true` (with an optional `node`) starts a deferred retry now: on a live run that is all it does, a released or paused run is resumed with the retry due (a refused resume leaves it waiting), the request is journaled as the host's (`by: host`), and a run with nothing waiting is refused with `no_deferred_retry`. Refusals come in the dashboard's order: `retry_now_with_from_node` and `node_without_retry_now` first, then the run gate, then `no_deferred_retry`. On a live run the other resume arguments are not applied and are listed in `not_applied` |
 | `run_pause` | Pause a run so it can continue later (operator tool: any live or paused run, `by: operator`, no supervisor token). `mode` `drain` (default: running nodes finish) or `now` (running nodes are interrupted and run again on resume); optional `reason`, `until` (RFC 3339 or a duration such as `90m`; the run resumes by itself then) and `keep_lock`. See Pause and resume below |
 | `run_notify` | Change whether a person hears about a live run: `notify` `true` (the run's current target, or the machine's), `false`, or `{ on, finished }` with only transitions and end-of-run outcomes it notifies about already. Never a target (the argument has no such field, so the call fails as invalid parameters), never a wider list (`invalid_notify`; on a run that is off, the bound is the list it last had, or else the default): the person changes those in the dashboard or with `apb notify`. The target is checked now and its digests pinned; `notify_unavailable` when it cannot be used, `run_ended` for a run that ended. Answers with the run's `notify` block. Not offered to a supervisor session. See Notifications below |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
@@ -524,15 +524,16 @@ until someone answers it.
 `run_status`, `run_wait` and `run_report` say what the run is ready for:
 `next_actions` lists one entry per open wait of the run and of its live
 sub-playbook runs (a question, a review, a publish gate, a host task, a
-supervisor decision, a `wait` node, a pause or a dead driver; on a finished
+supervisor decision, a `wait` node, a deferred retry, a pause, a release or
+a dead driver; on a finished
 run, each send nobody can tell went out and the report), `primary` is the
 index of the one to lead with, and `stop` is one verdict over all of them:
 `finished`, `needs_input`, `stopped` or `progresses_by_itself`. Each entry:
 
 - `code` (`answer_question`, `decide_review`, `decide_publish`,
   `submit_host_task`, `supervisor_retry_node`, `supervisor_continue_from`,
-  `supervisor_abort`, `resume_run`, `resume_with_budget`, `resolve_intent`,
-  `wait_again`, `read_report`) and `run_id`: the run it acts on, a child's
+  `supervisor_abort`, `resume_run`, `resume_with_budget`, `retry_now`,
+  `resolve_intent`, `wait_again`, `read_report`) and `run_id`: the run it acts on, a child's
   id for a child's wait;
 - `tool` and `arguments`: the tool that takes it and the arguments it
   carries, `request` among them for a question or a review (pass it back

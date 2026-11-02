@@ -316,6 +316,13 @@ pub fn render(action: &NextAction, chosen: &BTreeMap<String, String>) -> Option<
             b.option("raise-budget-tokens", tokens);
             b.positional(run);
         }
+        ActionCode::RetryNow => {
+            b = Builder::new(&["resume"]);
+            b.flag("retry-now");
+            let node = v.get("node", &mut b);
+            b.option("node", node);
+            b.positional(run);
+        }
         ActionCode::ResolveIntent => {
             b = Builder::new(&["intent", "resolve"]);
             let decision = v.get("decision", &mut b);

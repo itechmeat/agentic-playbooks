@@ -13,6 +13,13 @@ export function isTerminalRunStatus(status: string): boolean {
 // that writes a terminal event is the drive loop that no longer exists, so the
 // marker is shown NEXT TO the status badge rather than replacing it. A terminal
 // run has nothing left to drive, so a stale claim there is not worth a marker.
+/** Whether the run's driver is dead, as the engine reads it
+ * (`RunView::driver_dead`): no live driver, and not a run its driver
+ * released while a retry waits (its waker resumes it). */
+export function driverDead(d: { driver_alive?: boolean | null; released?: unknown }): boolean {
+  return d.driver_alive === false && !d.released
+}
+
 export function showsDriverDead(status: string, driverDead?: boolean): boolean {
   return !!driverDead && !isTerminalRunStatus(status)
 }

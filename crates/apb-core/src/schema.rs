@@ -364,6 +364,34 @@ impl Playbook {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    /// The retry count in force for `node`'s own attempts: its own
+    /// `max_retries`, else `defaults.max_retries`, else 0. Only an
+    /// `agent_task` retries its attempts; the engine's other retries (a
+    /// finish answer, which reads `defaults.max_retries` itself) are not
+    /// counted here.
+    pub fn effective_max_retries(&self, node: &Node) -> u32 {
+        match &node.kind {
+            NodeKind::AgentTask { max_retries, .. } => {
+                max_retries.or(self.defaults.max_retries).unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// The [`RetryDelay`] in force for `node`: its own, else
+    /// `defaults.retry_delay`. `None` for every node that is not an
+    /// `agent_task` and for a list node, whose item retries are never
+    /// delayed (a list node's own `retry_delay` is a validation error).
+    pub fn effective_retry_delay<'a>(&'a self, node: &'a Node) -> Option<&'a RetryDelay> {
+        let NodeKind::AgentTask { retry_delay, .. } = &node.kind else {
+            return None;
+        };
+        if node.list.is_some() {
+            return None;
+        }
+        retry_delay.as_ref().or(self.defaults.retry_delay.as_ref())
+    }
+
     /// The baseline checks, empty without a `baseline_check` block.
     pub fn baseline_checks(&self) -> &[crate::baseline::BaselineCheck] {
         self.baseline_check
@@ -840,6 +868,104 @@ pub struct Defaults {
     /// is configured. Additive to schema 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_decisions: Option<HostDecisions>,
+    /// Playbook-wide [`RetryDelay`] for every `agent_task` that is not a
+    /// list node; a node's own `retry_delay` wins. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<RetryDelay>,
+}
+
+/// The wait before an ordinary retry of an `agent_task` (one that spends
+/// `max_retries`). Retry `n` (1-based within a chain step) waits
+/// `min(initial * factor^(n-1), max)`, counted on the run's active clock.
+/// Infrastructure backoff, quota pauses, profile fallbacks and timeout
+/// continuations are not delayed by it. Additive to schema 2: a binary that
+/// does not know the field retries at once, as before.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryDelay {
+    /// The first delay, a duration (`30s`, `1m`, `1h30m`, or plain
+    /// seconds); at least 1 s.
+    #[serde(deserialize_with = "duration_text")]
+    pub initial: String,
+    /// The growth per further retry, in `[1, 10]`. Default 2, which a
+    /// re-save leaves out as the author did.
+    #[serde(
+        default = "RetryDelay::default_factor",
+        skip_serializing_if = "RetryDelay::is_default_factor"
+    )]
+    pub factor: f64,
+    /// The cap of every delay, at least `initial` and at most 7 days.
+    /// Absent: the 7-day ceiling.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_duration_text"
+    )]
+    pub max: Option<String>,
+}
+
+/// A duration field as text: a string as written, or a plain number of
+/// seconds (`90`) as its decimal text, so `parse_duration_str` reads both.
+/// Any other value (`1.5`, `-5`, `true`) is kept as its YAML text, so the
+/// validator refuses it by name (V126, V128) instead of the whole playbook
+/// failing to parse.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DurationText {
+    Seconds(u64),
+    Text(String),
+    Other(yaml_serde::Value),
+}
+
+impl From<DurationText> for String {
+    fn from(d: DurationText) -> Self {
+        match d {
+            DurationText::Seconds(n) => n.to_string(),
+            DurationText::Text(t) => t,
+            DurationText::Other(v) => yaml_serde::to_string(&v)
+                .map(|t| t.trim().to_string())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+fn duration_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    DurationText::deserialize(d).map(String::from)
+}
+
+fn optional_duration_text<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<DurationText>::deserialize(d).map(|o| o.map(String::from))
+}
+
+impl RetryDelay {
+    /// The factor an absent `factor` means.
+    pub const DEFAULT_FACTOR: f64 = 2.0;
+    /// The ceiling of every delay: 7 days, in seconds.
+    pub const CEILING_SECS: u64 = 7 * 24 * 60 * 60;
+
+    fn default_factor() -> f64 {
+        Self::DEFAULT_FACTOR
+    }
+
+    fn is_default_factor(f: &f64) -> bool {
+        *f == Self::DEFAULT_FACTOR
+    }
+
+    /// `initial` in seconds, `None` when it does not parse.
+    pub fn initial_secs(&self) -> Option<u64> {
+        crate::duration::parse_duration_str(&self.initial)
+    }
+
+    /// `max` in seconds: the 7-day ceiling when absent, `None` when it does
+    /// not parse.
+    pub fn max_secs(&self) -> Option<u64> {
+        match &self.max {
+            None => Some(Self::CEILING_SECS),
+            Some(m) => crate::duration::parse_duration_str(m),
+        }
+    }
 }
 
 /// `defaults.host_decisions` (issue #193).
@@ -1421,6 +1547,10 @@ pub enum NodeKind {
         profile: Option<QualifiedProfileRef>,
         #[serde(default)]
         max_retries: Option<u32>,
+        /// The wait before each ordinary retry ([`RetryDelay`]); wins over
+        /// `defaults.retry_delay`. Not allowed on a list node.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_delay: Option<RetryDelay>,
         #[serde(default)]
         timeout_seconds: Option<u64>,
         #[serde(default)]

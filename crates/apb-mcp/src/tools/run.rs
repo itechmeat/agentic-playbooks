@@ -376,6 +376,16 @@ fn with_truncated(mut list: Value, left_out: usize) -> Value {
 /// totals, and the note about events a newer apb wrote that this binary
 /// skipped. Shared by `run_status` and `run_report`.
 fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
+    // Nodes whose retry waits out its delay, each with when it is due, and
+    // the release of a run nobody drives until its waker resumes it.
+    let waits = apb_engine::retry_wait::of_view(view, apb_core::clock::now_ms_u64());
+    if !waits.is_empty() {
+        out["retry_waiting"] = json!(waits);
+    }
+    if let Some(r) = view.released() {
+        out["released"] = json!(r);
+        out["released_note"] = json!(apb_engine::retry_wait::released_line(r));
+    }
     if let Some(usage) = view.usage() {
         out["usage"] = json!(usage);
     }
@@ -390,6 +400,9 @@ fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     // One compact object; each decision's detail stays in `run_events`.
     if let Some(decisions) = view.decisions() {
         out["decisions"] = json!(decisions);
+    }
+    if let Some(line) = view.driven_by() {
+        out["driven_by"] = json!(line);
     }
     if !view.unknown.is_empty() {
         out["unknown_events"] = json!(view.unknown.len());
@@ -541,6 +554,9 @@ pub fn run_wait_result_as(
             Some(apb_engine::run_wait::NeedsInput::HostTask) => HOST_TASK_NEXT,
             _ => "the run is parked for a supervisor decision (pending_supervisor)",
         },
+        WaitReason::Stopped if view.released().is_some() => {
+            "the run is released while a deferred retry waits (see released); its waker resumes it at released.wake_at_ms, and run_resume with retry_now: true starts the retry now"
+        }
         WaitReason::Stopped if res.driver_alive == Some(false) => {
             "the run's driver is dead, so the run is interrupted; run_resume continues it"
         }
@@ -586,6 +602,9 @@ pub fn run_wait_result_as(
     }
     if let Some(p) = res.pause() {
         out["pause"] = json!(p);
+    }
+    if let Some(r) = view.released() {
+        out["released"] = json!(r);
     }
     let progress = view.progress.as_ref();
     let fields = [
@@ -730,6 +749,96 @@ pub fn run_report_html(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }))
 }
 
+/// The check of a retry-now request every surface makes first (MCP
+/// `run_resume { retry_now }` and `supervisor_node_retry`, the dashboard): the refusal as the answer's
+/// `error` and `detail` when the run takes none, else whether a live
+/// driver holds the run.
+pub fn retry_now_plan(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+) -> Result<Result<apb_engine::retry_wait::RetryNowPlan, Value>, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    Ok(apb_engine::retry_wait::plan_retry_now(&dir, run_id, node)
+        .map_err(|r| json!({ "error": r.error, "detail": r.detail })))
+}
+
+/// The refusal of a resume's retry-now arguments that do not go together,
+/// checked before anything else on MCP and HTTP alike: `retry_now` with
+/// `from_node` (the retry continues where it waits), or `node` without
+/// `retry_now` (a node-scoped request must never turn into a whole-run
+/// resume).
+pub fn retry_now_arg_refusal(retry_now: bool, from_node: bool, node: bool) -> Option<Value> {
+    if retry_now && from_node {
+        return Some(json!({
+            "error": "retry_now_with_from_node",
+            "detail": "retry_now continues the waiting retry; it takes no from_node",
+        }));
+    }
+    if node && !retry_now {
+        return Some(json!({
+            "error": "node_without_retry_now",
+            "detail": "node names the waiting retry to start now; it needs retry_now",
+        }));
+    }
+    None
+}
+
+/// Adds `not_applied` to a live retry-now answer: the resume arguments the
+/// caller sent that the expedite, being the whole action, did not use.
+pub fn note_not_applied(answer: &mut Value, given: &[(&str, bool)]) {
+    let names: Vec<&str> = given.iter().filter(|(_, g)| *g).map(|(n, _)| *n).collect();
+    if !names.is_empty() {
+        answer["not_applied"] = json!(names);
+        answer["note"] = json!(
+            "the run's live driver took the retry; the other resume arguments were not applied (resume the run once it pauses to apply them)"
+        );
+    }
+}
+
+/// Journals `retry_expedited` for the waiting retries of `node` (every one
+/// when `None`): a live driver starts them at its next look, a released
+/// run's waker wakes it at once, a resumed run finds them due. The nodes it
+/// expedited. Only the run's supervisor session expedites this way; a
+/// person's or a host's retry-now goes through [`retry_now_live`] or a
+/// resume.
+pub fn retry_now_expedite(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+    by: apb_engine::scheduler::deferred::ExpediteBy,
+) -> Result<Vec<String>, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    Ok(apb_engine::scheduler::deferred::expedite_run(
+        &dir,
+        node,
+        Some(by),
+    )?)
+}
+
+/// The answer to a retry-now request on a run a live driver holds: the
+/// expedite is the whole action. `None`, with nothing journaled, when the
+/// driver let go of the run meanwhile (decided under the run's event lock):
+/// the caller resumes it with the retry due instead.
+pub fn retry_now_live(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+    by: apb_engine::scheduler::deferred::ExpediteBy,
+) -> Result<Option<Value>, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    let Some(nodes) = apb_engine::scheduler::deferred::expedite_live(&dir, run_id, node, by)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(json!({
+        "run_id": run_id,
+        "retry_now": nodes,
+        "live": true,
+        "next": "the run's live driver starts the retry at once; follow it with run_wait",
+    })))
+}
+
 pub fn run_resume(
     root: &Path,
     run_id: &str,
@@ -737,6 +846,29 @@ pub fn run_resume(
     allow_environment_drift: bool,
     budget: Option<&apb_engine::budget::BudgetResume>,
     launch: Option<&apb_engine::gate::launch::LaunchGrant>,
+) -> Result<Value, ToolError> {
+    run_resume_with(
+        root,
+        run_id,
+        from_node,
+        allow_environment_drift,
+        budget,
+        launch,
+        None,
+    )
+}
+
+/// [`run_resume`] that also starts waiting retries now: their
+/// `retry_expedited` is journaled with `run_resumed`, so a refused resume
+/// waives no delay.
+pub fn run_resume_with(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    budget: Option<&apb_engine::budget::BudgetResume>,
+    launch: Option<&apb_engine::gate::launch::LaunchGrant>,
+    retry_now: Option<apb_engine::scheduler::RetryNow<'_>>,
 ) -> Result<Value, ToolError> {
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
@@ -767,6 +899,7 @@ pub fn run_resume(
         allow_environment_drift,
         budget,
         launch,
+        retry_now,
         ..apb_engine::ResumeRequest::operator()
     };
     match apb_engine::resume_detached_req(root, run_id, &req) {

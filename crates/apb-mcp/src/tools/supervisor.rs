@@ -145,6 +145,28 @@ pub fn node_retry(
     node: &str,
     prompt_override: Option<String>,
 ) -> Result<Value, ToolError> {
+    // A node whose retry waits out its delay starts it now, on the chain
+    // step and binding it waits with: the expedite is journaled with the
+    // supervisor as who asked, and the live driver picks it up. A read
+    // error is the answer; only "nothing waits" (or a retry that started
+    // between the plan and the expedite) falls through to a plain retry.
+    if let Ok(plan) = super::run::retry_now_plan(root, run_id, Some(node))? {
+        if prompt_override.is_some() {
+            return Ok(json!({
+                "error": "prompt_override_with_deferred_retry",
+                "detail": format!("node `{node}` waits to retry on its recorded step; a prompt override needs the node's attempts to have ended"),
+            }));
+        }
+        let nodes = super::run::retry_now_expedite(
+            root,
+            run_id,
+            Some(node),
+            apb_engine::scheduler::deferred::ExpediteBy::Supervisor,
+        )?;
+        if !nodes.is_empty() {
+            return Ok(json!({ "retry_now": nodes, "live": plan.live }));
+        }
+    }
     let seq = post_supervisor_command(
         root,
         run_id,

@@ -320,3 +320,134 @@ fn an_outcome_filter_is_checked_by_name_and_the_doctor_reads_the_policy_file() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     assert!(text(&out.stderr).contains("policy.yaml"), "{out:?}");
 }
+
+/// A chat service connector that can carry a notification.
+const CHAT: &str = r#"name: chat
+version: 0.1.0
+account_fields:
+  - name: api_base
+    required: true
+functions:
+  - name: notify_person
+    description: Send a message to a person
+    method: POST
+    url: "{{account.api_base}}/messages"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string }
+        subject: { type: string }
+        text: { type: string }
+      required: [to, text]
+    people: { to: to, subject: subject, text: text }
+    idempotency: { mode: none, result_ref: id }
+"#;
+
+/// The end of a run whose last sweep the service refused is sent by the
+/// notify waker the drive leaves behind, once the retry gap has passed
+/// (shortened here), and the waker exits once nothing is due.
+#[test]
+fn a_refused_last_notification_is_sent_by_the_notify_waker() {
+    use crate::http_service::{Script, Service};
+    let service = Service::spawn(Script::from([(
+        "/messages",
+        vec![
+            Some((400, r#"{"error":"try later"}"#)),
+            Some((200, r#"{"id":"m-2"}"#)),
+        ],
+    )]));
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cfg = root.join("cfg");
+    let apb = |args: &[&str]| {
+        let out = crate::common::apb_std()
+            .args(args)
+            .current_dir(root)
+            .env("APB_CONFIG_DIR", &cfg)
+            .env("APB_NO_REGISTRY", "1")
+            .env("APB_NOTIFY_RETRY_GAP_MS", "300")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "apb {args:?}: {out:?}");
+        text(&out.stdout)
+    };
+    fs::create_dir_all(cfg.join("connectors/chat")).unwrap();
+    fs::write(cfg.join("connectors/chat/connector.yaml"), CHAT).unwrap();
+    apb(&["init"]);
+    let acct = root.join(".apb/connector-config/chat.yaml");
+    fs::create_dir_all(acct.parent().unwrap()).unwrap();
+    fs::write(
+        &acct,
+        format!(
+            "accounts:\n  - name: default\n    api_base: {}\n",
+            service.base_url
+        ),
+    )
+    .unwrap();
+    apb(&["connector", "approve", "chat"]);
+    apb(&["connector", "approve", "chat", "--account", "default"]);
+    let vdir = root.join(".apb/playbooks/quick/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), QUICK).unwrap();
+    fs::write(root.join(".apb/playbooks/quick/current"), "1.0.0").unwrap();
+
+    let stdout = apb(&[
+        "run",
+        "quick",
+        "--notify",
+        "--notify-on",
+        "finished",
+        "--notify-via",
+        "chat/default:notify_person",
+        "--notify-to",
+        "42",
+    ]);
+    let run_id = stdout
+        .trim()
+        .strip_prefix("run ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("unexpected output: {stdout}"))
+        .to_string();
+    // The drive's own try went out before the run ended; the waker's first
+    // sweep may already follow it, so only the order below is exact.
+    assert!(
+        !service.bodies("/messages").is_empty(),
+        "the drive's own try"
+    );
+
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let start = std::time::Instant::now();
+    let states = loop {
+        let events = apb_engine::event::read_all(&run_dir).unwrap();
+        let states: Vec<String> = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                apb_engine::event::EventPayload::SendIntentSettled { outcome, .. } => {
+                    Some(outcome.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if states.len() >= 2 {
+            break states;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "the notify waker never retried: {states:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(states, ["not_sent", "confirmed"]);
+    // Nothing is due any more: the waker lets its lease go, with no third
+    // try.
+    let start = std::time::Instant::now();
+    while apb_engine::waker::Lease::held(&run_dir, apb_engine::waker::WakerFor::Notify) {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "the notify waker never exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(service.bodies("/messages").len(), 2);
+}

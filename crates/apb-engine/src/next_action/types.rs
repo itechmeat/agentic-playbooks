@@ -33,6 +33,8 @@ pub enum ActionCode {
     SupervisorAbort,
     ResumeRun,
     ResumeWithBudget,
+    /// Start a deferred retry now instead of at its due time.
+    RetryNow,
     ResolveIntent,
     WaitAgain,
     ReadReport,
@@ -40,7 +42,7 @@ pub enum ActionCode {
 
 impl ActionCode {
     /// Every code, in declaration order.
-    pub const ALL: [ActionCode; 12] = [
+    pub const ALL: [ActionCode; 13] = [
         ActionCode::AnswerQuestion,
         ActionCode::DecideReview,
         ActionCode::DecidePublish,
@@ -50,6 +52,7 @@ impl ActionCode {
         ActionCode::SupervisorAbort,
         ActionCode::ResumeRun,
         ActionCode::ResumeWithBudget,
+        ActionCode::RetryNow,
         ActionCode::ResolveIntent,
         ActionCode::WaitAgain,
         ActionCode::ReadReport,
@@ -67,6 +70,7 @@ impl ActionCode {
             ActionCode::SupervisorAbort => "supervisor_abort",
             ActionCode::ResumeRun => "resume_run",
             ActionCode::ResumeWithBudget => "resume_with_budget",
+            ActionCode::RetryNow => "retry_now",
             ActionCode::ResolveIntent => "resolve_intent",
             ActionCode::WaitAgain => "wait_again",
             ActionCode::ReadReport => "read_report",
@@ -177,6 +181,8 @@ pub enum AutoOutcome {
     WaitTimesOut,
     /// The pause waker tries to resume the run.
     ResumeAttempt,
+    /// A deferred retry's delay passes and the node's next attempt starts.
+    RetryAttempt,
 }
 
 impl AutoOutcome {

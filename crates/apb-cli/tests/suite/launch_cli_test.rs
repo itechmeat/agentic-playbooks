@@ -222,13 +222,11 @@ fn resume_all_leaves_a_run_the_launch_policy_refuses() {
     // The run resumed, then paused by its operator until a time long past:
     // a due pause `--all` considers.
     let mut log = EventLog::open(&p.root().join(".apb/runs").join(&res)).unwrap();
-    log.append(EventPayload::RunResumed {
-        from_node: "s".into(),
-        by: Some(apb_engine::pause::PauseBy::Operator),
-        explicit: false,
-        launch: None,
-        definition: None,
-    })
+    log.append(EventPayload::resumed(
+        "s",
+        Some(apb_engine::pause::PauseBy::Operator),
+        false,
+    ))
     .unwrap();
     log.append(EventPayload::RunPaused {
         reason: "operator".into(),

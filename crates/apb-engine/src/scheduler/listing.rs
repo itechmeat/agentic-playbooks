@@ -41,6 +41,12 @@ pub struct RunSummary {
     /// and a run that has ended ([`crate::run_view::RunView::driver_dead`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub driver_dead: bool,
+    /// The run's driver let go while a deferred retry waits: a waker
+    /// resumes it at `wake_at_ms` ([`crate::run_view::RunView::released`]).
+    /// Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub released: Option<crate::state::Released>,
     /// Events of a type this binary does not know, skipped when the journal
     /// was read: a newer apb wrote them. Zero (and absent) for a journal this
     /// binary reads in full.
@@ -136,6 +142,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
         let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
         let driver_dead = view.driver_dead();
+        let released = view.released().cloned();
         let unknown_events = view.unknown.len();
         let status = view.run_status.as_str().into();
         let candidate_trial = crate::candidate::trial_of(&entry.path(), &view.events);
@@ -156,6 +163,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             continued_from,
             superseded_by,
             driver_dead,
+            released,
             unknown_events,
             candidate_trial,
         });

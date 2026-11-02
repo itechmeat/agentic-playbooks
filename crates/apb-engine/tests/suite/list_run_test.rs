@@ -771,6 +771,61 @@ fn a_host_mode_run_with_a_list_node_is_refused_at_start() {
     );
 }
 
+/// A list item never falls back to a host task: in a `cli` run an MCP host
+/// session started, an item whose CLI cannot start (not logged in) fails
+/// with the CLI's error, writes no `execution_fallback` and asks the host
+/// for nothing, while the other item passes.
+#[test]
+fn an_unstartable_item_in_a_host_session_run_fails_without_a_host_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let list = format!(
+        "items: {{ inline: [ {{ id: a }}, {{ id: b }} ] }}\nbatch: {{ size: 2, parallel: 2, retries: 0 }}\n{OUTPUT_CHECK}"
+    );
+    seed(root, &playbook(&list, "", ""), &[]);
+    let hook =
+        "if [ \"$I\" = a ]; then echo 'Error: Not logged in. Please run /login' >&2; exit 1; fi";
+    let cfg_dir = cfg.path().to_string_lossy().into_owned();
+    let _env = Env::set(&stub(root, hook), &[("APB_CONFIG_DIR", &cfg_dir)]);
+    let opts = RunOptions {
+        execution: apb_core::execution::ExecutionRequest {
+            mode: None,
+            host_session: true,
+            client: Some("test-host".into()),
+            inherited: false,
+        },
+        ..RunOptions::default()
+    };
+    let run_id = apb_engine::scheduler::run_background(root, "lst", None, opts).unwrap();
+    // Before the fix the item waited on a host task nobody answers: stop at
+    // the first sign of either ending.
+    let ev = poll_until("the run ends or asks the host", || {
+        let ev = events(root, &run_id);
+        ev.iter()
+            .any(|e| {
+                matches!(
+                    e.payload,
+                    EventPayload::RunFinished { .. }
+                        | EventPayload::HostTaskRequested { .. }
+                        | EventPayload::ExecutionFallback { .. }
+                )
+            })
+            .then_some(ev)
+    });
+    let asked = ev.iter().any(|e| {
+        matches!(
+            e.payload,
+            EventPayload::HostTaskRequested { .. } | EventPayload::ExecutionFallback { .. }
+        )
+    });
+    assert!(!asked, "a list item never falls back to a host task");
+    let a = last_state(&ev, "a");
+    assert_eq!(a.state, "needs_look", "{a:?}");
+    assert_eq!(last_state(&ev, "b").state, "passed");
+    assert_eq!(runs_of(root, "b"), 1);
+}
+
 /// A script step runs once per item with the item in its environment: each
 /// run gets its own item's id and the file holding its own JSON; its stdout
 /// is the item's output.

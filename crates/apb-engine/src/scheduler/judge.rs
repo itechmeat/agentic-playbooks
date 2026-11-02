@@ -512,6 +512,8 @@ impl ProfileEmulation<'_, '_> {
             transcript: None,
             token: spawn_env.attempt_token.clone(),
             isolation: None,
+            // A judge's ask is no step of an executor chain.
+            exec: None,
         };
         let on_spawn = |pid: u32, spawn_ms: u64| {
             spawn_at.set(Some(std::time::Instant::now()));

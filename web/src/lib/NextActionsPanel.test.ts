@@ -72,6 +72,7 @@ afterEach(() => {
   if (app) unmount(app)
   app = null
   document.body.innerHTML = ''
+  vi.unstubAllGlobals()
 })
 
 const byTestId = (id: string) => document.querySelector<HTMLElement>(`[data-testid="${id}"]`)
@@ -213,6 +214,101 @@ describe('NextActionsPanel', () => {
     byTestId('next-action-resume')!.click()
     await tick()
     expect(resumeRun).toHaveBeenCalledWith('parent', 'w', { consentNonce: undefined })
+  })
+
+  it('starts a waiting retry now with its node', async () => {
+    resumeRun.mockResolvedValue({ run_id: 'parent', retry_now: ['work'], live: true })
+    const retry: NextAction = {
+      code: 'retry_now',
+      run_id: 'parent',
+      target: { node: 'work' },
+      args: [{ name: 'node', value: { kind: 'given', value: 'work' }, required: true }],
+      principals: ['person', 'operator', 'supervisor'],
+      ready: true,
+      auto: { kind: 'frozen', remaining_ms: 90_000, outcome: 'retry_attempt' },
+      reason: 'node `work` waits to retry; it starts by itself, or start it now',
+    }
+    show({ actions: runActions([retry], { status: 'running', stop: 'progresses_by_itself' }) })
+    expect(byTestId('next-action-auto')!.textContent).toContain('delay frozen while paused, 1m 30s left')
+    expect(byTestId('next-action-auto')!.textContent).toContain("the node's retry starts")
+    expect(byTestId('next-action-cli')).toBeNull()
+    byTestId('next-action-retry-now')!.click()
+    await tick()
+    expect(resumeRun).toHaveBeenCalledWith('parent', 'w', {
+      consentNonce: undefined,
+      launchNonce: undefined,
+      retryNow: { node: 'work' },
+    })
+  })
+
+  it('replays a retry-now resume with its node after the launch confirmation', async () => {
+    resumeRun
+      .mockRejectedValueOnce(
+        new ApiError('refused', 409, 'launch_needs_confirmation', 'confirm', {
+          policy: 'launch_needs_confirmation',
+          detail: 'confirm the launch',
+          launch_nonce: 'n-1',
+        }),
+      )
+      .mockResolvedValueOnce({ run_id: 'parent', retry_now: ['work'] })
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    const retry: NextAction = {
+      code: 'retry_now',
+      run_id: 'parent',
+      target: { node: 'work' },
+      args: [{ name: 'node', value: { kind: 'given', value: 'work' }, required: true }],
+      principals: ['person'],
+      ready: true,
+      reason: 'node `work` waits to retry',
+    }
+    show({ actions: runActions([retry], { status: 'running', stop: 'progresses_by_itself' }) })
+    byTestId('next-action-retry-now')!.click()
+    await tick()
+    await tick()
+    await new Promise((r) => setTimeout(r, 0))
+    await tick()
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(resumeRun).toHaveBeenCalledTimes(2)
+    expect(resumeRun).toHaveBeenLastCalledWith('parent', 'w', {
+      consentNonce: undefined,
+      launchNonce: 'n-1',
+      retryNow: { node: 'work' },
+    })
+  })
+
+  it('replays a retry-now resume with its node after the irreversible consent, and says the run resumed', async () => {
+    resumeRun
+      .mockRejectedValueOnce(
+        new ApiError('refused', 409, 'irreversible_requires_confirmation', 'confirm', {
+          sources: ['node `push` declares irreversible'],
+          consent_nonce: 'c-1',
+        }),
+      )
+      .mockResolvedValueOnce({ run_id: 'parent', retry_now: ['work'], detached: true })
+    const retry: NextAction = {
+      code: 'retry_now',
+      run_id: 'parent',
+      target: { node: 'work' },
+      args: [{ name: 'node', value: { kind: 'given', value: 'work' }, required: true }],
+      principals: ['person'],
+      ready: true,
+      reason: 'node `work` waits to retry',
+    }
+    show({ actions: runActions([retry], { status: 'running', stop: 'progresses_by_itself' }) })
+    byTestId('next-action-retry-now')!.click()
+    await tick()
+    flushSync()
+    byTestId('irreversible-confirm')!.click()
+    await tick()
+    await tick()
+    expect(resumeRun).toHaveBeenLastCalledWith('parent', 'w', {
+      consentNonce: 'c-1',
+      launchNonce: undefined,
+      retryNow: { node: 'work' },
+    })
+    const { toast } = await import('svelte-sonner')
+    expect(toast.success).toHaveBeenLastCalledWith('Run resumed with the retry due')
   })
 
   it("leaves out what another control on the page takes, and keeps a child's and what has none", () => {

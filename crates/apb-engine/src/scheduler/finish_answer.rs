@@ -121,13 +121,7 @@ mod tests {
     }
 
     fn resumed(explicit: bool) -> EventPayload {
-        EventPayload::RunResumed {
-            from_node: "done".into(),
-            by: None,
-            explicit,
-            launch: None,
-            definition: None,
-        }
+        EventPayload::resumed("done", None, explicit)
     }
 
     #[test]

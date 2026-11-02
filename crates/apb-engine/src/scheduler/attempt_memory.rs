@@ -494,6 +494,7 @@ mod tests {
                 transcript: None,
                 token: None,
                 isolation: None,
+                exec: None,
             },
         )
     }

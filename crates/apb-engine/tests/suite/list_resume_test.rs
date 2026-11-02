@@ -487,6 +487,7 @@ fn a_crashed_item_attempt_is_reaped_under_its_item_and_rerun_alone() {
         transcript: None,
         token: None,
         isolation: None,
+        exec: None,
     })
     .unwrap();
     drop(log);

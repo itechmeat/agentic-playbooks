@@ -2520,6 +2520,8 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
             RunResumeArgs {
                 run_id: run_id.clone(),
                 from_node: Some("note".into()),
+                retry_now: false,
+                node: None,
                 allow_environment_drift: false,
                 acknowledge_untrusted: Some(true),
                 confirm_irreversible: confirm,
@@ -2754,4 +2756,123 @@ async fn playbook_execute_plan_refuses_a_param_without_a_value() {
     unsafe {
         std::env::remove_var("APB_CONFIG_DIR");
     }
+}
+
+/// `run_resume { retry_now }` on a run a live driver holds (this process):
+/// the expedite is journaled as the host's (`host`), never the operator's,
+/// and no driver starts. Refusals come in the dashboard's order (see
+/// `next_actions_api_test::retry_now_expedites_a_live_run_...`) with its
+/// codes: the arguments, then the run gate, then a node with nothing
+/// waiting. The supervisor starts a waiting retry through
+/// `supervisor_node_retry`, journaled as its own.
+#[test]
+fn run_resume_retry_now_expedites_a_live_run() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    let proj = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(proj.path()).unwrap();
+    let dir = proj.path().join(".apb/runs/r-defer");
+    fs::create_dir_all(&dir).unwrap();
+    let now = apb_core::clock::now_ms_u64();
+    let lines = [
+        json!({"seq":0,"ts":now,"type":"run_started","playbook":"p","version":"1.0.0"}),
+        json!({"seq":1,"ts":now,"type":"node_started","node":"work","attempt":1}),
+        json!({"seq":2,"ts":now,"type":"retry_deferred","node":"work","after_attempt":1,"retry":1,"step":0,"binding":"b","delay_ms":3_600_000}),
+        json!({"seq":3,"ts":now,"type":"node_started","node":"side","attempt":1}),
+        json!({"seq":4,"ts":now,"type":"retry_deferred","node":"side","after_attempt":3,"retry":1,"step":0,"binding":"b","delay_ms":3_600_000}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(dir.join("events.jsonl"), text).unwrap();
+    fs::write(
+        apb_engine::driver::driver_pid_path(&dir),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let args = |node: &str| RunResumeArgs {
+        run_id: "r-defer".into(),
+        from_node: None,
+        retry_now: true,
+        node: Some(node.into()),
+        allow_environment_drift: false,
+        acknowledge_untrusted: None,
+        confirm_irreversible: None,
+        workspace: None,
+        budget: None,
+        confirm_budget: None,
+        confirm_launch: None,
+        launch_version: None,
+        launch_choice: None,
+    };
+    let server = WfMcp::new(proj.path().to_path_buf());
+    let refused = |args: RunResumeArgs| -> String {
+        let out: serde_json::Value =
+            serde_json::from_str(&result_text(&server.run_resume_for(args, None))).unwrap();
+        out["error"]
+            .as_str()
+            .or(out["policy_refusal"]["policy"].as_str())
+            .unwrap_or_else(|| panic!("not a refusal: {out}"))
+            .to_string()
+    };
+    let last = |dir: &Path| {
+        let events = apb_engine::event::read_all(dir).unwrap();
+        serde_json::to_value(&events.last().unwrap().payload).unwrap()
+    };
+
+    // On a run directory this machine did not create: the arguments are
+    // refused first, then the run gate refuses before anything about the
+    // run's retries is told, and nothing is journaled.
+    let with_from = RunResumeArgs {
+        from_node: Some("work".into()),
+        ..args("work")
+    };
+    let node_alone = RunResumeArgs {
+        retry_now: false,
+        ..args("work")
+    };
+    assert_eq!(refused(with_from), "retry_now_with_from_node");
+    assert_eq!(refused(node_alone), "node_without_retry_now");
+    assert_eq!(refused(args("nope")), "run_not_created_locally");
+    assert_eq!(refused(args("work")), "run_not_created_locally");
+    assert_eq!(last(&dir)["type"], "retry_deferred");
+
+    apb_core::run_origin::ensure_key().unwrap();
+    apb_core::run_origin::stamp(&dir, "r-defer").unwrap();
+    fs::write(
+        dir.join("playbook.yaml"),
+        "schema: 2\nid: p\nname: P\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+    )
+    .unwrap();
+    let acknowledged = |node: &str| RunResumeArgs {
+        acknowledge_untrusted: Some(true),
+        ..args(node)
+    };
+    assert_eq!(refused(acknowledged("nope")), "no_deferred_retry");
+    // The expedite is the whole action: a resume argument it cannot apply
+    // is named, never dropped in silence.
+    let out: serde_json::Value = serde_json::from_str(&result_text(&server.run_resume_for(
+        RunResumeArgs {
+            allow_environment_drift: true,
+            ..acknowledged("work")
+        },
+        None,
+    )))
+    .unwrap();
+    assert_eq!(out["retry_now"], json!(["work"]), "{out}");
+    assert_eq!(out["live"], true);
+    assert_eq!(
+        out["not_applied"],
+        json!(["allow_environment_drift"]),
+        "{out}"
+    );
+    // A host over MCP is recorded as the host, not as the operator.
+    assert_eq!(
+        last(&dir),
+        json!({"type": "retry_expedited", "node": "work", "by": "host"})
+    );
+    let out = crate::tools::supervisor::node_retry(proj.path(), "r-defer", "side", None).unwrap();
+    assert_eq!(out["retry_now"], json!(["side"]), "{out}");
+    assert_eq!(
+        last(&dir),
+        json!({"type": "retry_expedited", "node": "side", "by": "supervisor"})
+    );
 }

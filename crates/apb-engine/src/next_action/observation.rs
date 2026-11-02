@@ -106,12 +106,14 @@ impl Observation {
         self.view.run_status
     }
 
-    /// The run is stopped by itself: paused, or interrupted with no live
-    /// driver (the same rule the default wait applies).
+    /// The run is stopped by itself: paused, interrupted with no live
+    /// driver, or released while a deferred retry waits (the same rule the
+    /// default wait applies).
     pub fn stopped(&self) -> bool {
         match self.status() {
             RunStatus::Paused => true,
             RunStatus::Interrupted => self.view.driver_alive != Some(true),
+            RunStatus::Running => self.view.released().is_some(),
             _ => false,
         }
     }

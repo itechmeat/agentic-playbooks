@@ -78,7 +78,11 @@ pub fn request_pause(
             state.run_status.as_str()
         )));
     }
+    // A released run's driver is on its way out (it journaled its release
+    // under this lock): a control posted now would never be applied, so
+    // the pause is journaled here like on a run nothing drives.
     if state.run_status != RunStatus::Paused
+        && state.released.is_none()
         && crate::liveness::driver_alive(&run_dir, run_id) == Some(true)
     {
         let seq = post_control(&run_dir, Control::Pause(req))?;
@@ -86,7 +90,13 @@ pub fn request_pause(
     }
     // Nothing drives the run: the lock first (a `--keep-lock` that cannot
     // take the lock refuses before anything is journaled), then the event.
-    sync_lock(root, &run_dir, run_id, req.keep_lock)?;
+    // A released run's departing driver may still hold the lock: it is the
+    // run's own, parked over it.
+    let departing = state
+        .released
+        .as_ref()
+        .and_then(|_| crate::driver::read_driver_pid(&run_dir));
+    sync_lock(root, &run_dir, run_id, req.keep_lock, departing)?;
     let mut log = EventLog::open(&run_dir)?;
     let seq = log.append(req.to_event())?.seq;
     if req.until.is_some() {
@@ -103,6 +113,7 @@ fn sync_lock(
     run_dir: &Path,
     run_id: &str,
     keep_lock: bool,
+    departing: Option<u32>,
 ) -> Result<(), EngineError> {
     if !keep_lock {
         crate::workdir::release_paused(root, run_id);
@@ -114,7 +125,7 @@ fn sync_lock(
     let tree = RunState::fold(&read_all(run_dir)?)
         .worktree
         .map(std::path::PathBuf::from);
-    crate::workdir::park_for(root, tree.as_deref(), run_id)
+    crate::workdir::park_for(root, tree.as_deref(), run_id, departing)
 }
 
 /// Whether the run's snapshot takes the workdir lock (a write-run).
@@ -127,6 +138,40 @@ fn takes_workdir_lock(run_dir: &Path) -> bool {
             .ok()
             .and_then(|y| crate::legacy_snapshot::parse_snapshot_playbook(&y).ok())
             .is_some_and(|p| p.nodes.iter().any(|n| n.kind.takes_workdir_lock()))
+}
+
+/// Called by the drive when it released the run (`drive_released`): the
+/// driver exits with nothing but deferred retries left, so it frees the busy
+/// lock and spawns the waker that resumes the run when the earliest retry is
+/// due. Best effort: a waker that cannot start leaves a released run that
+/// `apb resume` or `apb resume --all` continues.
+pub(crate) fn after_release(
+    root: &Path,
+    run_dir: &Path,
+    run_id: &str,
+    lock: &mut Option<WorkdirGuard>,
+) {
+    let events = match read_all(run_dir) {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!(
+                "apb: warning: run `{run_id}` was released, but its waker could not be armed ({e}); `apb resume {run_id}` or `apb resume --all` picks it up"
+            );
+            return;
+        }
+    };
+    let state = crate::state::RunState::fold(&events);
+    let Some(released) = state.released else {
+        // A pause journaled right after the release (see `request_pause`)
+        // replaced it: the driver leaves the run as a pause does.
+        if state.run_status == RunStatus::Paused {
+            after_pause(root, run_dir, run_id, lock);
+        }
+        return;
+    };
+    // Dropping the guard removes the lock this driver holds.
+    drop(lock.take());
+    super::waker::spawn_release_waker(root, run_id, released.seq);
 }
 
 /// Called by the drive when it ends `paused` (issue #200, design 4): the

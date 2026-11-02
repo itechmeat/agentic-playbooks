@@ -208,7 +208,7 @@ agent_summary?: string, };
 
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
-export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
+export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled" | "retry_waiting";
 
 export type WaitingKind = "human_review" | "wait" | "question" | "supervisor" | "host_task";
 
@@ -993,6 +993,36 @@ pausing?: boolean,
  */
 cause?: PauseCause, };
 
+export type RetryDue = { "kind": "now" } | { "kind": "at", at_ms: number, } | { "kind": "frozen", remaining_ms: number, };
+
+export type RetryWait = { node: string, 
+/**
+ * The display number of the failed attempt; the delayed one follows it.
+ */
+attempt: number, 
+/**
+ * The retry number the delayed attempt runs as.
+ */
+retry: number, 
+/**
+ * The whole delay, in active run time.
+ */
+delay_ms: number, due: RetryDue, 
+/**
+ * The failure kind of the attempt that failed, when it was classified.
+ */
+failure_kind?: string, 
+/**
+ * Someone asked for it to start now (`retry_expedited`).
+ */
+expedited?: boolean, };
+
+export type Released = { 
+/**
+ * The seq of its `drive_released`.
+ */
+seq: number, wake_at_ms: number, nodes: Array<string>, };
+
 export type OnNoEstimate = "ask" | "pause" | "continue";
 
 export type BudgetLimit = { tokens?: number, usd?: number, };
@@ -1237,6 +1267,12 @@ paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, cont
  */
 driver_dead?: boolean, 
 /**
+ * The run's driver let go while a deferred retry waits: a waker
+ * resumes it at `wake_at_ms` ([`crate::run_view::RunView::released`]).
+ * Absent otherwise.
+ */
+released?: Released, 
+/**
  * Events of a type this binary does not know, skipped when the journal
  * was read: a newer apb wrote them. Zero (and absent) for a journal this
  * binary reads in full.
@@ -1287,6 +1323,12 @@ paused_ms?: number, progress?: ProgressSummary, parent_run?: string | null, cont
  * and a run that has ended ([`crate::run_view::RunView::driver_dead`]).
  */
 driver_dead?: boolean, 
+/**
+ * The run's driver let go while a deferred retry waits: a waker
+ * resumes it at `wake_at_ms` ([`crate::run_view::RunView::released`]).
+ * Absent otherwise.
+ */
+released?: Released, 
 /**
  * Events of a type this binary does not know, skipped when the journal
  * was read: a newer apb wrote them. Zero (and absent) for a journal this
@@ -1449,6 +1491,17 @@ launch?: LaunchRecord,
  */
 pause?: PauseInfo, 
 /**
+ * The nodes whose retry waits out its `retry_delay`, each with when it
+ * is due (an absolute time, or frozen while the run is paused); empty
+ * when none waits.
+ */
+retry_waits?: Array<RetryWait>, 
+/**
+ * The run's driver let go while only deferred retries were left: a
+ * waker resumes it at `wake_at_ms`. Absent otherwise.
+ */
+released?: Released, 
+/**
  * The run's budget: limits, spent and left per dimension, and the node
  * a budget pause holds it before. Absent for a run without a budget.
  */
@@ -1494,6 +1547,11 @@ decisions?: RunDecisions,
  * left out of `events`; 0 for a journal read in full.
  */
 unknown_events: number, 
+/**
+ * "driven by apb X, resumed by apb Y": the binaries that drove the run,
+ * from the versions its journal recorded; absent when none did.
+ */
+driven_by?: string, 
 /**
  * Who executes the run's agent steps, from its manifest: `cli` (the
  * profiles' CLIs) or `host` (the host session's subagents). Read-only.
@@ -1600,7 +1658,7 @@ approved_at_ms: number, };
 
 export type TrustRevoked = { revoked: Array<TrustEntry>, };
 
-export type ActionCode = "answer_question" | "decide_review" | "decide_publish" | "submit_host_task" | "supervisor_retry_node" | "supervisor_continue_from" | "supervisor_abort" | "resume_run" | "resume_with_budget" | "resolve_intent" | "wait_again" | "read_report";
+export type ActionCode = "answer_question" | "decide_review" | "decide_publish" | "submit_host_task" | "supervisor_retry_node" | "supervisor_continue_from" | "supervisor_abort" | "resume_run" | "resume_with_budget" | "retry_now" | "resolve_intent" | "wait_again" | "read_report";
 
 export type Principal = "person" | "operator" | "host" | "supervisor";
 
@@ -1614,7 +1672,7 @@ export type ArgValue = { "kind": "given", value: string, } | { "kind": "choice",
 
 export type ActionArg = { name: string, value: ArgValue, required: boolean, };
 
-export type AutoOutcome = "answered_default" | "timer_elapses" | "attempt_fails" | "wait_times_out" | "resume_attempt";
+export type AutoOutcome = "answered_default" | "timer_elapses" | "attempt_fails" | "wait_times_out" | "resume_attempt" | "retry_attempt";
 
 export type AutoProgress = { "kind": "at", at_ms: number, outcome: AutoOutcome, assured: boolean, } | { "kind": "frozen", remaining_ms: number, outcome: AutoOutcome, };
 

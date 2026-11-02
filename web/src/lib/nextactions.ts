@@ -12,6 +12,7 @@ export const EXECUTABLE: readonly ActionCode[] = [
   'decide_publish',
   'resolve_intent',
   'resume_run',
+  'retry_now',
 ]
 
 export function isExecutable(a: NextAction): boolean {
@@ -83,6 +84,7 @@ const OUTCOME: Record<AutoOutcome, string> = {
   attempt_fails: 'the attempt fails',
   wait_times_out: 'the wait times out and fails',
   resume_attempt: 'apb tries to resume the run',
+  retry_attempt: "the node's retry starts",
 }
 
 /** What a wait does by itself, with the time in the viewer's local time. */
@@ -91,10 +93,12 @@ export function autoLine(auto: AutoProgress, fmt: (ms: number) => string = local
   if (auto.kind === 'at') {
     return `continues by itself at ${fmt(auto.at_ms)}${auto.assured ? '' : ' (not assured)'}: ${what}`
   }
-  return `timer frozen while paused, ${durationWords(auto.remaining_ms)} left: then ${what}`
+  const clock = auto.outcome === 'retry_attempt' ? 'delay' : 'timer'
+  return `${clock} frozen while paused, ${durationWords(auto.remaining_ms)} left: then ${what}`
 }
 
-function localTime(ms: number): string {
+/** A time in the viewer's locale, date included (tooltips, full times). */
+export function localTime(ms: number): string {
   return new Date(ms).toLocaleString()
 }
 

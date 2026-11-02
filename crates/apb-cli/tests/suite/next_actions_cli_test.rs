@@ -196,3 +196,318 @@ fn only_the_printed_placeholder_is_refused_as_an_answer() {
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].answer, "<ok>");
 }
+
+/// `apb resume --retry-now` on a run a live driver holds: the expedite is
+/// journaled as a person's and no driver starts; a node with nothing
+/// waiting is refused with the code MCP and HTTP give. `apb runs <id>`
+/// shows the waiting retry with its due time.
+#[cfg(unix)]
+#[test]
+fn resume_retry_now_expedites_a_live_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let out = apb_in(root, &["init"]);
+    assert!(out.status.success(), "apb init failed: {out:?}");
+    let run = root.join(".apb/runs/rd");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("playbook.yaml"), HOUR_RETRY).unwrap();
+    let now = apb_core::clock::now_ms_u64();
+    // The first attempt of `work` failed and its retry waits an hour.
+    let lines = [
+        serde_json::json!({"seq":0,"ts":now,"type":"run_started","playbook":"hour","version":"1.0.0"}),
+        serde_json::json!({"seq":1,"ts":now,"type":"node_started","node":"work","attempt":1}),
+        serde_json::json!({"seq":2,"ts":now,"type":"attempt_started","node":"work","attempt":1,"agent":"claude"}),
+        serde_json::json!({"seq":3,"ts":now,"type":"attempt_finished","node":"work","attempt":1,"status":"failed"}),
+        serde_json::json!({"seq":4,"ts":now,"type":"retry_deferred","node":"work","after_attempt":2,"retry":1,"step":0,"binding":"b","delay_ms":3_600_000}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(run.join("events.jsonl"), text).unwrap();
+    // A live process that names the run as its driver, killed by the guard
+    // however the test ends.
+    let mut driver = std::process::Command::new("sh")
+        .args(["-c", "while :; do sleep 1; done", "drv", "--run-id", "rd"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    fs::write(run.join("driver.pid"), driver.id().to_string()).unwrap();
+    let _guard = crate::common::RunGuard::new(root, "rd");
+
+    let out = apb_in(root, &["runs", "rd"]);
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        shown.contains("work\tretry_waiting\tretry 1 at "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("apb resume --retry-now --node=work rd"),
+        "{shown}"
+    );
+
+    let out = apb_in(root, &["resume", "rd", "--retry-now", "--node", "nope"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no_deferred_retry"),
+        "{out:?}"
+    );
+
+    let out = apb_in(root, &["resume", "rd", "--retry-now", "--node", "work"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("retry of `work` starts now"),
+        "{out:?}"
+    );
+    let journal = fs::read_to_string(run.join("events.jsonl")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+    assert_eq!(last["type"], "retry_expedited");
+    assert_eq!(last["node"], "work");
+    assert_eq!(last["by"], "operator");
+    let _ = driver.kill();
+    let _ = driver.wait();
+}
+
+const HOUR_RETRY: &str = r#"
+schema: 2
+id: hour
+name: Hour
+version: 1.0.0
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do", max_retries: 1, retry_delay: { initial: 1h } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
+/// A project `apb init` creates at `root`, whose run of [`HOUR_RETRY`] released itself (exit
+/// 4) with its only retry waiting an hour. Every command runs with the
+/// config dir `cfg`, which also registers the project there.
+pub(crate) struct ReleasedRun {
+    pub(crate) run_id: String,
+    /// The agent stub; a driver that resumes the run needs it as
+    /// `APB_AGENT_CMD`.
+    pub(crate) stub: std::path::PathBuf,
+    calls: std::path::PathBuf,
+    cfg: std::path::PathBuf,
+    root: std::path::PathBuf,
+    _guard: crate::common::RunGuard,
+}
+
+#[cfg(unix)]
+pub(crate) fn released_hour_run(root: &Path, cfg: &Path) -> ReleasedRun {
+    use std::os::unix::fs::PermissionsExt;
+    let out = apb_cfg(root, cfg, Path::new("/bin/false"), &["init"]);
+    assert!(out.status.success(), "apb init failed: {out:?}");
+    let vdir = root.join(".apb/playbooks/hour/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), HOUR_RETRY).unwrap();
+    fs::write(root.join(".apb/playbooks/hour/current"), "1.0.0").unwrap();
+    let pdir = root.join(".apb/profiles/main");
+    fs::create_dir_all(&pdir).unwrap();
+    fs::write(
+        pdir.join("profile.yaml"),
+        "name: main\ndescription: test\nexecutor:\n  agent: claude\n  model: haiku\n",
+    )
+    .unwrap();
+    fs::write(pdir.join("SOUL.md"), "").unwrap();
+    // The first call fails, every later one answers.
+    let stub = root.join("agent.sh");
+    let calls = root.join("calls");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf x >> '{c}'\nn=$(wc -c < '{c}' | tr -d ' ')\nif [ \"$n\" -eq 1 ]; then echo 'the agent made a mistake' 1>&2; exit 1; fi\necho done\n",
+            c = calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = apb_cfg(root, cfg, &stub, &["run", "hour"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(4), "released: {out:?}");
+    let run_id = fs::read_dir(root.join(".apb/runs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .next()
+        .unwrap();
+    let guard = crate::common::RunGuard::new(root, &run_id);
+    assert!(stdout.contains("released"), "{stdout}");
+    ReleasedRun {
+        run_id,
+        stub,
+        calls,
+        cfg: cfg.to_path_buf(),
+        root: root.to_path_buf(),
+        _guard: guard,
+    }
+}
+
+/// `apb <args>` in `root` with the config dir `cfg` (the project registered
+/// there) and the agent stub.
+fn apb_cfg(root: &Path, cfg: &Path, stub: &Path, args: &[&str]) -> std::process::Output {
+    crate::common::apb_std()
+        .args(args)
+        .current_dir(root)
+        .env("APB_CONFIG_DIR", cfg)
+        .env_remove("CI")
+        .env_remove("APB_NO_REGISTRY")
+        .env("APB_AGENT_CMD", stub)
+        .env("APB_RELEASE_AFTER_MS", "300")
+        .output()
+        .unwrap()
+}
+
+impl ReleasedRun {
+    /// The workspace id the project is registered under in the config dir.
+    pub(crate) fn workspace(&self) -> String {
+        fs::read_to_string(self.root.join(".apb/workspace.local"))
+            .expect("the project was registered")
+            .trim()
+            .to_string()
+    }
+
+    /// Waits for the run to finish, then checks that the retry-now was
+    /// journaled by `by` right before its `run_resumed` and that the
+    /// delayed attempt ran at once (the second agent call).
+    pub(crate) fn assert_resumed_by(&self, by: &str) {
+        let dir = self.root.join(".apb/runs").join(&self.run_id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let events = loop {
+            let events = apb_engine::event::read_all(&dir).unwrap();
+            if events.last().is_some_and(|e| {
+                matches!(
+                    e.payload,
+                    apb_engine::event::EventPayload::RunFinished { .. }
+                )
+            }) {
+                break events;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the resumed run never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let kinds: Vec<String> = events
+            .iter()
+            .map(|e| {
+                serde_json::to_value(&e.payload).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let at = kinds
+            .iter()
+            .position(|k| k == "retry_expedited")
+            .unwrap_or_else(|| panic!("no retry_expedited: {kinds:?}"));
+        assert_eq!(kinds[at + 1], "run_resumed", "{kinds:?}");
+        assert_eq!(serde_json::to_value(&events[at].payload).unwrap()["by"], by);
+        assert_eq!(fs::read_to_string(&self.calls).unwrap().len(), 2);
+    }
+}
+
+/// End to end through the real binary: a foreground run whose only retry
+/// waits an hour releases the run (exit 4), and `apb resume --retry-now`
+/// resumes it with the retry due at once, the expedite journaled by a
+/// person right before its `run_resumed`.
+#[cfg(unix)]
+#[test]
+fn retry_now_resumes_a_released_run_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run = released_hour_run(root, cfg.path());
+    let out = apb_cfg(
+        root,
+        cfg.path(),
+        &run.stub,
+        &["resume", &run.run_id, "--retry-now"],
+    );
+    assert!(out.status.success(), "{out:?}");
+    run.assert_resumed_by("operator");
+}
+
+/// MCP `run_resume { retry_now }` on a released run resumes it through a
+/// detached driver with the retry due at once, the expedite journaled as
+/// the host's.
+#[cfg(unix)]
+#[test]
+fn mcp_retry_now_resumes_a_released_run_as_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run = released_hour_run(root, cfg.path());
+    let mut cmd = crate::common::apb_std();
+    cmd.env("APB_CONFIG_DIR", &run.cfg)
+        .env("APB_AGENT_CMD", &run.stub);
+    let mut mcp = crate::detached_driver_test::McpSession::start_with(root, cmd);
+    let body = mcp.call(
+        2,
+        &format!(
+            r#"{{"name":"run_resume","arguments":{{"run_id":"{}","retry_now":true,"acknowledge_untrusted":true}}}}"#,
+            run.run_id
+        ),
+    );
+    assert_eq!(body["detached"], true, "{body}");
+    assert_eq!(body["retry_now"], serde_json::json!(["work"]), "{body}");
+    run.assert_resumed_by("host");
+}
+
+/// The dashboard's resume with `retry_now` on a released run resumes it
+/// through a detached driver with the retry due at once, the expedite
+/// journaled as the operator's.
+#[cfg(unix)]
+#[test]
+fn http_retry_now_resumes_a_released_run_as_the_operator() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let root = dir.path();
+    let run = released_hour_run(root, cfg.path());
+    let dashboard = crate::detached_driver_test::Dashboard::start_with(
+        cfg.path(),
+        &[("APB_AGENT_CMD", run.stub.as_path())],
+    );
+    let body = dashboard.post(
+        &format!(
+            "/api/runs/{}/resume?workspace={}",
+            run.run_id,
+            run.workspace()
+        ),
+        r#"{"retry_now":true}"#,
+    );
+    assert_eq!(body["detached"], true, "{body}");
+    assert_eq!(body["retry_now"], serde_json::json!(["work"]), "{body}");
+    run.assert_resumed_by("operator");
+}
+
+/// The detached driver's retry-now arguments are refused before anything
+/// runs when they cannot be honored: a `--retry-now-by` that names nobody
+/// (it would otherwise be journaled as a person), and a retry-now or a
+/// budget change next to the engine's hold of a pause or a release (which
+/// takes neither).
+#[test]
+fn the_driver_refuses_retry_now_arguments_it_cannot_honor() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let base = ["__drive-run", "--root", root, "--run-id", "r", "--resume"];
+    for extra in [
+        &["--retry-now", "--retry-now-by", "martian"][..],
+        &["--release-seq", "3", "--retry-now"][..],
+        &["--pause-seq", "3", "--retry-now"][..],
+        &["--release-seq", "3", "--budget-json", "{}"][..],
+    ] {
+        let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+        let out = apb_in(dir.path(), &args);
+        assert_eq!(out.status.code(), Some(2), "{extra:?}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("martian") || err.contains("cannot be used with"),
+            "{extra:?}: {err}"
+        );
+    }
+}
