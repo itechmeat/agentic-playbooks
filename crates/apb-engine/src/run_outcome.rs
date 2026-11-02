@@ -8,7 +8,9 @@
 //!
 //! Submodules: `claims` (evidence and gaps), `baseline` (the baseline check's view), `notes` (findings and
 //! warnings), `calls` (connector calls by what they say about the outcome),
-//! `commits` (the commits and their `Apb-Run` trailers), `intents` (the send
+//! `commits` (the commits and their `Apb-Run` trailers), `graph` (what the
+//! journal proves about every node and edge, over `route_evidence`, with
+//! `judge_answers` and the `route_explain` "why it did not run"), `intents` (the send
 //! intents of the send ledger), `publish` (the publish nodes), `lists` (the list nodes' counts, item checks
 //! and items that need a look) and `summary` (the human outcome every
 //! surface shows, and the cheap "needs a look" marker of a run listing).
@@ -19,14 +21,20 @@ pub mod baseline;
 pub mod calls;
 pub mod claims;
 pub mod commits;
+pub mod graph;
 pub mod intents;
+pub mod judge_answers;
 pub mod lists;
 pub mod notes;
+pub mod overlay;
 pub mod publish;
+pub mod route_evidence;
+pub mod route_explain;
 pub mod summary;
 
 pub use baseline::{RunBaseline, baseline_from};
 pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
+pub use graph::{EdgeRun, EdgeState, GraphInput, RunGraph};
 pub use intents::{RunIntent, intents_from, outcome_intents};
 pub use lists::ListOutcome;
 pub use notes::RunNotes;

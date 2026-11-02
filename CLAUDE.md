@@ -123,7 +123,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
   agent registry (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
-  shared by the validator and the engine (`graphutil.rs`), the address of one
+  shared by the validator and the engine (`graphutil.rs`, with
+  `reachable_with_policies` the one reachability from the start and every
+  failure policy handler that V07 and the run graph's "why it did not run"
+  share), the address of one
   edge in one definition with its rank and check order (`edge_address.rs`,
   shared with the dashboard's port through
   `tests/fixtures/edge_addresses.json`), content/bundle digests
@@ -194,9 +197,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the send intents and the unknown ones a person resolves, `publish` the
   publish nodes' lines and done lines, `lists` the list
   nodes' counts, item-check evidence and items that need a look, `summary` the
-  human outcome every surface shows and the "needs a look" marker), the
+  human outcome every surface shows and the "needs a look" marker,
+  `route_evidence` what the journal proves about routing: raw traversal
+  records, deliveries normalized by source execution, segment and edge, and
+  routing episodes only a complete one of which supports a negative claim,
+  `graph` the run graph over it with taken, not taken and not established
+  edges and `RunGraph::present` that redacts before it clips,
+  `judge_answers` each judge node execution and judge edge answer with the
+  comparison its question kind routes on, `route_explain` "why it did not
+  run" per entry with its class, `overlay` a run laid over a playbook
+  version with its alignment and per-segment mapping), the
   cross-run metrics behind `apb stats`
-  (`run_stats.rs`, `run_stats/`, `findings` for findings and baseline
+  (`run_stats.rs`, `run_stats/`, `route` for membership over established
+  definitions and the reasons a node did not run, `findings` for findings and baseline
   results, `quality` for the levels of signed grades per comparable key and
   their `--compare` deltas), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
@@ -371,7 +384,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
-  resume budgets, `fit` for the fit report, `memory` for remembered run
+  resume budgets, `fit` for the fit report, `graph` for the editor's
+  draft validation and the overlay of a run on a version, `memory` for remembered run
   input, `notify` for the machine's notify target and a live run's change,
   `current` for moving a playbook's `current` and its history,
   `quality` for a run's grades and a playbook's candidate, `problems` for

@@ -8,6 +8,7 @@ pub mod current;
 pub mod discover;
 pub mod estimate;
 pub mod fit;
+pub mod graph;
 pub mod memory;
 pub mod meta;
 pub mod notify;

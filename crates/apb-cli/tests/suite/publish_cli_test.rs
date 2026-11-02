@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
-use crate::common::{RunGuard, apb_std};
+use crate::common::{self, RunGuard, apb_std};
 
 const FAKE_GIT: &str = include_str!("../fixtures/fake-git.sh");
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -224,7 +224,10 @@ impl Project {
         .unwrap_or_default()
     }
 
-    /// Waits until the run journaled its `n`-th `run_finished`.
+    /// Waits until the run journaled its `n`-th `run_finished` and its
+    /// driver let go of the workdir (it releases the lock after its last
+    /// notification sweep, so a resume right after the finish could find
+    /// the workdir busy).
     fn finished(&self, run_id: &str, n: usize) {
         poll("the run to finish", || {
             (self
@@ -234,6 +237,7 @@ impl Project {
                 >= n)
                 .then_some(())
         });
+        common::wait_released(&self.root, run_id);
     }
 
     fn runs(&self, run_id: &str) -> String {

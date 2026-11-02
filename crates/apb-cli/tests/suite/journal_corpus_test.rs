@@ -1262,6 +1262,32 @@ fn row10_new_writer_bounded_duplicate_pair_old_binaries() {
     }
 }
 
+/// Row 12: beta.1 writes a run through the bounded duplicate pair (no
+/// addresses, no definition digests); the new binary's route reads it as
+/// not established: the definition is unknown, the hops resolve to no edge
+/// and nothing is drawn as not taken.
+#[test]
+fn row12_beta1_writer_new_route_reads_not_established() {
+    let mut case = Case::new("row 12");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let run = case.write_playbook_waiting_at_review(&beta1, "corpus-routes");
+    let shown = case.run(&new_binary(), &["runs", &run]);
+    assert!(shown.ok(), "row 12: {shown:?}");
+    let out = &shown.stdout;
+    assert!(out.contains("route:"), "row 12: {out}");
+    assert!(
+        out.contains("not established: segment 0"),
+        "row 12: the definition beta.1 ran is unknown: {out}"
+    );
+    assert!(
+        out.contains("hop work -> dup at seq") && out.contains("not established"),
+        "row 12: {out}"
+    );
+    assert!(!out.contains("not taken"), "row 12: {out}");
+}
+
 const JUDGE_DECISIONS: &str = "version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      edge_0: { type: noul, noul: 0.1 }\n      edge_1: { type: noul, noul: 0.9 }\nuses:\n  judge_edge: { mode: enforce }\n";
 
 /// Row 11: the new binary routes `work` on two judge edges answered by a

@@ -628,3 +628,24 @@ export const dismissDiscovered = (id: string, slug: string, kind: 'soft' | 'hard
     `${suggestion(id, slug)}/dismiss${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ kind }) },
   )
+
+// The playbook page's graph layers. POST /api/validate checks a
+// draft as the playbook detail does and writes nothing; `id` and `version`
+// name the version whose directory the reference checks read.
+export const validateDraft = (yaml: string, workspace = '', id = '', version = '') =>
+  requestJson<import('../api.gen').DraftValidation>(
+    `/api/validate${qs({ workspace, id, version })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ yaml }) },
+  )
+
+// GET /api/playbooks/{id}/overlay: a page of the playbook's runs with their
+// alignment to the shown version and the chosen run's graph (`run`, else
+// the newest exact one); `before` is the previous page's `next_before`.
+export const fetchOverlay = (
+  id: string,
+  workspace = '',
+  opts: { version?: string; run?: string; before?: string } = {},
+) =>
+  getJson<import('../api.gen').PlaybookOverlay>(
+    `${pb(id)}/overlay${qs({ workspace, version: opts.version, run: opts.run, before: opts.before })}`,
+  )

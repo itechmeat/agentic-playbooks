@@ -27,9 +27,15 @@
   // what an editor drags a new edge from, so every node but a finish has it.
   // A conditional edge or a fallback has its own dot under its caption.
   const hasSource = $derived(data.kind !== 'finish' || (data.exits?.parallel ?? 0) > 0)
-  const exitRow = $derived(hasExitRow(data.exits))
-  // In the caption row the plain dot takes the first slot.
-  const slots = $derived((data.exits?.list.length ?? 0) + (hasSource ? 1 : 0))
+  const hollow = $derived(data.hollow ?? [])
+  const exitRow = $derived(hasExitRow(data.exits) || hollow.length > 0)
+  // In the caption row the plain dot takes the first slot, the hollow judge
+  // exits (values without an edge) the last ones.
+  const named = $derived(data.exits?.list.length ?? 0)
+  const slots = $derived(named + hollow.length + (hasSource ? 1 : 0))
+  // Too many exits for a label each: the hollow ones are listed in one line
+  // under the row instead, each dot keeping its own tooltip.
+  const crowded = $derived(slots > 6 && hollow.length > 0)
   const plainLeft = $derived(exitRow && hasSource ? `left: ${((0.5 / slots) * 100).toFixed(2)}%` : undefined)
 
   // Start and finish are small muted pills, unless they carry named exits,
@@ -145,6 +151,8 @@
     }
   })
   const subtitle = $derived(data.title && data.title !== id ? data.title : '')
+  // The card's tooltip on a run canvas: why it did not run, or its counts.
+  const cardTitle = $derived(data.notRun?.title ?? data.runCount?.title)
 </script>
 
 {#if pill}
@@ -153,19 +161,31 @@
       'flex h-[30px] min-w-[110px] items-center justify-center gap-1.5 rounded-full border bg-panel px-4 text-[11px] tracking-[0.06em] text-muted-foreground transition-[opacity,box-shadow]',
       dimmed && 'opacity-40',
       (selected || running) && 'glow',
+      data.diff && `diff-${data.diff}`,
+      'pill-box',
     )}
     style:--k={k}
     style:border-color={statusBorder ?? k}
-    title={data.title !== id ? data.title : undefined}
+    data-diff={data.diff}
+    title={[data.title !== id ? data.title : '', cardTitle, data.layer?.title, data.issue?.text].filter(Boolean).join('\n') ||
+      undefined}
   >
     {#if hasTarget}<Handle type="target" position={Position.Top} />{/if}
     {#if running}<span class="spin text-blue"></span>{/if}
     {#if data.status === 'succeeded'}<span class="text-green" aria-hidden="true">✓</span>{/if}
     <span>{id}</span>
+    {#if data.runCount?.badge}<span class="run-count">{data.runCount.badge}</span>{/if}
+    {#if data.issue}<span class={['node-issue', data.issue.error && 'error']} aria-label="validation issue">!</span>{/if}
     {#if data.status && data.status !== 'succeeded' && data.status !== 'pending'}
       <span class="sr-only">{data.status}</span>
     {/if}
     {#if hasSource}<Handle type="source" id={PLAIN_HANDLE} position={Position.Bottom} />{/if}
+    {#if data.layer || data.notRun}
+      <!-- A pill has no room for a line: the note hangs below it. -->
+      <span class="pill-note" data-testid={data.layer ? 'node-layer' : 'node-not-run'}
+        >{data.layer ? data.layer.text : `not run · ${data.notRun?.word}`}</span
+      >
+    {/if}
   </div>
 {:else}
   <div
@@ -175,9 +195,12 @@
       skipped && 'border-dashed opacity-30',
       dimmed && !skipped && 'opacity-40',
       (selected || running) && 'glow',
+      data.diff && `diff-${data.diff}`,
     )}
     style:--k={k}
     style:border-color={statusBorder ?? k}
+    title={cardTitle}
+    data-diff={data.diff}
   >
     {#if hasTarget}<Handle type="target" position={Position.Top} />{/if}
 
@@ -196,6 +219,18 @@
           <span class="tag px-1 text-[10px] leading-[14px]" title={modeBadge.title}>{modeBadge.text}</span>
         {/if}
         {#if data.expected}<span title="expected time of one execution">~{data.expected}</span>{/if}
+        {#if data.orderChanged}
+          <span class="order-badge" title="Its edges are checked in another order than before">order changed</span>
+        {/if}
+        {#if data.diff === 'changed'}<span class="diff-word">changed</span>{/if}
+        {#if data.runCount?.badge}
+          <span class="run-count" title={data.runCount.title} data-testid="node-run-count">{data.runCount.badge}</span>
+        {/if}
+        {#if data.issue}
+          <span class={['node-issue', data.issue.error && 'error']} title={data.issue.text} data-testid="node-issue"
+            >!</span
+          >
+        {/if}
       </span>
     </div>
 
@@ -229,6 +264,21 @@
       {/if}
     {/if}
 
+    {#if data.notRun}
+      <div class="run-note" title={data.notRun.title} data-testid="node-not-run">not run · {data.notRun.word}</div>
+    {/if}
+    {#if data.judge}
+      <div class="judge-box" title={data.judge.title} data-testid="node-judge">
+        {#each data.judge.lines as line, i (i)}<div class="judge-line">{line}</div>{/each}
+        {#if data.judge.more}<div class="judge-more">+{data.judge.more}</div>{/if}
+        {#each data.judge.routed as r (r)}<div class="judge-routed">routed {r}</div>{/each}
+        {#if data.judge.shadow}<span class="judge-shadow">shadow</span>{/if}
+      </div>
+    {/if}
+    {#if data.layer}
+      <div class="layer-line" title={data.layer.title} data-testid="node-layer">{data.layer.text}</div>
+    {/if}
+
     {#if data.cached || data.failure}
       <div class="mt-0.5 flex items-center gap-1.5">
         {#if data.cached}
@@ -253,7 +303,7 @@
       </div>
     {/if}
 
-    {#if data.exits && exitRow}
+    {#if exitRow}
       <!-- One dot per exit, each under its own caption, so no two lines share a
            point and every line says on the node itself why it is taken. The
            plain dot comes first: the unconditional edges, and new ones. -->
@@ -261,14 +311,14 @@
         {#if hasSource}
           <span
             class="exit-plain"
-            title={data.exits.parallel > 0
-              ? `always taken: ${data.exits.parallel} unconditional ${data.exits.parallel === 1 ? 'edge' : 'edges'}`
+            title={(data.exits?.parallel ?? 0) > 0
+              ? `always taken: ${data.exits?.parallel} unconditional ${data.exits?.parallel === 1 ? 'edge' : 'edges'}`
               : 'unconditional edges leave from here'}
           >
-            {data.exits.parallel > 0 ? 'always' : ''}
+            {(data.exits?.parallel ?? 0) > 0 ? 'always' : ''}
           </span>
         {/if}
-        {#each data.exits.list as exit, i (exit.id)}
+        {#each data.exits?.list ?? [] as exit, i (exit.id)}
           <span
             class={cn('flex-1 px-0.5 text-center text-[9px] leading-tight', exitTone[exit.tone])}
             title={exit.title}
@@ -282,13 +332,153 @@
             style={`left: ${(((i + (hasSource ? 1 : 0) + 0.5) / slots) * 100).toFixed(2)}%`}
           />
         {/each}
+        {#each hollow as h, i (h.id)}
+          <span class="exit-hollow" title={h.title}>{crowded ? '' : h.label}</span>
+          <Handle
+            type="source"
+            id={h.id}
+            class="hollow-handle"
+            position={Position.Bottom}
+            style={`left: ${(((named + i + (hasSource ? 1 : 0) + 0.5) / slots) * 100).toFixed(2)}%`}
+          />
+        {/each}
       </div>
+      {#if crowded}
+        <div class="exit-hollow-list" title={hollow.map((h) => h.title).join('\n')}>
+          not connected: {hollow.map((h) => h.label).join(', ')}
+        </div>
+      {/if}
     {/if}
+    <!-- Outside the exit row: a judge whose only hint is "add bands" may
+         have no exit to draw. -->
+    {#if data.exitNote}<div class="exit-note">{data.exitNote}</div>{/if}
     {#if hasSource}<Handle type="source" id={PLAIN_HANDLE} position={Position.Bottom} style={plainLeft} />{/if}
   </div>
 {/if}
 
 <style>
+  /* The diff canvas: removed nodes are ghosts, added ones outlined in the
+     success tone, changed ones in the warning tone. */
+  .diff-removed {
+    border-style: dashed;
+    opacity: 0.45;
+  }
+  .diff-added {
+    outline: 2px solid var(--c-green);
+    outline-offset: 2px;
+  }
+  .diff-changed {
+    outline: 2px solid var(--c-amber);
+    outline-offset: 2px;
+  }
+  .order-badge,
+  .diff-word {
+    padding: 0 4px;
+    border: 1px solid var(--c-amber);
+    color: var(--c-amber);
+    font-size: 10px;
+    line-height: 14px;
+  }
+  .run-count {
+    padding: 0 4px;
+    border: 1px solid var(--c-line-2);
+    color: var(--c-fg-2);
+    font-size: 10px;
+    line-height: 14px;
+  }
+  .node-issue {
+    padding: 0 4px;
+    border: 1px solid var(--c-amber);
+    color: var(--c-amber);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 14px;
+  }
+  .node-issue.error {
+    border-color: var(--c-red);
+    color: var(--c-red);
+  }
+  .run-note,
+  .layer-line {
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--muted-foreground);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .judge-box {
+    position: relative;
+    margin-top: 3px;
+    padding-top: 2px;
+    border-top: 1px dashed var(--c-line);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+  .judge-line,
+  .judge-routed {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .judge-routed,
+  .judge-more {
+    color: var(--muted-foreground);
+  }
+  .pill-box {
+    position: relative;
+  }
+  .pill-note {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    color: var(--muted-foreground);
+    font-size: 9px;
+    letter-spacing: 0;
+    line-height: 1.25;
+    text-align: center;
+  }
+  .judge-shadow {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 0 3px;
+    border: 1px dashed var(--c-line-2);
+    color: var(--muted-foreground);
+  }
+  .exit-hollow {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 2px;
+    color: var(--muted-foreground);
+    font-size: 9px;
+    font-style: italic;
+    line-height: 1.25;
+    text-align: center;
+  }
+  .exit-hollow-list {
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--muted-foreground);
+    font-size: 9px;
+    font-style: italic;
+    line-height: 1.25;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  :global(.svelte-flow__handle.hollow-handle) {
+    background: var(--c-bg);
+    border: 1px dashed var(--c-fg-2);
+  }
+  .exit-note {
+    margin-top: 2px;
+    color: var(--c-amber);
+    font-size: 9px;
+    line-height: 1.25;
+  }
   .list-badge {
     padding: 0 4px;
     border: 1px solid var(--c-line-2);

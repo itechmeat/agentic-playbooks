@@ -82,9 +82,11 @@ fn a_run_without_decisions_prints_as_before() {
         .current_dir(dir.path())
         .assert()
         .success()
-        // No decisions line: only the run's own lines and its outcome.
+        // No decisions line: only the run's own lines, its route (this
+        // synthetic journal names no definition) and its outcome.
         .stdout(concat!(
             "demo-1\tdemo 1.0.0\tsucceeded\n  execution: cli\n  w\tsucceeded\n",
+            "  route:\n    definitions: 1 segment(s); not established: segment 0 from seq 0 (definition_not_journaled)\n",
             "  outcome: Run succeeded; nothing checked by the engine\n",
             "    Done:\n      succeeded: w\n",
         ));

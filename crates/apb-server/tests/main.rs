@@ -31,6 +31,8 @@ mod current_api_test;
 mod discover_api_test;
 #[path = "suite/fit_api_test.rs"]
 mod fit_api_test;
+#[path = "suite/graph_api_test.rs"]
+mod graph_api_test;
 #[path = "suite/inbox_api_test.rs"]
 mod inbox_api_test;
 #[path = "suite/ingest_test.rs"]

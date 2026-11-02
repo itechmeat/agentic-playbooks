@@ -9,7 +9,7 @@
   import ChunkPending from '$lib/components/ChunkPending.svelte'
   import StaleBuildBanner from '$lib/components/StaleBuildBanner.svelte'
   import { Toaster } from '$lib/components/ui/sonner'
-  import { connectorRouteName, decodeSegment } from '$lib/route'
+  import { connectorRouteName, decodeSegment, splitRoute } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
   import Login from './pages/Login.svelte'
   import { authState, refreshAuthStatus } from '$lib/auth.svelte'
@@ -67,8 +67,11 @@
     }
   }
 
+  // The query after `?` (`?node=`, `?edge=`, `?yaml=1`, `?run=`) asks a page
+  // to open something; the path names the page.
+  const split = $derived(splitRoute(hash))
   const route = $derived.by(() => {
-    const h = hash
+    const h = split.path
     const base = { page: 'playbooks', workspace: '', id: '', scope: 'project', name: '' }
     if (h === '#/new') return { ...base, page: 'new' }
     if (h.startsWith('#/edit/')) return { ...base, page: 'edit', ...wsId(h.slice(7)) }
@@ -110,13 +113,13 @@
   {#await loadPlaybookEdit()}
     <ChunkPending />
   {:then { default: Page }}
-    <Page id={route.id} workspace={route.workspace} />
+    <Page id={route.id} workspace={route.workspace} focus={split.focus} />
   {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'playbook'}
   {#await loadPlaybookView()}
     <ChunkPending />
   {:then { default: Page }}
-    <Page id={route.id} workspace={route.workspace} />
+    <Page id={route.id} workspace={route.workspace} run={split.focus.run} />
   {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'run'}
   {#await loadRunView()}

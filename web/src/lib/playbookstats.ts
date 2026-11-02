@@ -1,4 +1,18 @@
-import type { Comparison, DigestStats, PerRun, QualityDelta, QualityStats, Rate, StatsReport, VersionStats, Waits } from './api.gen'
+import type {
+  Comparison,
+  DigestStats,
+  NodeStats,
+  PerRun,
+  QualityDelta,
+  QualityStats,
+  Rate,
+  ReasonCount,
+  StatsReport,
+  VersionStats,
+  Waits,
+} from './api.gen'
+import { EXPLAIN_CLASSES } from './consts.gen'
+import { classWord } from './runoverlay'
 import { tallyLeftOut } from './quality'
 
 // The playbook page's stats card (C3): pure formatting of `GET /api/stats`.
@@ -143,4 +157,65 @@ export function previousVersion(r: StatsReport | null): string {
 // neither version could grade to a level (all not applicable) is left out.
 export function qualityDeltas(c: Comparison | null | undefined): QualityDelta[] {
   return (c?.quality ?? []).filter((d) => d.good_delta !== undefined || d.poor_delta !== undefined)
+}
+
+// --- per node: executions and why a node did not run ---
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+
+// `seen 2, inferred 1, unknown 1`: the runs a node did not run in, by the
+// class of the explanation, strongest first.
+export function reasonClassText(reasons: ReasonCount[]): string {
+  return EXPLAIN_CLASSES.map((c) => [c, reasons.filter((r) => r.class === c).reduce((n, r) => n + r.runs, 0)] as const)
+    .filter(([, n]) => n > 0)
+    .map(([c, n]) => `${classWord(c)} ${n}`)
+    .join(', ')
+}
+
+// `routed elsewhere: 2 (seen)` per reason, for a tooltip or a list.
+export function reasonLines(reasons: ReasonCount[]): string[] {
+  return reasons.map((r) => `${r.code.replace(/_/g, ' ')}: ${r.runs} (${classWord(r.class)})`)
+}
+
+// One node's row: executions, completed, open, failed, cancelled race
+// losers apart, and the runs it belongs to. A node no run executed has a
+// row of zeros.
+export function nodeStatsText(n: NodeStats): string {
+  const parts = [
+    plural(n.executions, 'execution'),
+    `${n.completed} completed`,
+    `${n.open} open`,
+    `${n.failed} failed`,
+  ]
+  if (n.cancelled) parts.push(`${n.cancelled} cancelled by a race`)
+  let line = `${parts.join(', ')}; in ${n.runs} of ${plural(n.in_runs, 'run')}`
+  if (n.in_runs_unknown) line += `, membership unknown in ${plural(n.in_runs_unknown, 'run')}`
+  return line
+}
+
+// The counts layer of one node: `executed 3 times in 2 of 4 runs`, then the
+// runs it did not run in with their reasons by class. Never a verdict on
+// the branch: an `unknown` reason stays unknown.
+export function nodeLayer(n: NodeStats): { text: string; title: string } {
+  const times = n.executions === 1 ? 'once' : `${n.executions} times`
+  let text = n.executions ? `executed ${times} in ${n.runs} of ${plural(n.in_runs, 'run')}` : `not executed in ${plural(n.in_runs, 'run')}`
+  const missed = Math.max(0, n.in_runs - n.runs)
+  const classes = reasonClassText(n.not_run)
+  if (n.executions && missed) text += `; not executed in ${plural(missed, 'run')}`
+  if (classes) text += ` (${classes})`
+  if (n.in_runs_unknown) text += `; membership unknown in ${plural(n.in_runs_unknown, 'run')}`
+  const title = [
+    nodeStatsText(n),
+    ...reasonLines(n.not_run),
+    n.in_runs_unknown ? `membership unknown in ${plural(n.in_runs_unknown, 'run')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return { text, title }
+}
+
+// The node rows of the version a page shows, by node id.
+export function nodeStatsOf(r: StatsReport | null, version: string): Map<string, NodeStats> {
+  const v = r?.versions.find((x) => x.version === version)
+  return new Map((v?.nodes ?? []).map((n) => [n.node, n]))
 }

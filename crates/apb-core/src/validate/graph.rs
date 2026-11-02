@@ -98,40 +98,20 @@ pub(crate) fn check_failure_policy(playbook: &Playbook, r: &mut ValidationReport
 }
 
 pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) {
-    let Some(start) = playbook
+    if !playbook
         .nodes
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Start))
-    else {
-        return;
-    };
-    let adj = adjacency(playbook);
-    let mut seen = HashSet::new();
-    let mut q = VecDeque::from([start.id.as_str()]);
-    // The failure policy is a route like any other, it just has no edge drawn
-    // for it: without this the handler a playbook points every unhandled
-    // failure at would read as unreachable the moment its last incoming edge
-    // is deleted, which is exactly what the policy exists to allow.
-    if let FailurePolicy::Node(target) = &playbook.defaults.on_failure
-        && playbook.node(target).is_some()
+        .any(|n| matches!(n.kind, NodeKind::Start))
     {
-        q.push_back(target.as_str());
+        return;
     }
-    // A fork's `on_failure` (issue #195) is a route with no edge drawn too.
-    for n in &playbook.nodes {
-        if let Some(target) = n.fork.as_ref().and_then(|f| f.on_failure.as_deref())
-            && playbook.node(target).is_some()
-        {
-            q.push_back(target);
-        }
-    }
-    while let Some(id) = q.pop_front() {
-        if seen.insert(id) {
-            for next in adj.get(id).into_iter().flatten() {
-                q.push_back(next);
-            }
-        }
-    }
+    // The failure policies are routes like any other, they just have no
+    // edge drawn for them: without them the handler a playbook points every
+    // unhandled failure at would read as unreachable the moment its last
+    // incoming edge is deleted, which is exactly what the policy exists to
+    // allow.
+    let seen = crate::graphutil::reachable_with_policies(playbook);
+    let adj = adjacency(playbook);
     for n in &playbook.nodes {
         if !seen.contains(n.id.as_str()) {
             r.error(

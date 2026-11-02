@@ -52,6 +52,12 @@ pub fn build_router(state: AppState) -> Router {
             put(routes::playbooks::put_layout),
         )
         .route("/api/playbooks/{id}/diff", get(routes::playbooks::get_diff))
+        // Not under `/api/playbooks/`: a playbook may be named `validate`.
+        .route("/api/validate", post(routes::graph::post_validate_draft))
+        .route(
+            "/api/playbooks/{id}/overlay",
+            get(routes::graph::get_overlay),
+        )
         .route(
             "/api/playbooks/{id}/estimate",
             get(routes::estimate::get_estimate_handler),

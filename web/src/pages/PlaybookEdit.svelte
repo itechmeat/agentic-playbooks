@@ -12,7 +12,13 @@
     saveLayout,
     type ProfileSummary,
     updatePlaybook,
+    validateDraft,
   } from '../lib/api'
+  import IssuesPanel from '../lib/IssuesPanel.svelte'
+  import FocusOn from '../lib/FocusOn.svelte'
+  import { drawableOf, nextDraftIssues, withIssues, type DraftIssues, type IssueTarget } from '../lib/issues'
+  import type { RouteFocus } from '../lib/route'
+  import { judgeDrag } from '../lib/judgeexits'
   import type { Project } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import DiffView from '../lib/DiffView.svelte'
@@ -36,7 +42,10 @@
   import { takeDraftYaml } from '../lib/playbookdupe'
   import {
     addEdge,
+    addJudgeExit,
     addNode,
+    retargetEdge,
+    routeUnavailable,
     EDITOR_NODE_KINDS,
     removeEdge,
     issueLine,
@@ -67,7 +76,100 @@
   import GitCompare from '@lucide/svelte/icons/git-compare'
   import LayoutGrid from '@lucide/svelte/icons/layout-grid'
 
-  let { id, workspace = '' }: { id: string; workspace?: string } = $props()
+  // `focus`: what the route asks to open (`?node=`, `?edge=`, `?yaml=1`),
+  // such as the target of an issue's "fix" on the playbook page.
+  let { id, workspace = '', focus: routeFocus = {} }: { id: string; workspace?: string; focus?: RouteFocus } =
+    $props()
+
+  // The draft's validation: the server's checks of the last text that
+  // parsed, kept (marked stale) while the text does not parse.
+  let draft = $state<DraftIssues>({ issues: [], stale: false, parseError: null })
+  let issueEdges = $state.raw<ReadonlySet<string>>(new Set())
+  let canvasFocus = $state.raw<{ nodes: string[]; seq: number } | null>(null)
+  let focusSeq = 0
+  // The route's focus, applied once the graph it names is drawn.
+  let pendingFocus: RouteFocus | null = null
+  let validateToken = 0
+
+  async function validate(yaml: string) {
+    const token = ++validateToken
+    try {
+      const r = await validateDraft(yaml, isNew ? targetWorkspace : workspace, isNew ? '' : id, loadedVersion)
+      if (token === validateToken) draft = nextDraftIssues(draft, r)
+    } catch {
+      // The checks are a help while editing; the save still validates.
+    }
+  }
+
+  // Markers on the drawn graph: only targets present in it.
+  function mark() {
+    const out = withIssues(
+      untrack(() => nodes),
+      untrack(() => edges),
+      draft.issues,
+      issueEdges,
+    )
+    nodes = out.nodes
+    edges = out.edges
+  }
+  $effect(() => {
+    void [draft, issueEdges]
+    untrack(() => mark())
+  })
+
+  function centreOn(nodeIds: string[]) {
+    canvasFocus = { nodes: nodeIds, seq: ++focusSeq }
+  }
+
+  // An issue picked: an edge opens the edge panel (every edge of the issue
+  // highlighted, the first selected), a node its form, V06 the YAML view.
+  function selectIssue(t: IssueTarget) {
+    if (t.kind === 'document') {
+      if (t.yaml) {
+        showYaml = true
+        showDiff = false
+      }
+      return
+    }
+    showYaml = false
+    showDiff = false
+    if (t.kind === 'node') {
+      issueEdges = new Set()
+      selectedEdge = null
+      selectedNodeId = t.node
+      centreOn([t.node])
+      return
+    }
+    issueEdges = new Set(t.edges)
+    openEdge(t.first)
+  }
+
+  function openEdge(address: string): boolean {
+    const e = edges.find((x) => x.data.address === address)
+    if (!e || e.data.index === undefined) return false
+    selectedNodeId = null
+    selectedEdge = { address, index: e.data.index }
+    centreOn([e.source, e.target])
+    return true
+  }
+
+  function applyRouteFocus() {
+    const f = pendingFocus
+    if (!f) return
+    pendingFocus = null
+    if (f.yaml) {
+      showYaml = true
+      return
+    }
+    if (f.edge && openEdge(f.edge)) {
+      issueEdges = new Set([f.edge])
+      return
+    }
+    if (f.node && nodes.some((n) => n.id === f.node)) {
+      selectedNodeId = f.node
+      centreOn([f.node])
+    }
+  }
 
   const isNew = $derived(!id)
 
@@ -202,6 +304,10 @@
     loadFailed = false
     selectedNodeId = null
     selectedEdge = null
+    draft = { issues: [], stale: false, parseError: null }
+    issueEdges = new Set()
+    validateToken++
+    pendingFocus = untrack(() => routeFocus)
     // Drop the previous route's graph: its positions must not seed the new
     // layout, and the canvas must fit the new graph, not the old one (the
     // FitTop key moves with the route before the new nodes arrive).
@@ -292,14 +398,21 @@
             for (const n of prev) merged.set(n.id, n)
             return { nodes: [...merged.values()] }
           })()
-      const flow = toFlow(model, layoutInput)
+      const flow = toFlow(model, { layout: layoutInput, judgeExits: true })
       // Read untracked: a profile list or project change must not rebuild
       // the graph (and drop a drag); the effect below applies the models.
       nodes = withProfileModels(flow.nodes, untrack(() => models))
       edges = flow.edges
+      untrack(() => {
+        mark()
+        applyRouteFocus()
+      })
     } else if (error) {
       parseError = error
     }
+    // The server's checks run on the same timer as the parse.
+    const yaml = debouncedYaml
+    untrack(() => void validate(yaml))
   })
 
   // The profiles' models arrive (or the project changes) after the graph is
@@ -361,6 +474,24 @@
   // condition is edited in the YAML.
   function onBeforeConnect(conn: Connection): null {
     if (!conn.source || !conn.target) return null
+    // A judge's value exits: a hollow value adds its edge, a connected one
+    // is retargeted, `unavailable` sets the route and its edge together.
+    if (lastValidModel) {
+      const { source, target } = conn
+      const j = judgeDrag(lastValidModel, source, conn.sourceHandle)
+      if (j.kind === 'add') {
+        applyMutation((d) => addJudgeExit(d, source, j.field, j.value, target))
+        return null
+      }
+      if (j.kind === 'retarget') {
+        applyMutation((d) => retargetEdge(d, j.address, target))
+        return null
+      }
+      if (j.kind === 'unavailable') {
+        applyMutation((d) => routeUnavailable(d, source, target))
+        return null
+      }
+    }
     const drag = dragFromHandle(conn.sourceHandle)
     if (!drag.add) {
       const at = lastValidModel ? edgeAddresses(lastValidModel.edges).find((a) => a.rendered === drag.exit) : undefined
@@ -375,6 +506,7 @@
     return null
   }
   function onPaneClick() {
+    issueEdges = new Set()
     selectedNodeId = null
     selectedEdge = null
   }
@@ -424,9 +556,10 @@
   // playbook path, which has nothing to discard).
   function onRelayout() {
     if (!lastValidModel) return
-    const flow = toFlow(lastValidModel, { forceAuto: true })
+    const flow = toFlow(lastValidModel, { forceAuto: true, judgeExits: true })
     nodes = withProfileModels(flow.nodes, models)
     edges = flow.edges
+    mark()
     if (isNew || !loadedVersion) return
     clearTimeout(layoutTimer)
     layoutTimer = setTimeout(async () => {
@@ -479,6 +612,7 @@
       // A refused definition: its issues, each with the addresses of the
       // edges it is about, when the server sends them.
       const issues = e instanceof ApiError ? refusedIssues(e.body) : []
+      if (issues.length) draft = { issues, stale: false, parseError: null }
       if (step) toast.error('Save refused', { description: step.message })
       else if (issues.length) toast.error('Save refused', { description: issues.map(issueLine).join('\n') })
       else toast.error('Save failed', { description: String(e) })
@@ -709,7 +843,23 @@
       <Background />
       <Controls />
       <FitTop {nodes} key={isNew ? 'new' : `${workspace}/${id}/${loadedVersion}`} />
+      <FocusOn focus={canvasFocus} />
     </SvelteFlow>
+
+    {#if (draft.issues.length || parseError) && !overlayOpen && !selectedNode}
+      <div class="box editor-issues" data-testid="editor-issues">
+        <span class="box-cap">issues</span>
+        <div class="editor-issues-scroll">
+          <IssuesPanel
+          issues={draft.issues}
+          drawable={drawableOf(nodes, edges)}
+          stale={draft.stale || !!parseError}
+          parseError={parseError ?? draft.parseError}
+            onselect={selectIssue}
+          />
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -717,6 +867,19 @@
 
 <style>
   /* Plain CSS over the app's variables. */
+  .editor-issues {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 5;
+    max-width: min(460px, calc(100% - 16px));
+    padding: 14px 12px 8px;
+    background: var(--c-bg);
+  }
+  .editor-issues-scroll {
+    max-height: 32vh;
+    overflow: auto;
+  }
   .edge-ends {
     font-size: 12px;
     overflow-wrap: anywhere;

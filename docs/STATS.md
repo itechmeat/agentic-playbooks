@@ -121,9 +121,23 @@ node without a prompt). The figures:
 - `runs`: the runs with at least one execution counted in `executions`;
 - `re-entries`: `executions - runs`, the executions after the first in the
   same run, never negative;
-- `in_runs`: the runs whose definition contains the node. Every node of a
-  run's definition has a row, so a node no run executed shows as `not
-  executed in N of M runs` with zero executions.
+- `in_runs`: the runs the node is established to belong to: a definition
+  the run executed is known to declare it (the definitions the run's
+  journal names by digest, every segment counted once per node and run), or
+  the run executed it. So `runs` never exceeds `in_runs`, also for a run
+  patched to a definition without the node. Every such node has a row, so a
+  node no run executed shows as `not executed in N of M runs` with zero
+  executions;
+- `in_runs_unknown`: runs whose only mention of the node is the final
+  snapshot while a definition the run executed is not established (a run an
+  older apb started): counted apart, never guessed into `in_runs`;
+- `not_run`: why the node did not run in the runs it belongs to and did
+  not execute in, one explanation per run, counted by class (`observed`,
+  `inferred`, `unknown`) and code (`no_failure_to_route`,
+  `condition_not_matched`, `source_not_executed`, `cannot_tell` and the
+  others the run graph uses). `unknown` is shown, never left out, and no
+  count is read as "dead branch". Text: `node report: not executed in 3 of
+  3 runs (why: 3 observed no_failure_to_route)`.
 
 Then first pass (its first result was a success on attempt 1, with no retry,
 fallback or later re-entry); retries and fallbacks; the median duration

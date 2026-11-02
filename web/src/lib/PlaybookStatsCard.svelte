@@ -5,7 +5,10 @@
     costKnownText,
     executorGroups,
     modelsText,
+    nodeStatsText,
     perRunText,
+    reasonClassText,
+    reasonLines,
     qualityDeltaText,
     qualityDeltas,
     qualityKey,
@@ -90,6 +93,21 @@
             <dd data-testid="playbook-stats-models">{modelsText(v)}</dd>
           {/if}
         </dl>
+        {#if v.nodes?.length}
+          <ul class="node-rows" data-testid="playbook-stats-nodes">
+            {#each v.nodes as n (n.node)}
+              <li>
+                <span class="node-id">{n.node}</span>
+                <span>{nodeStatsText(n)}</span>
+                {#if n.not_run.length}
+                  <span class="muted" title={reasonLines(n.not_run).join('\n')} data-testid="playbook-stats-reasons">
+                    not run: {reasonClassText(n.not_run)}
+                  </span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#if executors.length}
           <ul class="executors" data-testid="playbook-stats-executors">
             {#each executors as n (n.node)}
@@ -190,6 +208,21 @@
   .group {
     padding-left: 0.75rem;
     font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .node-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+    overflow-wrap: anywhere;
+  }
+  .node-rows li {
+    display: flex;
+    flex-direction: column;
+  }
+  .node-id {
+    color: var(--c-fg-2);
+    font-weight: 600;
   }
   .goal,
   .quality {

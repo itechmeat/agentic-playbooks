@@ -36,6 +36,30 @@ fn run(
         execution: Some("cli".into()),
         node_profiles: BTreeMap::new(),
         grades: Vec::new(),
+        definitions: snapshot.map(known).unwrap_or_default(),
+        diagnostics: Vec::new(),
+    }
+}
+
+/// The definitions of a run that executed `yaml` from its start, known.
+fn known(yaml: &str) -> crate::run_definitions::DefinitionsInForce {
+    use crate::run_definitions::*;
+    DefinitionsInForce {
+        segments: vec![Segment {
+            from_seq: 0,
+            to_seq: None,
+            boundary: Some(Boundary {
+                seq: 0,
+                definition: Some(digest(yaml.as_bytes())),
+                kind: BoundaryKind::Start,
+            }),
+            resolved: Resolved::Known {
+                playbook: Box::new(apb_core::schema::Playbook::from_yaml(yaml).unwrap()),
+                digest: digest(yaml.as_bytes()),
+            },
+            mismatch_recorded: false,
+        }],
+        playbook_changed: false,
     }
 }
 
@@ -1080,6 +1104,32 @@ fn a_finish_without_a_prompt_counts_and_unexecuted_nodes_have_zero_rows() {
     let text = render::render_text(&r);
     assert!(
         text.contains("node work: not executed in 1 of 1 runs"),
+        "{text}"
+    );
+}
+
+#[test]
+fn unknown_membership_shows_for_a_node_that_also_executed() {
+    let executed = run(
+        "r1",
+        "1.0.0",
+        Some(SNAPSHOT),
+        &[
+            (1_100, started("work")),
+            (1_200, finished("work", "succeeded", 1)),
+            (1_300, end("succeeded")),
+        ],
+    );
+    // An older run: its snapshot names `work`, no definition is known.
+    let mut old = run("r2", "1.0.0", Some(SNAPSHOT), &[(1_400, end("succeeded"))]);
+    old.definitions = Default::default();
+    let r = build(&[executed, old], &StatsFilter::default());
+    let w = node_of(&r, "work");
+    assert_eq!((w.runs, w.in_runs, w.in_runs_unknown), (1, 1, 1));
+    let text = render::render_text(&r);
+    assert!(
+        text.lines()
+            .any(|l| l.contains("node work: executed") && l.contains("membership unknown in 1")),
         "{text}"
     );
 }

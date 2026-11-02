@@ -694,6 +694,15 @@ pub fn run_report_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     }
     super::notify::add_run_block(&mut base, &dir, events);
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    // The route: what the journal proves about every node and edge, judge
+    // answers and why nodes did not run, through the run's redactor before
+    // anything is clipped.
+    if let Some(obj) = base.as_object_mut() {
+        obj.insert(
+            "route".into(),
+            view.graph(&dir).present(&redaction.run_dir(&dir)),
+        );
+    }
     let actions = super::actions::of_view(&redaction, &dir, run_id, view.clone());
     super::actions::add_to(&mut base, &actions, caller);
 

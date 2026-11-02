@@ -297,6 +297,32 @@ fn render_types() -> String {
         apb_core::versioning::EdgeCorrespondence::decl(&cfg),
         apb_core::versioning::EdgeOrderChange::decl(&cfg),
         apb_core::versioning::VersionDiff::decl(&cfg),
+        // The run graph: what the journal proves about every node and edge,
+        // judge answers, "why it did not run", the overlay of a run on a
+        // version and the reasons in the node statistics.
+        apb_engine::run_outcome::graph::DefinitionSegmentView::decl(&cfg),
+        apb_engine::run_outcome::graph::NodeRun::decl(&cfg),
+        apb_engine::run_outcome::graph::EdgeState::decl(&cfg),
+        apb_engine::run_outcome::graph::EdgeRun::decl(&cfg),
+        apb_engine::run_outcome::graph::TraversalRow::decl(&cfg),
+        apb_engine::run_outcome::judge_answers::JudgeEvidence::decl(&cfg),
+        apb_engine::run_outcome::judge_answers::JudgeComparison::decl(&cfg),
+        apb_engine::run_outcome::judge_answers::JudgeAnswerView::decl(&cfg),
+        apb_engine::run_outcome::judge_answers::JudgeQuestionView::decl(&cfg),
+        apb_engine::run_outcome::judge_answers::JudgeNodeAnswers::decl(&cfg),
+        apb_engine::run_outcome::judge_answers::JudgeEdgeAnswer::decl(&cfg),
+        apb_engine::run_outcome::route_explain::ExplainClass::decl(&cfg),
+        apb_engine::run_outcome::route_explain::NotRunCode::decl(&cfg),
+        apb_engine::run_outcome::route_explain::Entry::decl(&cfg),
+        apb_engine::run_outcome::route_explain::InputFact::decl(&cfg),
+        apb_engine::run_outcome::route_explain::NotRun::decl(&cfg),
+        apb_engine::run_outcome::RunGraph::decl(&cfg),
+        apb_engine::run_outcome::overlay::Alignment::decl(&cfg),
+        apb_engine::run_outcome::overlay::OverlayCandidate::decl(&cfg),
+        apb_engine::run_outcome::overlay::SegmentMapping::decl(&cfg),
+        apb_engine::run_outcome::overlay::PlaybookOverlay::decl(&cfg),
+        apb_engine::run_stats::route::ReasonCount::decl(&cfg),
+        crate::routes::graph::DraftValidation::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"
@@ -411,11 +437,28 @@ fn render_consts() -> String {
     ));
     render_isolation_consts(&mut out);
     render_publish_consts(&mut out);
+    render_route_consts(&mut out);
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")
     ));
     out
+}
+
+/// The classes and codes a "why it did not run" statement carries, so the
+/// dashboard can hold its words to the generated enums.
+fn render_route_consts(out: &mut String) {
+    use apb_engine::run_outcome::route_explain::{ExplainClass, NotRunCode};
+    let classes: Vec<&str> = ExplainClass::ALL.iter().map(|c| c.as_str()).collect();
+    let codes: Vec<&str> = NotRunCode::ALL.iter().map(|c| c.as_str()).collect();
+    out.push_str(&format!(
+        "\n/** Every class of a \"why it did not run\" statement, strongest first. */\nexport const EXPLAIN_CLASSES = {}\n",
+        ts_string_array(&classes)
+    ));
+    out.push_str(&format!(
+        "\n/** Every code of a \"why it did not run\" statement. */\nexport const NOT_RUN_CODES = {}\n",
+        ts_string_array(&codes)
+    ));
 }
 
 /// The isolation code tables: the sentence of every hold and limit code an

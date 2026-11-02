@@ -23,7 +23,6 @@
   import { formatCost, formatTokens, runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import {
     currentStage,
-    edgeRunState,
     decisionSource,
     formatAge,
     lastNote,
@@ -36,6 +35,17 @@
     runSteps,
   } from '../lib/runview'
   import { candidateTrialLabel } from '../lib/versioninfo'
+  import {
+    classWord,
+    graphOf,
+    graphWithheld,
+    judgeCard,
+    latestJudges,
+    nodeCounts,
+    notRunTitle,
+    runEdgeLooks,
+    segmentBanner,
+  } from '../lib/runoverlay'
   import { launchRecordLine } from '../lib/fit'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
@@ -231,9 +241,38 @@
   // note, and the model the attempt actually ran on, which wins over the
   // profile's current one) on top of toFlow's nodes, and give every edge its
   // run state (walked, active into the running node, idle).
+  // What the run graph adds to each card: counts, why it did not run, and a
+  // judge's answers; the status stays the reported one.
+  const graphNodeData = $derived.by(() => {
+    const out = new Map<string, Partial<FlowNode['data']>>()
+    const g = detail ? graphOf(detail.graph) : null
+    if (!g) return out
+    for (const n of g.nodes) if (n.executions > 0) out.set(n.node, { runCount: nodeCounts(n) })
+    for (const n of g.not_run) {
+      out.set(n.node, { ...out.get(n.node), notRun: { word: classWord(n.class), title: notRunTitle(n) } })
+    }
+    for (const [node, j] of latestJudges(g.judge_nodes)) out.set(node, { ...out.get(node), judge: judgeCard(j) })
+    return out
+  })
+  const graphBanners = $derived.by(() => {
+    if (!detail) return [] as string[]
+    const out: string[] = []
+    if (graphWithheld(detail.graph)) out.push('The run graph data is withheld: edge states are not shown.')
+    else if (!detail.graph_model) out.push("The run's definition is not established; edge states are not shown.")
+    else {
+      const g = graphOf(detail.graph)
+      const b = g ? segmentBanner(g) : null
+      if (b) out.push(b)
+    }
+    return out
+  })
+
   $effect(() => {
     const data = runData
-    nodes = withProfileModels(flowNodes, profileModels).map((n) => {
+    const extra = graphNodeData
+    nodes = withProfileModels(flowNodes, profileModels).map((raw) => {
+      const add = extra.get(raw.id)
+      const n = add ? { ...raw, data: { ...raw.data, ...add } } : raw
       const { profile: _profile, model, ...rest } = data.get(n.id) ?? {}
       // `null`: the attempt reported no model; the profile's must not stand
       // in for it (it is in `modelHint`, shown as a hint).
@@ -247,11 +286,21 @@
       return { ...n, data: { ...n.data, ...rest, ...(m ? { model: m } : {}) } }
     })
   })
+  // Edge states come only from the run graph's shown segment, matched by
+  // the rendered address the canvas edge carries; a canvas drawn from the
+  // mutable `model` (no established definition) or a withheld graph gets
+  // none.
   $effect(() => {
     const d = detail
     if (!d) return
-    const state = edgeRunState(d.events, d.nodes)
-    edges = flowEdges.map((e) => ({ ...e, data: { ...e.data, state: state(e.source, e.target) } }))
+    const g = graphOf(d.graph)
+    const running = new Set(Object.entries(d.nodes).filter(([, s]) => s === 'running').map(([n]) => n))
+    const looks = g && d.graph_model ? runEdgeLooks(g, running) : new Map()
+    edges = flowEdges.map((e) => {
+      const { run: _old, ...data } = e.data
+      const look = data.address ? looks.get(data.address) : undefined
+      return { ...e, data: look ? { ...data, run: look } : data }
+    })
   })
 
   // A running run's ages and progress move with the clock, not only with
@@ -379,8 +428,11 @@
       detail = d
       loadError = null
       now = Date.now()
-      if (d.model) {
-        const flow = toFlow(d.model, {
+      // The definition the graph's shown segment ran, so edge states match
+      // the bytes that ran; the mutable snapshot only when none is known.
+      const model = d.graph_model ?? d.model
+      if (model) {
+        const flow = toFlow(model, {
           layout: d.layout,
           statuses: d.nodes,
           cachedIds: cachedNodeIds(d.events),
@@ -663,6 +715,11 @@
 
     <!-- Center: the graph. -->
     <div class="relative h-[60vh] min-h-80 min-w-0 border border-line lg:mt-2 lg:h-auto lg:min-h-0">
+      {#if graphBanners.length}
+        <div class="graph-banners" data-testid="run-graph-banner">
+          {#each graphBanners as b (b)}<p>{b}</p>{/each}
+        </div>
+      {/if}
       <SvelteFlow
         bind:nodes
         bind:edges
@@ -904,6 +961,23 @@
 {/if}
 
 <style>
+  /* Why the canvas shows fewer edge states than it could. */
+  .graph-banners {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 5;
+    max-width: min(560px, calc(100% - 16px));
+    padding: 4px 8px;
+    border: 1px solid var(--c-amber);
+    background: var(--c-bg);
+    color: var(--c-amber);
+    font-size: 11px;
+  }
+  .graph-banners p {
+    margin: 0;
+  }
+
   /* The rail's step list: a dashed spine with one glyph per step, so the
      state never rests on color alone: a check when done, a play mark on the
      current step, a cross when failed, a dash (and strike-through) when

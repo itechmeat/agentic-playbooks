@@ -408,13 +408,17 @@ fn consent_by(run: &std::path::Path) -> String {
         .by
 }
 
-/// Polls until the run in `run` has finished (a detached driver), bounded.
+/// Polls until the run in `run` has finished (a detached driver) and its
+/// driver let go of the workdir ([`crate::common::wait_released`]), bounded.
 fn wait_finished(run: &std::path::Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if fs::read_to_string(run.join("events.jsonl"))
             .is_ok_and(|t| t.contains("\"type\":\"run_finished\""))
         {
+            let id = run.file_name().unwrap().to_string_lossy().into_owned();
+            let root = run.ancestors().nth(3).unwrap();
+            crate::common::wait_released(root, &id);
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

@@ -57,7 +57,7 @@ pub(crate) fn node_questions(questions: &JudgeQuestions) -> BTreeMap<String, Que
 
 /// The band `value` falls into: `[lo, hi)`, the last band (highest `hi`)
 /// closed at its top.
-fn band(bands: &OrderedMap<[f64; 2]>, value: f64) -> Option<&str> {
+pub(crate) fn band(bands: &OrderedMap<[f64; 2]>, value: f64) -> Option<&str> {
     let top = bands
         .iter()
         .map(|(_, [_, hi])| *hi)

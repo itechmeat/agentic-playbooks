@@ -126,10 +126,18 @@ pub fn render_text(r: &StatsReport) -> String {
         }
         for n in &v.nodes {
             if n.executions == 0 && n.cancelled == 0 {
-                out.push_str(&format!(
-                    "  node {}: not executed in {} of {} runs\n",
+                let mut line = format!(
+                    "  node {}: not executed in {} of {} runs",
                     n.node, n.in_runs, v.runs
-                ));
+                );
+                if n.in_runs_unknown > 0 {
+                    line.push_str(&format!(", membership unknown in {}", n.in_runs_unknown));
+                }
+                if !n.not_run.is_empty() {
+                    line.push_str(&format!(" (why: {})", super::route::text(&n.not_run)));
+                }
+                out.push_str(&line);
+                out.push('\n');
                 continue;
             }
             let mut line = format!(
@@ -164,6 +172,16 @@ pub fn render_text(r: &StatsReport) -> String {
             }
             if let Some(m) = n.model_use.text() {
                 line.push_str(&format!(", models {m}"));
+            }
+            if !n.not_run.is_empty() {
+                line.push_str(&format!(
+                    ", not executed in {} runs (why: {})",
+                    n.in_runs.saturating_sub(n.runs),
+                    super::route::text(&n.not_run)
+                ));
+            }
+            if n.in_runs_unknown > 0 {
+                line.push_str(&format!(", membership unknown in {}", n.in_runs_unknown));
             }
             out.push_str(&line);
             out.push('\n');

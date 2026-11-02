@@ -396,6 +396,8 @@ mod run_provenance_test;
 mod run_retro_test;
 // Unix-only: its agents are shell scripts.
 #[cfg(unix)]
+#[path = "suite/run_graph_test.rs"]
+mod run_graph_test;
 #[path = "suite/run_secrets_test.rs"]
 mod run_secrets_test;
 #[path = "suite/run_wait_test.rs"]

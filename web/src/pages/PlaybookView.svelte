@@ -13,6 +13,7 @@
     fetchPlaybook,
     fetchProfiles,
     fetchProjects,
+    fetchOverlay,
     fetchStats,
     fetchVersions,
     keepCurrentCandidate,
@@ -45,7 +46,24 @@
     ValidationIssue,
   } from '../lib/types'
   import { issueLine } from '../lib/playbookedit'
+  import IssuesPanel from '../lib/IssuesPanel.svelte'
+  import FocusOn from '../lib/FocusOn.svelte'
+  import { drawableOf, withIssues, type IssueTarget } from '../lib/issues'
+  import {
+    alignmentText,
+    alignmentTone,
+    classWord,
+    graphOf,
+    graphWithheld,
+    nodeCounts,
+    notRunTitle,
+    overlayBanner,
+    projectOverlay,
+  } from '../lib/runoverlay'
+  import { nodeLayer, nodeStatsOf } from '../lib/playbookstats'
   import type {
+    OverlayCandidate,
+    PlaybookOverlay,
     CandidateQualityView,
     FitReport,
     History as CurrentHistory,
@@ -97,10 +115,150 @@
   // --- end of 0.23.0 stats ---
   import X from '@lucide/svelte/icons/x'
 
-  let { id, workspace = '' }: { id: string; workspace?: string } = $props()
+  // `run`: a deep link (`?run=`) that lays that run over the graph.
+  let { id, workspace = '', run: runLink }: { id: string; workspace?: string; run?: string } = $props()
 
   let nodes = $state.raw<FlowNode[]>([])
   let edges = $state.raw<FlowEdge[]>([])
+  // The graph as the definition draws it; the layers and the issue markers
+  // are put on top of it by `decorate`.
+  let baseNodes = $state.raw<FlowNode[]>([])
+  let baseEdges = $state.raw<FlowEdge[]>([])
+
+  // --- graph layers: "last run" and "counts" ---
+  // Off by default, remembered per browser; storage may be unavailable.
+  const LAYER_KEY = 'apb.playbook.layers'
+  function readLayers(): { lastRun: boolean; counts: boolean } {
+    try {
+      const v = JSON.parse(localStorage.getItem(LAYER_KEY) ?? '{}') as Record<string, unknown>
+      return { lastRun: v.lastRun === true, counts: v.counts === true }
+    } catch {
+      return { lastRun: false, counts: false }
+    }
+  }
+  function writeLayers() {
+    try {
+      localStorage.setItem(LAYER_KEY, JSON.stringify({ lastRun: layerLastRun, counts: layerCounts }))
+    } catch {
+      // A per-browser convenience only.
+    }
+  }
+  const storedLayers = readLayers()
+  let layerLastRun = $state(storedLayers.lastRun)
+  let layerCounts = $state(storedLayers.counts)
+  let overlay = $state.raw<PlaybookOverlay | null>(null)
+  let overlayCandidates = $state.raw<OverlayCandidate[]>([])
+  let overlayError = $state<string | null>(null)
+  let overlayLoading = $state(false)
+  let pickerOpen = $state(false)
+  // The run history the counts layer reads: the same request as the runs
+  // count (every run, no period chosen yet).
+  let countsReport = $state.raw<import('../lib/api.gen').StatsReport | null>(null)
+  // The selected issue's edges, highlighted, and the canvas focus.
+  let issueEdges = $state.raw<ReadonlySet<string>>(new Set())
+  let focus = $state.raw<{ nodes: string[]; seq: number } | null>(null)
+  let focusSeq = 0
+
+  const overlayGraph = $derived(graphOf(overlay?.graph ?? null))
+  const projected = $derived(overlay && overlayGraph ? projectOverlay(overlay, overlayGraph) : null)
+  const overlayNote = $derived(
+    overlay && projected ? overlayBanner(overlay, projected.missingInShown) : null,
+  )
+
+  // The canvas: the definition, then the layers, then the issue markers.
+  function decorate() {
+    const g = layerLastRun ? overlayGraph : null
+    const p = layerLastRun ? projected : null
+    const counts = layerCounts ? nodeStatsOf(countsReport, version) : null
+    const runNodes = new Map((g?.nodes ?? []).map((n) => [n.node, n]))
+    const notRun = new Map((g?.not_run ?? []).map((n) => [n.node, n]))
+    const decorated = baseNodes.map((n) => {
+      const { status: _s, runCount: _c, notRun: _n, layer: _l, ...data } = n.data
+      const r = runNodes.get(n.id)
+      const nr = notRun.get(n.id)
+      const c = counts?.get(n.id)
+      return {
+        ...n,
+        selected: n.id === selectedNodeId,
+        data: {
+          ...data,
+          ...(r ? { status: r.status ?? r.last_status ?? undefined, runCount: nodeCounts(r) } : {}),
+          ...(nr ? { notRun: { word: classWord(nr.class), title: notRunTitle(nr) } } : {}),
+          ...(c ? { layer: nodeLayer(c) } : {}),
+        },
+      }
+    })
+    const runEdges = baseEdges.map((e) => {
+      const look = p && e.data.address ? p.edges.get(e.data.address) : undefined
+      const { run: _r, ...data } = e.data
+      return { ...e, data: look ? { ...data, run: look } : data }
+    })
+    const out = withIssues(decorated, runEdges, validation, issueEdges)
+    nodes = withProfileModels(out.nodes, models)
+    edges = out.edges
+  }
+
+  $effect(() => {
+    void [layerLastRun, layerCounts, overlay, countsReport, validation, issueEdges, baseNodes, baseEdges]
+    untrack(() => decorate())
+  })
+
+  let overlayToken = 0
+  async function loadOverlay(opts: { run?: string; before?: string } = {}) {
+    const token = ++overlayToken
+    overlayLoading = true
+    overlayError = null
+    try {
+      const o = await fetchOverlay(id, workspace, { version: version || undefined, ...opts })
+      if (token !== overlayToken) return
+      if (opts.before !== undefined) {
+        overlayCandidates = [...overlayCandidates, ...o.candidates]
+        overlay = { ...(overlay ?? o), next_before: o.next_before }
+      } else {
+        if (!overlayCandidates.length || !opts.run) overlayCandidates = o.candidates
+        overlay = overlay && opts.run ? { ...o, candidates: overlay.candidates, next_before: overlay.next_before } : o
+      }
+    } catch (e) {
+      if (token === overlayToken) overlayError = String(e)
+    } finally {
+      if (token === overlayToken) overlayLoading = false
+    }
+  }
+
+  function toggleLastRun() {
+    layerLastRun = !layerLastRun
+    writeLayers()
+    if (layerLastRun && !overlay) void loadOverlay()
+  }
+  function toggleCounts() {
+    layerCounts = !layerCounts
+    writeLayers()
+  }
+  function pickRun(runId: string) {
+    pickerOpen = false
+    void loadOverlay({ run: runId })
+  }
+
+  // An issue picked in the list: its edges highlighted and the first
+  // selected, its node selected, or the YAML view for one with nothing to
+  // draw; the canvas centres on it.
+  function selectIssue(t: IssueTarget) {
+    if (t.kind === 'document') {
+      if (t.yaml) showYaml = true
+      return
+    }
+    showYaml = false
+    if (t.kind === 'node') {
+      issueEdges = new Set()
+      select(t.node)
+      focus = { nodes: [t.node], seq: ++focusSeq }
+      return
+    }
+    issueEdges = new Set(t.edges)
+    select(null)
+    const first = baseEdges.find((e) => e.data.address === t.first)
+    if (first) focus = { nodes: [first.source, first.target], seq: ++focusSeq }
+  }
   let name = $state<string>(untrack(() => id))
   let version = $state<string>('')
   let validation = $state<ValidationIssue[]>([])
@@ -512,10 +670,8 @@
       const detail = await fetchPlaybook(id, workspace)
       if (token !== loadToken) return
       const flow = toFlow(detail.playbook, detail.layout)
-      nodes = withProfileModels(flow.nodes, models).map((n) =>
-        n.id === selectedNodeId ? { ...n, selected: true } : n,
-      )
-      edges = flow.edges
+      baseNodes = flow.nodes
+      baseEdges = flow.edges
       playbookNodes = detail.playbook.nodes
       playbookEdges = detail.playbook.edges
       meta = metaOf(detail.playbook, detail.effective_effects)
@@ -527,6 +683,8 @@
       frozen = detail.frozen
       budgetBlock = detail.playbook.budget ?? null
       runParams = detail.playbook.params ?? []
+      // The layer reads the shown version: load it once the version is known.
+      if (layerLastRun) void loadOverlay(overlay?.chosen ? { run: overlay.chosen } : runLink ? { run: runLink } : {})
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load playbook', { description: String(e) })
     }
@@ -555,9 +713,15 @@
   async function loadRunsCount(route: number) {
     try {
       const r = await fetchStats(id, workspace)
-      if (route === routeToken) runsCount = r.runs
+      if (route === routeToken) {
+        runsCount = r.runs
+        countsReport = r
+      }
     } catch {
-      if (route === routeToken) runsCount = null
+      if (route === routeToken) {
+        runsCount = null
+        countsReport = null
+      }
     }
   }
 
@@ -757,6 +921,18 @@
     startRefusal = null
     nodes = []
     edges = []
+    baseNodes = []
+    baseEdges = []
+    overlay = null
+    overlayCandidates = []
+    overlayError = null
+    overlayToken++
+    pickerOpen = false
+    countsReport = null
+    issueEdges = new Set()
+    focus = null
+    // A deep link to a run turns the layer on for this visit.
+    if (untrack(() => runLink)) layerLastRun = true
     playbookNodes = []
     playbookEdges = []
     meta = {}
@@ -982,13 +1158,14 @@
           {/if}
         </dl>
         {#if validation.length > 0}
-          <ul class="mt-3 flex flex-col gap-1 border-t border-line pt-2 text-xs">
-            {#each validation as v, i (i)}
-              <li class={v.severity === 'error' ? 'text-red' : 'text-amber'}>
-                {v.code}<span class="prose-text text-fg-2">: {v.message}{v.node ? ` (${v.node})` : ''}{v.edges?.length ? ` (edges ${v.edges.join(', ')})` : ''}</span>
-              </li>
-            {/each}
-          </ul>
+          <div class="issues-slot">
+            <IssuesPanel
+              issues={validation}
+              drawable={drawableOf(baseNodes, baseEdges)}
+              fix={{ workspace, id }}
+              onselect={selectIssue}
+            />
+          </div>
         {/if}
       </section>
 
@@ -1067,6 +1244,97 @@
         </div>
       {/if}
 
+      <div class="layers" data-testid="graph-layers">
+        <div class="layer-bar">
+          <button
+            type="button"
+            class="layer-toggle"
+            aria-pressed={layerLastRun}
+            onclick={toggleLastRun}
+            title="Lay a run of this playbook over the graph"
+            data-testid="layer-last-run">last run</button
+          >
+          <button
+            type="button"
+            class="layer-toggle"
+            aria-pressed={layerCounts}
+            onclick={toggleCounts}
+            title="How often each node executed over every recorded run"
+            data-testid="layer-counts">counts</button
+          >
+          {#if layerLastRun && overlay?.chosen}
+            <button
+              type="button"
+              class="layer-run"
+              onclick={() => (pickerOpen = !pickerOpen)}
+              title="Choose another run"
+              data-testid="layer-run-picker"
+            >
+              {overlay.chosen}
+              <span class={['badge', alignmentTone(overlay.alignment)]}>{alignmentText(overlay.alignment)}</span>
+            </button>
+          {:else if layerLastRun && overlayCandidates.length}
+            <button type="button" class="layer-run" onclick={() => (pickerOpen = !pickerOpen)}>choose a run</button>
+          {/if}
+        </div>
+        {#if layerLastRun}
+          {#if overlayLoading && !overlay}
+            <p class="layer-note">loading the runs</p>
+          {:else if overlayError}
+            <p class="layer-note warn">Could not load the runs: {overlayError}</p>
+          {:else if overlay && !overlay.chosen && !overlayCandidates.length}
+            <p class="layer-note">No run of this playbook yet.</p>
+          {:else if overlay && !overlay.chosen}
+            <p class="layer-note">No run of this version matches it exactly: choose one.</p>
+          {/if}
+          {#if overlay && graphWithheld(overlay.graph)}
+            <p class="layer-note warn">The run graph data is withheld: edge states are not shown.</p>
+          {/if}
+          {#if overlayNote}<p class="layer-note warn" data-testid="layer-banner">{overlayNote}</p>{/if}
+          {#if projected?.unprojected.length}
+            <details class="layer-note">
+              <summary>{projected.unprojected.length} not established (a definition that cannot be mapped)</summary>
+              <ul>
+                {#each projected.unprojected as row, i (i)}<li>{row.text}</li>{/each}
+              </ul>
+            </details>
+          {/if}
+          {#if pickerOpen}
+            <ul class="picker" data-testid="layer-picker">
+              {#each overlayCandidates as c (c.run_id)}
+                <li>
+                  <button
+                    type="button"
+                    class={['pick', c.run_id === overlay?.chosen && 'chosen']}
+                    onclick={() => pickRun(c.run_id)}
+                    title={c.reason ?? undefined}
+                  >
+                    <span class="pick-id">{c.run_id}</span>
+                    <span class="muted">{c.version}</span>
+                    <span class={['badge', alignmentTone(c.alignment)]}>{alignmentText(c.alignment)}</span>
+                    {#if c.reason}<span class="muted pick-reason">{c.reason}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+              {#if overlay?.next_before !== null && overlay?.next_before !== undefined}
+                <li>
+                  <button
+                    type="button"
+                    class="pick older"
+                    disabled={overlayLoading}
+                    onclick={() => void loadOverlay({ before: overlay?.next_before ?? undefined, run: overlay?.chosen ?? undefined })}
+                    >older</button
+                  >
+                </li>
+              {/if}
+            </ul>
+          {/if}
+        {/if}
+        {#if layerCounts && !countsReport}
+          <p class="layer-note">No run history to count yet.</p>
+        {/if}
+      </div>
+
       <SvelteFlow
         bind:nodes
         bind:edges
@@ -1076,12 +1344,19 @@
         nodesConnectable={false}
         elementsSelectable={false}
         elevateEdgesOnSelect={false}
-        onnodeclick={({ node }) => select(node.id)}
-        onpaneclick={() => select(null)}
+        onnodeclick={({ node }) => {
+          issueEdges = new Set()
+          select(node.id)
+        }}
+        onpaneclick={() => {
+          issueEdges = new Set()
+          select(null)
+        }}
       >
         <Background />
         <Controls showLock={false} />
         <FitTop {nodes} key={`${workspace}/${id}`} />
+        <FocusOn {focus} />
       </SvelteFlow>
     </div>
 
@@ -1289,6 +1564,113 @@
 />
 
 <style>
+  .issues-slot {
+    margin-top: 12px;
+    border-top: 1px solid var(--c-line);
+    padding-top: 8px;
+  }
+
+  /* The graph layers over the canvas. */
+  .layers {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-width: min(420px, calc(100% - 16px));
+    font-size: 11px;
+  }
+  .layer-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .layer-toggle,
+  .layer-run,
+  .pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--c-line-2);
+    background: var(--c-bg);
+    color: var(--c-fg-2);
+    font: inherit;
+    cursor: pointer;
+  }
+  .layer-toggle[aria-pressed='true'] {
+    border-color: var(--c-violet);
+    color: var(--c-violet);
+  }
+  .layer-toggle:focus-visible,
+  .layer-run:focus-visible,
+  .pick:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+  .layer-note {
+    margin: 0;
+    padding: 3px 8px;
+    border: 1px solid var(--c-line);
+    background: var(--c-bg);
+    color: var(--muted-foreground);
+  }
+  .layer-note.warn {
+    border-color: var(--c-amber);
+    color: var(--c-amber);
+  }
+  .layer-note ul {
+    margin: 4px 0 0;
+    padding-left: 14px;
+  }
+  .badge {
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    font-size: 10px;
+  }
+  .badge.ok {
+    color: var(--c-green);
+  }
+  .badge.warn {
+    color: var(--c-amber);
+  }
+  .badge.muted,
+  .muted {
+    color: var(--muted-foreground);
+  }
+  .picker {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 50vh;
+    margin: 0;
+    padding: 4px;
+    overflow: auto;
+    border: 1px solid var(--c-line-2);
+    background: var(--c-bg);
+    list-style: none;
+  }
+  .pick {
+    width: 100%;
+    flex-wrap: wrap;
+    border-color: transparent;
+    text-align: left;
+  }
+  .pick.chosen {
+    border-color: var(--c-violet);
+  }
+  .pick-id {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .pick-reason {
+    flex-basis: 100%;
+  }
+  .pick.older {
+    justify-content: center;
+  }
+
   .current-moves {
     margin-top: 10px;
     border-top: 1px solid var(--c-line);

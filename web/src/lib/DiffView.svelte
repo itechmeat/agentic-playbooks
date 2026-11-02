@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { fetchDiff } from './api'
+  import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
+  import { fetchDiff, fetchPlaybook } from './api'
+  import { diffUnion } from './diffgraph'
+  import type { FlowEdge, FlowNode } from './graph'
+  import PlaybookNode from './PlaybookNode.svelte'
+  import PlaybookEdge from './PlaybookEdge.svelte'
+  import FitTop from './FitTop.svelte'
   import { diffEdgeChanges, diffOrderChanges, formatDiff } from './difffmt'
   import type { VersionDiff } from './types'
   import { Button } from '$lib/components/ui/button'
@@ -15,6 +21,14 @@
   let diff = $state<VersionDiff | null>(null)
   let loading = $state(false)
   let error = $state<string | null>(null)
+  // "graph | yaml": the union canvas of the two versions, or the lists and
+  // the YAML diff.
+  let mode = $state<'graph' | 'yaml'>('yaml')
+  let graphNodes = $state.raw<FlowNode[]>([])
+  let graphEdges = $state.raw<FlowEdge[]>([])
+  let graphError = $state<string | null>(null)
+  const nodeTypes = { playbookNode: PlaybookNode }
+  const edgeTypes = { default: PlaybookEdge }
 
   const lines = $derived(diff ? formatDiff(diff.yaml_diff) : [])
   // The edges present in both versions whose attributes changed, and the
@@ -41,6 +55,17 @@
     error = null
     try {
       diff = await fetchDiff(id, from, to, workspace)
+      graphError = null
+      try {
+        const [b, a] = await Promise.all([fetchPlaybook(id, workspace, from), fetchPlaybook(id, workspace, to)])
+        const flow = diffUnion(b.playbook, a.playbook, diff)
+        graphNodes = flow.nodes
+        graphEdges = flow.edges
+      } catch (e) {
+        graphError = String(e)
+        graphNodes = []
+        graphEdges = []
+      }
     } catch (e) {
       error = String(e)
       diff = null
@@ -83,9 +108,39 @@
       diff
     </Button>
     {#if error}<span class="text-sm text-red" title={error}>error</span>{/if}
+    <span class="mode-switch" role="group" aria-label="Diff view">
+      <button type="button" aria-pressed={mode === 'graph'} onclick={() => (mode = 'graph')} data-testid="diff-mode-graph"
+        >graph</button
+      >
+      <button type="button" aria-pressed={mode === 'yaml'} onclick={() => (mode = 'yaml')} data-testid="diff-mode-yaml"
+        >yaml</button
+      >
+    </span>
   </div>
 
-  {#if diff}
+  {#if diff && mode === 'graph'}
+    {#if graphError}
+      <p class="graph-error">Could not load the two versions: {graphError}</p>
+    {:else}
+      <div class="diff-canvas" data-testid="diff-graph">
+        <SvelteFlow
+          nodes={graphNodes}
+          edges={graphEdges}
+          {nodeTypes}
+          {edgeTypes}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+        >
+          <Background />
+          <Controls showLock={false} />
+          <FitTop nodes={graphNodes} key={`${from}->${to}`} />
+        </SvelteFlow>
+      </div>
+    {/if}
+  {/if}
+
+  {#if diff && mode === 'yaml'}
     <div class="box flex flex-shrink-0 flex-col gap-2 px-3 py-2 text-xs">
       {#if diff.nodes_added.length}
         <div>
@@ -156,6 +211,39 @@
 
 <style>
   /* Plain CSS over the app's variables. */
+  .mode-switch {
+    display: inline-flex;
+    margin-left: auto;
+    border: 1px solid var(--c-line-2);
+  }
+  .mode-switch button {
+    padding: 2px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--c-fg-2);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .mode-switch button[aria-pressed='true'] {
+    background: var(--c-line);
+    color: var(--c-violet);
+  }
+  .mode-switch button:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+  .diff-canvas {
+    position: relative;
+    min-height: 320px;
+    flex: 1;
+    border: 1px solid var(--c-line);
+  }
+  .graph-error {
+    margin: 0;
+    color: var(--c-red);
+    font-size: 12px;
+  }
   .edge-list h4 {
     margin: 0;
     font-size: 11px;
