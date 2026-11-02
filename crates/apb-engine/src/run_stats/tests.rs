@@ -36,6 +36,30 @@ fn run(
         execution: Some("cli".into()),
         node_profiles: BTreeMap::new(),
         grades: Vec::new(),
+        definitions: snapshot.map(known).unwrap_or_default(),
+        diagnostics: Vec::new(),
+    }
+}
+
+/// The definitions of a run that executed `yaml` from its start, known.
+fn known(yaml: &str) -> crate::run_definitions::DefinitionsInForce {
+    use crate::run_definitions::*;
+    DefinitionsInForce {
+        segments: vec![Segment {
+            from_seq: 0,
+            to_seq: None,
+            boundary: Some(Boundary {
+                seq: 0,
+                definition: Some(digest(yaml.as_bytes())),
+                kind: BoundaryKind::Start,
+            }),
+            resolved: Resolved::Known {
+                playbook: Box::new(apb_core::schema::Playbook::from_yaml(yaml).unwrap()),
+                digest: digest(yaml.as_bytes()),
+            },
+            mismatch_recorded: false,
+        }],
+        playbook_changed: false,
     }
 }
 

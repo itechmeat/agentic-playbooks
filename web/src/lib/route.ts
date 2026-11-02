@@ -27,3 +27,27 @@ export function connectorRouteName(rest: string): string {
 export function connectorHref(name: string): string {
   return `#/connector/${encodeURIComponent(name)}`
 }
+
+/** What a route's query asks a page to open. */
+export interface RouteFocus {
+  node?: string
+  edge?: string
+  yaml?: boolean
+  run?: string
+}
+
+/** Splits `#/edit/ws/id?node=x` into its path and the focus it asks for. */
+export function splitRoute(hash: string): { path: string; focus: RouteFocus } {
+  const q = hash.indexOf('?')
+  if (q < 0) return { path: hash, focus: {} }
+  const params = new URLSearchParams(hash.slice(q + 1))
+  const focus: RouteFocus = {}
+  const node = params.get('node')
+  const edge = params.get('edge')
+  const run = params.get('run')
+  if (node) focus.node = node
+  if (edge) focus.edge = edge
+  if (run) focus.run = run
+  if (params.get('yaml') === '1') focus.yaml = true
+  return { path: hash.slice(0, q), focus }
+}

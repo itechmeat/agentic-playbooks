@@ -30,6 +30,11 @@ pub struct StatsRun {
     /// read only by [`StatsRun::with_grades`]: the readers that need no
     /// quality (estimates, retros) skip the grade files and their MACs.
     pub grades: Vec<apb_core::quality::grade::Grade>,
+    /// The definitions the run executed, by journal segment, resolved
+    /// against its stored definitions (membership and reasons read them).
+    pub definitions: crate::run_definitions::DefinitionsInForce,
+    /// The run's diagnostics sidecar records.
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
 }
 
 impl StatsRun {
@@ -45,6 +50,7 @@ impl StatsRun {
             })
             .unwrap_or_default();
         let manifest = crate::manifest::read(run_dir).ok().flatten();
+        let definitions = crate::run_definitions::DefinitionsInForce::load(run_dir, &j.events);
         let m = manifest.as_ref();
         Some(StatsRun {
             run_id: j.run_id,
@@ -68,6 +74,8 @@ impl StatsRun {
                 .map(crate::manifest::RunExecutionManifest::node_digests)
                 .unwrap_or_default(),
             grades: Vec::new(),
+            definitions,
+            diagnostics: crate::diagnostics::read(run_dir),
         })
     }
 

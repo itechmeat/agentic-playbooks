@@ -47,6 +47,7 @@ pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
             sections::goal(&w, report.goal.as_ref()),
             sections::steps(&w, &report.steps),
             sections::lists(&w, &report.outcome),
+            sections::route(&w, &report.graph),
             quality::grades(&w, &report.grades, report.grades_left_out),
             quality::known_problems(&w, report.known_problems.as_ref()),
             sections::publish(&w, &report.publish),

@@ -56,6 +56,21 @@ pub struct RunDetail {
     pub model: serde_json::Value,
     #[cfg_attr(test, ts(type = "WfLayout | null"))]
     pub layout: Option<serde_json::Value>,
+    /// What the journal proves about every node and edge of the
+    /// definitions the run executed, through the run's redactor; a string
+    /// when the run's text is withheld.
+    #[cfg_attr(test, ts(type = "RunGraph | string | null"))]
+    pub graph: Option<serde_json::Value>,
+    /// The definition of the graph's shown segment (the latest known one):
+    /// what the run canvas draws so edge states match the bytes that ran;
+    /// null when no definition of the run is established.
+    #[cfg_attr(
+        test,
+        ts(
+            type = "{ id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[]; defaults?: { on_failure?: string } | null } | null"
+        )
+    )]
+    pub graph_model: serde_json::Value,
     pub hooks: std::collections::BTreeMap<String, String>,
     /// Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
     pub children: Vec<apb_engine::run_view::ChildRun>,
@@ -357,6 +372,11 @@ pub(crate) async fn get_run_handler(
     let notify = apb_mcp::tools::notify::run_block(&run_dir, &view.events);
     let redactor = redaction.run_dir(&run_dir);
     let (params, redacted_params) = redactor.params(&cfg.params);
+    let (run_graph, shown_definition) = view.graph_and_definition(&run_dir);
+    let graph = Some(run_graph.present(&redactor));
+    let graph_model = shown_definition
+        .and_then(|p| serde_json::to_value(p).ok())
+        .unwrap_or(serde_json::Value::Null);
     let (run_status, driver_alive) = (view.run_status, view.driver_alive);
     let worktree = view.state.worktree.clone();
     let unknown_events = view.unknown.len();
@@ -386,6 +406,8 @@ pub(crate) async fn get_run_handler(
         redacted_params,
         model: playbook_json,
         layout,
+        graph,
+        graph_model,
         hooks,
         children,
         commits,

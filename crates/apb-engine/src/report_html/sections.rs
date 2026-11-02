@@ -133,6 +133,75 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
     )
 }
 
+/// The route: each node with its executions, every edge with what the
+/// journal established, the judge answers, the rows that resolve to no
+/// edge (not established) and why each node did not run, with its class.
+pub(super) fn route(w: &Writer, g: &crate::run_outcome::RunGraph) -> Markup {
+    use crate::run_outcome::EdgeState;
+    if g.shown_segment.is_none() {
+        return section(
+            "Route",
+            empty("The run's definition is not established, so its route is not shown."),
+        );
+    }
+    let nodes = w.table(
+        &["Node", "Executions", "Open", "Last status"],
+        g.nodes
+            .iter()
+            .map(|n| {
+                vec![
+                    n.node.clone(),
+                    n.executions.to_string(),
+                    n.open.to_string(),
+                    n.last_status.clone().unwrap_or_else(|| "none".into()),
+                ]
+            })
+            .collect(),
+    );
+    let edges = w.table(
+        &["Edge", "Segment", "State"],
+        g.edges
+            .iter()
+            .map(|e| {
+                let state = match &e.state {
+                    EdgeState::Taken { count } => format!("taken {count}"),
+                    EdgeState::NotTaken => "not taken".to_string(),
+                    EdgeState::NotEstablished { reason } => {
+                        format!("not established ({reason})")
+                    }
+                };
+                vec![e.rendered.clone(), e.segment.to_string(), state]
+            })
+            .collect(),
+    );
+    let mut lines: Vec<String> = g
+        .traversals
+        .iter()
+        .filter(|t| !t.resolved)
+        .map(|t| {
+            format!(
+                "hop {} -> {} at seq {}: not established ({})",
+                t.from,
+                t.to,
+                t.seq,
+                t.reason.as_deref().unwrap_or("cannot_tell")
+            )
+        })
+        .collect();
+    lines.extend(
+        g.lines().into_iter().filter(|l| {
+            l.starts_with("judge ") || l.starts_with("not run ") || l.starts_with("  ")
+        }),
+    );
+    Markup::concat([
+        section("Route", Markup::concat([nodes, edges])),
+        match lines.is_empty() {
+            true => Markup::default(),
+            false => section("Route detail", w.list(&lines)),
+        },
+    ])
+}
+
 /// What the run did, what was checked and what was not.
 pub(super) fn outcome(w: &Writer, o: &OutcomeSummary) -> Markup {
     let parts: Vec<Markup> = o

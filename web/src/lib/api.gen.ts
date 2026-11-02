@@ -790,10 +790,23 @@ export type NodeStats = { node: string,
  */
 runs: number, 
 /**
- * Runs whose definition contains the node, executed or not: a node no
- * run executed has a row with zero executions.
+ * Runs the node is established to belong to: a known definition the
+ * run executed declares it, or the run executed it. Counted once per
+ * run across its definitions. A node no run executed has a row with
+ * zero executions.
  */
 in_runs: number, 
+/**
+ * Runs where only the final snapshot names the node and a definition
+ * the run executed is not established: membership unknown, counted
+ * apart from `in_runs`.
+ */
+in_runs_unknown: number, 
+/**
+ * Why the node did not run in the runs it belongs to but did not
+ * execute in, one explanation per run, by class and code.
+ */
+not_run: Array<ReasonCount>, 
 /**
  * Executions begun, race losers left out (`crate::identity`).
  */
@@ -1357,7 +1370,19 @@ worktree: string | null,
 /**
  * The run's playbook snapshot; null for very old runs without one.
  */
-model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[]; defaults?: { on_failure?: string } | null } | null, layout: WfLayout | null, hooks: { [key in string]: string }, 
+model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[]; defaults?: { on_failure?: string } | null } | null, layout: WfLayout | null, 
+/**
+ * What the journal proves about every node and edge of the
+ * definitions the run executed, through the run's redactor; a string
+ * when the run's text is withheld.
+ */
+graph: RunGraph | string | null, 
+/**
+ * The definition of the graph's shown segment (the latest known one):
+ * what the run canvas draws so edge states match the bytes that ran;
+ * null when no definition of the run is established.
+ */
+graph_model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[]; defaults?: { on_failure?: string } | null } | null, hooks: { [key in string]: string }, 
 /**
  * Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
  */
@@ -2449,3 +2474,244 @@ edges: Array<EdgeCorrespondence>,
  * order, sorted by node id.
  */
 edge_order_changed: Array<EdgeOrderChange>, yaml_diff: string, };
+
+export type DefinitionSegmentView = { index: number, from_seq: number, 
+/**
+ * `None` for the segment in force now.
+ */
+to_seq: number | null, 
+/**
+ * `start`, `resume`, `patch`, or `none` for a journal without a
+ * boundary.
+ */
+opened_by: string, 
+/**
+ * The digest of its stored definition, when it is known.
+ */
+digest: string | null, known: boolean, 
+/**
+ * Why it is not known: `definition_not_journaled`,
+ * `definition_not_stored` or `definition_unreadable`.
+ */
+reason: string | null, 
+/**
+ * A resume recorded a definition mismatch against it (detail only).
+ */
+mismatch_recorded: boolean, };
+
+export type NodeRun = { node: string, 
+/**
+ * Executions begun, race losers left out.
+ */
+executions: number, 
+/**
+ * Of those, the ones still open.
+ */
+open: number, 
+/**
+ * `join: any` race losers.
+ */
+cancelled: number, 
+/**
+ * Ended executions by the status they ended with.
+ */
+by_status: { [key in string]: number }, 
+/**
+ * The status the run reports for the node now (liveness included).
+ */
+status: string | null, 
+/**
+ * The status its latest ended execution recorded.
+ */
+last_status: string | null, 
+/**
+ * Whether a known definition of the run declares the node.
+ */
+in_definition: boolean, };
+
+export type EdgeState = { "state": "taken", count: number, } | { "state": "not_taken" } | { "state": "not_established", reason: string, };
+
+export type EdgeRun = { segment: number, edge: EdgeAddress, 
+/**
+ * The address as the canvas and the journal spell it.
+ */
+rendered: string, from: string, to: string, } & ({ "state": "taken", count: number, } | { "state": "not_taken" } | { "state": "not_established", reason: string, });
+
+export type TraversalRow = { seq: number, from: string, to: string, 
+/**
+ * The ordinal of the source's execution that routed it.
+ */
+execution: number | null, via_policy: boolean, 
+/**
+ * `defaults` or `fork:<id>` for a policy delivery.
+ */
+policy: string | null, 
+/**
+ * The record spends a bounded edge's budget.
+ */
+counted: boolean, edges: Array<EdgeAddress>, segment: number | null, 
+/**
+ * It resolved to edges of a known definition (or is a policy hop).
+ */
+resolved: boolean, 
+/**
+ * Why it did not resolve.
+ */
+reason: string | null, };
+
+export type JudgeEvidence = { seq: number, 
+/**
+ * `native` (the judge's own decision model) or `emulation` (its
+ * declared `emulate` fallback).
+ */
+source: string, 
+/**
+ * The use's mode when it was asked (`off`, `shadow`, `advise`,
+ * `enforce`).
+ */
+mode: string, applied: boolean, provider: string | null, model: string | null, 
+/**
+ * The error kind when nothing usable came back.
+ */
+error: string | null, };
+
+export type JudgeComparison = { 
+/**
+ * `confidence` (choice), `p` (noul) or `value` (score).
+ */
+measure: string, observed: number, 
+/**
+ * Whether the answer passed its threshold; `None` for a score, which
+ * lands in a band or in none.
+ */
+passed: boolean | null, 
+/**
+ * The band a score fell into.
+ */
+band: string | null, 
+/**
+ * One line for people, such as `confidence 0.30 < 0.70: takes below`.
+ */
+label: string, };
+
+export type JudgeAnswerView = { 
+/**
+ * `native` or `emulation`, as in [`JudgeEvidence::source`].
+ */
+source: string, value: unknown, p: number | null, confidence: number | null, invalid: string | null, comparison: JudgeComparison | null, };
+
+export type JudgeQuestionView = { id: string, 
+/**
+ * `choice`, `noul` or `score`.
+ */
+kind: string, answers: Array<JudgeAnswerView>, 
+/**
+ * The value the node's output carries for the question (what routing
+ * read), apart from what the model said.
+ */
+routed_value: unknown, };
+
+export type JudgeNodeAnswers = { node: string, execution: number, segment: number | null, 
+/**
+ * The status the execution ended with; `None` while open.
+ */
+status: string | null, 
+/**
+ * From the output: `<provider>/<model>`, `default`, `unavailable` or
+ * `emulated:<provider>`.
+ */
+decided_by: string | null, 
+/**
+ * From the output: why a fallback answered.
+ */
+reason: string | null, 
+/**
+ * The declared `on_unavailable` form: `route`, `default`, `fail`,
+ * `emulate`, or `fail` when absent.
+ */
+fallback: string | null, evidence: Array<JudgeEvidence>, questions: Array<JudgeQuestionView>, };
+
+export type JudgeEdgeAnswer = { node: string, execution: number, seq: number, 
+/**
+ * The edge, when the decision named it or its rank resolves in a known
+ * definition; `None` reads as unknown.
+ */
+edge: EdgeAddress | null, rendered: string | null, p: number | null, min_p: number | null, mode: string, applied: boolean, 
+/**
+ * Whether routing took the edge, when that is established.
+ */
+taken: boolean | null, label: string, };
+
+export type ExplainClass = "observed" | "inferred" | "unknown";
+
+export type NotRunCode = "source_not_executed" | "routed_elsewhere" | "condition_not_matched" | "budget_spent" | "loop_exhausted" | "no_failure_to_route" | "failure_routed_elsewhere" | "delivered_not_executed" | "run_ended_first" | "cancelled_by_race" | "unreachable" | "no_input_delivered" | "run_not_finished" | "definition_unknown" | "duplicate_pair_before_edges" | "old_loop_round" | "output_clipped" | "open_execution" | "routing_not_recorded" | "cannot_tell";
+
+export type Entry = { "kind": "edge", edge: EdgeAddress, rendered: string, from: string, } | { "kind": "policy", policy: string, source: string | null, };
+
+export type InputFact = { segment: number, entry: Entry, class: ExplainClass, code: NotRunCode, detail: string, };
+
+export type NotRun = { node: string, class: ExplainClass, code: NotRunCode, detail: string, inputs: Array<InputFact>, };
+
+export type RunGraph = { segments: Array<DefinitionSegmentView>, 
+/**
+ * The latest known segment: the definition a run canvas draws, so
+ * edge states are matched by address against the bytes that ran.
+ */
+shown_segment: number | null, nodes: Array<NodeRun>, edges: Array<EdgeRun>, traversals: Array<TraversalRow>, judge_nodes: Array<JudgeNodeAnswers>, judge_edges: Array<JudgeEdgeAnswer>, not_run: Array<NotRun>, 
+/**
+ * The run journaled its end.
+ */
+ended: boolean, };
+
+export type Alignment = "exact" | "same_version_other_definition" | "patched" | "other_version" | "unknown";
+
+export type OverlayCandidate = { run_id: string, version: string, started_ts: number, alignment: Alignment, 
+/**
+ * Why it is not exact, in words.
+ */
+reason: string | null, };
+
+export type SegmentMapping = { segment: number, 
+/**
+ * Each edge of either definition with its counterpart (`before` is the
+ * run's segment, `after` the shown version); `None` for an unknown
+ * segment, which is never projected.
+ */
+correspondence: Array<EdgeCorrespondence> | null, 
+/**
+ * Nodes the segment has and the shown version lacks.
+ */
+missing_in_shown: Array<string>, 
+/**
+ * Nodes the shown version has and the segment lacks.
+ */
+missing_in_run: Array<string>, };
+
+export type PlaybookOverlay = { candidates: Array<OverlayCandidate>, 
+/**
+ * The `before` of the next page, when there is one.
+ */
+next_before: number | null, 
+/**
+ * The newest exact run of the shown version.
+ */
+default_run: string | null, 
+/**
+ * The run laid over the graph.
+ */
+chosen: string | null, alignment: Alignment | null, reason: string | null, 
+/**
+ * The chosen run's graph, through its run's redactor on the way out
+ * (a surface replaces it with [`RunGraph::present`]); a string when
+ * the run's text is withheld.
+ */
+graph: RunGraph | string | null, mapping: Array<SegmentMapping>, };
+
+export type ReasonCount = { class: ExplainClass, code: NotRunCode, runs: number, };
+
+export type DraftValidation = { 
+/**
+ * The YAML does not parse as a playbook: the parser's message, and no
+ * issues (the editor keeps the last valid ones).
+ */
+parse_error: string | null, issues: Array<IssueView>, };

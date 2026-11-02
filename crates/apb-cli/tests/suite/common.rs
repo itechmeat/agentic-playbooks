@@ -184,6 +184,34 @@ pub mod sig {
     }
 }
 
+/// Waits until the driver of run `run_id` let go of the busy lock of the
+/// tree it works in.
+///
+/// A driver journals `run_finished` and only then makes its last
+/// notification sweep, while it is still the run's one driver, before it
+/// releases the lock (`apb_engine::scheduler::drive`). So a command that
+/// needs the workdir right after the finish (a resume) can still find it
+/// busy; a test waits here after it saw the finish, which is what a person
+/// running the same commands one after another would never notice. Bounded.
+pub fn wait_released(root: &Path, run_id: &str) {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let events = apb_engine::event::read_all(&run_dir).unwrap_or_default();
+        let tree = apb_engine::state::RunState::fold(&events)
+            .worktree
+            .map(PathBuf::from);
+        if apb_engine::workdir::check_free_for(root, tree.as_deref(), run_id).is_ok() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the driver of {run_id} kept the workdir past 60s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Kills a detached run's driver when a test ends, however it ends. The
 /// driver deliberately outlives every process a test controls, so an assert
 /// that fails before the run finished would otherwise leave it running (a

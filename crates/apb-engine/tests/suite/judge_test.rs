@@ -723,3 +723,124 @@ fn a_judge_self_edge_loops_to_its_cap_then_takes_the_fallback() {
     );
     assert!(ran(&events, "done"));
 }
+
+/// The run graph of a finished run: its judge node view and its edge states.
+fn graph_of(p: &Project, run_id: &str) -> apb_engine::run_outcome::RunGraph {
+    let dir = p.run_dir(run_id);
+    apb_engine::run_view::RunView::load(&dir, run_id)
+        .unwrap()
+        .graph(&dir)
+}
+
+fn taken(g: &apb_engine::run_outcome::RunGraph, rendered: &str) -> bool {
+    g.edges.iter().any(|e| {
+        e.rendered == rendered
+            && matches!(e.state, apb_engine::run_outcome::EdgeState::Taken { .. })
+    })
+}
+
+/// A judge with a guarded choice and a score whose bands leave a gap; the
+/// else edge takes whatever no question exit matches.
+fn guarded(fallback: &str) -> String {
+    format!(
+        "schema: 2\nid: guarded\nname: guarded\nversion: 1.0.0\ndefaults:\n  profile: main\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: review, type: agent_task, prompt: review }}\n  - id: triage\n    type: judge\n    state: {{ x: \"{{{{nodes.review.output}}}}\" }}\n    questions:\n      verdict: {{ type: choice, instructions: \"Pick\", criteria: {{ clean: a, needs_fix: b, unclear: c }} }}\n      effort: {{ type: score, instructions: \"How much\", levels: [none, some, much] }}\n    thresholds:\n      verdict: {{ min_confidence: 0.7, below: unclear }}\n      effort: {{ bands: {{ low: [0, 1], high: [1.8, 2] }} }}\n{fallback}  - {{ id: fix, type: finish, outcome: success }}\n  - {{ id: big, type: finish, outcome: success }}\n  - {{ id: other, type: finish, outcome: success }}\n  - {{ id: failed, type: finish, outcome: failure }}\nedges:\n  - {{ from: start, to: review }}\n  - {{ from: review, to: triage }}\n  - {{ from: triage, to: failed, condition: {{ type: node_status, node: triage, equals: failure }} }}\n  - {{ from: triage, to: fix, condition: {{ type: output_field, node: triage, field: verdict, equals: needs_fix }} }}\n  - {{ from: triage, to: big, condition: {{ type: output_field, node: triage, field: effort, equals: high }} }}\n  - {{ from: triage, to: other, fallback: true }}\n"
+    )
+}
+
+fn guarded_fake(mode: &str, confidence: f64, score: f64) -> String {
+    format!(
+        "version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      verdict: {}\n      effort: {{ type: score, score: {score}, probabilities: {{ \"0\": 0.2, \"1\": 0.5, \"2\": 0.3 }} }}\nuses:\n  judge_node: {{ mode: {mode} }}\n",
+        json!({"type": "choice", "choice": "needs_fix", "probabilities": {"clean": 0.025, "needs_fix": 0.95, "unclear": 0.025}, "confidence": confidence})
+    )
+}
+
+/// Every fallback form and threshold case, as the run graph shows it: the
+/// route actually taken, who decided, the answer apart from the routed
+/// value, and the comparison each question routes on.
+#[test]
+fn the_run_graph_shows_every_judge_fallback_form() {
+    let _lock = common::env_lock();
+    // `route` without a provider, and in shadow: the unavailable exit, not
+    // the duplicate fallback beside it.
+    for mode in [None, Some("shadow")] {
+        let p = Project::new(&without_gate(&example()));
+        if let Some(m) = mode {
+            p.decisions(&fake(m, "needs_fix"));
+        }
+        let _env = p.env();
+        let (_, run_id, _) = p.run("review-triage");
+        let g = graph_of(&p, &run_id);
+        let j = &g.judge_nodes[0];
+        assert_eq!(j.decided_by.as_deref(), Some("unavailable"), "{mode:?}");
+        assert_eq!(j.fallback.as_deref(), Some("route"));
+        assert!(
+            taken(&g, "e:triage>human_review#1"),
+            "{mode:?}: {:?}",
+            g.edges
+        );
+        assert!(!taken(&g, "e:triage>human_review#2"));
+        match mode {
+            Some(_) => {
+                assert_eq!(j.evidence.len(), 1);
+                assert!(!j.evidence[0].applied && j.evidence[0].mode == "shadow");
+                // The model said needs_fix; routing read no verdict.
+                let q = apb_engine::run_outcome::judge_answers::questions_by_id(j);
+                assert_eq!(q["verdict"].answers[0].value, Some(json!("needs_fix")));
+                assert_eq!(q["verdict"].routed_value, None);
+            }
+            None => assert!(j.evidence.is_empty()),
+        }
+    }
+    // `default` routes through the question exits; `fail` takes the
+    // failure edge.
+    let p = Project::new(&small(
+        "    on_unavailable: { default: { verdict: needs_fix, risky: true } }\n",
+        "",
+    ));
+    let _env = p.env();
+    let (_, run_id, _) = p.run("small");
+    let g = graph_of(&p, &run_id);
+    assert_eq!(g.judge_nodes[0].decided_by.as_deref(), Some("default"));
+    assert!(taken(&g, "e:triage>fix#1"));
+    let p = Project::new(&small("    on_unavailable: fail\n", ""));
+    let _env = p.env();
+    let (_, run_id, _) = p.run("small");
+    let g = graph_of(&p, &run_id);
+    assert_eq!(g.judge_nodes[0].status.as_deref(), Some("failed"));
+    assert!(taken(&g, "e:triage>failed#1"));
+    // `emulate` through the profile routes through the question exits.
+    let p = Project::new(&small("    on_unavailable: emulate\n", ""));
+    p.set_emulation("```json\n{\"q1\": 0.9, \"q2\": {\"clean\": 0.1, \"needs_fix\": 0.8, \"unclear\": 0.1}}\n```");
+    let _env = p.env();
+    let (_, run_id, _) = p.run("small");
+    let g = graph_of(&p, &run_id);
+    let j = &g.judge_nodes[0];
+    assert_eq!(j.decided_by.as_deref(), Some("emulated:profile:main"));
+    assert_eq!(j.evidence[0].source, "emulation");
+    assert!(taken(&g, "e:triage>fix#1"));
+    // `below` under min_confidence, and a score in a band gap: no value is
+    // written, so the else edge is taken.
+    let p = Project::new(&guarded("    on_unavailable: fail\n"));
+    p.decisions(&guarded_fake("enforce", 0.3, 1.5));
+    let _env = p.env();
+    let (_, run_id, events) = p.run("guarded");
+    let out = output(&events, "triage").unwrap().1;
+    assert_eq!(
+        out["verdict"],
+        json!("unclear"),
+        "{out} {:?}",
+        decisions(&events)
+    );
+    assert!(out.get("effort").is_none(), "{out}");
+    let g = graph_of(&p, &run_id);
+    let j = &g.judge_nodes[0];
+    let q = apb_engine::run_outcome::judge_answers::questions_by_id(j);
+    let c = q["verdict"].answers[0].comparison.as_ref().unwrap();
+    assert_eq!((c.measure.as_str(), c.passed), ("confidence", Some(false)));
+    assert!(c.label.contains("takes `unclear`"), "{}", c.label);
+    assert_eq!(q["verdict"].routed_value, Some(json!("unclear")));
+    let e = q["effort"].answers[0].comparison.as_ref().unwrap();
+    assert_eq!(e.band, None);
+    assert!(taken(&g, "e:triage>other#1"), "{:?}", g.edges);
+    assert!(!taken(&g, "e:triage>fix#1") && !taken(&g, "e:triage>big#1"));
+}

@@ -40,6 +40,8 @@ const detail = (
   worktree: null,
   model: null,
   layout: null,
+  graph: null,
+  graph_model: null,
   hooks: {},
   children: [],
   progress: p,

@@ -643,6 +643,36 @@ pub(crate) async fn list_playbooks(State(state): State<AppState>) -> impl IntoRe
     Json(out).into_response()
 }
 
+/// The issues the playbook detail and the editor's draft validation show:
+/// the validator's, plus the missing profile and script references of the
+/// version directory `version_dir` (V91, V92) as warnings, because the
+/// editor saves the YAML first and the profile or the scripts may follow;
+/// `apb validate` errors on them. Reads only.
+pub(crate) fn validation_issues(
+    reg: &Registry,
+    root: &std::path::Path,
+    version_dir: &std::path::Path,
+    playbook: &apb_core::schema::Playbook,
+) -> Vec<apb_core::validate::IssueView> {
+    let ctx =
+        ValidationContext::for_registry(reg, apb_core::profile_store::PlaybookOrigin::Project);
+    let mut report = validate(playbook, &ctx);
+    report.issues.extend(
+        apb_core::preflight::missing_references(
+            root,
+            apb_core::profile_store::PlaybookOrigin::Project,
+            version_dir,
+            playbook,
+        )
+        .into_iter()
+        .map(|mut i| {
+            i.severity = Severity::Warning;
+            i
+        }),
+    );
+    report.issues.iter().map(Into::into).collect()
+}
+
 #[derive(Deserialize)]
 pub(crate) struct DetailQuery {
     version: Option<String>,
@@ -667,28 +697,12 @@ pub(crate) async fn get_playbook(
     };
     match reg.load(&id, q.version.as_deref()) {
         Ok(loaded) => {
-            let ctx = ValidationContext::for_registry(
+            let validation = validation_issues(
                 &reg,
-                apb_core::profile_store::PlaybookOrigin::Project,
+                &root,
+                &reg.version_dir(&id, &loaded.version),
+                &loaded.playbook,
             );
-            let mut report = validate(&loaded.playbook, &ctx);
-            // V91, V92 as warnings: the editor saves the YAML first and the
-            // profile or the scripts may follow; `apb validate` errors.
-            report.issues.extend(
-                apb_core::preflight::missing_references(
-                    &root,
-                    apb_core::profile_store::PlaybookOrigin::Project,
-                    &reg.version_dir(&id, &loaded.version),
-                    &loaded.playbook,
-                )
-                .into_iter()
-                .map(|mut i| {
-                    i.severity = Severity::Warning;
-                    i
-                }),
-            );
-            let validation: Vec<apb_core::validate::IssueView> =
-                report.issues.iter().map(Into::into).collect();
             Json(serde_json::json!({
                 "id": id,
                 "version": loaded.version,

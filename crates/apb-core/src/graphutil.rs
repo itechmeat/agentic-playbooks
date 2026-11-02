@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::schema::Playbook;
+use crate::schema::{FailurePolicy, NodeKind, Playbook};
 
 /// Successor adjacency of the node graph. Every declared node gets an entry,
 /// including one with no outgoing edge; an edge whose endpoint is not a
@@ -87,6 +87,54 @@ pub fn reachable(playbook: &Playbook, from: &[&str]) -> BTreeSet<String> {
     seen
 }
 
+/// The nodes a run of `playbook` can reach at all: forward from the start
+/// node, and from every failure route that has no edge drawn for it (the
+/// `defaults.on_failure` handler and every fork's `on_failure` target).
+/// Empty when the playbook has no start node. The validator's unreachable
+/// rule (V07) and the run's "why it did not run" explanation both read this,
+/// so the two never disagree about what is reachable.
+pub fn reachable_with_policies(playbook: &Playbook) -> HashSet<&str> {
+    let Some(start) = playbook
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::Start))
+    else {
+        return HashSet::new();
+    };
+    let adj = adjacency(playbook);
+    let mut q = VecDeque::from([start.id.as_str()]);
+    q.extend(policy_handlers(playbook));
+    let mut seen = HashSet::new();
+    while let Some(id) = q.pop_front() {
+        if seen.insert(id) {
+            for next in adj.get(id).into_iter().flatten() {
+                q.push_back(next);
+            }
+        }
+    }
+    seen
+}
+
+/// The declared nodes a failure policy routes to without an edge: the
+/// `defaults.on_failure` handler first, then every fork's `on_failure`
+/// target in node order.
+pub fn policy_handlers(playbook: &Playbook) -> Vec<&str> {
+    let mut out = Vec::new();
+    if let FailurePolicy::Node(target) = &playbook.defaults.on_failure
+        && playbook.node(target).is_some()
+    {
+        out.push(target.as_str());
+    }
+    for n in &playbook.nodes {
+        if let Some(target) = n.fork.as_ref().and_then(|f| f.on_failure.as_deref())
+            && playbook.node(target).is_some()
+        {
+            out.push(target);
+        }
+    }
+    out
+}
+
 /// The strongly connected components of the node graph (iterative Tarjan).
 /// Every declared node appears in exactly one component; a component of one
 /// node is cyclic only when that node carries a self-loop edge.
@@ -156,6 +204,37 @@ pub fn sccs(playbook: &Playbook) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reachability_with_policies_seeds_the_start_and_every_failure_handler() {
+        let pb = crate::schema::Playbook::from_yaml(
+            r#"
+schema: 2
+id: p
+name: P
+version: 1.0.0
+defaults: { on_failure: report }
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: prompt, prompt: "w" }
+  - { id: report, type: prompt, prompt: "r" }
+  - { id: after, type: finish, outcome: failure }
+  - { id: lost, type: prompt, prompt: "l" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+  - { from: report, to: after }
+"#,
+        )
+        .unwrap();
+        let seen = reachable_with_policies(&pb);
+        for id in ["start", "work", "done", "report", "after"] {
+            assert!(seen.contains(id), "{id}");
+        }
+        assert!(!seen.contains("lost"));
+        assert_eq!(policy_handlers(&pb), ["report"]);
+    }
 
     const DIAMOND_WITH_LOOP: &str = r#"
 schema: 1

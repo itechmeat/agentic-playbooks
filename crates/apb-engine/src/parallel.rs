@@ -239,7 +239,22 @@ fn selected_edges_as_run<'a>(
     from: &str,
     state: &RunState,
 ) -> Vec<&'a Edge> {
-    select_edges(playbook, from, state, |e| {
+    evaluate_route_as_run(playbook, from, state)
+        .chosen
+        .into_iter()
+        .map(|i| &playbook.edges[i])
+        .collect()
+}
+
+/// [`evaluate_route`] with the as-run availability of
+/// [`selected_edges_as_run`]: the decision `from`'s latest execution made,
+/// re-derived from the state at its routing boundary. Read surfaces only.
+pub(crate) fn evaluate_route_as_run(
+    playbook: &Playbook,
+    from: &str,
+    state: &RunState,
+) -> RouteEvaluation {
+    evaluate_route(playbook, from, state, |e| {
         edge_available(e, state)
             || state.hop_of_latest_run(&e.from, &e.to)
                 && state

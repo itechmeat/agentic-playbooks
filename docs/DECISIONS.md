@@ -752,6 +752,23 @@ true. A drive that stopped between the node's finish and the decision asks on
 resume; an execution already decided is never asked again. A failed source
 asks nothing. Judge edges go to the decision models only, never to emulation.
 
+## Judge answers on the run graph
+
+The run page, `run_report.route`, `apb runs <id>` and the HTML report show
+each judge node execution and each judge edge answer from the journal
+(`apb_engine::run_outcome::judge_answers`). A judge node's view is built
+from its `node_finished` output even when no decision was journaled: a judge
+that is off or not configured still shows its `decided_by` (`unavailable` or
+`default`), its reason and the route it took. Each question compares the
+measure its type routes on: a choice's confidence with `min_confidence`
+(below it the engine substitutes `below`, so `confidence 0.30 < 0.70: takes
+below` is shown even when the choice's probability is 0.95), a noul's `p`
+with `yes_at`, a score's value with its bands (a value in a gap writes no
+field). The model's answer and the routed output are shown apart, and the
+native ask and an `emulate` fallback of the same execution are separate
+evidence. A judge edge shows its `p` against `min_p`, and whether routing
+took it only when that is established.
+
 ## Engine uses (issue #165 Parts 8 to 12)
 
 Each use lives in its own module under `crates/apb-engine/src/decision/` and

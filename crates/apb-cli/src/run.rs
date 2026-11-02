@@ -1506,6 +1506,10 @@ fn run_detail_text(
     for (node, status) in view.nodes() {
         say!("  {node}\t{status}");
     }
+    say!("  route:");
+    for line in view.graph(&run_dir).lines() {
+        say!("    {line}");
+    }
     // Issue #193: the model each attempt actually ran on.
     for a in apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events) {
         let mut line = format!(

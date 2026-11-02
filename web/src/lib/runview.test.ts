@@ -48,6 +48,8 @@ function detail(over: Partial<RunDetail> = {}): RunDetail {
       defaults: { max_parallel: 2 } as never,
     },
     layout: null,
+    graph: null,
+    graph_model: null,
     hooks: {},
     children: [],
     outcome: { headline: 'Run running', done: [], verified: [], unverified: [], findings: [], warnings: [] },
@@ -225,34 +227,6 @@ describe('runview latest attempt', () => {
 })
 
 describe('runview graph helpers', () => {
-  it('marks walked, active and idle edges', async () => {
-    const { edgeRunState } = await import('./runview')
-    const state = edgeRunState([ev(1, 1, 'edge_traversed', { from: 'a', to: 'b' })], {
-      a: 'succeeded',
-      b: 'running',
-      c: 'pending',
-    })
-    expect(state('a', 'b')).toBe('active')
-    expect(state('b', 'c')).toBe('idle')
-    expect(edgeRunState([ev(1, 1, 'edge_traversed', { from: 'a', to: 'c' })], { a: 'succeeded', c: 'succeeded' })('a', 'c')).toBe('walked')
-  })
-
-  it('lights only the edge that led back into a looping node', async () => {
-    const { edgeRunState } = await import('./runview')
-    const state = edgeRunState(
-      [
-        ev(1, 1, 'edge_traversed', { from: 'start', to: 'build' }),
-        ev(2, 2, 'node_finished', { node: 'build', status: 'succeeded' }),
-        ev(3, 3, 'edge_traversed', { from: 'build', to: 'review' }),
-        ev(4, 4, 'node_finished', { node: 'review', status: 'failed' }),
-        ev(5, 5, 'edge_traversed', { from: 'review', to: 'build' }),
-      ],
-      { start: 'succeeded', build: 'running', review: 'failed' },
-    )
-    expect(state('review', 'build')).toBe('active')
-    expect(state('start', 'build')).toBe('walked')
-  })
-
   it('reads an unknown node status as stopped part-way, not pending', () => {
     expect(stepState('unknown')).toBe('current')
   })

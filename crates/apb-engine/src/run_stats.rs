@@ -122,9 +122,18 @@ pub struct NodeStats {
     /// (an open one included). A finish without a prompt is an execution;
     /// a `join: any` race loser is not counted here ([`NodeStats::cancelled`]).
     pub runs: usize,
-    /// Runs whose definition contains the node, executed or not: a node no
-    /// run executed has a row with zero executions.
+    /// Runs the node is established to belong to: a known definition the
+    /// run executed declares it, or the run executed it. Counted once per
+    /// run across its definitions. A node no run executed has a row with
+    /// zero executions.
     pub in_runs: usize,
+    /// Runs where only the final snapshot names the node and a definition
+    /// the run executed is not established: membership unknown, counted
+    /// apart from `in_runs`.
+    pub in_runs_unknown: usize,
+    /// Why the node did not run in the runs it belongs to but did not
+    /// execute in, one explanation per run, by class and code.
+    pub not_run: Vec<route::ReasonCount>,
     /// Executions begun, race losers left out (`crate::identity`).
     pub executions: usize,
     /// Of those, the ones that ended.
@@ -408,6 +417,14 @@ struct RunFacts {
 struct NodeAcc {
     runs: usize,
     in_runs: usize,
+    in_runs_unknown: usize,
+    not_run: BTreeMap<
+        (
+            crate::run_outcome::route_explain::ExplainClass,
+            crate::run_outcome::route_explain::NotRunCode,
+        ),
+        usize,
+    >,
     executions: usize,
     completed: usize,
     open: usize,
@@ -569,11 +586,16 @@ fn run_facts(
             acc.first_pass += 1;
         }
     }
-    // Every node of the run's definition gets a row, executed or not.
-    if let Some(pb) = &run.snapshot {
-        for n in &pb.nodes {
-            nodes.entry(n.id.clone()).or_default().in_runs += 1;
-        }
+    // Every node the run is established to contain gets a row, executed or
+    // not; a node only the final snapshot names counts as unknown.
+    let r = route::run_route(run);
+    for n in &r.members {
+        let acc = nodes.entry(n.clone()).or_default();
+        acc.in_runs += 1;
+        route::add_reason(&mut acc.not_run, &r, n);
+    }
+    for n in &r.unknown {
+        nodes.entry(n.clone()).or_default().in_runs_unknown += 1;
     }
     (f.gate_waits, f.question_waits) = spans::human_waits(ev);
     f
@@ -673,6 +695,8 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
                 first_pass: Rate::new(a.first_pass, a.runs),
                 runs: a.runs,
                 in_runs: a.in_runs,
+                in_runs_unknown: a.in_runs_unknown,
+                not_run: route::counts(a.not_run),
                 executions: a.executions,
                 completed: a.completed,
                 open: a.open,
@@ -745,6 +769,7 @@ pub mod models;
 pub mod quality;
 mod rate;
 mod render;
+pub mod route;
 pub(crate) mod spans;
 mod stats_run;
 mod waits;

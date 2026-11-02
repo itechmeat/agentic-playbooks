@@ -6,7 +6,12 @@ import {
   digestText,
   executorGroups,
   modelsText,
+  nodeLayer,
+  nodeStatsOf,
+  nodeStatsText,
   perRunText,
+  reasonClassText,
+  reasonLines,
   previousVersion,
   qualityDeltaText,
   qualityDeltas,
@@ -18,7 +23,7 @@ import {
   versionsNewestFirst,
   waitsText,
 } from './playbookstats'
-import type { QualityStats, StatsReport, VersionStats } from './api.gen'
+import type { NodeStats, QualityStats, StatsReport, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
   playbook: 'p',
@@ -134,6 +139,8 @@ describe('executor digests', () => {
     node: name,
     runs: 2,
     in_runs: 2,
+    in_runs_unknown: 0,
+    not_run: [],
     executions: 2,
     completed: 2,
     open: 0,
@@ -257,5 +264,77 @@ describe('quality in the stats', () => {
     expect(body).toContain('outcome (rules/1, default), definition aa')
     expect(body).toContain('outcome (rules/1, default), definition bbbbbbbb')
     expect(qualityLabels([row()])).toEqual(['outcome (rules/1, default)'])
+  })
+})
+
+describe('node statistics', () => {
+  const stats = (node: string, over: Partial<NodeStats> = {}): NodeStats => ({
+    node,
+    runs: 0,
+    in_runs: 0,
+    in_runs_unknown: 0,
+    not_run: [],
+    executions: 0,
+    completed: 0,
+    open: 0,
+    failed: 0,
+    cancelled: 0,
+    first_pass: { count: 0, of: 0 },
+    retries: 0,
+    fallbacks: 0,
+    reentries: 0,
+    duration: { count: 0 },
+    deliverable_missing: 0,
+    output_fields_missing: 0,
+    digests: [],
+    models: {},
+    model_mismatch: 0,
+    ...over,
+  })
+
+  it('shows a zero row for a node no run executed, with its reasons by class', () => {
+    const n = stats('deploy', {
+      in_runs: 4,
+      not_run: [
+        { class: 'observed', code: 'routed_elsewhere', runs: 2 },
+        { class: 'inferred', code: 'condition_not_matched', runs: 1 },
+        { class: 'unknown', code: 'cannot_tell', runs: 1 },
+      ],
+    })
+    expect(nodeStatsText(n)).toBe('0 executions, 0 completed, 0 open, 0 failed; in 0 of 4 runs')
+    expect(reasonClassText(n.not_run)).toBe('seen 2, inferred 1, unknown 1')
+    expect(nodeLayer(n).text).toBe('not executed in 4 runs (seen 2, inferred 1, unknown 1)')
+    expect(nodeLayer(n).text).not.toMatch(/dead/)
+    expect(reasonLines(n.not_run)[0]).toBe('routed elsewhere: 2 (seen)')
+  })
+
+  it('counts a promptless finish as an execution and keeps race losers apart', () => {
+    const finish = stats('done', { runs: 3, in_runs: 3, executions: 3, completed: 3 })
+    expect(nodeStatsText(finish)).toBe('3 executions, 3 completed, 0 open, 0 failed; in 3 of 3 runs')
+    const raced = stats('b', { runs: 1, in_runs: 2, executions: 1, completed: 1, cancelled: 1 })
+    expect(nodeStatsText(raced)).toContain('1 cancelled by a race')
+  })
+
+  it('uses the membership denominator and shows unknown membership apart', () => {
+    const n = stats('fix', {
+      runs: 2,
+      in_runs: 5,
+      in_runs_unknown: 1,
+      executions: 3,
+      completed: 2,
+      open: 1,
+      failed: 1,
+      not_run: [{ class: 'observed', code: 'routed_elsewhere', runs: 3 }],
+    })
+    expect(nodeLayer(n).text).toBe(
+      'executed 3 times in 2 of 5 runs; not executed in 3 runs (seen 3); membership unknown in 1 run',
+    )
+    expect(nodeLayer(n).title).toContain('membership unknown in 1 run')
+    expect(nodeStatsText(n)).toBe('3 executions, 2 completed, 1 open, 1 failed; in 2 of 5 runs, membership unknown in 1 run')
+    const report = { runs: 5, versions: [version('1.0.0', { nodes: [n] })] } as StatsReport
+    expect(nodeStatsOf(report, '1.0.0').get('fix')).toBe(n)
+    const body = render(PlaybookStatsCard, { props: { report } }).body
+    expect(body).toContain('data-testid="playbook-stats-nodes"')
+    expect(body).toContain('not run: seen 3')
   })
 })

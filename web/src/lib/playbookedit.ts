@@ -1,4 +1,4 @@
-import { Document, isAlias, isMap as isYamlMap, visit, YAMLMap, YAMLSeq, type Alias } from 'yaml'
+import { Document, isAlias, isMap as isYamlMap, Scalar, visit, YAMLMap, YAMLSeq, type Alias } from 'yaml'
 
 // Structural mutations of the playbook model. The source of truth is the YAML
 // text, so edits go through the `yaml` package's AST (Document): this preserves
@@ -249,6 +249,73 @@ export function removeEdge(doc: Document, address: EdgeAddress | string, index?:
     })
   }
   seq.items.splice(item, 1)
+  return next
+}
+
+/**
+ * Adds the edge of a judge exit: `{ from, to, condition: { type:
+ * output_field, node: from, field, equals: "<value>" } }`, `equals` always
+ * a quoted string, placed and given an id as `addEdge` does.
+ */
+export function addJudgeExit(doc: Document, from: string, field: string, value: string, to: string): Document {
+  const equals = new Scalar(value)
+  equals.type = Scalar.QUOTE_DOUBLE
+  return addEdge(doc, from, to, { type: 'output_field', node: from, field, equals })
+}
+
+/**
+ * Points the edge `address` names at `to`: its id, condition and every
+ * other key stay. Dropping it on its current target changes nothing. A
+ * retarget that makes it an id-less duplicate of a pair gives it an id.
+ */
+export function retargetEdge(doc: Document, address: EdgeAddress | string, to: string, index?: number): Document {
+  const next = doc.clone()
+  const seq = next.get('edges')
+  if (!(seq instanceof YAMLSeq)) return next
+  const item = itemOf(next, seq, address, index)
+  if (item < 0) return next
+  const raw = seq.items[item]
+  const node = isAlias(raw) ? raw.resolve(next) : raw
+  if (!isYamlMap(node)) return next
+  const plain = node.toJSON() as Record<string, unknown>
+  if (plain.to === to) return doc.clone()
+  const others = docEdges(next, seq).filter((e) => e.item !== item)
+  if (typeof plain.id !== 'string') {
+    const id = idForPair(others, String(plain.from), to)
+    if (id) node.items.unshift(next.createPair('id', id) as never)
+  }
+  node.set('to', to)
+  return next
+}
+
+/**
+ * Routes a judge's unavailable answer to `to` in one mutation: sets
+ * `on_unavailable: { route: to }` and retargets the `decided_by =
+ * unavailable` edge, creating it when it is missing.
+ */
+export function routeUnavailable(doc: Document, judge: string, to: string): Document {
+  let next = doc.clone()
+  const nodes = next.get('nodes')
+  if (!(nodes instanceof YAMLSeq)) return next
+  const node = nodeById(nodes, judge) as YAMLMap | undefined
+  if (!node || !isYamlMap(node)) return next
+  node.set('on_unavailable', next.createNode({ route: to }))
+  const seq = next.get('edges')
+  const existing = seq instanceof YAMLSeq ? docEdges(next, seq) : []
+  const at = existing.find((e) => {
+    const c = e.condition as Record<string, unknown> | undefined
+    return (
+      e.from === judge &&
+      e.fallback !== true &&
+      c?.type === 'output_field' &&
+      c.node === judge &&
+      c.field === 'decided_by' &&
+      String(c.equals) === 'unavailable'
+    )
+  })
+  if (!at) return addJudgeExit(next, judge, 'decided_by', 'unavailable', to)
+  const address = edgeAddresses(existing)[existing.indexOf(at)].rendered
+  next = retargetEdge(next, address, to, at.item)
   return next
 }
 

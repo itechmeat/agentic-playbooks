@@ -5,6 +5,8 @@ import { profileModelKey, profileToField, usesDefaultProfile, type ProfileScope 
 export { profileModelKey }
 import { listBadge } from './listprogress'
 import { edgeAddresses, type AddressedEdge } from './edgeaddress'
+import type { EdgeRunLook } from './runoverlay'
+import { judgeExits, type JudgeExits } from './judgeexits'
 
 /**
  * What a graph card (PlaybookNode.svelte) shows. `toFlow` fills the playbook
@@ -49,6 +51,27 @@ export type FlowNodeData = {
   duration?: string
   /** Short note after the status, e.g. `#205` or `no · 0.91`. */
   note?: string
+  /**
+   * Run view: identity-derived counts of the node over the run (`x3` above
+   * one execution) and their tooltip; the status stays the reported one.
+   */
+  runCount?: { badge: string | null; title: string }
+  /** Run view: why the node did not run, as a tooltip (`notRunTitle`). */
+  notRun?: { word: string; title: string }
+  /** Run view: a judge node's latest answers (`judgeCard`). */
+  judge?: { lines: string[]; more: number; routed: string[]; shadow: boolean; title: string }
+  /** A layer line under the card (the playbook page's counts layer). */
+  layer?: { text: string; title: string }
+  /** Validation issues about this node, one per line, for its marker. */
+  issue?: { text: string; error: boolean }
+  /** Judge exits without an edge yet (the editor's hollow handles). */
+  hollow?: { id: string; label: string; title: string }[]
+  /** A note under a judge's exits (score without bands, a band gap). */
+  exitNote?: string
+  /** The diff canvas: how the node differs between the two versions. */
+  diff?: 'added' | 'removed' | 'changed'
+  /** The diff canvas: its one-of edges are checked in another order. */
+  orderChanged?: boolean
 }
 
 export interface FlowNode {
@@ -68,13 +91,22 @@ export interface FlowNode {
 export type EdgeTone = 'plain' | 'cond' | 'fail' | 'else'
 
 /**
- * What the edge component (PlaybookEdge.svelte) reads. `state` is optional
- * and only set by a run view: `walked` was traversed, `active` leads to the
- * running node, `idle` was not reached (dimmed). Absent: the plain look.
+ * What the edge component (PlaybookEdge.svelte) reads. `run` is optional
+ * and only set from a run graph (`runoverlay`): taken (solid, a count above
+ * one), not taken (dimmed) or not established (dotted, never a count).
+ * Absent: the plain look.
  */
 export type FlowEdgeData = {
   tone: EdgeTone
-  state?: 'walked' | 'active' | 'idle'
+  run?: EdgeRunLook
+  /** Validation issues about this edge, for its marker. */
+  issue?: { text: string; error: boolean }
+  /** Highlighted as the target of a selected issue. */
+  highlight?: boolean
+  /** The diff canvas: how the edge differs, and its address in each version. */
+  diff?: 'added' | 'removed' | 'changed'
+  before?: string
+  after?: string
   /**
    * The edge's rendered address (`apb_core::edge_address`), which is also
    * its canvas id unless an id used twice (a validation error) made the id
@@ -117,7 +149,7 @@ const PILL_H = 30
 
 /** Whether a card draws the row of exit captions. */
 export function hasExitRow(exits: NodeExits | null | undefined): boolean {
-  return !!exits && exits.list.length > 0
+  return !!exits && (exits.list.length > 0 || exits.hollowOnly === true)
 }
 
 /**
@@ -235,6 +267,8 @@ export interface NodeExits {
   list: NodeExit[]
   /** How many unconditional edges leave together from the plain handle. */
   parallel: number
+  /** Layout only: the row holds a judge's hollow exits and nothing else. */
+  hollowOnly?: boolean
 }
 
 /**
@@ -633,9 +667,11 @@ export interface ToFlowOptions {
   forceAuto?: boolean
   /** A list node's items processed of its total, in a run. */
   listProgress?: Record<string, { processed: number; total: number }>
+  /** The editor: a judge's values without an edge as hollow handles. */
+  judgeExits?: boolean
 }
 
-const OPTION_KEYS = ['layout', 'statuses', 'cachedIds', 'forceAuto', 'listProgress']
+const OPTION_KEYS = ['layout', 'statuses', 'cachedIds', 'forceAuto', 'listProgress', 'judgeExits']
 
 /** The options of a call, which may pass a bare stored layout in their place. */
 function flowOptions(arg: ToFlowOptions | WfLayout | null | undefined): ToFlowOptions {
@@ -652,7 +688,7 @@ export function toFlow(
   playbook: PlaybookModel,
   options?: ToFlowOptions | WfLayout | null,
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const { layout, statuses, cachedIds, forceAuto, listProgress } = flowOptions(options)
+  const { layout, statuses, cachedIds, forceAuto, listProgress, judgeExits: withJudge } = flowOptions(options)
   // `forceAuto` is the topbar "Re-layout" button: it ignores any stored
   // arrangement (manual or otherwise) and recomputes from scratch, so the
   // result is auto again and can be persisted without the userArranged marker.
@@ -665,11 +701,21 @@ export function toFlow(
   const exits = new Map<string, NodeExits | null>(
     playbook.nodes.map((n) => [n.id, nodeExits(playbook, n.id, addressed)]),
   )
+  const judges = new Map<string, JudgeExits>()
+  if (withJudge) {
+    for (const n of playbook.nodes) {
+      const j = n.type === 'judge' ? judgeExits(playbook, n.id, addressed) : null
+      if (j && (j.hollow.length || j.notes.length)) judges.set(n.id, j)
+    }
+  }
 
   const needAuto = forceAuto || playbook.nodes.some((n) => !stored.has(n.id))
   const auto = new Map<string, { x: number; y: number }>()
   if (needAuto) {
-    for (const [id, pos] of autoLayout(playbook, exits, addressed)) auto.set(id, pos)
+    const rows = new Map(exits)
+    // A judge with hollow exits only still draws the caption row.
+    for (const [id, j] of judges) if (j.hollow.length && !hasExitRow(rows.get(id))) rows.set(id, { mode: 'one-of', list: [], parallel: 0, hollowOnly: true } as NodeExits)
+    for (const [id, pos] of autoLayout(playbook, rows, addressed)) auto.set(id, pos)
   }
 
   // Agent tasks and answering finish nodes without their own profile run on
@@ -698,6 +744,8 @@ export function toFlow(
         ...(expectedText(n.expected_duration) ? { expected: expectedText(n.expected_duration) } : {}),
         ...(sub ? { subPlaybook: sub } : {}),
         list: listBadge(n, listProgress?.[n.id]),
+        ...(judges.get(n.id)?.hollow.length ? { hollow: judges.get(n.id)!.hollow } : {}),
+        ...(judges.get(n.id)?.notes.length ? { exitNote: judges.get(n.id)!.notes.join('; ') } : {}),
       },
     }
   })
