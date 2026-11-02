@@ -170,11 +170,14 @@ pub fn grade_submit(
 ) -> Result<Submitted, ToolError> {
     outside_run(step, GRADING)?;
     let dir = resolve_run_dir(root, run_id)?;
+    // Built before the submit stores anything, so a run tree whose secrets
+    // cannot be read refuses the submit instead of failing after it.
+    let shown = Shown::of(&dir)?;
     let outcome = apb_engine::grade::submit(&dir, session, proposals)?;
     let (outcome, after) = match outcome {
         SubmitOutcome::Graded { grade } => {
             let after = after_stored(root, &grade.playbook);
-            let grade = Box::new(Shown::of(&dir)?.grade(*grade));
+            let grade = Box::new(shown.grade(*grade));
             (SubmitOutcome::Graded { grade }, after)
         }
         rejected @ SubmitOutcome::Rejected { .. } => (rejected, CandidateAfter::default()),
