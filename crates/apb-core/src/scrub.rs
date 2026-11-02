@@ -35,6 +35,25 @@ use crate::secret::Secret;
 /// ([`crate::run_params::too_short_to_scrub`]).
 pub const MIN_SECRET_LEN: usize = 6;
 
+/// How many JSON texts deep a scrub reads JSON text inside a string (a
+/// child's run outputs inside its parent's, and so on).
+pub const MAX_JSON_DEPTH: usize = 8;
+
+/// What a JSON text nested deeper than [`MAX_JSON_DEPTH`] reads as: it is
+/// withheld rather than shown unread.
+pub const NESTED_WITHHELD: &str = "[withheld: nested too deep]";
+
+/// `text` as a JSON object or array, when it is one.
+fn embedded_json(text: &str) -> Option<serde_json::Value> {
+    let t = text.trim_start();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .filter(|v| v.is_object() || v.is_array())
+}
+
 static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
         .expect("valid")
@@ -76,10 +95,6 @@ pub struct Scrubber {
     /// Secret values, longest first so a value containing another is
     /// replaced whole.
     secrets: Vec<Secret>,
-    /// Every spelling of the values that is replaced, longest first: each
-    /// value as written and as JSON text spells it inside a string, once
-    /// and twice escaped ([`spellings`]).
-    spellings: Vec<Secret>,
     /// The project root, as written in paths (no trailing slash).
     root: Option<String>,
     home: Option<String>,
@@ -92,32 +107,6 @@ impl std::fmt::Debug for Scrubber {
             .field("root", &self.root)
             .finish_non_exhaustive()
     }
-}
-
-/// `secret` as written, and as JSON text spells it inside a string once
-/// and twice escaped (a value apb serialized into JSON text, and that text
-/// serialized again): a quote, a backslash or a control character changes
-/// its spelling there, and a scrub that knew only the written one would
-/// miss it.
-fn spellings(secret: &Secret) -> Vec<Secret> {
-    let escape = |s: &str| {
-        let quoted = serde_json::to_string(s).unwrap_or_default();
-        quoted
-            .strip_prefix('"')
-            .and_then(|q| q.strip_suffix('"'))
-            .unwrap_or_default()
-            .to_string()
-    };
-    let raw = secret.expose_secret();
-    let once = escape(raw);
-    let twice = escape(&once);
-    let mut out = vec![secret.clone()];
-    for spelled in [once, twice] {
-        if spelled != raw && !spelled.is_empty() {
-            out.push(Secret::new(spelled));
-        }
-    }
-    out
 }
 
 impl Scrubber {
@@ -141,13 +130,6 @@ impl Scrubber {
             }
         }
         let secrets = distinct;
-        let mut spelled: Vec<Secret> = Vec::new();
-        for s in secrets.iter().flat_map(spellings) {
-            if !spelled.iter().any(|d| d.ct_eq(s.expose_secret())) {
-                spelled.push(s);
-            }
-        }
-        spelled.sort_by_key(|s| std::cmp::Reverse(s.len()));
         let root = std::fs::canonicalize(root)
             .unwrap_or_else(|_| root.to_path_buf())
             .to_string_lossy()
@@ -159,7 +141,6 @@ impl Scrubber {
             .filter(|h| h.len() > 1);
         Scrubber {
             secrets,
-            spellings: spelled,
             root: (root.len() > 1).then_some(root),
             home,
         }
@@ -185,9 +166,47 @@ impl Scrubber {
     /// `text` with only the secret values replaced: paths, token shapes
     /// and addresses stay as written, so a structured answer keeps its
     /// paths usable.
+    ///
+    /// A text that is a JSON object or array (a node output, a child's run
+    /// outputs embedded as JSON text) is redacted by its structure
+    /// ([`Scrubber::scrub_values_json`]) and written again, so a value its
+    /// serialisation escaped is still found and the text stays valid JSON;
+    /// a text with nothing to replace is returned as written.
     pub fn scrub_values(&self, text: &str) -> String {
+        self.scrub_text(text, 0)
+    }
+
+    /// [`Scrubber::scrub_values`] of a text met `depth` JSON texts deep.
+    fn scrub_text(&self, text: &str, depth: usize) -> String {
+        if self.secrets.is_empty() {
+            return text.to_string();
+        }
+        if let Some(mut v) = embedded_json(text) {
+            if depth >= MAX_JSON_DEPTH {
+                return NESTED_WITHHELD.to_string();
+            }
+            let before = v.clone();
+            self.scrub_json(&mut v, depth + 1);
+            let out = if v == before {
+                text.to_string()
+            } else {
+                v.to_string()
+            };
+            // A value that spans the JSON syntax itself is still replaced
+            // as written (the text may no longer parse then; nothing leaks).
+            return if self.holds_value(&out) {
+                self.replace_values(&out)
+            } else {
+                out
+            };
+        }
+        self.replace_values(text)
+    }
+
+    /// `text` with every secret value replaced where it is written.
+    fn replace_values(&self, text: &str) -> String {
         let mut out = text.to_string();
-        for s in &self.spellings {
+        for s in &self.secrets {
             out = s.scrub_as(&out, "[redacted]");
         }
         out
@@ -198,26 +217,40 @@ impl Scrubber {
     /// value are left alone. Two keys that scrub alike keep the later entry,
     /// as in [`Scrubber::redact_value`].
     pub fn scrub_values_json(&self, v: &mut serde_json::Value) {
-        use serde_json::Value;
         if self.secrets.is_empty() {
             return;
         }
+        self.scrub_json(v, 0);
+    }
+
+    /// [`Scrubber::scrub_values_json`] of a value met `depth` JSON texts
+    /// deep: every string through [`Scrubber::scrub_text`], so one that is
+    /// itself JSON text is redacted by its structure too, and a number
+    /// that spells a secret value becomes the string `[redacted]`.
+    fn scrub_json(&self, v: &mut serde_json::Value, depth: usize) {
+        use serde_json::Value;
         match v {
             Value::String(s) => {
-                if self.holds_value(s) {
-                    *s = self.scrub_values(s);
+                let out = self.scrub_text(s, depth);
+                if out != *s {
+                    *s = out;
                 }
             }
-            Value::Array(items) => items.iter_mut().for_each(|i| self.scrub_values_json(i)),
+            Value::Number(n) => {
+                if self.holds_value(&n.to_string()) {
+                    *v = Value::String("[redacted]".into());
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|i| self.scrub_json(i, depth)),
             Value::Object(map) => {
                 if map.keys().any(|k| self.holds_value(k)) {
                     let old = std::mem::take(map);
                     *map = old
                         .into_iter()
-                        .map(|(k, v)| (self.scrub_values(&k), v))
+                        .map(|(k, v)| (self.replace_values(&k), v))
                         .collect();
                 }
-                map.values_mut().for_each(|v| self.scrub_values_json(v));
+                map.values_mut().for_each(|v| self.scrub_json(v, depth));
             }
             _ => {}
         }
@@ -240,10 +273,9 @@ impl Scrubber {
         within(&self.secrets, &other.secrets) && within(&other.secrets, &self.secrets)
     }
 
-    /// Whether `text` holds one of the secret values, in any spelling
-    /// [`Scrubber::scrub_values`] replaces.
+    /// Whether `text` holds one of the secret values.
     pub fn holds_value(&self, text: &str) -> bool {
-        self.spellings
+        self.secrets
             .iter()
             .any(|s| text.contains(s.expose_secret()))
     }
@@ -541,15 +573,37 @@ mod tests {
         );
     }
 
+    /// JSON text inside JSON text is read to [`MAX_JSON_DEPTH`] levels;
+    /// what is nested deeper is withheld, not shown unread.
+    #[test]
+    fn json_text_nested_deeper_than_the_bound_is_withheld() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Scrubber::new(vec![Secret::new(r#"pa"ss-word-1"#)], root.path());
+        let nest = |levels: usize| {
+            let mut v = serde_json::json!({ "creds": r#"pa"ss-word-1"# });
+            for _ in 1..levels {
+                v = serde_json::json!({ "inner": v.to_string() });
+            }
+            v.to_string()
+        };
+        let read = r.scrub_values(&nest(MAX_JSON_DEPTH));
+        assert!(!read.contains("ss-word-1"), "{read}");
+        assert!(read.contains("[redacted]"), "{read}");
+        let deep = r.scrub_values(&nest(MAX_JSON_DEPTH + 1));
+        assert!(!deep.contains("ss-word-1"), "{deep}");
+        assert!(deep.contains(NESTED_WITHHELD), "{deep}");
+    }
+
     #[test]
     fn refuses_value_checks_each_string_before_it_is_serialised() {
         let root = tempfile::tempdir().unwrap();
         let configured = r#"q"uo\te-v4lue"#;
         let r = Scrubber::new(vec![Secret::new(configured)], root.path());
         let v = serde_json::json!({ "steps": [format!("call with {configured}")] });
-        // The serialised form escapes it, and is still found by its
-        // JSON spelling.
-        assert_eq!(r.flags(&v.to_string()), Some(ScrubFlag::SecretValue));
+        assert!(
+            r.flags(&v.to_string()).is_none(),
+            "serialised form escapes it"
+        );
         assert_eq!(r.refuses_value(&v), Some(ScrubFlag::SecretValue));
         let keyed = serde_json::json!({ configured: "x" });
         assert_eq!(r.refuses_value(&keyed), Some(ScrubFlag::SecretValue));
