@@ -1938,3 +1938,150 @@ async fn run_detail_carries_the_lists_and_the_listing_marks_items_that_need_a_lo
         .expect("the run is listed");
     assert_eq!(entry["needs_look"]["list_items"], 1);
 }
+
+/// The run detail carries the declared run outputs projected from the
+/// journal, and leaves the key out for a playbook that declares none.
+#[tokio::test]
+async fn run_detail_carries_the_declared_run_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/outs/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: outs\nname: outs\nversion: 1.0.0\noutputs:\n  greeting: { from: { node: note } }\nnodes:\n  - { id: start, type: start }\n  - { id: note, type: prompt, prompt: \"hi there\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: note }\n  - { from: note, to: done }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/outs/current"), "1.0.0").unwrap();
+    let run_id = apb_engine::run(root, "outs", None, apb_engine::RunOptions::default())
+        .unwrap()
+        .run_id;
+    let app = build_router(AppState::new(root.to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let o = &json["run_outputs"];
+    assert_eq!(o["final"], true, "{json}");
+    assert_eq!(o["definition"], "stored");
+    assert_eq!(o["outputs"][0]["name"], "greeting");
+    assert_eq!(o["outputs"][0]["state"], "value");
+    assert_eq!(o["outputs"][0]["value"], "hi there");
+    assert_eq!(o["outputs"][0]["source"]["execution"]["node"], "note");
+
+    let plain = seed_with_run();
+    let plain_id = apb_engine::list_runs(plain.path()).unwrap()[0]
+        .run_id
+        .clone();
+    let app = build_router(AppState::new(plain.path().to_path_buf()));
+    let (_, json) = get_json(app, &format!("/api/runs/{plain_id}")).await;
+    assert!(json.get("run_outputs").is_none(), "{json}");
+}
+
+/// The run whose resend went out while its first send stays unknown, and
+/// what every surface says about it: one fixture
+/// (`crates/apb-core/tests/fixtures/resent_run.json`) for the CLI, MCP and
+/// HTTP tests.
+fn resent_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../apb-core/tests/fixtures/resent_run.json"
+    ))
+    .unwrap()
+}
+
+/// The words of [`resent_fixture`] under `key` (`reason` or `gap`).
+fn resent_text(key: &str) -> String {
+    resent_fixture()[key].as_str().unwrap().to_string()
+}
+
+fn seed_resent_run(root: &std::path::Path, run_id: &str) {
+    let fixture = resent_fixture();
+    let dir = root.join(".apb/runs").join(run_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("playbook.yaml"),
+        fixture["playbook"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut log = apb_engine::event::EventLog::open(&dir).unwrap();
+    for line in fixture["events"].as_array().unwrap() {
+        log.append(serde_json::from_value(line.clone()).unwrap())
+            .unwrap();
+    }
+}
+
+/// The run detail says that the resend went out and that the first send is
+/// still unknown, in the outcome and in the next action.
+#[tokio::test]
+async fn run_detail_says_a_resend_went_out_and_the_first_send_is_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    seed_resent_run(root, "resent");
+    let app = build_router(AppState::new(root.to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/resent").await;
+    assert_eq!(status, StatusCode::OK);
+    let shown = json.to_string();
+    assert!(shown.contains(&resent_text("gap")), "{shown}");
+    assert!(shown.contains(&resent_text("reason")), "{shown}");
+}
+
+/// Item b's first `none` send is unknown and its resend went out: b passed
+/// on its send chain, while the first send stays open for a person. The run
+/// detail's row of b says so; a's row, with no send, does not.
+#[tokio::test]
+async fn run_detail_marks_a_passed_item_whose_earlier_send_is_unresolved() {
+    let dir = seed_with_run();
+    let payload = |v: serde_json::Value| -> apb_engine::event::EventPayload {
+        serde_json::from_value(v).unwrap()
+    };
+    let send = |id: &str, resend_of: Option<&str>| {
+        let mut v = serde_json::json!({
+            "type": "send_intent_recorded", "intent": id, "nonce": format!("n-{id}"),
+            "node": "rows", "connector": "outbox", "function": "send", "account": "default",
+            "mode": "none", "label": "item", "item": "b",
+        });
+        if let Some(of) = resend_of {
+            v["resend_of"] = of.into();
+        }
+        payload(v)
+    };
+    seed_gate_run_yaml(
+        dir.path(),
+        "listed-2",
+        LISTED,
+        &[
+            payload(
+                serde_json::json!({ "type": "list_started", "node": "rows", "total": 2,
+                "items_digest": "d", "batch_size": 2, "parallel": 1 }),
+            ),
+            send("si-1", None),
+            payload(
+                serde_json::json!({ "type": "send_intent_settled", "intent": "si-1",
+                "outcome": "unknown", "source": "response" }),
+            ),
+            send("si-2", Some("si-1")),
+            payload(
+                serde_json::json!({ "type": "send_intent_settled", "intent": "si-2",
+                "outcome": "confirmed", "source": "response" }),
+            ),
+            item_settled("a", "passed"),
+            item_settled("b", "passed"),
+        ],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/listed-2").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows: Vec<(&str, &str, Option<bool>)> = json["lists"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap(),
+                i["state"].as_str().unwrap(),
+                i["unresolved_send"].as_bool(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [("a", "passed", None), ("b", "passed", Some(true))]);
+}

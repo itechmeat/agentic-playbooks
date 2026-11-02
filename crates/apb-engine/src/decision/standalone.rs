@@ -75,7 +75,7 @@ pub struct StandaloneDecider {
     /// The declared secret values of the run a request speaks about
     /// ([`StandaloneDecider::for_run`]), removed from every request whatever
     /// `privacy.redact` says. Empty for a request about no run.
-    run_values: redact::Redactor,
+    run_values: crate::run_redact::RunValues,
 }
 
 impl std::fmt::Debug for StandaloneDecider {
@@ -114,7 +114,7 @@ impl StandaloneDecider {
             root: root.to_path_buf(),
             chain: OnceLock::new(),
             redactor: OnceLock::new(),
-            run_values: redact::Redactor::default(),
+            run_values: crate::run_redact::RunValues::default(),
         }
     }
 
@@ -122,8 +122,7 @@ impl StandaloneDecider {
     /// loses the run's secret values (`crate::run_redact`), before any
     /// clip, whatever `privacy.redact` says.
     pub fn for_run(mut self, run_dir: &Path) -> Self {
-        self.run_values =
-            redact::Redactor::new(crate::run_redact::secret_values(run_dir), &self.root);
+        self.run_values = crate::run_redact::RunValues::of(run_dir, &self.root);
         self
     }
 

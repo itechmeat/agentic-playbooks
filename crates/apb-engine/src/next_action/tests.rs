@@ -676,6 +676,49 @@ fn a_finished_run_offers_its_report_and_each_unknown_send() {
     assert_eq!((fx.default_exit("sent"), fx.follow_exit("sent")), (1, 1));
 }
 
+/// A first send left unknown after a resend under `on_unknown: resend` went
+/// out: the run still needs a person for the first one, and the action and
+/// the run outcome (the text every surface shows) both say that a resend
+/// went out and that whether the first also went out is unknown.
+#[test]
+fn an_unknown_send_after_a_resend_says_the_resend_went_out() {
+    let fx = Fx::new();
+    let mut r = fx.run("resent");
+    r.ev(
+        json!({"type": "send_intent_recorded", "intent": "si-1", "nonce": "n1", "node": "work",
+        "connector": "chat", "function": "send", "account": "main", "mode": "key", "label": "hello",
+        "deadline_ms": 1}),
+    );
+    r.ev(json!({"type": "send_intent_settled", "intent": "si-1", "outcome": "unknown", "source": "response", "detail": "timeout"}));
+    r.ev(
+        json!({"type": "send_intent_recorded", "intent": "si-2", "nonce": "n2", "node": "work",
+        "connector": "chat", "function": "send", "account": "main", "mode": "key", "label": "hello",
+        "deadline_ms": 1, "resend_of": "si-1"}),
+    );
+    r.ev(json!({"type": "send_intent_settled", "intent": "si-2", "outcome": "confirmed", "source": "response"}));
+    r.finish("succeeded");
+    let a = fx.observe("resent");
+    assert_eq!(
+        codes(&a),
+        vec![ActionCode::ResolveIntent, ActionCode::ReadReport]
+    );
+    assert_eq!(
+        primary(&a).reason,
+        "a resend of intent `si-1` (chat.send) went out as `si-2`; whether the first send also went out is unknown; check the service and record what you found"
+    );
+    let dir = fx.root().join(".apb/runs/resent");
+    let view = crate::run_view::RunView::load(&dir, "resent").unwrap();
+    let outcome = crate::run_outcome::OutcomeSummary::build(&view, &dir);
+    let resolve = super::command::resolve_intent("resent", Some("si-1"), None).line();
+    assert!(
+        outcome.lines().contains(&format!(
+            "  [call outcome unknown] chat.send: intent \"hello\" (si-1) by work: a resend went out (si-2); whether this first send also went out is not known (timeout); resolve with {resolve}"
+        )),
+        "{:#?}",
+        outcome.lines()
+    );
+}
+
 // --- compositions ------------------------------------------------------------
 
 #[test]

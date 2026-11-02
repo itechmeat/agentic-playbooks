@@ -64,7 +64,7 @@ const STOP_REASON: &str = "stop requested";
 /// another `stop_run` racing it: without it two concurrent stops of the same
 /// dead run could both observe a non-terminal state and both append
 /// `RunAborted`.
-pub(crate) const EVENT_LOCK: &str = "events.jsonl.lock";
+pub const EVENT_LOCK: &str = "events.jsonl.lock";
 
 /// What a `stop_run` call actually did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

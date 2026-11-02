@@ -57,15 +57,19 @@ impl Execution {
 }
 
 /// A reference to one execution of a node.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct ExecutionRef {
     pub node: String,
     pub ordinal: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub ended_seq: Option<u64>,
 }
 
 /// A visit of a list node: its non-reopen `list_started`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct ListVisitRef {
     pub node: String,
     pub started_seq: u64,

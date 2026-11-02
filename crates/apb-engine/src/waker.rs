@@ -71,10 +71,14 @@ fn lease_path(run_dir: &Path, wait: WakerFor) -> PathBuf {
     run_dir.join("wakers").join(wait.lease_name())
 }
 
-/// Opens (creating) the lease file at `path` under `run_dir`, which an agent
-/// step may write: a `wakers` entry that is not a real directory and a lease
-/// that is not a regular file are refused, and no link is followed.
-fn open_lease(run_dir: &Path, path: &Path) -> std::io::Result<File> {
+/// Opens (creating) the lease file of `wait` under `run_dir`, which an
+/// agent step may write: a `wakers` entry that is not a real directory, a
+/// lease that is not a regular file (a fifo fails at once, it never blocks
+/// the opener) and a link anywhere below `run_dir` are refused. The lease
+/// is opened relative to the `wakers` directory it checked
+/// ([`apb_core::fsutil::open_append_private_in`]), so a `wakers` swapped
+/// for a link meanwhile is never gone through.
+fn open_lease(run_dir: &Path, wait: WakerFor) -> std::io::Result<File> {
     apb_core::process_mode::guard()?;
     let dir = run_dir.join("wakers");
     match std::fs::symlink_metadata(&dir) {
@@ -89,23 +93,7 @@ fn open_lease(run_dir: &Path, path: &Path) -> std::io::Result<File> {
         }
         Err(e) => return Err(e),
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(not(unix))]
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(std::io::Error::other("a lease file is a link"));
-    }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("a lease file is not a regular file"));
-    }
-    apb_core::fsutil::narrow_open(&file);
-    Ok(file)
+    apb_core::fsutil::open_append_private_in(&dir, &wait.lease_name())
 }
 
 /// A waker's lease on one wait of one run, held until dropped.
@@ -125,8 +113,7 @@ impl Lease {
     /// another process holds it. An error when the lease file cannot be
     /// opened at all.
     pub fn try_take(run_dir: &Path, wait: WakerFor) -> std::io::Result<Option<Lease>> {
-        let path = lease_path(run_dir, wait);
-        let file = open_lease(run_dir, &path)?;
+        let file = open_lease(run_dir, wait)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Lease { file })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -154,6 +141,22 @@ impl Lease {
 /// process that is not `apb` (a test binary) spawns nothing. Returns the
 /// pid of the waker spawned.
 pub fn spawn(root: &Path, run_id: &str, wait: WakerFor) -> Option<u32> {
+    let child = start(root, run_id, wait, Stdio::null())?;
+    let pid = child.id();
+    reap(child);
+    Some(pid)
+}
+
+/// Waits for `child` to exit on a thread of its own.
+fn reap(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// Starts `apb __pause-waker` for `wait` of run `run_id` (see [`spawn`]),
+/// its stdout going to `stdout`.
+fn start(root: &Path, run_id: &str, wait: WakerFor, stdout: Stdio) -> Option<std::process::Child> {
     if !apb_core::registry::is_safe_segment(run_id)
         || Lease::held(&root.join(".apb/runs").join(run_id), wait)
     {
@@ -173,7 +176,7 @@ pub fn spawn(root: &Path, run_id: &str, wait: WakerFor) -> Option<u32> {
         .args(wait.args())
         .current_dir(&root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::null());
     // Its own process group, like the detached driver: tearing down the
     // launcher's group must not take the waker with it.
@@ -183,13 +186,7 @@ pub fn spawn(root: &Path, run_id: &str, wait: WakerFor) -> Option<u32> {
         cmd.process_group(0);
     }
     match apb_core::fsutil::spawn_when_not_busy(&mut cmd) {
-        Ok(mut child) => {
-            let pid = child.id();
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Some(pid)
-        }
+        Ok(child) => Some(child),
         Err(e) => {
             eprintln!(
                 "apb: warning: run `{run_id}`: {}, but its waker could not start ({e}); {}",
@@ -197,6 +194,148 @@ pub fn spawn(root: &Path, run_id: &str, wait: WakerFor) -> Option<u32> {
                 wait.instead(run_id)
             );
             None
+        }
+    }
+}
+
+/// What a waker writes on its stdout once it holds its lease
+/// ([`acknowledge_held`]).
+const HELD: &[u8] = b"held\n";
+
+/// How long [`spawn_held`] waits for the waker it started to hold its
+/// lease.
+pub const HELD_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether a waker holds the lease of `wait` of run `run_id` once this
+/// returns: a live one already did, or the waker this call starts
+/// acknowledged it ([`acknowledge_held`]) within a bounded wait. A spawned
+/// process is never taken for a held lease: a waker that cannot open its
+/// lease (a fifo or a link at its path) exits without acknowledging. A
+/// waker that ended without acknowledging because another one holds the
+/// wait counts as held. `Err` says why nothing holds it.
+pub fn spawn_held(root: &Path, run_id: &str, wait: WakerFor) -> Result<(), String> {
+    start_held(root, run_id, wait).settle()
+}
+
+/// A waker [`start_held`] started, whose acknowledgment
+/// [`HeldWaker::settle`] waits for: a caller re-arming many waits starts
+/// them all first, then settles each, so the waits overlap and the whole
+/// pass waits about [`HELD_WAIT`] at most, not that much per run.
+pub struct HeldWaker {
+    run_dir: std::path::PathBuf,
+    wait: WakerFor,
+    state: HeldState,
+}
+
+enum HeldState {
+    /// Nothing was started: a live waker held the lease, or none could
+    /// start.
+    NotStarted,
+    /// Started at `since`; its acknowledgment arrives on `ack`.
+    Started {
+        child: std::process::Child,
+        ack: std::sync::mpsc::Receiver<bool>,
+        since: std::time::Instant,
+        limit: std::time::Duration,
+    },
+}
+
+/// Starts the waker of [`spawn_held`] without waiting for it.
+pub fn start_held(root: &Path, run_id: &str, wait: WakerFor) -> HeldWaker {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let state = match start(root, run_id, wait, Stdio::piped()) {
+        Some(child) => HeldState::waiting(child, HELD_WAIT),
+        None => HeldState::NotStarted,
+    };
+    HeldWaker {
+        run_dir,
+        wait,
+        state,
+    }
+}
+
+impl HeldState {
+    /// `child`'s acknowledgment read on a thread of its own, awaited for
+    /// `limit` from now.
+    fn waiting(mut child: std::process::Child, limit: std::time::Duration) -> Self {
+        let out = child.stdout.take();
+        let (tx, ack) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut got = [0u8; HELD.len()];
+            let acked = out.is_some_and(|mut o| o.read_exact(&mut got).is_ok() && got == HELD);
+            let _ = tx.send(acked);
+        });
+        HeldState::Started {
+            child,
+            ack,
+            since: std::time::Instant::now(),
+            limit,
+        }
+    }
+}
+
+impl HeldWaker {
+    /// [`spawn_held`]'s answer: waits for the acknowledgment until its
+    /// limit counted from the start, not from this call.
+    pub fn settle(self) -> Result<(), String> {
+        let HeldState::Started {
+            child,
+            ack,
+            since,
+            limit,
+        } = self.state
+        else {
+            return if Lease::held(&self.run_dir, self.wait) {
+                Ok(())
+            } else {
+                Err("no waker could start for it".into())
+            };
+        };
+        let answer = ack.recv_timeout(limit.saturating_sub(since.elapsed()));
+        reap(child);
+        match answer {
+            Ok(true) => Ok(()),
+            // Its stdout closed unacknowledged: it ended, and only a wait
+            // another waker holds is still served.
+            Ok(false) if Lease::held(&self.run_dir, self.wait) => Ok(()),
+            Ok(false) => Err("its waker ended before it held the wait's lease".into()),
+            Err(_) => Err(format!(
+                "its waker did not hold the wait's lease within {}s",
+                limit.as_secs()
+            )),
+        }
+    }
+}
+
+/// Whether this process is an `apb __pause-waker` that acknowledges its
+/// lease on its stdout ([`acknowledge_on_hold`]).
+static ACKNOWLEDGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes this process acknowledge the lease it takes as a waker
+/// ([`acknowledge_held`]). Only `apb __pause-waker` calls it: a process
+/// that runs a waker's body in-process keeps its stdout.
+pub fn acknowledge_on_hold() {
+    ACKNOWLEDGES.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Tells the process that started this waker ([`spawn_held`]) that it holds
+/// its lease, once, then points stdout at the null device, so nothing a
+/// waker writes later reaches a pipe nobody reads. Nothing unless
+/// [`acknowledge_on_hold`] was called.
+pub(crate) fn acknowledge_held() {
+    use std::io::Write as _;
+    if !ACKNOWLEDGES.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(HELD).and_then(|()| out.flush());
+    #[cfg(unix)]
+    if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: both descriptors are open; dup2 replaces fd 1 atomically.
+        unsafe {
+            libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO);
         }
     }
 }
@@ -211,6 +350,61 @@ pub fn spawn_notify_waker(root: &Path, run_id: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wakers started side by side that never acknowledge: each is settled
+    /// against its own limit counted from its start, so settling them one
+    /// after the other waits about one limit in all, not one per waker.
+    #[cfg(unix)]
+    #[test]
+    fn wakers_started_together_are_awaited_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = std::time::Duration::from_millis(400);
+        let silent = || {
+            let child = std::process::Command::new("sleep")
+                .arg("1")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            HeldWaker {
+                run_dir: dir.path().to_path_buf(),
+                wait: WakerFor::Notify,
+                state: HeldState::waiting(child, limit),
+            }
+        };
+        let started: Vec<HeldWaker> = (0..4).map(|_| silent()).collect();
+        let pids: Vec<u32> = started
+            .iter()
+            .filter_map(|w| match &w.state {
+                HeldState::Started { child, .. } => Some(child.id()),
+                HeldState::NotStarted => None,
+            })
+            .collect();
+        let begin = std::time::Instant::now();
+        for w in started {
+            let why = w.settle().unwrap_err();
+            assert!(why.contains("did not hold"), "{why}");
+        }
+        let took = begin.elapsed();
+        assert!(
+            took < limit * 2,
+            "four silent wakers took {took:?}, about one limit each"
+        );
+        // The children end on their own and are reaped; none outlives the
+        // test. A signal 0 finds a pid until it is reaped, on every unix.
+        let exists = |p: &u32| {
+            let pid = libc::pid_t::try_from(*p).unwrap();
+            // SAFETY: signal 0 only checks that the process exists.
+            unsafe { libc::kill(pid, 0) == 0 }
+        };
+        let gone = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pids.iter().any(exists) {
+            assert!(
+                std::time::Instant::now() < gone,
+                "a child outlived its waker"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     /// One lease per wait: a second taker is refused while the first holds
     /// it, other waits are independent, and dropping it frees it.

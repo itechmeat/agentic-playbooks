@@ -197,6 +197,7 @@ mod tests {
             note: None,
             reason: reason.map(str::to_string),
             attempts: 2,
+            unresolved_send: false,
             check_rejected,
         }
     }

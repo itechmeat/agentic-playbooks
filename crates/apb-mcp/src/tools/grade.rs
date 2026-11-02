@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use apb_core::quality::QualityRecord;
-use apb_core::quality::grade::{Grade, Level};
+use apb_core::quality::grade::{Cite, CriterionGrade, Grade, Level, ReadOp, ReadTrace, SkillRead};
 use apb_core::step_env::StepCaller;
 use apb_engine::grade::evidence::Proposal;
 use apb_engine::grade::reader::{ReadRequest, ReadResponse};
@@ -93,6 +93,7 @@ pub fn grade_by(
 ) -> Result<Graded, ToolError> {
     outside_run(step, GRADING)?;
     let dir = resolve_run_dir(root, run_id)?;
+    let shown = Shown::of(&dir)?;
     let graded = match grader {
         GraderChoice::Rules => ModelGraded::Graded(Box::new(apb_engine::grade::grade_rules(&dir)?)),
         GraderChoice::Model => apb_engine::grade::grade_model(&dir)?,
@@ -101,7 +102,7 @@ pub fn grade_by(
         ModelGraded::Graded(grade) => Graded {
             grader: grader.as_str().to_string(),
             after: after_stored(root, &grade.playbook),
-            grade: Some(*grade),
+            grade: Some(shown.grade(*grade)),
             skipped: None,
         },
         ModelGraded::Skipped { reason } => Graded {
@@ -170,9 +171,13 @@ pub fn grade_submit(
     outside_run(step, GRADING)?;
     let dir = resolve_run_dir(root, run_id)?;
     let outcome = apb_engine::grade::submit(&dir, session, proposals)?;
-    let after = match &outcome {
-        SubmitOutcome::Graded { grade } => after_stored(root, &grade.playbook),
-        SubmitOutcome::Rejected { .. } => CandidateAfter::default(),
+    let (outcome, after) = match outcome {
+        SubmitOutcome::Graded { grade } => {
+            let after = after_stored(root, &grade.playbook);
+            let grade = Box::new(Shown::of(&dir)?.grade(*grade));
+            (SubmitOutcome::Graded { grade }, after)
+        }
+        rejected @ SubmitOutcome::Rejected { .. } => (rejected, CandidateAfter::default()),
     };
     Ok(Submitted { outcome, after })
 }
@@ -198,7 +203,138 @@ pub fn grade_reopen(
 /// Every stored grade of run `run_id`, oldest first.
 pub fn run_grades(root: &Path, run_id: &str) -> Result<Vec<Grade>, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
-    Ok(apb_engine::grade::grades_of(&dir))
+    let shown = Shown::of(&dir)?;
+    Ok(apb_engine::grade::grades_of(&dir)
+        .into_iter()
+        .map(|g| shown.grade(g))
+        .collect::<Vec<_>>())
+}
+
+/// How a grade leaves for a surface: a grade holds text rendered from the
+/// run (its task type, a host's reasons), so every grade answer goes
+/// through the run's redactor. The stored, signed grade is unchanged.
+struct Shown(apb_core::scrub::Scrubber);
+
+impl Shown {
+    /// Refused (`secrets_unresolved`) while the secret values of the run's
+    /// tree cannot all be read.
+    fn of(run_dir: &Path) -> Result<Self, ToolError> {
+        let values = apb_engine::run_redact::RunRedactor::for_run_dir(run_dir)
+            .into_scrubber()
+            .map_err(apb_engine::error::EngineError::from)?;
+        Ok(Shown(values))
+    }
+
+    /// `grade` with every secret value of the run's tree replaced in the
+    /// text it carries. Field by field, so a value that happens to be a
+    /// word of the grade's own vocabulary (a level, a source) leaves the
+    /// grade whole; a field added to a grade does not compile here until
+    /// it is placed.
+    fn grade(&self, grade: Grade) -> Grade {
+        let s = |t: String| self.0.scrub_values(&t);
+        let Grade {
+            schema,
+            grade_id,
+            run_id,
+            playbook,
+            version,
+            task_type,
+            grader,
+            created_at,
+            criteria,
+            reading,
+            skills,
+            mac,
+        } = grade;
+        let criteria = criteria
+            .into_iter()
+            .map(|c| {
+                let CriterionGrade {
+                    id,
+                    source,
+                    digest,
+                    subject,
+                    level,
+                    reason_code,
+                    why,
+                    cites,
+                    absence_basis,
+                    counts_for_promotion,
+                } = c;
+                CriterionGrade {
+                    id,
+                    source,
+                    digest,
+                    subject: s(subject),
+                    level,
+                    reason_code: s(reason_code),
+                    why: s(why),
+                    cites: cites
+                        .into_iter()
+                        .map(|Cite { r#ref, span }| Cite {
+                            r#ref: s(r#ref),
+                            span,
+                        })
+                        .collect(),
+                    absence_basis,
+                    counts_for_promotion,
+                }
+            })
+            .collect();
+        let ReadTrace {
+            budget_chars,
+            read_chars,
+            ops,
+            views,
+        } = reading;
+        let ops = ops
+            .into_iter()
+            .map(|ReadOp { op, r#ref, chars }| ReadOp {
+                op,
+                r#ref: s(r#ref),
+                chars,
+            })
+            .collect();
+        let skills = skills
+            .into_iter()
+            .map(
+                |SkillRead {
+                     node,
+                     profile,
+                     skill,
+                     bundle_digest,
+                     read,
+                     at,
+                 }| SkillRead {
+                    node: s(node),
+                    profile: s(profile),
+                    skill: s(skill),
+                    bundle_digest,
+                    read,
+                    at: at.map(s),
+                },
+            )
+            .collect();
+        Grade {
+            schema,
+            grade_id,
+            run_id,
+            playbook,
+            version,
+            task_type: s(task_type),
+            grader,
+            created_at,
+            criteria,
+            reading: ReadTrace {
+                budget_chars,
+                read_chars,
+                ops,
+                views,
+            },
+            skills,
+            mac,
+        }
+    }
 }
 
 /// What a backfill graded, and what that did to the candidate.

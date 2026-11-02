@@ -212,6 +212,39 @@ pub fn wait_released(root: &Path, run_id: &str) {
     }
 }
 
+/// Kills every `apb __pause-waker` of run `run_id` in the project at
+/// `root` (Linux `/proc`; elsewhere nothing to find). A waker outlives
+/// every process a test controls, like a detached driver. The root counts:
+/// run ids are unique per project only, and two tests' runs started in the
+/// same millisecond share one.
+pub fn kill_wakers(root: &Path, run_id: &str) {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return;
+    };
+    let root = root.to_string_lossy().into_owned();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in procs.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+        let has = |s: &str| args.contains(&s.as_bytes());
+        if has("__pause-waker") && has(&root) && has(run_id) {
+            #[cfg(unix)]
+            sig::kill_pid(pid);
+        }
+    }
+}
+
 /// Kills a detached run's driver when a test ends, however it ends. The
 /// driver deliberately outlives every process a test controls, so an assert
 /// that fails before the run finished would otherwise leave it running (a
@@ -291,4 +324,22 @@ pub fn on_a_terminal(
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     ))
+}
+
+/// Whether some process holds a `flock` on the file at `path`, read from
+/// `/proc/locks` without touching the lock: a probe that took the lock
+/// itself (even for an instant) could make a waker taking it then give up.
+#[cfg(target_os = "linux")]
+pub fn flock_held(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(ino) = std::fs::metadata(path).map(|m| m.ino()) else {
+        return false;
+    };
+    let ino = format!(":{ino}");
+    std::fs::read_to_string("/proc/locks").is_ok_and(|locks| {
+        locks.lines().any(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            f.get(1) == Some(&"FLOCK") && f.get(5).is_some_and(|id| id.ends_with(&ino))
+        })
+    })
 }

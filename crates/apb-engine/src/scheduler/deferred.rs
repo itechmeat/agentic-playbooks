@@ -15,7 +15,7 @@
 //! resume, a released run's wake and the live drive all read the same
 //! state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use apb_core::schema::RetryDelay;
@@ -28,7 +28,8 @@ use crate::state::{DeferredRetry, NodeStatus, RunState, RunStatus};
 /// before it releases the run instead: 60 s.
 pub const RELEASE_AFTER: Duration = Duration::from_secs(60);
 
-/// Overrides [`RELEASE_AFTER`] in milliseconds (tests).
+/// Overrides [`RELEASE_AFTER`] in milliseconds, for tests only: a release
+/// build ignores it ([`crate::env_duration::test_override`]).
 pub const RELEASE_AFTER_ENV: &str = "APB_RELEASE_AFTER_MS";
 
 /// Whether a drive with nothing to run but deferred retries, the earliest
@@ -53,12 +54,14 @@ pub(crate) fn may_release(
 /// scan runs at least this often.
 pub(crate) const WAIT_TICK: Duration = Duration::from_millis(200);
 
-/// The release threshold in force.
+/// The release threshold in force: [`RELEASE_AFTER`], shortened by
+/// [`RELEASE_AFTER_ENV`] in a debug build only.
 pub fn release_after() -> Duration {
-    std::env::var(RELEASE_AFTER_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map_or(RELEASE_AFTER, Duration::from_millis)
+    release_after_from(std::env::var(RELEASE_AFTER_ENV).ok().as_deref())
+}
+
+fn release_after_from(raw: Option<&str>) -> Duration {
+    crate::env_duration::test_override(raw).unwrap_or(RELEASE_AFTER)
 }
 
 /// The delay before retry `retry` (1-based within its chain step):
@@ -236,6 +239,35 @@ pub(crate) fn hold(
     }
 }
 
+/// The drive's rule for a node that parks the sequential arm (a review, a
+/// publish consent, a wait, a pending question) while a deferred retry is
+/// due: the retry takes `current` and the parked node goes back to the
+/// frontier's head, so the drive returns to it right after. A parked node
+/// spins the loop with `current` fixed, so without this a due retry would
+/// wait for a person or a signal. Every parking arm re-enters from the
+/// journal (a request or a wait is declared once), so stepping away from
+/// one and back is safe. `due` holds the open deferrals due now. Returns
+/// whether `current` changed.
+pub(crate) fn give_way(
+    due: &BTreeSet<String>,
+    parks: bool,
+    current: &mut String,
+    frontier: &mut Vec<String>,
+) -> bool {
+    if !parks || due.contains(current.as_str()) {
+        return false;
+    }
+    let Some(i) = frontier.iter().position(|n| due.contains(n)) else {
+        return false;
+    };
+    let next = frontier.remove(i);
+    let parked = std::mem::replace(current, next);
+    if !frontier.contains(&parked) {
+        frontier.insert(0, parked);
+    }
+    true
+}
+
 /// [`expedite`] from outside the drive: journals `retry_expedited` into the
 /// run at `run_dir` directly. A live driver sees it at its next look and
 /// admits the node at once; a released run's waker wakes it at once; a
@@ -279,11 +311,17 @@ pub fn expedite_live(
 /// (none was expedited). Returns the release journaled, `None` when the
 /// drive goes on (it applies what came in at its next turn). A lock it
 /// cannot take is a `None` too: the drive looks again.
+///
+/// Once the release is journaled, `let_go` runs before the event lock is
+/// given back: the driver gives up `driver.pid` and the busy lock there, so
+/// whoever decides under that lock next (a stop, a pause, a retry-now, a
+/// resume) finds a run nothing drives, never a departing driver.
 pub(crate) fn try_release(
     run_dir: &std::path::Path,
     log: &mut EventLog,
     control_cursor: Option<u64>,
     now_ms: u128,
+    let_go: impl FnOnce(),
 ) -> Result<Option<u64>, EngineError> {
     let Ok(_lock) = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK) else {
         return Ok(None);
@@ -313,6 +351,7 @@ pub(crate) fn try_release(
         wake_at_ms,
         nodes: held.keys().cloned().collect(),
     })?;
+    let_go();
     Ok(Some(wake_at_ms))
 }
 
@@ -425,24 +464,37 @@ mod tests {
             crate::control::Control::Pause(crate::pause::PauseRequest::default()),
         )
         .unwrap();
-        assert_eq!(try_release(dir.path(), &mut log, None, now).unwrap(), None);
+        assert_eq!(
+            try_release(dir.path(), &mut log, None, now, || ()).unwrap(),
+            None
+        );
         assert!(!released(dir.path()));
         // Once the scan applied it, the release goes through.
-        let at = try_release(dir.path(), &mut log, Some(seq), now).unwrap();
+        let at = try_release(dir.path(), &mut log, Some(seq), now, || ()).unwrap();
         assert!(at.is_some_and(|at| u128::from(at) > now));
         assert!(released(dir.path()));
 
         let (dir, mut log) = deferred_run();
         expedite(&mut log, Some("work"), Some(ExpediteBy::Host)).unwrap();
-        assert_eq!(try_release(dir.path(), &mut log, None, now).unwrap(), None);
+        assert_eq!(
+            try_release(dir.path(), &mut log, None, now, || ()).unwrap(),
+            None
+        );
         assert!(!released(dir.path()));
     }
 
-    /// The documented defaults (docs and spec say "60 s"): nothing in this
-    /// unit-test binary sets the override.
+    /// The documented default (docs and spec say "60 s"), and a shipped
+    /// (release) build never shortened by a value left in the environment.
     #[test]
     fn a_drive_releases_after_a_minute_by_default() {
-        assert_eq!(release_after(), Duration::from_secs(60));
+        assert_eq!(release_after_from(None), Duration::from_secs(60));
+        // The knob shortens it in a debug build only.
+        let want = if cfg!(debug_assertions) {
+            Duration::from_millis(300)
+        } else {
+            Duration::from_secs(60)
+        };
+        assert_eq!(release_after_from(Some("300")), want);
     }
 
     #[test]

@@ -1,0 +1,55 @@
+{
+  "_doc": "A run whose resend went out while its first send stays unknown, and the words every run surface says about it: one fixture for the CLI, MCP and HTTP tests.",
+  "playbook": "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: script, script: s.sh, runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+  "events": [
+    {
+      "type": "run_started",
+      "playbook": "p",
+      "version": "1.0.0"
+    },
+    {
+      "type": "send_intent_recorded",
+      "intent": "si-1",
+      "nonce": "n1",
+      "node": "work",
+      "connector": "chat",
+      "function": "send",
+      "account": "main",
+      "mode": "key",
+      "label": "hello",
+      "deadline_ms": 1
+    },
+    {
+      "type": "send_intent_settled",
+      "intent": "si-1",
+      "outcome": "unknown",
+      "source": "response",
+      "detail": "timeout"
+    },
+    {
+      "type": "send_intent_recorded",
+      "intent": "si-2",
+      "nonce": "n2",
+      "node": "work",
+      "connector": "chat",
+      "function": "send",
+      "account": "main",
+      "mode": "key",
+      "label": "hello",
+      "deadline_ms": 1,
+      "resend_of": "si-1"
+    },
+    {
+      "type": "send_intent_settled",
+      "intent": "si-2",
+      "outcome": "confirmed",
+      "source": "response"
+    },
+    {
+      "type": "run_finished",
+      "outcome": "succeeded"
+    }
+  ],
+  "reason": "a resend of intent `si-1` (chat.send) went out as `si-2`; whether the first send also went out is unknown",
+  "gap": "a resend went out (si-2); whether this first send also went out is not known"
+}

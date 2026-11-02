@@ -693,11 +693,12 @@ fn resume_all_picks_due_and_driverless_runs_and_skips_children() {
         ),
         "{entries:?}"
     );
-    assert_eq!(
-        action(&later),
-        Some(ResumeAllAction::Rearmed {
-            wake_at_ms: now + 3_600_000
-        }),
+    // No waker can start from this test binary: the run is not re-armed.
+    assert!(
+        matches!(
+            action(&later),
+            Some(ResumeAllAction::NotRearmed { wake_at_ms, .. }) if wake_at_ms == now + 3_600_000
+        ),
         "{entries:?}"
     );
     assert!(

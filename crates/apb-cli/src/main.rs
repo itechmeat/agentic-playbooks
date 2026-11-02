@@ -41,6 +41,7 @@ mod publish;
 mod report;
 mod run;
 mod run_items;
+mod run_outputs;
 // --- 0.24.0 run execution mode lines ---
 mod run_mode;
 // --- end 0.24.0 run execution mode lines ---
@@ -288,6 +289,10 @@ enum Command {
         /// output
         #[arg(long, value_name = "PATH", requires = "run_id", conflicts_with_all = ["json", "items"])]
         html: Option<PathBuf>,
+        /// With a run id: print exactly the run's projected outputs as JSON
+        /// (the playbook's `outputs:` block), for a pipeline to read
+        #[arg(long, requires = "run_id", conflicts_with_all = ["json", "items", "html"])]
+        outputs_json: bool,
     },
     /// Notifications about runs ("Notify me"): without arguments, the
     /// machine's notify target and whether runs here notify by default;
@@ -709,7 +714,9 @@ enum Command {
         #[arg(long = "release-seq", conflicts_with_all = ["retry_now", "budget_json"])]
         release_seq: Option<u64>,
         /// Start the waiting retries now, journaled with `run_resumed`.
-        #[arg(long = "retry-now")]
+        /// Takes `--retry-now-by`: a retry-now that names nobody is refused,
+        /// never recorded as a person's.
+        #[arg(long = "retry-now", requires = "retry_now_by")]
         retry_now: bool,
         /// With `--retry-now`: only this node's waiting retry.
         #[arg(long = "retry-now-node", requires = "retry_now")]
@@ -914,6 +921,11 @@ fn main() -> ExitCode {
             html: Some(out),
             ..
         }) => report::html_cmd(&root, &run_id, &out),
+        Some(Command::Runs {
+            run_id: Some(run_id),
+            outputs_json: true,
+            ..
+        }) => run_outputs::outputs_json_cmd(&root, &run_id),
         Some(Command::Runs { run_id, json, .. }) => runs_cmd(&root, run_id.as_deref(), json),
         Some(Command::Notify {
             run,
@@ -1176,11 +1188,23 @@ fn main() -> ExitCode {
                 },
                 retry_now: retry_now.then(|| apb_engine::scheduler::RetryNow {
                     node: retry_now_node.as_deref(),
-                    // Validated by `parse_expedite_by`; absent means a person.
-                    by: retry_now_by
+                    // Required with `--retry-now` and validated by
+                    // `parse_expedite_by`, so never taken for a person's;
+                    // inside a run step never a person's, whatever it says.
+                    by: match retry_now_by
                         .as_deref()
                         .and_then(apb_engine::scheduler::deferred::ExpediteBy::parse)
-                        .unwrap_or(apb_engine::scheduler::deferred::ExpediteBy::Operator),
+                    {
+                        Some(apb_engine::scheduler::deferred::ExpediteBy::Operator)
+                            if apb_core::step_env::StepCaller::from_env()
+                                .describe()
+                                .is_some() =>
+                        {
+                            apb_engine::scheduler::deferred::ExpediteBy::Host
+                        }
+                        Some(by) => by,
+                        None => apb_engine::scheduler::deferred::ExpediteBy::Host,
+                    },
                 }),
                 budget_json: budget_json.as_deref(),
                 launch_handoff: launch_handoff.as_deref(),

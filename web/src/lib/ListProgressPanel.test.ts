@@ -81,4 +81,17 @@ describe('ListProgressPanel', () => {
     flushSync()
     expect(document.querySelector('[data-testid="run-list"]')).toBeNull()
   })
+
+  it('says on the row of a passed item that an earlier send of it is unresolved', () => {
+    const all: RunListItem[] = [
+      { id: 'a', state: 'passed', round: 0, attempts: 1 },
+      { id: 'b', state: 'passed', round: 0, attempts: 1, unresolved_send: true },
+    ]
+    app = mount(ListProgressPanel, { target: document.body, props: { lists: [triage(all)] } })
+    flushSync()
+    const [a, b] = Array.from(rows())
+    expect(b.querySelector('td:nth-child(2)')?.textContent).toBe('passed')
+    expect(b.querySelector('.note')?.textContent).toBe('earlier send unresolved')
+    expect(a.querySelector('.note')?.textContent).toBe('')
+  })
 })

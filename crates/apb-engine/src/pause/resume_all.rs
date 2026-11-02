@@ -14,7 +14,9 @@
 //!    wake time has passed is resumed;
 //! 4. a released run whose wake time is ahead, and a paused run whose
 //!    `until` is ahead, get a new waker, since the one they had may have
-//!    died with the machine;
+//!    died with the machine; the wakers of one pass are started as their
+//!    runs come up and their acknowledgments awaited together at its end,
+//!    so the pass waits about [`crate::waker::HELD_WAIT`] in all;
 //! 5. any other paused run is left alone.
 //!
 //! A finished run with a notification due a retry gets one sweep
@@ -78,9 +80,14 @@ pub enum ResumeAllAction {
     /// again or found it superseded.
     LeftPaused,
     /// A released run whose wake time, or a paused run whose `until`, is
-    /// still ahead: a new waker was spawned for it (none starts when this
-    /// process is not `apb`).
+    /// still ahead: a waker spawned for it acknowledged that it holds the
+    /// wait's lease, or a live one already held it.
     Rearmed { wake_at_ms: u64 },
+    /// The same run, but no waker holds the wait: none could start (this
+    /// process is not `apb`, or the spawn failed), or the one spawned ended
+    /// or did not take the lease in time: nothing wakes it at its time;
+    /// `apb resume <run>` or a later `apb resume --all` does.
+    NotRearmed { wake_at_ms: u64, detail: String },
     /// The launch policy refused the caller for a run never authorized: left
     /// as it is, not marked driverless.
     LaunchRefused { detail: String },
@@ -91,6 +98,52 @@ pub enum ResumeAllAction {
 pub struct ResumeAllEntry {
     pub run_id: String,
     pub action: ResumeAllAction,
+}
+
+/// The re-arming of the waits of one pass: every waker is started as its
+/// run comes up, and all are settled once the pass is over, so their
+/// acknowledgments are awaited side by side (about
+/// [`crate::waker::HELD_WAIT`] for the whole pass, never that much per
+/// run).
+#[derive(Default)]
+struct Rearming {
+    started: Vec<(usize, crate::waker::HeldWaker, u64)>,
+}
+
+impl Rearming {
+    /// Starts the waker of the wait `hold` of run `run_id` and holds the
+    /// place of its entry in `out`.
+    fn start(
+        &mut self,
+        root: &Path,
+        out: &mut Vec<ResumeAllEntry>,
+        run_id: String,
+        hold: super::WakeHold,
+        wake_at_ms: u64,
+    ) {
+        let waker = super::waker::start_held_waker(root, &run_id, hold);
+        self.started.push((out.len(), waker, wake_at_ms));
+        out.push(ResumeAllEntry {
+            run_id,
+            action: ResumeAllAction::NotRearmed {
+                wake_at_ms,
+                detail: "not settled".into(),
+            },
+        });
+    }
+
+    /// What re-arming came to for each run: armed only when a waker holds
+    /// the wait's lease, a live one or the one started here once it
+    /// acknowledged its lease ([`crate::waker::spawn_held`]), never on a
+    /// spawn alone.
+    fn settle(self, out: &mut [ResumeAllEntry]) {
+        for (at, waker, wake_at_ms) in self.started {
+            out[at].action = match waker.settle() {
+                Ok(()) => ResumeAllAction::Rearmed { wake_at_ms },
+                Err(detail) => ResumeAllAction::NotRearmed { wake_at_ms, detail },
+            };
+        }
+    }
 }
 
 /// Resumes what a lost driver or a passed `until` left waiting in the
@@ -129,6 +182,7 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
     ids.sort();
     let now = apb_core::clock::now_ms();
     let mut out = Vec::new();
+    let mut rearming = Rearming::default();
     for run_id in ids {
         let run_dir = runs_dir.join(&run_id);
         // A sub-playbook child follows its parent's drive.
@@ -163,11 +217,13 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
             && crate::liveness::driver_alive(&run_dir, &run_id) != Some(true)
             && u128::from(wake_at_ms) > now
         {
-            super::waker::spawn_release_waker(root, &run_id, seq);
-            out.push(ResumeAllEntry {
+            rearming.start(
+                root,
+                &mut out,
                 run_id,
-                action: ResumeAllAction::Rearmed { wake_at_ms },
-            });
+                super::WakeHold::Release(seq),
+                wake_at_ms,
+            );
             continue;
         }
         let due = match status {
@@ -187,14 +243,15 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
         if !candidate {
             if status == RunStatus::Paused {
                 // A pause with an `until` still ahead gets its waker back.
-                let action = match super::waker::latest_pause(&events) {
+                match super::waker::latest_pause(&events) {
                     Some((seq, _, Some(until))) => {
-                        super::waker::spawn_waker(root, &run_id, seq);
-                        ResumeAllAction::Rearmed { wake_at_ms: until }
+                        rearming.start(root, &mut out, run_id, super::WakeHold::Pause(seq), until)
                     }
-                    _ => ResumeAllAction::LeftPaused,
-                };
-                out.push(ResumeAllEntry { run_id, action });
+                    _ => out.push(ResumeAllEntry {
+                        run_id,
+                        action: ResumeAllAction::LeftPaused,
+                    }),
+                }
             }
             continue;
         }
@@ -325,6 +382,7 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
         }
         out.push(ResumeAllEntry { run_id, action });
     }
+    rearming.settle(&mut out);
     Ok(out)
 }
 

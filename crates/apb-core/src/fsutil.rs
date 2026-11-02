@@ -449,6 +449,99 @@ pub fn open_append_private(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Opens (creating, mode 0600) the regular file `name` inside the directory
+/// `dir` for appending, where a less trusted writer may own `dir`'s
+/// content. On unix `dir` is opened first without following a link at its
+/// last component, and the file is opened relative to that descriptor
+/// (`openat`), without following a link and without blocking: a `dir`
+/// swapped for a link after the check is never gone through, and a fifo or
+/// a device at `name` fails at once instead of hanging the caller. Anything
+/// but a regular file is refused, and so is a file with more than one hard
+/// link (its mode is another file's too); a file an older apb left readable
+/// beyond its owner is narrowed. `name` must be one path segment.
+pub fn open_append_private_in(dir: &Path, name: &str) -> io::Result<File> {
+    crate::process_mode::guard()?;
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("`{name}` is not one path segment"),
+        ));
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir)?;
+        #[cfg(test)]
+        unix_tests::between_opens();
+        let leaf = std::ffi::CString::new(name)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let flags = libc::O_WRONLY
+            | libc::O_APPEND
+            | libc::O_CREAT
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | libc::O_CLOEXEC;
+        // SAFETY: `parent` is an open directory descriptor for the whole
+        // call and `leaf` a NUL-terminated string; the returned descriptor
+        // is owned by the `File` built from it and by nothing else.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                flags,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh descriptor nothing else owns.
+        unsafe { File::from_raw_fd(fd) }
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if fs::symlink_metadata(dir)?.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", dir.display()),
+            ));
+        }
+        let path = dir.join(name);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", path.display()),
+            ));
+        }
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", dir.join(name).display()),
+        ));
+    }
+    // A hard link shares its mode with a file elsewhere: narrowing it would
+    // change that file.
+    #[cfg(unix)]
+    if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} has more than one link", dir.join(name).display()),
+        ));
+    }
+    narrow_open(&file);
+    Ok(file)
+}
+
 /// Clears the group and other bits of an open file, through its handle (so
 /// a path swapped for a link after the open is not followed). A mode given
 /// at open applies only to a file the open creates: one an older apb left
@@ -804,5 +897,105 @@ mod unix_tests {
             fs::metadata(&private).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    thread_local! {
+        /// What runs between the directory open and the leaf open of
+        /// [`open_append_private_in`] on this thread (a test's swap).
+        static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Runs the swap a test planted between the two opens, once.
+    pub(super) fn between_opens() {
+        if let Some(swap) = BETWEEN.with(|b| b.borrow_mut().take()) {
+            swap();
+        }
+    }
+
+    /// The directory is swapped for a link after its descriptor was opened
+    /// and before the leaf is: the leaf is still created in the directory
+    /// that was opened, never where the link points. Deterministic: the
+    /// swap runs at that exact point.
+    #[test]
+    fn a_directory_swapped_between_the_two_opens_is_never_gone_through() {
+        let t = tempfile::tempdir().unwrap();
+        let (outside, dir, moved) = (
+            t.path().join("outside"),
+            t.path().join("wakers"),
+            t.path().join("moved"),
+        );
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(&dir).unwrap();
+        let (d, m, o) = (dir.clone(), moved.clone(), outside.clone());
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&d, &m).unwrap();
+                std::os::unix::fs::symlink(&o, &d).unwrap();
+            }))
+        });
+        let mut f = open_append_private_in(&dir, "notify").unwrap();
+        use std::io::Write as _;
+        f.write_all(b"x").unwrap();
+        assert!(
+            fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(),
+            "swapped"
+        );
+        assert!(!outside.join("notify").exists(), "went through the link");
+        assert_eq!(fs::read(moved.join("notify")).unwrap(), b"x");
+    }
+
+    /// The directory `open_append_private_in` is handed is opened without
+    /// following a link: a `dir` swapped for a link after the caller checked
+    /// it (the state a racing writer leaves) is refused, and nothing is
+    /// created where the link points. Deterministic: the swap has already
+    /// happened when the helper runs.
+    #[test]
+    fn a_directory_swapped_for_a_link_is_never_gone_through() {
+        let t = tempfile::tempdir().unwrap();
+        let (outside, dir) = (t.path().join("outside"), t.path().join("wakers"));
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &dir).unwrap();
+        assert!(open_append_private_in(&dir, "notify").is_err());
+        assert!(!outside.join("notify").exists());
+    }
+
+    /// The leaf is one plain regular file: a path, a fifo (refused at once,
+    /// never waited on), a link and a hard link are refused, a plain file is
+    /// created 0600 or narrowed to it.
+    #[test]
+    fn the_leaf_is_one_private_regular_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("wakers");
+        fs::create_dir(&dir).unwrap();
+        for bad in ["", ".", "..", "a/b"] {
+            let e = open_append_private_in(&dir, bad).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+        let fifo = std::ffi::CString::new(dir.join("fifo").to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(open_append_private_in(&dir, "fifo").is_err());
+        let victim = t.path().join("victim");
+        fs::write(&victim, "x").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("link")).unwrap();
+        assert!(open_append_private_in(&dir, "link").is_err());
+        fs::hard_link(&victim, dir.join("hard")).unwrap();
+        assert!(open_append_private_in(&dir, "hard").is_err());
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let old = dir.join("old");
+        fs::write(&old, "").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+        open_append_private_in(&dir, "old").unwrap();
+        open_append_private_in(&dir, "new").unwrap();
+        for name in ["old", "new"] {
+            let mode = fs::metadata(dir.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
     }
 }

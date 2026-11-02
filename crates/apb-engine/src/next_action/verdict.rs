@@ -247,11 +247,7 @@ fn finished(obs: &Observation, out: &mut Vec<Wait>) {
                 not_ready: None,
                 auto: None,
                 command: None,
-                reason: format!(
-                    "nobody can tell whether the send of intent `{}` ({}) went out; check the service and record what you found",
-                    intent.id,
-                    intent.target()
-                ),
+                reason: intent.resolve_reason(),
             },
         });
     }

@@ -118,8 +118,8 @@ Owner: `apb_engine::scheduler::deferred`.
 ## 6. Releasing the driver and waking up
 
 1. When the only work left is deferrals and the earliest is due more than
-   60 s away (`APB_RELEASE_AFTER_MS` overrides it for tests), the drive
-   journals `drive_released { wake_at_ms, nodes }` and returns with the run
+   60 s away (`APB_RELEASE_AFTER_MS` shortens it in a debug build, for
+   tests; a release build ignores it), the drive journals `drive_released { wake_at_ms, nodes }` and returns with the run
    still `running`. It journals the release under the run's event lock, and
    only while nothing came in since its last look: a control its scan
    applies (a pause, a stop, a retry-now, a patch) or an expedited deferral
@@ -192,12 +192,16 @@ released, paused or driverless run (or one whose driver let go meanwhile)
 is resumed through the ordinary resume path, which journals the
 `retry_expedited` right before its `run_resumed`, under the same lock and
 after every resume check passed, so a refused resume waives no delay.
-`by` is `operator` for the CLI and the dashboard, `host` for MCP (a host
-may relay a person or act on its own), `supervisor` for
+`by` is `operator` (a person) only for the CLI at a terminal outside a run
+step and for a dashboard with keys; it is `host` for MCP (a host may relay a
+person or act on its own), for a run step (`APB_RUN_ID` or `APB_HOST_TASK`
+set: a run step is never a person), for the CLI without a terminal and for
+a dashboard without keys, the callers the launch policy also does not take
+for a person; `supervisor` for
 `supervisor_node_retry`, which journals directly (a read error is its
 answer; when nothing was left to expedite it posts a plain retry); an
 unknown value reads as absent. The detached driver refuses a
-`--retry-now-by` that names nobody, and a retry-now or a budget change
+`--retry-now-by` that names nobody or is missing, and a retry-now or a budget change
 next to the engine's hold of a pause or a release.
 
 Next actions: `ActionCode::RetryNow` (principals person, operator,
@@ -310,8 +314,8 @@ Owner: `apb_engine::execution_identity`.
    one a driver runs, so a refused send that was due a retry waited forever.
    When a send may be due again, the drive now leaves
    `apb __pause-waker --notify`, which sleeps the retry gap (30 s,
-   `APB_NOTIFY_RETRY_GAP_MS` for tests) and sweeps the run once, again
-   while a retry is ahead and no driver runs; each notification gets at
+   `APB_NOTIFY_RETRY_GAP_MS` shortens it in a debug build, for tests) and
+   sweeps the run once, again while a retry is ahead and no driver runs; each notification gets at
    most three tries. Due-ness is a
    pure function of the send ledger, so nothing is sent twice and a send
    the trust gate retired is never retried. No new journal state. A reboot

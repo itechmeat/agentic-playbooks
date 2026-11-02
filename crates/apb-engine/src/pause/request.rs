@@ -90,8 +90,9 @@ pub fn request_pause(
     }
     // Nothing drives the run: the lock first (a `--keep-lock` that cannot
     // take the lock refuses before anything is journaled), then the event.
-    // A released run's departing driver may still hold the lock: it is the
-    // run's own, parked over it.
+    // A released run's driver gave up its lock and `driver.pid` under this
+    // lock when it released; a lock an older driver left in that window is
+    // still the run's own, parked over it.
     let departing = state
         .released
         .as_ref()
@@ -169,7 +170,8 @@ pub(crate) fn after_release(
         }
         return;
     };
-    // Dropping the guard removes the lock this driver holds.
+    // The drive gave up its busy lock when it journaled the release
+    // (`deferred::try_release`); a guard still held here is dropped too.
     drop(lock.take());
     super::waker::spawn_release_waker(root, run_id, released.seq);
 }

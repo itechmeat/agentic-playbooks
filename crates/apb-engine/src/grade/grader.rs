@@ -95,7 +95,15 @@ pub(crate) fn run_grader(grader: &dyn Grader, sources: &RunSources) -> Grade {
     // Every grading view, a grade's `why` and the reader go through the
     // run's redactor: its own and its ancestors' secret values included.
     let redactor = crate::run_redact::RunRedactor::for_run_dir(&sources.run_dir);
-    let mut reader = Reader::new(sources, redactor.scrubber(), ReadState::new(budget));
+    // The known values, even when discovery is incomplete: a model
+    // grader's request withholds on its own, and the grade answers of
+    // `run_grade`, `run_grades` and `run_grade_submit` go through the run's
+    // redactor (refused while it withholds). The stored grade can still
+    // carry text a secret of the tree matches later (a task type rendered
+    // from the run's own ordinary param that a child declared secret), and
+    // the stored grades `apb stats` and the candidate views show are not
+    // redacted again.
+    let mut reader = Reader::new(sources, redactor.known_values(), ReadState::new(budget));
     let proposals = grader.propose(sources, &defs, &mut reader);
     let state = reader.state;
     let round = Round::of(&proposals, &state);

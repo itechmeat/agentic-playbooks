@@ -434,6 +434,15 @@ pub fn send_verdict<'a>(
     )
 }
 
+/// Whether `rec` holds its send open for a person: nobody can tell whether
+/// the send went out, no replay of it tells either, and `rec` is the member
+/// that says so. A resend is a separate send and does not close it. The run
+/// outcome's unknown sends and a list item's row read this one rule.
+pub fn holds_send_open(ledger: &Ledger, rec: &IntentRecord, now_ms: u64) -> bool {
+    let verdict = send_verdict(ledger, rec, now_ms);
+    matches!(verdict.state, IntentState::Unknown { .. }) && verdict.member.id == rec.id
+}
+
 /// [`chain_verdict`] with the process check given.
 fn chain_verdict_with<'a>(
     ledger: &'a Ledger,

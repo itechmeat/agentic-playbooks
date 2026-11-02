@@ -102,7 +102,15 @@ impl Scrubber {
     pub fn new(mut secrets: Vec<Secret>, root: &std::path::Path) -> Self {
         secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        secrets.dedup_by(|a, b| a.ct_eq(b.expose_secret()));
+        // Every repeat goes, not only an adjacent one: values of one length
+        // keep their input order, so a repeat may sit apart from its first.
+        let mut distinct: Vec<Secret> = Vec::with_capacity(secrets.len());
+        for s in secrets {
+            if !distinct.iter().any(|d| d.ct_eq(s.expose_secret())) {
+                distinct.push(s);
+            }
+        }
+        let secrets = distinct;
         let root = std::fs::canonicalize(root)
             .unwrap_or_else(|_| root.to_path_buf())
             .to_string_lossy()
@@ -181,6 +189,17 @@ impl Scrubber {
     /// characters long).
     pub fn values(&self) -> &[Secret] {
         &self.secrets
+    }
+
+    /// Whether `other` replaces exactly the secret values this scrubber
+    /// does: the same distinct values both ways, compared in constant time
+    /// per value.
+    pub fn same_values(&self, other: &Scrubber) -> bool {
+        let within = |a: &[Secret], b: &[Secret]| {
+            a.iter()
+                .all(|s| b.iter().any(|o| o.ct_eq(s.expose_secret())))
+        };
+        within(&self.secrets, &other.secrets) && within(&other.secrets, &self.secrets)
     }
 
     /// Whether `text` holds one of the secret values.

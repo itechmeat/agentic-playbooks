@@ -69,7 +69,8 @@ fn started(events: &[Event]) -> Option<(String, Scope)> {
 /// Adds what the run at `run_dir` (under project `root`) saw to its
 /// playbook's store, its texts scrubbed and their sources attached. Returns
 /// how many sightings it had. Observing a run twice adds nothing; a run
-/// without sightings leaves the store untouched.
+/// without sightings, or whose tree's secret values cannot all be read,
+/// leaves the store untouched.
 pub fn observe(root: &Path, run_dir: &Path) -> Result<usize, EngineError> {
     let events = crate::run_view::read_events(run_dir)?;
     let Some((playbook, scope)) = started(&events) else {
@@ -82,7 +83,11 @@ pub fn observe(root: &Path, run_dir: &Path) -> Result<usize, EngineError> {
     // The run's own secret values (and its ancestors') go with the
     // workspace's: a sighting is stored beyond the run and read later.
     let redactor = crate::run_redact::RunRedactor::for_run(root, run_dir);
-    let scrubber = redactor.scrubber();
+    // A sighting outlives the run and is read without its redactor: when
+    // the tree's secrets cannot all be read, nothing is stored.
+    let Ok(scrubber) = redactor.scrubber() else {
+        return Ok(0);
+    };
     let mut seen = extract::sightings(&run_id, &events, scrubber);
     if seen.is_empty() {
         // Nothing to add: the store is left as it is (no file per run).

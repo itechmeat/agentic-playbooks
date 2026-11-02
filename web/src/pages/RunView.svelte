@@ -70,6 +70,7 @@
   import { hasRunProblems } from '../lib/knownproblems'
   import { gradeSkippedText, verdictText } from '../lib/quality'
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
+  import RunOutputsPanel from '../lib/RunOutputsPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -746,7 +747,7 @@
 
     <!-- Right column: what needs a person, then the decision layer, the
          attempt and what the run produced. -->
-    <div class="flex flex-col gap-5 pt-2 lg:min-h-0 lg:overflow-auto lg:pr-1">
+    <div class="side-column flex flex-col gap-5 pt-2 lg:min-h-0 lg:overflow-auto lg:pr-1">
       {#each questions as q (q.node)}
         <QuestionPanel question={q} posting={answering} onAnswer={answer} />
       {/each}
@@ -826,6 +827,7 @@
         onchange={load}
       />
       <RunVerdictPanel outcome={detail.outcome} />
+      <RunOutputsPanel outputs={detail.run_outputs} onCite={showCite} />
       {#key `${workspace}/${id}`}
         <ListProgressPanel lists={detail.lists} />
       {/key}
@@ -970,6 +972,12 @@
 {/if}
 
 <style>
+  /* The right column scrolls, so its panels keep their full height: a
+     panel with overflow hidden (a card) would otherwise shrink to fit the
+     column and clip its content. */
+  .side-column > :global(*) {
+    flex-shrink: 0;
+  }
   /* Why the canvas shows fewer edge states than it could. */
   .graph-banners {
     position: absolute;

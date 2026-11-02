@@ -420,6 +420,38 @@ async fn retry_now_expedites_a_live_run_and_refuses_a_node_with_nothing_waiting(
     );
     let events = apb_engine::event::read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
     let last = serde_json::to_value(&events.last().unwrap().payload).unwrap();
+    // A dashboard without keys takes any request that reaches its loopback
+    // port, so it never records the expedite as a person's.
+    assert_eq!(
+        last,
+        serde_json::json!({"type": "retry_expedited", "node": "ask", "by": "host"})
+    );
+}
+
+/// A dashboard with keys: the request was signed in, so the retry-now is
+/// journaled as the person's (`operator`).
+#[tokio::test]
+async fn a_signed_in_retry_now_is_journaled_as_the_operators() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let run_id = seed_deferred(dir.path());
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    apb_core::run_origin::ensure_key().unwrap();
+    apb_core::run_origin::stamp(&run_dir, &run_id).unwrap();
+    let (key, state) = crate::common::keyed(dir.path().to_path_buf());
+    let app = build_router(state);
+    let (status, out) = call_as(
+        app,
+        "POST",
+        &format!("/api/runs/{run_id}/resume"),
+        Some(&key),
+        Some(serde_json::json!({ "retry_now": true, "node": "ask" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["live"], true, "{out}");
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    let last = serde_json::to_value(&events.last().unwrap().payload).unwrap();
     assert_eq!(
         last,
         serde_json::json!({"type": "retry_expedited", "node": "ask", "by": "operator"})

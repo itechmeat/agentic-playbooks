@@ -25,8 +25,8 @@ pub use identity::{
 };
 pub use ledger::{
     Admission, AdmitQuery, ChainVerdict, IntentRecord, IntentState, Ledger, admit, chain_verdict,
-    effect_scope_floor, effect_scope_floor_with, effective_state, item_scope_floor, passed_floors,
-    send_verdict,
+    effect_scope_floor, effect_scope_floor_with, effective_state, holds_send_open,
+    item_scope_floor, passed_floors, send_verdict,
 };
 
 use crate::error::EngineError;

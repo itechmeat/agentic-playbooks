@@ -108,6 +108,8 @@ mod release_workflow_test;
 mod run_cli_test;
 #[path = "suite/run_doctor_cli_test.rs"]
 mod run_doctor_cli_test;
+#[path = "suite/run_outputs_cli_test.rs"]
+mod run_outputs_cli_test;
 #[path = "suite/run_secrets_cli_test.rs"]
 mod run_secrets_cli_test;
 #[path = "suite/run_wait_cli_test.rs"]

@@ -207,6 +207,11 @@ pub struct Playbook {
     /// held up by the launch floor (`crate::launch::floor`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_launch: Option<crate::launch::policy::LaunchPolicy>,
+    /// Named values a run hands to whoever started it, projected from the
+    /// journal on read (see [`crate::run_outputs`]). Additive to schema 2;
+    /// no migration.
+    #[serde(default, skip_serializing_if = "crate::judge::OrderedMap::is_empty")]
+    pub outputs: crate::run_outputs::RunOutputsDecl,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
@@ -1680,6 +1685,13 @@ pub enum NodeKind {
         /// own draft.
         #[serde(default)]
         instruction: Option<String>,
+        /// What the node's output is: the child's answer text (default) or
+        /// a JSON object of its projected run outputs.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::run_outputs::ChildOutput::is_answer"
+        )]
+        output: crate::run_outputs::ChildOutput,
     },
     // --- issue #165 Part 5: the judge node --------------------------------
     /// Asks a decision model typed questions over a small named state and
@@ -2038,6 +2050,7 @@ edges: []
             NodeKind::Playbook {
                 playbook,
                 instruction,
+                ..
             } => {
                 assert_eq!(playbook.id, "child");
                 assert_eq!(playbook.scope, crate::profile::ProfileScope::Auto);

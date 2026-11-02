@@ -109,6 +109,7 @@ pub fn plan(root: &Path, id: &str, opts: &MakeGlobalOpts) -> GlobalPlan {
         profiles: Vec::new(),
         playbook_origin: PlaybookOrigin::Global,
         connectors: apb_core::connector::resolve::validation_facts(),
+        ..Default::default()
     };
     for issue in validate(&loaded.playbook, &ctx).issues {
         if issue.severity == Severity::Error {

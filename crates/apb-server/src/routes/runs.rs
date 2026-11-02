@@ -117,6 +117,11 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub notes: Option<apb_engine::run_outcome::RunNotes>,
+    /// The declared run outputs projected from the journal; absent for a
+    /// playbook that declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub run_outputs: Option<apb_engine::run_outputs::RunOutputs>,
     /// Each list node's visit with its items; empty for a run without a
     /// list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -374,6 +379,7 @@ pub(crate) async fn get_run_handler(
     let baseline = readout.baseline;
     let notes = Some(readout.notes).filter(|n| !n.is_empty());
     let lists = readout.lists;
+    let run_outputs = view.run_outputs(&run_dir);
     let candidate_trial = apb_engine::candidate::trial_of(&run_dir, &view.events);
     let known_problems = apb_mcp::tools::problems::run_block(&view.events);
     let pause = view.pause().cloned();
@@ -438,6 +444,7 @@ pub(crate) async fn get_run_handler(
         outcome,
         baseline,
         notes,
+        run_outputs,
         lists,
         attempt_models,
         isolation,
@@ -780,6 +787,20 @@ pub(crate) struct ResumeBody {
     node: Option<String>,
 }
 
+/// Who the dashboard's retry-now is journaled as (`retry_expedited.by`): a
+/// person (`operator`) only on a dashboard with keys, where every request
+/// was signed in. A dashboard without keys takes any request that reaches
+/// its loopback port, so, as the launch policy decides it like the CLI
+/// without a terminal, its retry-now is recorded as `host`, never a person.
+fn retry_now_by(auth: &crate::auth::AuthState) -> apb_engine::scheduler::deferred::ExpediteBy {
+    use apb_engine::scheduler::deferred::ExpediteBy;
+    if auth.enabled() {
+        ExpediteBy::Operator
+    } else {
+        ExpediteBy::Host
+    }
+}
+
 /// The retry-now half of a resume request, after the run gate passed:
 /// `Err` with the answer when the request ends here (nothing waits to
 /// retry, or expedited on a run a live driver holds), else the nodes the
@@ -791,9 +812,9 @@ fn retry_now_first(
     root: &std::path::Path,
     id: &str,
     node: Option<&str>,
+    by: apb_engine::scheduler::deferred::ExpediteBy,
     unused: &[(&str, bool)],
 ) -> Result<Vec<String>, Box<axum::response::Response>> {
-    let by = apb_engine::scheduler::deferred::ExpediteBy::Operator;
     match apb_mcp::tools::run::retry_now_plan(root, id, node) {
         Err(e) => Err(Box::new(crate::state::tool_refusal(e))),
         Ok(Err(refusal)) => {
@@ -870,8 +891,9 @@ pub(crate) async fn post_resume_handler(
             ("allow_environment_drift", body.allow_environment_drift),
         ];
         let (root, id, node) = (root.clone(), id.clone(), body.node.clone());
+        let by = retry_now_by(&state.auth);
         let first = tokio::task::spawn_blocking(move || {
-            retry_now_first(&root, &id, node.as_deref(), &unused)
+            retry_now_first(&root, &id, node.as_deref(), by, &unused)
         })
         .await;
         match first {
@@ -930,7 +952,7 @@ pub(crate) async fn post_resume_handler(
         // the resume passed.
         retry_now: expedited.as_ref().map(|_| apb_engine::scheduler::RetryNow {
             node: body.node.as_deref(),
-            by: apb_engine::scheduler::deferred::ExpediteBy::Operator,
+            by: retry_now_by(&state.auth),
         }),
         ..apb_engine::ResumeRequest::operator()
     };

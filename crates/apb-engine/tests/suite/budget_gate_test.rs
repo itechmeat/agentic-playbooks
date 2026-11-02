@@ -712,3 +712,163 @@ fn a_shown_estimate_is_recomputed_for_the_bindings_of_run_overrides() {
     assert_ne!(snap.note.as_deref(), Some("what the person saw"));
     assert_eq!(snap.unestimated, vec!["a".to_string()]);
 }
+
+/// `a` fails once (with `flaky` present) and its retry waits a second.
+const DEFERRED: &str = "schema: 2\nid: bud\nname: Budget\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: FLAKYA, max_retries: 1, retry_delay: { initial: 1s } }\n  - { id: b, type: agent_task, prompt: b }\n  - { id: c, type: agent_task, prompt: c }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: c }\n  - { from: c, to: done }\n";
+
+/// A deferred retry meets the budget gate: the delayed attempt spends like
+/// any attempt, so with 500 tokens and 200 per attempt the run pauses
+/// before `b` (400 spent by `a`'s two attempts), where without the retry it
+/// would pause before `c`.
+#[test]
+fn the_spend_of_a_delayed_attempt_counts_at_the_next_gate() {
+    let p = project(DEFERRED);
+    p.history(3);
+    let root = p.root().to_path_buf();
+    let agent = root.join("agent.sh");
+    common::write_sync(
+        &agent,
+        &format!(
+            "#!/bin/sh\nout='{out}'\ncase \"$*\" in *FLAKYA*) if [ -f '{flaky}' ]; then rm -f '{flaky}'; cat \"$out\"; echo 'the agent made a mistake' 1>&2; exit 1; fi;; esac\n[ -n \"$APB_STATUS_FILE\" ] && printf '{{\"status\":\"success\"}}' > \"$APB_STATUS_FILE\"\ncat \"$out\"\n",
+            out = root.join("out.json").display(),
+            flaky = root.join("flaky").display(),
+        ),
+    );
+    let without = p.run(tokens(500));
+    let ev = p.events(&without.run_id);
+    assert_eq!(
+        gates(&ev)[0].0,
+        "c",
+        "without a retry the pause is before c"
+    );
+
+    fs::write(root.join("flaky"), "").unwrap();
+    let res = p.run(tokens(500));
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let ev = p.events(&res.run_id);
+    let deferred = ev
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::RetryDeferred { node, .. } if node == "a"))
+        .count();
+    let attempts = ev
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "a"))
+        .count();
+    assert_eq!((deferred, attempts), (1, 2), "a's retry waited, then ran");
+    assert_eq!(
+        gates(&ev),
+        vec![("b".into(), None, GateDecision::Paused, GateBasis::Median)]
+    );
+    assert_eq!(started(&ev, "b"), 0);
+}
+
+/// `a` fails once and its retry waits a second, while `x` and then `b` run
+/// beside it.
+const DEFERRED_FORK: &str = "schema: 2\nid: bud\nname: Budget\nversion: 1.0.0\ndefaults: { profile: main, max_parallel: 2 }\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: FLAKYA, max_retries: 1, retry_delay: { initial: 1s } }\n  - { id: x, type: agent_task, prompt: x }\n  - { id: b, type: agent_task, prompt: b }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: start, to: x }\n  - { from: x, to: b }\n  - { from: a, to: done }\n  - { from: b, to: done }\n";
+
+/// A budget pause freezes a waiting retry's delay: the paused run shows
+/// what is left of it, a plain retry-now is refused as the budget pause it
+/// is (no delay waived, nothing journaled), and once a person raises the
+/// budget the retry still waits what was left when the run paused, however
+/// long the pause lasted.
+#[test]
+fn a_budget_pause_freezes_a_waiting_retry_until_a_person_resumes() {
+    let p = project(DEFERRED_FORK);
+    p.history(3);
+    let root = p.root().to_path_buf();
+    common::write_sync(
+        &root.join("agent.sh"),
+        &format!(
+            "#!/bin/sh\nout='{out}'\ncase \"$*\" in *FLAKYA*) if [ -f '{flaky}' ]; then rm -f '{flaky}'; cat \"$out\"; echo 'the agent made a mistake' 1>&2; exit 1; fi;; esac\n[ -n \"$APB_STATUS_FILE\" ] && printf '{{\"status\":\"success\"}}' > \"$APB_STATUS_FILE\"\ncat \"$out\"\n",
+            out = root.join("out.json").display(),
+            flaky = root.join("flaky").display(),
+        ),
+    );
+    fs::write(root.join("flaky"), "").unwrap();
+    // 200 tokens per attempt: `a` and `x` spend 400, so `b` does not fit.
+    let res = p.run(tokens(500));
+    assert_eq!(
+        res.outcome,
+        RunStatus::Paused,
+        "{:?}",
+        p.events(&res.run_id)
+    );
+    let dir = p.run_dir(&res.run_id);
+    let ev = p.events(&res.run_id);
+    assert_eq!(gates(&ev)[0].0, "b", "{ev:?}");
+    let deferral = ev
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::RetryDeferred { node, .. } if node == "a"))
+        .expect("a's retry waits");
+    let paused_at = ev
+        .iter()
+        .rev()
+        .find(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+        .unwrap()
+        .ts;
+    let frozen = |dir: &Path| {
+        let view = RunView::load(dir, &res.run_id).unwrap();
+        let waits = apb_engine::retry_wait::of_view(&view, apb_core::clock::now_ms_u64());
+        match waits.as_slice() {
+            [w] if w.node == "a" => match w.due {
+                apb_engine::retry_wait::RetryDue::Frozen { remaining_ms } => remaining_ms,
+                ref other => panic!("the retry is not frozen: {other:?}"),
+            },
+            other => panic!("one waiting retry of a: {other:?}"),
+        }
+    };
+    let left = frozen(&dir);
+    assert!(left > 0 && left <= 1000, "{left}");
+    // The pause outlasts the whole delay: a delay that kept running would
+    // be due at once on resume.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(frozen(&dir), left, "the delay does not run while paused");
+
+    // A retry-now cannot start it: the budget pause needs a person's
+    // decision first, and the refusal says so.
+    let before = p.events(&res.run_id).len();
+    let now = ResumeRequest {
+        retry_now: Some(apb_engine::scheduler::RetryNow {
+            node: Some("a"),
+            by: apb_engine::scheduler::deferred::ExpediteBy::Operator,
+        }),
+        ..ResumeRequest::operator()
+    };
+    let err = resume_req(p.root(), &res.run_id, &now)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(apb_engine::budget::BUDGET_PAUSED), "{err}");
+    assert_eq!(p.events(&res.run_id).len(), before, "nothing journaled");
+    assert_eq!(frozen(&dir), left, "no delay waived");
+
+    let raise = BudgetResume {
+        raise_tokens: Some(1_000),
+        ..BudgetResume::default()
+    };
+    let req = ResumeRequest {
+        budget: Some(&raise),
+        ..ResumeRequest::operator()
+    };
+    let done = resume_req(p.root(), &res.run_id, &req).unwrap();
+    assert_eq!(done.outcome, RunStatus::Succeeded);
+    let ev = p.events(&res.run_id);
+    let resumed = ev
+        .iter()
+        .find(|e| matches!(e.payload, EventPayload::RunResumed { .. }))
+        .unwrap()
+        .ts;
+    let retry = ev
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "a"))
+        .nth(1)
+        .expect("a's retry ran")
+        .ts;
+    assert!(
+        retry >= resumed + u128::from(left) - 50,
+        "the retry started {} ms after the resume, {left} ms were left",
+        retry - resumed
+    );
+    // Active run time from the deferral to the retry is the whole delay.
+    let active = (paused_at - deferral.ts) + (retry - resumed);
+    assert!(active >= 950, "{active}");
+}

@@ -23,14 +23,17 @@ pub enum WakeHold {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExpediteBy {
-    /// A person: `apb resume --retry-now` at a terminal, the dashboard.
+    /// A person: `apb resume --retry-now` at a terminal outside a run step,
+    /// the dashboard with keys.
     Operator,
     /// The run's supervisor session.
     Supervisor,
     /// The engine itself.
     Engine,
-    /// An agent host over MCP (`run_resume { retry_now }`): it may relay a
-    /// person or act on its own, so it is not recorded as the operator.
+    /// A caller not shown to be a person: an agent host over MCP
+    /// (`run_resume { retry_now }`), a run step, the CLI without a terminal,
+    /// the dashboard without keys. It may relay a person or act on its own,
+    /// so it is not recorded as the operator.
     Host,
 }
 

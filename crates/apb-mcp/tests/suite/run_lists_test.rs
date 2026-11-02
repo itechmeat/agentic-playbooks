@@ -108,3 +108,62 @@ fn a_run_without_a_list_carries_no_lists_block() {
     .unwrap();
     assert!(run_status(tmp.path(), "r2").unwrap().get("lists").is_none());
 }
+
+/// Item b passed on a resend while its first send is still unknown: the
+/// status names it beside the items that need a look, and the report's row
+/// of b says the earlier send is unresolved.
+#[test]
+fn a_passed_item_with_an_earlier_send_unresolved_is_named_and_marked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join(".apb/runs/r3");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), PLAYBOOK).unwrap();
+    let send = |id: &str, resend_of: Option<&str>| {
+        let mut v = json!({ "type": "send_intent_recorded", "intent": id,
+            "nonce": format!("n-{id}"), "node": "rows", "connector": "outbox",
+            "function": "send", "account": "default", "mode": "none",
+            "label": "item", "item": "b" });
+        if let Some(of) = resend_of {
+            v["resend_of"] = json!(of);
+        }
+        v
+    };
+    let events = [
+        json!({ "type": "list_started", "node": "rows", "total": 2,
+            "items_digest": "d", "batch_size": 2, "parallel": 1 }),
+        send("si-1", None),
+        json!({ "type": "send_intent_settled", "intent": "si-1",
+            "outcome": "unknown", "source": "response" }),
+        send("si-2", Some("si-1")),
+        json!({ "type": "send_intent_settled", "intent": "si-2",
+            "outcome": "confirmed", "source": "response" }),
+        json!({ "type": "list_item_settled", "node": "rows", "item": "a",
+            "state": "passed", "round": 0 }),
+        json!({ "type": "list_item_settled", "node": "rows", "item": "b",
+            "state": "passed", "round": 0 }),
+    ];
+    let journal: String = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let mut e = e.clone();
+            e["seq"] = json!(i + 1);
+            e["ts"] = json!(i);
+            format!("{e}\n")
+        })
+        .collect();
+    fs::write(dir.join("events.jsonl"), journal).unwrap();
+
+    let status = run_status(tmp.path(), "r3").unwrap();
+    let named = status["lists"][0]["items"].as_array().unwrap();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert_eq!(
+        (&named[0]["id"], &named[0]["unresolved_send"]),
+        (&json!("b"), &json!(true))
+    );
+    let report = run_report(tmp.path(), "r3").unwrap();
+    let rows = report["lists"][0]["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].get("unresolved_send").is_none(), "{rows:?}");
+    assert_eq!(rows[1]["unresolved_send"], true);
+}

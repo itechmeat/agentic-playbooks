@@ -630,25 +630,20 @@ fn a_push_under_a_stale_lease_is_not_sent() {
     fs::create_dir_all(&run_dir).unwrap();
     let remote =
         apb_engine::publish::push::Remote::open(&run_dir, &url, &common_dir, &[], None).unwrap();
+    let redactor = apb_engine::run_redact::RunRedactor::for_run(&f.root, &run_dir);
     let stale = remote.push(
         "apb/out",
         &next,
         Some(&next),
         Duration::from_secs(30),
-        &apb_core::scrub::Scrubber::default(),
+        &redactor,
     );
     assert!(
         matches!(stale, apb_core::publish::porcelain::Outcome::NotSent(_)),
         "{stale:?}"
     );
     // An empty lease refuses an existing ref too.
-    let absent = remote.push(
-        "apb/out",
-        &next,
-        None,
-        Duration::from_secs(30),
-        &apb_core::scrub::Scrubber::default(),
-    );
+    let absent = remote.push("apb/out", &next, None, Duration::from_secs(30), &redactor);
     assert!(
         matches!(absent, apb_core::publish::porcelain::Outcome::NotSent(_)),
         "{absent:?}"
@@ -660,10 +655,40 @@ fn a_push_under_a_stale_lease_is_not_sent() {
         &next,
         Some(&base),
         Duration::from_secs(30),
-        &apb_core::scrub::Scrubber::default(),
+        &redactor,
     );
     assert_eq!(ok, apb_core::publish::porcelain::Outcome::Confirmed);
     assert_eq!(f.remote_ref("apb/out").as_deref(), Some(next.as_str()));
+}
+
+/// A refused push whose run tree's secrets cannot all be read: git's
+/// stderr may hold a value the redactor could not discover, so the outcome
+/// withholds it whole rather than keep a clipped, partly scrubbed tail
+/// that a later repair of the tree no longer matches.
+#[test]
+fn a_refused_push_withholds_gits_text_when_the_run_tree_cannot_be_read() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    f.remote_hook(
+        "pre-receive",
+        "echo \"denied for orchard-candle\" >&2\nexit 1",
+    );
+    let next = f.commit("n.txt", "next");
+    let url = PushUrl::parse(&f.url()).unwrap();
+    let run_dir = f.root.parent().unwrap().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("run.yaml"), "params: [unclosed\n").unwrap();
+    let remote =
+        apb_engine::publish::push::Remote::open(&run_dir, &url, &f.root.join(".git"), &[], None)
+            .unwrap();
+    let redactor = apb_engine::run_redact::RunRedactor::for_run(&f.root, &run_dir);
+    let refused = remote.push("apb/out", &next, None, Duration::from_secs(30), &redactor);
+    let apb_core::publish::porcelain::Outcome::NotSent(detail) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(!detail.contains("orchard-candle"), "{detail}");
+    assert!(detail.contains("[secrets_unresolved]"), "{detail}");
 }
 
 /// Runs to a consent, approves it, and returns the run once it ended.

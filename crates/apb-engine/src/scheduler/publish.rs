@@ -565,7 +565,7 @@ fn push(
         Ok(new) => new,
         Err(admission) => return not_admitted(r, d, node, plan, admission),
     };
-    let scrubber = crate::run_redact::RunRedactor::for_run(r.root, d.run_dir).into_scrubber();
+    let redactor = crate::run_redact::RunRedactor::for_run(r.root, d.run_dir);
     // A shadow that cannot be made means git never started: not sent.
     let outcome = match plan.remote(input) {
         Ok(remote) => remote.push(
@@ -573,7 +573,7 @@ fn push(
             &plan.after,
             plan.remote_before.as_deref(),
             Duration::from_secs(s.timeout),
-            &scrubber,
+            &redactor,
         ),
         Err(e) => Outcome::NotSent(format!("the shadow git directory could not be made: {e}")),
     };

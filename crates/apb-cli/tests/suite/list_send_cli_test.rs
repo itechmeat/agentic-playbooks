@@ -7,7 +7,9 @@
 //! loop visit. A `key` send whose answer is lost gets one free reconcile run
 //! of its item, whose repeat carries the same nonce. Once a person confirms
 //! a lost send as sent, the item's next run answers `already_sent` even when
-//! it writes the payload differently.
+//! it writes the payload differently. A binding that allows a resend lets
+//! the item pass on its resend, and every surface that lists items says the
+//! earlier send is still unresolved.
 
 use std::fs;
 use std::io::Write;
@@ -64,6 +66,12 @@ struct Project {
 
 impl Project {
     fn new(base_url: &str, items: &str, looped: bool) -> Project {
+        Project::with_binding(base_url, items, looped, "")
+    }
+
+    /// [`Project::new`] with `binding` added to the node's connector
+    /// binding (`, on_unknown: resend`).
+    fn with_binding(base_url: &str, items: &str, looped: bool, binding: &str) -> Project {
         let dir = tempfile::tempdir().unwrap();
         let p = Project { dir };
         let root = p.root();
@@ -94,7 +102,7 @@ impl Project {
             "  - { from: work, to: done }\n"
         };
         let yaml = format!(
-            "schema: 2\nid: lst\nname: List\nversion: 1.0.0\ndefaults: {{ profile: main }}\nnodes:\n  - {{ id: start, type: start }}\n  - id: work\n    type: agent_task\n    prompt: Send the item's message.\n    connectors: [{{ name: outbox, accounts: [default], functions: [send, post] }}]\n    list:\n      items: {{ inline: {items} }}\n      batch: {{ size: 3, parallel: 1, retries: 0 }}\n      item_outputs: [blocking]\n      check: {{ output: {{ field: blocking, equals: \"0\" }} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: work }}\n{edges}"
+            "schema: 2\nid: lst\nname: List\nversion: 1.0.0\ndefaults: {{ profile: main }}\nnodes:\n  - {{ id: start, type: start }}\n  - id: work\n    type: agent_task\n    prompt: Send the item's message.\n    connectors: [{{ name: outbox, accounts: [default], functions: [send, post]{binding} }}]\n    list:\n      items: {{ inline: {items} }}\n      batch: {{ size: 3, parallel: 1, retries: 0 }}\n      item_outputs: [blocking]\n      check: {{ output: {{ field: blocking, equals: \"0\" }} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: work }}\n{edges}"
         );
         let vdir = root.join(".apb/playbooks/lst/1.0.0");
         fs::create_dir_all(&vdir).unwrap();
@@ -343,4 +351,61 @@ if [ "$I" = c ] && [ "$N" = 1 ]; then while [ -f "$D/gate" ]; do sleep 0.05; don
         serde_json::from_str(&fs::read_to_string(p.stub_dir().join("call-b-2")).unwrap()).unwrap();
     assert_eq!(again["already_sent"], true);
     assert_eq!(again["intent"]["id"], intent.as_str());
+}
+
+/// Item b's `none` send loses its answer and the binding allows a resend,
+/// which goes out: b passes on its send chain, while the first send stays
+/// open for a person. `apb runs --items`, `apb runs --json` (the MCP
+/// `run_status` view) and the item's JSON row say the earlier send is
+/// unresolved; item a, which sent nothing, says nothing of the kind.
+#[test]
+fn a_passed_item_whose_earlier_send_is_unknown_says_so_on_its_row() {
+    let service = Service::spawn(Script::from([(
+        "/send",
+        vec![None, Some((200, r#"{"id":"m-3"}"#))],
+    )]));
+    let p = Project::with_binding(
+        &service.base_url,
+        "[ { id: a }, { id: b } ]",
+        false,
+        ", on_unknown: resend",
+    );
+    p.stub(
+        r#"if [ "$I" = b ]; then "$APB" connector call outbox send --args '{"text":"hi"}' > "$D/call-$I-1" || true; "$APB" connector call outbox send --args '{"text":"hi"}' > "$D/call-$I-2"; fi"#,
+    );
+    let out = p.apb(&["run", "lst"]);
+    let id = run_id_of(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(service.bodies("/send").len(), 2, "the send and its resend");
+    assert_eq!(
+        settlements(&p.events(&id), "b").last(),
+        Some(&("passed".to_string(), None))
+    );
+
+    let items = p.ok(&["runs", &id, "--items"]);
+    let row = |item: &str| {
+        items
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{item}\t")))
+            .unwrap_or_else(|| panic!("no row of {item} in: {items}"))
+            .to_string()
+    };
+    assert_eq!(
+        row("b").trim(),
+        "b\tpassed\tround 0\taccept: earlier send unresolved"
+    );
+    assert_eq!(row("a").trim(), "a\tpassed\tround 0\taccept");
+
+    let status: serde_json::Value = serde_json::from_str(&p.ok(&["runs", &id, "--json"])).unwrap();
+    let named: Vec<(&str, bool)> = status["lists"][0]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no list items in: {status}"))
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap(),
+                i["unresolved_send"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect();
+    assert_eq!(named, [("b", true)], "the status names b for a look");
 }

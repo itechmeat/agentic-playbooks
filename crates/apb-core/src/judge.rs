@@ -41,8 +41,14 @@ pub const ESCAPE_OPTIONS: [&str; 3] = ["unclear", "other", "none"];
 pub const DEFAULT_YES_AT: f64 = 0.5;
 
 /// A string-keyed map that keeps the order it was written in.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OrderedMap<V>(pub Vec<(String, V)>);
+
+impl<V> Default for OrderedMap<V> {
+    fn default() -> Self {
+        OrderedMap(Vec::new())
+    }
+}
 
 impl<V> OrderedMap<V> {
     pub fn get(&self, key: &str) -> Option<&V> {

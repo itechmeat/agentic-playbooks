@@ -116,7 +116,7 @@ impl<'a> Remote<'a> {
         after: &str,
         remote_before: Option<&str>,
         timeout: Duration,
-        scrubber: &apb_core::scrub::Scrubber,
+        redactor: &crate::run_redact::RunRedactor,
     ) -> Outcome {
         let cmd = transport::push(&self.shadow, self.url, branch, after, remote_before);
         let out = match self.run(cmd, timeout) {
@@ -125,18 +125,43 @@ impl<'a> Remote<'a> {
         };
         let killed = out.status.is_none();
         let exit = out.status.and_then(|s| s.code());
-        let tail = detail(&out.stderr, scrubber);
-        match porcelain::classify(&out.stdout, exit, killed, &refname::full(branch)) {
-            Outcome::Confirmed => Outcome::Confirmed,
-            Outcome::NotSent(s) => Outcome::NotSent(join(&s, &tail)),
-            Outcome::Unknown(s) => Outcome::Unknown(join(&s, &tail)),
-        }
+        reported(&out.stdout, &out.stderr, exit, killed, branch, redactor)
     }
 }
 
-/// The scrubbed tail of git's stderr, at most [`DETAIL_CAP`] characters.
-fn detail(stderr: &str, scrubber: &apb_core::scrub::Scrubber) -> String {
-    let clean = scrubber.scrub(stderr.trim());
+/// What a finished push of `branch` reported, its text as the ledger keeps
+/// it: git's summary of the ref and the tail of its stderr.
+fn reported(
+    stdout: &str,
+    stderr: &str,
+    exit: Option<i32>,
+    killed: bool,
+    branch: &str,
+    redactor: &crate::run_redact::RunRedactor,
+) -> Outcome {
+    let tail = detail(stderr, redactor);
+    match porcelain::classify(stdout, exit, killed, &refname::full(branch)) {
+        Outcome::Confirmed => Outcome::Confirmed,
+        Outcome::NotSent(s) => Outcome::NotSent(join(&scrubbed(&s, redactor), &tail)),
+        Outcome::Unknown(s) => Outcome::Unknown(join(&scrubbed(&s, redactor), &tail)),
+    }
+}
+
+/// `text` git printed, scrubbed whole before anything clips it. Withheld
+/// whole while the run tree's secrets cannot all be read: a clipped text
+/// could keep part of a value a later, complete scrub no longer
+/// recognizes.
+fn scrubbed(text: &str, redactor: &crate::run_redact::RunRedactor) -> String {
+    match redactor.scrubber() {
+        Ok(scrubber) => scrubber.scrub(text.trim()),
+        Err(_) => crate::run_redact::WITHHELD.to_string(),
+    }
+}
+
+/// The scrubbed tail of git's stderr, at most [`DETAIL_CAP`] characters
+/// ([`scrubbed`]).
+fn detail(stderr: &str, redactor: &crate::run_redact::RunRedactor) -> String {
+    let clean = scrubbed(stderr, redactor);
     let chars: Vec<char> = clean.chars().collect();
     let start = chars.len().saturating_sub(DETAIL_CAP);
     chars[start..].iter().collect()
@@ -149,4 +174,47 @@ fn join(summary: &str, tail: &str) -> String {
         (false, false) => format!("{summary}; {tail}"),
     };
     joined.chars().take(DETAIL_CAP).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote's refusal reason is git's summary of the ref, not stderr:
+    /// it holds the run's secret value as freely as stderr does.
+    #[test]
+    fn a_refusal_summary_is_scrubbed_or_withheld_before_it_is_clipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        // The clip falls inside the value: `orchard` is kept, `-candle` is not.
+        let prefix = "[remote rejected] (".len();
+        let reason = format!("{}orchard-candle", "x".repeat(DETAIL_CAP - prefix - 7));
+        let stdout = format!(
+            "To file:///r.git\n!\tabc:refs/heads/apb/out\t[remote rejected] ({reason})\nDone\n"
+        );
+        let shown = |redactor| match reported(&stdout, "", Some(1), false, "apb/out", &redactor) {
+            Outcome::NotSent(text) => text,
+            other => panic!("{other:?}"),
+        };
+        let cfg = crate::run_config::RunConfig {
+            params: [("password".to_string(), "orchard-candle".to_string())].into(),
+            ..Default::default()
+        };
+        crate::run_config::write_run_config(&run_dir, &cfg).unwrap();
+        let scrubbed = shown(crate::run_redact::RunRedactor::for_run(
+            tmp.path(),
+            &run_dir,
+        ));
+        assert!(!scrubbed.contains("orchard"), "{scrubbed}");
+        assert!(scrubbed.starts_with("[remote rejected]"), "{scrubbed}");
+
+        std::fs::write(run_dir.join("run.yaml"), "params: [unclosed\n").unwrap();
+        let withheld = shown(crate::run_redact::RunRedactor::for_run(
+            tmp.path(),
+            &run_dir,
+        ));
+        assert!(!withheld.contains("orchard"), "{withheld}");
+        assert!(withheld.contains(crate::run_redact::WITHHELD), "{withheld}");
+    }
 }

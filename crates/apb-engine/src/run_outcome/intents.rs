@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 use crate::connector::intent::{
-    IntentRecord, IntentState, Ledger, effective_state, ledger, send_verdict,
+    IntentRecord, IntentState, Ledger, effective_state, holds_send_open, ledger, send_verdict,
 };
 use crate::event::Event;
 
@@ -51,6 +51,11 @@ pub struct RunIntent {
     /// it. A resend is a separate send and does not close it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub open: bool,
+    /// Whether the send that sent it again as a new send (`resent_by`) went
+    /// out: what the wording of an open send tells a person, since that
+    /// resend proves nothing about this one.
+    #[serde(skip)]
+    pub resend_went_out: bool,
 }
 
 const PENDING: &str = "pending";
@@ -67,9 +72,7 @@ impl RunIntent {
                 (ledger::UNKNOWN, Some(source), detail, None)
             }
         };
-        let verdict = send_verdict(ledger, rec, now_ms);
-        let open =
-            matches!(verdict.state, IntentState::Unknown { .. }) && verdict.member.id == rec.id;
+        let open = holds_send_open(ledger, rec, now_ms);
         let next = rec.superseded_by.as_deref().and_then(|id| ledger.get(id));
         let replay = next.filter(|n| n.replay_of.as_deref() == Some(rec.id.as_str()));
         RunIntent {
@@ -89,6 +92,12 @@ impl RunIntent {
             replayed_by: replay.map(|n| n.id.clone()),
             resent_by: next.filter(|_| replay.is_none()).map(|n| n.id.clone()),
             open,
+            resend_went_out: next.filter(|_| replay.is_none()).is_some_and(|n| {
+                matches!(
+                    send_verdict(ledger, n, now_ms).state,
+                    IntentState::Confirmed { .. }
+                )
+            }),
         }
     }
 
@@ -135,11 +144,39 @@ impl RunIntent {
     /// that resolves it.
     pub fn gap_detail(&self, run_id: &str) -> String {
         let why = self.detail.as_deref().unwrap_or("no answer was recorded");
+        let what = match self.went_out_resend() {
+            Some(resend) => format!(
+                "a resend went out ({resend}); whether this first send also went out is not known"
+            ),
+            None => "whether it was sent is not known".to_string(),
+        };
         format!(
-            "{}: whether it was sent is not known ({why}); resolve with {}",
+            "{}: {what} ({why}); resolve with {}",
             self.who(),
             crate::next_action::command::resolve_intent(run_id, Some(&self.id), None).line()
         )
+    }
+
+    /// Why a person resolves this open send: the reason of its
+    /// `resolve_intent` next action.
+    pub fn resolve_reason(&self) -> String {
+        match self.went_out_resend() {
+            Some(resend) => format!(
+                "a resend of intent `{}` ({}) went out as `{resend}`; whether the first send also went out is unknown; check the service and record what you found",
+                self.id,
+                self.target()
+            ),
+            None => format!(
+                "nobody can tell whether the send of intent `{}` ({}) went out; check the service and record what you found",
+                self.id,
+                self.target()
+            ),
+        }
+    }
+
+    /// The resend (`on_unknown: resend`) of this send that went out.
+    fn went_out_resend(&self) -> Option<&str> {
+        self.resent_by.as_deref().filter(|_| self.resend_went_out)
     }
 
     /// The done line of a send confirmed without a successful call of its

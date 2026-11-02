@@ -266,7 +266,7 @@ fn add_trial_and_grades(out: &mut Value, view: &apb_engine::run_view::RunView, d
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListItems {
     /// `run_status`: the counts and at most [`STATUS_LOOK_ITEMS`] items
-    /// that need a look.
+    /// a person looks at (`RunListItem::wants_a_look`).
     NeedingALook,
     /// `run_report`: every item up to [`REPORT_LIST_ITEMS`], and how many
     /// it left out.
@@ -295,6 +295,11 @@ fn add_outcome_blocks(
 ) {
     if let Some(goal) = &readout.goal {
         out["goal"] = json!(goal);
+    }
+    // The declared run outputs projected from the journal; absent for a
+    // playbook that declares none.
+    if let Some(outputs) = view.run_outputs(dir) {
+        out["run_outputs"] = json!(outputs);
     }
     let commits = view.commits();
     if !commits.is_empty() {
@@ -349,8 +354,7 @@ fn add_outcome_blocks(
                     .lists
                     .iter()
                     .map(|l| {
-                        let named = l.needing_a_look(STATUS_LOOK_ITEMS);
-                        let left_out = (l.needs_look as usize).saturating_sub(named.items.len());
+                        let (named, left_out) = l.needing_a_look(STATUS_LOOK_ITEMS);
                         with_truncated(json!(named), left_out)
                     })
                     .collect::<Vec<_>>()
@@ -631,6 +635,15 @@ pub fn run_wait_result_as(
         (
             "answer",
             json!(apb_engine::progress::run_answer(&dir, &view.events)),
+        ),
+        // The declared run outputs, once the run has finished.
+        (
+            "run_outputs",
+            json!(
+                (res.reason == WaitReason::Finished)
+                    .then(|| view.run_outputs(&dir))
+                    .flatten()
+            ),
         ),
     ];
     for (key, value) in fields {

@@ -31,7 +31,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120, `edges` for edge ids, pairs and judge values V121-V125, `retry` for `retry_delay` V126-V130; `nodes` also holds V68, ids that start with `@`
+  V116-V120, `edges` for edge ids, pairs and judge values V121-V125 and a review decision only bounded edges route V136, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -271,10 +271,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the redactor every text that
   leaves the machine goes through (`redact.rs`, over
   `apb_core::scrub::Scrubber`), the run-scoped redactor of a run's secret
-  values and its ancestors' (`run_redact.rs`: `RunRedactor`, `redact_text`
+  values and those of every run of its tree, ancestors, children and
+  siblings (`run_redact.rs`: `RunRedactor`, `redact_text`
   for text that leaves the machine, `redact_json` for structured answers;
-  a read-only process missing a referenced connector secret withholds the
-  run text as `[secrets_unresolved]`),
+  a read-only process missing a referenced connector secret, or any
+  process that cannot read a run, config or journal of the tree, withholds
+  the run text as `[secrets_unresolved]`),
   the run directory's private modes and their narrowing (`run_perms.rs`),
   entering read-only mode with the decision client's request ban
   (`read_only.rs`), next actions (`next_action/`: `observation` one read of
