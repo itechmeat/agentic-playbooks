@@ -204,7 +204,7 @@
   })
 
   let overlayToken = 0
-  async function loadOverlay(opts: { run?: string; before?: number } = {}) {
+  async function loadOverlay(opts: { run?: string; before?: string } = {}) {
     const token = ++overlayToken
     overlayLoading = true
     overlayError = null

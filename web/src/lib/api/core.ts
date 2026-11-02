@@ -644,8 +644,8 @@ export const validateDraft = (yaml: string, workspace = '', id = '', version = '
 export const fetchOverlay = (
   id: string,
   workspace = '',
-  opts: { version?: string; run?: string; before?: number } = {},
+  opts: { version?: string; run?: string; before?: string } = {},
 ) =>
   getJson<import('../api.gen').PlaybookOverlay>(
-    `${pb(id)}/overlay${qs({ workspace, version: opts.version, run: opts.run, before: opts.before?.toString() })}`,
+    `${pb(id)}/overlay${qs({ workspace, version: opts.version, run: opts.run, before: opts.before })}`,
   )

@@ -198,6 +198,19 @@ async fn the_overlay_lays_the_newest_exact_run_over_its_version() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // A page cursor (`<started_ts>:<run_id>`, past the u64 a query parser
+    // reads) is accepted; the run it names is not on the next page.
+    let started = json["candidates"][0]["started_ts"].as_u64().unwrap();
+    let cursor = format!("{}%3A{run}", started);
+    let (status, page) = call(
+        app.clone(),
+        "GET",
+        &format!("/api/playbooks/noagent/overlay?before={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["candidates"], serde_json::json!([]));
 
     // The HTML report has the route as text.
     let res = app

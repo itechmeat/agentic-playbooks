@@ -180,6 +180,9 @@ pub fn render_text(r: &StatsReport) -> String {
                     super::route::text(&n.not_run)
                 ));
             }
+            if n.in_runs_unknown > 0 {
+                line.push_str(&format!(", membership unknown in {}", n.in_runs_unknown));
+            }
             out.push_str(&line);
             out.push('\n');
             for d in &n.digests {

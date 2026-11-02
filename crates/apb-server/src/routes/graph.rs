@@ -81,7 +81,8 @@ pub(crate) struct OverlayQuery {
     /// The shown version; the current one when absent.
     version: Option<String>,
     run: Option<String>,
-    before: Option<u128>,
+    /// The previous page's `next_before` cursor.
+    before: Option<String>,
 }
 
 /// `GET /api/playbooks/{id}/overlay?workspace=&version=&run=&before=`: a
@@ -119,7 +120,7 @@ pub(crate) async fn get_overlay(
             version: &loaded.version,
             yaml: &loaded.yaml,
             run: q.run.as_deref(),
-            before: q.before,
+            before: q.before.as_deref(),
         },
     );
     let graph = overlay

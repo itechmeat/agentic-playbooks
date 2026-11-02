@@ -2689,9 +2689,11 @@ missing_in_run: Array<string>, };
 
 export type PlaybookOverlay = { candidates: Array<OverlayCandidate>, 
 /**
- * The `before` of the next page, when there is one.
+ * The `before` of the next page, when there is one: the cursor
+ * `<started_ts>:<run_id>` of the page's last run, so runs that share a
+ * start time are never skipped.
  */
-next_before: number | null, 
+next_before: string | null, 
 /**
  * The newest exact run of the shown version.
  */

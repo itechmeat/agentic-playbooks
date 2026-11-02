@@ -1107,3 +1107,29 @@ fn a_finish_without_a_prompt_counts_and_unexecuted_nodes_have_zero_rows() {
         "{text}"
     );
 }
+
+#[test]
+fn unknown_membership_shows_for_a_node_that_also_executed() {
+    let executed = run(
+        "r1",
+        "1.0.0",
+        Some(SNAPSHOT),
+        &[
+            (1_100, started("work")),
+            (1_200, finished("work", "succeeded", 1)),
+            (1_300, end("succeeded")),
+        ],
+    );
+    // An older run: its snapshot names `work`, no definition is known.
+    let mut old = run("r2", "1.0.0", Some(SNAPSHOT), &[(1_400, end("succeeded"))]);
+    old.definitions = Default::default();
+    let r = build(&[executed, old], &StatsFilter::default());
+    let w = node_of(&r, "work");
+    assert_eq!((w.runs, w.in_runs, w.in_runs_unknown), (1, 1, 1));
+    let text = render::render_text(&r);
+    assert!(
+        text.lines()
+            .any(|l| l.contains("node work: executed") && l.contains("membership unknown in 1")),
+        "{text}"
+    );
+}

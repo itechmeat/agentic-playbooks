@@ -471,3 +471,33 @@ fn a_closed_stdout_ends_the_cli_quietly() {
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert_eq!(out.status.code(), Some(141), "{stderr}");
 }
+
+/// A judge output in the journal cannot forge terminal lines in the route
+/// block: control characters and line breaks are made harmless.
+#[test]
+fn the_route_block_neutralizes_control_characters_from_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let run = dir.path().join(".apb/runs/judge-1");
+    fs::create_dir_all(&run).unwrap();
+    let yaml = "schema: 2\nid: j\nname: j\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: triage\n    type: judge\n    questions:\n      ok: { type: noul, instructions: i }\n    on_unavailable: { route: done }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: triage }\n  - { from: triage, to: done }\n";
+    let digest = apb_engine::run_definitions::store(&run, yaml.as_bytes()).unwrap();
+    fs::write(run.join("playbook.yaml"), yaml).unwrap();
+    let output = serde_json::json!({"decided_by": "x\u{1b}[2J\nforged: line"}).to_string();
+    let lines = [
+        serde_json::json!({"seq":1,"ts":1,"type":"run_started","playbook":"j","version":"1.0.0","definition":digest}),
+        serde_json::json!({"seq":2,"ts":2,"type":"node_started","node":"triage","attempt":1}),
+        serde_json::json!({"seq":3,"ts":3,"type":"node_finished","node":"triage","status":"succeeded","attempt":1,"output":output}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(run.join("events.jsonl"), text).unwrap();
+    let out = apb_std()
+        .args(["runs", "judge-1"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("judge triage #1: decided by x"), "{stdout}");
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    assert!(!stdout.lines().any(|l| l.starts_with("forged")), "{stdout}");
+}

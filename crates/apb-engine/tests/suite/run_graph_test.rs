@@ -994,15 +994,21 @@ fn the_overlay_aligns_each_run_and_finds_the_default_beyond_the_page() {
             None,
         );
     }
-    let req = |run: Option<&'static str>, before: Option<u128>| OverlayRequest {
-        root: r,
-        playbook: "p",
-        version: "1.0.0",
-        yaml: A,
-        run,
-        before,
-    };
-    let o = overlay(&req(None, None));
+    fn req<'a>(
+        r: &'a std::path::Path,
+        run: Option<&'a str>,
+        before: Option<&'a str>,
+    ) -> OverlayRequest<'a> {
+        OverlayRequest {
+            root: r,
+            playbook: "p",
+            version: "1.0.0",
+            yaml: A,
+            run,
+            before,
+        }
+    }
+    let o = overlay(&req(r, None, None));
     assert_eq!(o.candidates.len(), PAGE);
     assert!(
         o.candidates
@@ -1013,7 +1019,7 @@ fn the_overlay_aligns_each_run_and_finds_the_default_beyond_the_page() {
     assert_eq!(o.default_run.as_deref(), Some("back"));
     assert_eq!(o.chosen.as_deref(), Some("back"));
     let next = o.next_before.unwrap();
-    let page2 = overlay(&req(None, Some(next)));
+    let page2 = overlay(&req(r, None, Some(&next)));
     let by_id: BTreeMap<&str, Alignment> = page2
         .candidates
         .iter()
@@ -1024,14 +1030,56 @@ fn the_overlay_aligns_each_run_and_finds_the_default_beyond_the_page() {
     assert_eq!(by_id["patched"], Alignment::Patched);
     assert_eq!(by_id["old"], Alignment::Unknown);
     // `run=` resolves a run that is not on the shown page.
-    let chosen = overlay(&req(Some("patched"), None));
+    let chosen = overlay(&req(r, Some("patched"), None));
     assert_eq!(chosen.chosen.as_deref(), Some("patched"));
     assert_eq!(chosen.alignment, Some(Alignment::Patched));
     // Each known segment has its own mapping onto the shown version.
     assert_eq!(chosen.mapping.len(), 2);
     assert!(chosen.mapping.iter().all(|m| m.correspondence.is_some()));
-    let unknown = overlay(&req(Some("old"), None));
+    let unknown = overlay(&req(r, Some("old"), None));
     assert!(unknown.mapping.iter().all(|m| m.correspondence.is_none()));
+}
+
+#[test]
+fn overlay_pages_keep_runs_that_share_a_start_time() {
+    use apb_engine::run_outcome::overlay::{OverlayRequest, PAGE, overlay};
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    // Every two runs share a start time, so a page boundary falls inside a
+    // tie.
+    let total = 2 * PAGE + 3;
+    for i in 0..total {
+        write_run(
+            r,
+            &format!("run-{i:02}"),
+            "1.0.0",
+            1_000 + (i / 2) as u64,
+            Some(A),
+            None,
+        );
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut before: Option<String> = None;
+    loop {
+        let o = overlay(&OverlayRequest {
+            root: r,
+            playbook: "p",
+            version: "1.0.0",
+            yaml: A,
+            run: None,
+            before: before.as_deref(),
+        });
+        seen.extend(o.candidates.iter().map(|c| c.run_id.clone()));
+        match o.next_before {
+            Some(n) => before = Some(n),
+            None => break,
+        }
+    }
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(seen.len(), total, "every run listed once: {seen:?}");
+    assert_eq!(unique.len(), total);
 }
 
 #[test]

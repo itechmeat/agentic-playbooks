@@ -348,8 +348,10 @@
           not connected: {hollow.map((h) => h.label).join(', ')}
         </div>
       {/if}
-      {#if data.exitNote}<div class="exit-note">{data.exitNote}</div>{/if}
     {/if}
+    <!-- Outside the exit row: a judge whose only hint is "add bands" may
+         have no exit to draw. -->
+    {#if data.exitNote}<div class="exit-note">{data.exitNote}</div>{/if}
     {#if hasSource}<Handle type="source" id={PLAIN_HANDLE} position={Position.Bottom} style={plainLeft} />{/if}
   </div>
 {/if}

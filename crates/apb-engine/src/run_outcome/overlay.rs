@@ -74,9 +74,10 @@ pub struct SegmentMapping {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PlaybookOverlay {
     pub candidates: Vec<OverlayCandidate>,
-    /// The `before` of the next page, when there is one.
-    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
-    pub next_before: Option<u128>,
+    /// The `before` of the next page, when there is one: the cursor
+    /// `<started_ts>:<run_id>` of the page's last run, so runs that share a
+    /// start time are never skipped.
+    pub next_before: Option<String>,
     /// The newest exact run of the shown version.
     pub default_run: Option<String>,
     /// The run laid over the graph.
@@ -100,7 +101,9 @@ pub struct OverlayRequest<'a> {
     /// The shown version's stored YAML bytes.
     pub yaml: &'a str,
     pub run: Option<&'a str>,
-    pub before: Option<u128>,
+    /// A cursor from [`PlaybookOverlay::next_before`]: only runs ordered
+    /// after it (older, or as old with a smaller run id) are listed.
+    pub before: Option<&'a str>,
 }
 
 struct Head {
@@ -185,17 +188,39 @@ pub fn alignment_of(
     }
 }
 
+/// The cursor of run `h`: `<started_ts>:<run_id>`.
+fn cursor_of(h: &Head) -> String {
+    format!("{}:{}", h.ts, h.run_id)
+}
+
+/// A cursor's start time and run id; `None` for one that does not parse.
+fn parse_cursor(c: &str) -> Option<(u128, String)> {
+    let (ts, id) = c.split_once(':')?;
+    Some((ts.parse().ok()?, id.to_string()))
+}
+
+/// Whether `h` comes after the cursor in the listing order (newest start
+/// first, then the larger run id first).
+fn after_cursor(h: &Head, ts: u128, id: &str) -> bool {
+    h.ts < ts || (h.ts == ts && h.run_id.as_str() < id)
+}
+
 /// The overlay for `req`.
 pub fn overlay(req: &OverlayRequest<'_>) -> PlaybookOverlay {
     let shown = digest(req.yaml.as_bytes());
     let runs = runs_of(req.root, req.playbook);
     let align = |h: &Head| alignment_of(&h.dir, &h.version, req.version, &shown);
+    let cursor = req.before.and_then(parse_cursor);
     let page: Vec<&Head> = runs
         .iter()
-        .filter(|h| req.before.is_none_or(|b| h.ts < b))
+        .filter(|h| {
+            cursor
+                .as_ref()
+                .is_none_or(|(ts, id)| after_cursor(h, *ts, id))
+        })
         .take(PAGE + 1)
         .collect();
-    let next_before = (page.len() > PAGE).then(|| page[PAGE - 1].ts);
+    let next_before = (page.len() > PAGE).then(|| cursor_of(page[PAGE - 1]));
     let candidates = page
         .iter()
         .take(PAGE)

@@ -1508,7 +1508,14 @@ fn run_detail_text(
     }
     say!("  route:");
     for line in view.graph(&run_dir).lines() {
-        say!("    {line}");
+        // Journal text in a route line (a judge's `decided_by`, an observed
+        // value) is shown with its control characters and line breaks
+        // made harmless; an entry line keeps its indent.
+        let indent = if line.starts_with("  ") { "  " } else { "" };
+        say!(
+            "    {indent}{}",
+            sanitize_for_terminal(&line, OUTCOME_LINE_MAX)
+        );
     }
     // Issue #193: the model each attempt actually ran on.
     for a in apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events) {
