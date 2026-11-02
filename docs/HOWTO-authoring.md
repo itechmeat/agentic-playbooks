@@ -121,12 +121,14 @@ cannot be read (a torn last journal line is read past, as everywhere) never
 counts as holding no secret, and neither does a run whose own `run.yaml`
 is gone though it was prepared (it has a manifest, or its `run_started`
 names its definition): the run's surfaces then withhold its text as
-`[secrets_unresolved]`, keeping only its ids and states. A string that
-is itself a JSON object or array (a child's run outputs as its parent
-node's output, nested any number of times) is redacted by its structure
-and written again as valid JSON, so a quote or a backslash in a value does
-not hide it; JSON text nested more than 8 levels deep reads
-`[withheld: nested too deep]`. What would hand
+`[secrets_unresolved]`, keeping only its ids and states. A text that is
+JSON (a child's run outputs as its parent node's output, nested, or a
+quoted string) has only its strings rewritten, each decoded and scrubbed
+before it is encoded again, so a quote or a backslash in a value does not
+hide it and every number, space and key stays as written; JSON text nested
+more than 8 levels deep reads `[withheld: nested too deep]`. In other text
+(a log line with JSON after a prefix) a value is replaced both as written
+and as JSON escapes it. What would hand
 the run's text on whole is refused with `secrets_unresolved` instead: a
 host grading session (`run_grade_start`, and every read of an open one,
 which also hides a value a run of the tree declared after it opened), a

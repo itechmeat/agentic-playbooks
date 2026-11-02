@@ -29,6 +29,8 @@ use regex::Regex;
 
 use crate::secret::Secret;
 
+mod json_text;
+
 /// Shorter values are not scrubbed by value: a two-letter secret would blank
 /// every occurrence of that pair in the text. Token shapes still apply. A
 /// run start warns about a declared secret param this short
@@ -42,17 +44,6 @@ pub const MAX_JSON_DEPTH: usize = 8;
 /// What a JSON text nested deeper than [`MAX_JSON_DEPTH`] reads as: it is
 /// withheld rather than shown unread.
 pub const NESTED_WITHHELD: &str = "[withheld: nested too deep]";
-
-/// `text` as a JSON object or array, when it is one.
-fn embedded_json(text: &str) -> Option<serde_json::Value> {
-    let t = text.trim_start();
-    if !(t.starts_with('{') || t.starts_with('[')) {
-        return None;
-    }
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .filter(|v| v.is_object() || v.is_array())
-}
 
 static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
@@ -167,11 +158,13 @@ impl Scrubber {
     /// and addresses stay as written, so a structured answer keeps its
     /// paths usable.
     ///
-    /// A text that is a JSON object or array (a node output, a child's run
-    /// outputs embedded as JSON text) is redacted by its structure
-    /// ([`Scrubber::scrub_values_json`]) and written again, so a value its
-    /// serialisation escaped is still found and the text stays valid JSON;
-    /// a text with nothing to replace is returned as written.
+    /// A text that is one JSON document (a node output, a child's run
+    /// outputs embedded as JSON text, a quoted string) has only its string
+    /// tokens rewritten: each is decoded, scrubbed the same way (JSON text
+    /// inside it too, to [`MAX_JSON_DEPTH`] levels, deeper withheld) and
+    /// encoded again; numbers, whitespace and key order stay as written.
+    /// Any other text has each value replaced as written and as JSON
+    /// escapes it inside a string (a log line with JSON after a prefix).
     pub fn scrub_values(&self, text: &str) -> String {
         self.scrub_text(text, 0)
     }
@@ -181,26 +174,55 @@ impl Scrubber {
         if self.secrets.is_empty() {
             return text.to_string();
         }
-        if let Some(mut v) = embedded_json(text) {
-            if depth >= MAX_JSON_DEPTH {
-                return NESTED_WITHHELD.to_string();
-            }
-            let before = v.clone();
-            self.scrub_json(&mut v, depth + 1);
-            let out = if v == before {
-                text.to_string()
-            } else {
-                v.to_string()
-            };
-            // A value that spans the JSON syntax itself is still replaced
-            // as written (the text may no longer parse then; nothing leaks).
-            return if self.holds_value(&out) {
-                self.replace_values(&out)
-            } else {
-                out
-            };
+        match self.rewrite_tokens(text, depth) {
+            // A value that spans the JSON syntax itself, or sits in a
+            // number, is still replaced as written: the text may no longer
+            // parse then, but nothing leaks.
+            Some(out) if self.holds_value(&out) => self.replace_values(&out),
+            Some(out) => out,
+            None => self.replace_spellings(text),
         }
-        self.replace_values(text)
+    }
+
+    /// `text` as one JSON document with each string token that holds a
+    /// value rewritten ([`Scrubber::scrub_values`]); `None` when it is not
+    /// one the tokenizer reads.
+    fn rewrite_tokens(&self, text: &str, depth: usize) -> Option<String> {
+        let doc = json_text::document(text)?;
+        if depth >= MAX_JSON_DEPTH && doc.top != json_text::Top::Scalar {
+            return Some(NESTED_WITHHELD.to_string());
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut kept = 0;
+        for (from, to) in doc.strings {
+            let decoded: String = serde_json::from_str(&text[from..to]).ok()?;
+            let scrubbed = self.scrub_text(&decoded, depth + 1);
+            if scrubbed != decoded {
+                out.push_str(&text[kept..from]);
+                out.push_str(&serde_json::to_string(&scrubbed).ok()?);
+                kept = to;
+            }
+        }
+        out.push_str(&text[kept..]);
+        Some(out)
+    }
+
+    /// `text` that is no JSON document with each value replaced as written
+    /// and as JSON escapes it inside a string, when that differs.
+    fn replace_spellings(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for s in &self.secrets {
+            out = s.scrub_as(&out, "[redacted]");
+            let quoted = serde_json::to_string(s.expose_secret()).unwrap_or_default();
+            let escaped = quoted
+                .strip_prefix('"')
+                .and_then(|q| q.strip_suffix('"'))
+                .unwrap_or_default();
+            if !escaped.is_empty() && escaped != s.expose_secret() {
+                out = out.replace(escaped, "[redacted]");
+            }
+        }
+        out
     }
 
     /// `text` with every secret value replaced where it is written.
@@ -571,6 +593,35 @@ mod tests {
                 .as_deref(),
             Some("Bearer [redacted-token]")
         );
+    }
+
+    /// A value escaped by JSON is found wherever the text holds it: a JSON
+    /// string scalar, a log line with JSON after a prefix, a document with
+    /// a number no float holds, which stays as written.
+    #[test]
+    fn an_escaped_value_is_found_in_any_json_text_and_the_rest_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Scrubber::new(
+            vec![Secret::new(r#"pa"ss-word-1"#), Secret::new("secret-7")],
+            root.path(),
+        );
+        let cases = [
+            (r#""pa\"ss-word-1""#, r#""[redacted]""#),
+            (
+                r#"log: {"pw":"pa\"ss-word-1"}"#,
+                r#"log: {"pw":"[redacted]"}"#,
+            ),
+            (
+                r#"{"id":18446744073709551617, "password":"secret-7"}"#,
+                r#"{"id":18446744073709551617, "password":"[redacted]"}"#,
+            ),
+        ];
+        let wrong: Vec<(String, &str)> = cases
+            .iter()
+            .map(|(text, want)| (r.scrub_values(text), *want))
+            .filter(|(got, want)| got != want)
+            .collect();
+        assert!(wrong.is_empty(), "got, wanted: {wrong:#?}");
     }
 
     /// JSON text inside JSON text is read to [`MAX_JSON_DEPTH`] levels;
