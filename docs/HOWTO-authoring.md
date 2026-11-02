@@ -118,8 +118,13 @@ short gets a warning (on the terminal for `apb run`, in `warnings` of the
 MCP and dashboard start answers); it is not refused. Use a longer value
 where the echo matters. A run, a `run.yaml` or a journal of the tree that
 cannot be read (a torn last journal line is read past, as everywhere) never
-counts as holding no secret: the run's surfaces then withhold its text as
-`[secrets_unresolved]`, keeping only its ids and states. What would hand
+counts as holding no secret, and neither does a run whose own `run.yaml`
+is gone though it was prepared (it has a manifest, or its `run_started`
+names its definition): the run's surfaces then withhold its text as
+`[secrets_unresolved]`, keeping only its ids and states. A value is also
+found as JSON text spells it inside a string, so a quote or a backslash in
+it does not hide it where apb embedded it in JSON (a child's run outputs
+as its parent node's output). What would hand
 the run's text on whole is refused with `secrets_unresolved` instead: a
 host grading session (`run_grade_start`, and every read of an open one,
 which also hides a value a run of the tree declared after it opened), a

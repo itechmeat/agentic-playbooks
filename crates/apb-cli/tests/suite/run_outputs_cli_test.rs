@@ -740,6 +740,8 @@ fn hand_run(p: &Project, run: &str, playbook: &str, lines: &[Value]) {
     let dir = p.run_dir(run);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("playbook.yaml"), playbook).unwrap();
+    // A prepared run always has its config: one without it withholds.
+    fs::write(dir.join("run.yaml"), "params: {}\n").unwrap();
     write_journal(&dir, lines);
 }
 

@@ -220,14 +220,43 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
 }
 
 /// The run config of the run at `dir`: `None` when it cannot be read, or
-/// when the run was `named` by another run of the tree and has none (a
-/// named run always has one: a child's is written before its parent
-/// journals it).
+/// when the run has none though it must (a run `named` by another run of
+/// the tree: a child's is written before its parent journals it; a run
+/// [`config_expected`] says was prepared).
 fn named_config(dir: &Path, named: bool) -> Option<crate::run_config::RunConfig> {
-    if named && !dir.join("run.yaml").is_file() {
+    if !dir.join("run.yaml").is_file() && (named || config_expected(dir)) {
         return None;
     }
     crate::run_config::read_run_config(dir).ok()
+}
+
+/// Whether the run at `dir` was prepared, so it wrote its `run.yaml`: it
+/// has a manifest, or its journal's `run_started` names the definition it
+/// executes (both are written after the config). The one legacy exception
+/// is a run that shows neither: a start refused before its config was
+/// written, or a run of an apb that journaled no definition. A journal
+/// that cannot be read cannot tell, so the config is expected.
+fn config_expected(dir: &Path) -> bool {
+    if dir.join("manifest.yaml").is_file() {
+        return true;
+    }
+    let bytes = match std::fs::read(dir.join("events.jsonl")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let Ok(journal) = crate::event::parse_lossy_tail(&bytes) else {
+        return true;
+    };
+    journal.events.iter().any(|e| {
+        matches!(
+            &e.payload,
+            crate::event::EventPayload::RunStarted {
+                definition: Some(_),
+                ..
+            }
+        )
+    })
 }
 
 /// The values of every run under `top` (see [`tree_secrets`]) into
