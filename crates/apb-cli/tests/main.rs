@@ -120,6 +120,18 @@ mod run_wait_cli_test;
 mod runs_detail_cli_test;
 #[path = "suite/sandbox_exec_test.rs"]
 mod sandbox_exec_test;
+#[cfg(unix)]
+#[path = "suite/scenario_fixture.rs"]
+mod scenario_fixture;
+#[cfg(unix)]
+#[path = "suite/scenario_mutation_test.rs"]
+mod scenario_mutation_test;
+#[cfg(unix)]
+#[path = "suite/scenario_run_test.rs"]
+mod scenario_run_test;
+#[cfg(unix)]
+#[path = "suite/scenario_smoke_test.rs"]
+mod scenario_smoke_test;
 #[path = "../../apb-server/tests/support/secret_runs.rs"]
 mod secret_runs;
 #[path = "suite/server_key_cli_test.rs"]

@@ -27,6 +27,9 @@ pub(super) fn spawn_agent(
     target: &SpawnTarget,
     on_spawn: Option<&dyn Fn(u32, u64)>,
 ) -> Result<Child, (ErrorClass, String)> {
+    // A read-only or scenario process starts no agent.
+    apb_core::process_mode::guard_program_start()
+        .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
     let sandbox = target.env.sandbox.as_deref();
     let mut cmd = match sandbox {
         Some(plan) => {
@@ -134,5 +137,38 @@ mod tests {
                 .is_ok_and(|s| s.contains(") Z "))
         });
         assert!(gone, "the grandchild survived the group kill");
+    }
+
+    // In a scenario process no agent starts: the spawn is refused before
+    // the program runs.
+    apb_core::scenario_test! {
+        fn no_agent_starts_in_a_scenario_process() at Quick, _root => {
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("agent.ran");
+            let agent = dir.path().join("agent");
+            std::fs::write(&agent, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let env = super::spawn_env::SpawnEnv::default();
+            let target = SpawnTarget {
+                env: &env,
+                agent: "custom",
+                model: "m",
+                node: "n",
+                status_file: None,
+            };
+            let e = spawn_agent(
+                &agent.to_string_lossy(),
+                &[],
+                Stdio::null(),
+                dir.path(),
+                &target,
+                None,
+            )
+            .unwrap_err();
+            assert!(e.1.contains(apb_core::process_mode::SCENARIO_REFUSAL), "{}", e.1);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!marker.exists(), "the agent ran");
+        }
     }
 }

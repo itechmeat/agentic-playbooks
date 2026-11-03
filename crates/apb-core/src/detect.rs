@@ -351,9 +351,7 @@ fn run_probe(
     args: &[String],
     extra_path: Option<&Path>,
 ) -> Result<ProbeOut, String> {
-    if crate::process_mode::is_read_only() {
-        return Err(crate::process_mode::READ_ONLY_REFUSAL.to_string());
-    }
+    crate::process_mode::guard_program_start().map_err(|e| e.to_string())?;
     // PATH is built via join_paths (platform separator, correct handling of
     // paths with special characters and non-UTF8), rather than manual
     // concatenation via ':'. The binary's parent (extra_path) comes FIRST -
@@ -731,7 +729,10 @@ pub fn build_id() -> String {
 pub fn probe(refresh: bool) -> Vec<AgentInfo> {
     let probes = configured_probes();
     if crate::process_mode::is_read_only() {
-        return unprobed(&probes);
+        return unprobed(&probes, NOT_PROBED_READ_ONLY);
+    }
+    if crate::process_mode::scenario().is_some() {
+        return unprobed(&probes, NOT_PROBED_SCENARIO);
     }
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     // Current cache keys: probe description + binary/absent + sources +
@@ -787,11 +788,11 @@ pub fn probe(refresh: bool) -> Vec<AgentInfo> {
     agents
 }
 
-/// What a read-only process reports for detection: the memo as it is,
-/// stale or written by another build, never rewritten; without a memo,
-/// every configured agent as not installed with the reason. Nothing is
+/// What a read-only or scenario process reports for detection: the memo
+/// as it is, stale or written by another build, never rewritten; without a
+/// memo, every configured agent as not installed with `note`. Nothing is
 /// probed, since a probe starts the agent's program.
-fn unprobed(probes: &[Probe]) -> Vec<AgentInfo> {
+fn unprobed(probes: &[Probe], note: &str) -> Vec<AgentInfo> {
     if let Some(cache) = read_cache() {
         return cache.agents;
     }
@@ -806,13 +807,16 @@ fn unprobed(probes: &[Probe]) -> Vec<AgentInfo> {
             models: None,
             providers: None,
             auth: None,
-            notes: vec![NOT_PROBED_READ_ONLY.to_string()],
+            notes: vec![note.to_string()],
         })
         .collect()
 }
 
 /// The note of an agent a read-only process did not probe.
 pub const NOT_PROBED_READ_ONLY: &str = "not probed: read-only server";
+
+/// The note of an agent a scenario process did not probe.
+pub const NOT_PROBED_SCENARIO: &str = "not probed: scenario run";
 
 fn read_cache() -> Option<DetectCache> {
     let path = cache_path()?;
@@ -864,5 +868,60 @@ mod signal_target_tests {
         assert_eq!(targets_sent_for(2), vec![-2]);
         assert_eq!(targets_sent_for(4321), vec![-4321]);
         assert_eq!(targets_sent_for(i32::MAX as u32), vec![-i32::MAX]);
+    }
+}
+
+/// Detection and a command-sourced secret in a quick scenario process:
+/// neither starts its program, and detection writes no memo.
+#[cfg(all(test, unix))]
+mod scenario_tests {
+    use std::path::Path;
+
+    /// A stub program `name` in `dir` that leaves `<dir>/<name>.ran` when
+    /// it runs.
+    fn stub(dir: &Path, name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        let marker = dir.join(format!("{name}.ran"));
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ntouch '{}'\necho value\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    crate::scenario_test! {
+        fn detection_and_a_secret_helper_start_no_program_in_a_scenario_process() at Quick, _root => {
+            let bin = tempfile::tempdir().unwrap();
+            let cfg = tempfile::tempdir().unwrap();
+            let helper = stub(bin.path(), "helper");
+            let agent = stub(bin.path(), "agent");
+            // SAFETY: a scenario child runs this one test on one thread.
+            unsafe {
+                std::env::set_var("APB_CONFIG_DIR", cfg.path());
+                std::env::set_var("PATH", bin.path());
+            }
+            let refusal = format!("{}: program start", crate::process_mode::SCENARIO_REFUSAL);
+            let e = crate::connector::secrets::resolve_cmd(
+                &helper.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&e, crate::connector::secrets::CmdSecretError::Spawn(m) if *m == refusal),
+                "got {e:?}"
+            );
+            assert_eq!(super::probe_output(&agent, &["--version".into()]), Err(refusal));
+            let agents = super::probe(true);
+            assert!(!agents.is_empty());
+            assert!(agents
+                .iter()
+                .all(|a| !a.installed && a.notes == [super::NOT_PROBED_SCENARIO]));
+            assert!(!bin.path().join("helper.ran").exists(), "the helper ran");
+            assert!(!bin.path().join("agent.ran").exists(), "the agent ran");
+            assert_eq!(std::fs::read_dir(cfg.path()).unwrap().count(), 0, "a memo was written");
+        }
     }
 }

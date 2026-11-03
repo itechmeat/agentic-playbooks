@@ -95,6 +95,47 @@ pub(crate) fn journal_check(
     })
 }
 
+/// A scenario run's read-only check (the tree states are not taken, no
+/// `read_only_checked` is journaled): the paths the scenario scripts as
+/// changed fail the attempt exactly as a detected change does, journaled
+/// `read_only_violated` (tier `detected`). `None` when it scripts none.
+pub(crate) fn scripted(
+    journal: &Journal,
+    node: &str,
+    attempt: u32,
+    dirty: &[String],
+) -> Result<Option<String>, EngineError> {
+    let Some(first) = dirty.first() else {
+        return Ok(None);
+    };
+    let changes: Vec<ReadOnlyChange> = dirty
+        .iter()
+        .take(MAX_LISTED)
+        .map(|p| ReadOnlyChange {
+            path: p.clone(),
+            change: apb_core::fingerprint::ChangeKind::Modified
+                .as_str()
+                .to_string(),
+        })
+        .collect();
+    journal.append(EventPayload::ReadOnlyViolated {
+        node: node.to_string(),
+        attempt,
+        tier: ReadOnlyTier::Detected,
+        changes,
+        truncated: dirty.len().saturating_sub(MAX_LISTED) as u64,
+        evidence: None,
+    })?;
+    let more = match dirty.len() {
+        1 => String::new(),
+        n => format!(" (and {} more)", n - 1),
+    };
+    Ok(Some(format!(
+        "{READ_ONLY_DIRTY}: node `{node}` changed the tree it may only read: {first} {}{more}",
+        apb_core::fingerprint::ChangeKind::Modified.as_str()
+    )))
+}
+
 /// The message of a read-only node on a list (V138 refuses it; this is the
 /// engine's own refusal when the validator was skipped).
 pub(crate) fn list_refusal(node: &str) -> String {

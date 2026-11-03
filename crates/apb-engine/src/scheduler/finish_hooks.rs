@@ -15,6 +15,11 @@ use super::*;
 /// known problems it saw. `succeeded` is the outcome `run_finished` will
 /// carry.
 pub(crate) fn finish_hooks(log: &mut EventLog, run_dir: &Path, succeeded: bool) {
+    // A scenario run is no evidence: no grade, no candidate settlement, no
+    // known problems.
+    if crate::scenario::session::skips(run_dir, crate::scenario::BoundaryKind::FinishHooks) {
+        return;
+    }
     grade(log, run_dir, succeeded);
     crate::candidate::settle(log, run_dir, succeeded);
     crate::known_problems::observe_ended(run_dir);

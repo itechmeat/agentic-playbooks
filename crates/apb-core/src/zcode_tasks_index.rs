@@ -149,6 +149,8 @@ fn is_wsl_kernel(release: &str) -> bool {
 
 /// The trimmed stdout of a successful short command, `None` otherwise.
 fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    // A read-only or scenario process starts no program: unknown.
+    crate::process_mode::guard_program_start().ok()?;
     let out = std::process::Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -331,6 +333,21 @@ fn try_insert(db: &Path, rec: &TaskRecord, busy_timeout: Duration) -> rusqlite::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A scenario process starts no program: the host facts it would ask a
+    // command for read as unknown, and the stub never runs.
+    #[cfg(unix)]
+    crate::scenario_test! {
+        fn a_scenario_process_asks_no_command_for_host_facts() at Quick, root => {
+            use std::os::unix::fs::PermissionsExt as _;
+            let id = root.join("id");
+            let ran = root.join("id.ran");
+            std::fs::write(&id, format!("#!/bin/sh\n: > '{}'\necho someone\n", ran.display())).unwrap();
+            std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(command_stdout(id.to_str().unwrap(), &["-un"]), None);
+            assert!(!ran.exists(), "the command ran");
+        }
+    }
 
     const SCHEMA: &str = include_str!("../tests/fixtures/zcode/tasks-index-schema.sql");
 

@@ -51,6 +51,9 @@ fn observed(
 /// Reads `check`. `prior` is the before snapshot when taking the after one:
 /// project checks rerun exactly the commands it recorded.
 pub(crate) fn read(check: &BaselineCheck, ctx: &ReadCtx<'_>, prior: Option<&Snapshot>) -> Snapshot {
+    if let Some(snap) = scripted(check, ctx) {
+        return snap;
+    }
     match check.source() {
         Some(BaselineSource::Connector(conn)) => connector(check, conn, ctx),
         Some(BaselineSource::Script(path)) => script(check, path, ctx),
@@ -69,6 +72,37 @@ pub(crate) fn read(check: &BaselineCheck, ctx: &ReadCtx<'_>, prior: Option<&Snap
             ctx,
         ),
     }
+}
+
+/// A scenario run's read: the scenario's observations of the check at this
+/// phase, read like a source's document; unknown when it scripts none or
+/// says `skip`. `None` for a real run.
+fn scripted(check: &BaselineCheck, ctx: &ReadCtx<'_>) -> Option<Snapshot> {
+    use crate::scenario::{Answer, BoundaryKey, BoundaryKind, Resolution};
+    use apb_core::scenario::BaselineAnswer;
+    let key = BoundaryKey {
+        part: Some(ctx.phase.to_string()),
+        ..Default::default()
+    };
+    let doc = match crate::scenario::session::at_run(ctx.run_dir, BoundaryKind::Baseline, &key) {
+        Resolution::Real => return None,
+        Resolution::Answer(Answer::Baseline(BaselineAnswer::Observed { before, after })) => {
+            match ctx.phase {
+                super::phase::BEFORE => before.get(&check.id).cloned(),
+                _ => after.get(&check.id).cloned(),
+            }
+        }
+        _ => None,
+    };
+    Some(match doc {
+        Some(doc) => observed(check, &doc, String::new(), Vec::new(), ctx),
+        None => unknown(
+            "the scenario observes nothing for this check",
+            String::new(),
+            Vec::new(),
+            ctx,
+        ),
+    })
 }
 
 /// `{{params.*}}` rendered into every string of `v`; nothing else is

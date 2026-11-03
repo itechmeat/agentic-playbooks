@@ -22,11 +22,26 @@ pub(super) fn load(
     playbook: &Playbook,
     state: &RunState,
     spec: &ListSpec,
+    run_dir: &std::path::Path,
+    node_id: &str,
 ) -> Result<Loaded, String> {
     let src = &spec.items;
-    let sourced: Vec<SourcedItem> = match &src.from {
-        None => plain(items_from_values(&src.inline, &src.key, src.max_items))?,
-        Some(from) => {
+    // A scenario that scripts the list's items (`source`) gives them here;
+    // otherwise the items load as in a run (they come from the run itself).
+    let scripted = match crate::scenario::session::at_run(
+        run_dir,
+        crate::scenario::BoundaryKind::ListSource,
+        &crate::scenario::session::node_key(node_id),
+    ) {
+        crate::scenario::Resolution::Answer(crate::scenario::Answer::Source(values)) => {
+            Some(values)
+        }
+        _ => None,
+    };
+    let sourced: Vec<SourcedItem> = match (&src.from, scripted) {
+        (_, Some(values)) => plain(items_from_values(&values, &src.key, src.max_items))?,
+        (None, None) => plain(items_from_values(&src.inline, &src.key, src.max_items))?,
+        (Some(from), None) => {
             let output = state
                 .outputs
                 .get(&from.node)

@@ -79,8 +79,8 @@ fn lease_path(run_dir: &Path, wait: WakerFor) -> PathBuf {
 /// ([`apb_core::fsutil::open_append_private_in`]), so a `wakers` swapped
 /// for a link meanwhile is never gone through.
 fn open_lease(run_dir: &Path, wait: WakerFor) -> std::io::Result<File> {
-    apb_core::process_mode::guard()?;
     let dir = run_dir.join("wakers");
+    apb_core::process_mode::guard_write(&dir)?;
     match std::fs::symlink_metadata(&dir) {
         Ok(meta) if !meta.file_type().is_dir() => {
             return Err(std::io::Error::other(
@@ -157,6 +157,8 @@ fn reap(mut child: std::process::Child) {
 /// Starts `apb __pause-waker` for `wait` of run `run_id` (see [`spawn`]),
 /// its stdout going to `stdout`.
 fn start(root: &Path, run_id: &str, wait: WakerFor, stdout: Stdio) -> Option<std::process::Child> {
+    // A read-only or scenario process starts no waker and opens no lease.
+    apb_core::process_mode::guard_program_start().ok()?;
     if !apb_core::registry::is_safe_segment(run_id)
         || Lease::held(&root.join(".apb/runs").join(run_id), wait)
     {

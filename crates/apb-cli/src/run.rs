@@ -256,21 +256,7 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                         &loaded.playbook,
                     ));
                 for issue in &report.issues {
-                    let sev = match issue.severity {
-                        Severity::Error => "error",
-                        Severity::Warning => "warning",
-                    };
-                    println!(
-                        "{id}: {sev} {} {}{}{}",
-                        issue.code,
-                        issue.message,
-                        issue
-                            .node
-                            .as_ref()
-                            .map(|n| format!(" (node `{n}`)"))
-                            .unwrap_or_default(),
-                        apb_core::validate::edges_segment(&issue.edges)
-                    );
+                    print_issue(&id, issue);
                 }
                 // The local preflight (requires, connectors): warnings, since
                 // another machine may well meet them; the run gate refuses.
@@ -291,7 +277,19 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                 }
                 let suite_ok = !suite_issues.iter().any(|i| i.severity == Severity::Error);
                 // --- end 0.24.0 eval suites ---
-                if report.is_valid() && suite_ok {
+                // Scenario files (`evals/scenarios/`, V146-V151): an error
+                // fails the validation like an eval case's.
+                let scenario_issues = apb_core::scenario::validate_all(
+                    &root.join(".apb/playbooks").join(&id),
+                    &loaded.playbook,
+                );
+                for issue in &scenario_issues {
+                    print_issue(&id, issue);
+                }
+                let scenarios_ok = !scenario_issues
+                    .iter()
+                    .any(|i| i.severity == Severity::Error);
+                if report.is_valid() && suite_ok && scenarios_ok {
                     println!("{id}: OK");
                 } else {
                     failed = true;
@@ -311,6 +309,26 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// One validation issue as `apb validate` prints it: the playbook id, the
+/// severity, the code, the message, then the node and the edge addresses.
+fn print_issue(id: &str, issue: &apb_core::validate::Issue) {
+    let sev = match issue.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    };
+    println!(
+        "{id}: {sev} {} {}{}{}",
+        issue.code,
+        issue.message,
+        issue
+            .node
+            .as_ref()
+            .map(|n| format!(" (node `{n}`)"))
+            .unwrap_or_default(),
+        apb_core::validate::edges_segment(&issue.edges)
+    );
 }
 
 /// Whole-project `apb validate` also checks every project profile's models

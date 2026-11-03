@@ -77,6 +77,11 @@ pub(super) fn run(
         };
     };
     let kind = source.kind();
+    if matches!(source, CheckSource::Script(_) | CheckSource::Connector(_))
+        && let Some(checked) = scripted(run, item, kind)
+    {
+        return checked;
+    }
     match source {
         CheckSource::Output(o) => match output_mismatch(o, output) {
             None => Checked {
@@ -90,6 +95,34 @@ pub(super) fn run(
         CheckSource::Connector(c) => connector(run, item, &outputs, c),
         CheckSource::Judge(j) => judge(run, item, &outputs, j, journal),
     }
+}
+
+/// A scenario run's verdict on an item's script or connector check: the
+/// `check` of the item's scripted attempt (`pass` when it names none), so
+/// no script runs and no connector is called. `None` for a real run.
+fn scripted(run: &ListRun<'_, '_, '_>, item: &Item, kind: &'static str) -> Option<Checked> {
+    use crate::scenario::{Answer, BoundaryKey, BoundaryKind, Resolution, session};
+    use apb_core::scenario::CheckAnswer;
+    let key = BoundaryKey {
+        item: Some(item.id.clone()),
+        ..session::node_key(&run.node.id)
+    };
+    Some(
+        match session::at_run(run.ctx.run_dir, BoundaryKind::SuccessCheck, &key) {
+            Resolution::Real => return None,
+            Resolution::Answer(Answer::Check(CheckAnswer::Pass)) => Checked::of(
+                kind,
+                Some(ItemVerdict::Accept),
+                "the scenario's check passed it",
+            ),
+            Resolution::Answer(Answer::Check(CheckAnswer::Reject)) => Checked::of(
+                kind,
+                Some(ItemVerdict::Reject),
+                "the scenario's check rejected it",
+            ),
+            _ => Checked::of(kind, None, "the scenario has no check verdict for it"),
+        },
+    )
 }
 
 /// Why the step's output fails an output check, clipped as a script's
@@ -281,14 +314,25 @@ fn judge(
             applied: enforce && decided(answers).is_some(),
             would_change: None,
         };
-    let why = match ask(
+    let staged = match crate::scenario::decide::stage(
+        run.ctx.run_dir,
+        crate::scenario::BoundaryKind::ListJudgeCheck,
+        &run.node.id,
+        Some(item.id.as_str()),
+    ) {
+        Ok(s) => s,
+        Err(e) => return Checked::of("judge", None, e.to_string()),
+    };
+    let asked = ask(
         run.ctx.decisions,
         journal,
         &run.node.id,
         &parts,
         &wire,
         &judgement,
-    ) {
+    );
+    drop(staged);
+    let why = match asked {
         Asked::Answered { answers, by } => {
             let confidence = answers
                 .get(VERDICT_QUESTION)

@@ -82,6 +82,25 @@ pub(crate) fn snapshot(root: &Path) -> Option<EffectiveDecisions> {
     }
 }
 
+/// The digest of a state as `runner` sends it (redacted and clipped), the
+/// one `decision_made.state_digest` carries. Without a runner, the state
+/// as the default privacy settings would send it, without redaction.
+pub(crate) fn state_digest(runner: Option<&DecisionRunner>, parts: &StateParts) -> String {
+    let state = match runner {
+        Some(r) => r.build_state(parts),
+        None => {
+            let texts: Vec<Option<String>> =
+                parts.fields.iter().map(|f| Some(f.text.clone())).collect();
+            let share = apb_core::decisions::Privacy::default()
+                .max_state_bytes
+                .checked_div(parts.fields.len().max(1))
+                .unwrap_or(0);
+            DecisionRunner::assemble(parts, &texts, share, &Value::Object(parts.meta.clone()))
+        }
+    };
+    apb_decide::digest::digest(&state)
+}
+
 /// Where a journaled decision goes: the attempt journal, written in place
 /// while the node runs (not the post-node batch).
 pub(crate) trait DecisionJournal {
@@ -276,6 +295,9 @@ pub(crate) struct DecisionRunner {
     /// The machine config dir: the live mode and the threshold store are
     /// read from it at every decision.
     config_dir: Option<PathBuf>,
+    /// A quick scenario run's runner: its snapshot is the whole truth (no
+    /// live cap from this machine's file, which a quick run never reads).
+    scripted: bool,
 }
 
 impl DecisionRunner {
@@ -291,6 +313,12 @@ impl DecisionRunner {
         // snapshot to narrow: providers, keys and limits come from what the
         // machine's file allows now.
         let snapshot = crate::manifest::read(run_dir).ok()??.decisions?;
+        // A quick scenario run asks the answer book, never a provider.
+        if crate::scenario::session::of(run_dir)
+            .is_some_and(|s| s.level() == apb_core::scenario::ScenarioLevel::Quick)
+        {
+            return Some(Self::for_scenario(snapshot, root, run_dir, events));
+        }
         let live = apb_core::config::config_dir()
             .and_then(|dir| apb_core::decisions::resolve_in(&dir, root).active());
         let settings = snapshot.capped_by(live.as_ref());
@@ -372,6 +400,7 @@ impl DecisionRunner {
             cache: DecisionCache::new(),
             ledger: Mutex::new(ledger),
             config_dir: apb_core::config::config_dir(),
+            scripted: false,
         }
     }
 
@@ -379,10 +408,30 @@ impl DecisionRunner {
         &self.settings
     }
 
+    /// The requests this runner saw sent and their cost so far.
+    pub(crate) fn spent(&self) -> (u32, f64) {
+        let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        (ledger.requests, ledger.cost_usd)
+    }
+
     /// The use's mode now: the snapshot, capped by what the machine and the
     /// project say at this moment (the kill switch, a lowered ceiling or use
     /// mode, a removed file), so every path stops mid-run.
     pub(crate) fn mode_for(&self, site: UseSite) -> DecisionMode {
+        // A scenario run asks only for its judges: the engine's own uses
+        // (completion check, retry advice, triage, review recommendation,
+        // tier routing) stay off.
+        if !matches!(site, UseSite::JudgeNode | UseSite::JudgeEdge)
+            && crate::scenario::session::skips(
+                &self.run_dir,
+                crate::scenario::BoundaryKind::EngineAid,
+            )
+        {
+            return DecisionMode::Off;
+        }
+        if self.scripted {
+            return self.settings.mode_for(site.as_str());
+        }
         if apb_core::decisions::killed_by_switch() {
             return DecisionMode::Off;
         }
@@ -654,7 +703,10 @@ impl DecisionRunner {
     /// in flight in any process ([`budget`]): parallel branches and host
     /// tasks asking at the same time share one cap, and a slot raised only
     /// after the reply would let each of them past the last one.
-    fn reserve_request(&self) -> Option<budget::Reservation> {
+    ///
+    /// A smoke scenario also takes `worst` from its tree's request cap: the
+    /// most HTTP requests this ask can send ([`Self::worst_requests`]).
+    fn reserve_request(&self, worst: u32) -> Option<budget::Reservation> {
         let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
         let slot = budget::reserve(
             &self.run_dir,
@@ -666,8 +718,34 @@ impl DecisionRunner {
             },
             ledger.inflight,
         )?;
+        // A smoke scenario's cap holds for its whole tree, per request: a
+        // nested child run takes from its parent's count too, and an ask
+        // takes the most requests it can send.
+        if let Some(session) = crate::scenario::session::of(&self.run_dir)
+            && !session.take_requests(worst)
+        {
+            return None;
+        }
         ledger.inflight += 1;
         Some(slot)
+    }
+
+    /// The most HTTP requests one ask through `route` can send: every
+    /// provider on the route, each with the decision client's retries. A
+    /// judge's profile emulation and the scenario's own provider send none.
+    fn worst_requests(&self, route: &Route<'_>) -> u32 {
+        if self.scripted {
+            return 0;
+        }
+        let providers = match route {
+            Route::All => self.chains().all.ids().len(),
+            Route::Native => self.chains().native.ids().len(),
+            Route::Emulation => self.chains().emulation.ids().len(),
+            Route::Custom { .. } => 0,
+        };
+        u32::try_from(providers)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(PROVIDER_ATTEMPTS)
     }
 
     /// Asks one decision. See the module docs for the steps.
@@ -791,7 +869,8 @@ impl DecisionRunner {
             join: call.join.clone(),
             edge_addresses: call.edge_addresses.clone(),
         };
-        let Some(slot) = self.reserve_request() else {
+        let worst = self.worst_requests(&route);
+        let Some(slot) = self.reserve_request(worst) else {
             let mut event = base;
             if let EventPayload::DecisionMade { error, .. } = &mut event {
                 *error = Some("budget".into());
@@ -812,14 +891,46 @@ impl DecisionRunner {
             questions: call.questions.clone(),
         };
         let started = std::time::Instant::now();
+        // A scripted answer belongs to its boundary (node, visit, item), not
+        // to the request: two judges asking the same question of the same
+        // state are answered as each is scripted, so a scenario's runner
+        // keeps no cache.
+        let cache = (!self.scripted).then_some(&self.cache);
+        // No request leaves a read-only or a quick scenario process, whichever
+        // entry put it in that mode. The scenario's own provider and a
+        // judge's profile emulation send none.
+        let refused = match &route {
+            Route::Custom { .. } => None,
+            _ if self.scripted => None,
+            _ => apb_core::process_mode::guard_decision_request().err(),
+        };
+        let refused_here = refused.is_some();
+        // The provider asked first on the route: a cache hit there is the
+        // one answer that sent nothing (a later provider's hit comes after
+        // every earlier provider sent).
+        let first_provider: Option<String> = match &route {
+            Route::All => self.chains().all.ids().first().map(|s| s.to_string()),
+            Route::Native => self.chains().native.ids().first().map(|s| s.to_string()),
+            Route::Emulation => self.chains().emulation.ids().first().map(|s| s.to_string()),
+            Route::Custom { .. } => None,
+        };
         let result = match &route {
-            Route::All => self.chains().all.decide(&request, Some(&self.cache)),
-            Route::Native => self.chains().native.decide(&request, Some(&self.cache)),
-            Route::Emulation => self.chains().emulation.decide(&request, Some(&self.cache)),
-            Route::Custom { id, model, ask } => match self.cache.get(id, model, &request) {
-                Some(hit) => Ok(hit),
-                None => ask(&request).inspect(|r| self.cache.put(id, model, &request, r)),
-            },
+            _ if refused.is_some() => Err(apb_decide::DecideError::Unavailable(
+                refused.map(|e| e.to_string()).unwrap_or_default(),
+            )),
+            Route::All => self.chains().all.decide(&request, cache),
+            Route::Native => self.chains().native.decide(&request, cache),
+            Route::Emulation => self.chains().emulation.decide(&request, cache),
+            Route::Custom { id, model, ask } => {
+                match cache.and_then(|c| c.get(id, model, &request)) {
+                    Some(hit) => Ok(hit),
+                    None => ask(&request).inspect(|r| {
+                        if let Some(c) = cache {
+                            c.put(id, model, &request, r);
+                        }
+                    }),
+                }
+            }
         };
         let elapsed = started.elapsed().as_millis() as u64;
         let mut event = base;
@@ -924,24 +1035,37 @@ impl DecisionRunner {
             unreachable!("the event is a DecisionMade")
         }
         let applied_now = meta.applied;
-        let (cost, counted) = match &event {
+        let (cost, counted, first_hit) = match &event {
             EventPayload::DecisionMade {
                 cost_usd,
                 cached,
                 provider,
                 ..
-            } => (cost_usd.unwrap_or(0.0), provider.is_some() && !cached),
-            _ => (0.0, false),
+            } => (
+                cost_usd.unwrap_or(0.0),
+                provider.is_some() && !cached,
+                *cached && provider.is_some() && *provider == first_provider,
+            ),
+            _ => (0.0, false, false),
         };
+        // Nothing left the process: the guard refused, the route has no
+        // provider, or the first provider answered from the cache.
+        let nothing_sent = refused_here || worst == 0 || first_hit;
         let source = meta.source();
         let appended = journal.append_decision(event);
         {
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
             ledger.inflight = ledger.inflight.saturating_sub(1);
             // A request that went out counts whether or not it was
-            // journaled; a cache hit or an empty chain sent none.
+            // journaled; a cache hit or an empty chain sent none. How many
+            // requests an ask sent is not reported (retries, and providers
+            // tried before the one that answered), so a smoke scenario
+            // gives its reservation back only when nothing went out.
             if counted {
                 ledger.requests += 1;
+            }
+            if nothing_sent && let Some(session) = crate::scenario::session::of(&self.run_dir) {
+                session.give_back_requests(worst);
             }
             ledger.cost_usd += cost;
             if appended.is_ok() && applied_now && !reserved {
@@ -1092,6 +1216,7 @@ impl DecisionRunner {
             cache: DecisionCache::new(),
             ledger: Mutex::new(Ledger::default()),
             config_dir: apb_core::config::config_dir(),
+            scripted: false,
         }
     }
 
@@ -1145,6 +1270,11 @@ pub(crate) enum Route<'a> {
     },
 }
 
+/// The most HTTP requests the decision client sends to one provider for
+/// one ask: the first and its retries (`apb_decide`'s retry rule, which it
+/// does not export; a test pins the two together).
+pub(crate) const PROVIDER_ATTEMPTS: u32 = 3;
+
 /// Who answered a decision.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AnswerSource {
@@ -1185,6 +1315,31 @@ impl DecisionRunner {
             uses: BTreeMap::new(),
         };
         Self::with_settings(settings, root, run_dir, events, scrub_names)
+    }
+
+    /// The runner of a quick scenario run: its snapshot's judge modes, one
+    /// provider (the scenario's answer book, [`crate::scenario::decide`])
+    /// for the native route, none for the emulation route, and no live cap.
+    /// Journal, replay, budget and the mode rule are the run's own.
+    pub(crate) fn for_scenario(
+        settings: EffectiveDecisions,
+        root: &Path,
+        run_dir: &Path,
+        events: &[Event],
+    ) -> Self {
+        let mut runner = Self::with_settings(settings, root, run_dir, events, &[]);
+        runner.scripted = true;
+        runner.config_dir = None;
+        let one = || -> Box<dyn apb_decide::DecisionProvider> {
+            Box::new(crate::scenario::decide::ScenarioProvider)
+        };
+        let _ = runner.chain.set(Chains {
+            all: apb_decide::ProviderChain::new(vec![one()]),
+            native: apb_decide::ProviderChain::new(vec![one()]),
+            emulation: apb_decide::ProviderChain::new(Vec::new()),
+            keys: Vec::new(),
+        });
+        runner
     }
 
     /// Whether any `llm_emulation` provider is configured for the run.
@@ -1500,6 +1655,74 @@ mod tests {
                 edge_addresses: BTreeMap::new(),
             },
         )
+    }
+
+    /// The quick ban on decision requests does not hang on which entry put
+    /// the process in scenario mode: entered through the core's own entry,
+    /// which leaves the decision client's switch alone, a run's provider is
+    /// still never asked, and the refusal is recorded.
+    #[test]
+    fn a_quick_process_entered_by_the_core_entry_still_asks_no_provider() {
+        apb_core::process_mode::testing::in_plain_child(
+            "decision::tests::a_quick_process_entered_by_the_core_entry_still_asks_no_provider",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let write_root = root.path().canonicalize().unwrap();
+                let provider = fake();
+                let runner = runner_over(cfg.path(), &write_root, &[], &provider);
+                apb_core::process_mode::enter_scenario(
+                    apb_core::scenario::ScenarioLevel::Quick,
+                    &write_root,
+                )
+                .unwrap();
+                let journal = Recorder::default();
+                let outcome = ask(&runner, &journal, "n");
+                assert!(
+                    !matches!(outcome, DecisionOutcome::Answered { .. }),
+                    "{outcome:?}"
+                );
+                assert_eq!(provider.calls(), 0, "the provider was asked");
+                assert!(
+                    apb_core::process_mode::scenario_refusals()
+                        .iter()
+                        .any(|r| r == "decision request"),
+                    "{:?}",
+                    apb_core::process_mode::scenario_refusals()
+                );
+            },
+        );
+    }
+
+    /// [`PROVIDER_ATTEMPTS`] is the decision client's own count: a provider
+    /// that answers 500 every time is asked exactly that often for one ask,
+    /// so a change of the client's retries fails here until the smoke
+    /// reservation follows it.
+    #[test]
+    fn provider_attempts_is_the_decision_clients_retry_count() {
+        use apb_decide::DecisionProvider as _;
+        let stub = apb_decide::testing::StubServer::start(vec![]);
+        let provider = apb_decide::SystemOne::new(
+            "s1",
+            stub.base_url.clone(),
+            "m",
+            None,
+            std::time::Duration::from_secs(10),
+        );
+        let request = DecisionRequest {
+            use_site: UseSite::JudgeNode,
+            state: json!({}),
+            state_order: Vec::new(),
+            questions: BTreeMap::from([(
+                "q".to_string(),
+                Question::Noul {
+                    instructions: json!("done?"),
+                    criteria: None,
+                },
+            )]),
+        };
+        assert!(provider.decide(&request).is_err());
+        assert_eq!(stub.count(), PROVIDER_ATTEMPTS as usize);
     }
 
     fn meta_of(o: &DecisionOutcome) -> (&AnswerMeta, bool) {

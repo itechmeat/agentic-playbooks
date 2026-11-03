@@ -95,6 +95,10 @@ impl Notifier {
     /// second left, so the sweep returns within `budget` plus the load of
     /// the target.
     fn sweep_within(&self, events: &[Event], budget: Duration) {
+        // A scenario run has no subscription and sends nothing.
+        if crate::scenario::session::skips(&self.run_dir, crate::scenario::BoundaryKind::Notify) {
+            return;
+        }
         let now_ms = apb_core::clock::now_ms_u64();
         if !self.may_be_due(events, now_ms) {
             return;
@@ -166,6 +170,9 @@ impl Notifier {
     /// subscription keeps its parent's real set time, so a send the gate
     /// refused stays retired and no waker sweeps for it.
     pub(crate) fn retry_ahead(&self) -> bool {
+        if crate::scenario::session::skips(&self.run_dir, crate::scenario::BoundaryKind::Notify) {
+            return false;
+        }
         let gap = retry_gap_ms();
         let at = apb_core::clock::now_ms_u64().saturating_add(gap);
         let Ok(events) = crate::event::read_all_lossy_tail(&self.run_dir) else {

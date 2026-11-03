@@ -138,19 +138,16 @@ pub fn execute_with_within(req: CallRequest, ctx: CallContext, max_secs: u64) ->
     execute_bounded(req, &ctx, Some(max_secs))
 }
 
-/// The refusal of a connector call in a read-only process: no account is
-/// resolved, nothing is sent and nothing is journaled.
-fn read_only_refusal() -> Option<CallError> {
-    crate::read_only::active().then(|| {
-        CallError::new(
-            CallErrorCode::Permission,
-            apb_core::process_mode::READ_ONLY_REFUSAL,
-        )
-    })
+/// The refusal of a connector call in a read-only or a scenario process:
+/// no account is resolved, nothing is sent and nothing is journaled.
+fn guard_refusal() -> Option<CallError> {
+    apb_core::process_mode::guard_connector_call()
+        .err()
+        .map(|e| CallError::new(CallErrorCode::Permission, e.to_string()))
 }
 
 fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> (Value, bool) {
-    if let Some(e) = read_only_refusal() {
+    if let Some(e) = guard_refusal() {
         return (e.to_json(), false);
     }
     match run(&req, ctx, max_secs) {
@@ -895,7 +892,7 @@ pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
 /// `execute` gives. A read-only process refuses before `prepare` runs, so no
 /// account is picked and no secret is resolved.
 fn answer_live(prepare: impl FnOnce() -> Result<Prepared, CallError>) -> (Value, bool) {
-    if let Some(e) = read_only_refusal() {
+    if let Some(e) = guard_refusal() {
         return (e.to_json(), false);
     }
     match prepare() {

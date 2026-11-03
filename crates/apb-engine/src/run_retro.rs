@@ -599,10 +599,12 @@ fn node_report(run: &RetroRun, id: &str, acc: NodeAcc, attempts: Vec<AttemptRetr
     n
 }
 
-/// The newest `n` finished runs of the report's playbook version.
+/// The newest `n` finished production runs of the report's playbook
+/// version.
 fn baseline_runs<'a>(report: &RetroReport, history: &'a [StatsRun], n: usize) -> Vec<&'a StatsRun> {
     let mut runs: Vec<(u128, &StatsRun)> = history
         .iter()
+        .filter(|r| crate::run_history::counts_as_history(r))
         .filter(|r| r.run_id != report.run_id)
         .filter(|r| r.playbook == report.playbook && r.version == report.version)
         .filter(|r| run_end(&r.events).0.is_some())

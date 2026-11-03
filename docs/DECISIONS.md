@@ -694,6 +694,17 @@ decides what happens with the answer:
   nothing is journaled; the node applies `on_unavailable` (reason
   `not_configured` or `off`).
 
+A run snapshots the machine's decision settings at its start when the
+playbook asks the decision models itself: a judge node, a judge edge, a
+list's judge item check, or a review with `auto_decide`, with or without
+agent nodes. A playbook with none of these and no agent node snapshots
+nothing. Without a snapshot every such ask reads `not_configured`. Before
+this release a playbook without agent nodes never snapshotted the
+settings, so its judge never asked a provider; now, on a machine whose
+`judge_node` (or `judge_edge`) use is above `off`, its judge state is
+sent to the configured providers under the same `privacy` rules as any
+other use.
+
 A judge node's own question goes to the decision models of the chain only
 (every kind but `llm_emulation`), never to an `llm_emulation` provider; those are used
 by `on_unavailable: emulate`. The judge node needs no stored threshold: its

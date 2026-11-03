@@ -844,3 +844,82 @@ fn the_run_graph_shows_every_judge_fallback_form() {
     assert!(taken(&g, "e:triage>other#1"), "{:?}", g.edges);
     assert!(!taken(&g, "e:triage>fix#1") && !taken(&g, "e:triage>big#1"));
 }
+
+// --- a judge in a playbook without agent nodes ------------------------------
+
+/// A judge node and finish nodes only: no agent node binds a profile.
+fn judge_only() -> String {
+    "schema: 2\nid: judge-only\nname: judge only\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: triage\n    type: judge\n    state: { task: \"{{run.instruction}}\" }\n    questions:\n      verdict: { type: choice, instructions: \"Which outcome does `task` ask for?\", criteria: { clean: a, needs_fix: b, unclear: c } }\n      risky: { type: noul, instructions: \"Is `task` risky?\" }\n    on_unavailable: { default: { verdict: clean, risky: false } }\n  - { id: fix, type: finish, outcome: success }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: triage }\n  - { from: triage, to: fix, condition: { type: output_field, node: triage, field: verdict, equals: needs_fix } }\n  - { from: triage, to: done, fallback: true }\n".to_string()
+}
+
+/// A list of script steps whose items a judge checks: no agent node either.
+fn judge_checked_list() -> String {
+    "schema: 2\nid: judged-list\nname: judged list\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: work\n    type: script\n    script: scripts/work.sh\n    runner: sh\n    list:\n      items: { inline: [ { id: a, subject: hello } ] }\n      batch: { size: 1, retries: 0 }\n      check:\n        judge:\n          state: { subject: \"{{item.subject}}\" }\n          instructions: Is it plausible?\n          criteria: { accept: plausible, reject: not plausible }\n          on_unavailable: accept_with_note\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n".to_string()
+}
+
+fn manifest_decisions(p: &Project, run_id: &str) -> bool {
+    apb_engine::manifest::read(&p.run_dir(run_id))
+        .unwrap()
+        .is_some_and(|m| m.decisions.is_some())
+}
+
+/// A judge-only playbook asks its provider and routes by the answer: the
+/// run snapshots the decision settings although no node binds a profile.
+/// Without `decisions.yaml` nothing is snapshotted and the declared route
+/// is taken.
+#[test]
+fn a_judge_without_agent_nodes_asks_and_routes_by_the_answer() {
+    let p = Project::new(&judge_only());
+    p.decisions(&fake("enforce", "needs_fix"));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (status, run_id, events) = p.run("judge-only");
+    assert_eq!(status, RunStatus::Succeeded);
+    assert!(
+        manifest_decisions(&p, &run_id),
+        "the settings are snapshotted"
+    );
+    let (_, out) = output(&events, "triage").unwrap();
+    assert_eq!(out["decided_by"], json!("fake/fake-1"));
+    assert!(ran(&events, "fix") && !ran(&events, "done"));
+
+    let p = Project::new(&judge_only());
+    let _env = p.env();
+    let (status, run_id, events) = p.run("judge-only");
+    assert_eq!(status, RunStatus::Succeeded);
+    assert!(!manifest_decisions(&p, &run_id), "no file, no block");
+    assert_eq!(
+        output(&events, "triage").unwrap().1["reason"],
+        json!("not_configured")
+    );
+    assert!(ran(&events, "done"));
+}
+
+/// A list whose items a judge checks asks the provider in a playbook with
+/// no agent node too.
+#[test]
+fn a_list_judge_check_without_agent_nodes_asks_the_provider() {
+    let p = Project::new(&judge_checked_list());
+    let scripts = p
+        .root
+        .path()
+        .join(".apb/playbooks/judged-list/1.0.0/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("work.sh"), "echo done\n").unwrap();
+    let accept = json!({"type": "choice", "choice": "accept", "probabilities": {"accept": 0.9, "reject": 0.1}, "confidence": 0.9});
+    p.decisions(&format!(
+        "version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      verdict: {accept}\nuses:\n  judge_node: {{ mode: enforce }}\n"
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (status, run_id, events) = p.run("judged-list");
+    assert_eq!(status, RunStatus::Succeeded);
+    assert!(manifest_decisions(&p, &run_id));
+    assert!(
+        decisions(&events)
+            .iter()
+            .any(|d| d.0 == "judge_node" && d.3.as_deref() == Some("fake")),
+        "{:?}",
+        decisions(&events)
+    );
+}

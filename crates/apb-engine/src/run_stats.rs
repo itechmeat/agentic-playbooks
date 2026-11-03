@@ -320,6 +320,7 @@ pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
     let kept: Vec<&StatsRun> = runs
         .iter()
         .filter(|r| !r.playbook.is_empty())
+        .filter(|r| crate::run_history::counts_as_history(r))
         .filter(|r| filter.playbook.as_ref().is_none_or(|p| &r.playbook == p))
         .filter(|r| {
             filter

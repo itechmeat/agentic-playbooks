@@ -278,6 +278,9 @@ pub fn run_capture_in(
     cancel: Option<&AtomicBool>,
     session: bool,
 ) -> std::io::Result<Captured> {
+    // A read-only or scenario process starts no program: a script, a check,
+    // a project command, a session listing, a push.
+    apb_core::process_mode::guard_program_start()?;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Make the child process the leader of its own process group (pgid ==
     // pid), so that on timeout the whole group can be killed (shell

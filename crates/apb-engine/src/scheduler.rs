@@ -109,6 +109,7 @@ pub use outcome::RunResult;
 pub(crate) use outcome::{AttemptOutcome, ExecOptions, LiveContext, NodeCtx, ResumeContext};
 use patch::*;
 use pipeline::{BatchSlots, feeds_ready_any, pipeline_member, reoffer_joins};
+pub use prepare::run_scenario;
 use prepare::*;
 pub(crate) use quota_probe::{ProbeRun, run_quota_probe};
 use rebind::*;
@@ -477,6 +478,162 @@ fn drive(
     }
 }
 
+/// The engine's own pause of an attempt (a quota). A scenario run cannot
+/// wait for it: it is due at once, journaled paused and resumed by the
+/// engine, and the drive goes on (the node runs again, so a run of quota
+/// failures still ends at the engine's own limit of pauses). Returns
+/// whether it was taken in-process; otherwise it is posted as an engine
+/// pause, as in every real run.
+fn engine_pause(
+    run_dir: &Path,
+    node: &str,
+    pause: crate::pause::PauseRequest,
+    append: &mut dyn FnMut(EventPayload) -> Result<(), EngineError>,
+) -> Result<bool, EngineError> {
+    if !crate::scenario::session::is_scenario(run_dir) {
+        journal::post_engine_pause(run_dir, pause)?;
+        return Ok(false);
+    }
+    append(EventPayload::RunPaused {
+        reason: pause.reason.unwrap_or_default(),
+        by: Some(crate::pause::kind::PauseBy::Engine),
+        mode: Some(pause.mode),
+        until: pause.until,
+        keep_lock: pause.keep_lock,
+    })?;
+    append(EventPayload::RunResumed {
+        from_node: node.to_string(),
+        by: Some(crate::pause::kind::PauseBy::Engine),
+        explicit: false,
+        launch: None,
+        definition: None,
+        apb: None,
+    })?;
+    Ok(true)
+}
+
+/// A scenario run's review that waits for a person: its scripted decision
+/// for this visit, posted like any decision (the next look consumes it).
+/// `false` for a real run. A decision that never comes cannot fail like a
+/// review fails: a missing one makes the scenario invalid whatever
+/// `on_missing` says.
+fn scripted_review(run_dir: &Path, node: &str) -> Result<bool, EngineError> {
+    use crate::scenario::{Answer, BoundaryKind, Resolution};
+    let key = crate::scenario::session::node_key(node);
+    match crate::scenario::session::at_run(run_dir, BoundaryKind::Review, &key) {
+        Resolution::Real | Resolution::Skip => Ok(false),
+        Resolution::Answer(Answer::Review(a)) => {
+            crate::review::post_review(
+                run_dir,
+                crate::review::ReviewCommand {
+                    node: node.to_string(),
+                    decision: a.decision,
+                    note: a.note.unwrap_or_default(),
+                },
+            )?;
+            Ok(true)
+        }
+        _ => {
+            crate::scenario::session::on_missing(run_dir, BoundaryKind::Review, &key)?;
+            Err(EngineError::Invalid(format!(
+                "{}: scenario has no answer for review `{node}`",
+                crate::scenario::session::MISSING_ANSWER
+            )))
+        }
+    }
+}
+
+/// A scenario run's answer to the question an attempt of `node` asked:
+/// `None` for a real run, `Some(None)` when the question times out (the
+/// scripted `timeout`, or a missing answer under `on_missing: fail`).
+fn scripted_question(run_dir: &Path, node: &str) -> Result<Option<Option<String>>, EngineError> {
+    use crate::scenario::{Answer, BoundaryKind, Resolution};
+    let key = crate::scenario::session::node_key(node);
+    Ok(
+        match crate::scenario::session::at_run(run_dir, BoundaryKind::Question, &key) {
+            Resolution::Real | Resolution::Skip => None,
+            Resolution::Answer(Answer::Question(q)) if !q.timeout => Some(q.answer),
+            Resolution::Answer(_) => Some(None),
+            Resolution::Missing => {
+                crate::scenario::session::on_missing(run_dir, BoundaryKind::Question, &key)?;
+                Some(None)
+            }
+        },
+    )
+}
+
+/// A scenario run's child playbook node.
+enum ScriptedChild {
+    /// The child's result as written: status and output (an output object
+    /// as compact JSON).
+    Result(NodeStatus, String),
+    /// A nested scenario run of the child: the scenario's name.
+    Scenario(String),
+}
+
+/// A scenario run's answer for child playbook node `node`: `None` for a
+/// real run. A missing one fails the node under `on_missing: fail`.
+fn scripted_child(run_dir: &Path, node: &str) -> Result<Option<ScriptedChild>, EngineError> {
+    use crate::scenario::{Answer, BoundaryKind, Resolution};
+    use apb_core::scenario::{ChildAnswer, ScriptedStatus};
+    let key = crate::scenario::session::node_key(node);
+    Ok(
+        match crate::scenario::session::at_run(run_dir, BoundaryKind::ChildPlaybook, &key) {
+            Resolution::Real | Resolution::Skip => None,
+            Resolution::Answer(Answer::Child(ChildAnswer::Scenario { scenario })) => {
+                Some(ScriptedChild::Scenario(scenario))
+            }
+            Resolution::Answer(Answer::Child(ChildAnswer::Result { status, output })) => {
+                let output = match output {
+                    None => String::new(),
+                    Some(serde_json::Value::String(s)) => s,
+                    Some(v) => serde_json::to_string(&v).unwrap_or_default(),
+                };
+                Some(ScriptedChild::Result(
+                    match status {
+                        ScriptedStatus::Succeeded => NodeStatus::Succeeded,
+                        ScriptedStatus::Failed => NodeStatus::Failed,
+                    },
+                    output,
+                ))
+            }
+            _ => {
+                crate::scenario::session::on_missing(run_dir, BoundaryKind::ChildPlaybook, &key)?;
+                Some(ScriptedChild::Result(
+                    NodeStatus::Failed,
+                    format!("scenario has no answer for child playbook `{node}`"),
+                ))
+            }
+        },
+    )
+}
+
+/// How a scenario run's wait ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptedWait {
+    /// The timer elapsed or the signal came.
+    Ended,
+    TimedOut,
+}
+
+/// A scenario run's wait, due at once: `None` for a real run. A missing
+/// answer under `on_missing: fail` times the wait out.
+fn scripted_wait(run_dir: &Path, node: &str) -> Result<Option<ScriptedWait>, EngineError> {
+    use crate::scenario::{Answer, BoundaryKind, Resolution};
+    let key = crate::scenario::session::node_key(node);
+    Ok(
+        match crate::scenario::session::at_run(run_dir, BoundaryKind::Wait, &key) {
+            Resolution::Real | Resolution::Skip => None,
+            Resolution::Answer(Answer::Wait(w)) if w.timed_out => Some(ScriptedWait::TimedOut),
+            Resolution::Answer(_) => Some(ScriptedWait::Ended),
+            Resolution::Missing => {
+                crate::scenario::session::on_missing(run_dir, BoundaryKind::Wait, &key)?;
+                Some(ScriptedWait::TimedOut)
+            }
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive_inner(
     mut playbook: Playbook,
@@ -746,6 +903,11 @@ fn drive_inner(
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
+        // A scenario that missed an answer under `on_missing: error` stops
+        // the run at once.
+        if let Some(e) = crate::scenario::session::halt_error(run_dir) {
+            return Err(e);
+        }
         // An unattended run's budget refused a node or a batch (the
         // sequential arm, a batch member or a list pool): it fails instead
         // of pausing, once the members in flight reported back.
@@ -817,7 +979,7 @@ fn drive_inner(
         // yet is never admitted. With nothing else to run the drive waits
         // here, the control scan at the top running every tick.
         let now = apb_core::clock::now_ms();
-        let held = deferred::held(&state, &events, now);
+        let held = deferred::held_in(run_dir, &state, &events, now);
         if let Some(due_at) = deferred::hold(&held, &mut current, &mut frontier) {
             // A long wait frees the run instead: `drive` releases its lock
             // and leaves a waker for `due_at`.
@@ -862,6 +1024,7 @@ fn drive_inner(
             .worktree
             .as_deref()
             .map(PathBuf::from)
+            .or_else(|| crate::scenario::session::workdir(run_dir))
             .unwrap_or_else(|| root.to_path_buf());
         let current_node = playbook
             .node(&current)
@@ -874,18 +1037,21 @@ fn drive_inner(
         if !baseline_before_done && apb_core::effects::node_acts(current_node) {
             // Every publish node's remote is pinned before anything acts
             // (see `crate::publish::pin`).
-            crate::publish::pin::ensure(&playbook, &events, log, cfg.parent_acted, |from| {
-                publish::resolved_tree(&playbook, from, &workdir, |t| {
-                    render_node_prompt(
-                        run_dir,
-                        &run_id,
-                        &state,
-                        cfg,
-                        t,
-                        &playbook.context_budget(from),
-                    )
-                })
-            })?;
+            // A scenario run pushes nothing: no remote to pin.
+            if !crate::scenario::session::is_scenario(run_dir) {
+                crate::publish::pin::ensure(&playbook, &events, log, cfg.parent_acted, |from| {
+                    publish::resolved_tree(&playbook, from, &workdir, |t| {
+                        render_node_prompt(
+                            run_dir,
+                            &run_id,
+                            &state,
+                            cfg,
+                            t,
+                            &playbook.context_budget(from),
+                        )
+                    })
+                })?;
+            }
             let (flag, _guard) = baseline::snapshot_flag(&fanout);
             let run = baseline::BaselineRun {
                 playbook: &playbook,
@@ -1548,8 +1714,11 @@ fn drive_inner(
                                         for ev in events {
                                             journal.append(ev)?;
                                         }
-                                        journal::post_engine_pause(run_dir, pause)?;
-                                        halt.store(true, Ordering::SeqCst);
+                                        if !engine_pause(run_dir, &node, pause, &mut |e| {
+                                            journal.append(e)
+                                        })? {
+                                            halt.store(true, Ordering::SeqCst);
+                                        }
                                         continue;
                                     }
                                     // Its retry waits: no `node_finished`, and
@@ -2043,6 +2212,9 @@ fn drive_inner(
                     (NodeStatus::Succeeded, entry.cmd.decision)
                 }
                 review_gate::GateStep::Moved => continue,
+                // A scenario run's person is its scripted decision, posted
+                // through the channel every decision surface uses.
+                review_gate::GateStep::Waiting if scripted_review(run_dir, &current)? => continue,
                 review_gate::GateStep::Waiting => {
                     std::thread::sleep(AWAIT_CONTROL_POLL);
                     continue;
@@ -2058,36 +2230,41 @@ fn drive_inner(
                     outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
                 });
             }
-            let run = publish::PublishRun {
-                root,
-                run_id: &run_id,
-                workdir: &workdir,
-                state: &state,
-                cfg,
-                scrub: &env_scrub,
-                abort: &run_cancel,
-            };
-            let step = publish::step(
-                &run,
-                &mut review_gate::GateDrive {
-                    run_dir,
-                    log: &mut *log,
-                    playbook: &playbook,
-                    current: &mut current,
-                    control_cursor: &mut control_cursor,
-                    prompt_overrides: &mut prompt_overrides,
-                    frontier: &mut frontier,
-                },
-            )?;
-            match step {
-                publish::PublishStep::Finished(status, output) => {
-                    steps += 1;
-                    (status, output)
-                }
-                publish::PublishStep::Again | publish::PublishStep::Moved => continue,
-                publish::PublishStep::Waiting => {
-                    std::thread::sleep(AWAIT_CONTROL_POLL);
-                    continue;
+            if let Some((status, output)) = publish::scripted(run_dir, log, &current)? {
+                steps += 1;
+                (status, output)
+            } else {
+                let run = publish::PublishRun {
+                    root,
+                    run_id: &run_id,
+                    workdir: &workdir,
+                    state: &state,
+                    cfg,
+                    scrub: &env_scrub,
+                    abort: &run_cancel,
+                };
+                let step = publish::step(
+                    &run,
+                    &mut review_gate::GateDrive {
+                        run_dir,
+                        log: &mut *log,
+                        playbook: &playbook,
+                        current: &mut current,
+                        control_cursor: &mut control_cursor,
+                        prompt_overrides: &mut prompt_overrides,
+                        frontier: &mut frontier,
+                    },
+                )?;
+                match step {
+                    publish::PublishStep::Finished(status, output) => {
+                        steps += 1;
+                        (status, output)
+                    }
+                    publish::PublishStep::Again | publish::PublishStep::Moved => continue,
+                    publish::PublishStep::Waiting => {
+                        std::thread::sleep(AWAIT_CONTROL_POLL);
+                        continue;
+                    }
                 }
             }
         } else if let NodeKind::Wait {
@@ -2114,22 +2291,29 @@ fn drive_inner(
             }
             let events = read_all(run_dir)?;
             let elapsed = wait_active_ms(&events, &current, apb_core::clock::now_ms()).unwrap_or(0);
-            let signalled = match wait_for {
-                WaitFor::Timer { seconds } => elapsed >= u128::from(*seconds) * 1000,
-                // We only resolve the wait via an UNCONSUMED signal: how many
-                // signals total have arrived for the key versus how many this node
-                // has already consumed (its WaitSignalled entries in the log). This way a
-                // repeated entry into wait (a loop) is not resolved by a historical, already
-                // consumed signal - a new one is required.
-                WaitFor::Webhook { key } => {
-                    let matching = read_signals_after(run_dir, None)?
-                        .iter()
-                        .filter(|e| &e.cmd.key == key)
-                        .count();
-                    let consumed = wait_signalled_count(&read_all(run_dir)?, &current);
-                    matching > consumed
-                }
+            // A scenario run's wait is due at once: its scripted end.
+            let scripted = scripted_wait(run_dir, &current)?;
+            let elapsed = match scripted {
+                Some(ScriptedWait::TimedOut) => u128::MAX,
+                _ => elapsed,
             };
+            let signalled = scripted.map(|w| w == ScriptedWait::Ended).unwrap_or(false)
+                || match wait_for {
+                    WaitFor::Timer { seconds } => elapsed >= u128::from(*seconds) * 1000,
+                    // We only resolve the wait via an UNCONSUMED signal: how many
+                    // signals total have arrived for the key versus how many this node
+                    // has already consumed (its WaitSignalled entries in the log). This way a
+                    // repeated entry into wait (a loop) is not resolved by a historical, already
+                    // consumed signal - a new one is required.
+                    WaitFor::Webhook { key } => {
+                        let matching = read_signals_after(run_dir, None)?
+                            .iter()
+                            .filter(|e| &e.cmd.key == key)
+                            .count();
+                        let consumed = wait_signalled_count(&read_all(run_dir)?, &current);
+                        matching > consumed
+                    }
+                } && scripted.is_none();
             if signalled {
                 steps += 1;
                 log.append(EventPayload::WaitSignalled {
@@ -2189,17 +2373,26 @@ fn drive_inner(
                 node: current.clone(),
                 attempt: 1,
             })?;
-            let (status, output) = run_playbook_node(
-                root,
-                run_dir,
-                log,
-                &playbook,
-                cfg,
-                &run_id,
-                &current,
-                child_ref,
-                node_instr.as_deref(),
-            )?;
+            // A scenario run's child: its scripted result, or a nested
+            // scenario run of the child at the same level.
+            let (status, output) = match scripted_child(run_dir, &current)? {
+                Some(ScriptedChild::Result(status, output)) => (status, output),
+                scripted => run_playbook_node(
+                    root,
+                    run_dir,
+                    log,
+                    &playbook,
+                    cfg,
+                    &run_id,
+                    &current,
+                    child_ref,
+                    node_instr.as_deref(),
+                    match &scripted {
+                        Some(ScriptedChild::Scenario(name)) => Some(name.as_str()),
+                        _ => None,
+                    },
+                )?,
+            };
             // A child of an unattended run that failed for want of a person
             // or of budget stops this run too, without its failure route.
             if cfg.unattended
@@ -2416,6 +2609,19 @@ fn drive_inner(
                                 }
                             }
                         }
+                        // A scenario run's person answers the question as
+                        // scripted, or lets it time out (due at once).
+                        let scripted = scripted_question(run_dir, &current)?;
+                        if let Some(Some(ans)) = &scripted {
+                            post_answer_if_unanswered(
+                                run_dir,
+                                &current,
+                                ans,
+                                crate::scenario::session::SCENARIO_AGENT,
+                                answered,
+                            )?;
+                            continue;
+                        }
                         let (question_timeout_seconds, default_answer) = match &node_kind {
                             NodeKind::AgentTask {
                                 question_timeout_seconds,
@@ -2424,13 +2630,14 @@ fn drive_inner(
                             } => (*question_timeout_seconds, default_answer.clone()),
                             _ => (None, None),
                         };
-                        let expired = match (
-                            question_timeout_seconds,
-                            question_active_ms(&events, &current, apb_core::clock::now_ms()),
-                        ) {
-                            (Some(secs), Some(open_ms)) => open_ms >= u128::from(secs) * 1000,
-                            _ => false,
-                        };
+                        let expired = scripted.is_some()
+                            || match (
+                                question_timeout_seconds,
+                                question_active_ms(&events, &current, apb_core::clock::now_ms()),
+                            ) {
+                                (Some(secs), Some(open_ms)) => open_ms >= u128::from(secs) * 1000,
+                                _ => false,
+                            };
                         if !expired {
                             std::thread::sleep(AWAIT_CONTROL_POLL);
                             continue;
@@ -2722,7 +2929,7 @@ fn drive_inner(
                         for ev in events {
                             log.append(ev)?;
                         }
-                        journal::post_engine_pause(run_dir, pause)?;
+                        engine_pause(run_dir, &current, pause, &mut |e| log.append(e).map(|_| ()))?;
                         continue;
                     }
                     // Its retry waits: the hold at the top of the loop keeps
@@ -2860,7 +3067,7 @@ fn drive_inner(
                         for ev in events {
                             log.append(ev)?;
                         }
-                        journal::post_engine_pause(run_dir, pause)?;
+                        engine_pause(run_dir, &current, pause, &mut |e| log.append(e).map(|_| ()))?;
                         continue;
                     }
                     // A list node stopped between items for a pause: no

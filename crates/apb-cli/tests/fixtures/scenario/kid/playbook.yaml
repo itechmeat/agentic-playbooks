@@ -1,0 +1,11 @@
+schema: 2
+id: kid
+name: Docs
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: build, type: script, script: scripts/build.sh, runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: build }
+  - { from: build, to: done }

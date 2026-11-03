@@ -26,6 +26,7 @@ mod publish;
 mod quality;
 mod read_only;
 mod retry;
+mod review;
 mod templates;
 mod unattended;
 
@@ -375,7 +376,9 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     edges::check_pair_caps(playbook, &mut r); // V122
     edges::check_one_of_order(playbook, &mut r); // V123, V124
     edges::check_judge_values(playbook, &mut r); // V125
-    edges::check_review_caps(playbook, &mut r); // V136
+    review::check_review_caps(playbook, &mut r); // V136
+    review::check_review_status_values(playbook, &mut r); // V144
+    review::check_review_options_routed(playbook, &mut r); // V145
     retry::check_retry_delay(playbook, &mut r); // V126-V130
     outputs::check_outputs(playbook, ctx, &mut r); // V131-V135
     read_only::check_read_only(playbook, &mut r); // V137-V139
@@ -402,6 +405,27 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_cache_key(playbook, &mut r); // V49
     }
     r
+}
+
+/// Whether a run of `playbook` can ask a decision model on its own: a
+/// `judge` node, a `judge` edge condition, a list item check with `judge`,
+/// or a `human_review` with `auto_decide`. A run of such a playbook
+/// snapshots the machine's decisions settings at start even when no node
+/// runs an agent; without a snapshot every such ask reads
+/// `not_configured`. Here rather than in [`crate::judge`], which the schema
+/// itself depends on.
+pub fn asks_decision_models(playbook: &Playbook) -> bool {
+    playbook.nodes.iter().any(|n| {
+        matches!(n.kind, NodeKind::Judge { .. })
+            || (matches!(n.kind, NodeKind::HumanReview { .. }) && n.auto_decide.is_some())
+            || n.list
+                .as_ref()
+                .and_then(|l| l.check.as_ref())
+                .is_some_and(|c| c.judge.is_some())
+    }) || playbook
+        .edges
+        .iter()
+        .any(|e| matches!(e.condition, Some(EdgeCondition::Judge { .. })))
 }
 
 /// Compiles glob patterns into a `GlobSet`. Shared by the validator (V29)
@@ -1852,5 +1876,38 @@ edges:
             !c.iter().any(|(code, _)| *code == "V40"),
             "the on_failure handler is entered from anywhere, no drawn edge describes what preceded it, V40 must stay silent, got {c:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod decision_model_tests {
+    use super::*;
+
+    const JUDGE_PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: check\n    type: judge\n    state: { task: x }\n    questions:\n      risky: { type: noul, instructions: Is it risky }\n    on_unavailable: fail\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: check }\n  - { from: check, to: done }\n";
+
+    /// Every way a run asks a decision model on its own makes the playbook
+    /// one that asks; a playbook of agents, scripts and plain reviews does
+    /// not.
+    #[test]
+    fn asks_decision_models_sees_every_judge_site() {
+        let plain = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: hi, profile: x }\n  - { id: gate, type: human_review }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: gate }\n  - { from: gate, to: done }\n";
+        let ask = |yaml: &str| asks_decision_models(&Playbook::from_yaml(yaml).unwrap());
+        assert!(!ask(plain));
+        assert!(ask(JUDGE_PB));
+        let edge = plain.replace(
+            "  - { from: work, to: gate }\n",
+            "  - { from: work, to: gate, condition: { type: judge, question: ok, min_p: 0.5, on_unavailable: true } }\n",
+        );
+        assert!(ask(&edge));
+        let list = plain.replace(
+            "  - { id: work, type: agent_task, prompt: hi, profile: x }\n",
+            "  - id: work\n    type: agent_task\n    prompt: hi\n    profile: x\n    list:\n      items: { inline: [ { id: a } ] }\n      check: { judge: { state: { out: x }, instructions: ok, criteria: { pass: null, fail: null } } }\n",
+        );
+        assert!(ask(&list));
+        let auto = plain.replace(
+            "  - { id: gate, type: human_review }\n",
+            "  - { id: gate, type: human_review, options: [approve, needs_changes], auto_decide: { allow: [needs_changes] } }\n",
+        );
+        assert!(ask(&auto));
     }
 }

@@ -437,6 +437,38 @@ pub fn emulation_profile(
     }
 }
 
+/// The digest of a judge node's definition: `j1:` and the `sha256:` of
+/// the canonical JSON of everything that decides its answer (the state
+/// templates, the questions with their type, instructions, criteria and
+/// levels, the thresholds with their bands, and `on_unavailable`), with
+/// the order as written, since a model reads them in that order. The node's
+/// `title`, `expected_duration` and `profile` are left out. A change of the
+/// prefix starts a new digest family.
+pub fn node_digest(
+    state: &OrderedMap<String>,
+    questions: &JudgeQuestions,
+    thresholds: &OrderedMap<JudgeThreshold>,
+    on_unavailable: Option<&JudgeFallback>,
+) -> String {
+    #[derive(Serialize)]
+    struct Definition<'a> {
+        state: &'a OrderedMap<String>,
+        questions: &'a JudgeQuestions,
+        thresholds: &'a OrderedMap<JudgeThreshold>,
+        on_unavailable: Option<&'a JudgeFallback>,
+    }
+    // Written straight to text, never through a `serde_json::Value`, whose
+    // maps would sort the state and the questions.
+    let text = serde_json::to_string(&Definition {
+        state,
+        questions,
+        thresholds,
+        on_unavailable,
+    })
+    .unwrap_or_default();
+    format!("j1:{}", crate::content::sha256_hex(text.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +569,53 @@ mod tests {
             },
         ));
         assert!(output_fields(&h.questions, &th).contains(&"e".to_string()));
+    }
+
+    #[derive(Deserialize)]
+    struct Parts {
+        #[serde(default)]
+        state: OrderedMap<String>,
+        questions: JudgeQuestions,
+        #[serde(default)]
+        thresholds: OrderedMap<JudgeThreshold>,
+        #[serde(default)]
+        on_unavailable: Option<JudgeFallback>,
+    }
+
+    /// The digest of a judge node written as YAML.
+    fn digest_of(yaml: &str) -> String {
+        let p: Parts = yaml_serde::from_str(yaml).unwrap();
+        node_digest(
+            &p.state,
+            &p.questions,
+            &p.thresholds,
+            p.on_unavailable.as_ref(),
+        )
+    }
+
+    const JUDGE_NODE: &str = "state: { task: \"{{params.task}}\", notes: \"{{nodes.start.output}}\" }\nquestions:\n  sufficient: { type: choice, instructions: Is it clear, criteria: { clear: null, unclear: null } }\n  risky: { type: noul, instructions: Is it risky }\nthresholds:\n  sufficient: { min_confidence: 0.6, below: unclear }\non_unavailable: fail\n";
+
+    /// The digest moves with everything that decides the answer: a
+    /// threshold, a question's words or options, the state's order, the
+    /// fallback.
+    #[test]
+    fn the_node_digest_follows_what_decides_the_answer() {
+        let base = digest_of(JUDGE_NODE);
+        assert!(base.starts_with("j1:sha256:"), "{base}");
+        for (from, to) in [
+            ("min_confidence: 0.6", "min_confidence: 0.7"),
+            ("instructions: Is it risky", "instructions: Is it dangerous"),
+            (
+                "{ clear: null, unclear: null }",
+                "{ clear: null, unclear: null, other: null }",
+            ),
+            (
+                "{ task: \"{{params.task}}\", notes: \"{{nodes.start.output}}\" }",
+                "{ notes: \"{{nodes.start.output}}\", task: \"{{params.task}}\" }",
+            ),
+            ("on_unavailable: fail", "on_unavailable: { route: done }"),
+        ] {
+            assert_ne!(digest_of(&JUDGE_NODE.replace(from, to)), base, "{from}");
+        }
     }
 }

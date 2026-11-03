@@ -240,12 +240,8 @@ fn spawn_retrying_etxtbsy(cmd: &mut Command) -> std::io::Result<std::process::Ch
 /// timeout, or empty stdout is an error. The resolved value lives only in the
 /// returned [`Secret`]; it is never logged here.
 pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<Secret, CmdSecretError> {
-    // A read-only process starts no helper program.
-    if crate::process_mode::is_read_only() {
-        return Err(CmdSecretError::Spawn(
-            crate::process_mode::READ_ONLY_REFUSAL.to_string(),
-        ));
-    }
+    // A read-only or scenario process starts no helper program.
+    crate::process_mode::guard_program_start().map_err(|e| CmdSecretError::Spawn(e.to_string()))?;
     let argv = shell_words::split(cmdline).map_err(|e| CmdSecretError::Parse(e.to_string()))?;
     let (program, args) = argv
         .split_first()

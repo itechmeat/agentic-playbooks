@@ -20,7 +20,7 @@ pub fn reexec_exe() -> io::Result<PathBuf> {
 /// holds that handle until its own `exec`. The window is short but real on a
 /// loaded host; any other error is returned at once.
 pub fn spawn_when_not_busy(cmd: &mut std::process::Command) -> io::Result<std::process::Child> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_program_start()?;
     const ATTEMPTS: u32 = 40;
     const STEP: std::time::Duration = std::time::Duration::from_millis(50);
     let mut attempt = 1;
@@ -53,7 +53,7 @@ fn live_exe_path(exe: PathBuf) -> PathBuf {
 /// [`io::ErrorKind::Unsupported`], which callers map to their own domain
 /// error rather than each re-deciding what an absent symlink API means.
 pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(link)?;
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link)
@@ -81,7 +81,7 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
 /// [`io::ErrorKind::InvalidInput`] rather than opened. Off unix a symlink
 /// fails with [`io::ErrorKind::Unsupported`] (see [`symlink`]).
 pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(dst)?;
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -291,7 +291,7 @@ pub fn read_prefix_capped<R: io::Read + io::Seek>(
 /// again before it is written. A symlink in the source is copied as a
 /// symlink (never followed), and never over an existing entry.
 pub fn copy_tree_no_follow(src: &Path, anchor: &Path, dst: &Path) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(dst)?;
     ensure_no_symlink_below(anchor, dst)?;
     copy_no_follow_inner(src, dst)
 }
@@ -366,7 +366,7 @@ fn copy_no_follow_inner(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Control files are always written this way: temp + fsync + atomic rename (spec 4.3).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -382,7 +382,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// workspace was removed) therefore never brings the deleted tree back, which
 /// the `create_dir_all` in [`atomic_write`] did.
 pub fn atomic_write_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -394,7 +394,7 @@ pub fn atomic_write_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Resul
 /// itself or anything above it: `NotFound` when `anchor` is missing, an error
 /// when `dir` is not inside `anchor`. See [`atomic_write_under`].
 pub fn create_dir_under(anchor: &Path, dir: &Path) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(dir)?;
     if !anchor.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -424,7 +424,7 @@ pub fn create_dir_under(anchor: &Path, dir: &Path) -> io::Result<()> {
 /// write) before it appears at the target path: run content an agent may
 /// have echoed a secret into (a transcript, a node output).
 pub fn atomic_write_private_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -436,7 +436,7 @@ pub fn atomic_write_private_under(anchor: &Path, path: &Path, bytes: &[u8]) -> i
 /// file keeps its mode): a run's journal and its question, answer and
 /// review logs.
 pub fn open_append_private(path: &Path) -> io::Result<File> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let mut options = fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -460,13 +460,13 @@ pub fn open_append_private(path: &Path) -> io::Result<File> {
 /// link (its mode is another file's too); a file an older apb left readable
 /// beyond its owner is narrowed. `name` must be one path segment.
 pub fn open_append_private_in(dir: &Path, name: &str) -> io::Result<File> {
-    crate::process_mode::guard()?;
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("`{name}` is not one path segment"),
         ));
     }
+    crate::process_mode::guard_write(&dir.join(name))?;
     #[cfg(unix)]
     let file = {
         use std::os::fd::{AsRawFd as _, FromRawFd as _};
@@ -565,7 +565,7 @@ pub fn narrow_open(file: &File) {
 /// Creates the directory `dir` (its parent must exist) with mode 0700 on
 /// unix: a run directory, whose content only its owner may read.
 pub fn create_private_dir(dir: &Path) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(dir)?;
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -641,7 +641,7 @@ fn write_via_temp_checked(
     create: impl FnOnce(&Path) -> io::Result<File>,
     before_rename: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let tmp = unique_temp(dir, path);
     let res = (|| {
         let mut f = create(&tmp)?;
@@ -689,7 +689,7 @@ pub fn atomic_rewrite_in_place_checked(
     bytes: &[u8],
     check: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<PathBuf> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let target = link_target(path)?;
     let dir = target
         .parent()
@@ -738,7 +738,7 @@ pub fn atomic_rewrite_in_place_checked(
 /// (trust.json, projects.json, suggestions.json), which may contain data that is
 /// privacy-sensitive. Permissions are left untouched on non-unix.
 pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(path)?;
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -775,7 +775,7 @@ pub struct HeldLock {
 /// `WouldBlock` error. The file is created private and is never followed
 /// through a symbolic link.
 pub fn hold_lock(dir: &Path, lock_name: &str) -> io::Result<HeldLock> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(&dir.join(lock_name))?;
     fs::create_dir_all(dir)?;
     let path = dir.join(lock_name);
     let mut opts = fs::OpenOptions::new();
@@ -881,7 +881,7 @@ fn lock_dir_attempts(
     stale_ms: u128,
     attempts: u32,
 ) -> io::Result<(DirLock, bool)> {
-    crate::process_mode::guard()?;
+    crate::process_mode::guard_write(&dir.join(lock_name))?;
     fs::create_dir_all(dir)?;
     let path = dir.join(lock_name);
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
@@ -1173,6 +1173,58 @@ mod unix_tests {
         for name in ["old", "new"] {
             let mode = fs::metadata(dir.join(name)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
+    }
+}
+
+/// Every file writer, called directly in a quick scenario process: each
+/// writes below the write root and refuses anywhere else, before it acts;
+/// and no program starts.
+#[cfg(test)]
+mod scenario_tests {
+    use super::*;
+
+    fn refused(r: io::Result<()>) {
+        let e = r.unwrap_err();
+        assert!(
+            e.to_string()
+                .starts_with(crate::process_mode::SCENARIO_REFUSAL),
+            "{e}"
+        );
+    }
+
+    crate::scenario_test! {
+        fn every_file_writer_writes_only_below_the_scenario_root() at Quick, root => {
+            // A project next to the root, as a scenario run sees it.
+            let outside = tempfile::tempdir().unwrap();
+            let d = outside.path();
+            let f = d.join("sub/f");
+            refused(atomic_write(&f, b"x"));
+            refused(atomic_write_private(&f, b"x"));
+            refused(atomic_write_under(d, &f, b"x"));
+            refused(atomic_write_private_under(d, &f, b"x"));
+            refused(create_dir_under(d, &d.join("sub")));
+            refused(create_private_dir(&d.join("sub")));
+            refused(open_append_private(&d.join("log")).map(drop));
+            refused(open_append_private_in(d, "log").map(drop));
+            refused(lock_dir(d, "x.lock").map(drop));
+            refused(hold_lock(d, "x.lock").map(drop));
+            refused(atomic_rewrite_in_place(&f, b"x").map(drop));
+            refused(copy_tree(root, &d.join("copy")));
+            refused(copy_tree_no_follow(root, d, &d.join("copy")));
+            refused(symlink(root, &d.join("link")));
+            assert_eq!(fs::read_dir(d).unwrap().count(), 0, "nothing was created");
+            // Below the root every writer acts as in any other process.
+            let run = root.join("run-1");
+            atomic_write(&run.join("a"), b"x").unwrap();
+            atomic_write_private(&run.join("b"), b"x").unwrap();
+            atomic_write_under(root, &run.join("sub/c"), b"x").unwrap();
+            open_append_private(&run.join("events.jsonl")).unwrap();
+            drop(lock_dir(&run, "x.lock").unwrap());
+            assert_eq!(fs::read(run.join("sub/c")).unwrap(), b"x");
+            refused(
+                spawn_when_not_busy(&mut std::process::Command::new("true")).map(drop),
+            );
         }
     }
 }

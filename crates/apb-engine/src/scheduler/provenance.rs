@@ -190,6 +190,10 @@ impl Tracker {
         workdir: &Path,
         render: impl FnOnce(&str) -> Result<String, EngineError>,
     ) -> Option<Self> {
+        // A scenario run reads no `HEAD`: nothing it ran can commit.
+        if crate::scenario::session::skips(run_dir, crate::scenario::BoundaryKind::Provenance) {
+            return None;
+        }
         let mut t = Self::start_here(playbook, node_id, workdir, render)?;
         if let Ok(parked) = std::fs::read_to_string(parked_path(run_dir, node_id)) {
             let mut lines = parked.lines();

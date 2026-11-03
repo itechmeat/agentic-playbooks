@@ -155,9 +155,7 @@ fn is_setuid(_path: &Path) -> bool {
 
 /// `bwrap --version` without the program name (`0.11.1`).
 fn version(path: &Path) -> Option<String> {
-    if crate::read_only::active() {
-        return None;
-    }
+    apb_core::process_mode::guard_program_start().ok()?;
     let out = std::process::Command::new(path)
         .arg("--version")
         .stdin(std::process::Stdio::null())
@@ -180,9 +178,7 @@ pub(crate) fn at_least(version: Option<&str>, major: u32, minor: u32) -> bool {
 /// stderr is the reason when it fails.
 fn trial(path: &Path) -> Result<(), String> {
     use std::process::Stdio;
-    if crate::read_only::active() {
-        return Err(apb_core::process_mode::READ_ONLY_REFUSAL.to_string());
-    }
+    apb_core::process_mode::guard_program_start().map_err(|e| e.to_string())?;
     let mut child = std::process::Command::new(path)
         .args(["--unshare-all", "--ro-bind", "/", "/", "--", "true"])
         .stdin(Stdio::null())

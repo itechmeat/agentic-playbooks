@@ -35,6 +35,10 @@ pub struct StatsRun {
     pub definitions: crate::run_definitions::DefinitionsInForce,
     /// The run's diagnostics sidecar records.
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    /// What kind of run it is ([`crate::manifest::RunOrigin::of_read`]); only a
+    /// production run counts as history
+    /// ([`crate::run_history::counts_as_history`]).
+    pub origin: crate::manifest::RunOrigin,
 }
 
 impl StatsRun {
@@ -49,7 +53,9 @@ impl StatsRun {
                 _ => None,
             })
             .unwrap_or_default();
-        let manifest = crate::manifest::read(run_dir).ok().flatten();
+        let read = crate::manifest::read(run_dir);
+        let origin = crate::manifest::RunOrigin::of_read(&read);
+        let manifest = read.ok().flatten();
         let definitions = crate::run_definitions::DefinitionsInForce::load(run_dir, &j.events);
         let m = manifest.as_ref();
         Some(StatsRun {
@@ -76,6 +82,7 @@ impl StatsRun {
             grades: Vec::new(),
             definitions,
             diagnostics: crate::diagnostics::read(run_dir),
+            origin,
         })
     }
 

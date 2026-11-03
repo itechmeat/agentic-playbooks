@@ -18,22 +18,16 @@
 use super::*;
 
 use apb_core::decisions::DecisionMode;
-use apb_core::judge::JudgeFallback;
 use apb_decide::{DecideError, DecisionRequest, DecisionResponse, Question, UseSite};
 
-use crate::decision::judge::{
-    differs_from_fallback, fallback_output, node_questions, output_from_answers,
-    render as render_output,
-};
+use crate::decision::judge::{output_from_answers, render as render_output};
 use crate::decision::{
     AnswerSource, DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, FieldClass,
-    Judgement, Route, StateField, StateParts, intern,
+    Judgement, Route, StateField, StateParts,
 };
+pub(super) use crate::judge_eval::inputs::state_field;
+use crate::judge_eval::{Answers, JudgeInputs, JudgeOutcome, JudgeRequest};
 
-/// Each state field's own clip, head and tail kept, before the share of
-/// `privacy.max_state_bytes` it may take.
-const FIELD_HEAD: usize = 12 * 1024;
-const FIELD_TAIL: usize = 12 * 1024;
 /// The profile emulation's retries after its first attempt.
 const EMULATION_RETRIES: u32 = 1;
 
@@ -45,7 +39,10 @@ fn finished(status: NodeStatus, output: String, events: Vec<EventPayload>) -> At
     }
 }
 
-/// Executes one judge node.
+/// Executes one judge node: the shared evaluation
+/// ([`crate::judge_eval::evaluate`]) over the run's inputs, then, when it
+/// hands over to the emulation, the configured `llm_emulation` providers and
+/// the node's profile.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute(
     playbook: &Playbook,
@@ -67,7 +64,6 @@ pub(crate) fn execute(
         state: fields,
         questions,
         thresholds,
-        on_unavailable,
         ..
     } = &node.kind
     else {
@@ -75,55 +71,59 @@ pub(crate) fn execute(
             "node `{node_id}` is not a judge"
         )));
     };
-    let fallback = on_unavailable.as_ref();
-    let parts = render_state(playbook, run_dir, run_id, state, cfg, node_id, fields)?;
-    let wire = node_questions(questions);
-
-    // 1. The node's own question, to the decision models proper.
-    let judge = |answers: &BTreeMap<String, crate::event::DecisionAnswer>, enforce: bool| {
-        let derived = output_from_answers(questions, thresholds, answers, "").ok();
-        Judgement {
-            applied: enforce && derived.is_some(),
-            would_change: match (&derived, enforce) {
-                (_, true) => None,
-                (Some(d), false) => differs_from_fallback(d, fallback, questions, thresholds),
-                (None, false) => None,
-            },
-        }
-    };
-    let reason: String = match ask(decisions, journal, node_id, &parts, &wire, &judge) {
-        Asked::Answered { answers, by } => {
-            match output_from_answers(questions, thresholds, &answers, &by) {
-                Ok(out) => {
-                    return Ok(finished(
-                        NodeStatus::Succeeded,
-                        render_output(&out),
-                        Vec::new(),
-                    ));
-                }
-                Err(_) => "invalid".into(),
-            }
-        }
-        Asked::Unavailable(reason) => reason,
-    };
-
-    // 2. The declared fallback.
-    if let Some(out) = fallback_output(fallback, questions, thresholds, &reason) {
-        return Ok(finished(
-            NodeStatus::Succeeded,
-            render_output(&out),
-            Vec::new(),
-        ));
+    let inputs = JudgeInputs::from_state(
+        run_dir,
+        run_id,
+        state,
+        cfg,
+        &playbook.context_budget(node_id),
+    )?;
+    for (name, template) in fields.iter() {
+        crate::scenario::session::note_empty_references(
+            run_dir,
+            node_id,
+            &format!("state.{name}"),
+            || inputs.unfilled(template, run_dir),
+        );
     }
-    if !matches!(fallback, Some(JudgeFallback::Emulate)) {
-        return Ok(finished(
-            NodeStatus::Failed,
-            format!(
-                "judge node `{node_id}` has no usable answer ({reason}) and on_unavailable is fail"
-            ),
-            Vec::new(),
-        ));
-    }
+    // 1. The node's own question, to the decision models proper, and the
+    // declared fallback. In a scenario run the answer book stands in for
+    // the providers at quick.
+    let staged = crate::scenario::decide::stage(
+        run_dir,
+        crate::scenario::BoundaryKind::JudgeNative,
+        node_id,
+        None,
+    )?;
+    let evaluated = crate::judge_eval::evaluate(
+        &JudgeRequest {
+            playbook,
+            node_id,
+            inputs: &inputs,
+            clip_dir: run_dir,
+        },
+        Answers::Runner {
+            runner: decisions,
+            journal,
+        },
+    )?;
+    drop(staged);
+    let parts = evaluated.parts;
+    let wire = evaluated.wire;
+    let reason = match evaluated.evaluation.as_configured {
+        JudgeOutcome::Output { output } | JudgeOutcome::Fallback { output, .. } => {
+            return Ok(finished(
+                NodeStatus::Succeeded,
+                render_output(&output),
+                Vec::new(),
+            ));
+        }
+        JudgeOutcome::Fail { reason } => {
+            return Ok(finished(NodeStatus::Failed, reason, Vec::new()));
+        }
+        JudgeOutcome::Emulate { reason } => reason,
+    };
+    // 2. The declared emulation.
     let emulated = |answers: &BTreeMap<String, crate::event::DecisionAnswer>| Judgement {
         applied: output_from_answers(questions, thresholds, answers, "").is_ok(),
         would_change: None,
@@ -138,14 +138,28 @@ pub(crate) fn execute(
         }
         _ => None,
     };
-    // 2a. The configured emulation endpoints, when the layer is on.
+    // 2a. The configured emulation endpoints, when the layer is on. A quick
+    // scenario run models none: its judge goes on to the profile, a
+    // scripted attempt.
+    let emulation_endpoints = !matches!(
+        crate::scenario::session::at_run(
+            run_dir,
+            crate::scenario::BoundaryKind::JudgeEmulation,
+            &crate::scenario::BoundaryKey {
+                node: Some(node_id.to_string()),
+                ..Default::default()
+            },
+        ),
+        crate::scenario::Resolution::Skip
+    );
     if let Some(runner) = decisions
+        && emulation_endpoints
         && runner.mode_for(UseSite::JudgeNode) > DecisionMode::Off
         && runner.has_emulation()
     {
         let (outcome, source) = runner.decide_routed(
             journal,
-            call(node_id, &parts, &wire, &emulated),
+            crate::judge_eval::call(node_id, &parts, &wire, &emulated),
             Route::Emulation,
         );
         if let Some(out) = use_answers(outcome, source) {
@@ -206,7 +220,7 @@ pub(crate) fn execute(
     let ask = |req: &DecisionRequest| agent.ask(req, &id, &model);
     let (outcome, source) = runner.decide_routed(
         journal,
-        call(node_id, &parts, &wire, &emulated),
+        crate::judge_eval::call(node_id, &parts, &wire, &emulated),
         Route::Custom {
             id: &id,
             model: &model,
@@ -236,7 +250,7 @@ pub(crate) fn execute(
     }
 }
 
-/// What asking a judge's questions came to.
+/// What asking a judge's questions came to (a list item's judge check).
 pub(super) enum Asked {
     /// Answered with the `judge_node` use at enforce; `by` names who
     /// answered (`<provider>/<model>`).
@@ -250,9 +264,8 @@ pub(super) enum Asked {
 }
 
 /// Asks a judge's questions over `parts` through the run's decision runner
-/// (journal first, replay on resume): the one path a judge node and a list
-/// item's judge check share. `judge` tells the runner whether the answers
-/// would act, given whether the use is at enforce.
+/// ([`crate::judge_eval::ask`], the one path a judge node and a list
+/// item's judge check share).
 pub(super) fn ask(
     decisions: Option<&DecisionRunner>,
     journal: &Journal,
@@ -261,107 +274,24 @@ pub(super) fn ask(
     wire: &BTreeMap<String, Question>,
     judge: &dyn Fn(&BTreeMap<String, crate::event::DecisionAnswer>, bool) -> Judgement,
 ) -> Asked {
-    let Some(runner) = decisions else {
-        return Asked::Unavailable("not_configured".into());
-    };
-    let mode = runner.mode_for(UseSite::JudgeNode);
-    if mode == DecisionMode::Off {
-        return Asked::Unavailable("off".into());
-    }
-    let enforce = mode == DecisionMode::Enforce;
-    let judged = |answers: &BTreeMap<String, crate::event::DecisionAnswer>| judge(answers, enforce);
-    let (outcome, source) =
-        runner.decide_routed(journal, call(node_id, parts, wire, &judged), Route::Native);
-    match outcome {
-        DecisionOutcome::Answered { answers, .. } if enforce => Asked::Answered {
-            answers,
-            by: source
-                .as_ref()
-                .map_or_else(|| "unknown".to_string(), decided_by),
+    let asked = crate::judge_eval::ask(decisions, journal, node_id, parts, wire, judge);
+    match asked.verdict {
+        crate::judge_eval::Verdict::Answered => Asked::Answered {
+            answers: asked.raw,
+            by: asked.by.unwrap_or_else(|| "unknown".to_string()),
         },
-        DecisionOutcome::Answered { .. } => Asked::Unavailable("mode".into()),
-        DecisionOutcome::Skipped { reason } => Asked::Unavailable(reason.into()),
-        DecisionOutcome::Failed { error_kind } => Asked::Unavailable(error_kind),
+        crate::judge_eval::Verdict::Unavailable(reason) => Asked::Unavailable(reason),
     }
 }
 
-/// The execution root a run belongs to: `<root>/.apb/runs/<id>`.
+/// The execution root a run belongs to: `<root>/.apb/runs/<id>` (or
+/// `.apb/scenario-runs/<id>`, the same depth).
 pub(super) fn cfg_root(run_dir: &Path) -> PathBuf {
     run_dir
         .ancestors()
         .nth(3)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| run_dir.to_path_buf())
-}
-
-fn decided_by(s: &AnswerSource) -> String {
-    format!("{}/{}", s.provider, s.model)
-}
-
-fn call<'a>(
-    node_id: &'a str,
-    parts: &StateParts,
-    wire: &BTreeMap<String, Question>,
-    judge: &'a dyn Fn(&BTreeMap<String, crate::event::DecisionAnswer>) -> Judgement,
-) -> DecisionCall<'a> {
-    DecisionCall {
-        edge_addresses: BTreeMap::new(),
-        enforce: None,
-        join: BTreeMap::new(),
-        join_from: None,
-        site: UseSite::JudgeNode,
-        node: Some(node_id),
-        attempt: None,
-        state: parts.clone(),
-        questions: wire.clone(),
-        baseline: None,
-        judge,
-    }
-}
-
-/// The rendered state: each field a template rendered like a prompt; a
-/// field reading a node's output is `output` material, any other `prompt`.
-fn render_state(
-    playbook: &Playbook,
-    run_dir: &Path,
-    run_id: &str,
-    state: &RunState,
-    cfg: &RunConfig,
-    node_id: &str,
-    fields: &apb_core::judge::OrderedMap<String>,
-) -> Result<StateParts, EngineError> {
-    let mut parts = StateParts::default();
-    for (name, template) in fields.iter() {
-        let text = render_node_prompt(
-            run_dir,
-            run_id,
-            state,
-            cfg,
-            template,
-            &playbook.context_budget(node_id),
-        )?;
-        let reads_output = apb_core::template::refs(template)
-            .iter()
-            .any(|r| r.starts_with("nodes.") || r == "run.context");
-        parts.fields.push(state_field(name, text, reads_output));
-    }
-    Ok(parts)
-}
-
-/// One rendered state field: `output` material when it carries what a node
-/// produced, `prompt` otherwise.
-pub(super) fn state_field(name: &str, text: String, reads_output: bool) -> StateField {
-    StateField {
-        name: intern(name),
-        class: if reads_output {
-            FieldClass::Output
-        } else {
-            FieldClass::Prompt
-        },
-        text,
-        head: FIELD_HEAD,
-        tail: FIELD_TAIL,
-    }
 }
 
 /// The profile backend of the LLM emulation: one agent attempt on the
@@ -450,10 +380,19 @@ impl ProfileEmulation<'_, '_> {
             .ok_or_else(|| EngineError::Invalid("empty executor chain".into()))?;
         let attempt = self.attempt.get() + 1;
         self.attempt.set(attempt);
-        let adapter = crate::adapter::ClaudeAdapter {
-            program: ri.canonical_executable.to_string_lossy().into_owned(),
-            spec: ri.spec.clone(),
-        };
+        let adapter: Box<dyn crate::adapter::AgentAdapter> =
+            match crate::scenario::session::is_scenario(self.run_dir) {
+                // A scenario run's emulation is a scripted attempt.
+                true => Box::new(crate::scenario::adapter::ScenarioAdapter {
+                    run_dir: self.run_dir,
+                    node: self.node_id,
+                    item: None,
+                }),
+                false => Box::new(crate::adapter::ClaudeAdapter {
+                    program: ri.canonical_executable.to_string_lossy().into_owned(),
+                    spec: ri.spec.clone(),
+                }),
+            };
         let spawn_env = crate::adapter::SpawnEnv::for_node(
             self.env_scrub.to_vec(),
             self.run_dir,
@@ -667,6 +606,13 @@ pub(crate) fn decide_edges(
             })
         }),
     };
+    // A quick scenario run answers from the scenario's edge answers.
+    let _staged = crate::scenario::decide::stage(
+        run_dir,
+        crate::scenario::BoundaryKind::JudgeEdges,
+        node_id,
+        None,
+    )?;
     let addresses = apb_core::edge_address::edge_addresses(playbook);
     let edge_addresses: BTreeMap<String, String> = addresses
         .iter()

@@ -315,9 +315,17 @@ pub fn suite_dir(playbook_dir: &Path) -> PathBuf {
     playbook_dir.join(EVALS_DIR)
 }
 
-/// Whether the playbook has a suite at all.
+/// Whether the playbook has a suite at all: `evals/` holds `suite.yaml` or
+/// a case file. Scenarios (`evals/scenarios/`) alone are not a suite, so a
+/// playbook an eval cannot run may still carry them.
 pub fn has_suite(playbook_dir: &Path) -> bool {
-    suite_dir(playbook_dir).is_dir()
+    let Ok(entries) = std::fs::read_dir(suite_dir(playbook_dir)) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        p.is_file() && p.extension().is_some_and(|x| x == "yaml" || x == "yml")
+    })
 }
 
 /// The field of a later release a case sets, if any.
@@ -546,7 +554,9 @@ fn unknown_nodes(case: &EvalCase, playbook: &Playbook) -> Vec<String> {
     out
 }
 
-const OUTCOMES: [&str; 4] = ["succeeded", "failed", "aborted", "stopped"];
+/// The terminal outcomes a run check may accept (shared with scenario
+/// expectations).
+pub const OUTCOMES: [&str; 4] = ["succeeded", "failed", "aborted", "stopped"];
 
 /// Whether the case file sets `checks.goal` itself (the field defaults to
 /// `required`, which only a case that says so is held to).
@@ -1062,6 +1072,30 @@ mod tests {
 
     fn codes(issues: &[Issue]) -> Vec<(&'static str, String)> {
         issues.iter().map(|i| (i.code, i.message.clone())).collect()
+    }
+
+    /// Scenarios live under `evals/scenarios/`; a playbook with scenarios
+    /// and no case has no suite, so the suite rules (V81 on a playbook an
+    /// eval cannot run) stay quiet, and a suite.yaml or a case makes one.
+    #[test]
+    fn a_scenarios_directory_alone_is_no_suite() {
+        let dir = tempfile::tempdir().unwrap();
+        let scenarios = dir.path().join(EVALS_DIR).join("scenarios");
+        std::fs::create_dir_all(&scenarios).unwrap();
+        std::fs::write(scenarios.join("green.yaml"), "schema: 1\nid: green\n").unwrap();
+        let publishing = pb(&PB.replace(
+            "  - { id: f, type: finish, outcome: success }\n",
+            "  - { id: f, type: finish, outcome: success }\n  - { id: ship, type: publish, from: w, remote: origin }\n",
+        ));
+        assert!(!has_suite(dir.path()));
+        assert!(validate_suite(dir.path(), &publishing).is_empty());
+        std::fs::write(dir.path().join(EVALS_DIR).join(SUITE_FILE), "repeat: 1\n").unwrap();
+        assert!(has_suite(dir.path()));
+        assert!(
+            codes(&validate_suite(dir.path(), &publishing))
+                .iter()
+                .any(|(c, _)| *c == "V81")
+        );
     }
 
     #[test]
