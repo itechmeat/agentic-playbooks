@@ -2,6 +2,7 @@
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import type { QuestionEntry } from './rungates'
+  import UnattendedNote from './UnattendedNote.svelte'
 
   // Mirrors RunView's "Human review" panel interaction pattern: option
   // buttons for a suggested answer plus a free-text field, both disabled
@@ -49,6 +50,9 @@
     <div class="flex flex-col gap-1">
       <span class="text-xs text-amber">{question.node}</span>
       <pre class="prose-text m-0 whitespace-pre-wrap break-words text-sm">{question.question}</pre>
+      {#if question.unattended}
+        <UnattendedNote outcome={question.unattended} testid="question-unattended" />
+      {/if}
     </div>
 
     {#if question.options.length}

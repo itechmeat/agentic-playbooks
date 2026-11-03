@@ -10,6 +10,10 @@ export interface GateRequest {
   runId: string
   /** Absent on a payload from an older server without next actions. */
   request?: number
+  /** What an unattended run does at this gate, from the gate's own next
+   * action; the next-actions panel leaves that action to the gate's card.
+   * Absent where it does not apply. */
+  unattended?: UnattendedOutcome
 }
 
 // A pending human-review gate as the review panel renders it: one button per
@@ -23,10 +27,6 @@ export interface ReviewEntry extends GateRequest {
    * Part 11); absent unless the machine runs `review_triage` in advise or
    * enforce. Never preselects an option. */
   recommendation?: string
-  /** What an unattended run does at this gate, from the gate's own
-   * `decide_review` action; the next-actions panel leaves that action to
-   * this card. Absent on a payload without it. */
-  unattended?: UnattendedOutcome
 }
 
 // A pending question as the question panel renders it. The panel always
@@ -110,8 +110,6 @@ export function runGates(detail: RunDetail): RunGates {
         const entry: ReviewEntry = { node, options, ...(prompt ? { prompt } : {}), ...req('decide_review', node) }
         const note = recommendationNote(recommendation)
         if (note) entry.recommendation = note
-        const unattended = ownAction(detail, 'decide_review', node)?.unattended
-        if (unattended) entry.unattended = unattended
         return entry
       }),
     publishes: p.pending_reviews.flatMap(({ node, publish, prompt }) =>
@@ -141,8 +139,13 @@ function ownAction(detail: RunDetail, code: ActionCode, node: string): NextActio
 // The request of the page's own run that a gate of `node` answers: the run
 // id, and the seq of the matching next action (same code, node and run).
 export function gateRequest(detail: RunDetail, code: ActionCode, node: string): GateRequest {
-  const seq = ownAction(detail, code, node)?.target.request?.seq
-  return seq === undefined ? { runId: detail.run_id } : { runId: detail.run_id, request: seq }
+  const a = ownAction(detail, code, node)
+  const seq = a?.target.request?.seq
+  return {
+    runId: detail.run_id,
+    ...(seq === undefined ? {} : { request: seq }),
+    ...(a?.unattended ? { unattended: a.unattended } : {}),
+  }
 }
 
 // The review card's recommendation line: `Advisory recommendation: approve

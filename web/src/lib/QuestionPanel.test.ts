@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render } from 'svelte/server'
 import QuestionPanel from './QuestionPanel.svelte'
+import type { QuestionEntry } from './rungates'
 
 describe('QuestionPanel', () => {
   it('renders the question text and an option button per option', () => {
@@ -79,5 +80,19 @@ describe('QuestionPanel', () => {
     // while an answer is in flight.
     const disabledCount = (body.match(/disabled/g) ?? []).length
     expect(disabledCount).toBeGreaterThanOrEqual(3)
+  })
+
+  // The next-actions panel leaves the question's `answer_question` to this
+  // card, so what an unattended run does there must show here, as on the CLI.
+  it('shows what an unattended run does at the question, marked where it stops', () => {
+    const line = (unattended: QuestionEntry['unattended']) =>
+      render(QuestionPanel, {
+        props: { question: { runId: 'r', node: 'ask', question: 'Which?', options: [], unattended }, onAnswer: () => {} },
+      }).body
+    const defaults = line({ kind: 'answers_default' })
+    expect(defaults).toMatch(/<p class="unattended[^"]*"[^>]*data-testid="question-unattended"[^>]*>\s*unattended: posts the default answer at once/)
+    expect(defaults).not.toMatch(/class="unattended[^"]*\bstops\b/)
+    const fails = line({ kind: 'fails_run', code: 'hitl_required' })
+    expect(fails).toMatch(/class="unattended[^"]*\bstops\b[^"]*"[^>]*data-testid="question-unattended"[^>]*>\s*unattended: fails the run \(hitl_required\)/)
   })
 })

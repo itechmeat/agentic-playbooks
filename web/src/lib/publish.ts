@@ -2,7 +2,7 @@
 // consents to, the push's ledger state after it, and the node form's
 // choices. Pure helpers, so the panel and the form only render.
 
-import type { PlanView, PublishCommit, PublishView, PushView } from './api.gen'
+import type { PlanView, PublishCommit, PublishView, PushView, UnattendedOutcome } from './api.gen'
 import { PUBLISH_REFUSAL_TEXTS } from './consts.gen'
 
 /** A publish gate waiting for a person: the node and the plan to consent to. */
@@ -11,10 +11,13 @@ export interface PublishGate {
   plan: PlanView
   /** The node's guidance for the person, shown literally. */
   prompt?: string
+  /** What an unattended run does at the open gate. */
+  unattended?: UnattendedOutcome
 }
 
-/** A publish node as the panel shows it: its run block, and the guidance of an open gate. */
-export type PublishCard = PublishView & { prompt?: string }
+/** A publish node as the panel shows it: its run block, and the guidance
+ * and unattended outcome of an open gate. */
+export type PublishCard = PublishView & { prompt?: string; unattended?: UnattendedOutcome }
 
 /** A node of the playbook as the publish source picker and skeleton read it. */
 export interface SourceNode {
@@ -102,6 +105,7 @@ export function publishCards(views: PublishView[] | null | undefined, gates: Pub
   const withGate = (v: PublishView, g: PublishGate): PublishCard => {
     const card: PublishCard = { ...v, plan: g.plan, awaiting_consent: true }
     if (g.prompt) card.prompt = g.prompt
+    if (g.unattended) card.unattended = g.unattended
     return card
   }
   const list: PublishCard[] = (views ?? []).map((v) => {

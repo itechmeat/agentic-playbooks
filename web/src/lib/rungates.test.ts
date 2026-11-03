@@ -246,21 +246,27 @@ describe('publish gates', () => {
       [
         { ...act('decide_review', 'gate', 'child-1', 99, 'review'), unattended: { kind: 'decides', option: 'reject' } },
         { ...act('decide_review', 'gate', 'r', 7, 'review'), unattended: { kind: 'fails_run', code: 'hitl_required' } },
-        act('decide_publish', 'ship', 'r', 9, 'publish'),
-        act('answer_question', 'ask', 'r', 12, 'question'),
+        { ...act('decide_publish', 'ship', 'r', 9, 'publish'), unattended: { kind: 'fails_run', code: 'hitl_required' } },
+        { ...act('answer_question', 'ask', 'r', 12, 'question'), unattended: { kind: 'answers_default' } },
       ],
     )
     const gates = runGates(d)
-    // The review card draws the gate's `decide_review`, so it also carries
-    // what an unattended run does there.
+    // Each card draws its gate's action, so it also carries what an
+    // unattended run does there.
     expect(gates.reviews[0]).toMatchObject({
       node: 'gate',
       runId: 'r',
       request: 7,
       unattended: { kind: 'fails_run', code: 'hitl_required' },
     })
-    expect(gates.publishes[0]).toMatchObject({ node: 'ship', runId: 'r', request: 9, plan: { nonce: 'publish-0123' } })
-    expect(gates.questions[0]).toMatchObject({ node: 'ask', runId: 'r', request: 12 })
+    expect(gates.publishes[0]).toMatchObject({
+      node: 'ship',
+      runId: 'r',
+      request: 9,
+      plan: { nonce: 'publish-0123' },
+      unattended: { kind: 'fails_run', code: 'hitl_required' },
+    })
+    expect(gates.questions[0]).toMatchObject({ node: 'ask', runId: 'r', request: 12, unattended: { kind: 'answers_default' } })
   })
 
   it('names no request when the run lists no matching action', () => {
