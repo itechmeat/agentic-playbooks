@@ -788,6 +788,7 @@ fn an_unspent_consent_pushes_an_identical_plan_once_after_a_crash() {
         decision: "publish".into(),
         note: String::new(),
         plan_digest: Some(plan.digest.clone()),
+        decided_by: None,
     })
     .unwrap();
     drop(log);
@@ -844,6 +845,7 @@ fn a_push_its_recorder_left_running_is_reconciled_only_after_its_deadline() {
         decision: "publish".into(),
         note: String::new(),
         plan_digest: Some(plan.digest.clone()),
+        decided_by: None,
     })
     .unwrap();
     log.append(EventPayload::SendIntentRecorded {
@@ -1608,6 +1610,7 @@ fn a_confirmed_push_of_this_commit_counts_without_its_effect_reference() {
             decision: "publish".into(),
             note: String::new(),
             plan_digest: Some(plan.digest.clone()),
+            decided_by: None,
         })
         .unwrap();
         drop(log);

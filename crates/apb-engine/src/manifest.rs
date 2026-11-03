@@ -239,6 +239,13 @@ pub struct RunExecutionManifest {
         deserialize_with = "lenient_launch"
     )]
     pub launch: Option<apb_core::launch::LaunchRecord>,
+    /// The run is unattended (`apb run --unattended`): every wait without a
+    /// declared outcome fails the run. Written once at start and the one
+    /// authoritative record of the mode: `run.yaml` carries a copy for the
+    /// drive, which an older apb's rewrite may drop, so a drive reads the
+    /// mode from here. Absent (false) for every other run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unattended: bool,
 }
 
 /// A launch record that does not read (a newer apb's shape) is absent.
@@ -354,6 +361,7 @@ impl RunExecutionManifest {
             && self.task_type.is_none()
             && self.secret_params.is_empty()
             && self.launch.is_none()
+            && !self.unattended
     }
 
     /// Each bound node's profile and bundle digests (the supervisor's
@@ -535,6 +543,30 @@ pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `unattended` is write-once and authoritative: absent from an older
+    /// manifest, which reads as attended and writes back without it; a set
+    /// one round trips and alone makes the manifest worth writing.
+    #[test]
+    fn the_unattended_record_keeps_old_manifests_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\n",
+        )
+        .unwrap();
+        let old = read(dir.path()).unwrap().unwrap();
+        assert!(!old.unattended && old.is_empty());
+        assert!(!yaml_serde::to_string(&old).unwrap().contains("unattended"));
+        let m = RunExecutionManifest {
+            unattended: true,
+            ..Default::default()
+        };
+        assert!(!m.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &m).unwrap();
+        assert!(read(dir.path()).unwrap().unwrap().unattended);
+    }
 
     #[test]
     fn a_cli_manifest_carries_no_execution_block() {

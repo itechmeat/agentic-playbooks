@@ -12,7 +12,7 @@ read-only triage that turns a failed build's log into a three-field summary
 ## The two commands
 
 ```sh
-apb run <playbook> --detach [--version X.Y.Z] [--param k=v]... [--instruction "..."] [--worktree DIR]
+apb run <playbook> --detach [--unattended] [--version X.Y.Z] [--param k=v]... [--instruction "..."] [--worktree DIR]
 apb wait <run_id> [--timeout SECS] [--follow-auto]
 ```
 
@@ -26,7 +26,7 @@ verdict in its exit code:
 | 0 | the run succeeded | pass |
 | 1 | the run failed or was aborted | fail the job |
 | 2 | error (unknown run id, unreadable run) | fail the job |
-| 3 | the run needs input: a question, a `human_review` gate, a supervisor decision, or host tasks of a host-mode run (`apb tasks <run>` lists them) | fail, or hand the run id to a person (see below) |
+| 3 | the run needs input: a question, a `human_review` gate, a supervisor decision, or host tasks of a host-mode run (`apb tasks <run>` lists them); an unattended run fails at such a gate or question instead | fail, or hand the run id to a person (see below) |
 | 4 | the run is paused, its driver is gone, or it is released while a deferred retry waits | fail; `apb resume <run_id>` continues it (`--retry-now` starts a waiting retry at once) |
 | 5 | `--timeout` elapsed while the run was still going | fail, and `apb stop <run_id>` |
 
@@ -155,11 +155,119 @@ prepares a separate `git worktree` for the run, or when the playbook declares a
 ## Gates in CI
 
 A run parked on a `human_review` gate or a question keeps waiting after the job
-ends; its state is on the runner's disk. On an ephemeral runner, treat exit 3 as
-a failure and design CI playbooks without gates. On a persistent runner (or a
+ends; its state is on the runner's disk. On a persistent runner (or a
 self-hosted machine), print the run id and let a person decide with
 `apb review <run_id> <node> --decision <option>` or `apb answer <run_id> <text>`,
-then continue with `apb wait <run_id> --follow-auto`, the form for CI.
+then continue with `apb wait <run_id> --follow-auto`, the form for CI. On an
+ephemeral runner nobody will come back to the run: start it unattended.
+
+## Unattended runs
+
+`apb run --unattended` (MCP `playbook_run { unattended: true }`, the HTTP
+start body `{ "unattended": true }`) starts a run that nobody attends. Every
+wait that would need a person and declares no outcome for this case ends
+the run `failed` at once, with a run error that names the node and starts
+with `hitl_required:`, for example ``hitl_required: human_review `review`
+has no unattended outcome``. No failure route is taken: neither the
+node's failure edge nor `defaults.on_failure` runs, because a route could
+lead into another wait. The job sees the failure right away (`apb run`
+exits 1, `apb wait` exits 1) instead of a run parked on a disk that is about
+to disappear.
+
+The mode is fixed when the run starts. It is recorded in the run's
+manifest, which is written once, so a resume cannot change it: a run
+resumed by the pause waker, by `apb resume --all` or by a person stays
+unattended, even when an older apb rewrote the run's `run.yaml` meanwhile.
+A sub-playbook run inherits it, and a child that fails `hitl_required` (or
+`budget_exhausted`) fails its parent with the same code and ``via child
+<run>`` in the reason, again without the parent's failure route.
+
+Who may start a run unattended: a person, a CI job, an agent session that
+is not a run step, and a step of a run that is itself unattended. A run step
+of an attended run (or a host task) that asks for it is refused before any
+run file exists (`unattended_unsupported`, requirement
+`unattended_caller`): the person that run waits on would otherwise be
+taken out of the gates of the run it starts. apb recognizes a run step by
+its environment (`APB_RUN_ID`, `APB_RUN_DIR`, `APB_HOST_TASK`), as for
+every other run-step refusal, so this rule keeps a cooperating step from
+choosing unattended by mistake; it is not a boundary against a step that
+changes its own environment. On the dashboard it reads the dashboard's
+own environment, so it applies to a dashboard a run step started. What
+an unattended decision may skip stays bounded either way: V142 and the
+run's recheck refuse a declared decision before a shipping step.
+
+Unattended does not mean consent. A playbook with irreversible effects still
+needs `--confirm-irreversible=<consent_nonce>`, and the launch policy
+(`agent_launch: ask` or `deny`) refuses the start as it would without the
+flag. Notifications behave as for any failed run.
+
+### What each wait does in an unattended run
+
+1. **A `human_review` without `unattended`** (or with `unattended: fail`):
+   the run fails `hitl_required`.
+2. **A `human_review` with `unattended: { decide: <option> }`**: the review
+   is decided at once with that option, on every visit, and journaled as
+   `review_decided` with `decided_by: unattended`. The validator refuses an
+   option that reaches an irreversible or secret step before the next gate,
+   over its edges and its failure handlers (HOWTO-authoring.md, "A review in
+   an unattended run"); the run checks it again with its pinned
+   sub-playbooks and fails `hitl_required` when that check refuses. A drive
+   that stopped between asking and deciding decides on resume; a decision
+   that cannot be recorded fails the run `hitl_required`.
+3. **A `publish` node**: the run fails `hitl_required`. A push always needs
+   a person's consent to its plan; there is no way to declare one.
+4. **A question with a `default_answer`**: answered at once with the
+   default (`answered_by: unattended`), without waiting for its timeout.
+5. **A question without a `default_answer`**: the run fails
+   `hitl_required`.
+6. **Host tasks and supervisors**: an unattended start that would run its
+   agent steps in the host (`execution: host`), under a supervisor
+   (`apb run --supervise`, MCP `supervise: self`) or in another supervised
+   mode is refused before any run file exists, with a start action
+   `fix_requirement` that says what to change (policy
+   `unattended_unsupported`); `apb run` exits 2. An unattended MCP start
+   also never falls back from an agent CLI to the host.
+7. **A timer `wait`**: elapses and the run goes on, as attended.
+8. **A webhook `wait`**: waits for its signal, which a program may still
+   send; at `timeout_seconds` the node fails and takes its failure route,
+   as attended.
+9. **A deferred retry (`retry_delay`)**: the retry runs at its time. An
+   unattended run never releases its driver while it waits: the driver
+   sleeps in its own process, so a foreground `apb run --unattended` ends
+   with the run's real outcome instead of exiting 4 and leaving a waker the
+   job's container would kill. `apb resume --retry-now` works as for any
+   run.
+10. **The run's budget**: where an attended run would pause for its budget,
+    an unattended run fails with a run error that starts with
+    `budget_exhausted:`, and journals no pause. This holds for a node on
+    its own, a node in a concurrent batch and the items of a list node.
+11. **A quota pause**: pauses as today and resumes at `until`; the resumed
+    run is still unattended. `apb wait` exits 4 for it; `--follow-auto`
+    keeps waiting up to a minute past `until`.
+12. **An operator pause**: unchanged; it is a person's act, not a wait.
+13. **A start that needs consent** (irreversible effects, `agent_launch:
+    ask`): refused before the run, as without the flag.
+
+A list item never asks a question (`interactive` is refused on a list
+node), so items have no unattended case of their own.
+
+### Seeing it before the run
+
+Every next action of every run, attended or not, carries `unattended`: what
+an unattended run would do at that wait. It is one of `proceeds` (with the
+automatic outcome: the timer elapses, the wait times out, the retry runs,
+the resume is tried), `decides` (with the option), `answers_default`,
+`fails_run` (with the code, `hitl_required` or `budget_exhausted`) and
+`refused_at_start` (with the code). So a CI author can run the playbook
+once attended, read `apb runs <id> --json` or MCP `run_status`, and see
+which gates still need an `unattended` declaration. A gate whose declared
+decision the run's own check would refuse (a pinned sub-playbook or an
+installed connector after it) shows `fails_run`, as the run would. The action itself is
+the one an attended run shows at that wait (`decide_review`,
+`answer_question`, `retry_now`, ...); a run that already failed
+`hitl_required` shows `read_report`. The run page marks an unattended run
+with a badge and shows the outcome under each action; the dashboard does
+not start a run unattended.
 
 ## GitHub Actions
 

@@ -285,6 +285,22 @@ fn policy_actions(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
                 )
             })
             .collect(),
+        crate::run_config::UNATTENDED_UNSUPPORTED => {
+            let detail = refusal["detail"].as_str().unwrap_or_default();
+            vec![of.fix(
+                Remedy::Manual {
+                    detail: match refusal["requirement"].as_str() {
+                        Some("cli_execution") => "start the unattended run with execution: cli",
+                        Some("unattended_caller") => {
+                            "start it attended, or start the outer run unattended"
+                        }
+                        _ => "start the unattended run without supervision",
+                    }
+                    .into(),
+                },
+                format!("playbook `{id}` cannot start unattended this way: {detail}"),
+            )]
+        }
         "requires_unsafe_path" | "requires_unsafe_command" => {
             let what = refusal["path"]
                 .as_str()

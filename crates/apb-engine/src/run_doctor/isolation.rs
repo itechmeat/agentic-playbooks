@@ -1,42 +1,119 @@
 //! The `isolation` rows of `apb doctor --run`: per attempt of an isolated
 //! node, its level, backend, network and limits (from
 //! `attempt_started.isolation`), and a FAIL row for a node the isolation
-//! check refused before anything was spawned.
+//! check refused before anything was spawned. A `read_only` node adds a
+//! row per attempt with its tier (`read_only_checked`: enforced,
+//! detected, or detected but partial), and a FAIL row for each
+//! `read_only_violated`.
 
 use super::check::{FAIL, OK, RunCheck, WARN};
-use crate::event::{Event, EventPayload};
+use crate::event::{Event, EventPayload, ReadOnlyCheck, ReadOnlyLimit, ReadOnlyTier};
 use crate::run_view::AttemptIsolationRow;
 
 const SUBJECT: &str = "isolation";
 
 /// The rows, in journal order.
 pub(super) fn isolation_checks(events: &[Event]) -> Vec<RunCheck> {
-    events
-        .iter()
-        .filter_map(|e| {
-            if let Some(row) = AttemptIsolationRow::of_event(e) {
-                let status = if row.sandboxed() { OK } else { WARN };
-                return Some(RunCheck::new(status, SUBJECT, row.line()));
+    let mut out = Vec::new();
+    for e in events {
+        if let Some(row) = AttemptIsolationRow::of_event(e) {
+            let status = if row.sandboxed() { OK } else { WARN };
+            out.push(RunCheck::new(status, SUBJECT, row.line()));
+        }
+        out.extend(read_only_check(e));
+        out.extend(refusal(e));
+    }
+    out
+}
+
+/// The FAIL row of a node the isolation check refused.
+fn refusal(e: &Event) -> Option<RunCheck> {
+    match &e.payload {
+        EventPayload::NodeFinished {
+            node,
+            status,
+            output,
+            ..
+        } if status == "failed"
+            && output.starts_with(apb_core::isolation::contract::UNAVAILABLE) =>
+        {
+            Some(RunCheck::new(
+                FAIL,
+                SUBJECT,
+                format!("node `{node}`: {output}"),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The `read_only` row of one event: an attempt's tier, or a violation.
+fn read_only_check(e: &Event) -> Option<RunCheck> {
+    match &e.payload {
+        EventPayload::ReadOnlyChecked {
+            node,
+            attempt,
+            check,
+        } => {
+            let status = if check.tier == ReadOnlyTier::DetectedPartial {
+                WARN
+            } else {
+                OK
+            };
+            Some(RunCheck::new(
+                status,
+                SUBJECT,
+                format!("node `{node}` attempt {attempt}: {}", tier_line(check)),
+            ))
+        }
+        EventPayload::ReadOnlyViolated {
+            node,
+            attempt,
+            changes,
+            truncated,
+            evidence,
+            ..
+        } => {
+            let listed: Vec<String> = changes
+                .iter()
+                .take(3)
+                .map(|c| format!("{} {}", c.path, c.change))
+                .collect();
+            let more = (changes.len() as u64 + truncated).saturating_sub(listed.len() as u64);
+            let mut detail = format!(
+                "node `{node}` attempt {attempt}: read_only, the tree changed: {}",
+                listed.join(", ")
+            );
+            if more > 0 {
+                detail.push_str(&format!(" (and {more} more)"));
             }
-            match &e.payload {
-                EventPayload::NodeFinished {
-                    node,
-                    status,
-                    output,
-                    ..
-                } if status == "failed"
-                    && output.starts_with(apb_core::isolation::contract::UNAVAILABLE) =>
-                {
-                    Some(RunCheck::new(
-                        FAIL,
-                        SUBJECT,
-                        format!("node `{node}`: {output}"),
-                    ))
-                }
-                _ => None,
+            if let Some(path) = evidence {
+                detail.push_str(&format!("; evidence {path}"));
             }
-        })
-        .collect()
+            Some(RunCheck::new(FAIL, SUBJECT, detail))
+        }
+        _ => None,
+    }
+}
+
+/// One attempt's read-only tier as a line.
+fn tier_line(check: &ReadOnlyCheck) -> String {
+    match check.tier {
+        ReadOnlyTier::Enforced => "read_only enforced by the sandbox".to_string(),
+        ReadOnlyTier::Detected => format!(
+            "read_only detected after the attempt ({} entries, {} bytes hashed)",
+            check.entries, check.bytes
+        ),
+        ReadOnlyTier::DetectedPartial => format!(
+            "read_only detected after the attempt, partial: the {} limit stopped the check at {} entries and {} bytes, so a change past it goes unseen",
+            match check.partial {
+                Some(ReadOnlyLimit::Bytes) => "byte",
+                _ => "entry",
+            },
+            check.entries,
+            check.bytes
+        ),
+    }
 }
 
 #[cfg(test)]

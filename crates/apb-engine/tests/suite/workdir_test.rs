@@ -35,6 +35,7 @@ fn run_config_round_trips() {
             tail_bytes: 4096,
             ..Default::default()
         }),
+        unattended: true,
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();
@@ -53,6 +54,8 @@ fn run_config_round_trips() {
     assert!(back.shared_workdir);
     // And for the output limits: a re-drive keeps the ones the run started with.
     assert_eq!(back.output_limits().tail_bytes, 4096);
+    // And for the unattended mode's copy (the manifest holds the record).
+    assert!(back.unattended);
 }
 
 #[test]

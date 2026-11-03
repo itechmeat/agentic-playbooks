@@ -732,3 +732,261 @@ fn review_and_commit_lines_keep_their_shape_with_the_publish_fields() {
         EventPayload::ReviewDecided { plan_digest: Some(ref d), .. } if d == "sha256:d"
     ));
 }
+
+/// `review_decided.decided_by`: an old line reads as decided by no one in
+/// particular and writes back byte for byte; `unattended` round trips; a
+/// value this binary does not know, in any shape, reads as `unknown` (never
+/// a person) instead of failing the journal; the constructor leaves it unset.
+#[test]
+fn review_decided_by_keeps_old_lines_and_decodes_leniently() {
+    use apb_engine::event::DecidedBy;
+    let old =
+        r#"{"seq":4,"ts":5,"type":"review_decided","node":"gate","decision":"approve","note":""}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewDecided {
+            decided_by: None,
+            ..
+        }
+    ));
+
+    let set = old.replace(r#""note":""}"#, r#""note":"","decided_by":"unattended"}"#);
+    let e: Event = serde_json::from_str(&set).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), set);
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewDecided {
+            decided_by: Some(DecidedBy::Unattended),
+            ..
+        }
+    ));
+
+    // A decider this binary does not know, in any shape, still decodes and
+    // is never read as a person's decision; `null` is the absent field.
+    for by in [r#""martian""#, r#"{"kind":"policy"}"#, "7"] {
+        let newer = old.replace(
+            r#""note":""}"#,
+            &format!(r#""note":"","decided_by":{by}}}"#),
+        );
+        let e: Event = serde_json::from_str(&newer).unwrap();
+        assert!(
+            matches!(
+                e.payload,
+                EventPayload::ReviewDecided {
+                    decided_by: Some(DecidedBy::Unknown),
+                    ..
+                }
+            ),
+            "{by}"
+        );
+    }
+    let null = old.replace(r#""note":""}"#, r#""note":"","decided_by":null}"#);
+    let e: Event = serde_json::from_str(&null).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewDecided {
+            decided_by: None,
+            ..
+        }
+    ));
+
+    let built = EventPayload::review_decided("gate", "approve", "", None);
+    let wire = serde_json::to_value(&built).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"type": "review_decided", "node": "gate", "decision": "approve", "note": ""})
+    );
+}
+
+/// `read_only_checked` is a known type that round trips each tier, decodes
+/// from a bare line (as `detected`, no counts), reads a newer `check`
+/// shape as that default instead of failing the journal, is no checkpoint
+/// and folds to nothing; `attempt_started` is unchanged by the read-only
+/// node (an old line writes back as it was).
+#[test]
+fn read_only_checked_round_trips_decodes_leniently_and_folds_to_nothing() {
+    use apb_engine::event::{ReadOnlyCheck, ReadOnlyLimit, ReadOnlyTier};
+    use apb_engine::state::RunState;
+    let old = r#"{"seq":1,"ts":2,"type":"attempt_started","node":"w","attempt":1,"agent":"claude","pid":7,"spawn_ms":1}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+
+    let checked = |check: &str| {
+        format!(
+            r#"{{"seq":2,"ts":3,"type":"read_only_checked","node":"w","attempt":1,"check":{check}}}"#
+        )
+    };
+    for (record, want) in [
+        (
+            r#"{"tier":"enforced"}"#,
+            ReadOnlyCheck {
+                tier: ReadOnlyTier::Enforced,
+                ..ReadOnlyCheck::default()
+            },
+        ),
+        (
+            r#"{"tier":"detected","entries":12,"bytes":3400}"#,
+            ReadOnlyCheck {
+                tier: ReadOnlyTier::Detected,
+                entries: 12,
+                bytes: 3400,
+                partial: None,
+            },
+        ),
+        (
+            r#"{"tier":"detected_partial","entries":20000,"bytes":9,"partial":"entries"}"#,
+            ReadOnlyCheck {
+                tier: ReadOnlyTier::DetectedPartial,
+                entries: 20000,
+                bytes: 9,
+                partial: Some(ReadOnlyLimit::Entries),
+            },
+        ),
+    ] {
+        let line = checked(record);
+        let e: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+        let EventPayload::ReadOnlyChecked { check, .. } = e.payload else {
+            panic!("read_only_checked decoded: {line}");
+        };
+        assert_eq!(check, want);
+    }
+    for newer in [
+        r#"{"tier":"sealed","entries":4}"#,
+        r#"{"tier":7}"#,
+        r#""yes""#,
+        r#"{"tier":"enforced","partial":"inodes"}"#,
+    ] {
+        let e: Event = serde_json::from_str(&checked(newer)).unwrap();
+        let EventPayload::ReadOnlyChecked { check, .. } = e.payload else {
+            panic!("{newer}");
+        };
+        assert_eq!(check, ReadOnlyCheck::default(), "{newer}");
+    }
+    let bare: Event =
+        serde_json::from_str(r#"{"seq":3,"ts":4,"type":"read_only_checked"}"#).unwrap();
+    assert!(matches!(
+        bare.payload,
+        EventPayload::ReadOnlyChecked { ref node, attempt: 0, ref check }
+            if node.is_empty() && *check == ReadOnlyCheck::default()
+    ));
+
+    let base: Vec<Event> = [
+        r#"{"seq":0,"ts":1,"type":"node_started","node":"w","attempt":1}"#,
+        old,
+        r#"{"seq":3,"ts":4,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#,
+    ]
+    .iter()
+    .map(|l| serde_json::from_str(l).unwrap())
+    .collect();
+    let mut with = base.clone();
+    with.insert(
+        2,
+        serde_json::from_str(&checked(r#"{"tier":"detected"}"#)).unwrap(),
+    );
+    let (a, b) = (RunState::fold(&with), RunState::fold(&base));
+    assert_eq!(format!("{:?}", a.nodes), format!("{:?}", b.nodes));
+    assert_eq!(a.attempts, b.attempts);
+    assert_eq!(a.outputs, b.outputs);
+    assert_eq!(a.run_status, b.run_status);
+}
+
+/// `read_only_violated` is a known type that round trips, decodes from a
+/// bare line, is no checkpoint, and changes nothing the run state folds:
+/// the failure it explains is the `node_finished` that follows. A binary
+/// that does not know it skips it while that checkpoint follows.
+#[test]
+fn read_only_violated_round_trips_is_skippable_and_folds_to_nothing() {
+    use apb_engine::state::RunState;
+    let line = r#"{"seq":3,"ts":4,"type":"read_only_violated","node":"look","attempt":1,"tier":"detected","changes":[{"path":".env","change":"modified"},{"path":"HEAD","change":"git_head"}],"truncated":3,"evidence":"read_only/look/1.json"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    assert!(!e.payload.is_checkpoint());
+    let bare: Event =
+        serde_json::from_str(r#"{"seq":3,"ts":4,"type":"read_only_violated"}"#).unwrap();
+    assert!(matches!(
+        bare.payload,
+        EventPayload::ReadOnlyViolated { ref node, attempt: 0, ref changes, truncated: 0, evidence: None, .. }
+            if node.is_empty() && changes.is_empty()
+    ));
+
+    let head = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+        r#"{"seq":1,"ts":2,"type":"node_started","node":"look","attempt":1}"#,
+    ];
+    let tail = r#"{"seq":4,"ts":5,"type":"node_finished","node":"look","status":"failed","attempt":1,"output":"read_only_dirty: 5 changes","artifacts":[]}"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let with = write_run(
+        tmp.path(),
+        "with",
+        &[head[0], head[1], line, tail, ""].join("\n"),
+    );
+    let without = write_run(
+        tmp.path(),
+        "without",
+        &[head[0], head[1], tail, ""].join("\n"),
+    );
+    let read = read_journal(&with).unwrap();
+    assert!(
+        read.unknown.is_empty(),
+        "a known type: {:?}",
+        read.unknown.len()
+    );
+    let (a, b) = (
+        RunState::fold(&read.events),
+        RunState::fold(&read_all(&without).unwrap()),
+    );
+    assert_eq!(format!("{:?}", a.nodes), format!("{:?}", b.nodes));
+    assert_eq!(a.attempts, b.attempts);
+    assert_eq!(a.outputs, b.outputs);
+    assert_eq!(a.run_status, b.run_status);
+
+    let future = line.replace("read_only_violated", "read_only_violated_from_the_future");
+    let dir = write_run(
+        tmp.path(),
+        "future",
+        &[head[0], head[1], &future, tail, ""].join("\n"),
+    );
+    assert_eq!(
+        read_all(&dir)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect::<Vec<_>>(),
+        [0, 1, 4]
+    );
+}
+
+/// A start asked to run unattended records the mode write-once in the
+/// manifest and carries a copy in `run.yaml`; a plain start writes neither,
+/// so an attended run's files read as before.
+#[test]
+fn an_unattended_start_records_the_mode_in_the_manifest_and_the_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed(tmp.path());
+    let opts = RunOptions {
+        unattended: true,
+        ..RunOptions::default()
+    };
+    let res = run(tmp.path(), "lin", None, opts).unwrap();
+    let dir = tmp.path().join(".apb/runs").join(&res.run_id);
+    let manifest = apb_engine::manifest::read(&dir)
+        .unwrap()
+        .expect("a manifest");
+    assert!(manifest.unattended);
+    assert!(
+        apb_engine::run_config::read_run_config(&dir)
+            .unwrap()
+            .unattended
+    );
+
+    let res = run(tmp.path(), "lin", None, RunOptions::default()).unwrap();
+    let dir = tmp.path().join(".apb/runs").join(&res.run_id);
+    let manifest = apb_engine::manifest::read(&dir).unwrap();
+    assert!(!manifest.is_some_and(|m| m.unattended));
+    let config = fs::read_to_string(dir.join("run.yaml")).unwrap();
+    assert!(!config.contains("unattended"), "{config}");
+}

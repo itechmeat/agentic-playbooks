@@ -23,6 +23,7 @@ pub mod observation;
 pub mod start;
 pub(crate) mod start_action;
 mod types;
+mod unattended;
 pub mod verdict;
 
 #[cfg(test)]
@@ -55,7 +56,8 @@ pub fn for_surface(
 pub fn next_actions(obs: &Observation) -> RunActions {
     let waits = verdict::collect(obs);
     let stop = verdict::stop_verdict(obs, &waits);
-    let actions: Vec<NextAction> = waits.into_iter().map(|w| w.action).collect();
+    let mut actions: Vec<NextAction> = waits.into_iter().map(|w| w.action).collect();
+    unattended::annotate(obs, &mut actions);
     RunActions {
         observed_at_ms: obs.now_ms,
         status: obs.status(),

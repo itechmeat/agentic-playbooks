@@ -2085,3 +2085,113 @@ async fn run_detail_marks_a_passed_item_whose_earlier_send_is_unresolved() {
         .collect();
     assert_eq!(rows, [("a", "passed", None), ("b", "passed", Some(true))]);
 }
+
+// --- unattended mode and the read-only node on the HTTP surfaces ---
+
+/// `POST /api/playbooks/{id}/run` with `unattended: true` starts the run
+/// unattended (its write-once manifest says so) and the run detail reports
+/// `unattended: true`; a start without it is attended and the detail leaves
+/// the field out.
+#[tokio::test]
+async fn an_unattended_start_records_the_mode_and_the_run_detail_shows_it() {
+    let _guard = crate::common::env_lock().await;
+    let dir = seed_with_run();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let mut seen = Vec::new();
+    for body in [
+        serde_json::json!({ "params": { "who": "world" }, "unattended": true }),
+        serde_json::json!({ "params": { "who": "world" } }),
+    ] {
+        let (status, json) = post_json(app.clone(), "/api/playbooks/noagent/run", body).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let run_id = json["run_id"].as_str().unwrap().to_string();
+        let run_dir = dir.path().join(".apb/runs").join(&run_id);
+        let manifest = apb_engine::manifest::read(&run_dir)
+            .unwrap()
+            .unwrap_or_default();
+        let (status, detail) = get_json(app.clone(), &format!("/api/runs/{run_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        seen.push((manifest.unattended, detail["unattended"].clone()));
+    }
+    assert_eq!(
+        seen,
+        [
+            (true, serde_json::json!(true)),
+            (false, serde_json::Value::Null)
+        ]
+    );
+}
+
+/// The run detail carries each read-only check: an attempt's tier from its
+/// `read_only_checked` with the violation folded in, and a violation
+/// without a check as a row of its own; a run without one has no
+/// `read_only`.
+#[tokio::test]
+async fn run_detail_carries_the_read_only_checks() {
+    let dir = seed_with_run();
+    let plain = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+    let run_dir = dir.path().join(".apb/runs/ro-1");
+    let mut log = apb_engine::event::EventLog::create(&run_dir).unwrap();
+    for line in [
+        r#"{"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
+        r#"{"type":"attempt_started","node":"scan","attempt":1,"agent":"claude"}"#,
+        r#"{"type":"read_only_checked","node":"scan","attempt":1,"check":{"tier":"detected","entries":12,"bytes":3400}}"#,
+        r#"{"type":"read_only_violated","node":"scan","attempt":1,"tier":"detected","changes":[{"path":"notes.md","change":"modified"}],"truncated":2,"evidence":"read_only/scan/1.json"}"#,
+        r#"{"type":"read_only_violated","node":"sh","attempt":1,"changes":[{"path":".env","change":"added"}]}"#,
+    ] {
+        log.append(serde_json::from_str(line).unwrap()).unwrap();
+    }
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app.clone(), "/api/runs/ro-1").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        json["read_only"],
+        serde_json::json!([
+            {
+                "node": "scan", "attempt": 1, "tier": "detected", "entries": 12, "bytes": 3400,
+                "violated": {
+                    "changes": [{ "path": "notes.md", "change": "modified" }],
+                    "truncated": 2,
+                    "evidence": "read_only/scan/1.json"
+                }
+            },
+            {
+                "node": "sh", "attempt": 1, "tier": "detected",
+                "violated": { "changes": [{ "path": ".env", "change": "added" }] }
+            }
+        ])
+    );
+    let (_, json) = get_json(app, &format!("/api/runs/{plain}")).await;
+    assert!(json.get("read_only").is_none(), "{json}");
+}
+
+/// `POST /api/playbooks/{id}/run` with `unattended: true` from a run step
+/// (a dashboard a step started, its process carrying `APB_RUN_ID`) whose
+/// run apb cannot read as unattended is refused before anything is
+/// written: 409, the policy `unattended_unsupported`, one start action for
+/// the person, and no new run directory. The run step of a readable
+/// attended run is the CLI suite's case.
+#[tokio::test]
+async fn an_unattended_start_from_a_run_step_not_known_unattended_is_refused() {
+    let _guard = crate::common::env_lock().await;
+    let dir = seed_with_run();
+    let before = apb_engine::list_runs(dir.path()).unwrap().len();
+    let _step = set_var("APB_RUN_ID", std::ffi::OsStr::new("attended-1"));
+    let _no_dir = unset_var("APB_RUN_DIR");
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        "/api/playbooks/noagent/run",
+        serde_json::json!({ "params": { "who": "world" }, "unattended": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["policy"], "unattended_unsupported", "{json}");
+    assert_eq!(json["requirement"], "unattended_caller", "{json}");
+    assert_eq!(
+        json["start_actions"].as_array().map(Vec::len),
+        Some(1),
+        "{json}"
+    );
+    assert_eq!(apb_engine::list_runs(dir.path()).unwrap().len(), before);
+}

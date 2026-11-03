@@ -1412,6 +1412,21 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "is_false")]
     pub auto_decide_ok: bool,
     // --- end decision-model opt-ins ---
+    /// The node must leave its tree as it found it (`agent_task` and
+    /// `script` only). Not to be confused with `isolation.read_only` (extra
+    /// paths bound read-only) or a connector binding's `functions:
+    /// read_only`. Sits on the node rather than inside a kind, because a
+    /// kind's unknown keys are dropped in silence. Additive to schema 2; an
+    /// older apb drops it and runs the node without the check.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+    /// What a `human_review` gate does in an unattended run: `fail` (the
+    /// default) or `{ decide: <option>, note? }`. Sits next to
+    /// `auto_decide`, never inside it: that block is strict in older
+    /// binaries. Additive to schema 2; an older apb drops it and waits for a
+    /// person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<UnattendedReview>,
     /// Branch-failure behavior of a forking node (issue #195). Absent: the
     /// `wait` default. Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1464,6 +1479,81 @@ fn default_auto_decide_confidence() -> f64 {
 
 /// The one option an `auto_decide` block may allow.
 pub const AUTO_DECIDE_ALLOWED: &str = "needs_changes";
+
+/// A `human_review` node's `unattended` outcome: in YAML either the word
+/// `fail` or a `{ decide: <option>, note? }` mapping. Any other shape is
+/// refused, never dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnattendedReview {
+    /// The unattended run fails at the gate (`hitl_required`).
+    Fail,
+    /// The unattended run decides the gate with a declared option.
+    Decide(UnattendedDecide),
+}
+
+/// The `{ decide, note }` form of [`UnattendedReview`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnattendedDecide {
+    /// The option the gate is decided with; must be a declared option.
+    pub decide: String,
+    /// The decision's note; absent gives an empty note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl UnattendedReview {
+    /// The word of the `fail` form.
+    pub const FAIL: &'static str = "fail";
+
+    /// The option an unattended run decides with, if any.
+    pub fn decide(&self) -> Option<&UnattendedDecide> {
+        match self {
+            UnattendedReview::Fail => None,
+            UnattendedReview::Decide(d) => Some(d),
+        }
+    }
+}
+
+impl Serialize for UnattendedReview {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            UnattendedReview::Fail => s.serialize_str(Self::FAIL),
+            UnattendedReview::Decide(d) => d.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UnattendedReview {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = UnattendedReview;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(
+                    "`unattended: fail` or `unattended: { decide: <option>, note: <text> }`",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v == UnattendedReview::FAIL {
+                    Ok(UnattendedReview::Fail)
+                } else {
+                    Err(E::custom(format!(
+                        "unknown `unattended` value `{v}`: expected `fail` or `{{ decide: <option> }}`"
+                    )))
+                }
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                UnattendedDecide::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(UnattendedReview::Decide)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
 
 /// The decision-model mode a playbook opts a use into (`defaults.retry_advice`,
 /// `supervisor.pre_triage`, issue #165 Part 14). Only `enforce` changes

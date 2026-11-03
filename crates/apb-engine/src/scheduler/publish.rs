@@ -333,6 +333,7 @@ fn request(node: &str, s: &Spec<'_>, plan: &Plan) -> GateRequest {
             plan_digest: Some(plan.digest.clone()),
         },
         auto: None,
+        by: None,
     }
 }
 
@@ -353,12 +354,12 @@ fn decided(
             if entry.cmd.decision == OPTION_SKIP {
                 start_visit(d.run_dir, d.log, node)?;
             }
-            d.log.append(EventPayload::ReviewDecided {
-                node: node.to_string(),
-                decision: entry.cmd.decision.clone(),
-                note: entry.cmd.note.clone(),
-                plan_digest: Some(digest.to_string()),
-            })?;
+            d.log.append(EventPayload::review_decided(
+                node,
+                entry.cmd.decision.clone(),
+                entry.cmd.note.clone(),
+                Some(digest.to_string()),
+            ))?;
             if entry.cmd.decision == OPTION_SKIP {
                 Ok(PublishStep::Finished(
                     NodeStatus::Succeeded,

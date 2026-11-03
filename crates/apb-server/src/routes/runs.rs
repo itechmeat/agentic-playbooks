@@ -198,6 +198,20 @@ pub struct RunDetail {
         )
     )]
     pub isolation: Vec<apb_engine::run_view::AttemptIsolationRow>,
+    /// Each read-only node's check per attempt (tier, what it covered) and
+    /// the changes that failed it; empty for a run without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_view::ReadOnlyRow>>", optional)
+    )]
+    pub read_only: Vec<apb_engine::run_view::ReadOnlyRow>,
+    /// The run is unattended (`apb run --unattended`, MCP and HTTP
+    /// `unattended: true`), from its write-once manifest: every wait without
+    /// a declared outcome fails it. Read-only; left out for an attended run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional, as = "Option<bool>"))]
+    pub unattended: bool,
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -366,6 +380,8 @@ pub(crate) async fn get_run_handler(
     let inbox_gaps = view.inbox_gaps();
     let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
     let isolation = view.isolation();
+    let read_only = view.read_only();
+    let unattended = apb_engine::run_view::run_unattended(&run_dir);
     // The goal, the baseline and the outcome are read against the one
     // playbook snapshot parsed above.
     let readout = view.readout_of(loaded_pb);
@@ -448,6 +464,8 @@ pub(crate) async fn get_run_handler(
         lists,
         attempt_models,
         isolation,
+        read_only,
+        unattended,
         goal,
         candidate_trial,
         known_problems,

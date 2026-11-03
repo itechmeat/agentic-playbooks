@@ -4,6 +4,7 @@
 use super::*;
 
 mod exposure;
+mod read_only;
 mod sandbox;
 mod step_env;
 
@@ -735,6 +736,15 @@ fn execute_node_kind(
         return Err(drive_handled_refusal(node_id, &node.kind));
     }
     let mut events: Vec<EventPayload> = Vec::new();
+    // A read-only node is never run unchecked: on a list (V138) its items
+    // would share one tree concurrently, so the engine refuses them.
+    if node.read_only && item.is_some() {
+        return Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Failed,
+            output: read_only::list_refusal(node_id),
+            events,
+        });
+    }
     match &node.kind {
         NodeKind::Start => Ok(AttemptOutcome::Finished {
             status: NodeStatus::Succeeded,
@@ -1562,6 +1572,7 @@ fn execute_node_kind(
                             process: step_env.process.as_deref(),
                             settings: step_env.hermetic.as_ref().map(|h| h.settings.as_path()),
                             host: step.host,
+                            read_only: node.read_only,
                         },
                     )? {
                         sandbox::Placed::Run(place) => place,
@@ -1574,6 +1585,17 @@ fn execute_node_kind(
                         }
                     };
                     let attempt_workdir: PathBuf = place.cwd.clone();
+                    // A read-only node: the sandbox enforces it, or the
+                    // tree's state is taken now and compared once the
+                    // process ended (`node/read_only.rs`). Taken before
+                    // `attempt_started`, which records the tier.
+                    let read_only_before = (node.read_only && place.sandbox.is_none())
+                        .then(|| read_only::Before::take(node_id, attempt, &node_dir));
+                    let attempt_read_only = match &read_only_before {
+                        Some(before) => Some(before.record()),
+                        None if node.read_only => Some(read_only::enforced()),
+                        None => None,
+                    };
                     // The invocation form of this attempt: the resume form for a
                     // continued session, else the base form plus whatever makes
                     // the new session findable later (`FreshSession`).
@@ -1832,7 +1854,17 @@ fn execute_node_kind(
                             isolation: place.record.clone(),
                             exec: attempt_exec.clone(),
                         }) {
-                            Ok(seq) => started_seq.set(seq),
+                            Ok(seq) => {
+                                started_seq.set(seq);
+                                if let Err(e) = read_only::journal_check(
+                                    journal,
+                                    node_id,
+                                    cur_attempt,
+                                    attempt_read_only.as_ref(),
+                                ) {
+                                    *spawn_err.borrow_mut() = Some(e);
+                                }
+                            }
                             Err(e) => *spawn_err.borrow_mut() = Some(e),
                         }
                     };
@@ -2051,12 +2083,23 @@ fn execute_node_kind(
                         Ok(report) => report.capture.clone(),
                         Err(f) => f.capture.clone(),
                     };
+                    // A read-only node's tree, compared before protect puts
+                    // anything back, so a change to a protected path is seen
+                    // as the read-only violation it is.
+                    // An error of the check (its evidence or journal) is
+                    // raised only after protect ran, so a protected path is
+                    // put back whatever the check met.
+                    let read_only_violation = match read_only_before {
+                        Some(before) => before.finish(run_dir, workdir, journal),
+                        None => Ok(None),
+                    };
                     // --- 0.23.0 protected paths (C6): undo and name any change
                     // to a protected file before anything else reads the tree. ---
                     let protect_violation = match protect_snapshot {
                         Some(snapshot) => snapshot.check_and_restore(journal)?,
                         None => None,
                     };
+                    let read_only_violation = read_only_violation?;
                     // A sandboxed attempt's changes to what redirects git
                     // are put back and fail it like a protected path.
                     let protect_violation = super::protect::Violation::join(
@@ -2073,7 +2116,17 @@ fn execute_node_kind(
                     // A tampered snapshot copy, or a repository the engine
                     // could not put back, fails the node at once: a retry
                     // would start from a tree the engine could not restore.
-                    if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
+                    // So does a read-only node that changed its tree: the
+                    // tree is no longer the one it was asked to read, and no
+                    // retry, fallback, deferral or pause path may run it
+                    // again.
+                    let fatal = match (read_only_violation, &protect_violation) {
+                        (Some(ro), Some(p)) => Some(format!("{ro}; {}", p.reason)),
+                        (Some(ro), None) => Some(ro),
+                        (None, Some(p)) if p.fatal => Some(p.reason.clone()),
+                        (None, _) => None,
+                    };
+                    if let Some(reason) = fatal {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
                         journal.append(EventPayload::AttemptFinished {
                             item: None,
@@ -2092,7 +2145,7 @@ fn execute_node_kind(
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
-                            output: v.reason.clone(),
+                            output: reason,
                             events,
                         });
                     }
@@ -2246,6 +2299,12 @@ fn execute_node_kind(
                             isolation: place.record.clone(),
                             exec: attempt_exec.clone(),
                         })?);
+                        read_only::journal_check(
+                            journal,
+                            node_id,
+                            attempt,
+                            attempt_read_only.as_ref(),
+                        )?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
                     // The attempt's verdict, read ONCE for both branches (spec
@@ -3106,6 +3165,14 @@ fn execute_node_kind(
             }
             let overlay = cfg.spawn_env();
             env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
+            // A script has no sandbox: a read-only script is always the
+            // detected tier, checked around its one run.
+            let read_only_before = node
+                .read_only
+                .then(|| read_only::Before::take(node_id, 1, workdir));
+            if let Some(before) = &read_only_before {
+                read_only::journal_check(journal, node_id, 1, Some(&before.record()))?;
+            }
             let r = crate::script::run_script_with_env(
                 run_dir,
                 workdir,
@@ -3115,6 +3182,15 @@ fn execute_node_kind(
                 Some(cancel),
                 &env,
             )?;
+            if let Some(before) = read_only_before
+                && let Some(reason) = before.finish(run_dir, ctx.workdir, journal)?
+            {
+                return Ok(AttemptOutcome::Finished {
+                    status: NodeStatus::Failed,
+                    output: reason,
+                    events,
+                });
+            }
             // A killed script's captured stdout is whatever it happened to
             // print before the signal landed (often nothing at all), not the
             // stable "cancelled" text the agent_task cancel paths already
@@ -3844,6 +3920,9 @@ pub(crate) fn run_playbook_node(
     opts.execution = super::host::child_execution_request(run_dir)?;
     // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
     opts.consent = inherited_consent(run_dir, run_id, node_id);
+    // A child of an unattended run is unattended (from the parent's
+    // manifest, here, so it never hangs on where the child's prepare looks).
+    opts.unattended = super::unattended::mode(run_dir, cfg);
     // The launch authorization: a child spawned under its verified pin
     // records its parent's, so a later resume of the child alone needs no
     // check of its own. A child resolved live inherits nothing.
@@ -4016,13 +4095,19 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
 /// A node with `protect` (C6) is never batchable: its check compares the
 /// whole tree before and after the attempt, so a concurrent sibling's write
 /// under its globs would be undone and blamed on it.
+///
+/// A `read_only` node is batchable only with `isolation: full`, which is
+/// always the enforced tier or a refusal: a detected-tier check compares
+/// the tree after the attempt, so a sibling's write would be blamed on it.
 pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
     is_agent_or_script(playbook, node)
         && !is_interactive(playbook, node)
         && playbook
             .node(node)
             // A list node runs its items on its own pool, on the sequential arm.
-            .is_none_or(|n| n.kind.protect_globs().is_empty() && n.list().is_none())
+            .is_none_or(|n| {
+                n.kind.protect_globs().is_empty() && n.list().is_none() && !detected_read_only(n)
+            })
         && !matches!(
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))
@@ -4030,6 +4115,15 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
         // A `require: all_succeeded` join (issue #195) may refuse, and only the
         // sequential path journals a refusal.
         && !(parallel::is_join(playbook, node) && parallel::requires_all_succeeded(playbook, node))
+}
+
+/// Whether `node` is read-only in a tier that may be the detected one.
+fn detected_read_only(node: &apb_core::schema::Node) -> bool {
+    node.read_only
+        && node
+            .kind
+            .isolation()
+            .is_none_or(|i| i.level != apb_core::isolation::Level::Full)
 }
 
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the

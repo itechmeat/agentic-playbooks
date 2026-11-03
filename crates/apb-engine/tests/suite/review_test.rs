@@ -466,6 +466,7 @@ fn post_review_on_a_gate_that_is_not_pending_is_a_conflict() {
                 decision: "approved".into(),
                 note: String::new(),
                 plan_digest: None,
+                decided_by: None,
             },
         ],
     );
@@ -544,6 +545,7 @@ fn a_new_request_after_the_queued_decision_is_consumed_accepts_a_new_decision() 
         decision: "approved".into(),
         note: String::new(),
         plan_digest: None,
+        decided_by: None,
     })
     .unwrap();
     log.append(review_requested("gate")).unwrap();

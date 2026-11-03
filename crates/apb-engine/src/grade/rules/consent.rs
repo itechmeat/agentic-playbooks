@@ -4,8 +4,9 @@
 //! `irreversible` (one whose effect may have happened), or a destructive
 //! shell command ([`crate::transcript::claude::is_destructive`]), a
 //! sub-agent's included. A connector action is consented by the run's
-//! irreversible consent or by an approving review gate right before its
-//! node; a shell command only by such a review (under the run's consent
+//! irreversible consent or by a person's approving review gate right
+//! before its node (an unattended run's declared decision approves
+//! nothing); a shell command only by such a review (under the run's consent
 //! alone it is `partial`, without it `poor`). A review decision covers the
 //! node the run went to from the gate right after it (the gate's next
 //! `edge_traversed`), and the latest such decision before the action is
@@ -46,7 +47,13 @@ impl Reviews {
         let events = &sources.run.events;
         let mut out: BTreeMap<String, Vec<(u64, bool)>> = BTreeMap::new();
         for (i, e) in events.iter().enumerate() {
-            let EventPayload::ReviewDecided { node, decision, .. } = &e.payload else {
+            let EventPayload::ReviewDecided {
+                node,
+                decision,
+                decided_by,
+                ..
+            } = &e.payload
+            else {
                 continue;
             };
             let next = events[i + 1..]
@@ -56,7 +63,11 @@ impl Reviews {
                     _ => None,
                 });
             if let Some(to) = next {
-                let approves = APPROVALS.iter().any(|a| decision.eq_ignore_ascii_case(a));
+                // A gate an unattended run decided by its declared outcome
+                // is never a person's consent: it counts as a decision that
+                // approves nothing, so it also replaces an earlier approval.
+                let approves = decided_by.is_none()
+                    && APPROVALS.iter().any(|a| decision.eq_ignore_ascii_case(a));
                 out.entry(to.clone()).or_default().push((e.seq, approves));
             }
         }

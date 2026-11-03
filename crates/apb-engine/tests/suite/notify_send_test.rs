@@ -623,6 +623,7 @@ fn open_action(code: ActionCode, node: &str, kind: RequestKind, seq: u64, arg: &
         auto: None,
         reason: String::new(),
         command: None,
+        unattended: None,
     }
 }
 

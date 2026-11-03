@@ -921,6 +921,7 @@ mod tests {
             task_type: None,
             secret_params: Vec::new(),
             launch: None,
+            unattended: false,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

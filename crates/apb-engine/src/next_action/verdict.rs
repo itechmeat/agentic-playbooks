@@ -247,6 +247,7 @@ fn finished(obs: &Observation, out: &mut Vec<Wait>) {
                 not_ready: None,
                 auto: None,
                 command: None,
+                unattended: None,
                 reason: intent.resolve_reason(),
             },
         });
@@ -266,6 +267,7 @@ fn finished(obs: &Observation, out: &mut Vec<Wait>) {
             not_ready: None,
             auto: None,
             command: None,
+            unattended: None,
             reason: format!(
                 "the run finished ({}); read its report",
                 obs.status().as_str()
@@ -315,6 +317,7 @@ impl RunCx<'_> {
             not_ready: None,
             auto: None,
             command: None,
+            unattended: None,
             reason: self.reason(line),
         }
     }

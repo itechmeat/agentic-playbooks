@@ -109,9 +109,11 @@ helper of apb's own and no second operating system user are involved.
   `read_only` paths; read-write, the node's `writable` paths. A `PATH` entry
   equal to the home or above it is never bound.
 - The node's tree (the run's worktree or the execution root) read-write at
-  its own path, as the working directory. It is bound after the extra
+  its own path, as the working directory, or read-only for a node with
+  `read_only: true` (see "Read-only nodes"). It is bound after the extra
   paths, so no extra path can cover what follows.
-- The git repository's own directory read-write, with every git directory's
+- The git repository's own directory read-write (read-only, the common
+  directory of a linked worktree included, for a `read_only` node), with every git directory's
   `config`, `hooks/`, `info/` and `config.worktree` (the common one, each
   linked worktree's and each submodule's) and the `.git` files of the tree
   and its submodules read-only: the agent can commit but cannot redirect a
@@ -371,6 +373,156 @@ A review node that is useful everywhere, safer where a sandbox exists:
 On a machine without `bwrap`, or on macOS, it runs in a scratch directory
 with the forced allowlist, and every attempt records `no_sandbox` and why.
 
+## Read-only nodes
+
+`read_only: true` on an `agent_task` or a `script` node promises that the
+node does not change its tree: the run's working tree, or the node's own
+`workdir`. Do not confuse it with the two other uses of the word: the
+`read_only` list of extra paths under `isolation`, and a connector
+binding's `functions: read_only`.
+
+```yaml
+- id: audit
+  type: agent_task
+  profile: reviewer
+  prompt: "Read the repository and list the risky modules. Change nothing."
+  read_only: true
+  isolation: full               # prevention; without it the change is detected
+```
+
+What apb guarantees depends on where the attempt runs, and every attempt
+records which of the two tiers it got:
+
+| Tier | When | Guarantee | Not covered |
+|---|---|---|---|
+| `enforced` | the attempt runs in the sandbox (`isolation: full`, or `best_effort` where the sandbox is available) | the tree and the repository's git directory, the common directory of a linked worktree included, are bound read-only: a write into them fails at the operating system, ignored files included | the attempt's own run paths and other writable sandbox paths, the sandbox home and `/tmp`, network effects (governed by `network`), connector calls |
+| `detected` | no sandbox: every `script`, `isolation: none`, `best_effort` without a sandbox (no `bwrap`, a sandbox that could not be set up, a host step) | after the attempt apb compares the tree with its state before the attempt: content, executable bit, symlink target, creation and deletion of tracked and untracked files git does not ignore, and of every `.gitignore` whose directory no rule outside it ignores, inside initialized submodules too; for every repository of the tree `HEAD`, the refs, the staged index and the files that change what git does (`config`, `config.worktree`, the alternates, everything under `info/` and `hooks/`); and the `.apb` definitions at the tree's root (playbooks, profiles, connector settings, `config.yaml`, `policy.yaml`, `decisions.yaml`, `secrets.env`); a change fails the node with `read_only_dirty` and no retry | ignored files (a file the attempt makes ignored is caught by the change to `info/exclude` or to a `.gitignore`, a new one included, not by its name; files under a directory a rule from before the attempt ignores, and an ignore rule outside the tree, are not covered), the run's own files under `.apb`, `.apb` and `.git` directories below the tree's root (a nested repository's state is covered, its `.git` files are not listed), changes outside the tree, a change made and undone inside the attempt, writes other processes make during the attempt (an edit of a playbook or profile through the dashboard or another agent session included: it fails the node, it is never missed), effects outside the file system |
+
+A node that needs prevention says `isolation: full`: on a machine that
+cannot isolate it is refused with `isolation_unavailable`, so it gets
+prevention or does not run.
+
+### The enforced tier
+
+The sandbox binds the tree read-only after every other mount, so no extra
+path reopens it, and binds the git directory read-only too, so `git commit`
+and `git add` fail inside. The attempt's own run paths stay writable as for
+any isolated attempt: its status file (which still publishes the verdict),
+its skill copies and its run-scoped home. A `writable` extra path inside
+the tree cannot work under a read-only tree, so the attempt is refused,
+at every isolation level, sandbox or not, with `isolation_unavailable` and
+a reason that names the path. The refusal comes when the attempt is
+placed: the path is resolved on the machine that runs it, so the start
+gate, the fit report and the doctor do not show it. No check
+runs after an enforced attempt, so a node in the enforced tier may run in a
+concurrent batch without being blamed for a sibling's write.
+
+### The detected tier
+
+Right before each attempt starts, apb records the state of the tree: one
+entry per file (its digest and executable bit), symlinks as entries with
+their target (never followed), and for each repository `HEAD`, a digest of
+the refs, a digest of the staged index and a digest of each file that
+changes what git does: `config`, `config.worktree`, `commondir`, `shallow`,
+the alternates and every file under `info/` (`exclude`, `attributes`,
+`sparse-checkout`) and `hooks/`, of the git directory and of a linked
+worktree's common one. A planted hook, a changed `core.hooksPath` or a new
+line in `info/exclude` therefore fails the node, as a new file would. On a
+git work tree the files are the ones git tracks or would track, plus every
+`.gitignore`, ignored or not, unless a rule from outside its directory
+ignores that directory: a new `.gitignore` that hides itself and a file
+next to it is added, while a cache directory the project already ignores
+(a test run's `.pytest_cache/.gitignore`) is not looked into. An
+initialized submodule is listed inside the same way with its own
+repository state, so a change or a commit there is seen though the
+parent's staged gitlink does not move; outside git, and in a tree its
+enclosing repository ignores as a whole (a project under another
+repository's ignored build directory), every file is, with no repository
+state. Of `.apb` at the tree's root only the definitions the run itself
+never writes while a node runs are listed (`playbooks/`, `profiles/`,
+`connector-config/`, `config.yaml`, `policy.yaml`, `decisions.yaml`,
+`secrets.env`, `workspace.local`, `.gitignore`), whether git ignores them
+or not; the run's own files there change while the node runs and are not
+covered, and an `.apb` or `.git` directory below the root is not listed. A
+person or another agent session that edits a playbook or profile of the
+project through apb while the attempt runs changes these definitions too:
+the node then fails with `read_only_dirty`, so run read-only checks while
+nobody edits the project's definitions. Nothing is copied, so no file content is stored, and
+there is nothing to restore: the node fails at once instead, because the
+tree is no longer the one it was asked to read. A person's change while the
+run waited (a deferred retry, a pause) is never blamed on the node, since
+each attempt takes its own state.
+
+The state has limits: at most 20000 entries and 512 MiB hashed per
+snapshot (the git control files count toward the bytes), repositories
+nested at most 8 deep, and at most 2000 entries under one git directory's
+`info/` and `hooks/`. Above any of them the attempt records
+`detected_partial` with the counts (`entries` for what was not listed,
+`bytes` for what was not hashed), and every surface says the check was
+partial: a file past the byte limit is compared by size and modification
+time, the entries past the entry limit and a repository nested deeper are
+not compared, and past the control bound one marker stands for those
+files, so only crossing the bound shows. A limit never reads as "no
+change". A limit that only the state after the attempt hit (the attempt
+grew the tree past it) makes the check partial too: the violation's tier
+is `detected_partial`, and the evidence file records `partial` and the
+after state's own limit as `after_partial`. `read_only_checked` is
+written before the attempt, so it keeps the tier of the state taken then.
+
+A change fails the node in one step: apb journals `read_only_violated`,
+then the attempt `failed`, and the node ends `failed` with the reason
+`read_only_dirty: ...`. Nothing retries it: not `max_retries`, not
+`retry_delay`, not retry advice, not the next profile of the fallback chain,
+not the host fallback, not the continuation of a `require_verdict` node and
+not the infrastructure or quota paths, and not the reprompt an
+interactive node gets after a failed resume. The run goes on as for any failed
+node: the node's failure edge or `defaults.on_failure`, else the
+unhandled-failure rule, whose run error names the node (with the
+`read_only_dirty` reason when the run stops there). A run output sourced from that execution reads
+`missing` (`not_succeeded`).
+
+The evidence goes to `runs/<id>/read_only/<node>/<n>.json` (`node-<digest>`
+in place of a node id that is not a safe path segment), private to the
+operator: the changed paths (scrubbed, at most 200 and a count of the
+rest) and `git diff --stat` for tracked files, never a file's content:
+every changed file, a secret-shaped one such as `.env` too, is compared by
+digest and listed by name only. The file is written for every check in the
+detected tier, of an agent attempt or a script, clean (`clean: true`) or
+not, each under the next free `<n>`, so a loop or a resume never
+overwrites an earlier one; the journal's `read_only_violated.evidence`
+names the file of a violation.
+
+A node in the detected tier never joins a concurrent batch, as with
+`protect`: while it runs, no sibling runs, so a change during its attempt is
+its own or an outside process's. Whether a node may batch is decided from
+the playbook, before the attempt knows its sandbox, so only a node with
+`isolation: full` may batch; `best_effort` and `none` run alone.
+
+### Where it is shown
+
+`read_only_checked` records the tier of every attempt of a read-only node
+and of a read-only script's run (`enforced`, `detected` or
+`detected_partial`) with the entry and byte counts, right after the
+attempt's `attempt_started`. `apb runs <id>`, MCP `run_status`, the
+dashboard's run detail, `apb doctor --run <id>` and the run page's
+Isolation card show it per attempt, with the changes of a violation.
+
+### What it does not cover
+
+- A `read_only` node's `success_check` runs after the check, and in the
+  detected tier outside any sandbox: a write it makes is not judged.
+- A driver that dies during the attempt loses the state taken before it, so
+  a reaped attempt is not judged.
+- A `read_only` node still counts as a node that can act for the baseline
+  check and the working-tree lock.
+- A list node cannot be `read_only` yet (V138): its items share one tree
+  and run at once, so a per-item check could not tell which item changed it.
+- An older apb ignores the field and runs the node without any check: the
+  promise holds only for a run driven by an apb that knows it.
+
+The validator rules (V137 to V140) are listed in HOWTO-authoring.md
+("Read-only node").
+
 ## Publishing
 
 A playbook that pushes does it through a `publish` node (PUBLISH.md). Under
@@ -391,7 +543,9 @@ time a credential-shaped variable the allowlist would pass to an agent
 ## Not in scope
 
 - A network limited to the model provider (see "The network, honestly").
-- Isolation for script nodes, goal scripts and project checks.
+- Isolation for script nodes, goal scripts and project checks (a
+  `read_only` script gets the detected tier only).
+- Restoring a tree a `read_only` node changed.
 - Connectors in an isolated node (V113 refuses them).
 - A separate copy of the tree per node for concurrent isolated nodes.
 - seccomp filters and setuid `bwrap`.

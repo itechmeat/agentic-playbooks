@@ -659,6 +659,70 @@ export type AttemptIsolationRow = { node: string,
  */
 item?: string, attempt: number, isolation: AttemptIsolation, };
 
+export type ReadOnlyTier = "enforced" | "detected" | "detected_partial";
+
+export type ReadOnlyLimit = "entries" | "bytes";
+
+export type ReadOnlyCheck = { tier: ReadOnlyTier, 
+/**
+ * Entries the before-state lists; 0 in the enforced tier.
+ */
+entries?: number, 
+/**
+ * Bytes the before-state hashed; 0 in the enforced tier.
+ */
+bytes?: number, 
+/**
+ * The limit that stopped it short (tier `detected_partial`).
+ */
+partial?: ReadOnlyLimit, };
+
+export type ReadOnlyChange = { 
+/**
+ * The tree-relative path, scrubbed; `HEAD`, `refs` or `index` for a
+ * change of the repository state.
+ */
+path: string, 
+/**
+ * `modified`, `added`, `deleted`, `mode`, `link`, `git_head`,
+ * `git_refs` or `git_index`. Free text, so a kind a newer apb adds
+ * still reads.
+ */
+change: string, };
+
+export type ReadOnlyViolation = { changes: Array<ReadOnlyChange>, 
+/**
+ * Changed paths left out of `changes`.
+ */
+truncated?: number, 
+/**
+ * The run-relative evidence file.
+ */
+evidence?: string, };
+
+export type ReadOnlyRow = { node: string, 
+/**
+ * The list item the attempt ran, for an item of a list node.
+ */
+item?: string, attempt: number, 
+/**
+ * The changes that failed the node (`read_only_dirty`); absent while
+ * none was seen.
+ */
+violated?: ReadOnlyViolation, tier: ReadOnlyTier, 
+/**
+ * Entries the before-state lists; 0 in the enforced tier.
+ */
+entries?: number, 
+/**
+ * Bytes the before-state hashed; 0 in the enforced tier.
+ */
+bytes?: number, 
+/**
+ * The limit that stopped it short (tier `detected_partial`).
+ */
+partial?: ReadOnlyLimit, };
+
 export type Rate = { count: number, of: number, rate?: number, };
 
 export type PerRun = { total: number, runs: number, per_run?: number, };
@@ -1057,7 +1121,7 @@ imputed?: number, };
 
 export type BudgetSpent = { tokens?: SpentDim, usd?: SpentDim, };
 
-export type GateDecision = "paused" | "continued" | "waived" | "admitted_waived" | "unknown";
+export type GateDecision = "paused" | "continued" | "waived" | "admitted_waived" | "failed" | "unknown";
 
 export type GateBasis = "median" | "exhausted" | "no_estimate" | "unknown_spend" | "operator" | "unknown";
 
@@ -1611,6 +1675,17 @@ attempt_models?: Array<AttemptModel>,
  */
 isolation?: Array<AttemptIsolationRow>, 
 /**
+ * Each read-only node's check per attempt (tier, what it covered) and
+ * the changes that failed it; empty for a run without one.
+ */
+read_only?: Array<ReadOnlyRow>, 
+/**
+ * The run is unattended (`apb run --unattended`, MCP and HTTP
+ * `unattended: true`), from its write-once manifest: every wait without
+ * a declared outcome fails it. Read-only; left out for an attended run.
+ */
+unattended?: boolean, 
+/**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.
  */
@@ -1759,6 +1834,8 @@ export type AutoOutcome = "answered_default" | "timer_elapses" | "attempt_fails"
 
 export type AutoProgress = { "kind": "at", at_ms: number, outcome: AutoOutcome, assured: boolean, } | { "kind": "frozen", remaining_ms: number, outcome: AutoOutcome, };
 
+export type UnattendedOutcome = { "kind": "proceeds", auto: AutoOutcome, } | { "kind": "decides", option: string, } | { "kind": "answers_default" } | { "kind": "fails_run", code: string, } | { "kind": "refused_at_start", code: string, };
+
 export type NotReady = { code: string, detail: string, };
 
 export type NextAction = { code: ActionCode, 
@@ -1784,7 +1861,13 @@ reason: string,
  * a surface shows ([`super::for_surface`]), absent for an action the
  * CLI has no command for.
  */
-command?: string, };
+command?: string, 
+/**
+ * What an unattended run does at this wait, shown on every run,
+ * attended or not, so a CI author sees what the mode would do. Absent
+ * where it does not apply.
+ */
+unattended?: UnattendedOutcome, };
 
 export type StopVerdict = "finished" | "progresses_by_itself" | "stopped" | "needs_input";
 

@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120, `edges` for edge ids, pairs and judge values V121-V125 and a review decision only bounded edges route V136, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and a review decision only bounded edges route V136, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`); `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -174,7 +174,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   session handoff between nodes, `node_workdir` a node's templated working
   directory, `skills_copy` the shared per-profile skills copy, `transcript`
   per-attempt output, `worktree` the run's working tree and its lock move,
-  `protect` the protected-path snapshot and restore, `goal` the goal criteria
+  `protect` the protected-path snapshot and restore, `node/read_only` the
+  before and after tree states of a `read_only` node, its
+  `read_only_checked` record and its `read_only_violated` exit,
+  `unattended` the drive's outcome of each wait in an unattended run (the
+  mode from the manifest, a gate's decision, a child's stop), `goal` the
+  goal criteria
   checked at run end, `provenance` the run id in the agent env and the
   commits a node made, `host` the host-mode adapter that turns an agent step
   into a host task, `dispatch` the one entry that sends a list node to its
@@ -282,6 +287,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   a run and its live children, `verdict` the waits and the one stop
   verdict, `deadlines` on the paused-interval clock, `types` the action
   shapes, `command` the one command-line renderer every surface prints,
+  `unattended` what an unattended run would do at each wait (the
+  `unattended` field of every next action),
   `start` and `start_action` the start actions of a refused start and of
   the fit report with their remedies), known problems (`known_problems/`: `observe`
   at a run's end, `at_start` what a starting run shows and journals once,
@@ -346,7 +353,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   single-use, written by the receiver's parent), the run
   policy gate every launch surface calls (`gate/`, with `trust_scan` the
   connector and profile-bundle trust facts collected before any refusal,
-  `isolation` the `isolation_unavailable` refusal, `launch` the launch
+  `isolation` the `isolation_unavailable` refusal, `unattended` the
+  `unattended_unsupported` refusal of an unattended start in host or
+  supervised mode and the run-time recheck of a gate's `decide`, `launch`
+  the launch
   check: the explicit `Initiator`, `LaunchConfirmation` and `LaunchKind`,
   the decision table, `effective_for` and its refusal of a redirected config
   dir that hides stricter settings, the canonical permit digest and the

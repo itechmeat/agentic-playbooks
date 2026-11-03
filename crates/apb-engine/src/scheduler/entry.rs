@@ -135,6 +135,11 @@ pub struct RunOptions {
     /// refuses a start of a playbook agents may not launch freely without
     /// one.
     pub launch: Option<crate::gate::launch::LaunchGrant>,
+    /// Start the run unattended (`apb run --unattended`, MCP and HTTP
+    /// `unattended: true`): every wait without a declared outcome fails the
+    /// run. Recorded write-once in the manifest; a resume cannot change it,
+    /// and a child inherits its parent's.
+    pub unattended: bool,
 }
 
 /// A permit hands the engine exactly what the gate verified (decision record

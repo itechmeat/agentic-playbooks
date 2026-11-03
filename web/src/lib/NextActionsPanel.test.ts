@@ -159,6 +159,30 @@ describe('NextActionsPanel', () => {
     expect(allByTestId('next-action-option').every((b) => (b as HTMLButtonElement).disabled)).toBe(true)
   })
 
+  it('says under each action what an unattended run does at its wait, and nothing where it does not apply', () => {
+    const gate = review({ unattended: { kind: 'fails_run', code: 'hitl_required' } })
+    const decided = review({ target: { node: 'ship' }, unattended: { kind: 'decides', option: 'approve' } })
+    const retry: NextAction = {
+      code: 'retry_now',
+      run_id: 'parent',
+      target: { node: 'flaky' },
+      args: [],
+      principals: ['person', 'operator'],
+      ready: true,
+      reason: 'node `flaky` waits out its retry delay',
+      unattended: { kind: 'proceeds', auto: 'retry_attempt' },
+    }
+    show({ actions: runActions([gate, decided, retry, report], { stop: 'needs_input' }) })
+    const lines = allByTestId('next-action-unattended')
+    expect(lines.map((l) => l.textContent?.trim())).toEqual([
+      'unattended: fails the run (hitl_required)',
+      'unattended: decides `approve` at once',
+      "unattended: goes on by itself (the node's retry starts)",
+    ])
+    expect(lines.map((l) => l.classList.contains('stops'))).toEqual([true, false, false])
+    expect(allByTestId('next-action').length).toBe(4)
+  })
+
   it('shows the intent buttons on a finished run, confirms the consequence, and resolves', async () => {
     const onchange = vi.fn()
     resolveIntent.mockResolvedValue({ run_id: 'parent', intent: 'int-1', settled: 'not_sent' })

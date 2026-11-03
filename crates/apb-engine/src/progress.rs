@@ -1572,6 +1572,7 @@ edges:
                     decision: "approve".into(),
                     note: String::new(),
                     plan_digest: None,
+                    decided_by: None,
                 },
             ),
         ];

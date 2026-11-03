@@ -619,6 +619,17 @@ pub enum EventPayload {
         /// `None` for every `human_review` decision. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_digest: Option<String>,
+        /// Who decided when it was not a person through a review channel:
+        /// `unattended` for the gate's declared `unattended: { decide }`
+        /// outcome. `None` for a person's decision and old logs; a value
+        /// this binary does not know reads as `unknown`, never as a
+        /// person ([`lenient_decided_by`]).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_decided_by"
+        )]
+        decided_by: Option<DecidedBy>,
     },
     /// An open review request that will never be decided: a supervisor's
     /// directive (`node_retry`, `run_continue_from`) moved the run off the
@@ -1291,6 +1302,49 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kept_copies: Option<String>,
     },
+    /// How the tree of a `read_only` node is held for one attempt (a
+    /// script's one run): the tier and, for a detected tier, what the
+    /// before-state covered. Written right after the attempt's
+    /// `attempt_started` (a script, which journals none, right before it
+    /// runs); the next checkpoint is the node's `node_finished` (or the
+    /// pause that interrupts it), and it is safe to skip up to there: it
+    /// changes no state. Additive variant.
+    ReadOnlyChecked {
+        #[serde(default)]
+        node: String,
+        /// The attempt checked; 1 for a script.
+        #[serde(default)]
+        attempt: u32,
+        /// A shape a newer apb wrote (a tier or a limit this binary does
+        /// not know) reads as the default: `detected`, no counts.
+        #[serde(default, deserialize_with = "lenient_default")]
+        check: ReadOnlyCheck,
+    },
+    /// A `read_only` node changed its tree in the detected tier: each
+    /// changed path by name (never content), at most a fixed number with
+    /// `truncated` counting the rest. Written before the attempt's
+    /// `attempt_finished { failed }`; the next checkpoint is the node's
+    /// `node_finished`, and it is safe to skip up to there: the node's own
+    /// failure carries the effect. Additive variant.
+    ReadOnlyViolated {
+        #[serde(default)]
+        node: String,
+        /// The attempt that changed the tree; 0 for a shape without one.
+        #[serde(default)]
+        attempt: u32,
+        /// A tier this binary does not know reads as `detected`.
+        #[serde(default, deserialize_with = "lenient_default")]
+        tier: ReadOnlyTier,
+        #[serde(default, deserialize_with = "lenient_default")]
+        changes: Vec<ReadOnlyChange>,
+        /// How many changed paths were left out of `changes`.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        truncated: u64,
+        /// The run-relative evidence file
+        /// (`read_only/<node>/<n>.json`), when it was written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+    },
     // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
     /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or
@@ -1915,6 +1969,119 @@ pub fn apb_version() -> Option<String> {
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+impl EventPayload {
+    /// A `review_decided` as a review channel decision makes it: no
+    /// `decided_by`.
+    pub fn review_decided(
+        node: impl Into<String>,
+        decision: impl Into<String>,
+        note: impl Into<String>,
+        plan_digest: Option<String>,
+    ) -> Self {
+        EventPayload::ReviewDecided {
+            node: node.into(),
+            decision: decision.into(),
+            note: note.into(),
+            plan_digest,
+            decided_by: None,
+        }
+    }
+}
+
+/// Who decided a gate other than a person through a review channel
+/// (`review_decided.decided_by`). Any value at all means "not a person":
+/// the consent grader and the decision labels read only an absent field as
+/// a person's decision, so a value this binary does not know (a newer
+/// apb's decider) reads as [`DecidedBy::Unknown`], never as absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DecidedBy {
+    /// The gate's declared `unattended: { decide }` outcome in an
+    /// unattended run. Never a person's consent.
+    Unattended,
+    /// A decider this binary does not know ([`lenient_decided_by`] reads
+    /// any value it cannot decode as this). Never a person's consent.
+    Unknown,
+}
+
+/// `decided_by` (and a review channel entry's `by`) as optional data that
+/// fails closed: absent or `null` is `None` (a person, and every old
+/// line); any other value is the decider it names, or
+/// [`DecidedBy::Unknown`] when this binary cannot read it.
+pub(crate) fn lenient_decided_by<'de, D>(d: D) -> Result<Option<DecidedBy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.filter(|v| !v.is_null())
+        .map(|v| serde_json::from_value(v).unwrap_or(DecidedBy::Unknown)))
+}
+
+/// How a `read_only` node's tree is held for one attempt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOnlyTier {
+    /// The sandbox binds the tree read-only: a write fails at the OS level.
+    Enforced,
+    /// No sandbox: a change is detected after the attempt.
+    #[default]
+    Detected,
+    /// Detected, but a limit stopped the before-state short: a change in
+    /// the part not covered goes unseen. Never reported as "no change".
+    DetectedPartial,
+}
+
+/// The limit that made a before-state partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOnlyLimit {
+    /// Too many entries.
+    Entries,
+    /// Too many bytes to hash.
+    Bytes,
+}
+
+/// `read_only_checked`: the tier and what the before-state covered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ReadOnlyCheck {
+    pub tier: ReadOnlyTier,
+    /// Entries the before-state lists; 0 in the enforced tier.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[cfg_attr(feature = "ts", ts(type = "number", optional))]
+    pub entries: u64,
+    /// Bytes the before-state hashed; 0 in the enforced tier.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[cfg_attr(feature = "ts", ts(type = "number", optional))]
+    pub bytes: u64,
+    /// The limit that stopped it short (tier `detected_partial`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub partial: Option<ReadOnlyLimit>,
+}
+
+/// One changed path of an [`EventPayload::ReadOnlyViolated`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ReadOnlyChange {
+    /// The tree-relative path, scrubbed; `HEAD`, `refs` or `index` for a
+    /// change of the repository state.
+    #[serde(default)]
+    pub path: String,
+    /// `modified`, `added`, `deleted`, `mode`, `link`, `git_head`,
+    /// `git_refs` or `git_index`. Free text, so a kind a newer apb adds
+    /// still reads.
+    #[serde(default)]
+    pub change: String,
 }
 
 /// One stream's kept-versus-dropped byte counts for a truncated attempt output

@@ -35,7 +35,9 @@ pub const RELEASE_AFTER_ENV: &str = "APB_RELEASE_AFTER_MS";
 /// Whether a drive with nothing to run but deferred retries, the earliest
 /// due at `due_at_ms`, releases the run instead of sleeping: only a
 /// top-level autonomous run (a child's parent drives it, a supervisor or an
-/// eval deadline lives in the driver) and only for a wait longer than
+/// eval deadline lives in the driver), never an unattended one (a CI job's
+/// foreground `apb run` must end with the run's own outcome, not leave a
+/// waker its container kills), and only for a wait longer than
 /// [`release_after`].
 pub(crate) fn may_release(
     cfg: &crate::run_config::RunConfig,
@@ -46,6 +48,7 @@ pub(crate) fn may_release(
     let wait = u128::from(due_at_ms).saturating_sub(now_ms);
     cfg.parent_run.is_none()
         && cfg.eval.is_none()
+        && !cfg.unattended
         && !mode.parks_on_failure()
         && wait > release_after().as_millis()
 }

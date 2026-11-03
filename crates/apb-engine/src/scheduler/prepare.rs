@@ -525,6 +525,40 @@ pub(crate) fn build_run_manifest(
     Ok(manifest)
 }
 
+/// Unattended mode at a start, before anything is written: a child of an
+/// unattended run is unattended too (its parent's manifest says so,
+/// whatever the caller passed), a start the mode cannot hold is refused
+/// (`unattended_unsupported`, the gate's own check, so no start path skips
+/// it), and the execution resolves without a host session, so the CLI to
+/// host fallback is off.
+fn unattended_start(root: &Path, opts: &mut RunOptions) -> Result<(), EngineError> {
+    if let Some(parent) = &opts.parent_run
+        && crate::manifest::read(&root.join(".apb/runs").join(parent))
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.unattended)
+    {
+        opts.unattended = true;
+    }
+    crate::gate::unattended::check_start(
+        root,
+        &crate::gate::UnattendedStart {
+            unattended: opts.unattended,
+            mode: opts.mode,
+            execution: &opts.execution,
+        },
+    )
+    .map_err(|refusal| {
+        EngineError::Invalid(format!(
+            "{}: {}",
+            crate::run_config::UNATTENDED_UNSUPPORTED,
+            refusal["detail"].as_str().unwrap_or_default()
+        ))
+    })?;
+    opts.execution = crate::gate::unattended::execution_request(&opts.execution, opts.unattended);
+    Ok(())
+}
+
 /// Claims a fresh run directory `<id>-<ms>` and opens its journal. The
 /// directory is created exclusively: two starts of one playbook in the same
 /// millisecond (now an ordinary case, since runs over different worktrees no
@@ -556,9 +590,10 @@ pub(crate) fn prepare_run_target(
     t: &PrepareTarget,
     id: &str,
     version: Option<&str>,
-    opts: RunOptions,
+    mut opts: RunOptions,
 ) -> Result<Prepared, EngineError> {
     let root = t.execution_root.as_path();
+    unattended_start(root, &mut opts)?;
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
     let digest = loaded.trust_digest()?;
@@ -954,6 +989,8 @@ pub(crate) fn prepare_run_target(
         shared_workdir: opts.allow_shared_workdir,
         eval: opts.eval.clone(),
         output_limits: Some(output_limits),
+        // A copy for the drive; the manifest's is the record.
+        unattended: opts.unattended,
     };
     prep_try_unstarted(&mut log, &unstarted, write_run_config(&run_dir, &cfg))?;
 
@@ -1006,6 +1043,7 @@ pub(crate) fn prepare_run_target(
         .candidate_skipped
         .clone()
         .filter(|_| opts.depth == 0 && opts.parent_run.is_none());
+    manifest.unattended = opts.unattended;
     manifest.candidate_trial = opts.depth == 0
         && opts.parent_run.is_none()
         && opts.eval.is_none()

@@ -115,6 +115,202 @@ pub fn attempt_isolation(events: &[Event]) -> Vec<AttemptIsolationRow> {
         .collect()
 }
 
+/// The `read_only` check of one attempt of a read-only node: its tier and
+/// what the before-state covered, and the changes that failed it. The row
+/// `apb runs <id>`, MCP `run_status`, the HTTP run detail and the run page
+/// show, from the attempt's (or a script's) `read_only_checked`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReadOnlyRow {
+    pub node: String,
+    /// The list item the attempt ran, for an item of a list node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub item: Option<String>,
+    pub attempt: u32,
+    #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
+    pub check: crate::event::ReadOnlyCheck,
+    /// The changes that failed the node (`read_only_dirty`); absent while
+    /// none was seen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub violated: Option<ReadOnlyViolation>,
+}
+
+/// What a `read_only_violated` recorded: the changed paths (names, never
+/// content), how many were left out, and the evidence file.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReadOnlyViolation {
+    pub changes: Vec<crate::event::ReadOnlyChange>,
+    /// Changed paths left out of `changes`.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(type = "number", optional))]
+    pub truncated: u64,
+    /// The run-relative evidence file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub evidence: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// The changed paths one line names before it counts the rest.
+const READ_ONLY_LINE_CHANGES: usize = 5;
+
+impl ReadOnlyRow {
+    /// The tier's wire name.
+    pub fn tier_name(&self) -> &'static str {
+        tier_name(self.check.tier)
+    }
+
+    /// One line: `node `r` attempt 1: enforced (the sandbox binds the tree
+    /// read-only)`, the counts of a detected tier, the limit of a
+    /// partial one, and the changes that failed it.
+    pub fn line(&self) -> String {
+        use crate::event::{ReadOnlyLimit, ReadOnlyTier};
+        let item = self
+            .item
+            .as_deref()
+            .map(|i| format!(" item `{i}`"))
+            .unwrap_or_default();
+        let c = &self.check;
+        // A script's row comes from its violation alone, which carries no
+        // counts.
+        let over = if c.entries == 0 && c.bytes == 0 {
+            String::new()
+        } else {
+            format!(
+                " over {} {}, {} {}",
+                c.entries,
+                if c.entries == 1 { "entry" } else { "entries" },
+                c.bytes,
+                if c.bytes == 1 { "byte" } else { "bytes" }
+            )
+        };
+        let how = match c.tier {
+            ReadOnlyTier::Enforced => "the sandbox binds the tree read-only".to_string(),
+            ReadOnlyTier::Detected => format!("checked after the attempt{over}"),
+            ReadOnlyTier::DetectedPartial => format!(
+                "checked after the attempt{over}; the {} limit stopped it short, so a change past it goes unseen",
+                match c.partial {
+                    Some(ReadOnlyLimit::Bytes) => "bytes",
+                    Some(ReadOnlyLimit::Entries) | None => "entries",
+                }
+            ),
+        };
+        let mut line = format!(
+            "node `{}`{item} attempt {}: {} ({how})",
+            self.node,
+            self.attempt,
+            self.tier_name()
+        );
+        if let Some(v) = &self.violated {
+            let total = v.changes.len() as u64 + v.truncated;
+            let named: Vec<String> = v
+                .changes
+                .iter()
+                .take(READ_ONLY_LINE_CHANGES)
+                .map(|ch| format!("{} {}", ch.path, ch.change))
+                .collect();
+            let more = total.saturating_sub(named.len() as u64);
+            line.push_str(&format!(
+                "; changed the tree (read_only_dirty), {total} {}: {}",
+                if total == 1 { "path" } else { "paths" },
+                named.join(", ")
+            ));
+            if more > 0 {
+                line.push_str(&format!(", {more} more"));
+            }
+            if let Some(e) = &v.evidence {
+                line.push_str(&format!("; evidence {e}"));
+            }
+        }
+        line
+    }
+}
+
+/// The wire name of a read-only tier.
+pub fn tier_name(tier: crate::event::ReadOnlyTier) -> &'static str {
+    use crate::event::ReadOnlyTier;
+    match tier {
+        ReadOnlyTier::Enforced => "enforced",
+        ReadOnlyTier::Detected => "detected",
+        ReadOnlyTier::DetectedPartial => "detected_partial",
+    }
+}
+
+/// Every read-only check of `events`, in journal order: one row per
+/// `read_only_checked`, with the `read_only_violated` of the same node and
+/// attempt folded into it; a violation with no such check (a journal cut
+/// between the two) is a row of its own.
+pub fn read_only_rows(events: &[Event]) -> Vec<ReadOnlyRow> {
+    let mut rows: Vec<ReadOnlyRow> = Vec::new();
+    for e in events {
+        match &e.payload {
+            EventPayload::ReadOnlyChecked {
+                node,
+                attempt,
+                check,
+            } => rows.push(ReadOnlyRow {
+                node: node.clone(),
+                item: None,
+                attempt: *attempt,
+                check: check.clone(),
+                violated: None,
+            }),
+            EventPayload::ReadOnlyViolated {
+                node,
+                attempt,
+                tier,
+                changes,
+                truncated,
+                evidence,
+            } => {
+                let violation = ReadOnlyViolation {
+                    changes: changes.clone(),
+                    truncated: *truncated,
+                    evidence: evidence.clone(),
+                };
+                match rows
+                    .iter_mut()
+                    .rev()
+                    .find(|r| r.node == *node && r.attempt == *attempt && r.violated.is_none())
+                {
+                    Some(row) => row.violated = Some(violation),
+                    None => rows.push(ReadOnlyRow {
+                        node: node.clone(),
+                        item: None,
+                        attempt: *attempt,
+                        check: crate::event::ReadOnlyCheck {
+                            tier: *tier,
+                            entries: 0,
+                            bytes: 0,
+                            partial: None,
+                        },
+                        violated: Some(violation),
+                    }),
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// Whether the run at `run_dir` is unattended, from its write-once
+/// manifest (the authoritative record; `run.yaml` is only the drive's
+/// copy). A run without a manifest, or one an older apb wrote, is attended.
+pub fn run_unattended(run_dir: &Path) -> bool {
+    crate::manifest::read(run_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.unattended)
+}
+
 /// The param names (and `instruction`) the start of the run in `run_dir`
 /// took from the project's remembered input, as its journal records them.
 /// Every start surface reports them, so input the caller never passed is
@@ -371,6 +567,11 @@ impl RunView {
     /// Every isolated attempt with what its isolation held and did not.
     pub fn isolation(&self) -> Vec<AttemptIsolationRow> {
         attempt_isolation(&self.events)
+    }
+
+    /// Every read-only check with the changes that failed it.
+    pub fn read_only(&self) -> Vec<ReadOnlyRow> {
+        read_only_rows(&self.events)
     }
 
     /// The attempts that lost part of their output (bounded agent output).
@@ -667,6 +868,53 @@ mod tests {
         assert!(rows[1].line().ends_with(
             "limits: no_sandbox; no sandbox: bwrap_missing (install bubblewrap (bwrap))"
         ));
+    }
+
+    /// An attempt's row comes from its `read_only_checked`, its violation
+    /// folds into it; a violation without a check (a journal cut between
+    /// the two) is a row of its own; an attempt without a check gets none.
+    #[test]
+    fn read_only_rows_join_the_start_and_the_violation() {
+        let events: Vec<Event> = [
+            r#"{"seq":0,"ts":1,"type":"attempt_started","node":"plain","attempt":1,"agent":"claude"}"#,
+            r#"{"seq":1,"ts":2,"type":"read_only_checked","node":"look","attempt":1,"check":{"tier":"enforced"}}"#,
+            r#"{"seq":2,"ts":3,"type":"read_only_checked","node":"scan","attempt":2,"check":{"tier":"detected_partial","entries":20000,"bytes":512,"partial":"entries"}}"#,
+            r#"{"seq":3,"ts":4,"type":"read_only_violated","node":"scan","attempt":2,"tier":"detected_partial","changes":[{"path":"a.txt","change":"modified"}],"evidence":"read_only/scan/2.json"}"#,
+            r#"{"seq":4,"ts":5,"type":"read_only_violated","node":"sh","attempt":1,"changes":[{"path":".env","change":"added"},{"path":"b","change":"deleted"}],"truncated":3}"#,
+        ]
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+        let rows = read_only_rows(&events);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].line(),
+            "node `look` attempt 1: enforced (the sandbox binds the tree read-only)"
+        );
+        assert_eq!(
+            rows[1].line(),
+            "node `scan` attempt 2: detected_partial (checked after the attempt over 20000 entries, 512 bytes; the entries limit stopped it short, so a change past it goes unseen); changed the tree (read_only_dirty), 1 path: a.txt modified; evidence read_only/scan/2.json"
+        );
+        assert_eq!(rows[2].tier_name(), "detected");
+        assert!(
+            rows[2].line().ends_with(
+                "changed the tree (read_only_dirty), 5 paths: .env added, b deleted, 3 more"
+            ),
+            "{}",
+            rows[2].line()
+        );
+        let one: Event = serde_json::from_str(
+            r#"{"seq":5,"ts":6,"type":"read_only_checked","node":"one","attempt":1,"check":{"tier":"detected","entries":1,"bytes":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_only_rows(&[one])[0].line(),
+            "node `one` attempt 1: detected (checked after the attempt over 1 entry, 1 byte)"
+        );
+        let json = serde_json::to_value(&rows[1]).unwrap();
+        assert_eq!(json["tier"], "detected_partial");
+        assert_eq!(json["partial"], "entries");
+        assert_eq!(json["violated"]["changes"][0]["path"], "a.txt");
     }
 
     /// The totals cover the attempts that reported usage; the count of all

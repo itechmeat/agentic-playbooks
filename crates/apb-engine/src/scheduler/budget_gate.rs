@@ -32,6 +32,11 @@ pub(crate) enum Admission {
     /// Pause the run with this engine pause (already journaled as a
     /// `budget_gate paused`).
     Pause(PauseRequest),
+    /// An unattended run: the refusal is journaled `budget_gate failed`
+    /// and recorded on the gate ([`DriveGate::exhausted`]); the caller
+    /// admits nothing more and the drive ends the run `budget_exhausted`
+    /// at the top of its loop.
+    Exhausted,
 }
 
 /// The medians of the admitted batch members still running.
@@ -60,6 +65,11 @@ impl Reservations {
 pub(crate) struct DriveGate {
     estimate: Option<RunEstimate>,
     active: bool,
+    /// The run is unattended: a refusal fails the run instead of pausing.
+    unattended: bool,
+    /// The first refusal of an unattended run: the node and the run error
+    /// reason. Shared with a list's batch loop, hence the lock.
+    exhausted: std::sync::Mutex<Option<(String, String)>>,
 }
 
 /// Where a gate decision stands.
@@ -71,12 +81,24 @@ struct Site<'a> {
 
 impl DriveGate {
     /// The gate for the run at `run_dir`, as its journal stands.
-    pub(crate) fn load(run_dir: &Path) -> Result<Self, EngineError> {
+    /// `unattended`: a refusal fails the run instead of pausing it.
+    pub(crate) fn load(run_dir: &Path, unattended: bool) -> Result<Self, EngineError> {
         let active = BudgetFold::of(&read_all(run_dir)?).is_some();
         Ok(DriveGate {
             estimate: active.then(|| snapshot::read(run_dir)).flatten(),
             active,
+            unattended,
+            exhausted: std::sync::Mutex::new(None),
         })
+    }
+
+    /// The node an unattended run's budget refused and the run error
+    /// reason (`budget_exhausted: ...`), once a gate refused.
+    pub(crate) fn exhausted(&self) -> Option<(String, String)> {
+        self.exhausted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Before `node` starts a new visit (on the sequential arm, or as a
@@ -227,8 +249,13 @@ impl DriveGate {
                 need,
                 remaining,
             } => {
+                let decision = if self.unattended {
+                    GateDecision::Failed
+                } else {
+                    GateDecision::Paused
+                };
                 journal.append(record(
-                    GateDecision::Paused,
+                    decision,
                     basis,
                     (!remaining.is_empty()).then_some(remaining),
                 ))?;
@@ -238,6 +265,19 @@ impl DriveGate {
                     need.as_ref(),
                     &remaining,
                 );
+                if self.unattended {
+                    let mut slot = self
+                        .exhausted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    slot.get_or_insert_with(|| {
+                        (
+                            site.node.to_string(),
+                            format!("{}: {reason}", crate::run_config::BUDGET_EXHAUSTED),
+                        )
+                    });
+                    return Ok(Admission::Exhausted);
+                }
                 Ok(Admission::Pause(crate::pause::budget::budget_pause(reason)))
             }
         }

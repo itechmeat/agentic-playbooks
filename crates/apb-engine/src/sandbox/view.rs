@@ -8,9 +8,12 @@
 //! 3. the extras, parents before children: the read-only paths (PATH
 //!    entries, the agent program's directory, the machine's and the node's
 //!    extras) and the node's writable ones;
-//! 4. the node's tree, read-write, at its own path;
+//! 4. the node's tree, read-write, at its own path (read-only for a
+//!    `read_only` node);
 //! 5. git: the common directory read-write (and a linked worktree's own git
-//!    directory, so it cannot be swapped), every git directory's `config`,
+//!    directory, so it cannot be swapped; both read-only for a `read_only`
+//!    node, whose common directory may lie outside the tree), every git
+//!    directory's `config`,
 //!    `hooks/`, `info/` and `config.worktree` and the `.git` files of the
 //!    tree and its submodules read-only;
 //! 6. the tree's `.apb` covered by a tmpfs, then the attempt's own run
@@ -85,6 +88,10 @@ pub struct ViewFacts {
     /// the tree's skill directories they cover.
     pub skills: Option<PathBuf>,
     pub skill_points: Vec<PathBuf>,
+    /// A `read_only` node: the tree and every git directory of it are bound
+    /// read-only (steps 4 and 5), so a write fails at the OS level. The run
+    /// paths bound back in step 6 stay as they are.
+    pub read_only_tree: bool,
 }
 
 /// The read-only paths of the repository.
@@ -148,12 +155,17 @@ pub fn plan(f: &ViewFacts) -> Vec<Mount> {
         m.push(bind(access, p, p));
     }
     // 4. the tree
-    m.push(bind(Access::ReadWrite, &f.tree, &f.tree));
+    let tree_access = if f.read_only_tree {
+        Access::ReadOnly
+    } else {
+        Access::ReadWrite
+    };
+    m.push(bind(tree_access, &f.tree, &f.tree));
     // 5. git
     if let Some(g) = &f.git {
-        m.push(bind(Access::ReadWrite, &g.common, &g.common));
+        m.push(bind(tree_access, &g.common, &g.common));
         if g.git_dir != g.common {
-            m.push(bind(Access::ReadWrite, &g.git_dir, &g.git_dir));
+            m.push(bind(tree_access, &g.git_dir, &g.git_dir));
         }
         for p in git_read_only(g) {
             m.push(bind(Access::ReadOnly, &p, &p));
@@ -258,6 +270,34 @@ mod tests {
             !m.iter()
                 .any(|x| matches!(x, Mount::ReadOnly(s, _) if s.starts_with("/p/.git")))
         );
+    }
+
+    /// A read-only node's tree and both git directories of a linked
+    /// worktree are bound read-only, while the attempt's own run paths,
+    /// bound back after them, stay writable.
+    #[test]
+    fn a_read_only_tree_binds_the_tree_and_its_git_directories_read_only() {
+        let mut f = facts();
+        f.read_only_tree = true;
+        f.git = Some(GitFacts {
+            common: "/repo/.git".into(),
+            git_dir: "/repo/.git/worktrees/p".into(),
+            ..GitFacts::default()
+        });
+        let attempt_box = PathBuf::from("/p/.apb/runs/r/sandbox/attempts/a");
+        f.run_paths = vec![(attempt_box.clone(), Access::ReadWrite)];
+        let m = plan(&f);
+        let tree = index(&m, &Mount::ReadOnly("/p".into(), "/p".into()));
+        for p in ["/repo/.git", "/repo/.git/worktrees/p"] {
+            assert!(
+                index(&m, &Mount::ReadOnly(p.into(), p.into())) > tree,
+                "{p}"
+            );
+        }
+        assert!(!m.iter().any(|x| matches!(x, Mount::ReadWrite(_, d)
+                if d.starts_with("/p") && !d.starts_with("/p/.apb")
+                    || d.starts_with("/repo"))));
+        assert!(index(&m, &Mount::ReadWrite(attempt_box.clone(), attempt_box)) > tree);
     }
 
     #[test]

@@ -45,6 +45,59 @@ describe('AttemptIsolationPanel', () => {
     expect(text).toContain('#2')
   })
 
+  it("shows each read-only check on its attempt's row, a script's check on its own, and the changes that failed it", () => {
+    const rows = [
+      {
+        node: 'look',
+        attempt: 1,
+        isolation: { level: 'full', backend: 'bwrap', network: 'none', holds: [], limits: [], view: [] },
+      },
+    ]
+    const readOnly = [
+      { node: 'look', attempt: 1, tier: 'enforced' as const },
+      {
+        node: 'scan',
+        attempt: 2,
+        tier: 'detected_partial' as const,
+        entries: 20000,
+        bytes: 4096,
+        partial: 'entries' as const,
+        violated: { changes: [{ path: 'notes.md', change: 'modified' }], truncated: 3, evidence: 'read_only/scan/2.json' },
+      },
+      { node: 'sh', attempt: 1, tier: 'detected' as const, violated: { changes: [{ path: '.env', change: 'added' }] } },
+    ]
+    app = mount(AttemptIsolationPanel, { target: document.body, props: { rows, readOnly } })
+    flushSync()
+    expect(document.querySelectorAll('[data-testid="run-isolation-row"]').length).toBe(3)
+    const badges = [...document.querySelectorAll('[data-testid="run-read-only-badge"]')]
+    expect(badges.map((b) => b.textContent?.trim())).toEqual([
+      'read-only · enforced',
+      'read-only · detected, partial (entries limit)',
+      'read-only · detected',
+    ])
+    expect(badges.map((b) => b.classList.contains('bare'))).toEqual([false, true, true])
+    // The enforced check sits on the isolated attempt's own row.
+    const first = document.querySelectorAll('[data-testid="run-isolation-row"]')[0]
+    expect(first.querySelector('[data-testid="run-isolation-badge"]')).not.toBeNull()
+    expect(first.querySelector('[data-testid="run-read-only-badge"]')).not.toBeNull()
+    const changes = [...document.querySelectorAll('[data-testid="run-read-only-change"]')].map((c) => c.textContent?.trim())
+    expect(changes).toEqual(['notes.md modified', '.env added'])
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('3 more')
+    expect(text).toContain('read_only/scan/2.json')
+    expect(text).toContain('read_only_dirty')
+    expect(text).toContain('over 20000 entries, 4096 bytes')
+  })
+
+  it('counts one entry and one byte in the singular', () => {
+    app = mount(AttemptIsolationPanel, {
+      target: document.body,
+      props: { rows: [], readOnly: [{ node: 'one', attempt: 1, tier: 'detected', entries: 1, bytes: 1 }] },
+    })
+    flushSync()
+    expect(document.body.textContent).toContain('over 1 entry, 1 byte')
+  })
+
   it('renders nothing for a run without an isolated attempt', () => {
     app = mount(AttemptIsolationPanel, { target: document.body, props: { rows: [] } })
     flushSync()

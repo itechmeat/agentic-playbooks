@@ -123,3 +123,68 @@ fn a_supervisor_caller_sees_a_human_review_as_not_available() {
     assert_eq!(host["next_actions"][0]["available_to_caller"], true);
     assert_eq!(host["next_actions"][0]["relay_to_person"], true);
 }
+
+/// Every `run_status` action carries what an unattended run would do at
+/// its wait, on an attended run too: a plain review fails the run
+/// (`hitl_required`), a review that declares `unattended: { decide }`
+/// decides that option unless the drive's recheck would refuse it (here a
+/// sub-playbook in reach that the run pinned no version of, so its effects
+/// are unknown and the run would fail `hitl_required`), and an operator
+/// pause is not a wait.
+#[test]
+fn every_action_says_what_an_unattended_run_does_at_its_wait() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    apb_core::registry::init_project(root).unwrap();
+    run(root, "plain", &[review()]);
+    let status = tools::run_status(root, "plain").unwrap();
+    assert_eq!(status["next_actions"][0]["code"], "decide_review");
+    assert_eq!(
+        status["next_actions"][0]["unattended"],
+        json!({ "kind": "fails_run", "code": "hitl_required" }),
+        "{status}"
+    );
+
+    run(root, "decided", &[review()]);
+    let dir = root.join(".apb/runs/decided");
+    fs::write(
+        dir.join("playbook.yaml"),
+        GATED.replace(
+            "options: [approved, rejected] }",
+            "options: [approved, rejected], unattended: { decide: approved } }",
+        ),
+    )
+    .unwrap();
+    let status = tools::run_status(root, "decided").unwrap();
+    assert_eq!(
+        status["next_actions"][0]["unattended"],
+        json!({ "kind": "decides", "option": "approved" }),
+        "{status}"
+    );
+
+    run(root, "refused", &[review()]);
+    fs::write(
+        root.join(".apb/runs/refused/playbook.yaml"),
+        GATED
+            .replace(
+                "options: [approved, rejected] }",
+                "options: [approved, rejected], unattended: { decide: approved } }\n  - { id: sub, type: playbook, playbook: other }",
+            )
+            .replace("{ from: gate, to: f }", "{ from: gate, to: sub }\n  - { from: sub, to: f }"),
+    )
+    .unwrap();
+    let status = tools::run_status(root, "refused").unwrap();
+    assert_eq!(
+        status["next_actions"][0]["unattended"],
+        json!({ "kind": "fails_run", "code": "hitl_required" }),
+        "{status}"
+    );
+
+    run(root, "paused", &[paused(None)]);
+    let status = tools::run_status(root, "paused").unwrap();
+    assert_eq!(status["next_actions"][0]["code"], "resume_run");
+    assert!(
+        status["next_actions"][0].get("unattended").is_none(),
+        "{status}"
+    );
+}

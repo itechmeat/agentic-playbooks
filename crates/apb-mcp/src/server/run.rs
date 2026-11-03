@@ -330,7 +330,7 @@ impl WfMcp {
 
     #[tool(
         name = "playbook_run",
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one. notify (only when the person asked to hear about the run): true uses the machine's notify target, false turns notifications off, an object sets on and/or target; a target that cannot be used refuses the start with notify_unavailable.",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one. notify (only when the person asked to hear about the run): true uses the machine's notify target, false turns notifications off, an object sets on and/or target; a target that cannot be used refuses the start with notify_unavailable. unattended: true (only when the person asked for a run nobody watches, such as CI): every wait without a declared unattended outcome fails the run with hitl_required instead of waiting; it grants no consent or trust, and with execution host or supervise self it is refused with unattended_unsupported.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run_tool(
@@ -370,9 +370,11 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
+            unattended,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
+        let unattended = unattended == Some(true);
         // --- host execution mode (0.23.0) ---
         // The mode is the caller's choice per run; the client name is only
         // recorded for attribution. A blocking call cannot serve host tasks,
@@ -391,11 +393,42 @@ impl WfMcp {
             },
         };
         let host_requested = requested_mode == Some(apb_core::execution::ExecutionMode::Host);
+        // An unattended start that also asks for host execution (or
+        // resolves to it) or for supervision is refused before anything
+        // else, by the run gate's own check: both would wait with nobody to
+        // answer.
+        let unattended_start = apb_engine::gate::UnattendedStart {
+            unattended,
+            mode: if supervise.as_deref() == Some("self") {
+                apb_engine::RunMode::Supervised
+            } else {
+                apb_engine::RunMode::Autonomous
+            },
+            execution: &apb_core::execution::ExecutionRequest {
+                mode: requested_mode,
+                client: client.clone(),
+                ..Default::default()
+            },
+        };
+        if let Err(refusal) = apb_engine::gate::check_unattended(&self.root, &unattended_start) {
+            let wref = apb_core::scope::PlaybookRef {
+                origin: apb_core::scope::Origin::Project { workspace_id: None },
+                id: id.clone(),
+                version: version.clone(),
+            };
+            return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                apb_engine::next_action::start::StartOf::of(&wref),
+                refusal,
+            )));
+        }
         let execution = apb_core::execution::ExecutionRequest {
             mode: requested_mode,
-            host_session: host_requested
-                || background == Some(true)
-                || supervise.as_deref() == Some("self"),
+            // An unattended run never falls back to a host task: nobody
+            // would execute it.
+            host_session: !unattended
+                && (host_requested
+                    || background == Some(true)
+                    || supervise.as_deref() == Some("self")),
             client,
             inherited: false,
         };
@@ -589,6 +622,7 @@ impl WfMcp {
             budget,
             estimate: checked.estimate,
             notify,
+            unattended,
         };
 
         // supervise:"self" - a project-scoped supervised run (a global scope

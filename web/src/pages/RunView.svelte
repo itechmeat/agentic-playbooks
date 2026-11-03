@@ -572,6 +572,13 @@
                 >released</span
               >
             {/if}
+            {#if detail.unattended}
+              <span
+                class="tag unattended-tag"
+                title="Unattended run: every wait without a declared unattended outcome fails the run (hitl_required); a budget pause fails it (budget_exhausted)"
+                data-testid="run-unattended-badge">unattended</span
+              >
+            {/if}
             {#if detail.execution === 'host'}
               <span
                 class="tag text-teal"
@@ -833,7 +840,7 @@
       {/key}
       <DecisionsPanel decisions={detail.decisions} events={detail.events} />
       <AttemptModelsPanel models={detail.attempt_models} {current} />
-      <AttemptIsolationPanel rows={detail.isolation} />
+      <AttemptIsolationPanel rows={detail.isolation} readOnly={detail.read_only} />
       <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
       <QualityPanel
@@ -1091,5 +1098,8 @@
      waker resumes it. Not a dead driver, so amber text, no alarm. */
   .released-tag {
     color: var(--c-amber);
+  }
+  .unattended-tag {
+    color: var(--c-violet, var(--muted-foreground));
   }
 </style>

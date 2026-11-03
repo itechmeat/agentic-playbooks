@@ -24,8 +24,10 @@ mod outputs;
 mod params;
 mod publish;
 mod quality;
+mod read_only;
 mod retry;
 mod templates;
+mod unattended;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -58,6 +60,7 @@ use nodes::{
 };
 pub use publish::{OpenAgent, publish_only_violations};
 use templates::{check_cross_branch_reads, check_refs, check_templates};
+pub use unattended::{unattended_decide_refusal, unattended_reach};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -367,7 +370,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     params::check_params(playbook, &mut r); // V99, V100
     quality::check_quality(playbook, &mut r); // V102-V107
     known_problems::check_known_problems(playbook, &mut r); // V108-V111
-    publish::check_publish(playbook, &mut r); // V116-V120
+    publish::check_publish(playbook, &mut r); // V116-V120, V140
     edges::check_edge_ids(playbook, &mut r); // V121
     edges::check_pair_caps(playbook, &mut r); // V122
     edges::check_one_of_order(playbook, &mut r); // V123, V124
@@ -375,6 +378,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     edges::check_review_caps(playbook, &mut r); // V136
     retry::check_retry_delay(playbook, &mut r); // V126-V130
     outputs::check_outputs(playbook, ctx, &mut r); // V131-V135
+    read_only::check_read_only(playbook, &mut r); // V137-V139
+    unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

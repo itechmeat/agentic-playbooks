@@ -31,6 +31,8 @@
     personTakes,
     shownElsewhere,
     suppliedArg,
+    unattendedLine,
+    unattendedStops,
   } from './nextactions'
   import { actionTarget, postDecision, postIntentDecision, postReply } from './runposts'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -271,6 +273,16 @@
           {#if a.auto}
             <p class="muted" data-testid="next-action-auto">{autoLine(a.auto)}</p>
           {/if}
+          {#if a.unattended}
+            <p
+              class="unattended"
+              class:stops={unattendedStops(a.unattended)}
+              title="What an unattended run (apb run --unattended) does at this wait"
+              data-testid="next-action-unattended"
+            >
+              {unattendedLine(a.unattended)}
+            </p>
+          {/if}
           {#if !a.ready && a.not_ready}
             <p class="bad" data-testid="next-action-not-ready">Not ready: {a.not_ready.detail}</p>
           {/if}
@@ -469,6 +481,13 @@
   }
   .muted {
     color: var(--muted-foreground);
+  }
+  .unattended {
+    color: var(--muted-foreground);
+    font-size: 11px;
+  }
+  .unattended.stops {
+    color: var(--warning);
   }
   .bad {
     color: var(--destructive);

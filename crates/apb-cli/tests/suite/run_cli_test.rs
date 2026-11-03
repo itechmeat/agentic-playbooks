@@ -668,3 +668,104 @@ fn a_resume_of_a_run_without_consent_asks_once() {
         .assert()
         .success();
 }
+
+// --- unattended mode: the start surface ---
+
+/// `apb run --unattended` with `--supervise` or `--execution host` is
+/// refused before anything is written: exit 2, the policy
+/// `unattended_unsupported` and the change a person makes by hand, and no
+/// run directory.
+#[test]
+fn an_unattended_start_that_needs_a_watcher_is_refused_before_any_run_file() {
+    let dir = seeded();
+    for (flags, says) in [
+        (
+            vec!["--supervise"],
+            "start the unattended run without supervision",
+        ),
+        (
+            vec!["--execution", "host"],
+            "start the unattended run with execution: cli",
+        ),
+    ] {
+        let mut args = vec!["run", "noagent", "--param", "who=world", "--unattended"];
+        args.extend(flags.iter().copied());
+        playbook()
+            .args(&args)
+            .current_dir(dir.path())
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "run refused (unattended_unsupported)",
+            ))
+            .stderr(predicate::str::contains(
+                "next: playbook `noagent` cannot start unattended this way",
+            ))
+            .stderr(predicate::str::contains(says));
+        assert!(no_runs(dir.path()), "{flags:?} wrote a run");
+    }
+}
+
+/// `apb run --unattended` records the mode in the run's write-once
+/// manifest, and `apb runs <id>` (text and `--json`) shows it; an attended
+/// run shows neither.
+#[test]
+fn an_unattended_run_records_and_shows_its_mode() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=world", "--unattended"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let run = only_run(dir.path());
+    let id = run.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        apb_engine::manifest::read(&run)
+            .unwrap()
+            .unwrap()
+            .unattended
+    );
+    playbook()
+        .args(["runs", &id])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  unattended: every wait without an unattended outcome fails the run (hitl_required)",
+        ));
+    let json = playbook()
+        .args(["runs", &id, "--json"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(v["unattended"], true, "{v}");
+
+    fs::remove_dir_all(&run).unwrap();
+    playbook()
+        .args(["run", "noagent", "--param", "who=world"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let run = only_run(dir.path());
+    let id = run.file_name().unwrap().to_string_lossy().into_owned();
+    playbook()
+        .args(["runs", &id])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unattended").not());
+    let json = playbook()
+        .args(["runs", &id, "--json"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert!(v.get("unattended").is_none(), "{v}");
+}

@@ -1197,6 +1197,57 @@ extra paths that are relative or reach a credential location (V114), and
 extras with level `none` (V115). Mechanism, guarantees per level, the
 network and the agents' logins: [docs/ISOLATION.md](ISOLATION.md).
 
+### Read-only node (read_only)
+
+`read_only: true` on an `agent_task` or a `script` says the node only reads
+its tree (the run's working tree, or its `workdir`): an audit, a review, a
+report. apb holds the node to it and fails it when it changed the tree.
+
+```yaml
+- id: audit
+  type: agent_task
+  prompt: "List the modules without tests. Do not change any file."
+  read_only: true
+  isolation: full     # prevented by the sandbox; without it, detected after the attempt
+```
+
+- In the sandbox (`isolation: full`, or `best_effort` where the sandbox
+  works) the tree and its git directory are mounted read-only, so a write
+  fails as it happens. This is the `enforced` tier.
+- Everywhere else (every `script`, `isolation: none`, `best_effort` without
+  a sandbox) apb compares the tree before and after each attempt: the
+  content, the executable bit, symlink targets, new and deleted files
+  (tracked, or untracked and not ignored), `HEAD`, the refs and the staged
+  index. This is the `detected` tier; it reads `detected_partial` when the
+  tree is above the limits of the check (20000 entries or 512 MiB), and
+  never "no change" then.
+- A detected change fails the node at once with `read_only_dirty`: no retry,
+  no delay, no fallback, and nothing is restored. The run takes the node's
+  failure edge or `defaults.on_failure`, else it fails with a run error that
+  names the node. A file git ignores is not checked; outside git every file
+  is.
+- The changed paths (at most 200, never file content; a `.env` file appears
+  by name only) are kept in `runs/<id>/read_only/<node>/<n>.json`, written
+  for every detected check, clean or not. The journal records the tier
+  (`read_only_checked`) and a change (`read_only_violated`).
+- A node in the detected tier never runs in a concurrent batch; one with
+  `isolation: full` may.
+- An older apb ignores `read_only` and runs the node without the check.
+
+`read_only` is not the `read_only` list of extra paths under `isolation`,
+nor a connector binding's `functions: read_only`. Tiers, limits and what is
+not covered: [docs/ISOLATION.md](ISOLATION.md) ("Read-only nodes").
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V137 | error | `read_only` on a node that is not an `agent_task` or a `script` |
+| V138 | error | `read_only` on a list node |
+| V139 | warning | `read_only` together with `protect`: the read-only check covers the whole tree, so `protect` adds nothing |
+| V140 | warning | a `publish` node names a `read_only` node as `from`: it commits nothing, so the publish pushes only what earlier nodes committed |
+
+A `read_only` node with a `workdir` cannot be isolated (V47), so it always
+gets the detected tier.
+
 ### Declared cache key (cache.key)
 
 `cache: auto` keys a node's result on its definition, rendered prompt, profile
@@ -1630,6 +1681,51 @@ edges:
   - { from: review,  to: publish, condition: { type: review_status, equals: approve } }
   - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
 ```
+
+### A review in an unattended run (unattended)
+
+A run started unattended (`apb run --unattended`, see
+[docs/CI.md](CI.md) "Unattended runs") has nobody to decide a review. By
+default such a run fails at the review with `hitl_required`. A
+`human_review` may declare instead which option an unattended run takes:
+
+```yaml
+- id: review
+  type: human_review
+  options: [approve, reject]
+  unattended: { decide: approve, note: "CI run, approved by the playbook" }
+```
+
+`unattended` is `fail` (the default) or `{ decide: <option>, note: <text> }`
+with `note` optional. In an unattended run the review is decided at once,
+on every visit, and the journal's `review_decided` carries `decided_by:
+unattended`, so nobody reads it as a person's decision; the run quality
+grader does not count it as consent for an irreversible step either, nor
+any `decided_by` value this apb does not know. A run whose drive stopped
+between asking and deciding decides when it is resumed, and a decision
+that cannot be recorded fails the run `hitl_required`: an unattended review
+never waits. In a
+run with a person the field changes nothing. An older apb ignores it and
+waits for a person.
+
+The validator keeps a declared decision away from what must not happen
+without a person:
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V141 | error | `unattended` on a node that is not a `human_review`, or `decide` names an option the review does not offer |
+| V142 | error | a node the chosen option reaches before the next `human_review` or `publish` declares or implies `irreversible` or `secrets` effects, may call a connector function flagged `irreversible`, or looks like a merge, push, deploy or publish step (the tests of V73), or the playbook itself declares those effects; the run checks it again with the effects of its pinned sub-playbooks and the connectors installed |
+| V143 | error | the chosen option is routed only by bounded edges: once the cap is spent the decision has no edge, and an unattended loop would have no way out |
+
+"Reaches" follows every way the run can leave a node after the option:
+its edges (judge edges included), the `defaults.on_failure` handler (any
+node after the gate may fail and route there) and the `fork.on_failure`
+target of a fork whose branches hold such a node. A risky failure handler
+therefore refuses the decision as a risky next step would. A risky step
+behind a second review is fine: the walk stops at the next gate, which an
+unattended run decides (or fails at) on its own terms. A
+`publish` node never has an unattended outcome: an unattended run fails
+there with `hitl_required`.
 
 ## Publishing (the publish node)
 
@@ -2472,7 +2568,9 @@ Four fields carry this:
   answer before falling back to `default_answer`. Omitted, the node waits
   forever, like `human_review`.
 - `default_answer` (optional): the answer used when the timeout elapses
-  (`answered_by: "timeout"`). Requires `question_timeout_seconds` (validator
+  (`answered_by: "timeout"`). In an unattended run it is used at once
+  (`answered_by: "unattended"`), and a question without it fails the run
+  with `hitl_required`. Requires `question_timeout_seconds` (validator
   V32); the reverse - `interactive` companion fields set without
   `interactive: true` - is validator V31.
 

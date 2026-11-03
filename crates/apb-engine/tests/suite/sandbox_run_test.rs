@@ -846,3 +846,222 @@ fn publish_only_refuses_an_attempt_that_would_pass_a_credential() {
     assert!(output.contains("credentials_passed"), "{output}");
     assert!(!f.stub.with_file_name("ran").exists(), "the agent ran");
 }
+
+// --- read_only in the sandbox: the enforced tier --------------------------
+
+/// Marks the fixture's `work` node `read_only`.
+fn make_read_only(f: &Fixture) {
+    let pb = f.root.join(".apb/playbooks/iso/1.0.0/playbook.yaml");
+    let yaml = fs::read_to_string(&pb).unwrap().replace(
+        "max_retries: 1, isolation",
+        "max_retries: 1, read_only: true, isolation",
+    );
+    assert!(yaml.contains("read_only: true"));
+    fs::write(&pb, yaml).unwrap();
+}
+
+/// What the read-only stub records, in its own box next to the status file
+/// (the tree cannot take it): each write it tries into the tree and the
+/// repository.
+const READ_ONLY_PROBES: &str = r#"box=$(dirname "$APB_STATUS_FILE"); out="$box/ro-probe.txt"; : > "$out"; r() { echo "$1=$2" >> "$out"; }
+if echo x >> .gitignore 2>/dev/null; then r tracked written; else r tracked ro; fi
+if touch new.txt 2>/dev/null; then r added written; else r added ro; fi
+if touch probe.txt 2>/dev/null; then r ignored written; else r ignored ro; fi
+if touch "$(git rev-parse --absolute-git-dir)/apb-probe" 2>/dev/null; then r gitdir written; else r gitdir ro; fi
+if touch "$(git rev-parse --path-format=absolute --git-common-dir)/apb-probe" 2>/dev/null; then r common written; else r common ro; fi
+if git commit -q --allow-empty -m sneaky 2>/dev/null; then r commit ok; else r commit failed; fi
+if echo kept > "$box/box.txt"; then r box written; else r box ro; fi
+printf '{"status":"success","outputs":{"verdict":"read"}}' > "$APB_STATUS_FILE"
+echo done"#;
+
+fn ro_probe(root: &Path, run_id: &str) -> std::collections::BTreeMap<String, String> {
+    let attempts = root.join(".apb/runs").join(run_id).join("sandbox/attempts");
+    let mut out = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(attempts).unwrap().flatten() {
+        let text = fs::read_to_string(entry.path().join("ro-probe.txt")).unwrap_or_default();
+        out.extend(
+            text.lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+    }
+    out
+}
+
+/// A read-only node in the sandbox, in a linked worktree (whose git common
+/// directory lies outside the tree): every write into the tree, an ignored
+/// file, its git directory and the common directory fails at the OS level;
+/// its own box stays writable and its status file still publishes. The
+/// attempt records the enforced tier, and nothing is checked afterwards.
+#[test]
+fn a_read_only_node_cannot_write_its_tree_or_its_repository() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    // The main repository, and the linked worktree the run uses as its tree.
+    let (main, outer, home) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    fs::write(main.path().join("seed.txt"), "seed").unwrap();
+    git(main.path(), &["init", "-q"]);
+    git(main.path(), &["add", "."]);
+    git(main.path(), &["commit", "-q", "-m", "seed"]);
+    let tree = outer.path().join("wt");
+    git(
+        main.path(),
+        &["worktree", "add", "-q", "-b", "wt", tree.to_str().unwrap()],
+    );
+    let h = home.path().to_path_buf();
+    let f = fixture_in(
+        &tree,
+        &h,
+        vec![main, outer, home],
+        "{ level: full, network: none }",
+        READ_ONLY_PROBES,
+    );
+    make_read_only(&f);
+    let common_dir = f.root.join(".git");
+    assert!(common_dir.is_file(), "a linked worktree has a .git file");
+    let _env = env(&f);
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    let ev = events(&f.root, &res.run_id);
+    let p = ro_probe(&f.root, &res.run_id);
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "{p:?} {:?}",
+        node_output(&ev, "work")
+    );
+    for (k, v) in [
+        ("tracked", "ro"),
+        ("added", "ro"),
+        ("ignored", "ro"),
+        ("gitdir", "ro"),
+        ("common", "ro"),
+        ("commit", "failed"),
+        ("box", "written"),
+    ] {
+        assert_eq!(p.get(k).map(String::as_str), Some(v), "{k}: {p:?}");
+    }
+    assert!(!f.root.join("new.txt").exists());
+    let tier = ev.iter().find_map(|e| match &e.payload {
+        EventPayload::ReadOnlyChecked { check, .. } => Some(check.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        tier.map(|t| t.tier),
+        Some(apb_engine::event::ReadOnlyTier::Enforced)
+    );
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e.payload, EventPayload::ReadOnlyViolated { .. }))
+    );
+    // The status file the agent wrote in its box was published.
+    let published = fs::read_dir(
+        f.root
+            .join(".apb/runs")
+            .join(&res.run_id)
+            .join("agent-status"),
+    )
+    .unwrap()
+    .flatten()
+    .any(|e| fs::read_to_string(e.path()).is_ok_and(|t| t.contains("\"verdict\":\"read\"")));
+    assert!(published, "the status file was not published");
+}
+
+/// A writable extra path inside a read-only node's tree cannot hold (the
+/// tree's read-only bind covers it): the attempt is refused before anything
+/// runs, with the reason. The twin without `read_only` is
+/// `a_writable_extra_over_the_tree_keeps_its_protections`, which runs.
+#[test]
+fn a_writable_extra_inside_a_read_only_tree_is_refused() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let tree = outside_tmp();
+    let path = tree.path().canonicalize().unwrap();
+    let f = fixture_at(
+        tree,
+        tempfile::tempdir().unwrap(),
+        &format!(
+            "{{ level: full, network: none, writable: ['{}'] }}",
+            path.display()
+        ),
+        "touch ran.txt; echo done",
+    );
+    make_read_only(&f);
+    let _env = env(&f);
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    let ev = events(&f.root, &res.run_id);
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let (status, output) = node_output(&ev, "work").unwrap();
+    assert_eq!(status, "failed");
+    assert!(
+        output.starts_with("isolation_unavailable")
+            && output.contains("lies inside the tree of a read_only node"),
+        "{output}"
+    );
+    assert!(!f.root.join("ran.txt").exists());
+}
+
+/// An enforced read-only node may share a batch with a writing sibling: the
+/// sibling's write is never blamed on it, since nothing is checked after an
+/// enforced attempt. The two wait (bounded) for each other, so in a batch
+/// the sibling writes while the read-only attempt runs.
+#[test]
+fn an_enforced_read_only_node_shares_a_batch_with_a_writer() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let f = fixture(
+        "{ level: full, network: none }",
+        "touch \"$(dirname \"$APB_STATUS_FILE\")/started\"\ni=0; while [ ! -f written.txt ] && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.05; done\necho done",
+    );
+    let dir = f.root.join(".apb/playbooks/iso/1.0.0");
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    // The writer waits (bounded) for the read-only attempt to have started,
+    // so its write lands while that attempt runs.
+    fs::write(
+        dir.join("scripts/w.sh"),
+        "i=0\nwhile ! ls \"$APB_RUN_DIR\"/sandbox/attempts/*/started >/dev/null 2>&1 && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.05; done\necho out > written.txt\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("playbook.yaml"),
+        "schema: 2\nid: iso\nname: Iso\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"do\", read_only: true, isolation: { level: full, network: none } }\n  - { id: w, type: script, script: \"scripts/w.sh\", runner: sh }\n  - { id: j, type: prompt, prompt: \"joined\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: start, to: w }\n  - { from: work, to: j }\n  - { from: w, to: j }\n  - { from: j, to: done }\n",
+    )
+    .unwrap();
+    let _env = env(&f);
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    let ev = events(&f.root, &res.run_id);
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "{:?}",
+        node_output(&ev, "work")
+    );
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e.payload, EventPayload::ReadOnlyViolated { .. }))
+    );
+    let pos = |node: &str, started: bool| {
+        ev.iter()
+            .position(|e| match &e.payload {
+                EventPayload::NodeStarted { node: n, .. } => started && n == node,
+                EventPayload::NodeFinished { node: n, .. } => !started && n == node,
+                _ => false,
+            })
+            .unwrap()
+    };
+    let (ro_start, ro_end, w_start) = (pos("work", true), pos("work", false), pos("w", true));
+    assert!(
+        w_start > ro_start && w_start < ro_end,
+        "the writer did not start while the read-only node ran"
+    );
+    assert!(f.root.join("written.txt").exists());
+}

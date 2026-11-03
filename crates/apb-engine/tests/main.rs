@@ -354,6 +354,9 @@ mod prompt_cache_test;
 #[cfg(unix)]
 #[path = "suite/protect_test.rs"]
 mod protect_test;
+#[cfg(unix)]
+#[path = "suite/read_only_test.rs"]
+mod read_only_test;
 // Unix-only: `runner: sh` scripts and shell hooks in the bare remote.
 #[cfg(unix)]
 #[path = "suite/publish_test.rs"]
@@ -456,6 +459,9 @@ mod transcript_read_test;
 #[cfg(unix)]
 #[path = "suite/transcript_test.rs"]
 mod transcript_test;
+#[cfg(unix)]
+#[path = "suite/unattended_test.rs"]
+mod unattended_test;
 #[path = "suite/unhandled_failure_test.rs"]
 mod unhandled_failure_test;
 #[path = "suite/wait_test.rs"]

@@ -162,6 +162,7 @@ fn an_open_review_is_due_and_a_decided_one_is_not() {
             decision: "approve".into(),
             note: String::new(),
             plan_digest: None,
+            decided_by: None,
         },
     ));
     assert!(ids(&events).is_empty());

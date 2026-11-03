@@ -81,6 +81,7 @@ mod skills_copy;
 mod status_file;
 mod supervisor;
 mod transcript;
+mod unattended;
 mod worktree;
 
 pub(crate) use crate::run_origin::parent_run_origin;
@@ -138,6 +139,20 @@ fn failure_detail(out: &str) -> String {
     let first_line = trimmed.lines().next().unwrap_or(trimmed);
     let capped: String = first_line.chars().take(200).collect();
     capped
+}
+
+/// Whether the latest attempt of `node` ended with `read_only_violated`:
+/// such a failure is final, and no recovery path may run the node again.
+pub(crate) fn last_attempt_read_only_violated(events: &[Event], node: &str) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptStarted { node: n, .. } if n == node => Some(false),
+            EventPayload::ReadOnlyViolated { node: n, .. } if n == node => Some(true),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Journals the hop `defaults.on_failure: <node>` just took, as the traversal it
@@ -274,6 +289,19 @@ fn stop_with_reason(
     Ok(RunStatus::Failed)
 }
 
+/// Ends an unattended run failed at `node`: a visit it left open is closed
+/// first, then the unhandled-failure stop applies (no failure route).
+fn unattended_stop(
+    log: &mut EventLog,
+    run_dir: &Path,
+    node: &str,
+    reason: String,
+    frontier: &mut Vec<String>,
+) -> Result<RunStatus, EngineError> {
+    unattended::close_open(log, run_dir, node, &reason)?;
+    stop_with_reason(log, node, reason, frontier)
+}
+
 /// The one write-off shape shared by both admission-time stop checks in the
 /// batch loop below (`run_cancel` and `cancel_now`): every member of `chunk`
 /// gets a `NodeStarted` immediately followed by a `NodeFinished` with
@@ -381,6 +409,11 @@ fn drive(
     // directory an older apb left readable beyond its owner is narrowed
     // before the run goes on (`crate::run_perms`).
     crate::run_perms::narrow(run_dir);
+    // Unattended mode comes from the write-once manifest, whatever the run
+    // config this drive was handed says (see `unattended::mode`).
+    let mut cfg = cfg.clone();
+    cfg.unattended = unattended::mode(run_dir, &cfg);
+    let cfg = &cfg;
     let run_id_for_failure = run_id.clone();
     let result = drive_inner(
         playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode, lock,
@@ -708,11 +741,20 @@ fn drive_inner(
     // returned true, so later acting nodes do not re-read the journal. A
     // patch cannot change `baseline_check` once an acting node started.
     let mut baseline_before_done = false;
-    let gate = budget_gate::DriveGate::load(run_dir)?;
+    let gate = budget_gate::DriveGate::load(run_dir, cfg.unattended)?;
     let notifier = crate::notify::send::Notifier::new(root, run_dir, &run_id);
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
+        // An unattended run's budget refused a node or a batch (the
+        // sequential arm, a batch member or a list pool): it fails instead
+        // of pausing, once the members in flight reported back.
+        if let Some((node, reason)) = gate.exhausted() {
+            return Ok(RunResult {
+                run_id,
+                outcome: unattended_stop(log, run_dir, &node, reason, &mut frontier)?,
+            });
+        }
         if steps >= max_steps {
             return Err(EngineError::Invalid(format!(
                 "run exceeded {max_steps} steps without reaching a finish node"
@@ -867,9 +909,14 @@ fn drive_inner(
             current_node,
             &mut reserved,
         );
-        if let budget_gate::Admission::Pause(p) = admit? {
-            journal::post_engine_pause(run_dir, p)?;
-            continue;
+        match admit? {
+            budget_gate::Admission::Go => {}
+            budget_gate::Admission::Pause(p) => {
+                journal::post_engine_pause(run_dir, p)?;
+                continue;
+            }
+            // The top of the loop ends the run.
+            budget_gate::Admission::Exhausted => continue,
         }
 
         if let NodeKind::Finish {
@@ -1233,13 +1280,31 @@ fn drive_inner(
                                 // `current` passed the gate above already.
                                 if n != current
                                     && let Some(member) = playbook.node(&n)
-                                    && let budget_gate::Admission::Pause(p) =
-                                        gate.admit_node(run_dir, &journal, member, &mut reserved)?
                                 {
-                                    journal::post_engine_pause(run_dir, p)?;
-                                    halt.store(true, Ordering::SeqCst);
-                                    queue.clear();
-                                    break;
+                                    match gate.admit_node(
+                                        run_dir,
+                                        &journal,
+                                        member,
+                                        &mut reserved,
+                                    )? {
+                                        budget_gate::Admission::Go => {}
+                                        budget_gate::Admission::Pause(p) => {
+                                            journal::post_engine_pause(run_dir, p)?;
+                                            halt.store(true, Ordering::SeqCst);
+                                            queue.clear();
+                                            break;
+                                        }
+                                        // An unattended run fails at the top of
+                                        // the loop: the members that never
+                                        // started go back to the frontier, so
+                                        // the stop journals them cancelled.
+                                        budget_gate::Admission::Exhausted => {
+                                            halt.store(true, Ordering::SeqCst);
+                                            frontier.push(n);
+                                            frontier.extend(queue.drain(..));
+                                            break;
+                                        }
+                                    }
                                 }
                                 // The state as it stands now: a member admitted
                                 // mid-batch renders the outputs of the members
@@ -1898,6 +1963,35 @@ fn drive_inner(
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
         let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
             let current_id = current.clone();
+            let unattended_decision = match cfg.unattended {
+                false => None,
+                true => match unattended::review(root, run_dir, &playbook, &current) {
+                    unattended::Review::Fail(reason) => {
+                        return Ok(RunResult {
+                            run_id,
+                            outcome: unattended_stop(
+                                log,
+                                run_dir,
+                                &current,
+                                reason,
+                                &mut frontier,
+                            )?,
+                        });
+                    }
+                    unattended::Review::Decide { option, note } => Some((option, note)),
+                },
+            };
+            // A request already open from before (a drive that stopped
+            // between the request and its decision) is decided now, or the
+            // run fails: an unattended gate never waits.
+            if let Some(decision) = &unattended_decision
+                && let Err(reason) = review_gate::post_unattended(run_dir, &current, decision)?
+            {
+                return Ok(RunResult {
+                    run_id,
+                    outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
+                });
+            }
             let step = review_gate::await_decision(
                 &mut review_gate::GateDrive {
                     run_dir,
@@ -1910,6 +2004,15 @@ fn drive_inner(
                 },
                 review_gate::Consume::Nth,
                 |log, events| {
+                    if let Some(decision) = unattended_decision {
+                        return Ok(review_gate::unattended_review_request(
+                            &playbook,
+                            &current_id,
+                            options,
+                            prompt.as_deref(),
+                            decision,
+                        ));
+                    }
                     review_gate::human_review_request(
                         root,
                         run_dir,
@@ -1935,6 +2038,7 @@ fn drive_inner(
                         decision: entry.cmd.decision.clone(),
                         note: entry.cmd.note.clone(),
                         plan_digest: None,
+                        decided_by: entry.by,
                     })?;
                     (NodeStatus::Succeeded, entry.cmd.decision)
                 }
@@ -1945,6 +2049,15 @@ fn drive_inner(
                 }
             }
         } else if matches!(node_kind, NodeKind::Publish { .. }) {
+            // A push leaves only after a person consented (decision record
+            // 0010): an unattended run has nobody to consent.
+            if cfg.unattended {
+                let reason = unattended::hitl("publish", &current);
+                return Ok(RunResult {
+                    run_id,
+                    outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
+                });
+            }
             let run = publish::PublishRun {
                 root,
                 run_id: &run_id,
@@ -2076,7 +2189,7 @@ fn drive_inner(
                 node: current.clone(),
                 attempt: 1,
             })?;
-            run_playbook_node(
+            let (status, output) = run_playbook_node(
                 root,
                 run_dir,
                 log,
@@ -2086,7 +2199,19 @@ fn drive_inner(
                 &current,
                 child_ref,
                 node_instr.as_deref(),
-            )?
+            )?;
+            // A child of an unattended run that failed for want of a person
+            // or of budget stops this run too, without its failure route.
+            if cfg.unattended
+                && status == NodeStatus::Failed
+                && let Some(reason) = unattended::child_stop(root, run_dir, &current)
+            {
+                return Ok(RunResult {
+                    run_id,
+                    outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
+                });
+            }
+            (status, output)
         } else if is_interactive(&playbook, &current) {
             // Interactive agent_task (spec 2026-07-20): the agent may ask the
             // user a question mid-run and the node parks until it is answered.
@@ -2138,15 +2263,24 @@ fn drive_inner(
             let live_exe: Option<std::path::PathBuf> = apb_core::fsutil::reexec_exe().ok();
             let live_claude = apb_core::agents::lookup(&prim_agent)
                 .is_some_and(|a| a.descriptor().capabilities.live_ask_mcp);
-            let live_injectable =
-                prim_interaction == Interaction::Live && live_claude && live_exe.is_some();
+            // An unattended run answers or fails a question at once on the
+            // drive thread, so it never injects the live sidecar, which would
+            // block the attempt on an answer nobody gives.
+            let live_injectable = prim_interaction == Interaction::Live
+                && live_claude
+                && live_exe.is_some()
+                && !cfg.unattended;
             // Downgrade reason when the ceiling is `Live` but injection is
             // unavailable (non-claude agent, or the current exe could not be
             // resolved). `None` when injectable, or the ceiling is not `Live`.
             let live_downgrade_detail: Option<String> = if prim_interaction == Interaction::Live
                 && !live_injectable
             {
-                Some(if !live_claude {
+                Some(if cfg.unattended {
+                    format!(
+                        "live transport is off in an unattended run; node `{current}` falls back to resume/reprompt"
+                    )
+                } else if !live_claude {
                     format!(
                         "live transport requires claude/claude-code; agent `{prim_agent}` for node `{current}` falls back to resume/reprompt"
                     )
@@ -2254,6 +2388,34 @@ fn drive_inner(
                         // parking and fail the node outright: a node that
                         // declares a timeout with no default has nothing
                         // sensible to proceed with.
+                        // An unattended run answers with the default at once,
+                        // or fails without one.
+                        if cfg.unattended {
+                            match unattended::question(&playbook, &current) {
+                                Ok(ans) => {
+                                    post_answer_if_unanswered(
+                                        run_dir,
+                                        &current,
+                                        &ans,
+                                        unattended::ANSWERED_BY,
+                                        answered,
+                                    )?;
+                                    continue;
+                                }
+                                Err(reason) => {
+                                    return Ok(RunResult {
+                                        run_id,
+                                        outcome: unattended_stop(
+                                            log,
+                                            run_dir,
+                                            &current,
+                                            reason,
+                                            &mut frontier,
+                                        )?,
+                                    });
+                                }
+                            }
+                        }
                         let (question_timeout_seconds, default_answer) = match &node_kind {
                             NodeKind::AgentTask {
                                 question_timeout_seconds,
@@ -2489,8 +2651,12 @@ fn drive_inner(
                         // failing the node. The follow-up reprompt attempt is not
                         // a resume attempt, so its own failure follows normal
                         // retry/failure handling.
+                        // A read-only node whose resumed attempt changed its
+                        // tree is never run again: the reprompt would start
+                        // from a tree it was not asked to read.
                         if resume_attempt
                             && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+                            && !last_attempt_read_only_violated(&read_all(run_dir)?, &current)
                         {
                             log.append(EventPayload::SupervisorAction {
                                 action: "interaction_downgraded".into(),

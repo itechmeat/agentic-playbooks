@@ -43,6 +43,7 @@ fn start_args(budget: Option<BudgetArg>) -> PlaybookRunArgs {
         notify: None,
         launch_version: None,
         launch_choice: None,
+        unattended: None,
         confirm_launch: None,
     }
 }

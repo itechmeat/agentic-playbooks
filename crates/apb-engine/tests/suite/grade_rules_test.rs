@@ -286,6 +286,27 @@ fn an_approval_consents_only_for_the_node_its_gate_led_to() {
     assert_eq!(level(&refused, "consent"), Level::Poor);
 }
 
+/// An unattended run's declared approval right before the delete is no
+/// person's consent: the run grades as with no approval at all. So is an
+/// approval by a decider this binary does not know (a newer apb's), or one
+/// whose `decided_by` it cannot read: any value but none fails closed.
+#[test]
+fn an_unattended_or_unknown_approval_consents_to_nothing() {
+    let _env = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _dir = common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let digest = install_crm(cfg.path());
+    for by in [r#""unattended""#, r#""policy""#, r#"{"kind":"policy"}"#] {
+        let journal = crm_with_review("confirm", "approve", "act").replace(
+            r#""decision":"approve","note":"""#,
+            &format!(r#""decision":"approve","note":"","decided_by":{by}"#),
+        );
+        assert!(journal.contains(&format!(r#""decided_by":{by}"#)));
+        let g = crm_grade_of(&journal, &digest);
+        assert_eq!(level(&g, "consent"), Level::Poor, "decided_by {by}");
+    }
+}
+
 #[test]
 fn a_sub_agents_destructive_command_and_write_count() {
     let extra = concat!(

@@ -128,6 +128,8 @@ mod stats_cli_test;
 #[path = "suite/eval_cli_test.rs"]
 mod eval_cli_test;
 // --- end 0.24.0 eval suites ---
+#[path = "suite/read_only_unattended_cli_test.rs"]
+mod read_only_unattended_cli_test;
 #[cfg(unix)]
 #[path = "suite/stdio_profile_e2e_test.rs"]
 mod stdio_profile_e2e_test;

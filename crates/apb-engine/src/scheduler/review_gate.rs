@@ -28,6 +28,10 @@ pub(crate) enum Consume<'a> {
 pub(crate) struct GateRequest {
     pub(crate) event: EventPayload,
     pub(crate) auto: Option<(String, String)>,
+    /// Who posts `auto` when it is not the engine's recommendation:
+    /// `unattended` for an unattended run's declared decision, stamped on
+    /// the channel entry and journaled as `decided_by`.
+    pub(crate) by: Option<crate::event::DecidedBy>,
 }
 
 /// What one look at the gate found.
@@ -91,20 +95,36 @@ pub(crate) fn await_decision(
     // an action is expected, what the options are, and how to answer.
     if review_open_count(&events, current) == 0 {
         let req = request(log, &events)?;
-        log.append(req.event)?;
+        let requested = log.append(req.event)?.seq;
         // Enforced: post through the review channel, so it is consumed and
         // journaled like a person's decision; a decision a person already
         // queued wins (the channel refuses a second one), and any failure
         // waits for the person (fail-closed).
         if let Some((decision, note)) = req.auto {
-            let _ = crate::review::post_review(
-                run_dir,
-                crate::review::ReviewCommand {
-                    node: current.clone(),
-                    decision,
-                    note,
-                },
-            );
+            let cmd = crate::review::ReviewCommand {
+                node: current.clone(),
+                decision,
+                note,
+            };
+            match req.by {
+                // The declared decision is consumed right away, in this
+                // look, like a decision queued before the request. A
+                // failure to post it is the next look's to settle
+                // ([`post_unattended`]).
+                Some(crate::event::DecidedBy::Unattended) => {
+                    let _ = crate::review::post_unattended_decision(run_dir, cmd, requested);
+                    if let Some(entry) = read_reviews_after(run_dir, None)?
+                        .into_iter()
+                        .filter(|e| e.cmd.node == **current)
+                        .nth(review_decided_count(&events, current))
+                    {
+                        return Ok(GateStep::Decided(entry));
+                    }
+                }
+                Some(crate::event::DecidedBy::Unknown) | None => {
+                    let _ = crate::review::post_review(run_dir, cmd);
+                }
+            }
         }
     }
     // A directive that moves the run elsewhere (`node_retry`,
@@ -156,6 +176,43 @@ pub(crate) fn await_decision(
     Ok(GateStep::Waiting)
 }
 
+/// An unattended run's declared decision for gate `gate` when its request
+/// is already open: a drive that stopped after journaling the request and
+/// before the decision reached the channel (a crash, a failed write) would
+/// otherwise find a request and no decision, and wait for nobody. Posts the
+/// decision for that request now; one already queued for it (this one
+/// before the crash, or a person's) is kept. `Err` with the reason when it
+/// cannot be posted: the run fails then rather than wait.
+pub(crate) fn post_unattended(
+    run_dir: &Path,
+    gate: &str,
+    decision: &(String, String),
+) -> Result<Result<(), String>, EngineError> {
+    let events = read_all(run_dir)?;
+    if review_open_count(&events, gate) == 0 {
+        return Ok(Ok(()));
+    }
+    let Some(requested) = events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::ReviewRequested { node, .. } if node == gate => Some(e.seq),
+        _ => None,
+    }) else {
+        return Ok(Ok(()));
+    };
+    let cmd = crate::review::ReviewCommand {
+        node: gate.to_string(),
+        decision: decision.0.clone(),
+        note: decision.1.clone(),
+    };
+    match crate::review::post_unattended_decision(run_dir, cmd, requested) {
+        Ok(_) | Err(EngineError::AlreadyAnswered(_)) => Ok(Ok(())),
+        Err(e) => Ok(Err(format!(
+            "{}: human_review `{gate}` could not record its unattended decision `{}`: {e}",
+            crate::run_config::HITL_REQUIRED,
+            decision.0
+        ))),
+    }
+}
+
 /// The request of a `human_review` visit: the instruction, and the review
 /// recommendation (issue #165 Part 11, 14.4) asked once per visit before the
 /// request is declared; an enforced one becomes the automatic decision.
@@ -195,7 +252,36 @@ pub(crate) fn human_review_request(
             plan_digest: None,
         },
         auto: rec.auto,
+        by: None,
     })
+}
+
+/// The request of a `human_review` visit in an unattended run that decides
+/// it with its declared option: the same instruction, no recommendation,
+/// and the decision posted at once as `unattended`.
+pub(crate) fn unattended_review_request(
+    playbook: &Playbook,
+    gate: &str,
+    options: &[String],
+    prompt: Option<&str>,
+    decision: (String, String),
+) -> GateRequest {
+    let title = playbook.node(gate).and_then(|n| n.title.clone());
+    let instruction =
+        crate::people::instruction::review_instruction(gate, title.as_deref(), options, prompt);
+    GateRequest {
+        event: EventPayload::ReviewRequested {
+            node: gate.to_string(),
+            options: apb_core::schema::effective_review_options(options),
+            title,
+            instruction,
+            prompt: prompt.map(str::to_string),
+            recommendation: None,
+            plan_digest: None,
+        },
+        auto: Some(decision),
+        by: Some(crate::event::DecidedBy::Unattended),
+    }
 }
 
 /// The effects of every sub-playbook the playbook runs, recursively and in

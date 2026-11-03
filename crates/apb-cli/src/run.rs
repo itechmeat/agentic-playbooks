@@ -183,6 +183,10 @@ fn gate_refusal_message(refusal: &serde_json::Value) -> String {
             strings("missing").join(", ")
         ),
         p if p == apb_engine::consent::REFUSAL_POLICY => crate::consent::refusal_message(refusal),
+        apb_engine::run_config::UNATTENDED_UNSUPPORTED => format!(
+            "run refused ({policy}): {}",
+            refusal["detail"].as_str().unwrap_or_default()
+        ),
         other => format!("run refused ({other}): {refusal}"),
     }
 }
@@ -489,6 +493,15 @@ pub(crate) struct RunArgs {
     /// Secret params and credential-shaped values are never stored
     #[arg(long, conflicts_with = "estimate")]
     pub remember: bool,
+    /// Run with no person watching (a CI job): every wait the playbook
+    /// gives no unattended outcome (a review without `unattended: {
+    /// decide }`, a publish, a question without a default) fails the run
+    /// at once (hitl_required), and a budget pause fails it
+    /// (budget_exhausted). It grants nothing: trust, the irreversible
+    /// consent and the launch policy are asked as for any start. Refused
+    /// with --supervise and --execution host
+    #[arg(long, conflicts_with = "estimate")]
+    pub unattended: bool,
 }
 
 /// `--remember`: stores what the start was given once the run gate and the
@@ -641,6 +654,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         notify,
         estimate,
         remember,
+        unattended,
     } = args;
     let (name, version) = (name.as_str(), version.as_deref());
     let execution = execution.as_deref();
@@ -661,6 +675,38 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         },
     };
     let host = execution_mode == Some(apb_core::execution::ExecutionMode::Host);
+    // An unattended start that also asks for what the mode cannot hold
+    // (supervision, host execution, asked for or resolved) is refused
+    // before anything is written, by the run gate's own check, with the
+    // start action that answers it.
+    let unattended_start = apb_engine::gate::UnattendedStart {
+        unattended,
+        mode: if supervise {
+            RunMode::AgentSupervised
+        } else {
+            RunMode::Autonomous
+        },
+        execution: &apb_core::execution::ExecutionRequest {
+            mode: execution_mode,
+            ..Default::default()
+        },
+    };
+    if let Err(refusal) = apb_engine::gate::check_unattended(root, &unattended_start) {
+        let wref = apb_core::scope::PlaybookRef {
+            origin: apb_core::scope::Origin::Project { workspace_id: None },
+            id: name.to_string(),
+            version: version.map(str::to_string),
+        };
+        let actions = apb_mcp::tools::actions::start_actions(
+            apb_engine::next_action::start::StartOf::of(&wref),
+            &refusal,
+        );
+        eprintln!("run failed: {}", gate_refusal_message(&refusal));
+        for line in crate::actions::start_lines(&actions) {
+            eprintln!("  {line}");
+        }
+        return ExitCode::from(2);
+    }
     if supervise && host {
         eprintln!(
             "--execution host spawns no agent CLI, so it cannot start a background supervisor agent (--supervise)"
@@ -867,6 +913,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     opts.overrides = overrides;
     opts.cache = cache;
     opts.execution = request;
+    opts.unattended = unattended;
     opts.eval = eval;
     // The consent and the `expected_*` pins come from the run gate
     // (`gate_run`).
@@ -1525,6 +1572,11 @@ fn run_detail_text(
             QUESTION_TEXT_MAX
         )
     );
+    if apb_engine::run_view::run_unattended(&run_dir) {
+        say!(
+            "  unattended: every wait without an unattended outcome fails the run (hitl_required)"
+        );
+    }
     if view.driver_dead() {
         say!("  driver dead");
     }
@@ -1593,6 +1645,13 @@ fn run_detail_text(
     for row in view.isolation() {
         say!(
             "  isolation {}",
+            sanitize_for_terminal(&row.line(), OUTCOME_LINE_MAX)
+        );
+    }
+    // Each read-only check and the changes that failed it.
+    for row in view.read_only() {
+        say!(
+            "  read-only {}",
             sanitize_for_terminal(&row.line(), OUTCOME_LINE_MAX)
         );
     }

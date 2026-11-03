@@ -79,7 +79,8 @@ export function goalSummary(g: RunGoal): string {
 }
 
 // The event journal note of the outcome events (0.23.0, plus inbox gaps,
-// baseline snapshots and comparisons, and attempt notes).
+// baseline snapshots and comparisons, attempt notes, and the changes that
+// failed a read-only node).
 export function outcomeEventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -96,6 +97,13 @@ export function outcomeEventNote(e: WfEvent): string | undefined {
       const failed = Array.isArray(r.restore_failed) && r.restore_failed.length ? `; not restored: ${r.restore_failed.join(', ')}` : ''
       const kept = str(r.kept_copies) ? ` (copies kept in ${str(r.kept_copies)})` : ''
       return `protected: ${list || 'changed'}${failed}${kept}`
+    }
+    case 'read_only_violated': {
+      const changes = Array.isArray(r.changes) ? (r.changes as Record<string, unknown>[]) : []
+      const list = changes.map((c) => `${str(c.change) ?? '?'} ${str(c.path) ?? ''}`.trim()).join(', ')
+      const more = num(r.truncated) ? `, ${num(r.truncated)} more` : ''
+      const tier = str(r.tier) ?? 'detected'
+      return `read-only (${tier}) node changed the tree: ${list || 'changed'}${more}`
     }
     case 'goal_checked': {
       const idx = num(r.index)
