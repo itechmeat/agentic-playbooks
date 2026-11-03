@@ -135,12 +135,16 @@ function eventNote(e: WfEvent): string | undefined {
       const check = r.check as Record<string, unknown> | undefined
       return check && typeof check.tier === 'string' ? `read-only ${check.tier}` : undefined
     }
-    // A gate the unattended run decided with its declared option: never a
-    // person's consent.
-    case 'review_decided':
-      return r.decided_by === 'unattended'
-        ? `${String(r.decision ?? '')}: decided by the unattended run, not a person`
-        : undefined
+    // A gate the engine decided (an unattended run's declared option, or a
+    // decision model's enforced recommendation): never a person's consent.
+    // Any decider this page does not know is not a person either.
+    case 'review_decided': {
+      if (r.decided_by == null) return undefined
+      const decision = String(r.decision ?? '')
+      if (r.decided_by === 'unattended') return `${decision}: decided by the unattended run, not a person`
+      if (r.decided_by === 'model') return `${decision}: decided by the decision model, not a person`
+      return `${decision}: not decided by a person`
+    }
     case 'agent_env_applied':
       return agentEnvNote(r)
     case 'tool_exposure_mismatch':

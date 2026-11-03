@@ -379,12 +379,18 @@ fn gate_visit_decision<'a>(
             EventPayload::ReviewWithdrawn { node: n, .. } if n == node && open => {
                 return Err("the gate visit was withdrawn");
             }
-            // An unattended run's declared decision is no person's label.
+            // A decision no person made is no person's label.
             EventPayload::ReviewDecided {
                 node: n,
-                decided_by: Some(_),
+                decided_by: Some(by),
                 ..
-            } if n == node && open => return Err("the gate visit was decided unattended"),
+            } if n == node && open => {
+                return Err(match by {
+                    crate::event::DecidedBy::Unattended => "the gate visit was decided unattended",
+                    crate::event::DecidedBy::Model => "the model decided the gate itself",
+                    crate::event::DecidedBy::Unknown => "the gate visit was decided by no person",
+                });
+            }
             EventPayload::ReviewDecided {
                 node: n,
                 decision,

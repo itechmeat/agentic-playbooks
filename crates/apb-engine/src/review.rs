@@ -31,8 +31,9 @@ pub struct ReviewEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
     /// Who decided when it was not a person: `unattended` for the gate's
-    /// declared outcome in an unattended run, stamped by the engine alone
-    /// ([`post_unattended_decision`]); no decision surface can set it.
+    /// declared outcome in an unattended run, `model` for an enforced
+    /// review recommendation, stamped by the engine alone
+    /// ([`post_engine_decision`]); no decision surface can set it.
     /// `None` for a person's decision and in old channels; a value this
     /// binary does not know reads as `unknown`, never as a person.
     #[serde(
@@ -296,24 +297,21 @@ pub fn post_decision_to(
     append_decision(run_dir, cmd, nonce, request, None)
 }
 
-/// Queues the declared `unattended: { decide }` outcome of a `human_review`
-/// gate in an unattended run, stamped `by: unattended`, for the request the
-/// journal holds at seq `request`. The engine's own path, never a decision
-/// surface's: the same lock and checks as a person's decision bound to a
-/// request, so a decision already queued for it (a person's, or this one
-/// posted before a crash) wins and this one is refused `AlreadyAnswered`.
-pub(crate) fn post_unattended_decision(
+/// Queues a decision the engine itself makes for the request the journal
+/// holds at seq `request`, stamped `by`: `unattended` for the declared
+/// `unattended: { decide }` outcome of a gate in an unattended run, `model`
+/// for an enforced review recommendation. The engine's own path, never a
+/// decision surface's: the same lock and checks as a person's decision
+/// bound to a request, so a decision already queued for it (a person's, or
+/// this one posted before a crash) wins and this one is refused
+/// `AlreadyAnswered`.
+pub(crate) fn post_engine_decision(
     run_dir: &Path,
     cmd: ReviewCommand,
     request: u64,
+    by: crate::event::DecidedBy,
 ) -> Result<u64, EngineError> {
-    append_decision(
-        run_dir,
-        cmd,
-        None,
-        Some(request),
-        Some(crate::event::DecidedBy::Unattended),
-    )
+    append_decision(run_dir, cmd, None, Some(request), Some(by))
 }
 
 fn append_decision(

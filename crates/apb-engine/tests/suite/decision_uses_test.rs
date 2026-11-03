@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
 use apb_decide::testing::{StubResponse, StubServer};
-use apb_engine::event::{Event, EventPayload, read_all};
+use apb_engine::event::{DecidedBy, Event, EventPayload, read_all};
 use apb_engine::scheduler::{RunMode, RunOptions, RunResult, resume, run};
 use apb_engine::state::RunStatus;
 use serde_json::{Value, json};
@@ -798,17 +798,22 @@ fn review_auto_decide_posts_needs_changes_with_an_auto_note() {
     let note = events
         .iter()
         .find_map(|e| match &e.payload {
-            EventPayload::ReviewDecided { decision, note, .. } => {
-                Some((decision.clone(), note.clone()))
-            }
+            EventPayload::ReviewDecided {
+                decision,
+                note,
+                decided_by,
+                ..
+            } => Some((decision.clone(), note.clone(), *decided_by)),
             _ => None,
         })
         .unwrap();
+    // The model decided, not a person: the journal says so.
     assert_eq!(
         note,
         (
             "needs_changes".to_string(),
-            "auto: stub/jev-1.13.0 p=0.90".to_string()
+            "auto: stub/jev-1.13.0 p=0.90".to_string(),
+            Some(DecidedBy::Model)
         )
     );
     assert!(decisions(&events, "review_triage")[0].applied);

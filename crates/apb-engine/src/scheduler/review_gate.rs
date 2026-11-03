@@ -24,13 +24,15 @@ pub(crate) enum Consume<'a> {
 }
 
 /// The request a gate declares once per visit: the `ReviewRequested` event,
-/// and a decision the engine posts by itself (an enforced recommendation).
+/// and a decision the engine posts by itself (an enforced recommendation, or
+/// an unattended run's declared decision).
 pub(crate) struct GateRequest {
     pub(crate) event: EventPayload,
     pub(crate) auto: Option<(String, String)>,
-    /// Who posts `auto` when it is not the engine's recommendation:
+    /// Who decided `auto`: `model` for an enforced recommendation,
     /// `unattended` for an unattended run's declared decision, stamped on
-    /// the channel entry and journaled as `decided_by`.
+    /// the channel entry and journaled as `decided_by`. `auto` is posted
+    /// only with a decider named here.
     pub(crate) by: Option<crate::event::DecidedBy>,
 }
 
@@ -96,34 +98,31 @@ pub(crate) fn await_decision(
     if review_open_count(&events, current) == 0 {
         let req = request(log, &events)?;
         let requested = log.append(req.event)?.seq;
-        // Enforced: post through the review channel, so it is consumed and
-        // journaled like a person's decision; a decision a person already
-        // queued wins (the channel refuses a second one), and any failure
-        // waits for the person (fail-closed).
-        if let Some((decision, note)) = req.auto {
+        // The engine's own decision (an enforced recommendation, or an
+        // unattended run's declared outcome): posted through the review
+        // channel for this request and stamped with who decided, so it is
+        // consumed and journaled like a person's decision but never reads
+        // as one. A decision a person already queued wins (the channel
+        // refuses a second one).
+        if let (Some((decision, note)), Some(by)) = (req.auto, req.by) {
             let cmd = crate::review::ReviewCommand {
                 node: current.clone(),
                 decision,
                 note,
             };
-            match req.by {
-                // The declared decision is consumed right away, in this
-                // look, like a decision queued before the request. A
-                // failure to post it is the next look's to settle
-                // ([`post_unattended`]).
-                Some(crate::event::DecidedBy::Unattended) => {
-                    let _ = crate::review::post_unattended_decision(run_dir, cmd, requested);
-                    if let Some(entry) = read_reviews_after(run_dir, None)?
-                        .into_iter()
-                        .filter(|e| e.cmd.node == **current)
-                        .nth(review_decided_count(&events, current))
-                    {
-                        return Ok(GateStep::Decided(entry));
-                    }
-                }
-                Some(crate::event::DecidedBy::Unknown) | None => {
-                    let _ = crate::review::post_review(run_dir, cmd);
-                }
+            let _ = crate::review::post_engine_decision(run_dir, cmd, requested, by);
+            // The declared decision is consumed right away, in this look,
+            // like a decision queued before the request. A failure to post
+            // it is the next look's to settle ([`post_unattended`]). An
+            // enforced recommendation that fails to post waits for the
+            // person (fail-closed).
+            if by == crate::event::DecidedBy::Unattended
+                && let Some(entry) = read_reviews_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|e| e.cmd.node == **current)
+                    .nth(review_decided_count(&events, current))
+            {
+                return Ok(GateStep::Decided(entry));
             }
         }
     }
@@ -203,7 +202,12 @@ pub(crate) fn post_unattended(
         decision: decision.0.clone(),
         note: decision.1.clone(),
     };
-    match crate::review::post_unattended_decision(run_dir, cmd, requested) {
+    match crate::review::post_engine_decision(
+        run_dir,
+        cmd,
+        requested,
+        crate::event::DecidedBy::Unattended,
+    ) {
         Ok(_) | Err(EngineError::AlreadyAnswered(_)) => Ok(Ok(())),
         Err(e) => Ok(Err(format!(
             "{}: human_review `{gate}` could not record its unattended decision `{}`: {e}",
@@ -251,8 +255,8 @@ pub(crate) fn human_review_request(
             recommendation: rec.recommendation,
             plan_digest: None,
         },
+        by: rec.auto.as_ref().map(|_| crate::event::DecidedBy::Model),
         auto: rec.auto,
-        by: None,
     })
 }
 

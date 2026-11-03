@@ -112,18 +112,22 @@ describe('runEventJournal notes', () => {
     ])
   })
 
-  it("names an attempt's read-only tier and a gate the unattended run decided, never as a person", () => {
+  it("names an attempt's read-only tier and a gate no person decided, never as a person", () => {
     const entries = runEventJournal([
       { seq: 1, ts: 1, type: 'read_only_checked', node: 'scan', attempt: 1, check: { tier: 'enforced' } },
       { seq: 2, ts: 2, type: 'read_only_checked', node: 'plain', attempt: 1 },
       { seq: 3, ts: 3, type: 'review_decided', node: 'gate', decision: 'approve', note: '', decided_by: 'unattended' },
       { seq: 4, ts: 4, type: 'review_decided', node: 'gate', decision: 'approve', note: '' },
+      { seq: 5, ts: 5, type: 'review_decided', node: 'gate', decision: 'needs_changes', note: 'auto: m p=0.9', decided_by: 'model' },
+      { seq: 6, ts: 6, type: 'review_decided', node: 'gate', decision: 'approve', note: '', decided_by: 'newer_decider' },
     ] as never)
     expect(entries.map((e) => e.note)).toEqual([
       'read-only enforced',
       undefined,
       'approve: decided by the unattended run, not a person',
       undefined,
+      'needs_changes: decided by the decision model, not a person',
+      'approve: not decided by a person',
     ])
   })
 
