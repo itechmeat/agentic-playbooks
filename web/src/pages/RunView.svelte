@@ -83,6 +83,7 @@
   import { releasedLine, withRetryBadges } from '../lib/retrywait'
   import RunDriveNotes from '../lib/RunDriveNotes.svelte'
   import { pageControls } from '../lib/nextactions'
+  import ReviewPanel from '../lib/ReviewPanel.svelte'
   import { toast } from 'svelte-sonner'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
 
@@ -761,35 +762,7 @@
 
       <PublishPanel runId={id} views={detail.publish} gates={publishes} posting={deciding} onDecide={decidePublish} />
 
-      {#if pending.length}
-        <section class="box glow flex flex-col gap-3 px-4 pt-4 pb-3" style:--k="var(--c-amber)">
-          <span class="box-cap">Human review</span>
-          {#each pending as pr (pr.node)}
-            <div class="flex flex-col gap-1">
-              <span class="text-xs text-amber">{pr.node}</span>
-              {#if pr.prompt}
-                <pre class="prose-text m-0 text-sm break-words whitespace-pre-wrap">{pr.prompt}</pre>
-              {/if}
-              {#if pr.recommendation}
-                <p class="m-0 text-xs text-muted-foreground" data-testid="review-recommendation">{pr.recommendation}</p>
-              {/if}
-              <div class="flex flex-wrap gap-1">
-                {#each pr.options as opt (opt)}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    class="h-7"
-                    onclick={() => decide(pr, opt)}
-                    disabled={deciding === `${pr.node}:${opt}`}
-                  >
-                    {opt}
-                  </Button>
-                {/each}
-              </div>
-            </div>
-          {/each}
-        </section>
-      {/if}
+      <ReviewPanel reviews={pending} posting={deciding} onDecide={decide} />
 
       {#if supervisor}
         <section class="box glow flex flex-col gap-2 px-4 pt-4 pb-3 text-xs" style:--k="var(--c-amber)">

@@ -1,6 +1,6 @@
 import { pendingSupervisorFromPayload, type SupervisorEntry } from './supervisors'
 import type { PublishGate } from './publish'
-import type { ActionCode, NextAction, PendingHostTask, ReviewRecommendation } from './api.gen'
+import type { ActionCode, NextAction, PendingHostTask, ReviewRecommendation, UnattendedOutcome } from './api.gen'
 import type { RunDetail } from './types'
 
 // The identity of the request a gate entry posts to: the run it belongs to
@@ -23,6 +23,10 @@ export interface ReviewEntry extends GateRequest {
    * Part 11); absent unless the machine runs `review_triage` in advise or
    * enforce. Never preselects an option. */
   recommendation?: string
+  /** What an unattended run does at this gate, from the gate's own
+   * `decide_review` action; the next-actions panel leaves that action to
+   * this card. Absent on a payload without it. */
+  unattended?: UnattendedOutcome
 }
 
 // A pending question as the question panel renders it. The panel always
@@ -106,6 +110,8 @@ export function runGates(detail: RunDetail): RunGates {
         const entry: ReviewEntry = { node, options, ...(prompt ? { prompt } : {}), ...req('decide_review', node) }
         const note = recommendationNote(recommendation)
         if (note) entry.recommendation = note
+        const unattended = ownAction(detail, 'decide_review', node)?.unattended
+        if (unattended) entry.unattended = unattended
         return entry
       }),
     publishes: p.pending_reviews.flatMap(({ node, publish, prompt }) =>
@@ -126,12 +132,16 @@ export function runGates(detail: RunDetail): RunGates {
   }
 }
 
+// The next action of the page's own run with this code at `node`.
+function ownAction(detail: RunDetail, code: ActionCode, node: string): NextAction | undefined {
+  const actions: NextAction[] = detail.next_actions?.actions ?? []
+  return actions.find((x) => x.code === code && x.target.node === node && x.run_id === detail.run_id)
+}
+
 // The request of the page's own run that a gate of `node` answers: the run
 // id, and the seq of the matching next action (same code, node and run).
 export function gateRequest(detail: RunDetail, code: ActionCode, node: string): GateRequest {
-  const actions: NextAction[] = detail.next_actions?.actions ?? []
-  const a = actions.find((x) => x.code === code && x.target.node === node && x.run_id === detail.run_id)
-  const seq = a?.target.request?.seq
+  const seq = ownAction(detail, code, node)?.target.request?.seq
   return seq === undefined ? { runId: detail.run_id } : { runId: detail.run_id, request: seq }
 }
 

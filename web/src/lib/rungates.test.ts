@@ -228,7 +228,7 @@ describe('publish gates', () => {
   // Each gate carries the request it answers: the run id and the seq of the
   // run's own matching next action, and a publish gate the nonce of its plan.
   // A child's action of the same node is never taken for the page's own.
-  it('carries the run id and request seq of the matching next action', () => {
+  it('carries the run id, request seq and unattended outcome of the matching next action', () => {
     const act = (code: NextAction['code'], node: string, run_id: string, seq: number, kind: 'question' | 'review' | 'publish'): NextAction => ({
       code,
       run_id,
@@ -244,14 +244,21 @@ describe('publish gates', () => {
       progress({ pending_reviews: [review, publish], pending_questions: [question] }),
       'running',
       [
-        act('decide_review', 'gate', 'child-1', 99, 'review'),
-        act('decide_review', 'gate', 'r', 7, 'review'),
+        { ...act('decide_review', 'gate', 'child-1', 99, 'review'), unattended: { kind: 'decides', option: 'reject' } },
+        { ...act('decide_review', 'gate', 'r', 7, 'review'), unattended: { kind: 'fails_run', code: 'hitl_required' } },
         act('decide_publish', 'ship', 'r', 9, 'publish'),
         act('answer_question', 'ask', 'r', 12, 'question'),
       ],
     )
     const gates = runGates(d)
-    expect(gates.reviews[0]).toMatchObject({ node: 'gate', runId: 'r', request: 7 })
+    // The review card draws the gate's `decide_review`, so it also carries
+    // what an unattended run does there.
+    expect(gates.reviews[0]).toMatchObject({
+      node: 'gate',
+      runId: 'r',
+      request: 7,
+      unattended: { kind: 'fails_run', code: 'hitl_required' },
+    })
     expect(gates.publishes[0]).toMatchObject({ node: 'ship', runId: 'r', request: 9, plan: { nonce: 'publish-0123' } })
     expect(gates.questions[0]).toMatchObject({ node: 'ask', runId: 'r', request: 12 })
   })
