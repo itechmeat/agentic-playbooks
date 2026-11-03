@@ -134,6 +134,18 @@ pub(crate) fn with_run_redaction<T>(
     f()
 }
 
+/// `value` as a run surface prints it, redacted before it is serialized:
+/// a serialized string escapes quotes, backslashes and control characters,
+/// a spelling of a secret value the redactor does not know.
+pub(crate) fn shown_value(mut value: serde_json::Value) -> serde_json::Value {
+    RUN_REDACTOR.with(|r| {
+        if let Some(redactor) = r.borrow().as_ref() {
+            redactor.redact_json(&mut value);
+        }
+    });
+    value
+}
+
 /// `text` as a run surface prints it: without the secret values of the run
 /// [`with_run_redaction`] is about, unchanged outside one.
 pub(crate) fn shown(text: &str) -> String {

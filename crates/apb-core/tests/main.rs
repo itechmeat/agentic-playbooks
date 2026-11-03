@@ -137,6 +137,8 @@ mod validate_quality_test;
 mod validate_references_test;
 #[path = "suite/validate_retry_test.rs"]
 mod validate_retry_test;
+#[path = "suite/validate_review_cap_test.rs"]
+mod validate_review_cap_test;
 #[path = "suite/validate_semantics_test.rs"]
 mod validate_semantics_test;
 #[path = "suite/validate_structure_test.rs"]

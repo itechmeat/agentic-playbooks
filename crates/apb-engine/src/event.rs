@@ -3067,6 +3067,13 @@ pub fn read_journal(run_dir: &Path) -> Result<JournalRead, EngineError> {
     read_journal_with(run_dir, true)
 }
 
+/// A journal snapshot's bytes as [`read_journal`] reads them: a single
+/// unparsable last line is dropped, an unparsable line with more after it
+/// is an error.
+pub(crate) fn parse_lossy_tail(bytes: &[u8]) -> Result<JournalRead, EngineError> {
+    parse_journal(bytes, true).map_err(Unreadable::into_error)
+}
+
 fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<JournalRead, EngineError> {
     read_journal_snapshot(run_dir, tolerate_torn_tail).map(|(journal, _)| journal)
 }

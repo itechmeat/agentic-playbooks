@@ -30,6 +30,12 @@ export const NOTIFY_DEFAULT_TRANSITIONS = ['review', 'question', 'paused', 'fini
 /** Every run outcome an end-of-run notice can be narrowed to. */
 export const NOTIFY_OUTCOMES = ['succeeded', 'needs_look', 'failed', 'aborted'] as const
 
+/** Every reason a run output is missing. */
+export const MISSING_REASONS = ['not_run', 'not_succeeded', 'field_absent', 'not_json_object', 'truncated', 'item_not_passed', 'definition_unknown'] as const
+
+/** What a passed list item with an earlier send still unknown says beside its state. */
+export const UNRESOLVED_SEND_TEXT = "earlier send unresolved"
+
 /** The dashboard's default port (the dev server proxies to it). */
 export const DEFAULT_PORT = 7321
 

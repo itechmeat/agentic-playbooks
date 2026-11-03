@@ -185,7 +185,11 @@ fn take_lease(run_dir: &Path, wait: WakerFor) -> Result<Option<Lease>, EngineErr
     if !run_dir.is_dir() {
         return Ok(None);
     }
-    Ok(Lease::try_take(run_dir, wait)?)
+    let lease = Lease::try_take(run_dir, wait)?;
+    if lease.is_some() {
+        crate::waker::acknowledge_held();
+    }
+    Ok(lease)
 }
 
 /// The waker of a released run: sleeps until the release at journal
@@ -285,6 +289,19 @@ pub fn spawn_waker(root: &Path, run_id: &str, seq: u64) -> Option<u32> {
 /// waits for it.
 pub fn spawn_release_waker(root: &Path, run_id: &str, seq: u64) -> Option<u32> {
     crate::waker::spawn(root, run_id, WakerFor::Release(seq))
+}
+
+/// The waker of the wait `hold` of run `run_id`, spawned unless one already
+/// holds it; `Ok` only once a waker holds its lease
+/// ([`crate::waker::spawn_held`]).
+pub fn spawn_held_waker(root: &Path, run_id: &str, hold: WakeHold) -> Result<(), String> {
+    crate::waker::spawn_held(root, run_id, hold.into())
+}
+
+/// [`spawn_held_waker`] without waiting for the acknowledgment: the caller
+/// settles it ([`crate::waker::HeldWaker::settle`]).
+pub fn start_held_waker(root: &Path, run_id: &str, hold: WakeHold) -> crate::waker::HeldWaker {
+    crate::waker::start_held(root, run_id, hold.into())
 }
 
 #[cfg(test)]

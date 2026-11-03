@@ -1521,3 +1521,86 @@ fn run_resume_refuses_a_busy_workdir() {
         "a refused resume journals nothing"
     );
 }
+
+/// A finished run's `run_wait` answer carries the declared run outputs, the
+/// same projection `run_status` and `run_report` carry; a run of a
+/// playbook that declares none carries no `run_outputs` key.
+#[test]
+fn run_wait_of_a_finished_run_carries_its_run_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/outs/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: outs\nname: outs\nversion: 1.0.0\noutputs:\n  greeting: { from: { node: note } }\n  gone: { from: { node: note, field: x } }\nnodes:\n  - { id: start, type: start }\n  - { id: note, type: prompt, prompt: \"hi there\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: note }\n  - { from: note, to: done }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/outs/current"), "1.0.0").unwrap();
+    let run_id = apb_engine::run(root, "outs", None, apb_engine::RunOptions::default())
+        .unwrap()
+        .run_id;
+    let mut waiter = apb_engine::run_wait::RunWaiter::new(root, &run_id).unwrap();
+    let res = waiter.wait(std::time::Duration::from_secs(5)).unwrap();
+    let out = apb_mcp::tools::run_wait_result(root, &run_id, &res).unwrap();
+    assert_eq!(out["reason"], "finished", "{out}");
+    let outputs = &out["run_outputs"];
+    assert_eq!(outputs["final"], true, "{out}");
+    assert_eq!(outputs["outputs"][0]["name"], "greeting");
+    assert_eq!(outputs["outputs"][0]["value"], "hi there");
+    assert_eq!(outputs["outputs"][1]["reason"], "not_json_object");
+    assert_eq!(run_status(root, &run_id).unwrap()["run_outputs"], *outputs);
+    assert_eq!(
+        apb_mcp::tools::run_report(root, &run_id).unwrap()["run_outputs"],
+        *outputs
+    );
+}
+
+/// The run whose resend went out while its first send stays unknown, and
+/// what every surface says about it: one fixture
+/// (`crates/apb-core/tests/fixtures/resent_run.json`) for the CLI, MCP and
+/// HTTP tests.
+fn resent_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../apb-core/tests/fixtures/resent_run.json"
+    ))
+    .unwrap()
+}
+
+/// The words of [`resent_fixture`] under `key` (`reason` or `gap`).
+fn resent_text(key: &str) -> String {
+    resent_fixture()[key].as_str().unwrap().to_string()
+}
+
+fn seed_resent_run(root: &std::path::Path, run_id: &str) {
+    let fixture = resent_fixture();
+    let dir = root.join(".apb/runs").join(run_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("playbook.yaml"),
+        fixture["playbook"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut log = apb_engine::event::EventLog::open(&dir).unwrap();
+    for line in fixture["events"].as_array().unwrap() {
+        log.append(serde_json::from_value(line.clone()).unwrap())
+            .unwrap();
+    }
+}
+
+/// `run_status` (its next action) and `run_report` (the run outcome) say
+/// that the resend went out and that the first send is still unknown.
+#[test]
+fn run_status_says_a_resend_went_out_and_the_first_send_is_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    seed_resent_run(root, "resent");
+    let status = run_status(root, "resent").unwrap().to_string();
+    assert!(status.contains(&resent_text("reason")), "{status}");
+    let report = apb_mcp::tools::run_report(root, "resent")
+        .unwrap()
+        .to_string();
+    assert!(report.contains(&resent_text("gap")), "{report}");
+}

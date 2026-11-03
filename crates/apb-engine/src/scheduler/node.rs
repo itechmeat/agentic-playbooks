@@ -3708,7 +3708,12 @@ pub(crate) fn run_playbook_node(
         )?;
         // Nested resume can also mirror wakes onto the parent log.
         log.resync_seq()?;
-        return Ok(map_child_outcome(root, &existing, res.outcome));
+        return Ok(map_child_outcome(
+            root,
+            &existing,
+            res.outcome,
+            child_output_of(playbook, node_id),
+        ));
     }
 
     // Render the node instruction with the parent context; the result is the
@@ -3897,7 +3902,20 @@ pub(crate) fn run_playbook_node(
     // Child may have mirrored wakes onto this parent log while we held it open
     // (issue #45 finding 8). Re-sync next_seq before any further parent appends.
     log.resync_seq()?;
-    Ok(map_child_outcome(root, &child_run_id, res.outcome))
+    Ok(map_child_outcome(
+        root,
+        &child_run_id,
+        res.outcome,
+        child_output_of(playbook, node_id),
+    ))
+}
+
+/// What a `type: playbook` node hands on: its `output` (answer by default).
+fn child_output_of(playbook: &Playbook, node_id: &str) -> apb_core::run_outputs::ChildOutput {
+    match playbook.node(node_id).map(|n| &n.kind) {
+        Some(NodeKind::Playbook { output, .. }) => *output,
+        _ => apb_core::run_outputs::ChildOutput::Answer,
+    }
 }
 
 /// Maps a child run's terminal status to the parent node's (status, output).
@@ -3910,14 +3928,32 @@ pub(crate) fn run_playbook_node(
 /// the parent node with a diagnostic naming the child run id and the error,
 /// while a successful read whose `run_answer` is None (a promptless finish, a
 /// legitimately empty answer) stays Succeeded with "".
-fn map_child_outcome(root: &Path, child_run_id: &str, outcome: RunStatus) -> (NodeStatus, String) {
+///
+/// With `output: outputs` the node's output is the child's projected run
+/// outputs as one compact JSON object ([`crate::run_outputs::child_object`])
+/// instead of the answer text.
+fn map_child_outcome(
+    root: &Path,
+    child_run_id: &str,
+    outcome: RunStatus,
+    output: apb_core::run_outputs::ChildOutput,
+) -> (NodeStatus, String) {
     match outcome {
         RunStatus::Succeeded => {
             let dir = root.join(".apb/runs").join(child_run_id);
             match read_all(&dir) {
                 Ok(events) => {
-                    let answer = crate::progress::run_answer(&dir, &events).unwrap_or_default();
-                    (NodeStatus::Succeeded, answer)
+                    let text = match output {
+                        apb_core::run_outputs::ChildOutput::Answer => {
+                            crate::progress::run_answer(&dir, &events).unwrap_or_default()
+                        }
+                        apb_core::run_outputs::ChildOutput::Outputs => {
+                            crate::run_outputs::child_object(&crate::run_outputs::of_run(
+                                &dir, &events,
+                            ))
+                        }
+                    };
+                    (NodeStatus::Succeeded, text)
                 }
                 Err(e) => (
                     NodeStatus::Failed,

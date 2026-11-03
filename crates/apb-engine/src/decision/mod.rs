@@ -433,8 +433,8 @@ impl DecisionRunner {
     /// which every request loses whatever `privacy.redact` says. Read anew
     /// at every request: the set only grows, and a cached one would miss a
     /// declaration a patch added after the first decision.
-    fn run_values(&self) -> redact::Redactor {
-        redact::Redactor::new(crate::run_redact::secret_values(&self.run_dir), &self.root)
+    fn run_values(&self) -> crate::run_redact::RunValues {
+        crate::run_redact::RunValues::of(&self.run_dir, &self.root)
     }
 
     /// Every string of `v` as a request carries it
@@ -446,7 +446,7 @@ impl DecisionRunner {
     /// `text` as a request carries it: the full redactor when
     /// `privacy.redact` is on, and without the run's secret values
     /// (`run_values`, read once for the whole request) either way.
-    fn outbound_text_with(&self, run_values: &redact::Redactor, text: &str) -> String {
+    fn outbound_text_with(&self, run_values: &crate::run_redact::RunValues, text: &str) -> String {
         let text = run_values.scrub_values(text);
         if self.settings.privacy.redact {
             self.redactor().redact(&text)
@@ -456,7 +456,11 @@ impl DecisionRunner {
     }
 
     /// [`DecisionRunner::outbound_text_with`] over every string of `v`.
-    fn outbound_value_with(&self, run_values: &redact::Redactor, mut v: Value) -> Value {
+    fn outbound_value_with(
+        &self,
+        run_values: &crate::run_redact::RunValues,
+        mut v: Value,
+    ) -> Value {
         run_values.scrub_values_json(&mut v);
         if self.settings.privacy.redact {
             self.redactor().redact_value(v)
@@ -1542,6 +1546,37 @@ mod tests {
         );
         let v = runner.outbound_value(json!({ "m": text }));
         assert!(!v.to_string().contains(value), "{v}");
+    }
+
+    /// A request about a run whose child's config cannot be read carries
+    /// none of its text: the child might hold a secret the request would
+    /// otherwise send. Once the config reads, only the child's value goes.
+    #[test]
+    fn a_request_withholds_its_text_when_a_childs_secrets_cannot_be_read() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let runs = root.path().join(".apb/runs");
+        let (parent, child) = (runs.join("p-1"), runs.join("c-1"));
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        crate::event::EventLog::open(&parent)
+            .unwrap()
+            .append(EventPayload::ChildRunStarted {
+                node_id: "sub".into(),
+                run_id: "c-1".into(),
+            })
+            .unwrap();
+        std::fs::write(child.join("run.yaml"), "params: [unclosed\n").unwrap();
+        let runner = enforce_runner(cfg.path(), &parent);
+        let v = runner.outbound_value(json!({ "m": "said orchard-candle", "n": 2 }));
+        assert_eq!(v, json!({ "m": crate::run_redact::WITHHELD, "n": 2 }));
+        let cfg_run = crate::run_config::RunConfig {
+            params: BTreeMap::from([("password".to_string(), "orchard-candle".to_string())]),
+            ..Default::default()
+        };
+        crate::run_config::write_run_config(&child, &cfg_run).unwrap();
+        let v = runner.outbound_value(json!({ "m": "said orchard-candle" }));
+        assert_eq!(v, json!({ "m": "said [redacted]" }));
     }
 
     #[test]

@@ -18,16 +18,17 @@ pub const MAX_TRIES: usize = 3;
 /// The least time between two tries of one transition, in milliseconds.
 pub const RETRY_GAP_MS: u64 = 30_000;
 
-/// Overrides [`RETRY_GAP_MS`] (milliseconds). Tests shorten it.
+/// Overrides [`RETRY_GAP_MS`] (milliseconds), for tests only: a release
+/// build ignores it ([`crate::env_duration::test_override`]).
 pub const RETRY_GAP_ENV: &str = "APB_NOTIFY_RETRY_GAP_MS";
 
-/// The retry gap in force: [`RETRY_GAP_ENV`] when set, else
-/// [`RETRY_GAP_MS`].
+/// The retry gap in force: [`RETRY_GAP_MS`], shortened by
+/// [`RETRY_GAP_ENV`] in a debug build only.
 pub fn retry_gap_ms() -> u64 {
-    std::env::var(RETRY_GAP_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(RETRY_GAP_MS)
+    crate::env_duration::test_override(std::env::var(RETRY_GAP_ENV).ok().as_deref())
+        .map_or(RETRY_GAP_MS, |d| {
+            u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// What every notification label starts with. A caller's `--intent` never

@@ -723,14 +723,16 @@ mod tests {
     /// A released run whose wake time passed long ago with no waker holding
     /// its lease and no driver is not "waiting to retry": nothing will
     /// resume it, so it reads interrupted with its driver dead. One whose
-    /// wake is ahead still waits.
+    /// wake is ahead still waits, and so does a late one whose waker holds
+    /// its lease (retrying behind a busy tree, say).
     #[test]
     fn a_release_long_overdue_with_no_waker_reads_driver_dead() {
         let tmp = tempfile::tempdir().unwrap();
         let now = apb_core::clock::now_ms_u64();
-        for (id, wake_at_ms, lost) in [
-            ("late", now - 600_000, true),
-            ("ahead", now + 600_000, false),
+        for (id, wake_at_ms, waker, lost) in [
+            ("late", now - 600_000, false, true),
+            ("ahead", now + 600_000, false, false),
+            ("late-held", now - 600_000, true, false),
         ] {
             let run_dir = tmp.path().join(".apb/runs").join(id);
             write_run(
@@ -757,6 +759,15 @@ mod tests {
                 ],
                 reaped_pid(),
             );
+            let _lease = waker.then(|| {
+                let seq = RunState::fold(&crate::event::read_all(&run_dir).unwrap())
+                    .released
+                    .unwrap()
+                    .seq;
+                crate::waker::Lease::try_take(&run_dir, crate::waker::WakerFor::Release(seq))
+                    .unwrap()
+                    .unwrap()
+            });
             let view = RunView::load(&run_dir, id).unwrap();
             assert_eq!(view.released().is_none(), lost, "{id}");
             assert_eq!(view.driver_dead(), lost, "{id}");

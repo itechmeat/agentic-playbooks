@@ -591,3 +591,205 @@ fn a_self_edge_loops_inside_a_parallel_batch() {
     assert_eq!(count_starts(&events, "merge"), 1, "the merge ran once");
     assert_eq!(count_finishes(&events, "done"), 1);
 }
+
+// --- A bounded edge out of a review, spent (design 7.1) ------------------------
+
+/// The review loop with its cap on the review's own edge: a second
+/// `rejected` finds that edge spent and no other edge for the decision.
+const REVIEW_CAP: &str = r#"schema: 2
+id: reviewcap
+name: Review cap
+version: 1.0.0
+nodes:
+  - { id: start,  type: start }
+  - { id: review, type: human_review, options: [approved, rejected] }
+  - { id: fix,    type: script, script: scripts/review.sh, runner: sh }
+  - { id: done,   type: finish, outcome: success }
+edges:
+  - { from: start,  to: review }
+  - { from: review, to: fix, condition: { type: review_status, equals: rejected }, max_traversals: 1 }
+  - { from: review, to: done, condition: { type: review_status, equals: approved } }
+  - { from: fix,    to: review }
+"#;
+
+/// A review whose decision has no edge left (its only edge for it is spent)
+/// fails the run as before, but through the unhandled-failure stop: the run
+/// error names the review, its decision and the spent edge's address, not a
+/// driver error with no node.
+#[test]
+fn a_spent_bounded_edge_out_of_a_review_fails_the_run_naming_it() {
+    let (errors, events) = dead_end_after(REVIEW_CAP, &["rejected", "rejected"]);
+    assert_eq!(
+        errors,
+        vec![(
+            Some("review".to_string()),
+            "no edge can be taken from `review`: decision `rejected`; exhausted: e:review>fix#1"
+                .to_string()
+        )]
+    );
+    assert_eq!(count_finishes(&events, "fix"), 1, "the loop ran once");
+}
+
+/// A review with two capped loops, one per decision: once both are spent,
+/// the dead end names only the edge of the decision that found no edge,
+/// never the other decision's spent edge.
+const TWO_CAPS: &str = r#"schema: 2
+id: reviewcap
+name: Review cap
+version: 1.0.0
+nodes:
+  - { id: start,  type: start }
+  - { id: review, type: human_review, options: [approved, rejected, later] }
+  - { id: fix,    type: script, script: scripts/review.sh, runner: sh }
+  - { id: redo,   type: script, script: scripts/review.sh, runner: sh }
+  - { id: done,   type: finish, outcome: success }
+edges:
+  - { from: start,  to: review }
+  - { from: review, to: redo, condition: { type: review_status, equals: later }, max_traversals: 1 }
+  - { from: review, to: fix, condition: { type: review_status, equals: rejected }, max_traversals: 1 }
+  - { from: review, to: done, condition: { type: review_status, equals: approved } }
+  - { from: redo,   to: review }
+  - { from: fix,    to: review }
+"#;
+
+#[test]
+fn the_dead_end_names_only_the_spent_edge_of_its_own_decision() {
+    let (errors, _) = dead_end_after(TWO_CAPS, &["later", "rejected", "rejected"]);
+    assert_eq!(
+        errors,
+        vec![(
+            Some("review".to_string()),
+            "no edge can be taken from `review`: decision `rejected`; exhausted: e:review>fix#1"
+                .to_string()
+        )]
+    );
+}
+
+/// Runs `yaml` (playbook `reviewcap`), deciding its review with each of
+/// `decisions` in turn, to its failed end; returns its run errors and its
+/// journal.
+fn dead_end_after(yaml: &str, decisions: &[&str]) -> (Vec<(Option<String>, String)>, Vec<Event>) {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path(), "reviewcap", yaml, REVIEW_OK);
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "reviewcap", None, RunOptions::default()));
+    });
+    let runs = dir.path().join(".apb/runs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let rd = loop {
+        if let Some(e) = fs::read_dir(&runs)
+            .ok()
+            .and_then(|mut d| d.find_map(|e| e.ok()))
+            .filter(|e| e.path().join("events.jsonl").is_file())
+        {
+            break e.path();
+        }
+        assert!(std::time::Instant::now() < deadline, "no run directory");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    for (i, decision) in decisions.iter().enumerate() {
+        let visit = i + 1;
+        // Gated on the journal: the review asks for its `visit`th decision.
+        loop {
+            let asked = read_all(&rd)
+                .unwrap_or_default()
+                .iter()
+                .filter(|e| matches!(e.payload, EventPayload::ReviewRequested { .. }))
+                .count();
+            if asked >= visit {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "review {visit} never asked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        apb_engine::review::post_review(
+            &rd,
+            apb_engine::review::ReviewCommand {
+                node: "review".into(),
+                decision: decision.to_string(),
+                note: String::new(),
+            },
+        )
+        .unwrap();
+    }
+    let res = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .unwrap()
+        .unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let events = read_all(&rd).unwrap();
+    let errors = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::RunError { node, reason } => Some((node.clone(), reason.clone())),
+            _ => None,
+        })
+        .collect();
+    (errors, events)
+}
+
+/// `check` fails once, then succeeds: its failure edge and then its success
+/// edge spend their one traversal each.
+const STATUS_CAPS: &str = r#"schema: 2
+id: statuscap
+name: Status cap
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: check, type: script, script: scripts/review.sh, runner: sh }
+  - { id: again, type: script, script: scripts/review.sh, runner: sh }
+  - { id: fix,   type: script, script: scripts/review.sh, runner: sh }
+edges:
+  - { from: start, to: check }
+  - { from: check, to: again, condition: { type: node_status, node: check, equals: success }, max_traversals: 1 }
+  - { from: check, to: fix, condition: { type: node_status, node: check, equals: failure }, max_traversals: 1 }
+  - { from: again, to: check }
+  - { from: fix,   to: check }
+"#;
+
+/// Fails `check` on its first run and succeeds from its second on (a
+/// counter in the working directory); `again` and `fix` succeed.
+const CHECK_THEN_FAIL: &str = r#"#!/bin/sh
+case "$APB_NODE_ID" in
+  check)
+    n=$(cat .checks 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > .checks
+    [ "$n" -eq 1 ] && { echo broken 1>&2; exit 1; }
+    echo ok ;;
+  *) echo ok ;;
+esac
+"#;
+
+/// A node's status dead end names its spent edge for that status only: the
+/// spent failure edge is not why a succeeded `check` stops. (A failed node
+/// nothing routes keeps the failure policy's own reason, so a status dead
+/// end is always a success.)
+#[test]
+fn the_dead_end_names_only_the_spent_edge_of_its_own_status() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path(), "statuscap", STATUS_CAPS, CHECK_THEN_FAIL);
+    let res = run(dir.path(), "statuscap", None, RunOptions::default()).unwrap();
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed, "{events:#?}");
+    let errors: Vec<(Option<String>, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::RunError { node, reason } => Some((node.clone(), reason.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        vec![(
+            Some("check".to_string()),
+            "no edge can be taken from `check`: status `succeeded`; exhausted: e:check>again#1"
+                .to_string()
+        )],
+        "{events:#?}"
+    );
+    assert_eq!(count_starts(&events, "check"), 3, "{events:#?}");
+}

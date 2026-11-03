@@ -170,6 +170,8 @@ fn lock(run_dir: &Path) -> Result<apb_core::fsutil::DirLock, EngineError> {
 struct OpenRun {
     sources: RunSources,
     defs: Vec<CriterionDef>,
+    /// The values the sources were redacted with.
+    values: apb_core::scrub::Scrubber,
 }
 
 /// What an opened run is cached under: the run and its journal as it is.
@@ -191,13 +193,21 @@ fn open_key(run_dir: &Path) -> OpenKey {
 }
 
 /// The ended run at `run_dir`, its sources redacted once: from the cache
-/// while its journal is unchanged, else read anew. An ended run's
-/// transcripts do not change.
+/// while its journal and the secret values of its tree are unchanged, else
+/// read anew. An ended run's transcripts do not change, but its tree can
+/// gain a run (a sibling a parent starts later) or lose a readable one, so
+/// the tree's values are discovered anew at every call: a tree whose
+/// secrets cannot all be read is not handed to a host at all, since a
+/// record's text could hold a value the scrubber misses.
 fn open_run(run_dir: &Path) -> Result<Arc<OpenRun>, EngineError> {
+    let values = crate::run_redact::RunRedactor::for_run_dir(run_dir).into_scrubber()?;
     let key = open_key(run_dir);
     let mut cache = OPENED.lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|(_, at, _)| at.elapsed() < OPEN_TTL);
-    if let Some((_, _, run)) = cache.iter().find(|(k, _, _)| *k == key) {
+    if let Some((_, _, run)) = cache
+        .iter()
+        .find(|(k, _, run)| *k == key && run.values.same_values(&values))
+    {
         return Ok(Arc::clone(run));
     }
     drop(cache);
@@ -207,12 +217,16 @@ fn open_run(run_dir: &Path) -> Result<Arc<OpenRun>, EngineError> {
             "the run has not ended: a run is graded once it ends".into(),
         ));
     }
-    sources.redact(crate::run_redact::RunRedactor::for_run_dir(run_dir).scrubber());
+    sources.redact(&values);
     let defs: Vec<CriterionDef> = super::grader::criteria_for(&sources)
         .into_iter()
         .filter(|d| d.source == CriterionSource::Playbook)
         .collect();
-    let run = Arc::new(OpenRun { sources, defs });
+    let run = Arc::new(OpenRun {
+        sources,
+        defs,
+        values,
+    });
     let mut cache = OPENED.lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|(k, _, _)| k.0 != key.0);
     if cache.len() >= OPEN_CACHED {
@@ -293,7 +307,8 @@ pub fn reopen(run_dir: &Path, by: &str) -> Result<(), EngineError> {
 /// Opens a grading session over the ended run at `run_dir` for its
 /// playbook's own criteria, with a reading budget of `budget_chars`
 /// ([`DEFAULT_BUDGET_CHARS`] when `None`). Refused while another session
-/// of the run is open.
+/// of the run is open, and (`secrets_unresolved`) while the secret values
+/// of the run's tree cannot all be read.
 pub fn start_session(
     run_dir: &Path,
     budget_chars: Option<u64>,

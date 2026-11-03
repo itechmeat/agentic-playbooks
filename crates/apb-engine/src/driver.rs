@@ -126,6 +126,9 @@ pub fn publish_driver_pid(run_dir: &Path, pid: u32) {
 /// silent either - see `claim`.
 pub(crate) struct DriverPidGuard {
     path: PathBuf,
+    /// Cleared once the drive let go of the run early ([`Self::let_go`]):
+    /// the file may name another driver by the time this guard drops.
+    armed: bool,
 }
 
 impl DriverPidGuard {
@@ -153,13 +156,24 @@ impl DriverPidGuard {
                 path.display()
             );
         }
-        Self { path }
+        Self { path, armed: true }
+    }
+
+    /// Removes `driver.pid` now and leaves it alone on drop: a released
+    /// run's driver lets go under the run's event lock, and a driver a
+    /// resume starts right after owns the file from then on.
+    pub(crate) fn let_go(&mut self) {
+        if std::mem::take(&mut self.armed) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
 impl Drop for DriverPidGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -223,6 +237,14 @@ impl DriveClaim {
         match parent_run {
             Some(parent) => Self::Nested(NestedDriveGuard::claim(run_dir, parent)),
             None => Self::Owned(DriverPidGuard::claim(run_dir)),
+        }
+    }
+
+    /// Gives up the claim before the drive returns (a release). A nested
+    /// child never releases, so its marker stays until the guard drops.
+    pub(crate) fn let_go(&mut self) {
+        if let Self::Owned(g) = self {
+            g.let_go();
         }
     }
 }

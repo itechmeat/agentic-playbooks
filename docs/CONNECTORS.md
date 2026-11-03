@@ -529,6 +529,14 @@ applies to `none` sends and to `key` sends after their window, never to
 functions declares `none` or `key` (V69), and `resend` on a binding that
 grants an `irreversible` function (V84).
 
+`resend` accepts a possible duplicate, and it does not settle the first
+send: a resend is a new send with its own nonce and proves nothing about
+the one before it. The first send stays unknown, so the run still needs a
+look and a person resolves that first send (see "A person's decision"
+below). The run outcome and the `resolve_intent` next action say so: "a
+resend went out (si-...); whether this first send also went out is not
+known".
+
 ### Sending once in list mode
 
 A list node (`list:`, HOWTO-authoring "List processing") runs its step once
@@ -547,6 +555,12 @@ needing a look (`unknown_send`), and no retry runs it again until a person
 resolves the send, also under `on_unknown: resend` (once the item has
 settled, no later round, visit or retry runs it again on its own while that
 send's outcome is unknown).
+An item whose step resent such a send itself (`on_unknown: resend`) and
+then passed reads as passed on its chain of sends, while its first send
+stays open for a person: its row says "earlier send unresolved" (the
+`unresolved_send` field of the item in `run_status`, `run_report`, the
+run detail of the HTTP API and `apb runs <id> --items`, and the dashboard's
+item table), and `run_status` names it beside the items that need a look.
 The declarations on `asana.create_task` and
 `imap.mark_read` exist so those functions can be used in list steps, but
 they apply to every binding: outside a list too, a repeat of a send whose

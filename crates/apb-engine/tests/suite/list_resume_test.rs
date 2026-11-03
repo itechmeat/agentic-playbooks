@@ -361,6 +361,62 @@ fn a_supervisor_retry_reruns_only_the_items_that_need_a_look() {
     assert_eq!(last_state(&ev, "b").state, "passed");
 }
 
+/// A run output that reads an item field of a list a supervisor retry
+/// reopened: the item the first execution passed is cited by that
+/// execution, its own settlement and its own attempt, and the item the
+/// second execution passed by the second.
+#[test]
+fn a_reopened_visit_cites_each_item_by_the_execution_that_settled_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let list = format!(
+        "items: {{ inline: [ {{ id: a }}, {{ id: b }} ] }}\nbatch: {{ size: 2, parallel: 1, retries: 0 }}\non_needs_look: fail\n{CHECK}"
+    );
+    let yaml = playbook(&list, "", "")
+        + "outputs:\n  blocking: { from: { node: work, item_field: blocking } }\n";
+    seed(root, &yaml, &[]);
+    let _env = Env::set(&stub(root, ""), &[]);
+    crate::list_run_test::plan(root, "b", Some(1), "1");
+    let run = supervised(root);
+    let id = run.id.clone();
+    wait_failed(root, &id, 1);
+    retry(root, &id);
+    run.finish(root, RunStatus::Succeeded);
+    let run_dir = root.join(".apb/runs").join(&id);
+    let ev = events(root, &id);
+    let projected = apb_engine::run_outputs::of_run(&run_dir, &ev);
+    let out = &projected.outputs[0];
+    let items = out
+        .items
+        .as_ref()
+        .expect("an item_field output lists items");
+    let exec = apb_engine::identity::index(&ev);
+    for (item, ordinal) in [("a", 1), ("b", 2)] {
+        let cited = items
+            .iter()
+            .find(|i| i.id == item)
+            .and_then(|i| i.source.as_ref())
+            .unwrap_or_else(|| panic!("item {item} has no citation: {items:?}"));
+        let owner = &exec.executions("work")[ordinal - 1];
+        let within = |seq: u64| owner.begin_seq <= seq && Some(seq) <= owner.end_seq;
+        assert_eq!(
+            cited.execution.ordinal as usize, ordinal,
+            "item {item}: {cited:?}"
+        );
+        assert!(
+            within(cited.settlement_seq),
+            "item {item}: {cited:?} {owner:?}"
+        );
+        let attempt = cited
+            .produced_by_attempt
+            .unwrap_or_else(|| panic!("item {item} names no attempt: {cited:?}"));
+        assert!(
+            within(attempt) && attempt < cited.settlement_seq,
+            "item {item}: {cited:?}"
+        );
+    }
+}
+
 /// A loop visit after a visit a supervisor retry reopened and finished is
 /// a fresh visit: under `rerun: all` every item runs again.
 #[test]

@@ -87,34 +87,13 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
 /// reads `nodes.<id>.output.<field>` of a node that declares `outputs.fields`
 /// without that field. Nodes that declare nothing are not checked, so
 /// existing playbooks see no new warnings.
-pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationReport) {
-    // A judge node publishes the fields its questions produce even when it
-    // declares none (issue #165 Part 5).
-    let judge_fields: HashMap<&str, Vec<String>> = playbook
-        .nodes
-        .iter()
-        .filter_map(|n| super::judge::judge_output_fields(n).map(|f| (n.id.as_str(), f)))
-        .collect();
-    // A list node publishes its counts and items whatever it declares.
-    let list_fields: HashMap<&str, Vec<String>> = playbook
-        .nodes
-        .iter()
-        .filter(|n| n.list().is_some())
-        .map(|n| {
-            let fields = crate::list::LIST_OUTPUT_FIELDS.map(String::from).to_vec();
-            (n.id.as_str(), fields)
-        })
-        .collect();
-    let declared = |id: &str| -> Option<&Vec<String>> {
-        list_fields.get(id).or_else(|| {
-            playbook
-                .node(id)
-                .and_then(|n| n.outputs.as_ref())
-                .map(|o| &o.fields)
-                .filter(|f| !f.is_empty())
-                .or_else(|| judge_fields.get(id))
-        })
-    };
+pub(crate) fn check_declared_fields(
+    playbook: &Playbook,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
+    let fields = declared_fields(playbook, ctx);
+    let declared = |id: &str| -> Option<&Vec<String>> { fields.get(id) };
     let report = |owner: Option<&str>,
                   source: &str,
                   field: &str,
@@ -160,6 +139,46 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
             report(Some(&edge.from), node, field, Some(edge), r);
         }
     }
+}
+
+/// The fields each node publishes, for nodes whose fields are known: its
+/// `outputs.fields`, a list node's counts and items, a judge node's answers
+/// and, for a `type: playbook` node with `output: outputs` whose child
+/// resolved, the child's declared output names. A node absent from the map
+/// is not checked. Shared by V46 and the run outputs rules (V133).
+pub(super) fn declared_fields<'a>(
+    playbook: &'a Playbook,
+    ctx: &ValidationContext,
+) -> HashMap<&'a str, Vec<String>> {
+    let mut out: HashMap<&str, Vec<String>> = HashMap::new();
+    for n in &playbook.nodes {
+        let fields = if n.list().is_some() {
+            Some(crate::list::LIST_OUTPUT_FIELDS.map(String::from).to_vec())
+        } else if let Some(f) = n
+            .outputs
+            .as_ref()
+            .map(|o| &o.fields)
+            .filter(|f| !f.is_empty())
+        {
+            Some(f.clone())
+        } else if let Some(f) = super::judge::judge_output_fields(n) {
+            Some(f)
+        } else if matches!(
+            n.kind,
+            NodeKind::Playbook {
+                output: crate::run_outputs::ChildOutput::Outputs,
+                ..
+            }
+        ) {
+            ctx.child_outputs.get(&n.id).cloned()
+        } else {
+            None
+        };
+        if let Some(f) = fields {
+            out.insert(n.id.as_str(), f);
+        }
+    }
+    out
 }
 
 /// The `run.*` value a `workdir` (V47) or `cache.key` (V49) may read.

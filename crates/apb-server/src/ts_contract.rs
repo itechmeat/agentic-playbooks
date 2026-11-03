@@ -168,6 +168,20 @@ fn render_types() -> String {
         // The launch policy of agents.
         apb_core::launch::LaunchPolicy::decl(&cfg),
         apb_core::launch::LaunchRecord::decl(&cfg),
+        // Run outputs: the projection and the result identity it cites.
+        apb_engine::identity::ExecutionRef::decl(&cfg),
+        apb_engine::identity::ListVisitRef::decl(&cfg),
+        apb_engine::result_ref::ResultItem::decl(&cfg),
+        apb_engine::result_ref::ResultPart::decl(&cfg),
+        apb_engine::result_ref::ResultRef::decl(&cfg),
+        apb_core::run_outputs::Pick::decl(&cfg),
+        apb_engine::run_outputs::OutputState::decl(&cfg),
+        apb_engine::run_outputs::MissingReason::decl(&cfg),
+        apb_engine::run_outputs::OutputsDefinition::decl(&cfg),
+        apb_engine::run_outputs::ProjectedItem::decl(&cfg),
+        apb_engine::run_outputs::ProjectedValue::decl(&cfg),
+        apb_engine::run_outputs::ProjectedOutput::decl(&cfg),
+        apb_engine::run_outputs::RunOutputs::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),
         apb_core::versioning::TrashEntry::decl(&cfg),
         apb_core::versioning::RestoredPlaybook::decl(&cfg),
@@ -404,6 +418,18 @@ fn render_consts() -> String {
     out.push_str(&format!(
         "\n/** Every run outcome an end-of-run notice can be narrowed to. */\nexport const NOTIFY_OUTCOMES = {}\n",
         ts_string_array(&outcomes)
+    ));
+    let reasons: Vec<&str> = apb_engine::run_outputs::MissingReason::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every reason a run output is missing. */\nexport const MISSING_REASONS = {}\n",
+        ts_string_array(&reasons)
+    ));
+    out.push_str(&format!(
+        "\n/** What a passed list item with an earlier send still unknown says beside its state. */\nexport const UNRESOLVED_SEND_TEXT = {}\n",
+        serde_json::to_string(apb_engine::list::UNRESOLVED_SEND_TEXT).expect("a string serializes")
     ));
     out.push_str(&format!(
         "\n/** The dashboard's default port (the dev server proxies to it). */\nexport const DEFAULT_PORT = {}\n",

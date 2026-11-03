@@ -439,7 +439,14 @@ state: string, round: number, verdict?: string, note?: string,
 /**
  * Why it needs a look.
  */
-reason?: string, attempts: number, };
+reason?: string, attempts: number, 
+/**
+ * It passed while an earlier send of it is still unknown: the item
+ * reads its send chain, which a later resend settled, while that first
+ * send stays open until a person resolves it. Only a passed item says
+ * so; an item held by an unknown send needs a look instead.
+ */
+unresolved_send?: boolean, };
 
 export type RunList = { node: string, title?: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, pending: number, running: number, 
 /**
@@ -1381,6 +1388,77 @@ policy: LaunchPolicy,
  */
 sources: Array<string>, };
 
+export type ExecutionRef = { node: string, ordinal: number, ended_seq?: number, };
+
+export type ListVisitRef = { node: string, started_seq: number, };
+
+export type ResultItem = { visit: ListVisitRef, id: string, };
+
+export type ResultPart = { "kind": "output" } | { "kind": "fields" } | { "kind": "file", scope: string, path: string, };
+
+export type ResultRef = { execution: ExecutionRef, 
+/**
+ * The list item, for a result one item settled.
+ */
+item?: ResultItem, settlement_seq: number, part: ResultPart, 
+/**
+ * The attempt id (the seq of its `attempt_started`) that produced the
+ * result; absent for work that spawned no attempt (a finish without a
+ * prompt, a sub-playbook node, a cache hit).
+ */
+produced_by_attempt?: number, };
+
+export type Pick = "last" | "first" | "all";
+
+export type OutputState = "value" | "null" | "missing";
+
+export type MissingReason = "not_run" | "not_succeeded" | "field_absent" | "not_json_object" | "truncated" | "item_not_passed" | "definition_unknown";
+
+export type OutputsDefinition = "stored" | "current";
+
+export type ProjectedItem = { id: string, state: OutputState, value?: unknown, reason?: MissingReason, 
+/**
+ * The item's settlement, when the journal has one in the visit.
+ */
+source?: ResultRef, };
+
+export type ProjectedValue = { state: OutputState, value?: unknown, reason?: MissingReason, source: ResultRef, items?: Array<ProjectedItem>, };
+
+export type ProjectedOutput = { name: string, pick: Pick, state: OutputState, 
+/**
+ * The value, for state `value`. With `pick: all` the array of every
+ * candidate's value (`null` kept, missing ones left out); with an
+ * `item_field` an object from item id to value.
+ */
+value?: unknown, reason?: MissingReason, 
+/**
+ * The result the value came from (`last` and `first`).
+ */
+source?: ResultRef, 
+/**
+ * `pick: all`: every candidate, in settlement order.
+ */
+values?: Array<ProjectedValue>, 
+/**
+ * An `item_field` source: every item of the picked execution.
+ */
+items?: Array<ProjectedItem>, };
+
+export type RunOutputs = { 
+/**
+ * The run is finished: the values will not change unless the run is
+ * revived or continued, which sets this back to false.
+ */
+final: boolean, 
+/**
+ * Which declaration the projection read.
+ */
+definition: OutputsDefinition, 
+/**
+ * Every declared output, in declaration order.
+ */
+outputs: Array<ProjectedOutput>, };
+
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
  * Why a failed run ended (`node \`x\`: reason`); null unless failed.
@@ -1463,6 +1541,11 @@ baseline?: RunBaseline,
  * The findings and warnings the attempts reported; absent when none.
  */
 notes?: RunNotes, 
+/**
+ * The declared run outputs projected from the journal; absent for a
+ * playbook that declares none.
+ */
+run_outputs?: RunOutputs, 
 /**
  * Each list node's visit with its items; empty for a run without a
  * list.

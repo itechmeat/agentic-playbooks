@@ -96,8 +96,10 @@ runs read them.
 **What is redacted.** Everywhere else a run's data leaves apb, the run's
 sensitive values are replaced: every param value declared `secret: true`,
 whose name looks like a credential's, or that looks like a credential
-itself, the same values of every parent run (followed up to 8 levels), and
-the secrets the project's connectors read from the environment or a
+itself, the same values of every other run of its tree (its parent runs,
+followed up to 8 levels, and every run the topmost of them started, so a
+child's secret its parent hands to a sibling stays hidden on the sibling
+too), and the secrets the project's connectors read from the environment or a
 secrets file (a secret a connector reads from a command is not run for
 this, so an echoed command-sourced value is not replaced). That covers the
 MCP run and supervisor tools, the dashboard's run list, run page, report and saved
@@ -114,13 +116,42 @@ shown as `<redacted>`, but an output, an error or an event that echoes such
 a short value keeps it, so a start whose declared secret value is that
 short gets a warning (on the terminal for `apb run`, in `warnings` of the
 MCP and dashboard start answers); it is not refused. Use a longer value
-where the echo matters.
+where the echo matters. A run, a `run.yaml` or a journal of the tree that
+cannot be read (a torn last journal line is read past, as everywhere) never
+counts as holding no secret, and neither does a run whose own `run.yaml`
+is gone though it was prepared (it has a manifest, or its `run_started`
+names its definition): the run's surfaces then withhold its text as
+`[secrets_unresolved]`, keeping only its ids and states. A text that is
+JSON (a child's run outputs as its parent node's output, nested, or a
+quoted string) has only its strings rewritten, each decoded and scrubbed
+before it is encoded again, so a quote or a backslash in a value does not
+hide it and every number, space and key stays as written; JSON text nested
+more than 8 levels deep reads `[withheld: nested too deep]`. In other text
+(a log line with JSON after a prefix) a value is replaced both as written
+and as JSON escapes it. Redaction guards against the accidental disclosure
+of a known value in the spellings apb itself and ordinary tools produce:
+as written, and as JSON escapes it, at any nesting apb creates. A step that
+deliberately re-encodes a value it knows (escaping each character, breaking
+the JSON around it, nesting it past the bounds, base64, reversing it) can
+always pass it on, as with any other encoding, and is out of its scope.
+What would hand
+the run's text on whole is refused with `secrets_unresolved` instead: a
+host grading session (`run_grade_start`, and every read of an open one,
+which also hides a value a run of the tree declared after it opened), a
+grade as `run_grade`, `run_grades` and `run_grade_submit` return it (the
+stored grade is unchanged), and the HTML report; a run that ends in that
+state adds no known problem, and a publish push it refuses journals git's
+message as `[secrets_unresolved]`. A grade is stored as it was made: its
+task type, rendered from the run's own params, is redacted in those grade
+answers but not in `apb stats` or a candidate's comparison, so a param that
+a child declares secret is not hidden there.
 
 **Decision requests never carry a declared secret.** Every request to a
 decision model, from a run (completion checks, judges, retry advice,
 reviews, host task questions) or about one (grading, known-problem
 rechecks), loses the run's sensitive values before any clip, whatever
-`privacy.redact` says. `privacy.redact` only governs the further scrubbing
+`privacy.redact` says; when the run's tree cannot be read, every string of
+the request reads `[secrets_unresolved]` instead. `privacy.redact` only governs the further scrubbing
 of paths, e-mail addresses and connector secrets.
 
 **A run's secret set only grows.** The params declared secret when a run
@@ -715,6 +746,86 @@ fails the node, the same policy as `deliverable_missing`. Validation warns
 (**V46**) when a template or an `output_field` condition reads a field that the
 source node's `outputs.fields` does not declare. A node that declares nothing is
 not checked.
+
+### Run outputs (outputs:)
+
+A playbook can declare the named values a run hands to whoever started it,
+at the top level, beside `nodes`:
+
+```yaml
+outputs:
+  summary:  { from: { node: report } }                       # the whole output text
+  pr_url:   { from: [ { node: publish_a, field: url },
+                      { node: publish_b, field: url } ] }     # alternative branches
+  verdicts: { from: { node: review, field: verdict }, pick: all }
+  checked:  { from: { node: files, item_field: status } }     # a list node, item by item
+```
+
+Each output names one source or several. A source is a node, with at most
+one of `field` (one key of its output read as a JSON object) and
+`item_field` (on a list node: one key of every item's output). It is never
+a dotted string, because a node id may contain dots. Names match
+`[a-z][a-z0-9_]*`, at most 64 characters, and a playbook declares at most 64
+outputs.
+
+The values are projected from the run journal whenever a surface reads the
+run, never journaled:
+
+1. The candidates of an output are the executions of its source nodes whose
+   `node_finished` says `succeeded`, in journal order. Failed, timed-out and
+   cancelled executions give none. A finish node counts like any node, so
+   `{ node: done }` is the finish answer.
+2. `pick: last` (the default) takes the candidate settled last across every
+   source, `first` the one settled first, `all` every one in order. So two
+   finish branches, or a loop that ran a node three times, need no rule of
+   their own: the journal order decides.
+3. A candidate without `field` gives the output text. With `field`, the key
+   with a value gives that value as JSON (strings, numbers, booleans, arrays
+   and objects kept), a key set to `null` reads `null`, and an absent key
+   reads `missing` (`field_absent`); an output that is no JSON object reads
+   `missing` (`not_json_object`). With `item_field`, every item of the list
+   execution reads on its own: an item that did not pass is `missing`
+   (`item_not_passed`), and one whose output was too large to keep is
+   `missing` (`truncated`).
+4. An output with no candidate reads `missing`: `not_run` when no source
+   node ran, `not_succeeded` when one ran but never succeeded.
+
+Every value names its source: the node execution (node and ordinal), the
+journal seq that settled it, and, for an agent, the attempt that produced
+it. As JSON, `source` is `{ execution: { node, ordinal, ended_seq },
+settlement_seq, part: { kind: output | fields }, produced_by_attempt }`,
+and an item of a list node adds `item: { visit: { node, started_seq }, id }`.
+The item is an object with named keys rather than a positional pair of
+visit and id, so a reader names what it takes and a later key can join it
+without moving the others. The projection is `final` once the run finished; a revival or a
+`continue_from` sets it back to false. It reads the declaration of the
+definition the run executed last; when that definition is not established
+(an older apb resumed the run), it reads the run's current `playbook.yaml`,
+and every output reads `missing` (`definition_unknown`) if that file
+declares outputs differently from the definition the run started with. A
+failed run projects the same way; a missing output never changes the run's
+outcome.
+
+The projection is the `run_outputs` field of MCP `run_status`, `run_report`
+and (once the run finished) `run_wait`, and of the dashboard's run detail,
+where the run page shows it in an Outputs card. `apb runs <id>` prints an
+"outputs" section, and `apb runs <id> --outputs-json` prints exactly the
+projection, for a pipeline to read. The raw `outputs` map of every surface,
+`{{nodes.<id>.output}}` and the run `answer` are unchanged. An older apb
+drops the block and projects nothing.
+
+The validator checks the block:
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V131 | error | an output name does not match `[a-z][a-z0-9_]*` or is longer than 64 characters, or more than 64 outputs are declared |
+| V132 | error | an output has no source, a source names a node that does not exist, or a source sets both `field` and `item_field` |
+| V133 | warning | `field` is not one the node publishes (its `outputs.fields`, a list node's counts, a judge node's answers, a child's declared outputs), when the node declares them |
+| V134 | error | `item_field` on a node that is not a list node |
+| V135 | warning | `item_field` is not one of the list's `item_outputs`, when it declares them |
+
+A `pick` other than `last`, `first` or `all` does not load. A source node no
+run can reach needs no rule of its own: V07 already refuses it.
 
 ### List processing (list:)
 
@@ -2054,6 +2165,9 @@ To start a waiting retry at once: `apb resume <run> --retry-now [--node
 "Retry now" button (a supervisor uses `supervisor_node_retry`). A live
 driver starts it right away; a released or paused run is resumed with the
 retry due, and a resume that is refused leaves the retry waiting as it was.
+The journal records a person's retry-now (`by: operator`) only from the CLI
+at a terminal and from a dashboard with keys; a run step, the CLI without a
+terminal and a dashboard without keys are recorded as `host`.
 
 What it does not delay:
 
@@ -2456,11 +2570,16 @@ edges:
 
 After three review failures the bounded `review -> fix` edge stops matching
 and the run takes whatever else is wired from `review` (here, `review -> qa`
-if `review` last succeeded). If nothing matches at all, the run fails with an
-explicit "node has no outgoing edge and is not finish" error rather than
-looping forever - wire an edge for the fully-exhausted case (an escalation to
+if `review` last succeeded). If nothing matches at all, the run fails rather
+than looping forever: after a failure with the explicit "node has no
+outgoing edge and is not finish" error, and after a node that succeeded (a
+`human_review` that was decided) with a run error that names the node, its
+decision or status and the spent bounded edges, for example "no edge can be
+taken from `review`: decision `rejected`; exhausted: e:review>fix#1". Wire an edge for the fully-exhausted case (an escalation to
 `human_review`, or a plain failure edge) if that outcome must be handled
-gracefully.
+gracefully. On a `human_review`, put the cap on the edge that leads back into
+the review rather than on the review's own edge for a decision: then the
+review always has an edge for every decision (V136 warns otherwise).
 
 A loop edge may also point straight back at its own source, for a node that
 repeats itself without a separate fix step. It needs `max_traversals` like any
@@ -2524,6 +2643,7 @@ The validator checks edges as individual things too:
 | V123 | warning | a fallback edge of a node that routes to one edge (it has a conditional or fallback edge and no plain one) is not that node's last outgoing edge; a fallback is only tried after everything else, so write it last |
 | V124 | warning | such a node has two edges without `max_traversals` with the same target, condition and fallback flag; only the first can ever be taken (plain fan-out edges and bounded edges are not checked) |
 | V125 | warning | an `output_field` edge compares a judge node's field with a value it never writes: a choice question writes one of its options, a noul question `true` or `false`, a score question with bands a band name and one without bands nothing under its own name (only `<id>_score`), and `decided_by` is `default`, `unavailable`, `<provider>/<model>` or `emulated:<provider>` |
+| V136 | warning | a `human_review` decision is routed only by bounded edges, and the review has no fallback edge and no unbounded edge that decision can take: once the cap is spent the decision has no edge and the run fails at the review; put the cap on the edge into the review instead, or add a fallback edge |
 
 ## expected_duration (progress estimates)
 
@@ -2733,7 +2853,15 @@ A `playbook` node runs another playbook as a full child run:
       expected_duration: 2h
 
 The node's rendered instruction becomes the child's run input; the child's
-finish answer becomes the node's output. The child is an ordinary playbook (any
+finish answer becomes the node's output. With `output: outputs` on the node,
+the output is instead one compact JSON object of the child's run outputs
+(see "Run outputs (outputs:)"): each output with a value or `null` under its
+name, a `pick: all` output as an array, missing outputs left out. Later nodes
+read them like any named output, `{{nodes.<node>.output.<name>}}` in a
+template or an `output_field` edge condition, and V46 checks those reads
+against the names the child declares when the child resolves in the same
+registry. A failed child fails the node as before. An older apb drops
+`output` and passes the answer text. The child is an ordinary playbook (any
 playbook can be a child). The parent's policy gate walks the whole reference
 tree once and pins each child, so you consent to the whole tree at parent start;
 an untrusted child blocks the parent, and a reference cycle is refused. Nesting

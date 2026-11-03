@@ -209,7 +209,7 @@ fn try_write(
     let mut value = Value::Object(value);
     // Every string once more, whole: a builder that forgot to scrub a text
     // still writes no secret value.
-    redactor.scrubber().scrub_values_json(&mut value);
+    redactor.known_values().scrub_values_json(&mut value);
     let mut line = serde_json::to_vec(&value).map_err(std::io::Error::other)?;
     line.push(b'\n');
     let mut file = apb_core::fsutil::open_append_private(&path)?;

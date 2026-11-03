@@ -655,7 +655,8 @@ pub(crate) fn validation_issues(
     playbook: &apb_core::schema::Playbook,
 ) -> Vec<apb_core::validate::IssueView> {
     let ctx =
-        ValidationContext::for_registry(reg, apb_core::profile_store::PlaybookOrigin::Project);
+        ValidationContext::for_registry(reg, apb_core::profile_store::PlaybookOrigin::Project)
+            .with_child_outputs(playbook, reg);
     let mut report = validate(playbook, &ctx);
     report.issues.extend(
         apb_core::preflight::missing_references(

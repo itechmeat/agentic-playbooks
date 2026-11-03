@@ -229,12 +229,15 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
         Some(n) => vec![n],
         None => reg.playbook_ids(),
     };
-    let ctx =
-        ValidationContext::for_registry(&reg, apb_core::profile_store::PlaybookOrigin::Project);
     let mut failed = false;
     for id in names {
         match reg.load(&id, None) {
             Ok(loaded) => {
+                let ctx = ValidationContext::for_registry(
+                    &reg,
+                    apb_core::profile_store::PlaybookOrigin::Project,
+                )
+                .with_child_outputs(&loaded.playbook, &reg);
                 let mut report = validate(&loaded.playbook, &ctx);
                 // Profiles and scripts a run would not find here (V91, V92),
                 // with their own severity: an error fails every run of this
@@ -296,7 +299,7 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
             }
         }
     }
-    if validate_all && !validate_profile_models(root, &ctx.profiles) {
+    if validate_all && !validate_profile_models(root, &reg.profiles()) {
         failed = true;
     }
     if failed {
@@ -1359,6 +1362,9 @@ pub(crate) enum WakerFor {
 /// nulled by the spawner; the exit code says what happened (0 resumed,
 /// swept or nothing to do, 1 refused, 2 error).
 pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, waker: WakerFor) -> ExitCode {
+    // Whoever started this waker learns on its stdout once it holds its
+    // lease (`apb resume --all` reports it armed only then).
+    apb_engine::waker::acknowledge_on_hold();
     let woke = match waker {
         WakerFor::Pause(seq) => apb_engine::pause::run_waker(root, run_id, seq),
         WakerFor::Release(seq) => apb_engine::pause::run_release_waker(root, run_id, seq),
@@ -1684,6 +1690,11 @@ fn run_detail_text(
         }
     }
     // --- end of the 0.23.0 blocks ---
+    if let Some(outputs) = view.run_outputs(&run_dir) {
+        for line in crate::run_outputs::lines(&outputs) {
+            say!("  {line}");
+        }
+    }
     // The human outcome: done, verified, not verified (inbox gaps among
     // them), findings, warnings, the baseline and the agent's own summary.
     print_outcome(&view.outcome(&run_dir));
@@ -1788,6 +1799,21 @@ pub(crate) struct RetryNowArg<'a> {
     pub node: Option<&'a str>,
 }
 
+/// Who a retry-now of this process is journaled as (`retry_expedited.by`).
+/// A person (`operator`) only at a terminal outside a run step, the way the
+/// launch policy tells a person from the CLI: a run step is never a person,
+/// and without a terminal a script cannot be told from one, so both are
+/// recorded as `host`, the agent principal MCP records.
+fn retry_now_by() -> apb_engine::scheduler::deferred::ExpediteBy {
+    use apb_engine::scheduler::deferred::ExpediteBy;
+    match apb_engine::gate::launch::Initiator::cli(crate::launch::at_terminal()) {
+        apb_engine::gate::launch::Initiator::CliUnattested { terminal: true } => {
+            ExpediteBy::Operator
+        }
+        _ => ExpediteBy::Host,
+    }
+}
+
 /// What `apb run` and `apb resume` in the foreground print for a run whose
 /// driver released it while a deferred retry waits, and the exit code they
 /// return for it: 4, the code `apb wait` gives a released run. A drive that
@@ -1833,12 +1859,8 @@ fn retry_now_live(
     }
     // Decided under the run's event lock: a driver that let go of the run
     // meanwhile leaves the retry to the resume below.
-    match apb_engine::scheduler::deferred::expedite_live(
-        &run_dir,
-        run_id,
-        arg.node,
-        apb_engine::scheduler::deferred::ExpediteBy::Operator,
-    ) {
+    match apb_engine::scheduler::deferred::expedite_live(&run_dir, run_id, arg.node, retry_now_by())
+    {
         Ok(Some(nodes)) => {
             println!(
                 "retry of {} starts now: the run's live driver picks it up",
@@ -1916,7 +1938,7 @@ pub(crate) fn resume_cmd(
         // the resume passed.
         retry_now: retry_now.map(|a| apb_engine::scheduler::RetryNow {
             node: a.node,
-            by: apb_engine::scheduler::deferred::ExpediteBy::Operator,
+            by: retry_now_by(),
         }),
         ..apb_engine::ResumeRequest::operator()
     };
@@ -2047,6 +2069,11 @@ pub(crate) fn resume_all_cmd(root: &Path, launch: &crate::launch::LaunchFlags) -
                     ResumeAllAction::Rearmed { wake_at_ms } => format!(
                         "waits until {}, a waker is armed",
                         apb_core::clock::iso_utc(*wake_at_ms)
+                    ),
+                    ResumeAllAction::NotRearmed { wake_at_ms, detail } => format!(
+                        "waits until {}, but nothing wakes it then: {detail}; `apb resume {}` continues it",
+                        apb_core::clock::iso_utc(*wake_at_ms),
+                        e.run_id
                     ),
                     ResumeAllAction::LaunchRefused { detail } => {
                         format!("left: launch policy: {detail}")

@@ -9,4 +9,4 @@ mod stamp;
 pub mod view;
 
 pub use ledger::{ItemRecord, ListCounts, ListFold, list_criterion, progress_label};
-pub use view::{ListProgress, RunList, RunListItem, run_lists};
+pub use view::{ListProgress, RunList, RunListItem, UNRESOLVED_SEND_TEXT, run_lists};

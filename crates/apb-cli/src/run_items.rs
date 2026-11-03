@@ -104,13 +104,22 @@ fn item_lines(lists: &[RunList], filter: &ItemFilter<'_>) -> Vec<String> {
     out
 }
 
-/// `id<TAB>state<TAB>round n<TAB>what it says`.
+/// `id<TAB>state<TAB>round n<TAB>what it says`: a passed item with an
+/// earlier send still unknown says so after its verdict.
 fn item_line(i: &RunListItem) -> String {
-    let words: Vec<&str> = [i.verdict.as_deref(), i.reason.as_deref(), i.note.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter(|w| !w.is_empty())
-        .collect();
+    let unresolved = i
+        .unresolved_send
+        .then_some(apb_engine::list::UNRESOLVED_SEND_TEXT);
+    let words: Vec<&str> = [
+        i.verdict.as_deref(),
+        unresolved,
+        i.reason.as_deref(),
+        i.note.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|w| !w.is_empty())
+    .collect();
     let mut line = format!(
         "{}\t{}\tround {}",
         sanitize_for_terminal(&i.id, QUESTION_TEXT_MAX),
@@ -137,6 +146,7 @@ mod tests {
             note: note.map(str::to_string),
             reason: (state == "needs_look").then(|| "rejected".into()),
             attempts: 2,
+            unresolved_send: false,
             check_rejected: false,
         }
     }

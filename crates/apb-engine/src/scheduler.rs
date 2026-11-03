@@ -175,6 +175,78 @@ fn stop_on_unhandled_failure(
     output: &str,
     frontier: &mut Vec<String>,
 ) -> Result<RunStatus, EngineError> {
+    stop_with_reason(log, node, failure_detail(output), frontier)
+}
+
+/// Why a run stops at `node`, which ended `status` with `output` and from
+/// which no edge can be taken: its decision (a review) or its status, and
+/// the addresses of its bounded edges whose cap is spent and that could
+/// have routed that decision or status (the edges a person most likely
+/// expected to take); an edge for another decision or status is not
+/// named.
+fn dead_end_reason(
+    playbook: &Playbook,
+    node: &str,
+    status: NodeStatus,
+    output: &str,
+    state: &RunState,
+) -> String {
+    let review = matches!(
+        playbook.node(node).map(|n| &n.kind),
+        Some(NodeKind::HumanReview { .. })
+    );
+    let ended = if review {
+        format!("decision `{output}`")
+    } else {
+        format!("status `{}`", status.as_str())
+    };
+    // Whether `e` could have been taken for this outcome but for its cap.
+    let could_route = |e: &apb_core::schema::Edge| match &e.condition {
+        Some(apb_core::schema::EdgeCondition::ReviewStatus { equals }) => {
+            review && equals == output
+        }
+        Some(apb_core::schema::EdgeCondition::NodeStatus { node: n, equals }) if n == node => {
+            match equals {
+                apb_core::schema::StatusEq::Success => status == NodeStatus::Succeeded,
+                apb_core::schema::StatusEq::Failure => {
+                    matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+                }
+            }
+        }
+        _ => true,
+    };
+    let exhausted: Vec<String> = playbook
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.from == node
+                && could_route(e)
+                && e.max_traversals.is_some_and(|cap| {
+                    state
+                        .edge_counts
+                        .get(&(e.from.clone(), e.to.clone()))
+                        .copied()
+                        .unwrap_or(0)
+                        >= cap
+                })
+        })
+        .filter_map(|(i, _)| apb_core::edge_address::rendered_at(playbook, i))
+        .collect();
+    let mut reason = format!("no edge can be taken from `{node}`: {ended}");
+    if !exhausted.is_empty() {
+        reason.push_str(&format!("; exhausted: {}", exhausted.join(", ")));
+    }
+    reason
+}
+
+/// [`stop_on_unhandled_failure`] with its reason given verbatim.
+fn stop_with_reason(
+    log: &mut EventLog,
+    node: &str,
+    reason: String,
+    frontier: &mut Vec<String>,
+) -> Result<RunStatus, EngineError> {
     for pending in std::mem::take(frontier) {
         log.append(EventPayload::NodeStarted {
             node: pending.clone(),
@@ -191,7 +263,7 @@ fn stop_on_unhandled_failure(
     deferred::cancel_open(log)?;
     log.append(EventPayload::RunError {
         node: Some(node.to_string()),
-        reason: failure_detail(output),
+        reason,
     })?;
     if let Some(run_dir) = log.run_dir() {
         finish_hooks::finish_hooks(log, &run_dir, false);
@@ -391,7 +463,7 @@ fn drive_inner(
     // instead so doctor/status never treat the parent process as a stale
     // dedicated driver of the child. The guard removes the claim on every
     // exit path.
-    let _driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
+    let mut driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
     // An eval run's wall clock (0.24.0): the driver aborts the run itself at
     // the deadline, so the limit holds even when the `apb eval` that
     // started it is gone.
@@ -711,7 +783,13 @@ fn drive_inner(
             // control or expedite came in since this turn's look: what did
             // is applied at the next turn instead.
             if deferred::may_release(cfg, mode, due_at, now)
-                && deferred::try_release(run_dir, log, control_cursor, now)?.is_some()
+                && deferred::try_release(run_dir, log, control_cursor, now, || {
+                    // The busy lock first, then `driver.pid`: the guard
+                    // removes the lock only while it names this process.
+                    drop(lock.take());
+                    driver_claim.let_go();
+                })?
+                .is_some()
             {
                 return Ok(RunResult {
                     run_id,
@@ -720,6 +798,19 @@ fn drive_inner(
             }
             std::thread::sleep(deferred::sleep_for(due_at, now));
             continue;
+        }
+        // A due retry never waits behind a node that parks the drive (a
+        // review, a publish consent, a wait, a pending question): it takes
+        // `current`, and the parked node comes back right after.
+        if !state.deferred.is_empty() {
+            let due: BTreeSet<String> = state
+                .deferred
+                .keys()
+                .filter(|n| !held.contains_key(n.as_str()))
+                .cloned()
+                .collect();
+            let parks = parks_the_drive(&playbook, &current, &events);
+            deferred::give_way(&due, parks, &mut current, &mut frontier);
         }
         // Where agent_task and script nodes without their own `workdir` run:
         // the run's working tree once it is resolved (issue #67 item 8), else
@@ -1972,6 +2063,7 @@ fn drive_inner(
         } else if let NodeKind::Playbook {
             playbook: child_ref,
             instruction: node_instr,
+            ..
         } = &node_kind
         {
             // A sub-playbook node runs a full child run in-process on this drive
@@ -2869,16 +2961,44 @@ fn drive_inner(
         if let Some(f) = &fork_failure {
             fork::settle(&playbook, run_dir, log, f, &mut frontier)?;
         }
-        if frontier.is_empty() {
+        if frontier.is_empty() && status != NodeStatus::Succeeded {
             // Branch completed with no ready successors and no other active
             // branches: dead-end (or unready join with no chance) - not finish.
+            // A failure nothing routes keeps its reason as it always read
+            // (the declared failure policy's contract).
             return Err(EngineError::Invalid(format!(
                 "node `{current}` has no outgoing edge and is not finish"
             )));
         }
+        if frontier.is_empty() {
+            // A node that succeeded (a review that was decided) with no edge
+            // left: the run fails like any unhandled failure, naming the
+            // node, its decision or status and the bounded edges it spent.
+            let reason = dead_end_reason(&playbook, &current, status, &output, &state_now);
+            return Ok(RunResult {
+                run_id,
+                outcome: stop_with_reason(log, &current, reason, &mut frontier)?,
+            });
+        }
         // Take the next active head (FIFO - deterministic order
         // by edge declaration).
         current = frontier.remove(0);
+    }
+}
+
+/// Whether `node`, as `current`, parks the sequential arm until a person or
+/// a signal moves it: a review, a publish consent, a wait, or an
+/// interactive node with a question out.
+fn parks_the_drive(playbook: &Playbook, node: &str, events: &[Event]) -> bool {
+    match playbook.node(node).map(|n| &n.kind) {
+        Some(NodeKind::HumanReview { .. } | NodeKind::Publish { .. } | NodeKind::Wait { .. }) => {
+            true
+        }
+        Some(_) => {
+            is_interactive(playbook, node)
+                && question_asked_count(events, node) > question_answered_count(events, node)
+        }
+        None => false,
     }
 }
 

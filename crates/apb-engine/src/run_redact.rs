@@ -3,9 +3,14 @@
 //!
 //! A run's sensitive values are its param values that
 //! [`apb_core::run_params::sensitive`] flags, the same values of every
-//! ancestor run (followed through `parent_run`, at most
-//! [`MAX_ANCESTORS`] deep) and the connector secrets the workspace scrubber
-//! resolves. A param counts as declared secret when the run's manifest
+//! other run of its tree (its ancestors, followed through `parent_run` at
+//! most [`MAX_ANCESTORS`] deep, and every run the topmost of them started,
+//! directly or below: a child's answer or run outputs become its parent's
+//! node output and from there a sibling's input) and the connector secrets
+//! the workspace scrubber resolves. An input that names or holds such a
+//! value and cannot be read (a named run without a readable config, a
+//! journal that does not parse) never reads as "no secret": the run's
+//! surfaces withhold its text ([`RunRedactor::withholds`]). A param counts as declared secret when the run's manifest
 //! records it (`secret_params`, written at start and only ever added to by
 //! a current-run patch) or when the run's current snapshot declares it, so
 //! a value classified secret once stays secret for the run and its
@@ -101,41 +106,229 @@ fn snapshot_declarations(run_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The sensitive param values of the run at `run_dir` and of its ancestors
-/// (see the module docs). A child receives its parents' values for
-/// redaction only, never as params.
-pub fn secret_values(run_dir: &Path) -> Vec<Secret> {
-    values_and_names(run_dir).0
+/// The sensitive param values of the run's tree a decision request loses,
+/// failing closed: when the tree's secret-discovery inputs could not all be
+/// read, every string of the request reads [`WITHHELD`] instead.
+#[derive(Debug, Default)]
+pub struct RunValues {
+    scrubber: Scrubber,
+    withhold: bool,
 }
 
-/// [`secret_values`] and the run's own [`secret_names`], each file read
-/// once.
-fn values_and_names(run_dir: &Path) -> (Vec<Secret>, BTreeSet<String>) {
+impl RunValues {
+    /// The values of the run at `run_dir` in the workspace at `root`.
+    pub fn of(run_dir: &Path, root: &Path) -> Self {
+        let found = tree_secrets(run_dir);
+        RunValues {
+            scrubber: Scrubber::new(found.values, root),
+            withhold: !found.complete,
+        }
+    }
+
+    /// `text` without the run's values.
+    pub fn scrub_values(&self, text: &str) -> String {
+        if self.withhold {
+            return WITHHELD.to_string();
+        }
+        self.scrubber.scrub_values(text)
+    }
+
+    /// Every string of `value` without the run's values, in place.
+    pub fn scrub_values_json(&self, value: &mut serde_json::Value) {
+        if self.withhold {
+            withhold_strings(value);
+            return;
+        }
+        self.scrubber.scrub_values_json(value);
+    }
+}
+
+/// Every string of `value` (keys stay) read as [`WITHHELD`].
+fn withhold_strings(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => *s = WITHHELD.to_string(),
+        Value::Array(items) => items.iter_mut().for_each(withhold_strings),
+        Value::Object(map) => map.values_mut().for_each(withhold_strings),
+        _ => {}
+    }
+}
+
+/// What the redaction of one run found in its tree.
+struct TreeSecrets {
+    /// The sensitive param values of every run of the tree.
+    values: Vec<Secret>,
+    /// The params the run itself counts as declared secret.
+    own: BTreeSet<String>,
+    /// Whether every input naming or holding a value was read: a run the
+    /// tree names whose config is missing or does not parse, a journal
+    /// that cannot be read, or a child id that is not a safe segment make
+    /// it `false`, and the run's surfaces then withhold.
+    complete: bool,
+}
+
+/// The run's tree as its redaction sees it: the ancestors followed through
+/// `parent_run` (at most [`MAX_ANCESTORS`]), and every run the topmost of
+/// them started, directly or through its children (the runs their
+/// `child_run_started` events name, at most [`MAX_ANCESTORS`] levels). Data
+/// moves along the whole tree: a child's answer or run outputs become its
+/// parent's node output, and from there a sibling's params or instruction,
+/// so every run of the tree hides the values of every other.
+fn tree_secrets(run_dir: &Path) -> TreeSecrets {
     let own = secret_names(run_dir);
-    let mut values = Vec::new();
+    let mut found = TreeSecrets {
+        values: Vec::new(),
+        own: own.clone(),
+        complete: true,
+    };
+    let mut seen = BTreeSet::new();
     let mut dir = run_dir.to_path_buf();
+    let mut top = dir.clone();
     for depth in 0..=MAX_ANCESTORS {
-        let Ok(cfg) = crate::run_config::read_run_config(&dir) else {
-            break;
+        seen.insert(dir.clone());
+        let cfg = match named_config(&dir, depth > 0) {
+            Some(cfg) => cfg,
+            None => {
+                found.complete = false;
+                break;
+            }
         };
         let names = if depth == 0 {
             own.clone()
         } else {
             secret_names(&dir)
         };
-        values.extend(sensitive_values(&cfg.params, &names));
-        let Some(parent) = cfg
-            .parent_run
-            .filter(|p| apb_core::registry::is_safe_segment(p))
-        else {
+        found.values.extend(sensitive_values(&cfg.params, &names));
+        top = dir.clone();
+        let Some(parent) = cfg.parent_run else {
             break;
         };
         let Some(runs) = dir.parent() else {
             break;
         };
+        if !apb_core::registry::is_safe_segment(&parent) || depth == MAX_ANCESTORS {
+            found.complete = false;
+            break;
+        }
         dir = runs.join(parent);
+        if seen.contains(&dir) {
+            break;
+        }
     }
-    (values, own)
+    descendants(&top, &mut found);
+    found
+}
+
+/// The run config of the run at `dir`: `None` when it cannot be read, or
+/// when the run has none though it must (a run `named` by another run of
+/// the tree: a child's is written before its parent journals it; a run
+/// [`config_expected`] says was prepared).
+fn named_config(dir: &Path, named: bool) -> Option<crate::run_config::RunConfig> {
+    if !dir.join("run.yaml").is_file() && (named || config_expected(dir)) {
+        return None;
+    }
+    crate::run_config::read_run_config(dir).ok()
+}
+
+/// Whether the run at `dir` was prepared, so it wrote its `run.yaml`: it
+/// has a manifest, or its journal's `run_started` names the definition it
+/// executes (both are written after the config). The one legacy exception
+/// is a run that shows neither: a start refused before its config was
+/// written, or a run of an apb that journaled no definition. A journal
+/// that cannot be read cannot tell, so the config is expected.
+fn config_expected(dir: &Path) -> bool {
+    if dir.join("manifest.yaml").is_file() {
+        return true;
+    }
+    let bytes = match std::fs::read(dir.join("events.jsonl")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let Ok(journal) = crate::event::parse_lossy_tail(&bytes) else {
+        return true;
+    };
+    journal.events.iter().any(|e| {
+        matches!(
+            &e.payload,
+            crate::event::EventPayload::RunStarted {
+                definition: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+/// The values of every run under `top` (see [`tree_secrets`]) into
+/// `found`. A run met twice (the ancestors already counted, a cycle a
+/// forged event names) is walked once.
+fn descendants(top: &Path, found: &mut TreeSecrets) {
+    let mut seen = BTreeSet::from([top.to_path_buf()]);
+    let mut level = vec![top.to_path_buf()];
+    for _ in 0..MAX_ANCESTORS {
+        let mut next = Vec::new();
+        for dir in &level {
+            let Some(runs) = dir.parent() else {
+                continue;
+            };
+            let Some(children) = child_runs(dir) else {
+                found.complete = false;
+                continue;
+            };
+            for child in children {
+                let child_dir = runs.join(&child);
+                if !seen.insert(child_dir.clone()) {
+                    continue;
+                }
+                match named_config(&child_dir, true) {
+                    Some(cfg) => found
+                        .values
+                        .extend(sensitive_values(&cfg.params, &secret_names(&child_dir))),
+                    None => found.complete = false,
+                }
+                next.push(child_dir);
+            }
+        }
+        if next.is_empty() {
+            return;
+        }
+        level = next;
+    }
+    // Runs deeper than the walk goes: a tree no sub-playbook depth allows.
+    if level
+        .iter()
+        .any(|dir| child_runs(dir).is_none_or(|c| !c.is_empty()))
+    {
+        found.complete = false;
+    }
+}
+
+/// The child run ids the journal at `run_dir` names, read with the same
+/// tolerance as every run surface ([`crate::event::read_journal`]: a torn
+/// last line is dropped): `None` when the journal cannot be read or names
+/// a child by an id that is not a safe segment. A run without a journal
+/// started no child.
+fn child_runs(run_dir: &Path) -> Option<Vec<String>> {
+    let bytes = match std::fs::read(run_dir.join("events.jsonl")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    const KIND: &[u8] = b"child_run_started";
+    if !bytes.windows(KIND.len()).any(|w| w == KIND) {
+        return Some(Vec::new());
+    }
+    let journal = crate::event::parse_lossy_tail(&bytes).ok()?;
+    let mut ids = Vec::new();
+    for e in journal.events {
+        if let crate::event::EventPayload::ChildRunStarted { run_id, .. } = e.payload {
+            if !apb_core::registry::is_safe_segment(&run_id) {
+                return None;
+            }
+            ids.push(run_id);
+        }
+    }
+    Some(ids)
 }
 
 fn sensitive_values(params: &BTreeMap<String, String>, declared: &BTreeSet<String>) -> Vec<Secret> {
@@ -176,7 +369,7 @@ impl WorkspaceRedaction {
     /// The redactor of the run at `run_dir`.
     pub fn run_dir(&self, run_dir: &Path) -> RunRedactor {
         let mut r = RunRedactor::with_workspace(self.workspace.clone(), &self.root, run_dir);
-        r.withhold = self.withhold;
+        r.withhold |= self.withhold;
         r
     }
 
@@ -198,12 +391,27 @@ pub struct RunRedactor {
     /// A read-only process that could not resolve a referenced connector
     /// secret (a command source it may not run, a variable missing from
     /// its environment) cannot tell whether the run's text holds it: it
-    /// withholds the run's text instead of showing it.
+    /// withholds the run's text instead of showing it. So does any process
+    /// that could not read the tree's secret-discovery inputs.
     withhold: bool,
 }
 
 /// What a withheld string reads as ([`RunRedactor::withholds`]).
 pub const WITHHELD: &str = "[secrets_unresolved]";
+
+/// A redactor that withholds was asked for its scrubber: the secret values
+/// of the run's tree could not all be read, so no text of the run may be
+/// handed on ([`RunRedactor::scrubber`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretsUnresolved;
+
+impl From<SecretsUnresolved> for EngineError {
+    fn from(_: SecretsUnresolved) -> Self {
+        EngineError::Conflict(
+            "secrets_unresolved: the secret values of this run or a run of its tree could not all be read (a run config or journal does not parse), so its text is withheld; repair or remove the unreadable file and try again".into(),
+        )
+    }
+}
 
 /// Where a withheld answer stays readable: by its position in apb's own
 /// answer shapes, never by a key name met anywhere. At the root of an answer
@@ -256,20 +464,25 @@ impl RunRedactor {
     /// [`RunRedactor::for_run`] with the workspace's connector secrets
     /// already resolved, so a listing of many runs resolves them once.
     pub fn with_workspace(workspace: Vec<Secret>, root: &Path, run_dir: &Path) -> Self {
-        let (values, declared) = values_and_names(run_dir);
+        let TreeSecrets {
+            values,
+            own,
+            complete,
+        } = tree_secrets(run_dir);
         let mut all = workspace;
         all.extend(values.iter().cloned());
         RunRedactor {
             workspace: Scrubber::new(all, root),
             run: Scrubber::new(values, root),
-            declared,
-            withhold: false,
+            declared: own,
+            withhold: !complete,
         }
     }
 
     /// Whether this redactor withholds the run's text: a read-only process
     /// that could not resolve every connector secret the workspace
-    /// references. [`RunRedactor::redact_json`] and
+    /// references, or any process that could not read an input naming or
+    /// holding a value of the run's tree (see the module docs). [`RunRedactor::redact_json`] and
     /// [`RunRedactor::redact_answer`] then keep only apb's own ids, states
     /// and numbers at known positions ([`ROOT_FIELDS`], [`CONTAINERS`]),
     /// every other value reads [`WITHHELD`], and every object answer (each
@@ -337,14 +550,34 @@ impl RunRedactor {
     }
 
     /// The full workspace scrubber with the run's values, for a reader
-    /// that takes a [`Scrubber`] (a grading session, a known problem).
-    pub fn scrubber(&self) -> &Scrubber {
-        &self.workspace
+    /// that takes a [`Scrubber`] and hands its text on (a grading session,
+    /// a known problem, a report). Refused when this redactor withholds
+    /// ([`RunRedactor::withholds`]): the scrubber would miss the values
+    /// discovery could not read, so the text is not handed on at all.
+    pub fn scrubber(&self) -> Result<&Scrubber, SecretsUnresolved> {
+        if self.withhold {
+            return Err(SecretsUnresolved);
+        }
+        Ok(&self.workspace)
     }
 
     /// [`RunRedactor::scrubber`], owned.
-    pub fn into_scrubber(self) -> Scrubber {
-        self.workspace
+    pub fn into_scrubber(self) -> Result<Scrubber, SecretsUnresolved> {
+        if self.withhold {
+            return Err(SecretsUnresolved);
+        }
+        Ok(self.workspace)
+    }
+
+    /// Every value discovery could read, possibly not all of them. Only for
+    /// text written back into the run's own private files (its diagnostics,
+    /// its grades), which every surface reads back through a [`RunRedactor`]
+    /// that withholds, or handed to a path that withholds on its own (a
+    /// decision request, [`RunValues`]). A text clipped after scrubbing
+    /// takes [`RunRedactor::scrubber`] instead: a clipped value is no longer
+    /// found once the tree reads again.
+    pub fn known_values(&self) -> &Scrubber {
+        &self.workspace
     }
 
     /// The run's own values (no connector secrets), which every decision

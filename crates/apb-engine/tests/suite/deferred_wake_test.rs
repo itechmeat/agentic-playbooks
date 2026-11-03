@@ -362,3 +362,153 @@ fn retry_now_resumes_a_released_run_with_the_retry_due() {
     assert_eq!(attempts_of(&events, "work").len(), 2);
     assert_eq!(expedites(&rd), 1);
 }
+
+/// The release and the driver's letting go are one step under the run's
+/// event lock: whoever sees `drive_released` (a stop, a pause, a resume or
+/// a retry-now, which all decide under that lock) finds no live driver and
+/// a free busy lock. A stop in the window finalizes the run at once instead
+/// of being posted to a driver that never reads it again, and a resume is
+/// not refused as busy by the run's own departing driver.
+#[test]
+fn a_release_lets_go_of_the_driver_and_the_lock_under_the_event_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "hourpb", HOUR_DELAY, &[]);
+    let prog = agent(root, "0");
+    let _lock = common::env_lock();
+    let _cmd = common::EnvVar::set("APB_AGENT_CMD", &prog);
+    let _release = common::EnvVar::set("APB_RELEASE_AFTER_MS", "0");
+    let (run_id, rd, rx) = drive_in_thread(root, "hourpb");
+    let busy = root.join(".apb/workdir.lock");
+    // Gated on the journal, read under the event lock the release is
+    // journaled under.
+    let (pid_file, lock_owner) = poll_until("the release", || {
+        let _guard = apb_core::fsutil::lock_dir(&rd, apb_engine::stop::EVENT_LOCK).ok()?;
+        let state = RunState::fold(&read_all(&rd).ok()?);
+        state.released.as_ref()?;
+        Some((
+            apb_engine::driver::driver_pid_path(&rd).exists(),
+            apb_engine::workdir::lock_owner(&busy),
+        ))
+    });
+    let stopped = apb_engine::stop::stop_run(root, &run_id).unwrap();
+    let drive = rx.recv_timeout(DEADLINE).unwrap().unwrap();
+    assert_eq!(drive.outcome, RunStatus::Running, "the drive released");
+    assert!(!pid_file, "driver.pid outlived the release");
+    assert_eq!(lock_owner, None, "the busy lock outlived the release");
+    assert_eq!(
+        stopped,
+        apb_engine::stop::StopOutcome::FinalizedDeadRun,
+        "a stop in the release window takes effect at once"
+    );
+    let state = RunState::fold(&read_all(&rd).unwrap());
+    assert_eq!(state.run_status, RunStatus::Aborted);
+}
+
+/// A real drive's release, then at once (gated on `drive_released` under
+/// the event lock, while the departing drive may still run its tail): a
+/// `--keep-lock` pause is journaled and parks the busy lock, which the
+/// departing drive leaves in place; a retry-now resume is not refused as
+/// busy and runs the retry to the end; a plain resume is not refused as
+/// busy either: it drives the run, which releases itself again while its
+/// retry still waits.
+#[test]
+fn a_keep_lock_pause_and_a_retry_now_right_after_a_real_release() {
+    for action in ["keep-lock pause", "retry-now", "resume"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed(root, "hourpb", HOUR_DELAY, &[]);
+        let prog = agent(root, "0");
+        let _lock = common::env_lock();
+        let _cmd = common::EnvVar::set("APB_AGENT_CMD", &prog);
+        let _release = common::EnvVar::set("APB_RELEASE_AFTER_MS", "0");
+        let (run_id, rd, rx) = drive_in_thread(root, "hourpb");
+        poll_until("the release", || {
+            let _guard = apb_core::fsutil::lock_dir(&rd, apb_engine::stop::EVENT_LOCK).ok()?;
+            RunState::fold(&read_all(&rd).ok()?).released.map(|_| ())
+        });
+        let busy = root.join(".apb/workdir.lock");
+        if action == "keep-lock pause" {
+            let req = PauseRequest {
+                keep_lock: true,
+                ..operator_pause()
+            };
+            let outcome = request_pause(root, &run_id, &req).unwrap();
+            assert!(
+                matches!(outcome, PauseOutcome::Journaled { .. }),
+                "{action}: {outcome:?}"
+            );
+            let drive = rx.recv_timeout(DEADLINE).unwrap().unwrap();
+            assert_eq!(drive.outcome, RunStatus::Running, "the drive released");
+            assert_eq!(
+                fs::read_to_string(&busy).unwrap(),
+                format!("paused:{run_id}"),
+                "the departing drive left the parked lock in place"
+            );
+            assert_eq!(
+                RunState::fold(&read_all(&rd).unwrap()).run_status,
+                RunStatus::Paused
+            );
+        } else if action == "resume" {
+            let done = apb_engine::resume_req(root, &run_id, &ResumeRequest::operator())
+                .unwrap_or_else(|e| panic!("{action}: {e}"));
+            assert_eq!(done.outcome, RunStatus::Running, "{action}: released again");
+            let drive = rx.recv_timeout(DEADLINE).unwrap().unwrap();
+            assert_eq!(drive.outcome, RunStatus::Running, "the drive released");
+            let events = read_all(&rd).unwrap();
+            let kinds: Vec<&str> = events
+                .iter()
+                .filter_map(|e| match e.payload {
+                    EventPayload::DriveReleased { .. } => Some("released"),
+                    EventPayload::RunResumed { .. } => Some("resumed"),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(kinds, ["released", "resumed", "released"], "{action}");
+            assert_eq!(
+                attempts_of(&events, "work").len(),
+                1,
+                "the retry still waits"
+            );
+        } else {
+            let done = apb_engine::resume_req(root, &run_id, &retry_now()).unwrap();
+            assert_eq!(done.outcome, RunStatus::Succeeded, "{action}");
+            let drive = rx.recv_timeout(DEADLINE).unwrap().unwrap();
+            assert_eq!(drive.outcome, RunStatus::Running, "the drive released");
+            let events = read_all(&rd).unwrap();
+            assert_eq!(attempts_of(&events, "work").len(), 2, "{action}");
+            assert_eq!(expedites(&rd), 1, "{action}");
+        }
+    }
+}
+
+/// A fifo planted at a due release's lease path (anything that can write
+/// the run directory can plant one) fails the lease open at once: `apb
+/// resume --all` goes on to the next run instead of hanging on it.
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_a_lease_path_never_hangs_resume_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let rd = seed_released(&root, "r-fifo", apb_core::clock::now_ms_u64() - 1_000);
+    // Nothing drives it any more.
+    fs::remove_file(apb_engine::driver::driver_pid_path(&rd)).unwrap();
+    let seq = RunState::fold(&read_all(&rd).unwrap())
+        .released
+        .unwrap()
+        .seq;
+    fs::create_dir_all(rd.join("wakers")).unwrap();
+    let fifo = std::ffi::CString::new(
+        rd.join(format!("wakers/release-{seq}"))
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(resume_all(&root).map(|e| e.len()));
+    });
+    let done = rx.recv_timeout(std::time::Duration::from_secs(20));
+    assert!(done.is_ok(), "resume --all hung on a fifo lease");
+}

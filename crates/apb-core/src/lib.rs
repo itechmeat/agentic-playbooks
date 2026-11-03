@@ -57,6 +57,7 @@ pub mod registry;
 pub mod run_memory;
 pub mod run_notes;
 pub mod run_origin;
+pub mod run_outputs;
 pub mod run_params;
 pub mod schema;
 pub mod schema_migrate;

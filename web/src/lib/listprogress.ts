@@ -1,4 +1,5 @@
 import type { RunList, RunListItem } from './api.gen'
+import { UNRESOLVED_SEND_TEXT } from './consts.gen'
 import type { PlaybookNode } from './types'
 
 // The run page's list panel and the graph's list badge: pure shaping of a
@@ -107,11 +108,13 @@ export function visibleItems(
   return { rows: matching.slice(0, ITEM_ROW_CAP), hidden: matching.length - ITEM_ROW_CAP }
 }
 
-// What an item row says beside its state: the reason it needs a look, the
-// check's note, or nothing.
+// What an item row says beside its state: that an earlier send of a
+// passed item is still unknown, the reason it needs a look, the check's
+// note, or nothing.
 export function itemText(i: RunListItem): string {
+  const unresolved = i.unresolved_send ? UNRESOLVED_SEND_TEXT : null
   const reason = i.reason ? i.reason.replace(/_/g, ' ') : null
-  return [reason, i.note].filter((s): s is string => !!s).join(': ')
+  return [unresolved, reason, i.note].filter((s): s is string => !!s).join(': ')
 }
 
 // The graph badge of a list node: `12/43` once its visit started, `list`

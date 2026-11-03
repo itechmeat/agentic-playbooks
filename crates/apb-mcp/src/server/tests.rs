@@ -2636,6 +2636,8 @@ mod notify;
 mod problems;
 // Run quality: grading sessions, grades and the candidate.
 mod quality;
+// A run's secret values on the run surfaces, in every spelling apb writes.
+mod redaction;
 
 /// Every next-action code maps to a tool this server really serves.
 #[test]

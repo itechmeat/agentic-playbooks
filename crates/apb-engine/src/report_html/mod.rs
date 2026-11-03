@@ -28,11 +28,13 @@ pub use model::{ANSWER_MAX_BYTES, JOURNAL_LINE_MAX_BYTES, JOURNAL_MAX_EVENTS};
 /// The report's stylesheet, inline and pinned by hash.
 pub const STYLESHEET: &str = include_str!("report.css");
 
-/// The report of the run at `run_dir` of the workspace at `root`.
+/// The report of the run at `run_dir` of the workspace at `root`. Refused
+/// (`secrets_unresolved`) when the secret values of the run's tree cannot
+/// all be read: the page leaves the machine.
 pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
     let report = Report::load(root, run_dir)?;
     let w = sections::Writer::new(
-        crate::run_redact::RunRedactor::for_run(root, run_dir).into_scrubber(),
+        crate::run_redact::RunRedactor::for_run(root, run_dir).into_scrubber()?,
     );
     let title = match &report.playbook {
         Some(p) => format!("{p} run {}", report.run_id),

@@ -73,7 +73,7 @@
           </thead>
           <tbody>
             {#each view.rows as i (i.id)}
-              <tr class={i.state} data-testid="run-list-item">
+              <tr class={i.state} class:unresolved={i.unresolved_send} data-testid="run-list-item">
                 <td><code>{i.id}</code></td>
                 <td>{stateLabel(i.state)}</td>
                 <td>{i.round}</td>
@@ -191,8 +191,12 @@
   .note {
     white-space: normal;
   }
-  tr.needs_look td:first-child {
+  tr.needs_look td:first-child,
+  tr.unresolved td:first-child {
     box-shadow: inset 2px 0 0 var(--warning);
+  }
+  tr.unresolved .note {
+    color: var(--foreground);
   }
   .note {
     width: 100%;

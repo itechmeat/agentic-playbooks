@@ -57,6 +57,7 @@ pub mod question;
 pub mod read_only;
 pub(crate) mod redact;
 pub mod report_html;
+pub mod result_ref;
 pub mod resume_kind;
 pub mod resume_launch;
 pub mod retry_wait;
@@ -70,6 +71,7 @@ pub mod run_history;
 mod run_lineage;
 pub mod run_origin;
 pub mod run_outcome;
+pub mod run_outputs;
 pub mod run_perms;
 pub mod run_redact;
 // --- run retrospective (#192 part 3) ---

@@ -36,8 +36,9 @@
 //! and patched runs, asserting the hops, the counted traversals and the
 //! nodes reached explicitly. Row 14 covers the definition digests every
 //! drive journals (`run_started`, `run_resumed`, `patch_applied`) across a
-//! crashed patch, a resume and a later patch. The parts of rows 13 and 14
-//! that need no old binary run without one.
+//! crashed patch, a resume and a later patch. The parts of rows 13, 14 and
+//! D1 to D6 and D8 that need no old binary run without one (D7's writer is
+//! beta.1, D9 needs none at all).
 //!
 //! Rows 3 and 4 start an `agent_launch: ask` playbook through the launch
 //! refusal's nonce, so the manifest holds a launch record; rows 6 and 9
@@ -224,6 +225,13 @@ fn old_binary(tag: &str, case: &Case) -> Option<PathBuf> {
         bin.display()
     );
     Some(bin)
+}
+
+/// Both released readers, beta.1 and 0.25.0, or `None` when either is
+/// missing (see [`old_binary`]): the part of a row that needs them is
+/// skipped, the rest of the row still runs.
+fn old_readers(case: &Case) -> Option<(PathBuf, PathBuf)> {
+    Some((old_binary(BETA1, case)?, old_binary(V025, case)?))
 }
 
 fn new_binary() -> PathBuf {
@@ -1722,29 +1730,10 @@ impl Case {
         );
     }
 
-    /// Kills every `apb __pause-waker` of `run` (Linux `/proc`; elsewhere
-    /// nothing to find), so no waker of a saved state acts on a later copy.
+    /// Kills every `apb __pause-waker` of `run`, so no waker of a saved
+    /// state acts on a later copy.
     fn kill_wakers(&self, run: &str) {
-        let Ok(procs) = fs::read_dir("/proc") else {
-            return;
-        };
-        for entry in procs.flatten() {
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|p| p.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
-                continue;
-            };
-            let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-            let has = |s: &str| args.contains(&s.as_bytes());
-            if has("__pause-waker") && has(run) {
-                crate::common::sig::kill_pid(pid);
-            }
-        }
+        crate::common::kill_wakers(&self.root(), run);
     }
 }
 
@@ -1827,12 +1816,6 @@ fn tree_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 #[test]
 fn d1_open_deferral_old_binaries_read_refuse_and_stop() {
     let mut case = Case::new("row D1");
-    let Some(beta1) = old_binary(BETA1, &case) else {
-        return;
-    };
-    let Some(v025) = old_binary(V025, &case) else {
-        return;
-    };
     let run = case.write_deferral_open();
     let new = new_binary();
     case.restore();
@@ -1841,6 +1824,10 @@ fn d1_open_deferral_old_binaries_read_refuse_and_stop() {
         doctor.stdout.contains("retry 1 of `flaky` deferred") && doctor.stdout.contains("guarded"),
         "row D1: the doctor names the guarded deferral: {doctor:?}"
     );
+    // Only the old readers need the old binaries; the doctor runs without.
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
     for reader in [beta1, v025] {
         let ran = case.read(&reader, &run);
         assert!(
@@ -1874,20 +1861,18 @@ fn d1_open_deferral_old_binaries_read_refuse_and_stop() {
 #[test]
 fn d2_released_run_old_resume_all_writes_nothing_new_resumes_when_due() {
     let mut case = Case::new("row D2");
-    let Some(beta1) = old_binary(BETA1, &case) else {
-        return;
-    };
-    let Some(v025) = old_binary(V025, &case) else {
-        return;
-    };
     let new = new_binary();
     case.seed_deferred("10m", 1, 1, &new);
     let run = case.start_deferred(&new);
+    // Read before the release: the release removes `driver.pid` while the
+    // departing driver still runs its tail (it starts the release's waker).
+    let driver = apb_engine::driver::read_driver_pid(&case.run_dir(&run));
+    assert!(driver.is_some(), "row D2: the driver wrote its pid");
     fs::remove_file(case.root().join("hold")).unwrap();
     case.wait_journal(&run, "the driver to release the run", |j| {
         j.last().is_some_and(|e| e["type"] == "drive_released")
     });
-    if let Some(pid) = apb_engine::driver::read_driver_pid(&case.run_dir(&run)) {
+    if let Some(pid) = driver {
         let start = Instant::now();
         while crate::common::sig::alive(pid) {
             assert!(start.elapsed() < DEADLINE, "row D2: the driver exits");
@@ -1897,7 +1882,12 @@ fn d2_released_run_old_resume_all_writes_nothing_new_resumes_when_due() {
     case.forget_driver(&run);
     case.kill_wakers(&run);
     case.save();
-    for reader in [beta1, v025] {
+    // The old readers' part needs them; the new resume below runs without.
+    for reader in old_readers(&case)
+        .map(|(b, v)| [b, v])
+        .into_iter()
+        .flatten()
+    {
         case.restore();
         let before = case.journal_bytes(&run);
         let ran = case.run(&reader, &["resume", "--all"]);
@@ -1976,12 +1966,6 @@ fn d2_released_run_old_resume_all_writes_nothing_new_resumes_when_due() {
 #[test]
 fn d3_paused_with_open_deferral_old_refuse_new_continues_the_delay() {
     let mut case = Case::new("row D3");
-    let Some(beta1) = old_binary(BETA1, &case) else {
-        return;
-    };
-    let Some(v025) = old_binary(V025, &case) else {
-        return;
-    };
     let new = new_binary();
     case.env
         .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
@@ -2005,7 +1989,12 @@ fn d3_paused_with_open_deferral_old_refuse_new_continues_the_delay() {
     }
     case.forget_driver(&run);
     case.save();
-    for reader in [beta1, v025] {
+    // The old readers' part needs them; the new resume below runs without.
+    for reader in old_readers(&case)
+        .map(|(b, v)| [b, v])
+        .into_iter()
+        .flatten()
+    {
         case.resume_refused(&reader, &run, "deferred_retry_guard");
     }
     // The new resume, with the ordinary release threshold.
@@ -2050,12 +2039,6 @@ fn d3_paused_with_open_deferral_old_refuse_new_continues_the_delay() {
 #[test]
 fn d4_synthetic_torn_guard_every_resume_refuses_reads_go_on() {
     let mut case = Case::new("row D4");
-    let Some(beta1) = old_binary(BETA1, &case) else {
-        return;
-    };
-    let Some(v025) = old_binary(V025, &case) else {
-        return;
-    };
     let run = case.write_deferral_open();
     let path = case.saved().join(&run).join("events.jsonl");
     let text = fs::read_to_string(&path).unwrap();
@@ -2070,7 +2053,12 @@ fn d4_synthetic_torn_guard_every_resume_refuses_reads_go_on() {
     fs::write(&path, torn).unwrap();
     let lines = torn.lines().count();
     let new = new_binary();
-    for reader in [new.clone(), beta1, v025] {
+    // The new binary always; the old ones when they are here.
+    let old = old_readers(&case)
+        .map(|(b, v)| [b, v])
+        .into_iter()
+        .flatten();
+    for reader in std::iter::once(new.clone()).chain(old) {
         case.read(&reader, &run);
         case.restore();
         let before = case.journal_bytes(&run);
@@ -2103,12 +2091,6 @@ fn d4_synthetic_torn_guard_every_resume_refuses_reads_go_on() {
 #[test]
 fn d5_crash_after_retry_deferred_old_resumes_refuse() {
     let mut case = Case::new("row D5");
-    let Some(beta1) = old_binary(BETA1, &case) else {
-        return;
-    };
-    let Some(v025) = old_binary(V025, &case) else {
-        return;
-    };
     let new = new_binary();
     case.env
         .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
@@ -2124,6 +2106,10 @@ fn d5_crash_after_retry_deferred_old_resumes_refuse() {
         .unwrap();
     assert!(deferred > checkpoint, "row D5: no checkpoint after it");
     case.save();
+    // Only the old resumes need the old binaries.
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
     for reader in [beta1, v025] {
         case.resume_refused(&reader, &run, "retry_deferred");
         case.stop(&reader, &run);
@@ -2197,12 +2183,6 @@ fn d9_killed_during_the_delay_new_resume_keeps_max_retries() {
 #[test]
 fn d6_d8_closed_deferral_old_binaries_resume_with_the_same_routing() {
     let mut case = Case::new("row D6");
-    let Some(beta1) = old_binary(BETA1, &case) else {
-        return;
-    };
-    let Some(v025) = old_binary(V025, &case) else {
-        return;
-    };
     let new = new_binary();
     case.env
         .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
@@ -2263,6 +2243,11 @@ fn d6_d8_closed_deferral_old_binaries_resume_with_the_same_routing() {
     let from = journal.len();
     case.approve_and_resume(&new, &run);
     let expected = routing(&case.journal(&run), from);
+    // Everything above runs on the new binary alone; the old readers'
+    // resumes and the doctor after beta.1's need the old binaries.
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
     for reader in [beta1.clone(), v025] {
         let ran = case.read(&reader, &run);
         assert!(
@@ -2376,5 +2361,121 @@ fn d7_beta1_starts_new_applies_the_delay_to_later_gaps_only() {
             && e["status"] == "succeeded"),
         "row D7: flaky succeeded: {}",
         summary(after)
+    );
+}
+
+/// The declaration row D10 adds to a finished corpus run's `playbook.yaml`:
+/// what a later definition of the playbook would declare.
+const D10_OUTPUTS: &str = "\noutputs:\n  work: { from: { node: work } }\n  child: { from: { node: sub } }\n  decided: { from: { node: ok } }\n  rejected: { from: { node: no } }\n  field: { from: { node: work, field: x } }\n";
+
+/// Row D10: the new binary projects `run_outputs` over journals older
+/// binaries wrote. beta.1 and 0.25.0 each run the corpus writer to its end
+/// (approved at the gate); without the old binaries, the new writer's run
+/// with everything an older apb does not journal removed (the definition
+/// digests, the binary versions, the stored definitions) stands in for
+/// them, so the new-binary half runs everywhere. Each journal projects
+/// without an error: nothing declared at first, then the values the
+/// journal holds once the run's `playbook.yaml` declares outputs, read
+/// against that current file because no definition of the run is
+/// established.
+#[test]
+fn d10_old_journals_project_run_outputs() {
+    let new = new_binary();
+    let mut case = Case::new("row D10 (old shape)");
+    let run = case.write_waiting_at_review(&new);
+    case.approve_and_resume(&new, &run);
+    rewrite_journal(&case.run_dir(&run), |journal| {
+        journal
+            .into_iter()
+            .map(|mut e| {
+                if let Some(o) = e.as_object_mut() {
+                    o.remove("definition");
+                    o.remove("apb");
+                }
+                e
+            })
+            .collect()
+    });
+    let _ = fs::remove_dir_all(case.run_dir(&run).join("definitions"));
+    d10_project(&case, &run);
+
+    for (tag, name) in [(BETA1, "row D10 (beta.1)"), (V025, "row D10 (0.25.0)")] {
+        let mut case = Case::new(name);
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        let run = case.write_waiting_at_review(&old);
+        case.approve_and_resume(&old, &run);
+        d10_project(&case, &run);
+    }
+}
+
+/// The new binary's projection of a finished corpus run, before and after
+/// its `playbook.yaml` declares outputs.
+fn d10_project(case: &Case, run: &str) {
+    let new = new_binary();
+    let outputs = |case: &Case| -> Value {
+        let ran = case.run(&new, &["runs", run, "--outputs-json"]);
+        assert!(ran.ok(), "{}: runs --outputs-json: {ran:?}", case.name);
+        serde_json::from_str(&ran.stdout)
+            .unwrap_or_else(|e| panic!("{}: not JSON ({e}): {ran:?}", case.name))
+    };
+    let o = outputs(case);
+    assert_eq!(
+        o,
+        serde_json::json!({ "final": true, "definition": "current", "outputs": [] }),
+        "{}: nothing declared",
+        case.name
+    );
+    let ran = case.run(&new, &["runs", run, "--json"]);
+    assert!(ran.ok(), "{}: runs --json: {ran:?}", case.name);
+    let status: Value = serde_json::from_str(&ran.stdout).unwrap();
+    assert!(
+        status.get("run_outputs").is_none(),
+        "{}: {status}",
+        case.name
+    );
+
+    let snapshot = case.run_dir(run).join("playbook.yaml");
+    let mut yaml = fs::read_to_string(&snapshot).unwrap();
+    yaml.push_str(D10_OUTPUTS);
+    fs::write(&snapshot, yaml).unwrap();
+    let journal = case.journal(run);
+    let output_of = |node: &str| {
+        journal
+            .iter()
+            .find(|e| e["type"] == "node_finished" && e["node"] == node)
+            .map(|e| e["output"].clone())
+            .unwrap_or_else(|| panic!("{}: no node_finished of {node}", case.name))
+    };
+    let o = outputs(case);
+    assert_eq!(o["definition"], "current", "{}: {o:#}", case.name);
+    assert_eq!(o["final"], true, "{}: {o:#}", case.name);
+    let named = |name: &str| -> &Value {
+        o["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == name)
+            .unwrap_or_else(|| panic!("{}: no output {name}: {o:#}", case.name))
+    };
+    assert_eq!(named("work")["value"], output_of("work"), "{}", case.name);
+    assert_eq!(named("work")["source"]["execution"]["ordinal"], 1);
+    assert_eq!(named("child")["value"], output_of("sub"), "{}", case.name);
+    assert_eq!(named("decided")["state"], "value", "{}: {o:#}", case.name);
+    assert_eq!(
+        named("rejected")["reason"],
+        "not_run",
+        "{}: {o:#}",
+        case.name
+    );
+    assert_eq!(named("field")["reason"], "not_json_object", "{}", case.name);
+    let ran = case.run(&new, &["runs", run]);
+    assert!(ran.ok(), "{}: runs: {ran:?}", case.name);
+    assert!(
+        ran.stdout
+            .contains("  outputs (final, current definition):"),
+        "{}: {ran:?}",
+        case.name
     );
 }

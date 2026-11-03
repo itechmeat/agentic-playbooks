@@ -20,6 +20,7 @@ mod known_problems;
 mod list;
 mod node_io;
 pub(crate) mod nodes;
+mod outputs;
 mod params;
 mod publish;
 mod quality;
@@ -266,6 +267,11 @@ pub struct ValidationContext {
     /// same way `profiles` being empty leaves a global profile reference to
     /// the run-start resolver.
     pub connectors: std::collections::BTreeMap<String, crate::connector::resolve::ConnectorFacts>,
+    /// The declared run output names of each `type: playbook` node's child
+    /// with `output: outputs`, keyed by node id, for the children that
+    /// resolved ([`ValidationContext::with_child_outputs`]). A node absent
+    /// here is not checked (V46, V133).
+    pub child_outputs: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl ValidationContext {
@@ -280,7 +286,57 @@ impl ValidationContext {
             profiles: reg.profiles(),
             playbook_origin: origin,
             connectors: crate::connector::resolve::validation_facts(),
+            child_outputs: Default::default(),
         }
+    }
+
+    /// Adds the declared run output names of every child of `playbook`
+    /// that a `type: playbook` node with `output: outputs` reads, so V46 and
+    /// V133 check reads of them. The child resolves as a run resolves it:
+    /// its current version in the first scope of
+    /// [`crate::scope::scope_candidates`] (the node's `scope`, from the
+    /// parent's origin) that has it, `reg` standing for the parent's own
+    /// store. A child that does not resolve is left unchecked.
+    pub fn with_child_outputs(
+        mut self,
+        playbook: &Playbook,
+        reg: &crate::registry::Registry,
+    ) -> Self {
+        use crate::scope::Origin;
+        let parent = match self.playbook_origin {
+            PlaybookOrigin::Project => Origin::Project { workspace_id: None },
+            PlaybookOrigin::Global => Origin::Global,
+        };
+        let load = |id: &str, cand: &Origin| -> Option<crate::registry::LoadedPlaybook> {
+            match (cand, &parent) {
+                // The parent's own store.
+                (Origin::Global, Origin::Global)
+                | (Origin::Project { .. }, Origin::Project { .. }) => reg.load(id, None).ok(),
+                (Origin::Global, _) => crate::store::global_playbooks_parent()
+                    .and_then(|dir| crate::registry::Registry::open_dir(&dir).ok())
+                    .and_then(|g| g.load(id, None).ok()),
+                // A global parent names no project here.
+                (Origin::Project { .. }, _) => None,
+            }
+        };
+        for n in &playbook.nodes {
+            let NodeKind::Playbook {
+                playbook: child,
+                output: crate::run_outputs::ChildOutput::Outputs,
+                ..
+            } = &n.kind
+            else {
+                continue;
+            };
+            let found = crate::scope::scope_candidates(child.scope, &parent)
+                .iter()
+                .find_map(|cand| load(&child.id, cand));
+            if let Some(loaded) = found {
+                let names = loaded.playbook.outputs.keys().map(String::from).collect();
+                self.child_outputs.insert(n.id.clone(), names);
+            }
+        }
+        self
     }
 }
 
@@ -316,7 +372,9 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     edges::check_pair_caps(playbook, &mut r); // V122
     edges::check_one_of_order(playbook, &mut r); // V123, V124
     edges::check_judge_values(playbook, &mut r); // V125
+    edges::check_review_caps(playbook, &mut r); // V136
     retry::check_retry_delay(playbook, &mut r); // V126-V130
+    outputs::check_outputs(playbook, ctx, &mut r); // V131-V135
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10
@@ -333,7 +391,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_trigger(playbook, &mut r); // V17
         check_goal(playbook, &mut r); // V41
         check_session_handoff(playbook, &mut r); // V44, V45
-        check_declared_fields(playbook, &mut r); // V46
+        check_declared_fields(playbook, ctx, &mut r); // V46
         check_workdir(playbook, &mut r); // V47
         check_worktree(playbook, &mut r); // V48
         check_cache_key(playbook, &mut r); // V49
