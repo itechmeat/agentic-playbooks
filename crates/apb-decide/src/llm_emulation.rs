@@ -583,12 +583,16 @@ mod tests {
 
     #[test]
     fn a_hostile_reply_is_searched_in_linear_time() {
-        // Unbalanced braces used to cost a scan to the end per `{`.
+        // Unbalanced braces used to cost a scan to the end per `{`. On these
+        // inputs that is about 10^11 to 10^12 byte steps, minutes even in a
+        // release build, while the linear search takes well under a second
+        // in a debug build. The bound sits between the two with room for a
+        // loaded CI runner, so only a change of complexity class trips it.
         let started = std::time::Instant::now();
         assert!(first_json_object(&"{".repeat(1_000_000)).is_none());
         assert!(first_json_object(&"{\"a\": [".repeat(200_000)).is_none());
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
+            started.elapsed() < std::time::Duration::from_secs(10),
             "took {:?}",
             started.elapsed()
         );
