@@ -128,7 +128,13 @@ before it is encoded again, so a quote or a backslash in a value does not
 hide it and every number, space and key stays as written; JSON text nested
 more than 8 levels deep reads `[withheld: nested too deep]`. In other text
 (a log line with JSON after a prefix) a value is replaced both as written
-and as JSON escapes it. What would hand
+and as JSON escapes it. Redaction guards against the accidental disclosure
+of a known value in the spellings apb itself and ordinary tools produce:
+as written, and as JSON escapes it, at any nesting apb creates. A step that
+deliberately re-encodes a value it knows (escaping each character, breaking
+the JSON around it, nesting it past the bounds, base64, reversing it) can
+always pass it on, as with any other encoding, and is out of its scope.
+What would hand
 the run's text on whole is refused with `secrets_unresolved` instead: a
 host grading session (`run_grade_start`, and every read of an open one,
 which also hides a value a run of the tree declared after it opened), a

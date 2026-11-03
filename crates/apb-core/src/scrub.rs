@@ -22,6 +22,13 @@
 //! nothing, it also refuses any value of 8 or more characters after a key
 //! name and bare keys of 32 to 64 characters
 //! ([`crate::token_shape::refuses_to_store`]).
+//!
+//! Redaction guards against the accidental disclosure of a known value in
+//! the spellings apb itself and ordinary tools produce: as written, and as
+//! JSON escapes it, at any nesting apb creates. A step that deliberately
+//! re-encodes a value it knows (escaping each character, breaking the JSON
+//! around it, nesting it past the bounds, base64, reversing it) can always
+//! pass it on, as with any other encoding, and is out of its scope.
 
 use std::sync::LazyLock;
 
@@ -86,6 +93,10 @@ pub struct Scrubber {
     /// Secret values, longest first so a value containing another is
     /// replaced whole.
     secrets: Vec<Secret>,
+    /// Each value of `secrets` as JSON escapes it inside a string, at the
+    /// same index; `None` where that is how it is written. Made once here,
+    /// never per scrubbed string.
+    escaped: Vec<Option<Secret>>,
     /// The project root, as written in paths (no trailing slash).
     root: Option<String>,
     home: Option<String>,
@@ -98,6 +109,15 @@ impl std::fmt::Debug for Scrubber {
             .field("root", &self.root)
             .finish_non_exhaustive()
     }
+}
+
+/// `secret` as JSON escapes it inside a string, when that differs from how
+/// it is written.
+fn json_escaped(secret: &Secret) -> Option<Secret> {
+    let raw = secret.expose_secret();
+    let quoted = serde_json::to_string(raw).ok()?;
+    let escaped = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    (escaped != raw).then(|| Secret::new(escaped))
 }
 
 impl Scrubber {
@@ -121,6 +141,7 @@ impl Scrubber {
             }
         }
         let secrets = distinct;
+        let escaped = secrets.iter().map(json_escaped).collect();
         let root = std::fs::canonicalize(root)
             .unwrap_or_else(|_| root.to_path_buf())
             .to_string_lossy()
@@ -132,6 +153,7 @@ impl Scrubber {
             .filter(|h| h.len() > 1);
         Scrubber {
             secrets,
+            escaped,
             root: (root.len() > 1).then_some(root),
             home,
         }
@@ -211,15 +233,10 @@ impl Scrubber {
     /// and as JSON escapes it inside a string, when that differs.
     fn replace_spellings(&self, text: &str) -> String {
         let mut out = text.to_string();
-        for s in &self.secrets {
+        for (s, escaped) in self.secrets.iter().zip(&self.escaped) {
             out = s.scrub_as(&out, "[redacted]");
-            let quoted = serde_json::to_string(s.expose_secret()).unwrap_or_default();
-            let escaped = quoted
-                .strip_prefix('"')
-                .and_then(|q| q.strip_suffix('"'))
-                .unwrap_or_default();
-            if !escaped.is_empty() && escaped != s.expose_secret() {
-                out = out.replace(escaped, "[redacted]");
+            if let Some(escaped) = escaped {
+                out = escaped.scrub_as(&out, "[redacted]");
             }
         }
         out
@@ -265,12 +282,11 @@ impl Scrubber {
             }
             Value::Array(items) => items.iter_mut().for_each(|i| self.scrub_json(i, depth)),
             Value::Object(map) => {
-                if map.keys().any(|k| self.holds_value(k)) {
+                // A key goes the way a string value does.
+                let keys: Vec<String> = map.keys().map(|k| self.scrub_text(k, depth)).collect();
+                if keys.iter().zip(map.keys()).any(|(new, old)| new != old) {
                     let old = std::mem::take(map);
-                    *map = old
-                        .into_iter()
-                        .map(|(k, v)| (self.replace_values(&k), v))
-                        .collect();
+                    *map = keys.into_iter().zip(old.into_values()).collect();
                 }
                 map.values_mut().for_each(|v| self.scrub_json(v, depth));
             }
@@ -622,6 +638,35 @@ mod tests {
             .filter(|(got, want)| got != want)
             .collect();
         assert!(wrong.is_empty(), "got, wanted: {wrong:#?}");
+    }
+
+    /// An object key goes the way a string value does: a key that is JSON
+    /// text holding the value escaped is scrubbed too.
+    #[test]
+    fn a_key_that_is_json_text_holding_a_value_is_scrubbed() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Scrubber::new(vec![Secret::new(r#"pa"ss-word-1"#)], root.path());
+        let mut v = serde_json::json!({ r#""pa\"ss-word-1""#: 1 });
+        r.scrub_values_json(&mut v);
+        assert_eq!(v, serde_json::json!({ r#""[redacted]""#: 1 }));
+    }
+
+    /// A long value and many short strings: each value's escaped spelling
+    /// is made once per scrubber, not once per string, so this ends fast.
+    #[test]
+    fn a_long_value_over_many_strings_is_scrubbed_in_bounded_time() {
+        let root = tempfile::tempdir().unwrap();
+        let long = format!("q\"{}", "v".repeat(1 << 20));
+        let r = Scrubber::new(vec![Secret::new(long)], root.path());
+        let text = serde_json::to_string(&vec!["x"; 20_000]).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(r.scrub_values(&text) == text);
+        });
+        let kept = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the scrub did not end within 20s");
+        assert!(kept);
     }
 
     /// JSON text inside JSON text is read to [`MAX_JSON_DEPTH`] levels;
