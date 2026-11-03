@@ -158,6 +158,9 @@ mod bounded_output_test;
 #[cfg(unix)]
 #[path = "suite/budget_gate_test.rs"]
 mod budget_gate_test;
+#[cfg(unix)]
+#[path = "suite/bundled_routing_test.rs"]
+mod bundled_routing_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
 #[cfg(unix)]

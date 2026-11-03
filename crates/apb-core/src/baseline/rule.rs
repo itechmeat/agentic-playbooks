@@ -16,11 +16,14 @@ pub enum Rule {
     AtLeast(f64),
     Change(Change),
     Empty,
+    /// A list holds this scalar among its items (compared as the item text
+    /// a list keeps, [`Scalar::as_item`]).
+    Contains(Scalar),
 }
 
 impl Rule {
     /// The rule as journaled: `equals 0`, `at_most 3`, `change no_new`,
-    /// `empty`.
+    /// `empty`, `contains \`bug\``.
     pub fn describe(&self) -> String {
         match self {
             Rule::Equals(s) => format!("equals {s}"),
@@ -28,6 +31,7 @@ impl Rule {
             Rule::AtLeast(n) => format!("at_least {}", format_number(*n)),
             Rule::Change(c) => format!("change {}", c.as_str()),
             Rule::Empty => "empty".into(),
+            Rule::Contains(s) => format!("contains {s}"),
         }
     }
 
@@ -50,7 +54,9 @@ impl Rule {
             ),
             ObservationType::List => matches!(
                 self,
-                Rule::Empty | Rule::Change(Change::NoNew | Change::Shrink | Change::Unchanged)
+                Rule::Empty
+                    | Rule::Contains(_)
+                    | Rule::Change(Change::NoNew | Change::Shrink | Change::Unchanged)
             ),
             ObservationType::Field => {
                 matches!(self, Rule::Equals(_) | Rule::Change(Change::Unchanged))
@@ -180,6 +186,11 @@ fn lists(b: &[String], a: &[String], rule: &Rule) -> Comparison {
             (same, !same)
         }
         Rule::Empty => (a.is_empty(), a.len() > b.len()),
+        Rule::Contains(s) => {
+            let item = s.as_item();
+            let (was, is) = (b.contains(&item), a.contains(&item));
+            (is, was && !is)
+        }
         other => {
             return Comparison::unknown(format!(
                 "rule `{}` does not apply to a list",
@@ -297,7 +308,37 @@ mod tests {
     }
 
     #[test]
+    fn contains_is_met_only_when_the_after_list_holds_the_item() {
+        let rule = Rule::Contains(Scalar::Text("bug".into()));
+        let c = compare(Some(&list(&["a"])), &list(&["a", "bug"]), &rule);
+        assert_eq!((c.verdict, c.regressed), (Verdict::Met, Some(false)));
+        let c = compare(Some(&list(&["bug"])), &list(&["a"]), &rule);
+        assert_eq!((c.verdict, c.regressed), (Verdict::NotMet, Some(true)));
+        let c = compare(Some(&list(&[])), &list(&["bugs"]), &rule);
+        assert_eq!((c.verdict, c.regressed), (Verdict::NotMet, Some(false)));
+        let numeric = Rule::Contains(Scalar::Number(42.0));
+        assert_eq!(
+            compare(Some(&list(&[])), &list(&["42"]), &numeric).verdict,
+            Verdict::Met
+        );
+        let unknown = Observation::unknown("timeout");
+        let c = compare(Some(&list(&["bug"])), &unknown, &rule);
+        assert_eq!((c.verdict, c.regressed), (Verdict::Unknown, None));
+        let text = Observation::value(ObservedValue::Text("a bug".into()));
+        assert_eq!(
+            compare(Some(&text), &text, &rule).verdict,
+            Verdict::Unknown,
+            "a field is never searched for a substring"
+        );
+        assert_eq!(rule.describe(), "contains `bug`");
+    }
+
+    #[test]
     fn rules_fit_only_their_observation_types() {
+        // `contains` on a list and on a number is the V64 test's; a field
+        // is checked only here.
+        let contains = Rule::Contains(Scalar::Text("x".into()));
+        assert!(contains.misfit(ObservationType::Field).is_some());
         assert!(
             Rule::Change(Change::NoNew)
                 .misfit(ObservationType::Number)

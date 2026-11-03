@@ -75,9 +75,44 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   version by its exact digest, `error` and `sidecar` the error and the
   provenance types, `current` the one locked operation that moves
   `current` with its intent file, recovery and value-audited history:
-  `current/model` the history line, `history` the audit, `intent` the
+  `current/model` the history line, `history` the audit and the newest
+  move, `settled` the pointers as recovery leaves them, `intent` the
   intent file, `fault` the test-only crash points), bundle export, import and the import preview
-  (`bundle/`), remembered run input per project (`run_memory/`: `key`,
+  (`bundle/`), the content apb ships from the repository folder `bundled/`
+  (`bundled/`: the embedded playbooks and skills and the reserved `apb-` id
+  prefix every create path refuses (`reserved_id`); every write of shipped
+  content holds one lock under the config dir (`hold`, `try_hold` for the
+  reconcile a start runs); `playbooks` the install
+  into the global store as ordinary versions trusted `Bundled` for their
+  exact digest; every write takes the playbook's pointer lock, runs
+  `current::recover` first and decides through one `classify` over
+  `current::settled` (absent, pristine, modified, or newer installed,
+  which every path refuses), and writes the shipped version inside the move itself
+  (`current::move_current_writing_locked`), so an interrupted install or
+  upgrade is an aborted or rolled-forward move; the read-only state projects
+  a pending intent without writing,
+  `replace_modified_playbook` the shipped content over a changed default on
+  a person's request and `restore_replaced_playbook` its undo,
+  `skills` the copy into the global skills dir with its sidecar digest and
+  claude bridge, `SkillUpdates` several skill installs judged once for the
+  role profiles, `replace_modified_skill` with the changed copy moved to a
+  backup (put back when the write fails) and `restore_replaced_skill` its
+  undo, `role_trust` the approval of a setup-made role profile carried to
+  its new bundle digest after a shipped skill update, only while the
+  profile is what setup wrote and every skill it carries holds the shipped
+  files (the origin it had, never `Bundled`), `roles` the plan of the
+  `apb-main`, `apb-reviewer` and
+  `apb-researcher` profiles from detection and the models table; the
+  profiles are written by `apb_mcp::profile_tools::write_role_profiles`;
+  `InstallState`, `playbook_state` and `skill_state` the read-only state
+  setup and the doctor report (no lock, nothing written), `report` the one wording of what an
+  upgrade reconcile did (`describe`, `reconcile_defaults`), `remove_playbook` to the global trash
+  (`versioning::delete_global_playbook`) and `remove_skill` of an unchanged
+  copy),
+  the staged install of an embedded file tree shared with the official
+  connectors (`tree_install.rs`, one install of a target at a time under
+  its lock, leftovers judged by the time in their name), remembered run input per project
+  (`run_memory/`: `key`,
   `schema` the params digest and the value check, `store` the file, bound
   to the installation by a MAC for a global playbook), the credential-shape
   detector of values and param names (`token_shape.rs`), a run's sensitive

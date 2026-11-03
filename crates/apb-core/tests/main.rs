@@ -34,6 +34,8 @@ mod agent_check_test;
 mod agents_test;
 #[path = "suite/bundle_test.rs"]
 mod bundle_test;
+#[path = "suite/bundled_content_lint_test.rs"]
+mod bundled_content_lint_test;
 #[path = "suite/config_test.rs"]
 mod config_test;
 #[path = "suite/content_snapshot_test.rs"]

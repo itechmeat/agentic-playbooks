@@ -634,3 +634,55 @@ pub fn parse_soul_requirement(s: Option<&str>) -> Result<SoulRequirement, String
         )),
     }
 }
+
+/// Writes the role profiles of `plan` (`apb_core::bundled::plan_role_profiles`)
+/// as global profiles through [`profile_write`], the normal write of the
+/// user's own profiles: the same checks, and the normal profile trust (never
+/// the `Bundled` origin of shipped content). A profile that exists is
+/// updated against its current digest, so applying a plan again re-adapts
+/// the profiles instead of failing. Returns each write's answer, in plan
+/// order; stops at the first refusal.
+pub fn write_role_profiles(
+    root: &Path,
+    plan: &apb_core::bundled::RolePlan,
+) -> Result<Vec<Value>, ToolError> {
+    let mut out = Vec::with_capacity(plan.profiles.len());
+    for p in &plan.profiles {
+        let expected_digest = profile_get(root, &p.name, "global")
+            .ok()
+            .and_then(|v| v["profile_digest"].as_str().map(str::to_string));
+        let written = profile_write(
+            root,
+            ProfileWrite {
+                name: p.name.clone(),
+                scope: "global".into(),
+                description: p.description.clone(),
+                soul_md: p.soul_md.clone(),
+                skills: skill_refs(&p.skills),
+                executor: ExecutorInput {
+                    agent: p.agent.clone(),
+                    model: p.model.clone(),
+                    fallbacks: p
+                        .fallbacks
+                        .iter()
+                        .map(|f| (f.agent.clone(), f.model.clone()))
+                        .collect(),
+                },
+                expected_digest,
+                ..Default::default()
+            },
+        )?;
+        // Recorded so a later update of a shipped skill it carries keeps
+        // its approval while it stays exactly what setup wrote.
+        if let Some(digest) = written["profile_digest"].as_str()
+            && let Err(e) = apb_core::bundled::note_role_profile(&p.name, digest)
+        {
+            return Err(ToolError::Engine(format!(
+                "the role profile `{}` was written, but not recorded: {e}",
+                p.name
+            )));
+        }
+        out.push(written);
+    }
+    Ok(out)
+}

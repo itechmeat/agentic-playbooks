@@ -114,10 +114,7 @@ impl Notifier {
         .map_err(|e| e.message);
         let window = live.as_ref().map_or(KeyWindow::default(), |l| {
             let f = l.function();
-            KeyWindow::new(
-                f.idempotency.as_ref().map_or(0, |i| i.window_sec()),
-                f.timeout_sec,
-            )
+            KeyWindow::new(f.send_once().map_or(0, |i| i.window_sec()), f.timeout_sec)
         });
         let started = Instant::now();
         for t in due(events, &state, now_ms, window, retry_gap_ms(), &needs_look) {
@@ -221,9 +218,9 @@ impl Notifier {
         };
         let mode = live
             .function()
-            .idempotency
-            .as_ref()
-            .map_or(IdempotencyMode::None, |i| i.mode());
+            .send_once()
+            .and_then(|i| i.mode())
+            .unwrap_or(IdempotencyMode::None);
         let Some(args) = args_for(
             live,
             target,

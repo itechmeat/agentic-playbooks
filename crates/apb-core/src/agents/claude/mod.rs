@@ -20,6 +20,16 @@ use super::{
 /// The agent id.
 pub const ID: &str = "claude";
 
+/// Where claude reads a user's global skills, `~/.claude/skills`; apb
+/// bridges its global skills (`crate::skills::global_skills_dir`) into it.
+/// None if HOME is not set.
+pub fn global_skills_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| std::path::PathBuf::from(h).join(".claude/skills"))
+}
+
 static DESCRIPTOR: Descriptor = Descriptor {
     id: ID,
     // Profiles saved before `claude-code` was renamed `claude` still name it.

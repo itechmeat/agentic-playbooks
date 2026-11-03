@@ -1,0 +1,123 @@
+schema: 2
+id: apb-setup
+name: Set up or re-adapt apb
+description: >-
+  Re-adapt apb to the person on this machine: ask at most five questions,
+  read what `apb setup plan` would change, check the default playbooks,
+  and suggest one dry trial. The run is read-only: it applies nothing, and
+  it never takes a step that needs a person's own consent (a launch floor,
+  trust of a changed playbook, a notification target, filing feedback).
+  The person or the host applies the plan afterwards.
+version: 1.0.0
+agent_launch: ask
+trigger:
+  when:
+    - set up apb for this user and their agents
+    - re-adapt the default playbooks after agents or goals changed
+  avoid_when:
+    - apb is not installed yet
+  examples:
+    - "set apb up for me"
+    - "I installed another coding agent, adapt apb"
+defaults:
+  profile: apb-main
+  require_verdict: true
+  max_retries: 1
+  on_failure: stop
+effects: [fs_read]
+goal:
+  statement: >-
+    The person knows exactly what `apb setup apply` would change on this
+    machine, how to undo it, and which steps still need their own
+    decision; nothing was applied by this run.
+  criteria:
+    - description: The summary names the plan digest, the changes and the undo command
+      check: { type: marker, marker: "SETUP PLAN:" }
+    - description: The person reviewed the plan before anyone applied it
+      check: { type: manual }
+nodes:
+  - { id: start, type: start }
+  - id: interview
+    type: agent_task
+    title: Ask the person about their setup
+    expected_duration: 5m
+    interactive: true
+    protect: ["**"]
+    prompt: >-
+      You adapt apb for the person. Ask at most five short questions, one
+      at a time, in the person's language, and skip any the run
+      instruction already answers ({{run.instruction}}): 1. their goals and
+      domains (code, documents, mail, CRM, other); 2. which installed
+      coding agents apb may use, and which one should review; 3. their
+      budget stance (cheapest that works, balanced, or best quality);
+      4. whether playbooks may write outside the current repository;
+      5. whether they want notifications when a run finishes or needs
+      them, and through what. Do not change anything. Write the outputs
+      goals, agents (the allowed agents and the preferred reviewer),
+      budget, write_outside_repo (true or false), notifications (wanted or
+      not, and the channel named) and notes.
+    outputs:
+      fields: [goals, agents, budget, write_outside_repo, notifications, notes]
+  - id: plan
+    type: agent_task
+    title: Read the setup plan
+    expected_duration: 5m
+    protect: ["**"]
+    prompt: >-
+      Read-only. Run `apb doctor --json` and `apb setup plan --json`. Do not
+      run `apb setup apply`, `apb setup remove`, `apb launch floor`, `apb
+      trust`, `apb notify` or any command that writes, and do not edit
+      config files. If `apb setup` does not exist, say that this apb is
+      too old for setup and stop with a failed verdict. The person's
+      answers: {{nodes.interview.output}}. Compare the plan with the
+      answers: which role profiles (apb-main, apb-reviewer, apb-researcher)
+      it would bind to which agent, which default playbooks and skills it
+      would install or update, which host configuration it would register,
+      and what it leaves untouched. Name each answer the plan cannot
+      honor and why. List separately what needs the person's own decision
+      and must not be done by an agent: a notification target, lowering a
+      launch floor, trusting a changed playbook, filing feedback. Write
+      the outputs digest (the plan digest), changes (a JSON array), unmet
+      (answers the plan cannot honor), person_only (the decisions left to
+      the person), apply_command (the exact `apb setup apply` command for
+      this digest) and undo_command.
+    outputs:
+      fields: [digest, changes, unmet, person_only, apply_command, undo_command]
+  - id: verify
+    type: agent_task
+    title: Check the playbooks and suggest a trial
+    expected_duration: 5m
+    protect: ["**"]
+    prompt: >-
+      Read-only. The default playbooks live in the global store, which
+      `apb validate` does not read. For each installed default whose id
+      starts with apb-, run `apb adopt <id> --scope global` and read its
+      compatibility section (validation errors and warnings) and its
+      profile and model findings. Do not start a run or a trial. Pick
+      one cheap, read-only default (apb-research or apb-code-review) and
+      write the exact command for a dry trial the person can start after
+      applying the plan. Write the outputs validation (each playbook and
+      its result), warnings (for example a reviewer bound to the same agent
+      as the implementer) and trial_command.
+    outputs:
+      fields: [validation, warnings, trial_command]
+  - id: summary
+    type: finish
+    outcome: success
+    expected_duration: 3m
+    prompt: >-
+      Summarize for the person in their language. Begin with the line
+      SETUP PLAN: followed by the plan digest {{nodes.plan.output.digest}}.
+      Then: what applying would change {{nodes.plan.output.changes}}, what
+      it cannot honor {{nodes.plan.output.unmet}}, the decisions that are
+      theirs alone {{nodes.plan.output.person_only}}, the validation
+      results and warnings {{nodes.verify.output}}, the apply command
+      {{nodes.plan.output.apply_command}}, the undo command
+      {{nodes.plan.output.undo_command}} and the suggested trial
+      {{nodes.verify.output.trial_command}}. Say clearly that nothing was
+      applied by this run.
+edges:
+  - { from: start, to: interview }
+  - { from: interview, to: plan }
+  - { from: plan, to: verify }
+  - { from: verify, to: summary }

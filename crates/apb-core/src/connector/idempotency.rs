@@ -13,6 +13,14 @@
 //!   later attempt reads the recent items to find it.
 //! - `none`: neither is possible. An unknown outcome stays unknown until a
 //!   person decides, unless the playbook allows a resend.
+//! - `repeatable`: a repeat changes nothing (attaching a label that is
+//!   already there). Nothing is recorded: the call behaves exactly like a
+//!   function without a declaration, retried on an unknown outcome, and a
+//!   list step may still use it (V88). [`super::def::FunctionSpec::send_once`]
+//!   leaves it out, so the send ledger never sees this mode, and
+//!   [`Idempotency::mode`] has no send-once mode for it. An apb older than
+//!   this mode cannot read a manifest that declares it (its parser denies
+//!   unknown values); docs/CONNECTORS.md says how to go back.
 //!
 //! The types are pure data. [`validate`] holds the manifest rules; `def`
 //! hands it a [`FunctionView`] per function, so this module never imports the
@@ -57,15 +65,28 @@ pub enum Idempotency {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result_ref: Option<String>,
     },
+    /// A repeat is harmless: not tracked by the send ledger at all.
+    Repeatable {},
 }
 
 impl Idempotency {
-    pub fn mode(&self) -> IdempotencyMode {
+    /// The send-once mode the ledger keeps, or `None` for `repeatable`,
+    /// which is not a send-once mode: the ledger never tracks it, and a
+    /// reader must not mistake it for `none` (an unknown outcome waiting
+    /// for a person).
+    pub fn mode(&self) -> Option<IdempotencyMode> {
         match self {
-            Idempotency::Key { .. } => IdempotencyMode::Key,
-            Idempotency::Marker { .. } => IdempotencyMode::Marker,
-            Idempotency::None { .. } => IdempotencyMode::None,
+            Idempotency::Key { .. } => Some(IdempotencyMode::Key),
+            Idempotency::Marker { .. } => Some(IdempotencyMode::Marker),
+            Idempotency::None { .. } => Some(IdempotencyMode::None),
+            Idempotency::Repeatable {} => None,
         }
+    }
+
+    /// Whether this declaration only says a repeat is harmless, which the
+    /// send ledger does not track.
+    pub fn is_repeatable(&self) -> bool {
+        matches!(self, Idempotency::Repeatable {})
     }
 
     /// The dot path to the effect reference in a success response.
@@ -74,6 +95,7 @@ impl Idempotency {
             Idempotency::Key { result_ref, .. }
             | Idempotency::Marker { result_ref, .. }
             | Idempotency::None { result_ref } => result_ref.as_deref(),
+            Idempotency::Repeatable {} => None,
         }
     }
 
@@ -333,7 +355,7 @@ fn check_function(
         Idempotency::Marker { arg, reconcile, .. } => {
             check_marker(f, arg, reconcile, has_identity, functions)
         }
-        Idempotency::None { .. } => Ok(()),
+        Idempotency::None { .. } | Idempotency::Repeatable {} => Ok(()),
     }
 }
 
@@ -482,11 +504,15 @@ mod tests {
         let key: Idempotency =
             yaml_serde::from_str("{ mode: key, field: nonce, window_sec: 120, result_ref: id }")
                 .unwrap();
-        assert_eq!(key.mode(), IdempotencyMode::Key);
+        assert_eq!(key.mode(), Some(IdempotencyMode::Key));
         assert_eq!(key.window_sec(), 120);
         assert_eq!(key.result_ref(), Some("id"));
         let none: Idempotency = yaml_serde::from_str("{ mode: none }").unwrap();
-        assert_eq!(none.mode(), IdempotencyMode::None);
+        assert_eq!(none.mode(), Some(IdempotencyMode::None));
+        // `repeatable` is no send-once mode: never read as `none`.
+        let repeatable: Idempotency = yaml_serde::from_str("{ mode: repeatable }").unwrap();
+        assert_eq!(repeatable.mode(), None);
+        assert!(repeatable.is_repeatable() && repeatable.result_ref().is_none());
         assert!(yaml_serde::from_str::<Idempotency>("{ mode: none, bogus: 1 }").is_err());
         assert!(yaml_serde::from_str::<Idempotency>("{ mode: maybe }").is_err());
     }

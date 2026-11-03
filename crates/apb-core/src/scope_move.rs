@@ -38,6 +38,9 @@ pub enum ScopeMoveError {
     NotFound(String),
     #[error("a playbook `{0}` already exists at the destination")]
     IdTaken(String),
+    /// The id carries the prefix reserved for the playbooks apb ships.
+    #[error("{}", crate::bundled::reserved_id_message(.0))]
+    ReservedId(String),
     #[error(transparent)]
     Launch(#[from] floor::FloorError),
     #[error(transparent)]
@@ -81,6 +84,9 @@ pub fn copy_playbook_to(
 ) -> Result<PathBuf, ScopeMoveError> {
     if !is_safe_segment(id) {
         return Err(ScopeMoveError::InvalidId(id.to_string()));
+    }
+    if crate::bundled::is_reserved_id(id) {
+        return Err(ScopeMoveError::ReservedId(id.to_string()));
     }
     if !src_playbook_dir.is_dir() {
         return Err(ScopeMoveError::NotFound(id.to_string()));

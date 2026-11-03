@@ -80,7 +80,8 @@ impl std::fmt::Display for ItemsError {
 }
 
 /// The items under `field` of a node's JSON object `output`, named by
-/// `key`, at most `max` of them.
+/// `key`, at most `max` of them. A field an agent wrote as a string that
+/// holds a JSON array is read as that array.
 pub fn items_from_output(
     output: &str,
     field: &str,
@@ -89,11 +90,15 @@ pub fn items_from_output(
 ) -> Result<Vec<Item>, ItemsError> {
     let doc: Value = serde_json::from_str(output).map_err(|_| ItemsError::NotJson)?;
     let obj = doc.as_object().ok_or(ItemsError::NotJson)?;
-    let values = obj
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or(ItemsError::NotArray)?;
-    items_from_values(values, key, max)
+    let values = match obj.get(field) {
+        Some(Value::Array(values)) => values.clone(),
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Array(values)) => values,
+            _ => return Err(ItemsError::NotArray),
+        },
+        _ => return Err(ItemsError::NotArray),
+    };
+    items_from_values(&values, key, max)
 }
 
 /// Items from a list of JSON objects named by `key`, at most `max`.
@@ -331,6 +336,14 @@ mod tests {
     fn items_load_by_key_and_refuse_every_bad_shape() {
         let ok = items_from_output(r#"{"m":[{"id":"a"},{"id":7}]}"#, "m", "id", 10).unwrap();
         assert_eq!(ids(&ok), ["a", "7"]);
+        // A JSON array written as a string reads as that array; any other
+        // string does not.
+        let quoted = items_from_output(r#"{"m":"[{\"id\":\"a\"}]"}"#, "m", "id", 10).unwrap();
+        assert_eq!(ids(&quoted), ["a"]);
+        assert_eq!(
+            items_from_output(r#"{"m":"a, b"}"#, "m", "id", 10),
+            Err(ItemsError::NotArray)
+        );
         assert_eq!(
             items_from_output("nope", "m", "id", 10),
             Err(ItemsError::NotJson)

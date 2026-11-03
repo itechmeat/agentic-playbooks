@@ -467,12 +467,24 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
     }
 
     let stamp = scope.send.as_ref().map(send_once::Tracked::stamp);
+    // An item check's args are rendered templates, so always text: read
+    // them as the function's schema types them.
+    let typed;
+    let args = if ctx.origin == CallOrigin::Check {
+        typed = apb_core::connector::common::typed_rendered_args(
+            target.function.args_schema.as_ref(),
+            &req.args,
+        );
+        &typed
+    } else {
+        &req.args
+    };
     let built = build_prepared(
         &target.function,
         &target.doc,
         target.account.clone(),
         &target.maccount,
-        &req.args,
+        args,
         req.root,
         CallMode {
             dry_run: req.dry_run,
@@ -696,7 +708,7 @@ fn build_prepared(
         stamp,
     } = mode;
     // A dry-run of a send shows where its stamp goes, never a real nonce.
-    let stamp = match (dry_run, &function.idempotency) {
+    let stamp = match (dry_run, function.send_once()) {
         (true, Some(_)) => Some(&Stamp::Preview),
         (true, None) => None,
         (false, _) => stamp,

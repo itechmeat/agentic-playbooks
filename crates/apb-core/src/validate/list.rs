@@ -315,13 +315,19 @@ fn check_item_check(
                     c.accept_when.path
                 ));
             }
-            if c.accept_when.equals.is_some() == c.accept_when.exists.is_some() {
-                err("accept_when sets exactly one of `equals` and `exists`".into());
+            if c.accept_when.rule_count() != 1 {
+                err("accept_when sets exactly one of `equals`, `exists` and `contains`".into());
             }
-            // `accept_when.equals` is rendered like the args.
+            if let Some(v) = &c.accept_when.contains
+                && !crate::baseline::extract::is_scalar(v)
+            {
+                err("accept_when.contains must be a string, a number or a bool".into());
+            }
+            // `accept_when.equals` and `contains` are rendered like the args.
             c.args
                 .values()
                 .chain(c.accept_when.equals.iter())
+                .chain(c.accept_when.contains.iter())
                 .flat_map(strings)
                 .collect()
         }
@@ -391,7 +397,8 @@ fn check_judge(node: &Node, j: &crate::list::JudgeCheck, r: &mut ValidationRepor
 }
 
 /// V88: a list step may write only through functions that declare
-/// send-once (`idempotency`), so a re-run item never acts twice.
+/// send-once (`idempotency`) or that a repeat leaves unchanged
+/// (`repeatable`), so a re-run item never acts twice.
 fn check_sends(node: &Node, ctx: &ValidationContext, r: &mut ValidationReport) {
     for b in node.kind.connector_bindings() {
         let Some(facts) = ctx.connectors.get(&b.name) else {
@@ -399,7 +406,7 @@ fn check_sends(node: &Node, ctx: &ValidationContext, r: &mut ValidationReport) {
         };
         let granted = super::decisions::granted(b, &facts.write_functions);
         for f in granted {
-            if !facts.idempotency.contains_key(f) {
+            if !facts.idempotency.contains_key(f) && !facts.repeatable_functions.contains(f) {
                 r.error(
                     "V88",
                     Some(&node.id),

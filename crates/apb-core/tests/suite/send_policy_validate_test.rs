@@ -72,7 +72,7 @@ fn the_valid_declarations_parse() {
     let modes: Vec<IdempotencyMode> = doc
         .functions
         .iter()
-        .filter_map(|f| f.idempotency.as_ref().map(|i| i.mode()))
+        .filter_map(|f| f.idempotency.as_ref().and_then(|i| i.mode()))
         .collect();
     assert_eq!(
         modes,
@@ -330,7 +330,7 @@ functions:
     };
     let ok = parse(&doc("{ mode: none }")).unwrap();
     assert_eq!(
-        ok.functions[0].idempotency.as_ref().map(|i| i.mode()),
+        ok.functions[0].idempotency.as_ref().and_then(|i| i.mode()),
         Some(IdempotencyMode::None)
     );
     let err = parse(&doc("{ mode: key, header: K, window_sec: 1 }")).unwrap_err();

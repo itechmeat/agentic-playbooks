@@ -104,7 +104,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
     let GateInput {
         req, ctx, function, ..
     } = input;
-    let Some(idem) = function.idempotency.as_ref() else {
+    let Some((idem, mode)) = function.send_once().and_then(|i| Some((i, i.mode()?))) else {
         return Ok(SendGate::Untracked);
     };
     if req.dry_run || !ctx.origin.tracks_sends() {
@@ -131,7 +131,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
         label,
         item: ctx.claim.item.clone(),
     };
-    let decided = decide(input, idem, &key)?;
+    let decided = decide(input, idem, mode, &key)?;
     match decided.admission {
         Admission::New { .. } | Admission::Replay { .. } => {
             let new = decided
@@ -140,6 +140,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
             Ok(SendGate::Send(Box::new(tracked(
                 input,
                 idem,
+                mode,
                 &key,
                 new,
                 &decided.binding,
@@ -180,6 +181,7 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
 fn decide(
     input: &GateInput<'_>,
     idem: &Idempotency,
+    mode: IdempotencyMode,
     key: &IntentKey,
 ) -> Result<Decided, CallError> {
     let req = input.req;
@@ -191,7 +193,7 @@ fn decide(
         let now_ms = apb_core::clock::now_ms_u64();
         let query = AdmitQuery {
             key,
-            mode: idem.mode(),
+            mode,
             window_sec: idem.window_sec(),
             timeout_sec: input.function.timeout_sec,
             on_unknown: input.on_unknown,
@@ -207,7 +209,7 @@ fn decide(
         }
         let draft = IntentDraft {
             key,
-            mode: idem.mode(),
+            mode,
             attempt: binding.attempt,
             attempt_seq: binding.attempt_seq,
             timeout_sec: input.function.timeout_sec,
@@ -249,6 +251,7 @@ fn decide(
 fn tracked(
     input: &GateInput<'_>,
     idem: &Idempotency,
+    mode: IdempotencyMode,
     key: &IntentKey,
     new: NewIntent,
     binding: &AttemptBinding,
@@ -263,7 +266,7 @@ fn tracked(
         id: new.id,
         label: key.label.clone(),
         nonce: new.nonce,
-        mode: idem.mode(),
+        mode,
         replay: new.replay,
         marker,
         result_ref: idem.result_ref().map(str::to_string),

@@ -211,55 +211,52 @@ pub fn ensure_claude_bridge(skills_parent: &Path, claude_parent: &Path) -> Vec<S
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let name = entry.file_name();
-        let target = entry.path();
-        let link = claude_parent.join(&name);
-        match std::fs::symlink_metadata(&link) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                let points_here = std::fs::read_link(&link)
-                    .map(|t| t == target)
-                    .unwrap_or(false);
-                if points_here {
-                    // Correct bridge - idempotent, nothing to do.
-                } else if std::fs::metadata(&link).is_err() {
-                    // A dangling link - this is our own orphaned bridge:
-                    // fix it by pointing it back at the canon.
-                    let _ = std::fs::remove_file(&link);
-                    if let Err(e) = crate::fsutil::symlink(&target, &link) {
-                        notes.push(format!(
-                            "could not repair dangling bridge for skill `{}`: {e}",
-                            name.to_string_lossy()
-                        ));
-                    }
-                } else {
-                    // A valid link, but pointing elsewhere - not ours, leave it alone.
-                    notes.push(format!(
-                        "skill `{}` is bridged elsewhere in {}; left as is",
-                        name.to_string_lossy(),
-                        claude_parent.display()
-                    ));
-                }
-            }
-            Ok(_) => {
-                notes.push(format!(
-                    "skill `{}` already exists as a real entry in {}; not bridged",
-                    name.to_string_lossy(),
-                    claude_parent.display()
-                ));
-            }
-            Err(_) => {
-                if let Err(e) = std::fs::create_dir_all(claude_parent)
-                    .and_then(|_| crate::fsutil::symlink(&target, &link))
-                {
-                    notes.push(format!(
-                        "could not bridge skill `{}`: {e}",
-                        name.to_string_lossy()
-                    ));
-                }
-            }
+        if let Some(note) = bridge_one(&entry.path(), claude_parent) {
+            notes.push(note);
         }
     }
     notes
+}
+
+/// Bridges the one skill folder `target` into `claude_parent` with a symlink
+/// of the same name, by the rules of [`ensure_claude_bridge`]: a correct
+/// link is kept, our own dangling link is repaired, anything else is left
+/// alone and reported. Returns the diagnostic, if any.
+pub fn bridge_one(target: &Path, claude_parent: &Path) -> Option<String> {
+    let name = target.file_name()?.to_string_lossy().to_string();
+    let link = claude_parent.join(&name);
+    match std::fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let points_here = std::fs::read_link(&link)
+                .map(|t| t == target)
+                .unwrap_or(false);
+            if points_here {
+                // Correct bridge - idempotent, nothing to do.
+                None
+            } else if std::fs::metadata(&link).is_err() {
+                // A dangling link - this is our own orphaned bridge: fix it by
+                // pointing it back at the canon.
+                let _ = std::fs::remove_file(&link);
+                crate::fsutil::symlink(target, &link)
+                    .err()
+                    .map(|e| format!("could not repair dangling bridge for skill `{name}`: {e}"))
+            } else {
+                // A valid link, but pointing elsewhere - not ours, leave it alone.
+                Some(format!(
+                    "skill `{name}` is bridged elsewhere in {}; left as is",
+                    claude_parent.display()
+                ))
+            }
+        }
+        Ok(_) => Some(format!(
+            "skill `{name}` already exists as a real entry in {}; not bridged",
+            claude_parent.display()
+        )),
+        Err(_) => std::fs::create_dir_all(claude_parent)
+            .and_then(|_| crate::fsutil::symlink(target, &link))
+            .err()
+            .map(|e| format!("could not bridge skill `{name}`: {e}")),
+    }
 }
 
 #[cfg(test)]

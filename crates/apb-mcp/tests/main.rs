@@ -24,6 +24,8 @@ mod ask_server_test;
 #[cfg(unix)]
 #[path = "suite/budget_tools_test.rs"]
 mod budget_tools_test;
+#[path = "suite/bundled_test.rs"]
+mod bundled_test;
 #[path = "suite/capture_tools_test.rs"]
 mod capture_tools_test;
 #[path = "suite/catalog_rank_test.rs"]

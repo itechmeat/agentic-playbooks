@@ -172,6 +172,9 @@ fn create_version_impl(
 
     let playbook_dir = playbooks_dir(root).join(id);
     let is_new = !playbook_dir.is_dir();
+    if is_new {
+        crate::bundled::refuse_reserved_id(id)?;
+    }
 
     // A frozen playbook refuses every new version. A brand-new playbook cannot
     // be frozen (it does not exist yet), so only guard existing ones.
@@ -582,7 +585,7 @@ pub(crate) fn unchanged_import(
 /// Whether the `scripts/` of `version_dir` holds exactly `files` (paths,
 /// bytes and executable bits). A missing `scripts/` holds nothing; a tree
 /// that cannot be read is never the same.
-fn same_scripts(version_dir: &Path, files: &[TreeFile]) -> bool {
+pub(crate) fn same_scripts(version_dir: &Path, files: &[TreeFile]) -> bool {
     let scripts_dir = version_dir.join("scripts");
     let mut have = if scripts_dir.is_dir() {
         match crate::content::read_tree_files(&scripts_dir, &crate::content::TreeLimits::default())
@@ -604,7 +607,7 @@ fn same_scripts(version_dir: &Path, files: &[TreeFile]) -> bool {
 /// a save writes, with the version field and the id pinned, so formatting,
 /// comments and the version number do not count as a change. Anything that
 /// does not parse is a change (the save then reports its own error).
-fn same_definition(playbook_dir: &Path, version: &str, id: &str, yaml: &str) -> bool {
+pub(crate) fn same_definition(playbook_dir: &Path, version: &str, id: &str, yaml: &str) -> bool {
     let normalized = |text: &str| canonical_definition(text, id, version).ok();
     let Ok(stored) = fs::read_to_string(playbook_dir.join(version).join("playbook.yaml")) else {
         return false;
@@ -781,11 +784,11 @@ pub fn write_provenance(
     version: &str,
     provenance: &VersionProvenance,
 ) -> Result<(), VersioningError> {
-    let path = provenance_path(root, id, version)?;
-    let yaml =
-        yaml_serde::to_string(provenance).map_err(|e| VersioningError::Schema(e.to_string()))?;
-    atomic_write(&path, yaml.as_bytes())?;
-    Ok(())
+    write_provenance_in(
+        &playbook_version_dir(root, id, version)?,
+        version,
+        provenance,
+    )
 }
 
 /// [`supersede_candidate_locked`] under the playbook's candidate lock.
@@ -897,13 +900,43 @@ pub fn delete_playbook(root: &Path, id: &str, ts_millis: u128) -> Result<PathBuf
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
+    if !playbooks_dir(root).join(id).is_dir() {
+        return Err(VersioningError::NotFound(id.to_string()));
+    }
+    delete_in(
+        &root.join(".apb"),
+        &FloorKey::project_of(root, id)?,
+        id,
+        ts_millis,
+    )
+}
 
-    let src = playbooks_dir(root).join(id);
+/// [`delete_playbook`] of a global playbook: moves
+/// `<config_dir>/playbooks/<id>` to `<config_dir>/trash/<id>-<ts_millis>`,
+/// where the launch floor's scan finds it.
+pub fn delete_global_playbook(id: &str, ts_millis: u128) -> Result<PathBuf, VersioningError> {
+    if !is_safe_segment(id) {
+        return Err(VersioningError::NotFound(id.to_string()));
+    }
+    let parent = crate::store::global_playbooks_parent()
+        .ok_or_else(|| VersioningError::NotFound(id.to_string()))?;
+    delete_in(&parent, &FloorKey::global(id), id, ts_millis)
+}
+
+/// Moves `<parent>/playbooks/<id>` to `<parent>/trash/<id>-<ts_millis>`,
+/// keeping `key`'s floor first.
+fn delete_in(
+    parent: &Path,
+    key: &FloorKey,
+    id: &str,
+    ts_millis: u128,
+) -> Result<PathBuf, VersioningError> {
+    let src = parent.join("playbooks").join(id);
     if !src.is_dir() {
         return Err(VersioningError::NotFound(id.to_string()));
     }
 
-    let trash = trash_dir(root);
+    let trash = parent.join("trash");
     fs::create_dir_all(&trash)?;
 
     let trash_name = format!("{id}-{ts_millis}");
@@ -915,7 +948,7 @@ pub fn delete_playbook(root: &Path, id: &str, ts_millis: u128) -> Result<PathBuf
     }
 
     // The floor outlives the store directory: a recreate of the id meets it.
-    floor::keep_before_removal(&FloorKey::project_of(root, id)?, &src)?;
+    floor::keep_before_removal(key, &src)?;
     fs::rename(&src, &dst)?;
     Ok(dst)
 }
@@ -1173,36 +1206,20 @@ pub fn create_draft_in_by(
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
+    crate::bundled::refuse_reserved_id(id)?;
     fs::create_dir_all(parent.join("playbooks"))?;
     let playbook_dir = parent.join("playbooks").join(id);
     let mut playbook = Playbook::from_yaml(yaml).map_err(schema_err)?;
     playbook.version = "1.0.0".to_string();
     playbook.id = id.to_string();
 
-    let reg = Registry::open_dir(parent).map_err(|e| VersioningError::NotFound(e.to_string()))?;
     // Origin is passed explicitly: global draft with `scope: project` should
     // fail V14 immediately, not only at runtime.
-    let ctx = ValidationContext::for_registry(&reg, origin);
-    let report = validate(&playbook, &ctx);
-    let errors: Vec<Issue> = report
-        .issues
-        .into_iter()
-        .filter(|i| i.severity == Severity::Error)
-        .collect();
-    if !errors.is_empty() {
-        return Err(VersioningError::Validation(errors));
-    }
-
-    let key = match origin {
-        crate::profile_store::PlaybookOrigin::Global => FloorKey::global(id),
-        crate::profile_store::PlaybookOrigin::Project => {
-            let owner = parent.parent().ok_or_else(|| {
-                VersioningError::NotFound(format!("the project of `{}`", parent.display()))
-            })?;
-            FloorKey::project_of(owner, id)?
-        }
+    validate_in(parent, origin, &playbook)?;
+    let authority = SaveAuthority {
+        key: floor_key_in(parent, origin, id)?,
+        channel,
     };
-    let authority = SaveAuthority { key, channel };
     let canonical =
         yaml_serde::to_string(&playbook).map_err(|e| VersioningError::Schema(e.to_string()))?;
     // Atomic collision check first: create the playbook folder
@@ -1235,6 +1252,155 @@ pub fn create_draft_in_by(
     current::move_current(&playbook_dir, &current::MoveCurrent::created("1.0.0"))
         .map_err(|e| e.into_versioning(id))?;
     Ok("1.0.0".to_string())
+}
+
+/// Refuses `playbook` when it has validation errors in the store `parent`
+/// (a project's `.apb` or the global config dir) of `origin`.
+fn validate_in(
+    parent: &Path,
+    origin: crate::profile_store::PlaybookOrigin,
+    playbook: &Playbook,
+) -> Result<(), VersioningError> {
+    let reg = Registry::open_dir(parent).map_err(|e| VersioningError::NotFound(e.to_string()))?;
+    let ctx = ValidationContext::for_registry(&reg, origin);
+    let errors: Vec<Issue> = validate(playbook, &ctx)
+        .issues
+        .into_iter()
+        .filter(|i| i.severity == Severity::Error)
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(VersioningError::Validation(errors))
+    }
+}
+
+/// The launch floor key of playbook `id` in the store `parent` of
+/// `origin`: the global store's machine-wide key, or the project that owns
+/// `parent` (`<root>/.apb`).
+fn floor_key_in(
+    parent: &Path,
+    origin: crate::profile_store::PlaybookOrigin,
+    id: &str,
+) -> Result<FloorKey, VersioningError> {
+    Ok(match origin {
+        crate::profile_store::PlaybookOrigin::Global => FloorKey::global(id),
+        crate::profile_store::PlaybookOrigin::Project => {
+            let owner = parent.parent().ok_or_else(|| {
+                VersioningError::NotFound(format!("the project of `{}`", parent.display()))
+            })?;
+            FloorKey::project_of(owner, id)?
+        }
+    })
+}
+
+/// A version apb writes from content it ships (see [`crate::bundled`]).
+pub(crate) struct ShippedVersion<'a> {
+    pub yaml: &'a str,
+    /// The version the content names; taken when it is free, else the next
+    /// free minor version after the newest one stored.
+    pub version: &'a str,
+    /// The files of the version's `scripts/`, exactly.
+    pub scripts: &'a [TreeFile],
+    /// The `created_by` of the version's provenance.
+    pub created_by: &'a str,
+}
+
+/// Writes `req` as a new immutable version of playbook `id` in the store
+/// `parent` of `origin`, through `channel`, and returns the version
+/// written. Validated against that store, published under the launch floor
+/// like every version, and committed by one atomic rename. It does not move
+/// `current`: the caller does that through [`current::move_current`], so
+/// the move has its own history line. The reserved id rule does not apply:
+/// the caller is the one writer of shipped content, which is why only this
+/// crate may call it.
+pub(crate) fn write_version_in(
+    parent: &Path,
+    origin: crate::profile_store::PlaybookOrigin,
+    id: &str,
+    req: &ShippedVersion<'_>,
+    channel: SaveChannel,
+) -> Result<String, VersioningError> {
+    if !is_safe_segment(id) {
+        return Err(VersioningError::NotFound(id.to_string()));
+    }
+    let playbook_dir = parent.join("playbooks").join(id);
+    let is_new = !playbook_dir.is_dir();
+    if !is_new && is_frozen_dir(&playbook_dir) {
+        return Err(VersioningError::Frozen(id.to_string()));
+    }
+    let existing = if is_new {
+        Vec::new()
+    } else {
+        list_versions(&playbook_dir)?
+    };
+    let version = shipped_version_number(&existing, req.version);
+    let mut playbook = Playbook::from_yaml(req.yaml).map_err(schema_err)?;
+    playbook.version = version.clone();
+    playbook.id = id.to_string();
+    validate_in(parent, origin, &playbook)?;
+    let authority = SaveAuthority {
+        key: floor_key_in(parent, origin, id)?,
+        channel,
+    };
+    fs::create_dir_all(&playbook_dir)?;
+    let written = commit_version_dir(
+        &playbook_dir,
+        &version,
+        &playbook,
+        VersionScripts::Imported(req.scripts),
+        VersionBump::Minor,
+        &authority,
+    )
+    .and_then(|path| {
+        let version = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let provenance = VersionProvenance {
+            created_by: req.created_by.to_string(),
+            shipped_version: Some(req.version.to_string()),
+            ..Default::default()
+        };
+        match write_provenance_in(&playbook_dir, &version, &provenance) {
+            Ok(()) => Ok(version),
+            Err(e) => {
+                let _ = remove_dir_all(&path);
+                Err(e)
+            }
+        }
+    });
+    if written.is_err() && is_new {
+        discard_new_playbook_dir(&playbook_dir);
+    }
+    written
+}
+
+/// The version number [`write_version_in`] gives shipped content numbered
+/// `shipped` next to the `existing` versions: its own number while free,
+/// else the next minor one.
+pub(crate) fn shipped_version_number(existing: &[String], shipped: &str) -> String {
+    if parse_version(shipped).is_some() && !existing.iter().any(|e| e.as_str() == shipped) {
+        return shipped.to_string();
+    }
+    let newest = existing.last().map(String::as_str).unwrap_or("1.0.0");
+    next_minor_version(newest, existing)
+}
+
+/// Writes `provenance` of `version` into `<playbook_dir>/meta/`.
+fn write_provenance_in(
+    playbook_dir: &Path,
+    version: &str,
+    provenance: &VersionProvenance,
+) -> Result<(), VersioningError> {
+    let yaml =
+        yaml_serde::to_string(provenance).map_err(|e| VersioningError::Schema(e.to_string()))?;
+    atomic_write(
+        &playbook_dir.join("meta").join(format!("{version}.yaml")),
+        yaml.as_bytes(),
+    )?;
+    Ok(())
 }
 
 fn provenance_path(root: &Path, id: &str, version: &str) -> Result<PathBuf, VersioningError> {

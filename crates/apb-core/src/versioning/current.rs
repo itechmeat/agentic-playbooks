@@ -16,7 +16,10 @@
 //!    holds a `playbook.yaml`, the caller's expectation of `current`, a
 //!    person never moves to the candidate, and every trial record the move
 //!    updates reads;
-//! 3. write the intent `current.intent.json`;
+//! 3. write the intent `current.intent.json`, then, for
+//!    [`move_current_writing_locked`] only, the target version itself
+//!    (shipped content apb installs), so the version and the move are one
+//!    operation;
 //! 4. end the trial of a candidate the move passes by (`superseded`);
 //! 5. write `current`;
 //! 6. when the target is the candidate: clear the pointer and record its
@@ -220,11 +223,50 @@ pub fn move_current_locked(
     req: &MoveCurrent<'_>,
     held: &DirLock,
 ) -> Result<Moved, MoveError> {
+    run(playbook_dir, req, held, None)
+}
+
+/// [`move_current_locked`] to a version that does not exist yet: `write`
+/// creates `req.to` after the intent is written and before `current`
+/// moves. A crash before `current` moves leaves an intent the next
+/// recovery records as aborted (the written version stays, named by
+/// nothing); a crash after it is rolled forward. The caller holds the
+/// pointer lock (`held`).
+pub fn move_current_writing_locked(
+    playbook_dir: &Path,
+    req: &MoveCurrent<'_>,
+    held: &DirLock,
+    write: &mut dyn FnMut() -> Result<(), MoveError>,
+) -> Result<Moved, MoveError> {
+    run(playbook_dir, req, held, Some(write))
+}
+
+fn run(
+    playbook_dir: &Path,
+    req: &MoveCurrent<'_>,
+    held: &DirLock,
+    write: Option<&mut dyn FnMut() -> Result<(), MoveError>>,
+) -> Result<Moved, MoveError> {
     refuse_read_only()?;
     recover_locked(playbook_dir, held)?;
-    let intent = plan(playbook_dir, req)?;
+    let intent = plan(playbook_dir, req, write.is_some())?;
     intent::write(playbook_dir, &intent)?;
     fault::after(Step::Intent)?;
+    if let Some(write) = write {
+        write()?;
+        fault::after(Step::Target)?;
+        if !playbook_dir
+            .join(&intent.to)
+            .join("playbook.yaml")
+            .is_file()
+        {
+            return Err(MoveError::NotFound(format!(
+                "{}@{}",
+                id_of(playbook_dir),
+                intent.to
+            )));
+        }
+    }
     if intent.supersede.is_some() {
         supersede_candidate_locked(
             playbook_dir,
@@ -307,6 +349,42 @@ pub fn history(playbook_dir: &Path, limit: usize) -> Result<History, MoveError> 
     Ok(history::read(playbook_dir, limit, pointers)?)
 }
 
+/// `current` and its newest move as [`recover`] leaves them, read without
+/// the lock and without writing anything.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settled {
+    /// The version `current` names.
+    pub current: Option<String>,
+    /// Who made the newest move (aborted lines skipped).
+    pub last_move_by: Option<MovedBy>,
+    /// An interrupted move waits for [`recover`]; the other fields already
+    /// say what recovering it settles.
+    pub pending: bool,
+}
+
+/// `current` and its newest move of the playbook in `playbook_dir`, with an
+/// interrupted move projected the way [`recover`] settles it: rolled
+/// forward when `current` is at its target, else aborted. Nothing is
+/// written, so a read-only check (`apb setup plan`, `apb doctor`) never
+/// changes the store; under the pointer lock after [`recover`] it is
+/// exact. An intent that does not read is an error, as for [`recover`].
+pub fn settled(playbook_dir: &Path) -> io::Result<Settled> {
+    let current = read_current_pointer(playbook_dir);
+    let pending = intent::read(playbook_dir)?;
+    let rolled_forward = pending
+        .as_ref()
+        .filter(|i| current.as_deref() == Some(i.to.as_str()));
+    let last_move_by = match rolled_forward {
+        Some(i) => Some(i.by.clone()),
+        None => history::last_move(playbook_dir)?.and_then(|e| e.by),
+    };
+    Ok(Settled {
+        current,
+        last_move_by,
+        pending: pending.is_some(),
+    })
+}
+
 fn refuse_read_only() -> Result<(), MoveError> {
     if crate::process_mode::is_read_only() {
         return Err(MoveError::ReadOnly);
@@ -373,8 +451,14 @@ fn finish_candidate(playbook_dir: &Path, finish: &FinishCandidate) -> Result<(),
     Ok(())
 }
 
-/// Step 2: the checks, and the intent the move writes.
-fn plan(playbook_dir: &Path, req: &MoveCurrent<'_>) -> Result<Intent, MoveError> {
+/// Step 2: the checks, and the intent the move writes. With `writes_target`
+/// the caller writes the target inside the operation: it must not exist
+/// yet.
+fn plan(
+    playbook_dir: &Path,
+    req: &MoveCurrent<'_>,
+    writes_target: bool,
+) -> Result<Intent, MoveError> {
     let id = id_of(playbook_dir);
     if !playbook_dir.is_dir() {
         return Err(MoveError::NotFound(id));
@@ -382,7 +466,17 @@ fn plan(playbook_dir: &Path, req: &MoveCurrent<'_>) -> Result<Intent, MoveError>
     if req.by.respects_frozen() && is_frozen_dir(playbook_dir) {
         return Err(MoveError::Frozen);
     }
-    if !is_safe_segment(req.to) || !playbook_dir.join(req.to).join("playbook.yaml").is_file() {
+    if !is_safe_segment(req.to) {
+        return Err(MoveError::NotFound(format!("{id}@{}", req.to)));
+    }
+    let target = playbook_dir.join(req.to);
+    if writes_target && target.exists() {
+        return Err(MoveError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{id}@{} exists already", req.to),
+        )));
+    }
+    if !writes_target && !target.join("playbook.yaml").is_file() {
         return Err(MoveError::NotFound(format!("{id}@{}", req.to)));
     }
     let from = read_current_pointer(playbook_dir);

@@ -1,0 +1,437 @@
+schema: 2
+id: apb-feature-delivery
+name: Feature delivery (assessment only)
+description: >-
+  Staged delivery of one feature, bug fix or refactoring in the current
+  project: intake with an expected-result card, design, a decomposition of
+  a large change into ordered subtasks, implementation, an independent
+  read-only review panel, at most two repair rounds, and a
+  report that accounts for every expected outcome. Assessment only: the run
+  reports how the candidate was reviewed; it does not certify that the
+  reviewed candidate is the final one. No commit, push or pull request is
+  made by the run.
+version: 1.1.0
+agent_launch: ask
+params:
+  - name: change_kind
+    type: enum
+    options: [feature, bugfix, refactor]
+    default: feature
+    label: Change kind
+  - name: task
+    type: text
+    label: The change to deliver, in the issuer's own words
+trigger:
+  when:
+    - implement a feature in this project with design, review and a report
+    - fix a bug with causal evidence and an independent review
+    - refactor code while preserving behavior, with an independent review
+  avoid_when:
+    - the task is research or design only
+    - the task is a one-line or mechanical edit
+  examples:
+    - "add a --json flag to the export command"
+    - "fix the crash when the config file is empty"
+defaults:
+  profile: apb-main
+  require_verdict: true
+  max_retries: 1
+  max_parallel: 3
+  on_failure: stop
+effects: [fs_read, fs_write]
+goal:
+  statement: >-
+    Assessment only. The requested change is implemented locally, reviewed
+    by independent read-only roles within at most two repair rounds, and
+    every expected outcome of the original request is accounted for with
+    evidence. The run does not certify that the reviewed candidate is the
+    final one, and it makes no commit, push or pull request.
+  enforce: true
+  criteria:
+    - description: The report node wrote its delivery report
+      check: { type: marker, marker: "DELIVERY REPORT:" }
+    - description: Every expected outcome on the card is reported as delivered, partial or not delivered, with evidence
+      check: { type: manual }
+    - description: The reviewed candidate is the one that will be integrated (not certified by this run)
+      check: { type: manual }
+# The project's own test command runs before the first acting node and
+# again at the finish; a test that passed before and fails after shows in
+# the outcome. Report only.
+baseline_check:
+  checks:
+    - id: tests
+      description: The project's own test suite, no new failures
+      timeout_seconds: 1800
+      project_checks: { only: [test] }
+quality:
+  task_type: "{{params.change_kind}}"
+  criteria:
+    - id: request_fidelity
+      reads: [outputs, findings, transcripts]
+      evidence: both
+      levels:
+        good: Every expected outcome on the intake card comes from the original request and is reported delivered with evidence; exclusions are kept.
+        partial: Some outcomes are reported partial or not delivered, each with evidence and a stated limit.
+        poor: The card was rewritten to match the code, or an expected outcome is missing from the report.
+    - id: process_followed
+      reads: [journal, outputs, findings]
+      evidence: both
+      levels:
+        good: Intake, design, decomposition, implementation (per subtask when decomposed), all three review roles and the report ran; every finding has a disposition; at most two repair rounds.
+        partial: A stage or a review role reports an explicit capability gap with its reason.
+        poor: A required stage or review role is missing, or a finding was dropped without a disposition.
+    - id: code_quality
+      reads: [outputs, findings, transcripts]
+      evidence: both
+      levels:
+        good: No confirmed defect is left open, the project checks ran on the final candidate, and the report separates checked facts from claims.
+        partial: Findings are open or a check could not run, and the report says so with the consequence.
+        poor: The report claims readiness while a confirmed defect is open or a required check failed.
+nodes:
+  - { id: start, type: start }
+  - id: intake
+    type: agent_task
+    title: Intake and expected-result card
+    expected_duration: 5m
+    protect: ["**"]
+    prompt: >-
+      Run only the Intake stage of the apb-delivery skill (if the skill is
+      not available, follow this prompt). Change kind:
+      {{params.change_kind}}. Original request: {{params.task}}. Extra
+      context from the run instruction, if any: {{run.instruction}}. Read
+      the project instructions, its checks and its CI; find code facts
+      yourself. Do not edit any file. Write the outputs original_request
+      (the request verbatim), expected (a JSON array of observable outcomes
+      taken from the original request, never from the code), exclusions,
+      must_preserve (behavior that must keep working), assumptions (a JSON
+      array, possibly empty), issuer (who asked and how to reply),
+      risk_triggers (which apply: persisted formats, public API or CLI
+      contracts, security or secrets, concurrency or recovery, release
+      pipeline, plus any the project defines) and checks (the project's
+      own build, test and lint commands).
+    outputs:
+      fields: [original_request, expected, exclusions, must_preserve, assumptions, issuer, risk_triggers, checks]
+  - id: design
+    type: agent_task
+    title: Design or diagnosis
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      Run only the Design stage. Change kind: {{params.change_kind}}. Card:
+      {{nodes.intake.output}}. For a feature, use the apb-brainstorm skill:
+      reuse a current advised design when it still applies, otherwise ask
+      an independent advisor through its fallback chain (another family,
+      any other available family, then a fresh clean-context subagent with
+      only the question packet); a usage limit routes to the next rung and
+      never stops the work. For a bugfix, reproduce the failure and give a
+      causal explanation before any fix is planned. For a refactor, list
+      what must be preserved and the realistic benefit. Do not edit
+      product files. Write the outputs ready (true or false), design (the
+      decisions, or the causal explanation, or the preservation plan),
+      advisor (who advised, at which rung, or why none was possible),
+      assumptions (a JSON array) and question (the one unresolved question
+      for the issuer, empty when ready). Set ready to false only for a
+      real unresolved dependency, never because a provider is unavailable.
+    outputs:
+      fields: [ready, design, advisor, assumptions, question]
+  - { id: design_route, type: condition, title: Design ready }
+  - id: decompose
+    type: agent_task
+    title: Decompose a large change
+    expected_duration: 5m
+    protect: ["**"]
+    prompt: >-
+      Run only the Decompose stage of the apb-delivery skill. Card:
+      {{nodes.intake.output}}. Design: {{nodes.design.output.design}}.
+      Do not edit any file. Check these triggers against the card and the
+      design, not against your sense of the size: more than about five
+      expected outcomes; a change across several layers (for example the
+      domain core, the execution layer, the command or API surfaces and
+      the user interface); a persisted-format change together with
+      behavior; a result that cannot be reviewed in one pass. When no
+      trigger holds, write decomposed false and subtasks []. When one
+      holds, write decomposed true and split the change into independently verifiable subtasks. Each
+      subtask is a JSON object with id (a short slug such as s1), summary,
+      outcomes (the card outcomes it delivers, quoted from the card),
+      checks (how each of its outcomes is observed and which project checks
+      must pass after it) and depends_on (ids of earlier subtasks only).
+      List them in the order they must be done; every card outcome belongs
+      to at least one subtask. Never rewrite the card. A subtask is a unit
+      of work and review, not a pull request. When the project uses a
+      spec-driven workflow, name where its task artifacts already hold this
+      breakdown, but write nothing. Write the outputs triggers (which hold
+      and why, or none), decomposed (the JSON boolean true or false) and
+      subtasks (the JSON array, empty when not decomposed).
+    outputs:
+      fields: [triggers, decomposed, subtasks]
+  - { id: decompose_route, type: condition, title: Decomposed or not }
+  - id: implement
+    type: agent_task
+    title: Implement
+    expected_duration: 30m
+    prompt: >-
+      Run only the Implement stage of the apb-delivery skill. Change kind:
+      {{params.change_kind}}. Card: {{nodes.intake.output}}. Design:
+      {{nodes.design.output.design}}. Define how each expected outcome is
+      observed before the code that depends on it. Implement end to end
+      through the real entry points. A bugfix shows the failing
+      observation before and the passing one after; a refactor shows
+      preservation. Gate every test you add or change with the authoring
+      mode of the apb-test-audit skill. Run the project's own checks. Do
+      not commit, push or
+      open a pull request, and preserve unrelated work. Write the outputs
+      changed_paths (a JSON array), evidence (checks run and their results)
+      and gaps (what could not be shown, empty when none).
+    outputs:
+      fields: [changed_paths, evidence, gaps]
+  # One item per subtask, strictly one at a time in the declared order. apb
+  # keeps each subtask's state; the run keeps no second list of it.
+  - id: implement_subtasks
+    type: agent_task
+    title: Implement the subtasks in order
+    expected_duration: 60m
+    prompt: >-
+      Run only the Implement stage of the apb-delivery skill for one
+      subtask. The item section holds the subtask: its id, summary, the
+      card outcomes it delivers, its checks and the subtasks it depends on.
+      Change kind: {{params.change_kind}}. Card, which you must not change:
+      {{nodes.intake.output}}. Design: {{nodes.design.output.design}}. All
+      subtasks in order: {{nodes.decompose.output.subtasks}}. The subtasks
+      it depends on ran before it; build on what is in the working tree. If
+      a dependency is missing or broken, do not work around it: write
+      self_check blocked and say why in gaps. Otherwise implement only this
+      subtask, end to end through the real entry points, gate every test
+      you add or change with the authoring mode of the apb-test-audit
+      skill, and run its checks
+      and the project's own checks. Then review your change against the
+      subtask's outcomes with the apb-review skill, through its fallback
+      chain to an independent context when one is available, and repair
+      what is confirmed. If the item section carries a check_note from an
+      earlier round, fix what it names first. Do not commit, push or open a
+      pull request, and preserve unrelated work. Write the outputs
+      changed_paths (a JSON array), evidence (checks run and their
+      results), review (who reviewed, at which rung, the findings and their
+      dispositions), gaps (empty when none) and self_check (pass only when
+      every outcome of the subtask is shown and its checks pass, otherwise
+      fail or blocked).
+    list:
+      items:
+        from: { node: decompose, field: subtasks }
+        key: id
+        max_items: 30
+      batch:
+        size: 1
+        parallel: 1
+        retries: 1
+      item_outputs: [changed_paths, evidence, review, gaps, self_check]
+      check:
+        output: { field: self_check, equals: "pass" }
+      on_needs_look: continue
+  - { id: candidate_ready, type: condition, title: Candidate ready for the panel }
+  - id: review_correctness
+    type: agent_task
+    title: Review correctness
+    profile: apb-reviewer
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      You are the correctness reviewer. Use the apb-review skill. Read-only:
+      never edit files or run commands that change the tree. Start from
+      only this packet: card {{nodes.intake.output}}, design
+      {{nodes.design.output.design}}, the latest change
+      {{nodes.implement.output}} {{nodes.implement_subtasks.output}}
+      {{nodes.fix.output}}, and the actual source and diff in the working
+      tree. When the change was decomposed, check every subtask against its
+      card outcomes ({{nodes.decompose.output.subtasks}}) and the whole
+      card, and name the subtask id in each finding's location. Focus: request fidelity, edge
+      cases, API and state contracts, error handling. Earlier panel state,
+      empty in the first round: {{nodes.collect.output.findings}}. Keep
+      every still open finding of your role with its id. Verify every
+      finding against the source. Write the outputs role (correctness),
+      blocking (the number of open confirmed defects and design concerns
+      with a consequence, 0 when none) and findings (a JSON array; each
+      has id, class: defect, design_concern, verification_gap or optional,
+      location, why, evidence, disposition: open, fixed or rejected).
+      Missing review capability fails the step; it never counts as clean.
+    outputs:
+      fields: [role, blocking, findings]
+  - id: review_security
+    type: agent_task
+    title: Review security
+    profile: apb-reviewer
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      You are the security reviewer. Use the apb-review skill, and always
+      run the apb-security-audit skill on the whole diff; a general reading
+      does not replace it, and each finding needs a concrete exploit or
+      failure path and a severity. Read-only:
+      never edit files or run commands that change the tree. Start from
+      only this packet: card {{nodes.intake.output}}, design
+      {{nodes.design.output.design}}, the latest change
+      {{nodes.implement.output}} {{nodes.implement_subtasks.output}}
+      {{nodes.fix.output}}, and the actual source and diff in the working
+      tree. When the change was decomposed, check every subtask against its
+      card outcomes ({{nodes.decompose.output.subtasks}}) and the whole
+      card, and name the subtask id in each finding's location. Focus: permissions, secrets,
+      injection, unsafe input, recovery boundaries. Earlier panel state,
+      empty in the first round: {{nodes.collect.output.findings}}. Keep
+      every still open finding of your role with its id. Verify every
+      finding against the source. Write the outputs role (security),
+      blocking (the number of open confirmed defects and design concerns
+      with a consequence, 0 when none) and findings (a JSON array; each
+      has id, class: defect, design_concern, verification_gap or optional,
+      location, why, evidence, disposition: open, fixed or rejected).
+      Missing review capability fails the step; it never counts as clean.
+    outputs:
+      fields: [role, blocking, findings]
+  - id: review_tests
+    type: agent_task
+    title: Review tests and maintainability
+    profile: apb-reviewer
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      You are the tests and maintainability reviewer. Use the apb-review
+      skill, and always run the apb-test-audit skill in audit mode on every
+      test the change adds or changes, and on changed behavior that has no
+      test; a general reading does not replace it. Read-only: never edit files or run commands that change the
+      tree. Start from only this packet: card {{nodes.intake.output}},
+      design {{nodes.design.output.design}}, the latest change
+      {{nodes.implement.output}} {{nodes.implement_subtasks.output}}
+      {{nodes.fix.output}}, and the actual source and diff in the working
+      tree. When the change was decomposed, check every subtask against its
+      card outcomes ({{nodes.decompose.output.subtasks}}) and the whole
+      card, and name the subtask id in each finding's location. Focus: test value, behavior
+      coverage, regression evidence, readability, coupling, and whether the
+      project's own checks and every installed review helper (the apb-review
+      skill makes them required) pass on this candidate; a helper that fails
+      to run is a blocking finding. Earlier panel state,
+      empty in the first round: {{nodes.collect.output.findings}}. Keep
+      every still open finding of your role with its id. Verify every
+      finding against the source. Write the outputs role (tests), blocking
+      (the number of open confirmed defects and design concerns with a
+      consequence, 0 when none) and findings (a JSON array; each has id,
+      class: defect, design_concern, verification_gap or optional,
+      location, why, evidence, disposition: open, fixed or rejected).
+      Missing review capability fails the step; it never counts as clean.
+    outputs:
+      fields: [role, blocking, findings]
+  - id: collect
+    type: agent_task
+    title: Collect the panel's findings
+    profile: apb-reviewer
+    expected_duration: 3m
+    protect: ["**"]
+    prompt: >-
+      Keep the review panel's state. Read-only. The reviewers' latest
+      outputs: correctness {{nodes.review_correctness.output}}, security
+      {{nodes.review_security.output}}, tests
+      {{nodes.review_tests.output}}. Your previous state, empty in the first
+      round: {{nodes.collect.output}}. Merge the findings by id; never drop
+      a finding or a role. Write the outputs open_count (the number of open
+      findings of class defect or design_concern, as a plain integer, 0
+      when none), findings (a JSON array of every finding with its role and
+      disposition) and roles (each role with its coverage and executor as
+      reported).
+    outputs:
+      fields: [open_count, findings, roles]
+  - { id: repair_round, type: condition, title: Another repair round }
+  - id: fix
+    type: agent_task
+    title: Repair the confirmed findings
+    expected_duration: 20m
+    prompt: >-
+      Run only the Repair stage of the apb-delivery skill. Open findings:
+      {{nodes.collect.output.findings}}. Card, which you must not change:
+      {{nodes.intake.output}}. Verify each open finding against the source
+      first. Fix the confirmed ones; reject the others with a reason. Do
+      not drop reviewers, weaken checks, or delete or edit tests to make a
+      finding go away. Rerun the affected project checks. Do not commit,
+      push or open a pull request. Write the outputs dispositions (a JSON
+      array: finding id, fixed or rejected, evidence), changed_paths and
+      evidence.
+    outputs:
+      fields: [dispositions, changed_paths, evidence]
+  - { id: next_round, type: condition, title: Start the next review round }
+  - id: report
+    type: agent_task
+    title: Report against the original request
+    expected_duration: 5m
+    protect: ["**"]
+    audience: people
+    prompt: >-
+      Run only the Report stage of the apb-delivery skill and use its
+      result template. Do not edit files. Assessment only: say that this
+      run does not certify that the reviewed candidate is the final one,
+      and that nothing was committed, pushed or published. Card:
+      {{nodes.intake.output}}. Design: {{nodes.design.output}}.
+      Decomposition: {{nodes.decompose.output}}. Implementation:
+      {{nodes.implement.output}} {{nodes.implement_subtasks.output}}. Panel, with the
+      dispositions of every repair round: {{nodes.collect.output}}. Put the
+      assumptions first. Then account for every expected outcome of the
+      whole original card (delivered, partial or not delivered, with
+      evidence), checked on the integrated result and not only as the sum
+      of the subtasks; when the change was decomposed, give each subtask's
+      state as apb recorded it, the stage conformance (done, not applicable, or skipped
+      with a reason), the findings per role with their dispositions, the
+      repair rounds used, and the measurements (change kind, risk triggers,
+      findings per role accepted and rejected, wall time; unknown stays
+      unknown). Begin the report with the line DELIVERY REPORT: and write
+      the outputs outcomes, conformance, findings and measurements.
+    outputs:
+      fields: [outcomes, conformance, findings, measurements]
+    success_check: { marker: "DELIVERY REPORT:" }
+  - { id: assessed, type: finish, outcome: success }
+  - id: reconsider
+    type: finish
+    outcome: failure
+    expected_duration: 3m
+    prompt: >-
+      The run stopped before a converged review: either the design has an
+      unresolved question, a decomposition named no subtask, a subtask
+      still needs a look after its repair round, a repair failed, or two repair rounds did not close the panel. Do not try again in this run. Card:
+      {{nodes.intake.output}}. Design: {{nodes.design.output}}. Subtasks:
+      {{nodes.implement_subtasks.output}}. Panel:
+      {{nodes.collect.output}}. Say which of these happened, what is still
+      open, what alternative approach the evidence suggests, and the one
+      question the issuer must answer. Assessment only: nothing was
+      committed, pushed or published.
+edges:
+  - { from: start, to: intake }
+  - { from: intake, to: design }
+  - { from: design, to: design_route }
+  - { from: design_route, to: decompose, condition: { type: output_field, node: design, field: ready, equals: "true" } }
+  - { from: design_route, to: reconsider, fallback: true }
+  # A trigger (decomposed is exactly true, as a JSON boolean or the string
+  # "true"): the subtasks, one at a time in the declared order. Anything
+  # else, an unreadable answer included, falls back to the single
+  # implementation, which is always a valid route.
+  - { from: decompose, to: decompose_route }
+  - { from: decompose_route, to: implement_subtasks, condition: { type: output_field, node: decompose, field: decomposed, equals: "true" } }
+  - { from: decompose_route, to: implement, fallback: true }
+  - { from: implement, to: candidate_ready, join: all }
+  # First match wins: a decomposition that yielded no subtask implemented
+  # nothing, so it reconsiders; then every subtask must have passed.
+  - { from: implement_subtasks, to: reconsider, condition: { type: output_field, node: implement_subtasks, field: total, equals: "0" } }
+  - { from: implement_subtasks, to: candidate_ready, join: all, condition: { type: output_field, node: implement_subtasks, field: needs_look, equals: "0" } }
+  - { from: implement_subtasks, to: reconsider, fallback: true }
+  # The panel: three independent read-only roles side by side on the
+  # integrated candidate; the collector waits for all of them every round.
+  - { from: candidate_ready, to: review_correctness }
+  - { from: candidate_ready, to: review_security }
+  - { from: candidate_ready, to: review_tests }
+  - { from: review_correctness, to: collect, join: all }
+  - { from: review_security, to: collect, join: all }
+  - { from: review_tests, to: collect, join: all }
+  - { from: collect, to: report, condition: { type: output_field, node: collect, field: open_count, equals: "0" } }
+  - { from: collect, to: repair_round, fallback: true }
+  # At most two repair rounds; a third goes to reconsider, never to another fix.
+  - { from: repair_round, to: fix, max_traversals: 2 }
+  - { from: repair_round, to: reconsider, fallback: true }
+  - { from: fix, to: next_round, condition: { type: node_status, node: fix, equals: success } }
+  - { from: fix, to: reconsider, fallback: true }
+  - { from: next_round, to: review_correctness }
+  - { from: next_round, to: review_security }
+  - { from: next_round, to: review_tests }
+  - { from: report, to: assessed }

@@ -2546,7 +2546,13 @@ trial?: TrialRecord,
 /**
  * Where an imported version came from (`created_by: import`).
  */
-imported?: ImportProvenance, };
+imported?: ImportProvenance, 
+/**
+ * The version the shipped content named, for a version apb wrote from
+ * the content it ships (`created_by: bundled`); the stored version can
+ * differ when that number was taken.
+ */
+shipped_version?: string, };
 
 export type VersionInfo = { version: string, 
 /**

@@ -217,6 +217,26 @@ fn v64_rules_types_and_paths() {
 }
 
 #[test]
+fn v64_contains_takes_one_scalar_on_a_list() {
+    let list_rule = "expect: { change: no_new } }";
+    for ok in ["expect: { contains: bug } }", "expect: { contains: 42 } }"] {
+        let got = issues(&GOOD.replace(list_rule, ok));
+        assert!(!has(&got, "V64", Severity::Error), "{ok}: {got:?}");
+    }
+    for bad in [
+        "expect: { contains: [bug] } }",
+        "expect: { contains: { a: 1 } } }",
+        "expect: { contains: bug, empty: true } }",
+    ] {
+        let got = issues(&GOOD.replace(list_rule, bad));
+        assert!(has(&got, "V64", Severity::Error), "{bad}: {got:?}");
+    }
+    // A number observation holds no items.
+    let got = issues(&GOOD.replace("expect: { equals: 0 } }", "expect: { contains: 0 } }"));
+    assert!(has(&got, "V64", Severity::Error), "{got:?}");
+}
+
+#[test]
 fn v65_only_params_may_be_templated() {
     let got = issues(&GOOD.replace("{{params.open_stages}}", "{{nodes.work.output}}"));
     assert!(has(&got, "V65", Severity::Error), "{got:?}");

@@ -231,6 +231,9 @@ pub struct ExpectRule {
     pub change: Option<Change>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty: Option<bool>,
+    /// A `list` observation holds this scalar among its items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<Value>,
 }
 
 impl ExpectRule {
@@ -241,10 +244,11 @@ impl ExpectRule {
             + usize::from(self.at_most.is_some())
             + usize::from(self.at_least.is_some())
             + usize::from(self.change.is_some())
-            + usize::from(self.empty.is_some());
+            + usize::from(self.empty.is_some())
+            + usize::from(self.contains.is_some());
         if set != 1 {
             return Err(format!(
-                "`expect` must state exactly one rule (equals, at_most, at_least, change or empty), found {set}"
+                "`expect` must state exactly one rule (equals, at_most, at_least, change, empty or contains), found {set}"
             ));
         }
         let finite = |n: f64, key: &str| {
@@ -267,6 +271,11 @@ impl ExpectRule {
         }
         if let Some(c) = self.change {
             return Ok(Rule::Change(c));
+        }
+        if let Some(v) = &self.contains {
+            return Scalar::from_json(v).map(Rule::Contains).ok_or_else(|| {
+                "`expect.contains` must be a string, a bool or a finite number".into()
+            });
         }
         match self.empty {
             Some(true) => Ok(Rule::Empty),
@@ -293,6 +302,16 @@ impl Scalar {
             Value::Number(n) => n.as_f64().filter(|f| f.is_finite()).map(Scalar::Number),
             Value::String(s) => Some(Scalar::Text(s.clone())),
             _ => None,
+        }
+    }
+
+    /// The scalar as a list item is kept: text as written, a number as
+    /// people read it (`3`, not `3.0`), a bool as `true` or `false`.
+    pub fn as_item(&self) -> String {
+        match self {
+            Scalar::Bool(b) => b.to_string(),
+            Scalar::Number(n) => format_number(*n),
+            Scalar::Text(s) => s.clone(),
         }
     }
 

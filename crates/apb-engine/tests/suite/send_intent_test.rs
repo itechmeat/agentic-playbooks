@@ -556,6 +556,35 @@ fn an_unknown_telegram_send_is_refused_unless_the_binding_allows_a_resend() {
     );
 }
 
+// -- A repeatable write: untracked, exactly like an undeclared one --------
+
+/// GitHub's `add_labels` declares `repeatable` and `add_assignees` declares
+/// nothing. Both behave the same: a lost answer records no intent, the
+/// repeat goes out again, and nothing waits for a person.
+#[test]
+fn a_repeatable_call_with_a_lost_answer_is_retried_like_an_undeclared_one() {
+    let _lock = common::env_lock();
+    for (function, args) in [
+        (
+            "add_labels",
+            json!({ "owner": "acme", "repo": "site", "number": 42, "labels": ["bug"] }),
+        ),
+        (
+            "add_assignees",
+            json!({ "owner": "acme", "repo": "site", "number": 42, "assignees": ["octo"] }),
+        ),
+    ] {
+        let stub = spawn_script(vec![Reply::Cut, Reply::Respond(200, "[]".into())]);
+        let run = run_with("github", &stub.base_url, Grant::of(&[function]));
+        let (_, first) = run.call(function, args.clone(), None);
+        assert!(!first, "{function}: the first answer was lost");
+        let (_, again) = run.call(function, args, None);
+        assert!(again, "{function}: the repeat goes out");
+        assert_eq!(stub.requests().len(), 2, "{function}");
+        assert!(run.ledger().records().is_empty(), "{function}: untracked");
+    }
+}
+
 #[test]
 fn a_refused_telegram_send_did_not_go_out_and_may_be_sent_again() {
     let _lock = common::env_lock();

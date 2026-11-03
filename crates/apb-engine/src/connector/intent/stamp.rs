@@ -54,7 +54,7 @@ pub fn prepare_body_args<'a>(
     };
     let neutral = rewritten.map_or(moded, Cow::Owned);
     let (Some(Idempotency::Marker { arg, format, .. }), Some(stamp)) =
-        (&function.idempotency, stamp)
+        (function.send_once(), stamp)
     else {
         return neutral;
     };
@@ -85,8 +85,7 @@ pub fn apply_key(
     body: &mut Option<Value>,
     headers: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let (Some(Idempotency::Key { header, field, .. }), Some(stamp)) =
-        (&function.idempotency, stamp)
+    let (Some(Idempotency::Key { header, field, .. }), Some(stamp)) = (function.send_once(), stamp)
     else {
         return Ok(());
     };

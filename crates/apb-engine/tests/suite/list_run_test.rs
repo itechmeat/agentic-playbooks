@@ -665,7 +665,9 @@ echo "$APB_STATUS_FILE" > "$D/status-$I""#;
 
 /// A connector item check through the `<node>#check` grant: a read that
 /// confirms the item accepts it, a read that fails decides nothing, so the
-/// item needs a look (`check_unknown`), never an accept.
+/// item needs a look (`check_unknown`), never an accept. `contains` accepts
+/// only when the list at the path holds the item, and a rendered text arg
+/// is read as the integer the function's schema asks for.
 #[test]
 fn a_connector_check_accepts_on_a_confirming_read_and_needs_a_look_on_a_failed_one() {
     const CONNECTOR: &str = r#"
@@ -683,10 +685,28 @@ functions:
     description: A read that fails
     read_only: true
     mock: { status: 500, body: { error: down } }
+  - name: get_issue
+    description: Reads an issue by number
+    read_only: true
+    args_schema: { type: object, properties: { number: { type: integer } }, required: [number] }
+    mock: { status: 200, body: { labels: [ { name: bug }, { name: ui } ] } }
 "#;
-    for (function, state, reason) in [
-        ("get_task", "passed", None),
-        ("broken", "needs_look", Some("check_unknown")),
+    const EXISTS: &str = "{ path: data.gid, exists: true }";
+    for (function, accept_when, state, reason) in [
+        ("get_task", EXISTS, "passed", None),
+        ("broken", EXISTS, "needs_look", Some("check_unknown")),
+        (
+            "get_issue",
+            "{ path: \"labels[].name\", contains: bug }",
+            "passed",
+            None,
+        ),
+        (
+            "get_issue",
+            "{ path: \"labels[].name\", contains: enhancement }",
+            "needs_look",
+            Some("rejected"),
+        ),
     ] {
         let cfg = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -695,7 +715,7 @@ functions:
         fs::create_dir_all(&cdir).unwrap();
         fs::write(cdir.join("connector.yaml"), CONNECTOR).unwrap();
         let list = format!(
-            "items: {{ inline: [ {{ id: a }} ] }}\nbatch: {{ size: 1, retries: 0 }}\nitem_outputs: [blocking]\ncheck:\n  connector:\n    name: tracker\n    function: {function}\n    args: {{ task: \"{{{{item_output.blocking}}}}\" }}\n    accept_when: {{ path: data.gid, exists: true }}"
+            "items: {{ inline: [ {{ id: a, n: 42 }} ] }}\nbatch: {{ size: 1, retries: 0 }}\nitem_outputs: [blocking]\ncheck:\n  connector:\n    name: tracker\n    function: {function}\n    args: {{ task: \"{{{{item_output.blocking}}}}\", number: \"{{{{item.n}}}}\" }}\n    accept_when: {accept_when}"
         );
         let yaml = playbook(&list, "", "");
         seed(root, &yaml, &[]);
@@ -727,7 +747,7 @@ functions:
         assert_eq!(
             (a.state.as_str(), a.reason.as_deref()),
             (state, reason),
-            "check through `{function}`"
+            "check through `{function}` with {accept_when}"
         );
         let checks = ev
             .iter()
