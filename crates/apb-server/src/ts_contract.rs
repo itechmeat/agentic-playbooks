@@ -185,6 +185,29 @@ fn render_types() -> String {
         apb_engine::result_ref::ResultItem::decl(&cfg),
         apb_engine::result_ref::ResultPart::decl(&cfg),
         apb_engine::result_ref::ResultRef::decl(&cfg),
+        // Result snapshots: the stamp, the manifest parts and the view.
+        apb_core::result_store::ResultScope::decl(&cfg),
+        apb_core::result_store::ResultFormat::decl(&cfg),
+        apb_core::result_store::EntryPart::decl(&cfg),
+        apb_core::result_store::OmissionReason::decl(&cfg),
+        apb_core::result_store::IncompleteReason::decl(&cfg),
+        apb_core::result_store::OutputOmitted::decl(&cfg),
+        apb_core::result_store::OmittedItem::decl(&cfg),
+        apb_core::result_store::OmittedMore::decl(&cfg),
+        apb_core::result_store::SnapshotOmission::decl(&cfg),
+        apb_core::result_store::SnapshotSubject::decl(&cfg),
+        apb_core::result_store::SnapshotProvenance::decl(&cfg),
+        apb_core::result_store::SnapshotEntry::decl(&cfg),
+        apb_core::result_store::ResultStamp::decl(&cfg),
+        apb_engine::result_view::Verified::decl(&cfg),
+        apb_engine::result_view::EntryView::decl(&cfg),
+        apb_engine::result_view::ResultRow::decl(&cfg),
+        apb_engine::result_view::LegacyRefRow::decl(&cfg),
+        apb_engine::result_view::NotStoredRow::decl(&cfg),
+        apb_engine::result_view::ResultsView::decl(&cfg),
+        apb_engine::result_view::EntryContent::decl(&cfg),
+        apb_engine::result_view::LiveComparison::decl(&cfg),
+        apb_engine::run_outcome::commits::CommitAttempt::decl(&cfg),
         apb_core::run_outputs::Pick::decl(&cfg),
         apb_engine::run_outputs::OutputState::decl(&cfg),
         apb_engine::run_outputs::MissingReason::decl(&cfg),
@@ -496,6 +519,7 @@ fn render_consts() -> String {
         "\n/** Every run outcome an end-of-run notice can be narrowed to. */\nexport const NOTIFY_OUTCOMES = {}\n",
         ts_string_array(&outcomes)
     ));
+    render_result_consts(&mut out);
     let reasons: Vec<&str> = apb_engine::run_outputs::MissingReason::ALL
         .iter()
         .map(|r| r.as_str())
@@ -601,6 +625,32 @@ fn render_check_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** The keyless demo's playbook id. */\nexport const DEMO_ID = '{}'\n",
         apb_core::demo::DEMO_ID
+    ));
+}
+
+/// The result snapshot reason lists and the inline read cap, so the
+/// dashboard words every reason this apb writes and cuts its reads where
+/// the server does.
+fn render_result_consts(out: &mut String) {
+    use apb_core::result_store::{IncompleteReason, OmissionReason, OutputOmitted};
+    let omissions: Vec<&str> = OmissionReason::ALL.iter().map(|r| r.as_str()).collect();
+    let incomplete: Vec<&str> = IncompleteReason::ALL.iter().map(|r| r.as_str()).collect();
+    let output: Vec<&str> = OutputOmitted::ALL.iter().map(|r| r.as_str()).collect();
+    out.push_str(&format!(
+        "\n/** Every reason a result snapshot omits a part or a file. */\nexport const RESULT_OMISSION_REASONS = {}\n",
+        ts_string_array(&omissions)
+    ));
+    out.push_str(&format!(
+        "\n/** Every limit that can stop a result capture early. */\nexport const RESULT_INCOMPLETE_REASONS = {}\n",
+        ts_string_array(&incomplete)
+    ));
+    out.push_str(&format!(
+        "\n/** Every reason a snapshot does not store the output itself. */\nexport const RESULT_OUTPUT_OMITTED = {}\n",
+        ts_string_array(&output)
+    ));
+    out.push_str(&format!(
+        "\n/** The most bytes of one entry an inline result read returns. */\nexport const RESULT_DISPLAY_CAP = {}\n",
+        apb_engine::result_view::DISPLAY_CAP
     ));
 }
 

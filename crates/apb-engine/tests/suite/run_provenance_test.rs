@@ -102,6 +102,7 @@ fn a_committing_node_on_a_git_tree_journals_its_commits_and_the_run_id() {
         commits,
         omitted,
         branch,
+        ..
     } = found[0]
     else {
         unreachable!()

@@ -61,6 +61,13 @@
 //! `node_finished` is skipped and routed the same (D13). The new-binary
 //! part of each runs without the old binaries.
 //!
+//! Row E1 covers result snapshots: the new binary stamps `node_finished`
+//! and `list_item_settled` with `result` and stores the snapshots under
+//! `results/`, and a synthetic `artifacts_committed` carries `attempt` and
+//! `attempts`; both old binaries read the run, approve and resume it with
+//! the new binary's routing and stop it, and the new binary still reads
+//! every snapshot verified afterwards.
+//!
 //! Row S1 covers scenario runs: a quick scenario run the new binary plays
 //! (`apb eval --level quick`) lives under `.apb/scenario-runs/` with
 //! `origin: scenario` in its manifest; neither old binary lists it, shows
@@ -2942,4 +2949,155 @@ fn rows1_new_scenario_run_old_binaries_do_not_see_it() {
     let m: Value = yaml_serde::from_str(&manifest).unwrap();
     assert_eq!(m["origin"]["kind"], "scenario", "row S1: {manifest}");
     assert_eq!(m["origin"]["scenario"], "green", "row S1: {manifest}");
+}
+
+/// Row E1's playbook: a script node and a list node that declare
+/// `results:`, then a gate.
+const E1_RESULTS: &str = r#"schema: 2
+id: corpus-results
+name: Journal corpus result snapshots
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/report.sh", runner: sh, results: [ { path: report.md } ] }
+  - id: each
+    type: script
+    script: scripts/item.sh
+    runner: sh
+    results: []
+    list:
+      items: { inline: [ { id: a }, { id: b } ] }
+      batch: { size: 1, retries: 0 }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: each }
+  - { from: each, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+const REPORT_SH: &str = "echo 'the report' > report.md\necho reported\n";
+const ITEM_SH: &str = "echo '{\"done\":true}'\n";
+
+/// The snapshot rows the new binary lists for `run`, every one verified.
+fn e1_rows_verified(case: &Case, run: &str) -> usize {
+    let listed = case.run(&new_binary(), &["results", run, "--json"]);
+    assert!(listed.ok(), "{}: results: {listed:?}", case.name);
+    let v: Value = serde_json::from_str(&listed.stdout).unwrap();
+    let rows = v["rows"].as_array().cloned().unwrap_or_default();
+    for row in &rows {
+        assert_eq!(row["verified"], "ok", "{}: {row}", case.name);
+    }
+    rows.len()
+}
+
+/// Row E1: result stamps and per-attempt heads are fields older apb
+/// ignores. The new binary writes a run with stamps on the work node, on
+/// each list item and on the list node, waiting at the gate; a synthetic
+/// `artifacts_committed` with `attempt` and `attempts` goes before the list
+/// node's settlement. Both old binaries read it (beta.1 without an unknown
+/// record; 0.25.0 skips only the list records it predates), approve and resume it routing as the new binary does, and stop it; the
+/// snapshots stay readable and verified for the new binary after each.
+#[test]
+fn rowe1_result_stamps_old_binaries_read_resume_stop() {
+    let new = new_binary();
+    let mut case = Case::new("row E1");
+    case.seed_inline(
+        &new,
+        "corpus-results",
+        E1_RESULTS,
+        &[("report.sh", REPORT_SH), ("item.sh", ITEM_SH)],
+    );
+    let run = case.start_inline(&new, "corpus-results", &[]);
+    let journal = case.wait_journal(&run, "the gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    case.kill_driver(&run);
+    let stamped = |kind: &str, node: &str| {
+        journal
+            .iter()
+            .filter(|e| e["type"] == kind && e["node"] == node)
+            .filter(|e| {
+                e["result"]["snapshot_id"]
+                    .as_str()
+                    .is_some_and(|s| s.len() == 64)
+            })
+            .count()
+    };
+    assert_eq!(
+        stamped("node_finished", "work"),
+        1,
+        "row E1: {}",
+        summary(&journal)
+    );
+    assert_eq!(
+        stamped("list_item_settled", "each"),
+        2,
+        "row E1: {}",
+        summary(&journal)
+    );
+    assert_eq!(
+        stamped("node_finished", "each"),
+        1,
+        "row E1: {}",
+        summary(&journal)
+    );
+    rewrite_journal(&case.run_dir(&run), |mut records| {
+        let at = records
+            .iter()
+            .position(|e| e["type"] == "node_finished" && e["node"] == "each")
+            .expect("each settled");
+        let head = "a".repeat(40);
+        records.insert(
+            at,
+            serde_json::json!({
+                "seq": 0, "ts": records[at]["ts"], "type": "artifacts_committed",
+                "node": "each", "before": "b".repeat(40), "after": head, "commits": [],
+                "attempt": 7, "attempts": [ { "attempt": 7, "head": head } ],
+            }),
+        );
+        records
+    });
+    case.save();
+    let rows = e1_rows_verified(&case, &run);
+    assert_eq!(rows, 4, "row E1: work, two items and the list node");
+
+    let from = case.journal(&run).len();
+    let ran = case.read(&new, &run);
+    assert!(!ran.stdout.contains("unknown event"), "row E1: {ran:?}");
+    case.approve_and_resume(&new, &run);
+    let expected = routing(&case.journal(&run), from);
+    assert_eq!(e1_rows_verified(&case, &run), rows);
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    // 0.25.0 predates list mode: it skips the list records, counted, and
+    // nothing else; beta.1 knows them, so any unknown record there would be
+    // a stamp read as a record.
+    for (reader, knows_lists) in [(beta1, true), (v025, false)] {
+        let ran = case.read(&reader, &run);
+        assert_eq!(
+            ran.stdout.contains("unknown event"),
+            !knows_lists,
+            "row E1: {} reads the stamps as fields it ignores: {ran:?}",
+            label(&reader)
+        );
+        case.approve_and_resume(&reader, &run);
+        assert_eq!(
+            routing(&case.journal(&run), from),
+            expected,
+            "row E1: {} routes as the new binary",
+            label(&reader)
+        );
+        assert_eq!(
+            e1_rows_verified(&case, &run),
+            rows,
+            "row E1: the snapshots survive {}'s resume",
+            label(&reader)
+        );
+        case.stop(&reader, &run);
+    }
 }

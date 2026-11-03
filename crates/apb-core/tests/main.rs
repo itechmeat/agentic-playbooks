@@ -91,6 +91,8 @@ mod provenance_test;
 mod quality_test;
 #[path = "suite/registry_test.rs"]
 mod registry_test;
+#[path = "suite/result_store_test.rs"]
+mod result_store_test;
 #[path = "suite/run_memory_test.rs"]
 mod run_memory_test;
 #[path = "suite/scenario_test.rs"]

@@ -44,13 +44,7 @@ fn fold_records_review_decision() {
         ),
         ev(
             3,
-            EventPayload::NodeFinished {
-                node: "gate".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "approved".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("gate", "succeeded", 1, "approved"),
         ),
     ];
     let state = RunState::fold(&events);

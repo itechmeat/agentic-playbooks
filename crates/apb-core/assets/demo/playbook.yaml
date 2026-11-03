@@ -4,7 +4,10 @@ name: apb demo
 description: >-
   A first run with nothing to set up: a script writes report.md in the
   demo directory, then a person looks at it and approves or rejects it.
-  No agent, no connector, no network, no decision model, no key.
+  No agent, no connector, no decision model, no key. The script itself
+  reaches nothing outside the demo directory; the effects still list
+  network and external, as for any script, since apb does not read what a
+  script does.
 version: 1.0.0
 goal:
   statement: A short report exists and a person looked at it.

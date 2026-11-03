@@ -25,6 +25,7 @@ mod params;
 mod publish;
 mod quality;
 mod read_only;
+mod results;
 mod retry;
 mod review;
 mod templates;
@@ -60,6 +61,7 @@ use nodes::{
     check_trigger,
 };
 pub use publish::{OpenAgent, publish_only_violations};
+pub use results::snapshotted_nodes;
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 pub use unattended::{unattended_decide_refusal, unattended_reach};
 
@@ -382,6 +384,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     retry::check_retry_delay(playbook, &mut r); // V126-V130
     outputs::check_outputs(playbook, ctx, &mut r); // V131-V135
     read_only::check_read_only(playbook, &mut r); // V137-V139
+    results::check_results(playbook, &mut r); // V152-V154
     unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08

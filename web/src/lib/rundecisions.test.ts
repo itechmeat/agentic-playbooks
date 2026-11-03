@@ -7,6 +7,7 @@ import { runEventJournal } from './journal'
 import { decisionRows, decisionsSummary, decisionUseLines, exampleDraftOf } from './rundecisions'
 import type { RunDecisions } from './api.gen'
 import type { WfEvent } from './types'
+import { auth } from './auth.svelte'
 
 const totals: RunDecisions = {
   decisions: 3,
@@ -172,8 +173,57 @@ describe('exampleDraftOf', () => {
 
 describe('DecisionsPanel saving an example', () => {
   afterEach(() => {
+    auth.set({ required: false, authenticated: true, checked: false })
     vi.unstubAllGlobals()
     document.body.innerHTML = ''
+  })
+
+  const judged: WfEvent[] = [
+    { seq: 0, ts: 1, type: 'node_started', node: 'gate', attempt: 1 },
+    { seq: 1, ts: 2, type: 'decision_made', use_site: 'judge_node', node: 'gate', answers: { verdict: { value: 'pass' } } },
+  ]
+
+  it('offers saving only with keys: a dashboard without keys points to the command line', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
+    const app = mount(DecisionsPanel, {
+      target: document.body,
+      props: { decisions: totals, events: judged, runId: 'r1', workspace: 'w1' },
+    })
+    flushSync()
+    const save = document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    expect(document.querySelector('[data-testid="decision-save-keyless"]')!.textContent).toContain(
+      'apb judge save-example',
+    )
+    auth.set({ required: true, authenticated: true, checked: true })
+    flushSync()
+    expect(save.disabled).toBe(false)
+    expect(document.querySelector('[data-testid="decision-save-keyless"]')).toBeNull()
+    unmount(app)
+  })
+
+  it('shows a refused save in the server\'s sentence, without the request\'s address', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const app = mount(DecisionsPanel, {
+      target: document.body,
+      props: { decisions: totals, events: judged, runId: 'r1', workspace: 'w1' },
+    })
+    flushSync()
+    ;(document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement).click()
+    flushSync()
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'saving an example is refused by a dashboard without keys' }), { status: 409 }),
+    )
+    ;(document.querySelector('[data-testid="example-save"]') as HTMLButtonElement).click()
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve()
+      await tick()
+    }
+    expect(document.querySelector('[data-testid="example-save-error"]')!.textContent).toBe(
+      'saving an example is refused by a dashboard without keys',
+    )
+    unmount(app)
   })
 
   it('saves a judge decision with the expected answers typed, a yes or no as a boolean, and shows what was stored', async () => {

@@ -1528,13 +1528,7 @@ fn run_resume_refuses_a_busy_workdir() {
                 node: "start".into(),
                 attempt: 1,
             },
-            EventPayload::NodeFinished {
-                node: "start".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("start", "succeeded", 1, String::new()),
             EventPayload::RunPaused {
                 reason: "away".into(),
                 by: Some(apb_engine::pause::PauseBy::Operator),

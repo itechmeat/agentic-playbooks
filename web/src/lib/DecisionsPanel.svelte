@@ -3,7 +3,8 @@
   import type { WfEvent } from './types'
   import { decisionsSummary, decisionUseLines, exampleDraftOf, type ExampleDraft } from './rundecisions'
   import { decisionBars, decisionSource } from './runview'
-  import { saveJudgeExample } from './api'
+  import { refusalText, saveJudgeExample } from './api'
+  import { authState } from './auth.svelte'
   import type { JudgeExample } from './api.gen'
   import { Button } from '$lib/components/ui/button'
 
@@ -27,6 +28,11 @@
   let saving = $state(false)
   let saved = $state<JudgeExample | null>(null)
   let saveError = $state<string | null>(null)
+  // A dashboard without keys refuses saving an example (it writes into the
+  // project, and anything on this machine reaches it): once the status
+  // read answered, the button is off and the command line is named.
+  const authSnapshot = authState()
+  const keyless = $derived(authSnapshot.checked && !authSnapshot.required)
   // The run page keeps this panel when it moves to another run: a draft,
   // a result or a save still on its way belongs to the run it was made on.
   // `page` counts the moves; a save answers only on the page it started on.
@@ -76,7 +82,7 @@
       saved = stored
       draft = null
     } catch (e) {
-      if (on === page) saveError = String(e)
+      if (on === page) saveError = refusalText(e)
     } finally {
       if (on === page) saving = false
     }
@@ -131,6 +137,7 @@
                 <Button
                   variant="outline"
                   size="xs"
+                  disabled={keyless}
                   onclick={() => openDraft(b.seq)}
                   data-testid="decision-save-example"
                   title="Save this judge decision as a labelled example of its node"
@@ -142,6 +149,12 @@
           </li>
         {/each}
       </ol>
+      {#if keyless && runId && bars.some((b) => exampleDraftOf(events, b.seq))}
+        <p class="dp-muted" data-testid="decision-save-keyless">
+          A dashboard without keys does not save examples: run
+          <span class="dp-mono">apb judge save-example {runId} &lt;node&gt; --expect question=answer</span> in a terminal.
+        </p>
+      {/if}
     {/if}
     {#if draft}
       {@const d = draft}
@@ -184,7 +197,7 @@
         </div>
       </div>
     {/if}
-    {#if saveError}<p class="dp-error" role="status">{saveError}</p>{/if}
+    {#if saveError}<p class="dp-error" role="status" data-testid="example-save-error">{saveError}</p>{/if}
     {#if saved}
       <div class="dp-draft" data-testid="example-saved">
         <p>Saved as example <span class="dp-mono">{saved.id}</span> of {saved.node}. Stored inputs:</p>

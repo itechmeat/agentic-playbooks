@@ -21,7 +21,7 @@ with cli and server on top, and `apb-decide` (no workspace dependency) <-
 engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
-  `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
+  `Playbook::from_yaml`; a node's `results:` entries are `ResultDecl`), validator (`validate/`, codes V01+, one module per
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`); `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot; `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -184,10 +184,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   edge in one definition with its rank and check order (`edge_address.rs`,
   shared with the dashboard's port through
   `tests/fixtures/edge_addresses.json`), content/bundle digests
-  (`content.rs`), the sealed type of every resolved secret with its
+  (`content.rs`), result snapshots (`result_store.rs`: the layout of
+  `runs/<id>/results/` and apb's own run storage names, the limits, the
+  canonical manifest with its `SnapshotSubject` and id, the `ResultStamp` a
+  settlement event carries, the omission and incomplete reasons, the
+  citation grammar `r:<id>/<entry>[#[a,b)]` with `EntryId`, the
+  secret-shaped names, and `ResultTxn`, the staging transaction under the
+  run's results lock with its run reservation), the sealed type of every resolved secret with its
   constant-time comparison and labelled redaction (`secret.rs`), trust store
   (`trust.rs`), atomic state IO, symlinks and dir
-  locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the agent-neutral
+  locks (`fsutil.rs`; `fsutil/beneath` the descriptor-relative reads and
+  writes beneath one anchor: no link followed at any component, a regular
+  file with one link only, capped reads that never cut, 0700 and 0600 at
+  creation, `flock` locks closed on exec), the single wall-clock source (`clock.rs`), the agent-neutral
   entry to each agent's output reader: reply and reported token usage
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
   `execution` config section, `cli` or `host` per run, the fallback rule),
@@ -250,7 +259,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   mode from the manifest, a gate's decision, a child's stop), `goal` the
   goal criteria
   checked at run end, `provenance` the run id in the agent env and the
-  commits a node made, `host` the host-mode adapter that turns an agent step
+  commits a node made with the head each attempt left, `result` the
+  snapshot capture at every settlement of a declaring node's work (scrub,
+  limits, fail closed, the stamp journaled before the transaction ends),
+  `host` the host-mode adapter that turns an agent step
   into a host task, `dispatch` the one entry that sends a list node to its
   runner, `list/` the list runner: `source` the item load, `batch` the
   batches on the list's worker pool and each item's settlement, `check` the
@@ -270,7 +282,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   read-only goal and commits blocks of the
   run surfaces (`run_outcome.rs`; `run_outcome/`: `baseline` and `notes` the
   baseline and findings views, `calls` connector calls by what they say about
-  the outcome, `claims` the evidence and gap types, `commits` the commits and their `Apb-Run` trailers, `intents`
+  the outcome, `claims` the evidence and gap types, `commits` the commits, their `Apb-Run` trailers and the attempt that made each, `intents`
   the send intents and the unknown ones a person resolves, `publish` the
   publish nodes' lines and done lines, `lists` the list
   nodes' counts, item-check evidence and items that need a look, `summary` the
@@ -290,7 +302,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   results, `quality` for the levels of signed grades per comparable key and
   their `--compare` deltas), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
-  `apb eval` (`eval/`),
+  `apb eval` (`eval/`), the reading view of a run's result snapshots every
+  surface answers through (`result_view.rs`: rows by node, execution and
+  item, every manifest and object re-hashed on every read, text through the
+  run redactor, `compare_live` a word only) and their cleanup
+  (`result_clean.rs`: dead transactions resolved by the journal, only what
+  no stamp and no open transaction names removed, `survey` writing nothing),
   the operator pause: who paused a run and how, the pause every run surface
   reports, and the paused-interval clock every deadline, timeout and
   duration goes through (`pause.rs`; `pause/`: `kind` the journal-facing
@@ -411,7 +428,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   writer that never fails a run, scrubs before it clips and drops a record
   rather than wait on its lock, `reader` the
   tolerant reader, `index` the dedup keys, `route` the `route_evaluated`
-  records, `mismatch` the `definition_mismatch` records), execution, list
+  records, `mismatch` the `definition_mismatch` records, and the
+  `result_capture_failed` record of a snapshot not stored), execution, list
   visit and attempt identity from event order (`identity.rs`), the
   definitions a run executed and the segments they cover
   (`run_definitions.rs`, over the write-once content-addressed run files of
@@ -434,7 +452,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   one agent step and its `agent_env_applied` event (`agent_env.rs`; the
   per-step wiring in `scheduler/node/step_env`), the per-run doctor
   (`run_doctor.rs`, `run_doctor/env` the process env rows, `run_doctor/exposure`
-  the tool exposure rows, `run_doctor/isolation` the isolation rows, `run_doctor/drift` the journal
+  the tool exposure rows, `run_doctor/isolation` the isolation rows, its inline `results` module the result store's leftovers, `run_doctor/drift` the journal
   format drift: the binaries that drove the run, a downgrade, unknown,
   undecodable and torn lines, open deferrals and their guard; the binaries
   themselves in `run_binaries.rs`), the paid agent probe behind `apb doctor
@@ -513,6 +531,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   version and is refused from a run step and a dashboard without keys),
   `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
+  `results` for a run's result snapshots (`run_results`, `run_result_read`,
+  the raw and live reads and `apb results clean`),
   and `discover` for history discovery, its stored results, a save
   through `capture::capture_draft` and a decline, all shared with the HTTP
   API and the CLI); `promote/` is `playbook_make_global` (the
@@ -569,7 +589,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `--promote --expect <v>@<digest> [--ack <id>]` line), `judge.rs` is `apb
   judge eval|examples|save-example|values`, `demo.rs` is `apb demo`
   (`--run` starts the real `apb run demo-report --detach`), `problems.rs` is `apb
-  problems`, `discover.rs` is `apb discover`, `actions.rs` prints next
+  problems`, `discover.rs` is `apb discover`, `results.rs` is `apb results`
+  (`show`, `clean`) and the results lines of `apb runs <id>`, `actions.rs` prints next
   actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
   `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
   `apb eval`, the terminal question and `apb launch floor`,
@@ -590,7 +611,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   promotion that names what it saw, `judge` for the judge sandbox and
   labelled examples, `scenario` for scenario runs, `demo` for the keyless
   demo, `problems` for
-  a playbook's known problems, `discover` for history discovery, loopback
+  a playbook's known problems, `results` for a run's result snapshots
+  (the listing, one entry, the raw download and the live comparison),
+  `discover` for history discovery, loopback
   only; `state.rs` also holds the tool-layer
   answer and refusal mapping they share;
   `runs` also serves the report page), shared request state in `state.rs`, and the svelte
@@ -661,6 +684,27 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `Host`, no forwarding header) and never takes or returns a path.
   `rules/1` still reads tool facts from claude sessions only (codex facts
   are deferred to a `rules/2`, see `docs/QUALITY.md`).
+- **Result snapshots** (`docs/RESULTS.md`): a node that declares
+  `results:` keeps a snapshot at every settlement of its work (`succeeded`,
+  `failed`, `timed_out`; a cache hit after its restore, the finish answer,
+  a list item's full output; write-offs never): the output, the declared
+  fields and, on success only, the declared files, as UTF-8 text scrubbed
+  by `RunRedactor::secret_text` and stored content-addressed under
+  `runs/<id>/results/`. Sources are read through `fsutil::beneath` (no
+  link, FIFO or hard-linked file opened; secret-shaped names never opened),
+  every limit stops work and marks the snapshot `incomplete`, and a
+  redactor that cannot resolve fails closed (`scrub_unavailable`). The
+  stamp (`node_finished.result`, `list_item_settled.result`) is journaled
+  before the transaction ends; nothing reads a snapshot no stamp names,
+  every read re-hashes manifest and object (`corrupt` otherwise) and passes
+  the run redactor, ranges counting in the served text. A failed capture
+  never fails the node (`result_capture_failed` in the diagnostics, listed
+  by every view as `not_stored`); a live comparison reads the tree capture
+  read, never an attempt's own `workdir`. `apb results clean` resolves dead transactions by the journal and
+  removes only what nothing names; `apb doctor --run` only reports.
+  `artifacts_committed.attempts` records each attempt's head, so commit
+  rows say which attempt made a commit. All new fields are
+  `serde(default)` and display or storage only.
 
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge

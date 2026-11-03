@@ -54,6 +54,9 @@ import type {
   SandboxRequest,
   ScenarioRunRequest,
   ScenarioRunView,
+  EntryContent,
+  LiveComparison,
+  ResultsView,
 } from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { launchFields, type LaunchConfirmation } from '../launch'
@@ -292,6 +295,13 @@ export const runScenario = (id: string, req: ScenarioRunRequest, workspace = '')
 export const fetchScenarioRun = (id: string, runId: string, workspace = '') =>
   getJson<ScenarioRunView>(`${pb(id)}/scenario-runs/${encodeURIComponent(runId)}${qs({ workspace })}`)
 
+/** A failed request as a person reads it: the server's own sentence (the
+ * `error` of its JSON body) without the request's address, else the
+ * error as it stands. */
+export function refusalText(e: unknown): string {
+  return e instanceof ApiError && typeof e.body?.error === 'string' ? e.body.error : String(e)
+}
+
 // The judge sandbox: one judge node evaluated outside any run, "fill from a
 // run" with a judge execution's inputs and the run's other values, and
 // saving that execution as a labelled example.
@@ -350,6 +360,42 @@ export const decideKnownProblem = (
     `${problems(id)}/${encodeURIComponent(problem)}/${action}${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
   )
+
+// Result snapshots (`docs/RESULTS.md`): every snapshot a run's journal
+// stamps, one stored entry (a byte range, the display cap by default), its
+// whole bytes as a download, and how a stored workspace file compares with
+// the live one (a word, never content). `entry` is the id inside the
+// snapshot (`output`, `fields`, `file:<scope>:<encoded path>`).
+// The routes are `apb-server`'s `routes/results.rs`: an entry read answers
+// `{ run_id, ref, content }` (MCP `run_result_read`'s shape), the live
+// comparison `{ live }`.
+const results = (id: string, snapshot?: string) =>
+  `${run(id)}/results${snapshot === undefined ? '' : `/${encodeURIComponent(snapshot)}`}`
+export const fetchRunResults = (id: string, workspace = '') =>
+  getJson<ResultsView>(`${results(id)}${qs({ workspace })}`)
+export const fetchResultEntry = (
+  id: string,
+  snapshot: string,
+  entry: string,
+  range: { offset?: number; limit?: number } = {},
+  workspace = '',
+) =>
+  // `requestJson` keeps a refusal's own sentence (`corrupt: ...`) for
+  // `refusalText`.
+  requestJson<{ run_id: string; ref: string; content: EntryContent }>(
+    `${results(id, snapshot)}${qs({
+      entry,
+      offset: range.offset?.toString(),
+      limit: range.limit?.toString(),
+      workspace,
+    })}`,
+    { method: 'GET' },
+  ).then((a) => a.content)
+export const resultRawUrl = (id: string, snapshot: string, entry: string, workspace = '') =>
+  `${results(id, snapshot)}/raw${qs({ entry, workspace })}`
+export const compareResultLive = async (id: string, snapshot: string, entry: string, workspace = '') =>
+  (await requestJson<{ live: LiveComparison }>(`${results(id, snapshot)}/live${qs({ entry, workspace })}`, { method: 'GET' }))
+    .live
 
 // GET /api/runs/{id}/report.html: the run report as one self-contained page,
 // served as a download (the run page's "Save report" link).

@@ -387,6 +387,37 @@ pub struct RunEventsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunResultsArgs {
+    pub run_id: String,
+    /// Only this node's rows.
+    #[serde(default)]
+    pub node: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunResultReadArgs {
+    pub run_id: String,
+    /// `r:<snapshot_id>/<entry>`, optionally `#[a,b)` (bytes, at most 64 KiB).
+    pub r#ref: String,
+    /// Start of the window in bytes of the served text (default 0); ignored
+    /// when `ref` has a range.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Window length in bytes, at most 64 KiB (the default).
+    #[serde(default)]
+    pub limit: Option<u64>,
+    /// Add the live comparison word of a workspace file.
+    #[serde(default)]
+    pub compare_live: Option<bool>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunRetroContextArgs {
     pub run_id: String,
     /// Compare with the median of this many earlier finished runs of the same

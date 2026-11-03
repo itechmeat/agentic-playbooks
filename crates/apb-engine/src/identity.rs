@@ -206,13 +206,7 @@ mod tests {
     }
 
     fn finished(node: &str, status: &str) -> EventPayload {
-        EventPayload::NodeFinished {
-            node: node.into(),
-            status: status.into(),
-            attempt: 1,
-            output: String::new(),
-            artifacts: Vec::new(),
-        }
+        EventPayload::node_finished(node, status, 1, String::new())
     }
 
     fn hop(from: &str, to: &str) -> EventPayload {

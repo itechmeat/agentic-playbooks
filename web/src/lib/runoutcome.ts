@@ -22,6 +22,9 @@ export interface CommitLine {
   subject: string
   // Set when the commit's `Apb-Run` trailer does not name this run.
   trailer?: string
+  // The number of the attempt that made it, when its attempts' heads were
+  // recorded (display only: a merge or a rewrite can make it inexact).
+  attempt?: number
 }
 
 // What a commit's `Apb-Run` trailer says against the run `runId`, in the
@@ -41,10 +44,12 @@ export function trailerNote(a: CommittedArtifact, runId: string | undefined): st
 export function commitLines(commits: NodeCommits[] | undefined, runId?: string): CommitLine[] {
   const out: CommitLine[] = []
   for (const c of commits ?? []) {
-    for (const a of c.commits) {
+    for (const [i, a] of c.commits.entries()) {
       const line: CommitLine = { node: c.node, sha: a.sha, short: a.sha.slice(0, 12), subject: a.subject }
       const trailer = trailerNote(a, runId)
       if (trailer) line.trailer = trailer
+      const attempt = c.by_attempt?.[i]?.number
+      if (attempt !== undefined) line.attempt = attempt
       out.push(line)
     }
   }

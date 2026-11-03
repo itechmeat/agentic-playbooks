@@ -27,13 +27,7 @@ fn fold(evs: &[Ev]) -> RunState {
                     node: (*n).into(),
                     attempt: 1,
                 },
-                Finish(n, status, output) => EventPayload::NodeFinished {
-                    node: (*n).into(),
-                    status: (*status).into(),
-                    attempt: 1,
-                    output: (*output).into(),
-                    artifacts: Vec::new(),
-                },
+                Finish(n, status, output) => EventPayload::node_finished(*n, *status, 1, *output),
                 Hop(from, to) => EventPayload::EdgeTraversed {
                     from: (*from).into(),
                     to: (*to).into(),

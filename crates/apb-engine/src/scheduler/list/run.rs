@@ -109,8 +109,33 @@ impl ListRun<'_, '_, '_> {
         crate::adapter::item_env(&item.id, &files.item)
     }
 
-    /// Journals one item's settlement.
+    /// Journals one item's settlement. A settlement right after the item's
+    /// step ran takes an item snapshot of its full output and fields when
+    /// the node declares `results:` (the stored `output` stays clipped).
     pub(super) fn settle(&self, s: Settlement<'_>) -> Result<(), EngineError> {
+        use super::super::result;
+        let taken = s.ran.and_then(|(status, output)| {
+            result::capture(result::Request {
+                run_dir: self.ctx.run_dir,
+                workdir: self.ctx.workdir,
+                node: self.node,
+                status,
+                output,
+                cache_hit: false,
+                item: Some(result::ItemSubject {
+                    id: s.id,
+                    fields: &self.spec.item_outputs,
+                }),
+            })
+        });
+        result::journal(taken, |stamp| self.settle_stamped(s, stamp))
+    }
+
+    fn settle_stamped(
+        &self,
+        s: Settlement<'_>,
+        result: Option<apb_core::result_store::ResultStamp>,
+    ) -> Result<(), EngineError> {
         self.ctx.journal.append(EventPayload::ListItemSettled {
             node: self.node.id.clone(),
             item: s.id.to_string(),
@@ -128,6 +153,7 @@ impl ListRun<'_, '_, '_> {
                 .digest
                 .or_else(|| self.item(s.id).map(|i| i.digest.as_str()))
                 .map(str::to_string),
+            result,
         })
     }
 }
@@ -145,6 +171,9 @@ pub(super) struct Settlement<'s> {
     pub carried: bool,
     pub check: Option<&'s str>,
     pub digest: Option<&'s str>,
+    /// The step's status and full output, for a settlement right after the
+    /// item's step ran; `None` for a settlement of no new work.
+    pub ran: Option<(crate::state::NodeStatus, &'s str)>,
 }
 
 /// The compact JSON of an item output's declared fields. Over

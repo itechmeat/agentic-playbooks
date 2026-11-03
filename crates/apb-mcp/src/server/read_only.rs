@@ -50,6 +50,9 @@ pub const READ_ONLY: &[(&str, ReadOnlyUse)] = &[
     ("run_report", ReadOnlyUse::Full),
     ("run_retro_context", ReadOnlyUse::Full),
     ("run_grades", ReadOnlyUse::Full),
+    // Reads re-hash and redact; nothing is written.
+    ("run_results", ReadOnlyUse::Full),
+    ("run_result_read", ReadOnlyUse::Full),
     // `query` is not ranked: ranking asks a decision model.
     ("playbook_catalog", ReadOnlyUse::Restricted),
     // `refresh: true` is refused: a refresh starts every agent's program.

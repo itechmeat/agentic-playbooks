@@ -112,13 +112,7 @@ impl Journal {
     fn node_finished(&mut self, status: &str) -> &mut Self {
         self.push(
             NOW,
-            EventPayload::NodeFinished {
-                node: "n".into(),
-                status: status.into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("n", status, 1, String::new()),
         )
     }
 }

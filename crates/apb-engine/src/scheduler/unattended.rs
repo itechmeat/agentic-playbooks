@@ -69,13 +69,12 @@ pub(crate) fn close_open(
 ) -> Result<(), EngineError> {
     let events = read_all(run_dir)?;
     if node_started_count(&events, node) > node_finished_count(&events, node) {
-        log.append(EventPayload::NodeFinished {
-            node: node.to_string(),
-            status: NodeStatus::Failed.as_str().into(),
-            attempt: 1,
-            output: reason.to_string(),
-            artifacts: Vec::new(),
-        })?;
+        log.append(EventPayload::node_finished(
+            node.to_string(),
+            NodeStatus::Failed.as_str(),
+            1,
+            reason.to_string(),
+        ))?;
     }
     Ok(())
 }

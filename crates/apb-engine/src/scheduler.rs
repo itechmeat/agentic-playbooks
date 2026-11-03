@@ -73,6 +73,7 @@ pub(crate) mod provenance;
 mod publish;
 mod quota_probe;
 mod rebind;
+mod result;
 mod resume;
 mod review_gate;
 mod revive;
@@ -268,13 +269,12 @@ fn stop_with_reason(
             node: pending.clone(),
             attempt: 1,
         })?;
-        log.append(EventPayload::NodeFinished {
-            node: pending,
-            status: "cancelled".into(),
-            attempt: 1,
-            output: "cancelled".into(),
-            artifacts: Vec::new(),
-        })?;
+        log.append(EventPayload::node_finished(
+            pending,
+            "cancelled",
+            1,
+            "cancelled",
+        ))?;
     }
     deferred::cancel_open(log)?;
     log.append(EventPayload::RunError {
@@ -323,13 +323,12 @@ fn write_off_cancelled(
             node: n.clone(),
             attempt: 1,
         })?;
-        log.append(EventPayload::NodeFinished {
-            node: n.clone(),
-            status: NodeStatus::Cancelled.as_str().into(),
-            attempt: 1,
-            output: "cancelled".into(),
-            artifacts: Vec::new(),
-        })?;
+        log.append(EventPayload::node_finished(
+            n.clone(),
+            NodeStatus::Cancelled.as_str(),
+            1,
+            "cancelled",
+        ))?;
         batch_results.push((n.clone(), NodeStatus::Cancelled, "cancelled".into()));
     }
     Ok(())
@@ -1258,12 +1257,26 @@ fn drive_inner(
                 RunStatus::Succeeded => "succeeded",
                 _ => "failed",
             };
-            log.append(EventPayload::NodeFinished {
-                node: current.clone(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: answer_output,
-                artifacts: Vec::new(),
+            // The finish answer settles the finish node's work: a finish
+            // with a prompt that declares `results:` keeps a snapshot.
+            let taken = result::of_node(
+                &playbook,
+                run_dir,
+                &workdir,
+                &current,
+                NodeStatus::Succeeded,
+                &answer_output,
+                false,
+            );
+            result::journal(taken, |stamp| {
+                log.append(EventPayload::node_settled(
+                    current.clone(),
+                    "succeeded",
+                    1,
+                    answer_output,
+                    Vec::new(),
+                    stamp,
+                ))
             })?;
             finish_answer::discard(run_dir);
             if outcome == RunStatus::Succeeded
@@ -1563,12 +1576,26 @@ fn drive_inner(
                                         for ev in events {
                                             journal.append(ev)?;
                                         }
-                                        journal.append(EventPayload::NodeFinished {
-                                            node: n.clone(),
-                                            status: NodeStatus::Succeeded.as_str().into(),
-                                            attempt: 1,
-                                            output: output.clone(),
-                                            artifacts,
+                                        // Captured after the restore, with
+                                        // `cache_hit`.
+                                        let taken = result::of_node(
+                                            &playbook,
+                                            run_dir,
+                                            &workdir,
+                                            &n,
+                                            NodeStatus::Succeeded,
+                                            &output,
+                                            true,
+                                        );
+                                        result::journal(taken, |stamp| {
+                                            journal.append(EventPayload::node_settled(
+                                                n.clone(),
+                                                NodeStatus::Succeeded.as_str(),
+                                                1,
+                                                output.clone(),
+                                                artifacts,
+                                                stamp,
+                                            ))
                                         })?;
                                         batch_results.push((
                                             n.clone(),
@@ -1804,12 +1831,18 @@ fn drive_inner(
                                     journal.append(ev)?;
                                 }
                                 batch_results.push((node.clone(), status, output.clone()));
-                                journal.append(EventPayload::NodeFinished {
-                                    node: node.clone(),
-                                    status: status.as_str().into(),
-                                    attempt: 1,
-                                    output,
-                                    artifacts,
+                                let taken = result::of_node(
+                                    &playbook, run_dir, &workdir, &node, status, &output, false,
+                                );
+                                result::journal(taken, |stamp| {
+                                    journal.append(EventPayload::node_settled(
+                                        node.clone(),
+                                        status.as_str(),
+                                        1,
+                                        output,
+                                        artifacts,
+                                        stamp,
+                                    ))
                                 })?;
                                 // Judge edges (issue #165 Part 7), before routing.
                                 judge::decide_edges(
@@ -2165,6 +2198,8 @@ fn drive_inner(
         // the node-cache branch sets it (captured on a store, replayed on a
         // hit); every other branch leaves it empty.
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
+        // A cache hit's snapshot holds the restored bytes, marked as such.
+        let mut node_cache_hit = false;
         let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
             let current_id = current.clone();
             let unattended_decision = match cfg.unattended {
@@ -3040,6 +3075,7 @@ fn drive_inner(
                         log.append(ev)?;
                     }
                     node_artifacts = artifacts;
+                    node_cache_hit = true;
                     (None, Some((NodeStatus::Succeeded, output)))
                 }
                 cache::CacheProbe::Miss { ctx, events } => {
@@ -3169,12 +3205,24 @@ fn drive_inner(
                 (st, out)
             }
         };
-        log.append(EventPayload::NodeFinished {
-            node: current.clone(),
-            status: status.as_str().into(),
-            attempt: 1,
-            output: output.clone(),
-            artifacts: node_artifacts,
+        let taken = result::of_node(
+            &playbook,
+            run_dir,
+            &workdir,
+            &current,
+            status,
+            &output,
+            node_cache_hit,
+        );
+        result::journal(taken, |stamp| {
+            log.append(EventPayload::node_settled(
+                current.clone(),
+                status.as_str(),
+                1,
+                output.clone(),
+                node_artifacts,
+                stamp,
+            ))
         })?;
         // Judge edges of this node (issue #165 Part 7), journaled before routing.
         judge::decide_edges(

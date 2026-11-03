@@ -1388,13 +1388,12 @@ async fn run_detail_body_round_trips_control_characters() {
     let payload = format!("before{control}after");
 
     let mut log = apb_engine::event::EventLog::open(&run_dir).unwrap();
-    log.append(apb_engine::event::EventPayload::NodeFinished {
-        node: "note".into(),
-        status: "succeeded".into(),
-        attempt: 1,
-        output: payload.clone(),
-        artifacts: Vec::new(),
-    })
+    log.append(apb_engine::event::EventPayload::node_finished(
+        "note",
+        "succeeded",
+        1,
+        payload.clone(),
+    ))
     .unwrap();
     log.append(apb_engine::event::EventPayload::RunError {
         node: Some("note".into()),
@@ -1826,13 +1825,7 @@ async fn resume_refuses_a_busy_workdir_and_leaves_the_run_paused() {
                 node: "start".into(),
                 attempt: 1,
             },
-            apb_engine::event::EventPayload::NodeFinished {
-                node: "start".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            apb_engine::event::EventPayload::node_finished("start", "succeeded", 1, String::new()),
             paused_event("away"),
         ],
     );
@@ -1899,6 +1892,7 @@ fn item_settled(item: &str, state: &str) -> apb_engine::event::EventPayload {
         carried: false,
         check: None,
         digest: None,
+        result: None,
     }
 }
 
@@ -2200,4 +2194,217 @@ async fn an_unattended_start_from_a_run_step_not_known_unattended_is_refused() {
         "{json}"
     );
     assert_eq!(apb_engine::list_runs(dir.path()).unwrap().len(), before);
+}
+
+/// The result snapshot routes, over a snapshot written through the store's
+/// transaction and stamped in a hand-built journal.
+mod results_routes {
+    use super::*;
+    use apb_core::result_store::{
+        EntryPart, ResultScope, ResultStamp, ResultTxn, SnapshotEntry, SnapshotManifest,
+        SnapshotProvenance, SnapshotSubject, Staged,
+    };
+    use apb_engine::event::{EventLog, EventPayload};
+
+    const RUN: &str = "res-1";
+    const TEXT: &str = "<script>alert(1)</script>\ncaf\u{e9}\n";
+
+    /// A project whose run `res-1` holds one stamped snapshot of a
+    /// workspace file `page.html` (also present live); the snapshot id.
+    fn seed() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        apb_core::registry::init_project(root).unwrap();
+        let run = root.join(".apb/runs").join(RUN);
+        fs::create_dir_all(&run).unwrap();
+        fs::write(run.join("run.yaml"), "params: {}\n").unwrap();
+        fs::write(root.join("page.html"), TEXT).unwrap();
+        let mut log = EventLog::open(&run).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+            definition: None,
+        })
+        .unwrap();
+        let mut txn = ResultTxn::begin(&run).unwrap();
+        let Staged::Stored(digest) = txn.stage_object(TEXT.as_bytes()).unwrap() else {
+            panic!()
+        };
+        let id = txn
+            .publish(&SnapshotManifest {
+                v: 1,
+                run_id: RUN.into(),
+                subject: SnapshotSubject {
+                    node: "work".into(),
+                    execution: 1,
+                    visit_seq: None,
+                    item: None,
+                    attempt: None,
+                },
+                provenance: SnapshotProvenance::default(),
+                entries: vec![SnapshotEntry {
+                    part: EntryPart::File,
+                    scope: Some(ResultScope::Workspace),
+                    path: Some("page.html".into()),
+                    size: TEXT.len() as u64,
+                    digest,
+                    redacted: false,
+                    format: Default::default(),
+                }],
+                omitted: Vec::new(),
+                incomplete: None,
+                output_omitted: None,
+            })
+            .unwrap();
+        log.append(EventPayload::node_settled(
+            "work",
+            "succeeded",
+            1,
+            "",
+            Vec::new(),
+            Some(ResultStamp {
+                snapshot_id: id.clone(),
+                entries: 1,
+                bytes: TEXT.len() as u64,
+                omitted: 0,
+                incomplete: false,
+            }),
+        ))
+        .unwrap();
+        txn.end().unwrap();
+        (dir, id)
+    }
+
+    async fn get_raw(app: axum::Router, uri: &str) -> axum::response::Response {
+        app.oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    const ENTRY: &str = "file:workspace:page.html";
+
+    /// The raw route sends the stored bytes as a download that is never
+    /// rendered, equal to the JSON route and to MCP `run_result_read`.
+    #[tokio::test]
+    async fn every_route_serves_the_same_bytes_and_the_raw_one_as_a_download() {
+        let (dir, id) = seed();
+        let app = build_router(AppState::new(dir.path().to_path_buf()));
+        let (status, listed) = get_json(app.clone(), &format!("/api/runs/{RUN}/results")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["rows"][0]["snapshot_id"], id.as_str());
+        assert_eq!(listed["rows"][0]["entries"][0]["entry"], ENTRY);
+
+        let (status, json) = get_json(
+            app.clone(),
+            &format!("/api/runs/{RUN}/results/{id}?entry={ENTRY}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["content"]["text"], TEXT);
+
+        let res = get_raw(
+            app.clone(),
+            &format!("/api/runs/{RUN}/results/{id}/raw?entry={ENTRY}"),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let h = res.headers();
+        assert_eq!(h["content-type"], "text/plain; charset=utf-8");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        // The file name comes from the digest only, never from a path.
+        let hex = apb_core::content::sha256_hex(TEXT.as_bytes());
+        let name: String = hex.trim_start_matches("sha256:").chars().take(16).collect();
+        assert_eq!(
+            h["content-disposition"],
+            format!("attachment; filename=\"result-{name}.txt\"").as_str()
+        );
+        assert_eq!(h["cache-control"], "no-store");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], TEXT.as_bytes());
+
+        let mcp = apb_mcp::tools::results::run_result_read(
+            dir.path(),
+            RUN,
+            &format!("r:{id}/{ENTRY}"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(mcp["content"]["text"], TEXT);
+        assert_eq!(mcp["content"]["digest"], json["content"]["digest"]);
+        assert_eq!(
+            json["content"]["digest"],
+            apb_core::content::sha256_hex(&body)
+        );
+
+        let (status, live) = get_json(
+            app,
+            &format!("/api/runs/{RUN}/results/{id}/live?entry={ENTRY}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(live, serde_json::json!({ "live": "same" }));
+    }
+
+    /// After a hand edit of the object every route says `corrupt` and
+    /// serves no text.
+    #[tokio::test]
+    async fn a_tampered_object_is_corrupt_on_every_route() {
+        let (dir, id) = seed();
+        let hex = apb_core::content::sha256_hex(TEXT.as_bytes())
+            .trim_start_matches("sha256:")
+            .to_string();
+        fs::write(
+            dir.path()
+                .join(".apb/runs")
+                .join(RUN)
+                .join("results/objects")
+                .join(&hex[..2])
+                .join(&hex),
+            "edited",
+        )
+        .unwrap();
+        let app = build_router(AppState::new(dir.path().to_path_buf()));
+        let (_, listed) = get_json(app.clone(), &format!("/api/runs/{RUN}/results")).await;
+        assert_eq!(listed["rows"][0]["verified"], "corrupt");
+        for uri in [
+            format!("/api/runs/{RUN}/results/{id}?entry={ENTRY}"),
+            format!("/api/runs/{RUN}/results/{id}/raw?entry={ENTRY}"),
+        ] {
+            let res = get_raw(app.clone(), &uri).await;
+            assert_eq!(res.status(), StatusCode::CONFLICT, "{uri}");
+            let body = res.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.starts_with("corrupt"), "{uri}: {body}");
+            assert!(!body.contains("edited"));
+        }
+    }
+
+    /// Nothing is taken as a path: an id that is not a snapshot id is 404,
+    /// an entry outside the grammar 422, an unsafe run id 404.
+    #[tokio::test]
+    async fn malformed_names_are_refused() {
+        let (dir, id) = seed();
+        let app = build_router(AppState::new(dir.path().to_path_buf()));
+        let not_found = [
+            format!("/api/runs/{RUN}/results/..%2F..%2Fevents.jsonl/raw?entry=output"),
+            format!(
+                "/api/runs/{RUN}/results/{}/raw?entry=output",
+                "A".repeat(64)
+            ),
+            format!("/api/runs/..%2F{RUN}/results"),
+            format!("/api/runs/{RUN}/results/{id}/raw?entry=output"),
+        ];
+        for uri in not_found {
+            let res = get_raw(app.clone(), &uri).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+        let res = get_raw(
+            app,
+            &format!("/api/runs/{RUN}/results/{id}/raw?entry=file:elsewhere:x"),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }

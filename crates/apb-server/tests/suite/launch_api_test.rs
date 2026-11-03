@@ -345,13 +345,7 @@ fn never_authorized_run(root: &Path, run_id: &str, decl: &str) {
             node: "start".into(),
             attempt: 1,
         },
-        EventPayload::NodeFinished {
-            node: "start".into(),
-            status: "succeeded".into(),
-            attempt: 1,
-            output: String::new(),
-            artifacts: Vec::new(),
-        },
+        EventPayload::node_finished("start", "succeeded", 1, String::new()),
         EventPayload::RunPaused {
             reason: "away".into(),
             by: Some(apb_engine::pause::PauseBy::Operator),

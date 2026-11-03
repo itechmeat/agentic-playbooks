@@ -1138,13 +1138,7 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("a", "succeeded", 1, String::new()),
             ),
         ];
         // done=100 of total=400 (a+b; start/finish weigh 0) -> 25
@@ -1165,13 +1159,7 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("a", "succeeded", 1, String::new()),
             ),
         ];
         let before = compute(&pb, &events).percent;
@@ -1199,23 +1187,11 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("a", "succeeded", 1, String::new()),
             ),
             ev(
                 2,
-                EventPayload::NodeFinished {
-                    node: "b".into(),
-                    status: "skipped".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("b", "skipped", 1, String::new()),
             ),
         ];
         // b left the denominator; a is all remaining work -> 100
@@ -1843,13 +1819,7 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "work".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("work", "succeeded", 1, String::new()),
             ),
         ];
         // One cycle pass done (100s) of the 200s plan -> 50 percent.
@@ -1889,13 +1859,7 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("a", "succeeded", 1, String::new()),
             ),
         ];
         let p = from_run_dir(&run_dir, &events).expect("schema-1 snapshot must yield progress");
@@ -1977,13 +1941,7 @@ edges:
             at(
                 3,
                 5_000 + 2 * hour,
-                EventPayload::NodeFinished {
-                    node: "w".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("w", "succeeded", 1, String::new()),
             ),
         ];
         assert_eq!(node_durations_seconds(&events).get("w"), Some(&5));
@@ -2004,13 +1962,7 @@ edges:
             Event {
                 seq: 1,
                 ts: 4_500,
-                payload: EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                payload: EventPayload::node_finished("a", "succeeded", 1, String::new()),
             },
         ];
         // (4500 - 1000) / 1000 = 3 (integer seconds).
@@ -2038,13 +1990,7 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "f".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: "THE ANSWER".into(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("f", "succeeded", 1, "THE ANSWER"),
             ),
         ];
         assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("THE ANSWER"));
@@ -2063,16 +2009,7 @@ edges:
         )
         .unwrap();
         let finished = |seq: u64, node: &str, out: &str| {
-            ev(
-                seq,
-                EventPayload::NodeFinished {
-                    node: node.into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: out.into(),
-                    artifacts: Vec::new(),
-                },
-            )
+            ev(seq, EventPayload::node_finished(node, "succeeded", 1, out))
         };
         let revival = |seq: u64, nodes: &[&str]| {
             ev(
@@ -2143,13 +2080,7 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::NodeFinished {
-                    node: "f".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("f", "succeeded", 1, String::new()),
             ),
         ];
         assert_eq!(run_answer(&run_dir, &events), None);
@@ -2170,13 +2101,7 @@ edges:
             Event {
                 seq: 1,
                 ts: 3_000,
-                payload: EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "failed".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                payload: EventPayload::node_finished("a", "failed", 1, String::new()),
             },
             Event {
                 seq: 2,
@@ -2189,13 +2114,7 @@ edges:
             Event {
                 seq: 3,
                 ts: 15_000,
-                payload: EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 2,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                payload: EventPayload::node_finished("a", "succeeded", 2, String::new()),
             },
         ];
         // Last pass: (15000 - 10000) / 1000 = 5.
@@ -2359,16 +2278,7 @@ edges:
                     definition: None,
                 },
             ),
-            ev(
-                1,
-                EventPayload::NodeFinished {
-                    node: "work".into(),
-                    status: "failed".into(),
-                    attempt: 1,
-                    output: "boom".into(),
-                    artifacts: Vec::new(),
-                },
-            ),
+            ev(1, EventPayload::node_finished("work", "failed", 1, "boom")),
             ev(
                 2,
                 EventPayload::WakeRaised {

@@ -108,6 +108,23 @@ describe('ScenarioRunPanel', () => {
     expect(q('scenario-issue')!.textContent).toContain('broken.yaml does not parse')
   })
 
+  it('puts every Run button in the same place, with or without a title, however long', async () => {
+    await render()
+    // A wrapping title moved the first row's button to the start of a new
+    // line while the others stayed at the end: the name and the title now
+    // share one block, and the button is the row's only other child.
+    for (const row of all('scenario-row')) {
+      const head = row.querySelector('[data-testid="scenario-head"]')!
+      expect([...head.children].map((c) => c.getAttribute('data-testid') ?? c.className.split(' ')[0])).toEqual([
+        'scenario-what',
+        'scenario-run',
+      ])
+      const what = head.querySelector('[data-testid="scenario-what"]')!
+      expect(what.textContent).toContain(row.dataset.name!)
+    }
+    expect(all('scenario-what')[0].textContent).toContain('The happy path')
+  })
+
   it('runs a quick scenario and shows the failed checks first, the trace and the answers nobody used', async () => {
     await render()
     fetchMock.mockResolvedValueOnce(json({ report }))

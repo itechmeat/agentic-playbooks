@@ -799,13 +799,7 @@ mod tests {
     fn supervisor_notes_section_is_empty_without_notes() {
         let events = vec![ev(
             0,
-            EventPayload::NodeFinished {
-                node: "a".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "ok".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("a", "succeeded", 1, "ok"),
         )];
         assert_eq!(supervisor_notes_section(&events), "");
         assert_eq!(with_supervisor_notes("do work", &events), "do work");
@@ -898,13 +892,7 @@ mod tests {
         assert_eq!(with_supervisor_notes(prompt, &[]), prompt);
         let events = vec![ev(
             0,
-            EventPayload::NodeFinished {
-                node: "a".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "ok".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("a", "succeeded", 1, "ok"),
         )];
         assert_eq!(with_supervisor_notes(prompt, &events), prompt);
         // Precedence frame is a separate helper; notes path must not invent it.
@@ -919,13 +907,7 @@ mod tests {
         assert_eq!(precedence_frame(Some("\n\t  \n"), &[]), "");
         let events = vec![ev(
             0,
-            EventPayload::NodeFinished {
-                node: "a".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "ok".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("a", "succeeded", 1, "ok"),
         )];
         assert_eq!(precedence_frame(None, &events), "");
         assert_eq!(precedence_frame(Some("  "), &events), "");
@@ -1095,13 +1077,7 @@ mod tests {
         assert_eq!(assemble_agent_prompt(template, None, "n", &[]), template);
         let events = vec![ev(
             0,
-            EventPayload::NodeFinished {
-                node: "a".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "ok".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("a", "succeeded", 1, "ok"),
         )];
         assert_eq!(
             assemble_agent_prompt(template, None, "n", &events),

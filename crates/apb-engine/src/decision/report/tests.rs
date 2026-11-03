@@ -99,13 +99,7 @@ fn node(seq: u64, name: &str, finished: Option<&str>) -> Event {
                 node: name.into(),
                 attempt: 1,
             },
-            Some(status) => EventPayload::NodeFinished {
-                node: name.into(),
-                status: status.into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            Some(status) => EventPayload::node_finished(name, status, 1, String::new()),
         },
     )
 }

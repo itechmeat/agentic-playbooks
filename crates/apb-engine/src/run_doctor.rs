@@ -35,9 +35,9 @@ pub use check::{FAIL, OK, RunCheck, WARN};
 ///
 /// Returns the checks in a fixed order - run, nodes, journal drift (the
 /// binaries, unknown and undecodable records, deferred retries), attempts,
-/// autonomy, models, process env, tool exposure, driver, workdir lock,
-/// control backlog, supervisor actions, file modes - so two reports
-/// of the same run are comparable line by line.
+/// autonomy, models, process env, tool exposure, result store, driver,
+/// workdir lock, control backlog, supervisor actions, file modes - so two
+/// reports of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -98,6 +98,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(env::env_checks(&run_dir, events));
     checks.extend(exposure::exposure_checks(events));
     checks.extend(isolation::isolation_checks(events));
+    checks.extend(results::results_check(&run_dir, run_id));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(
         root,
@@ -525,6 +526,53 @@ fn supervisor_action_check(events: &[Event]) -> RunCheck {
         "supervisor actions",
         format!("repeated actions: {}", dupes.join(", ")),
     )
+}
+
+mod results {
+    //! The `results` row of `apb doctor --run`: leftovers of the run's result
+    //! store (manifests and objects nothing names, transactions whose writer
+    //! ended), from the same survey a dry-run cleanup prints. Writes nothing:
+    //! resolving a transaction is the cleanup's work, never the doctor's.
+
+    use std::path::Path;
+
+    use super::check::{OK, RunCheck, WARN};
+    use crate::result_clean::{CleanReport, survey};
+
+    const SUBJECT: &str = "results";
+
+    /// One row when the run has a result store; none otherwise.
+    pub(super) fn results_check(run_dir: &Path, run_id: &str) -> Option<RunCheck> {
+        if !run_dir.join(apb_core::result_store::RESULTS_DIR).exists() {
+            return None;
+        }
+        Some(match survey(run_dir) {
+            Ok(report) if !report.has_leftovers() => RunCheck::new(
+                OK,
+                SUBJECT,
+                format!(
+                    "{} snapshot(s) stored, nothing left over",
+                    report.kept_snapshots
+                ),
+            ),
+            Ok(report) => RunCheck::new(WARN, SUBJECT, leftovers_line(&report, run_id)),
+            Err(e) => RunCheck::new(
+                WARN,
+                SUBJECT,
+                format!("the result store cannot be surveyed: {e}"),
+            ),
+        })
+    }
+
+    fn leftovers_line(r: &CleanReport, run_id: &str) -> String {
+        format!(
+            "{} unreferenced snapshot(s), {} unreferenced object(s), {} bytes, {} transaction(s) whose writer ended; remove them with: apb results clean {run_id}",
+            r.removed_snapshots.len(),
+            r.removed_objects,
+            r.removed_bytes,
+            r.dead.len()
+        )
+    }
 }
 
 #[cfg(test)]

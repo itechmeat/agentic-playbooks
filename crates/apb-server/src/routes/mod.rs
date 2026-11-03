@@ -18,6 +18,7 @@ pub mod playbooks;
 pub mod problems;
 pub mod profiles;
 pub mod quality;
+pub mod results;
 pub mod runs;
 pub mod scenario;
 // --- 0.23.0 stats (C3) ---

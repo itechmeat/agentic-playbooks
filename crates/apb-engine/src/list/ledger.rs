@@ -346,6 +346,7 @@ mod tests {
                 carried: false,
                 check: None,
                 digest: None,
+                result: None,
             },
         )
     }
@@ -441,13 +442,7 @@ mod tests {
         let done = |seq| {
             ev(
                 seq,
-                EventPayload::NodeFinished {
-                    node: "l".into(),
-                    status: "failed".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("l", "failed", 1, String::new()),
             )
         };
         let mut events = vec![

@@ -1,0 +1,154 @@
+{
+  "comment": "Shared by the Rust result_store tests and the web results helper. `manifest` is deliberately out of order; `canonical` is its canonical form; `snapshot_id` is the sha256 of `canonical`.",
+  "manifest": {
+    "v": 1,
+    "run_id": "r-20261103-0001",
+    "subject": {
+      "node": "report",
+      "execution": 2,
+      "attempt": 41
+    },
+    "provenance": {
+      "cache_hit": false,
+      "head": "0123456789abcdef0123456789abcdef01234567",
+      "commits_seq": 57
+    },
+    "entries": [
+      {
+        "part": "file",
+        "scope": "workspace",
+        "path": "docs/résumé.md",
+        "size": 17,
+        "digest": "sha256:bc883a61eddc5032607f28a56338d08fef3cfb30ce76aec85410ae26a01b25cf",
+        "redacted": true,
+        "format": "text"
+      },
+      {
+        "part": "output",
+        "size": 13,
+        "digest": "sha256:eef3002b02bb386c9ac48fbb52a19bd4a1f10f40f3e76e10d96aa54c99d1f52f",
+        "redacted": false,
+        "format": "text"
+      },
+      {
+        "part": "file",
+        "scope": "run",
+        "path": "notes/Ωmega.txt",
+        "size": 12,
+        "digest": "sha256:1791db41b629941be2e5084fce4588264a56db9a8d3503a3b7d3ceebc0a15c91",
+        "redacted": false,
+        "format": "records"
+      },
+      {
+        "part": "fields",
+        "size": 11,
+        "digest": "sha256:0c07187ea6d064441225b3cba26a7b1e8bc702fcf332b457dae8e26892ba68a6",
+        "redacted": false,
+        "format": "text"
+      },
+      {
+        "part": "file",
+        "scope": "workspace",
+        "path": "docs/a b.md",
+        "size": 6,
+        "digest": "sha256:dacf36547c7774a0a170806363b5d412991fbc0d6260b2c00b1d3a80a816c23f",
+        "redacted": false,
+        "format": "text"
+      }
+    ],
+    "omitted": [
+      {
+        "more": 3,
+        "reasons": {
+          "too_large": 2,
+          "hard_link": 1
+        }
+      },
+      {
+        "part": "file",
+        "scope": "workspace",
+        "path": "bin/tool",
+        "reason": "binary_not_supported"
+      },
+      {
+        "part": "file",
+        "scope": "workspace",
+        "path": ".env",
+        "reason": "secret_shaped"
+      }
+    ],
+    "incomplete": "match_limit"
+  },
+  "canonical": "{\"v\":1,\"run_id\":\"r-20261103-0001\",\"subject\":{\"node\":\"report\",\"execution\":2,\"attempt\":41},\"provenance\":{\"cache_hit\":false,\"head\":\"0123456789abcdef0123456789abcdef01234567\",\"commits_seq\":57},\"entries\":[{\"part\":\"output\",\"size\":13,\"digest\":\"sha256:eef3002b02bb386c9ac48fbb52a19bd4a1f10f40f3e76e10d96aa54c99d1f52f\",\"redacted\":false,\"format\":\"text\"},{\"part\":\"fields\",\"size\":11,\"digest\":\"sha256:0c07187ea6d064441225b3cba26a7b1e8bc702fcf332b457dae8e26892ba68a6\",\"redacted\":false,\"format\":\"text\"},{\"part\":\"file\",\"scope\":\"run\",\"path\":\"notes/Ωmega.txt\",\"size\":12,\"digest\":\"sha256:1791db41b629941be2e5084fce4588264a56db9a8d3503a3b7d3ceebc0a15c91\",\"redacted\":false,\"format\":\"records\"},{\"part\":\"file\",\"scope\":\"workspace\",\"path\":\"docs/a b.md\",\"size\":6,\"digest\":\"sha256:dacf36547c7774a0a170806363b5d412991fbc0d6260b2c00b1d3a80a816c23f\",\"redacted\":false,\"format\":\"text\"},{\"part\":\"file\",\"scope\":\"workspace\",\"path\":\"docs/résumé.md\",\"size\":17,\"digest\":\"sha256:bc883a61eddc5032607f28a56338d08fef3cfb30ce76aec85410ae26a01b25cf\",\"redacted\":true,\"format\":\"text\"}],\"omitted\":[{\"part\":\"file\",\"scope\":\"workspace\",\"path\":\".env\",\"reason\":\"secret_shaped\"},{\"part\":\"file\",\"scope\":\"workspace\",\"path\":\"bin/tool\",\"reason\":\"binary_not_supported\"},{\"more\":3,\"reasons\":{\"hard_link\":1,\"too_large\":2}}],\"incomplete\":\"match_limit\"}",
+  "snapshot_id": "997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999",
+  "citations": [
+    {
+      "ref": "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/output",
+      "entry": "output"
+    },
+    {
+      "ref": "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/fields#[0,11)",
+      "entry": "fields",
+      "range": [
+        0,
+        11
+      ]
+    },
+    {
+      "ref": "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/file:workspace:docs/r%C3%A9sum%C3%A9.md#[3,9)",
+      "entry": "file",
+      "scope": "workspace",
+      "path": "docs/résumé.md",
+      "range": [
+        3,
+        9
+      ]
+    },
+    {
+      "ref": "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/file:workspace:docs/a%20b.md",
+      "entry": "file",
+      "scope": "workspace",
+      "path": "docs/a b.md"
+    },
+    {
+      "ref": "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/file:run:notes/%CE%A9mega.txt",
+      "entry": "file",
+      "scope": "run",
+      "path": "notes/Ωmega.txt"
+    }
+  ],
+  "invalid_citations": [
+    "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa899/output",
+    "x:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/output",
+    "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/file:tmp:a",
+    "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/output#[5,2)",
+    "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/blob",
+    "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/output#[1,x)",
+    "r:997693121F8326EA3FF0DA4D95F30B52D9FECDDACCCABFE1BB70C0A4F4FA8999/output",
+    "r:997693121f8326ea3ff0da4d95f30b52d9fecddacccabfe1bb70c0a4f4fa8999/file:run:"
+  ],
+  "ranges": [
+    {
+      "text": "é𝄞 ok",
+      "bytes": [
+        2,
+        6
+      ],
+      "utf16": [
+        1,
+        3
+      ]
+    },
+    {
+      "text": "é𝄞 ok",
+      "bytes": [
+        0,
+        9
+      ],
+      "utf16": [
+        0,
+        6
+      ]
+    }
+  ]
+}

@@ -249,6 +249,7 @@ fn carry_passed(run: &ListRun<'_, '_, '_>, previous: &ListFold) -> Result<(), En
             carried: true,
             check: None,
             digest: Some(item.digest.clone()),
+            result: None,
         })?;
     }
     Ok(())
