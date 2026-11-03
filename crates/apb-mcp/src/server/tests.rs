@@ -2926,6 +2926,7 @@ fn unattended_args(
 /// manual remedy, no supervisor token, and no run directory.
 #[tokio::test]
 async fn an_unattended_start_that_needs_a_watcher_is_refused_before_any_run_file() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
     seed_noagent(dir.path());
     let server = WfMcp::new(dir.path().to_path_buf());
@@ -2967,6 +2968,7 @@ async fn an_unattended_start_that_needs_a_watcher_is_refused_before_any_run_file
 /// start does get; `run_status` says `unattended: true` only for it.
 #[tokio::test]
 async fn an_unattended_start_records_the_mode_and_gets_no_host_fallback() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
     seed_noagent(dir.path());
     let server = WfMcp::new(dir.path().to_path_buf());

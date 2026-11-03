@@ -2094,6 +2094,7 @@ async fn run_detail_marks_a_passed_item_whose_earlier_send_is_unresolved() {
 /// the field out.
 #[tokio::test]
 async fn an_unattended_start_records_the_mode_and_the_run_detail_shows_it() {
+    let _guard = crate::common::env_lock().await;
     let dir = seed_with_run();
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let mut seen = Vec::new();
