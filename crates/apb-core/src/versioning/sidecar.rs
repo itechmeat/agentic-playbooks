@@ -55,6 +55,12 @@ pub struct VersionProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub imported: Option<ImportProvenance>,
+    /// The version the shipped content named, for a version apb wrote from
+    /// the content it ships (`created_by: bundled`); the stored version can
+    /// differ when that number was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub shipped_version: Option<String>,
 }
 
 /// The trial record of a candidate version (issue #192): how many trial runs

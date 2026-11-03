@@ -59,6 +59,53 @@ pub fn is_string_arg(args_schema: Option<&serde_json::Value>, name: &str) -> boo
         == Some("string")
 }
 
+/// Rendered template args read the way `args_schema` asks for them: a
+/// top-level text arg whose property's `type` is `integer`, `number` or
+/// `boolean` becomes that JSON value when the text is written exactly as
+/// one (`"42"`, `"1.5"`, `"true"`). Anything else is kept as it is, so the
+/// schema check still refuses it. apb's own item checks render their args
+/// from templates, which always yield text.
+pub fn typed_rendered_args(
+    args_schema: Option<&serde_json::Value>,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::Value;
+    let (Some(properties), Value::Object(map)) = (
+        args_schema
+            .and_then(|s| s.get("properties"))
+            .and_then(Value::as_object),
+        args,
+    ) else {
+        return args.clone();
+    };
+    let typed = map
+        .iter()
+        .map(|(name, value)| {
+            let wanted = properties
+                .get(name)
+                .and_then(|p| p.get("type"))
+                .and_then(Value::as_str);
+            let read = match (wanted, value) {
+                (Some("integer"), Value::String(s)) => s
+                    .parse::<i64>()
+                    .map(Value::from)
+                    .or_else(|_| s.parse::<u64>().map(Value::from))
+                    .ok(),
+                (Some("number"), Value::String(s)) => s
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite())
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number),
+                (Some("boolean"), Value::String(s)) => s.parse::<bool>().ok().map(Value::Bool),
+                _ => None,
+            };
+            (name.clone(), read.unwrap_or_else(|| value.clone()))
+        })
+        .collect();
+    Value::Object(typed)
+}
+
 /// Resolves a dot path over objects and numeric array indices (`entry.0.id`).
 /// The empty path is the value itself. `None` when a segment is missing, an
 /// index does not parse or is out of range, or a scalar sits midway.
@@ -110,6 +157,30 @@ mod tests {
         assert_eq!(scalar_at_path(&body, "messages"), None);
         assert_eq!(scalar_at_path(&body, "messages.1.id"), None);
         assert_eq!(value_at_path(&body, ""), Some(&body));
+    }
+
+    #[test]
+    fn rendered_text_args_take_the_type_the_schema_asks_for() {
+        let schema = serde_json::json!({ "type": "object", "properties": {
+            "number": { "type": "integer" },
+            "ratio": { "type": "number" },
+            "open": { "type": "boolean" },
+            "owner": { "type": "string" }
+        }});
+        let args = serde_json::json!({
+            "number": "42", "ratio": "1.5", "open": "true", "owner": "7", "extra": "9"
+        });
+        assert_eq!(
+            typed_rendered_args(Some(&schema), &args),
+            serde_json::json!({
+                "number": 42, "ratio": 1.5, "open": true, "owner": "7", "extra": "9"
+            })
+        );
+        // Text that is not written as the wanted type stays text, so the
+        // schema check refuses it instead of a guess.
+        let odd = serde_json::json!({ "number": "42 ", "ratio": "NaN", "open": "yes" });
+        assert_eq!(typed_rendered_args(Some(&schema), &odd), odd);
+        assert_eq!(typed_rendered_args(None, &args), args);
     }
 
     #[test]

@@ -876,7 +876,8 @@ prompts, the environment and journal lines, so it may not hold a backtick,
 a line break, a tab or any separator other than a plain space, a control
 character or an invisible formatting mark (bidi embeddings, overrides and
 isolates included). Duplicate ids, a
-missing or malformed key, a source that is not a JSON array, or more items
+missing or malformed key, a source that is not a JSON array (a field an
+agent wrote as a string holding a JSON array reads as that array), or more items
 than `max_items` fail the node before any item runs, with a message that
 names the problem (duplicate ids are listed). `where` keeps the items whose
 `field` equals `equals` (compared as an `output_field` condition compares:
@@ -959,7 +960,12 @@ outputs by printing a JSON object, as any script node does.
   by the engine itself with `args` that may template `{{item.<path>}}`,
   `{{item_output.<field>}}` and `{{params.<name>}}`. `accept_when` sets a
   dot `path` into the response and exactly one of `equals` (which may
-  template the same way) or `exists: true`. The check is its own binding
+  template the same way), `exists: true` or `contains`. `contains` names
+  one string, number or bool (it may template the same way) and accepts
+  when the path reaches a list that holds it as an item: the array at the
+  path, or the values a `[]` path maps to (`labels[].name`). Each item is
+  compared as `equals` compares one value; a string at the path is not a
+  list and is never searched for a substring, and a missing path rejects. The check is its own binding
   site, `<node>#check`, granted only that one function and account, and it
   goes through trust and the run gate like a node's binding. A write
   function here is a validation error.
@@ -991,7 +997,8 @@ failure route or a supervisor sees it.
 
 **Sending once.** A list step is repeated by design, so every write
 function a list node is granted must declare `idempotency` (V88): an
-undeclared write could act twice for one item. A send is keyed by the node
+undeclared write could act twice for one item. A function whose repeat
+changes nothing may declare `repeatable` instead (not tracked as a send). A send is keyed by the node
 and the item, so one item's send never answers another's. Without
 `--intent` an item's send carries the fixed label `item:send`: one item
 sends a function once, and a rerun that words the payload differently is
@@ -1031,7 +1038,7 @@ execution mode with a list node is refused at start: list nodes need
 |---|---|---|
 | V85 | error | where `list:` may sit and its numbers (above) |
 | V86 | error | the item source: exactly one of `from` and `inline`, a source that finishes before the node, a declared field (or `items` of a list node), `where` shapes (`field` with `equals`, `state` only from a list node, both together when both must hold), usable inline items; and `{{item.*}}` in a prompt or `workdir` |
-| V87 | error | the check: one source, an `output` field among `item_outputs`, a script under `scripts/`, a read-only connector function, a valid `accept_when`, check templates limited to `item.*`, `item_output.<item_outputs>` and `params.*` |
+| V87 | error | the check: one source, an `output` field among `item_outputs`, a script under `scripts/`, a read-only connector function, a valid `accept_when` (one of `equals`, `exists` and a scalar `contains`), check templates limited to `item.*`, `item_output.<item_outputs>` and `params.*` |
 | V88 | error | a granted write function without an `idempotency` declaration |
 | V89 | error | a judge check's criteria keys, `min_confidence` in (0, 1], `on_unavailable` |
 | V93 | warning | a list without a check; `rerun: not_passed` on a node in no cycle |
@@ -3593,7 +3600,10 @@ document (`data.items[].id` maps over an array) and exactly one rule in
 - `number`: `equals`, `at_most` or `at_least: <n>`, or `change: decrease |
   increase | no_increase | no_decrease | unchanged`. `count: true` reads the
   length of the array at the path.
-- `list`: `change: no_new | shrink | unchanged`, or `empty: true`.
+- `list`: `change: no_new | shrink | unchanged`, `empty: true`, or
+  `contains: <value>` (a string, number or bool that must be one of the
+  after items; it regressed when the before list held it and the after
+  list does not).
 - `field` (a string, bool or number): `equals: <value>` or `change:
   unchanged`.
 

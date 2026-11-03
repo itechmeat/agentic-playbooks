@@ -376,12 +376,28 @@ impl FunctionSpec {
         self.inbox.is_some()
     }
 
+    /// The send-once declaration the send ledger tracks: the declared
+    /// `idempotency`, except `repeatable`, which behaves like no
+    /// declaration (see `super::idempotency`). Every runtime reader goes
+    /// through this, never through the raw field.
+    pub fn send_once(&self) -> Option<&Idempotency> {
+        self.idempotency.as_ref().filter(|i| !i.is_repeatable())
+    }
+
+    /// Whether the function declares that a repeat is harmless
+    /// (`idempotency: { mode: repeatable }`).
+    pub fn is_repeatable(&self) -> bool {
+        self.idempotency
+            .as_ref()
+            .is_some_and(Idempotency::is_repeatable)
+    }
+
     /// Whether the function can carry a run notification (see
     /// `super::people::notice_capable`).
     pub fn carries_notices(&self) -> bool {
         super::people::notice_capable(
             self.people.as_ref(),
-            self.idempotency.is_some(),
+            self.send_once().is_some(),
             self.args_schema.as_ref(),
         )
     }

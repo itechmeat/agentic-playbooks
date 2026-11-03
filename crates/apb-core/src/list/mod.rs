@@ -269,7 +269,9 @@ pub struct ConnectorCheck {
 }
 
 /// When a connector check's body accepts the item: `path` holds `equals`,
-/// or (with `exists: true`) `path` holds any non-null value.
+/// (with `exists: true`) `path` holds any non-null value, or the list at
+/// `path` has the scalar `contains` among its items
+/// ([`crate::baseline::extract::contains`]). Exactly one is set (V87).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptWhen {
@@ -278,6 +280,17 @@ pub struct AcceptWhen {
     pub equals: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<Value>,
+}
+
+impl AcceptWhen {
+    /// How many of `equals`, `exists` and `contains` it sets.
+    pub fn rule_count(&self) -> usize {
+        usize::from(self.equals.is_some())
+            + usize::from(self.exists.is_some())
+            + usize::from(self.contains.is_some())
+    }
 }
 
 /// A decision-model check of one item: one choice question named

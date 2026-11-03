@@ -461,7 +461,7 @@ offers, declared per function:
     url: "{{account.api_base}}/channels/{{args.channel_id}}/messages"
     body: { content: "{{args.content}}", enforce_nonce: true }
     idempotency:
-      mode: key                 # key | marker | none
+      mode: key                 # key | marker | none | repeatable
       field: nonce              # or `header: Idempotency-Key`, exactly one
       window_sec: 120           # how long the service honours the key
       result_ref: id            # optional: the created item's id or link
@@ -488,6 +488,13 @@ offers, declared per function:
 - `none`: the service offers no way to tell. A repeat of an unknown send is
   refused with `unknown_effect` until a person decides, unless the binding
   says `on_unknown: resend`.
+- `repeatable`: a repeat changes nothing (attaching a label that is already
+  there, removing one that is gone), so there is nothing to protect. The
+  call is not recorded in the send ledger and behaves exactly like a
+  function with no declaration: a call whose answer was lost is retried, and
+  nothing waits for a person. Unlike an undeclared write, a list step may be
+  granted it (V88). Declare it only when a second call really leaves the
+  same state as the first; a message or a comment is never repeatable.
 
 `idempotency` is allowed only on HTTP, mock, smtp and imap functions that
 are not `read_only` (an smtp or imap function may declare only `mode:
@@ -526,7 +533,8 @@ answering: a pending intent reads as unknown once its call's timeout plus
 in flight past that deadline can be resent, and both may arrive. It
 applies to `none` sends and to `key` sends after their window, never to
 `marker` sends. The validator refuses `on_unknown` on a binding none of whose
-functions declares `none` or `key` (V69), and `resend` on a binding that
+functions declares `none` or `key` (V69; a `repeatable` function does not
+count, since it is retried anyway), and `resend` on a binding that
 grants an `irreversible` function (V84).
 
 `resend` accepts a possible duplicate, and it does not settle the first
@@ -541,7 +549,8 @@ known".
 
 A list node (`list:`, HOWTO-authoring "List processing") runs its step once
 per item and repeats items by design, so every write function it is granted
-must declare `idempotency` (V88). The send ledger keys each item's sends by
+must declare `idempotency` (V88): a send-once mode, or `repeatable` for a
+call a repeat leaves unchanged. The send ledger keys each item's sends by
 the node and the item, so one item's send never answers another's. Without
 `--intent` an item's send carries the fixed label `item:send`: one send per
 function per item, also when a rerun words the payload differently. An item
@@ -747,7 +756,18 @@ Actions write permission for `dispatch_workflow`. Healthcheck:
 (`list_issue_comments`). A GitHub App installation token cannot read `/user`,
 so with one an unknown send stays unknown until a person decides.
 `create_release` declares `none`: a duplicate tag is refused by GitHub, but
-nothing reads back which intent created a release.
+nothing reads back which intent created a release. `add_labels` and
+`remove_label` declare `repeatable`: GitHub has no key or marker for a
+label, and repeating either changes nothing on the issue, so they are not
+tracked as sends (a lost answer is retried, as for any undeclared call), and
+a list step may be granted them (V88).
+
+`repeatable` arrived with github 0.2.1. An apb older than that mode cannot
+read a manifest that declares it (its parser denies an unknown mode), and it
+skips the connector instead of restoring its own copy. After going back to
+such a binary, put its copy back with `apb connector install github --force`
+(run with that older binary); this apb reads both the 0.2.0 and the 0.2.1
+manifest.
 
 ### telegram
 

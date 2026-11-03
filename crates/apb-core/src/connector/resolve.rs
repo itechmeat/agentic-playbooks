@@ -427,8 +427,12 @@ pub struct ConnectorFacts {
     /// grant of one after an `auto_decide` gate).
     pub write_functions: Vec<String>,
     /// Function name -> the send-once mode it declares; functions that
-    /// declare none are absent (V69).
+    /// declare none, or only `repeatable`, are absent (V69).
     pub idempotency: std::collections::BTreeMap<String, super::idempotency::IdempotencyMode>,
+    /// Names of its functions that declare `idempotency: { mode:
+    /// repeatable }`: untracked, but safe to repeat, so a list step may use
+    /// them (V88).
+    pub repeatable_functions: Vec<String>,
     /// Account field names the webhook block's `{{secret.*}}` placeholders
     /// reference, sorted and deduplicated. Empty when there is no block.
     pub webhook_secret_fields: Vec<String>,
@@ -449,6 +453,35 @@ pub struct ConnectorFacts {
     /// checks and stop loading. Without this the connector would simply vanish
     /// from the fact map and V42 could never fire on it.
     pub load_error: Option<String>,
+}
+
+impl ConnectorFacts {
+    /// The facts a manifest alone gives: its functions, which of them write,
+    /// are irreversible or inbox functions, and how each write is kept from
+    /// acting twice. No accounts, no webhook secrets.
+    pub fn of_manifest(doc: &super::def::ConnectorDoc) -> Self {
+        let names = |keep: &dyn Fn(&super::def::FunctionSpec) -> bool| -> Vec<String> {
+            doc.functions
+                .iter()
+                .filter(|f| keep(f))
+                .map(|f| f.name.clone())
+                .collect()
+        };
+        Self {
+            has_webhook: doc.webhook.is_some(),
+            functions: names(&|_| true),
+            inbox_functions: doc.inbox_functions(),
+            irreversible_functions: doc.irreversible_functions(),
+            write_functions: names(&|f| !f.read_only),
+            idempotency: doc
+                .functions
+                .iter()
+                .filter_map(|f| Some((f.name.clone(), f.send_once()?.mode()?)))
+                .collect(),
+            repeatable_functions: names(&|f| f.is_repeatable()),
+            ..Self::default()
+        }
+    }
 }
 
 /// Collects [`ConnectorFacts`] for every installed connector.
@@ -516,31 +549,9 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
         out.insert(
             name.clone(),
             ConnectorFacts {
-                has_webhook: loaded.doc.webhook.is_some(),
-                functions: loaded
-                    .doc
-                    .functions
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect(),
-                inbox_functions: loaded.doc.inbox_functions(),
-                irreversible_functions: loaded.doc.irreversible_functions(),
-                write_functions: loaded
-                    .doc
-                    .functions
-                    .iter()
-                    .filter(|f| !f.read_only)
-                    .map(|f| f.name.clone())
-                    .collect(),
-                idempotency: loaded
-                    .doc
-                    .functions
-                    .iter()
-                    .filter_map(|f| f.idempotency.as_ref().map(|i| (f.name.clone(), i.mode())))
-                    .collect(),
                 webhook_secret_fields,
                 accounts,
-                load_error: None,
+                ..ConnectorFacts::of_manifest(&loaded.doc)
             },
         );
     }

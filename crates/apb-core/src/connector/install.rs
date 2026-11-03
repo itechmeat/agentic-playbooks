@@ -87,27 +87,16 @@ pub enum UninstallError {
     Io(String),
 }
 
-/// Records connector trust for a freshly installed embedded connector. Origin
-/// is `Bundled`: the bytes came out of the trusted binary the user already
-/// runs, so no separate approval step is asked of them. Returns the warning
-/// text when the record could not be written.
+/// Records connector trust for a freshly installed embedded connector (see
+/// [`crate::trust::record_bundled`]).
 fn record_trust(name: &str, digest: &str) -> Option<String> {
-    let mut trust = crate::trust::TrustStore::load();
-    match trust.approve_kind(
-        digest,
-        name,
-        crate::trust::Kind::Connector,
-        crate::trust::OriginKind::Bundled,
-    ) {
-        Ok(()) => None,
-        Err(e) => Some(e.to_string()),
-    }
+    crate::trust::record_bundled(digest, name, crate::trust::Kind::Connector)
 }
 
 /// Installs the embedded official connector `name` into the global store and
 /// records its trust in the same action.
 ///
-/// Stages the embedded files into `<connectors_dir>/.<name>.install-tmp`,
+/// Stages the embedded files into a unique `<connectors_dir>/.<name>.install-tmp-*`,
 /// digests the staged tree, and only then moves it onto the target. An
 /// existing target with the same digest is a no-op; one that differs is
 /// refused unless `force` is set. The staging folder is removed on every path,
@@ -128,94 +117,19 @@ pub fn install_official(name: &str, force: bool) -> Result<InstallReport, Instal
     let official =
         official::get(name).ok_or_else(|| InstallError::NotEmbedded(name.to_string()))?;
     let base = store::connectors_dir().ok_or(InstallError::NoConfigDir)?;
-
-    let target = base.join(name);
-    let staging = base.join(format!(".{name}.install-tmp"));
-    let _ = std::fs::remove_dir_all(&staging);
-    if let Err(e) = official.write_to(&staging) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(InstallError::Io(format!("cannot stage `{name}`: {e}")));
-    }
-
-    let limits = crate::content::TreeLimits::default();
-    let new_digest = match crate::content::tree_digest(&staging, &limits) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(InstallError::Io(format!("cannot digest `{name}`: {e}")));
-        }
-    };
-
-    if target.exists() {
-        let current = crate::content::tree_digest(&target, &limits).ok();
-        if current.as_deref() == Some(new_digest.as_str()) {
-            let _ = std::fs::remove_dir_all(&staging);
-            let trust_warning = record_trust(name, &new_digest);
-            return Ok(InstallReport {
-                name: name.to_string(),
-                version: official.version,
-                digest: new_digest,
-                no_op: true,
-                trust_warning,
-            });
-        }
-        if !force {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(InstallError::NeedsForce {
-                path: target.display().to_string(),
-            });
-        }
-
-        // Backup-swap: move the existing target aside before moving staging
-        // into place, so a rename failure partway through never leaves
-        // nothing installed. Any stale backup from a previous interrupted
-        // force-reinstall is cleared first so this rename never fails
-        // because the sibling already exists. On a failed second rename the
-        // backup is moved straight back, restoring the connector that was
-        // there a moment ago; it is removed only once the swap has fully
-        // succeeded.
-        let backup = base.join(format!(".{name}.install-backup"));
-        let _ = std::fs::remove_dir_all(&backup);
-        if let Err(e) = std::fs::rename(&target, &backup) {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(InstallError::Io(format!(
-                "cannot replace {}: {e}",
-                target.display()
-            )));
-        }
-        if let Err(e) = std::fs::rename(&staging, &target) {
-            let _ = std::fs::rename(&backup, &target);
-            return Err(InstallError::Io(format!(
-                "cannot install into {}: {e}",
-                target.display()
-            )));
-        }
-        let _ = std::fs::remove_dir_all(&backup);
-
-        let trust_warning = record_trust(name, &new_digest);
-        return Ok(InstallReport {
-            name: name.to_string(),
-            version: official.version,
-            digest: new_digest,
-            no_op: false,
-            trust_warning,
-        });
-    }
-
-    if let Err(e) = std::fs::rename(&staging, &target) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(InstallError::Io(format!(
-            "cannot install into {}: {e}",
-            target.display()
-        )));
-    }
-
-    let trust_warning = record_trust(name, &new_digest);
+    let installed = crate::tree_install::install_tree(&base, name, &official.files, |_| force)
+        .map_err(|e| match e {
+            crate::tree_install::TreeInstallError::NeedsForce { path } => {
+                InstallError::NeedsForce { path }
+            }
+            crate::tree_install::TreeInstallError::Io(m) => InstallError::Io(m),
+        })?;
+    let trust_warning = record_trust(name, &installed.digest);
     Ok(InstallReport {
         name: name.to_string(),
         version: official.version,
-        digest: new_digest,
-        no_op: false,
+        digest: installed.digest,
+        no_op: installed.no_op,
         trust_warning,
     })
 }
@@ -240,47 +154,36 @@ pub enum Reconciled {
         installed_version: String,
         embedded_version: String,
     },
+    /// The installed copy is newer shipped content than this binary's (an
+    /// older binary runs beside a newer one): left alone, never moved back.
+    NewerInstalled {
+        name: String,
+        installed_version: String,
+        embedded_version: String,
+    },
     /// The installed copy was pristine but replacing it failed.
     Failed { name: String, error: String },
 }
 
-/// Whether the files under `dir` are exactly the embedded `official` files:
-/// the same relative paths with the same bytes, nothing more, nothing less.
+/// Whether the files under `dir` are exactly the embedded `official` files.
 fn matches_embedded(dir: &std::path::Path, official: &official::OfficialConnector) -> bool {
-    fn collect(
-        base: &std::path::Path,
-        dir: &std::path::Path,
-        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
-    ) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ty = entry.file_type()?;
-            if ty.is_dir() {
-                collect(base, &path, out)?;
-            } else {
-                let rel = path
-                    .strip_prefix(base)
-                    .map_err(std::io::Error::other)?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.insert(rel, std::fs::read(&path)?);
-            }
-        }
-        Ok(())
-    }
-    let mut on_disk = std::collections::BTreeMap::new();
-    collect(dir, dir, &mut on_disk).is_ok() && on_disk == official.files
+    crate::tree_install::dir_matches(dir, &official.files)
 }
 
 /// The embedded version of `name` when it is an official connector whose
 /// installed copy differs from the one in this binary (`None` when it matches,
-/// is not installed, or is not official). Read-only: the one "update
-/// available" check every connector listing uses.
+/// is not installed, is not official, or is newer than the embedded one).
+/// Read-only: the one "update available" check every connector listing uses.
 pub fn embedded_update(name: &str) -> Option<String> {
     let official = official::get(name)?;
     let dir = store::connectors_dir()?.join(name);
     if !dir.is_dir() || matches_embedded(&dir, &official) {
+        return None;
+    }
+    // A newer installed copy is no update: reinstalling the embedded one
+    // would move it back.
+    let installed = store::list().into_iter().find(|c| c.name == name);
+    if installed.is_some_and(|c| crate::bundled::is_older(&official.version, &c.version)) {
         return None;
     }
     Some(official.version)
@@ -290,7 +193,10 @@ pub fn embedded_update(name: &str) -> Option<String> {
 /// the running binary after an upgrade. A copy that is exactly what an earlier
 /// apb installed (its tree digest is trusted with origin `Bundled`) is replaced
 /// by the embedded version, trust included; a copy with local changes is left
-/// alone and reported as [`Reconciled::UpdateAvailable`]. Connectors that
+/// alone and reported as [`Reconciled::UpdateAvailable`], and a copy whose
+/// version is newer than the embedded one (an older binary running beside a
+/// newer one) is never moved back and is reported as
+/// [`Reconciled::NewerInstalled`]. Connectors that
 /// already match, and non-official connectors, produce no entry.
 pub fn reconcile_official() -> Vec<Reconciled> {
     let trust = crate::trust::TrustStore::load();
@@ -305,6 +211,14 @@ pub fn reconcile_official() -> Vec<Reconciled> {
         };
         let dir = base.join(&installed.name);
         if matches_embedded(&dir, &official) {
+            continue;
+        }
+        if crate::bundled::is_older(&official.version, &installed.version) {
+            out.push(Reconciled::NewerInstalled {
+                name: installed.name,
+                installed_version: installed.version,
+                embedded_version: official.version,
+            });
             continue;
         }
         let pristine = crate::content::tree_digest(&dir, &limits)
@@ -432,13 +346,19 @@ mod tests {
         );
         assert!(crate::trust::TrustStore::load().is_approved(&report.digest));
         // No staging leftovers.
-        assert!(
-            !cfg.path()
-                .join("connectors")
-                .join(format!(".{EMBEDDED}.install-tmp"))
-                .exists()
-        );
+        assert!(install_leftovers(&cfg.path().join("connectors")).is_empty());
         drop(cfg);
+    }
+
+    /// The staging and backup folders of `EMBEDDED` left in `dir`.
+    fn install_leftovers(dir: &std::path::Path) -> Vec<String> {
+        let prefix = format!(".{EMBEDDED}.install-");
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(&prefix))
+            .collect()
     }
 
     #[test]
@@ -492,18 +412,13 @@ mod tests {
         install_official(EMBEDDED, false).unwrap();
         let dir = cfg.path().join("connectors").join(EMBEDDED);
         std::fs::write(dir.join("EXTRA.md"), "local edit").unwrap();
-        let backup = cfg
-            .path()
-            .join("connectors")
-            .join(format!(".{EMBEDDED}.install-backup"));
-
         let forced = install_official(EMBEDDED, true).unwrap();
 
         assert!(!forced.no_op);
         assert!(dir.is_dir(), "the reinstalled target must be in place");
         assert!(!dir.join("EXTRA.md").exists());
         assert!(
-            !backup.exists(),
+            install_leftovers(&cfg.path().join("connectors")).is_empty(),
             "the swap backup must be removed once the reinstall succeeds"
         );
         drop(cfg);
@@ -586,6 +501,61 @@ mod tests {
         drop(cfg);
     }
 
+    /// Installs the embedded `name` as a binary shipping `version` would
+    /// have: its manifest names that version, and the tree is trusted with
+    /// origin `Bundled`. The installed directory.
+    fn shipped_as(name: &str, version: &str) -> std::path::PathBuf {
+        install_official(name, false).unwrap();
+        let dir = store::connectors_dir().unwrap().join(name);
+        let manifest = dir.join("connector.yaml");
+        let yaml = std::fs::read_to_string(&manifest).unwrap();
+        let embedded = official::get(name).unwrap().version;
+        let changed = yaml.replacen(
+            &format!("version: {embedded}"),
+            &format!("version: {version}"),
+            1,
+        );
+        assert_ne!(changed, yaml, "the manifest names its version");
+        std::fs::write(&manifest, changed).unwrap();
+        let digest =
+            crate::content::tree_digest(&dir, &crate::content::TreeLimits::default()).unwrap();
+        crate::trust::TrustStore::load()
+            .approve_kind(
+                &digest,
+                name,
+                crate::trust::Kind::Connector,
+                crate::trust::OriginKind::Bundled,
+            )
+            .unwrap();
+        dir
+    }
+
+    /// An older apb started beside a newer one never moves a newer,
+    /// untouched connector back to its own copy: it reports it and leaves
+    /// the files as they are.
+    #[test]
+    fn reconcile_leaves_a_newer_installed_connector_alone() {
+        let _lock = crate::env_test_lock();
+        let (_cfg, _guard) = set_config_dir();
+        let dir = shipped_as("github", "99.0.0");
+        let before = std::fs::read(dir.join("connector.yaml")).unwrap();
+
+        let outcome = reconcile_official();
+
+        assert_eq!(
+            outcome,
+            [Reconciled::NewerInstalled {
+                name: "github".into(),
+                installed_version: "99.0.0".into(),
+                embedded_version: official::get("github").unwrap().version,
+            }]
+        );
+        assert_eq!(std::fs::read(dir.join("connector.yaml")).unwrap(), before);
+        // No listing offers the older embedded copy as an update either:
+        // reinstalling it would be the same downgrade.
+        assert_eq!(embedded_update("github"), None);
+    }
+
     /// F20: after an upgrade, a pristine installed copy (the bytes an earlier
     /// apb installed, trusted as `Bundled`) is replaced by the embedded
     /// version, while a copy with local edits is kept and only reported.
@@ -596,20 +566,9 @@ mod tests {
         let limits = crate::content::TreeLimits::default();
         let base = cfg.path().join("connectors");
 
-        // `github` as an older apb shipped it: different bytes, installed and
+        // `github` as an older apb shipped it: a lower version, installed and
         // trusted with origin Bundled by that older binary.
-        install_official("github", false).unwrap();
-        let old = base.join("github");
-        std::fs::write(old.join("README.md"), "# github: older release\n").unwrap();
-        let old_digest = crate::content::tree_digest(&old, &limits).unwrap();
-        crate::trust::TrustStore::load()
-            .approve_kind(
-                &old_digest,
-                "github",
-                crate::trust::Kind::Connector,
-                crate::trust::OriginKind::Bundled,
-            )
-            .unwrap();
+        let old = shipped_as("github", "0.0.1");
         // `slack` with a local edit the user approved by hand.
         install_official("slack", false).unwrap();
         let edited = base.join("slack");
@@ -631,11 +590,14 @@ mod tests {
         assert!(matches_embedded(&old, &github), "pristine copy updated");
         assert!(embedded_update("github").is_none());
         assert!(edited.join("NOTES.md").is_file(), "local edit kept");
-        assert!(outcome.contains(&Reconciled::Updated {
-            name: "github".into(),
-            from_version: github.version.clone(),
-            to_version: github.version.clone(),
-        }));
+        assert!(
+            outcome.contains(&Reconciled::Updated {
+                name: "github".into(),
+                from_version: "0.0.1".into(),
+                to_version: github.version.clone(),
+            }),
+            "{outcome:?}"
+        );
         assert!(
             outcome
                 .iter()

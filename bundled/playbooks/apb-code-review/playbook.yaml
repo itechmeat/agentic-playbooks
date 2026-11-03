@@ -1,0 +1,176 @@
+schema: 2
+id: apb-code-review
+name: Code review panel
+description: >-
+  An independent, read-only review panel over one change in the current
+  project: correctness, security, tests and maintainability, and the
+  project's own checks run side by side, then one report merges their
+  verified findings. No file is changed and nothing is committed or
+  published. A report is evidence that the review ran, not an approval.
+version: 1.1.0
+agent_launch: ask
+params:
+  - name: target
+    type: text
+    default: "HEAD"
+    label: >-
+      What to review: a commit, a range such as main..HEAD, a branch, or
+      "working tree" for uncommitted changes
+  - name: base
+    type: text
+    default: ""
+    label: Base ref to compare against (empty to use the target as given)
+trigger:
+  when:
+    - review a change, a branch or a commit range independently
+    - get a read-only review panel over a diff before merging
+  avoid_when:
+    - the user wants the findings fixed in the same run
+  examples:
+    - "review main..HEAD"
+    - "review my uncommitted changes"
+defaults:
+  profile: apb-reviewer
+  require_verdict: true
+  max_retries: 1
+  max_parallel: 4
+  on_failure: stop
+effects: [fs_read]
+goal:
+  statement: >-
+    Every review role reports on the same candidate, every finding is
+    verified against the source and classified, and the report keeps
+    reviewed apart from ready and integrated.
+  criteria:
+    - description: The report node wrote its review report
+      check: { type: marker, marker: "REVIEW REPORT:" }
+    - description: Every finding names its location, class and evidence
+      check: { type: manual }
+nodes:
+  - { id: start, type: start }
+  - id: scope
+    type: agent_task
+    title: Fix the candidate and the packet
+    expected_duration: 3m
+    protect: ["**"]
+    prompt: >-
+      Read-only. Identify the candidate to review: target
+      {{params.target}}, base {{params.base}}. Extra context from the run
+      instruction, if any: {{run.instruction}}. Record how its identity was
+      taken (commit ids, or for uncommitted work the changed paths and
+      their content digests). Write the outputs candidate (that identity),
+      files (a JSON array of the changed paths), summary (what the change
+      does, in a few sentences), intent (the request or issue the change
+      claims to address, empty when unknown) and checks (the project's own
+      build, test and lint commands).
+    outputs:
+      fields: [candidate, files, summary, intent, checks]
+  - id: review_correctness
+    type: agent_task
+    title: Review correctness
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      Your role: correctness (request fidelity, edge cases, API and state
+      contracts, error handling). Use the apb-review skill. You are one
+      independent reviewer of the panel. Read-only: never edit files or
+      run commands that change the tree. Start from only this packet:
+      {{nodes.scope.output}} and the actual source and diff. Do not rely
+      on other reviewers. Verify every finding against the source. Write
+      the outputs role, coverage (what you read and what you could not),
+      and findings (a JSON array; each has id, class: defect,
+      design_concern, verification_gap or optional, location, why,
+      evidence). Missing review capability fails the step; it never counts
+      as clean.
+    outputs:
+      fields: [role, coverage, findings]
+  - id: review_security
+    type: agent_task
+    title: Review security
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      Your role: security (permissions, secrets, injection, unsafe input,
+      recovery boundaries). Use the apb-review skill, and always run the
+      apb-security-audit skill on the whole diff; a general reading does
+      not replace it, and each finding needs a concrete exploit or failure
+      path and a severity. You are one
+      independent reviewer of the panel. Read-only: never edit files or
+      run commands that change the tree. Start from only this packet:
+      {{nodes.scope.output}} and the actual source and diff. Do not rely
+      on other reviewers. Verify every finding against the source. Write
+      the outputs role, coverage (what you read and what you could not),
+      and findings (a JSON array; each has id, class: defect,
+      design_concern, verification_gap or optional, location, why,
+      evidence). Missing review capability fails the step; it never counts
+      as clean.
+    outputs:
+      fields: [role, coverage, findings]
+  - id: review_tests
+    type: agent_task
+    title: Review tests and maintainability
+    expected_duration: 10m
+    protect: ["**"]
+    prompt: >-
+      Your role: tests and maintainability (test value, behavior coverage,
+      regression evidence, readability, coupling). Use the apb-review
+      skill, and always run the apb-test-audit skill in audit mode on
+      every test the change adds or changes, and on changed behavior that
+      has no test; a general reading does not replace it. You are one
+      independent reviewer of the panel. Read-only:
+      never edit files or run commands that change the tree. Start from
+      only this packet: {{nodes.scope.output}} and the actual source and
+      diff. Do not rely on other reviewers. Verify every finding against
+      the source. Write the outputs role, coverage (what you read and what
+      you could not), and findings (a JSON array; each has id, class:
+      defect, design_concern, verification_gap or optional, location, why,
+      evidence). Missing review capability fails the step; it never counts
+      as clean.
+    outputs:
+      fields: [role, coverage, findings]
+  - id: native_checks
+    type: agent_task
+    title: Run the project's own checks
+    expected_duration: 15m
+    protect: ["**"]
+    prompt: >-
+      Run the project's own checks listed in {{nodes.scope.output.checks}}
+      on the candidate {{nodes.scope.output.candidate}}, then every
+      review or check helper installed on this machine (the ones apb setup
+      plan lists with required true), as the apb-review skill requires.
+      These run code and configuration from the candidate: when the change
+      comes from an author the person does not trust and this step has no
+      sandbox, record each as not run with that reason instead. A helper
+      that fails to run is recorded as failed with its error excerpt, never
+      skipped or left out; do not try to repair it here, and set fresh to
+      false. Do not change tracked files and do not fix anything. Write the outputs results (a
+      JSON array: command, result passed, failed or not run, and a short
+      excerpt of any failure) and fresh (true when every check ran on
+      exactly this candidate).
+    outputs:
+      fields: [results, fresh]
+  - id: report
+    type: finish
+    outcome: success
+    expected_duration: 3m
+    prompt: >-
+      Use the findings template of the apb-review skill. Candidate:
+      {{nodes.scope.output}}. Correctness: {{nodes.review_correctness.output}}.
+      Security: {{nodes.review_security.output}}. Tests:
+      {{nodes.review_tests.output}}. Project checks:
+      {{nodes.native_checks.output}}. Merge the findings by location,
+      keep each one's role, class and evidence, and drop none. Report
+      partial coverage as partial. Begin with the line REVIEW REPORT:,
+      then say whether any defect or design concern is open, and keep
+      reviewed apart from ready to integrate. Nothing was changed or
+      published by this run.
+edges:
+  - { from: start, to: scope }
+  - { from: scope, to: review_correctness }
+  - { from: scope, to: review_security }
+  - { from: scope, to: review_tests }
+  - { from: scope, to: native_checks }
+  - { from: review_correctness, to: report, join: all }
+  - { from: review_security, to: report, join: all }
+  - { from: review_tests, to: report, join: all }
+  - { from: native_checks, to: report, join: all }

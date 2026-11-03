@@ -1,5 +1,5 @@
 name: github
-version: 0.2.0
+version: 0.2.1
 healthcheck: get_rate_limit
 # How the connector reads its own verified account, so a repeat of a
 # marker send can find the item the earlier attempt created. A GitHub App
@@ -231,6 +231,11 @@ functions:
     headers:
       Accept: application/vnd.github+json
       X-GitHub-Api-Version: "2022-11-28"
+    # GitHub offers no key or marker for a label, and none is needed: a
+    # repeat is harmless (a label already on the issue stays once). So the
+    # call is not tracked as a send: an unknown outcome is retried like any
+    # undeclared call, and a list step may use it.
+    idempotency: { mode: repeatable }
     examples:
       - args: { owner: acme, repo: site, number: 42, labels: [needs-triage] }
         note: "labels must already exist on the repository; this function only attaches them."
@@ -250,6 +255,9 @@ functions:
     headers:
       Accept: application/vnd.github+json
       X-GitHub-Api-Version: "2022-11-28"
+    # Like add_labels: removing a label that is already gone changes
+    # nothing on the issue (GitHub answers 404).
+    idempotency: { mode: repeatable }
 
   - name: add_assignees
     description: Add one or more assignees to an issue or pull request

@@ -1,0 +1,157 @@
+---
+name: apb-delivery
+description: Deliver an authorized feature, bug fix or refactoring from the original request to a reviewed, checked and reported change. Use for product code changes. Inside an apb playbook, run only the stage the node names. Research and design-only tasks stay local and unpublished.
+metadata:
+  version: "1.1.0"
+---
+
+# Deliver a change
+
+Finish the requested outcome and every authorized next step. Do not stop at a
+plan or a green unit suite. Do not narrow the task silently.
+
+Inside an apb run, do only the stage your node names. The playbook owns the
+order, the checks, the retries and the resume. See
+[references/stages.md](references/stages.md).
+
+## 1. Intake: the expected-result card
+
+- Read the original request, the issuer and the reply route, existing work,
+  the project instructions, its checks and its CI.
+- Write the card in the existing task record, or in the artifacts of the
+  project's spec workflow when it has one:
+  - observable expected outcomes, taken from the original request;
+  - exclusions;
+  - behavior that must keep working;
+  - assumptions, stated as such;
+  - the reference to the original request.
+- Never rewrite the card to match the code. A scope change the issuer
+  authorized stays explicit and attributed.
+- Find code facts yourself before you ask the issuer.
+
+## 2. Risk triggers
+
+Independent review of the risk is required when the change touches:
+
+- persisted formats or stored data;
+- a public API or CLI contract;
+- security, authentication or secrets;
+- concurrency, crash recovery or resume;
+- the release pipeline or the check machinery;
+- a guarantee other code relies on.
+
+A project may add triggers or size thresholds. File count alone neither sets
+nor lowers risk. Lower coverage needs a written reason based on consequences.
+Never waive a check the project requires.
+
+## 3. Change kind
+
+- **Feature.** One design pass with the apb-brainstorm skill, or reuse of a
+  current advised design.
+- **Bug fix.** A failing observation first, then a causal explanation, then
+  the fix. Show the original scenario passing and a regression check.
+- **Refactoring.** State what must be preserved and the realistic benefit.
+  Show preservation with tests, characterization or comparisons.
+- A behavior change hidden inside a refactoring or fix is not allowed. Name
+  it and give it the feature obligations.
+- Details: [references/change-kinds.md](references/change-kinds.md).
+
+## 4. Decompose a large change
+
+- After design, check the decomposition triggers: more than about five card
+  outcomes, a change across several layers, a persisted-format change
+  together with behavior, or a result that cannot be reviewed in one pass.
+- When one holds, split the change into independently verifiable subtasks,
+  each with its part of the card, its own checks and its dependencies in
+  order. A subtask is a unit of work and review, not a pull request.
+- Each subtask gets its own review with the apb-review skill and one
+  self-check repair round. The full review panel then reviews the
+  integrated result with at most two repair rounds. The final check runs
+  against the whole original card.
+- When the project uses a work tracker (issues, a graph tracker or
+  similar), the subtasks and their status go there. Otherwise they go into
+  the task record.
+- A pull request stays within the size an external reviewer the project
+  uses can read (for example a review bot's file limit). A delivery larger
+  than that goes out as several pull requests in dependency order, each
+  green on its own.
+- Details and where the breakdown goes:
+  [references/decomposition.md](references/decomposition.md).
+
+## 5. Acceptance before code
+
+- Define how each outcome will be observed before the code that depends on it.
+- Keep an evidence map: every card outcome names the check that proves it.
+  The check drives the shipped entry point (the real binary, process,
+  route or tool the person uses), not an in-process stand-in, and it fails
+  when that outcome is broken (shown failing first, or by a named mutation).
+  An outcome without such a check is not delivered.
+- When the change alters a shared mechanism (scheduling, state, retries,
+  locks, a stored format), list in the preserved behavior how it meets
+  every existing kind and state that uses the mechanism. Each pair gets a
+  check or a written reason why it cannot interact.
+- For a substantial criterion, ask an independent role which wrong
+  implementation could still pass. Combine this with design or review.
+- Test-first is a choice, not a rule. Implement end-to-end slices through the
+  real entry points.
+- A UI claim needs real interaction with the affected UI.
+
+## 6. Check and review
+
+- Run the project's own checks (build, tests, lint, type checks) through the
+  real interfaces, on the actual candidate.
+- Gate every test you add or change with the authoring mode of the
+  apb-test-audit skill before it lands.
+- Review with the apb-review skill. Its tests role always runs the
+  apb-test-audit skill on every added or changed test, its security role
+  always runs the apb-security-audit skill on the diff, and every installed
+  review helper runs as a required step. A general reviewer does not replace
+  these. Failed, unknown, skipped or stale evidence is not a pass.
+- Choose the executors with the apb-model-selection skill: a review round by
+  another family is required before integration when one is available.
+- A usage limit routes the review to the next rung of the fallback chain. It
+  never stops the task.
+
+## 7. Integrate
+
+- **Publishing** (push, pull request) happens only within the authority the
+  user or the project grants: the project instructions and the apb
+  settings. When it is granted, publish after fresh required checks and a
+  converged review. When it is not, stop at a local, reviewed candidate and
+  report it.
+- **Merge** follows the project's policy. Without a stated policy, ask.
+- **Tags and releases** follow the project's policy.
+- Local commits on a feature branch are allowed during the work. Never commit
+  on the shared main branch.
+- **Research or design-only work** stays local: no commit, push, pull request
+  or release.
+- apb's own publish consent still applies. Never bypass it with a manual push
+  or an invented approval.
+- Other external effects keep their own authority.
+
+## 8. Close and report
+
+- Compare every expected outcome with the original request: delivered,
+  partial or not delivered, with evidence.
+- Put assumptions first. Add stage conformance (done, not applicable, or
+  skipped with a reason), findings and their dispositions, the real
+  integration state and the next action.
+- Use [references/result-template.md](references/result-template.md) inside
+  the existing task record or the project's spec workflow artifacts. It is
+  not a new mandatory file.
+
+## Measurements per change
+
+Record: change kind, risk triggers hit, findings per review role (accepted
+and rejected), repair rounds, findings that escaped to later checks, wall
+time, tokens or cost when measured. Unknown stays unknown.
+
+## Questions and authority
+
+- Ask the task issuer. For delegated work that is the assigning agent.
+- If the issuer is unavailable, settle reversible engineering choices with an
+  advisor, record them and continue. Only work that depends on an owner-only
+  fact or a missing permission for an irreversible effect waits.
+- Keep existing grants. Do not ask again for what was already authorized.
+- If no permitted independent context exists, disclose it. Never present
+  self-review as independent review.

@@ -207,6 +207,38 @@ pub fn holds(doc: &Value, path: &str, equals: &Value) -> bool {
     }
 }
 
+/// Whether `path` in `doc` reaches a list with `item` in it (an item
+/// check's `accept_when.contains`). The list is the array at the path, or
+/// the values a `[]` path maps to (`labels[].name`). Each scalar element is
+/// compared with `item` the way [`holds`] compares one value; an object,
+/// an array or null in the list never matches. A path that does not reach
+/// a list (a string included: `contains` is never a substring match), a
+/// missing key or a non-scalar `item` does not hold.
+pub fn contains(doc: &Value, path: &str, item: &Value) -> bool {
+    if !is_scalar(item) {
+        return false;
+    }
+    let Ok(segments) = parse_path(path) else {
+        return false;
+    };
+    let elements: Vec<&Value> = match walk(doc, &segments) {
+        Ok((values, true)) => values,
+        Ok((values, false)) => match values.as_slice() {
+            [Value::Array(items)] => items.iter().collect(),
+            _ => return false,
+        },
+        Err(_) => return false,
+    };
+    elements
+        .into_iter()
+        .any(|v| is_scalar(v) && same_scalar(v, item))
+}
+
+/// A string, a number or a bool.
+pub fn is_scalar(v: &Value) -> bool {
+    matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_))
+}
+
 /// The exact value of an integer number, `None` for one with a fraction.
 fn integer(n: &serde_json::Number) -> Option<i128> {
     n.as_i64()
@@ -391,6 +423,45 @@ mod tests {
         assert!(holds(&doc, "page", &json!("3")));
         assert!(!holds(&doc, "more", &json!("true")));
         assert!(!holds(&doc, "page", &json!("4")));
+    }
+
+    #[test]
+    fn contains_finds_an_exact_scalar_in_an_array_or_a_mapped_path() {
+        let doc = json!({
+            "labels": [{"name": "bug"}, {"name": "needs-info"}],
+            "tags": ["a", 3, true],
+            "title": "a bug report",
+            "mixed": [{"name": "bug"}, null, ["bug"]]
+        });
+        assert!(contains(&doc, "labels[].name", &json!("bug")));
+        assert!(!contains(&doc, "labels[].name", &json!("bu")));
+        assert!(!contains(&doc, "labels[].name", &json!("enhancement")));
+        assert!(contains(&doc, "tags", &json!("a")));
+        assert!(contains(&doc, "tags", &json!(3)));
+        assert!(contains(&doc, "tags", &json!("3")));
+        assert!(contains(&doc, "tags", &json!(true)));
+        // A string is not a list: no substring match.
+        assert!(!contains(&doc, "title", &json!("bug")));
+        // Objects, arrays and null in the list never match.
+        assert!(!contains(&doc, "mixed", &json!("bug")));
+        // A missing path or a non-scalar item does not hold.
+        assert!(!contains(&doc, "absent", &json!("bug")));
+        assert!(!contains(&doc, "absent[].name", &json!("bug")));
+        assert!(!contains(&doc, "tags", &json!(["a"])));
+        assert!(!contains(&doc, "tags", &Value::Null));
+        assert!(!contains(&json!({"labels": []}), "labels", &json!("bug")));
+        // A mapped path that misses its key in any element does not hold,
+        // even where another element matches: a check fails closed rather
+        // than pass on a response it could not read whole.
+        let partial = json!({"labels": [{"name": "bug"}, {"color": "red"}]});
+        assert!(!contains(&partial, "labels[].name", &json!("bug")));
+        // Nested maps flatten: every name of every group.
+        let nested = json!({"groups": [
+            {"labels": [{"name": "a"}]},
+            {"labels": [{"name": "bug"}, {"name": "c"}]}
+        ]});
+        assert!(contains(&nested, "groups[].labels[].name", &json!("bug")));
+        assert!(!contains(&nested, "groups[].labels[].name", &json!("d")));
     }
 
     #[test]

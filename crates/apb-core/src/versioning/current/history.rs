@@ -23,6 +23,17 @@ fn lines(text: &str) -> Vec<&str> {
     text.lines().filter(|l| !l.trim().is_empty()).collect()
 }
 
+/// The newest move line (aborted lines skipped), read as the file stands;
+/// lines that do not parse are skipped.
+pub(super) fn last_move(playbook_dir: &Path) -> io::Result<Option<HistoryEntry>> {
+    let text = read_text(playbook_dir)?;
+    Ok(lines(&text)
+        .iter()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<HistoryEntry>(l).ok())
+        .find(|e| e.kind == EntryKind::Move))
+}
+
 /// Appends `entry` with its `prev`, unless a line with its `change_id` is
 /// already there. The file is rewritten whole (temp and rename), so no
 /// line is ever left half written.

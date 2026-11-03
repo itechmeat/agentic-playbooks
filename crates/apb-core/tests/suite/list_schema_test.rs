@@ -303,6 +303,153 @@ fn v87_the_check_names_one_source_reading_only_the_item() {
 }
 
 #[test]
+fn v87_accept_when_contains_names_one_scalar_and_no_other_rule() {
+    let contains = |rule: &str| {
+        with_check(&format!(
+            "connector: {{ name: imap, function: get_message, accept_when: {{ path: \"flags[].name\", {rule} }} }}"
+        ))
+    };
+    for ok in [
+        "contains: \"{{item_output.task_name}}\"",
+        "contains: 3",
+        "contains: true",
+    ] {
+        assert!(!has(&contains(ok), "V87", Severity::Error), "{ok}");
+    }
+    for bad in [
+        "contains: [a]",
+        "contains: { a: 1 }",
+        "contains: null",
+        "contains: a, equals: a",
+        "contains: a, exists: true",
+        "contains: \"{{item_output.nope}}\"",
+    ] {
+        assert!(has(&contains(bad), "V87", Severity::Error), "{bad}");
+    }
+}
+
+/// Validation facts of the github connector apb ships, read from its
+/// embedded manifest.
+fn github_facts() -> ValidationContext {
+    let doc = apb_core::connector::official::get("github")
+        .and_then(|c| c.doc())
+        .expect("the github connector is embedded");
+    let mut connectors = BTreeMap::new();
+    connectors.insert("github".to_string(), ConnectorFacts::of_manifest(&doc));
+    ValidationContext {
+        connectors,
+        ..ValidationContext::default()
+    }
+}
+
+#[test]
+fn the_bundled_issue_triage_labels_each_issue_in_a_list_and_v88_still_refuses_an_undeclared_write()
+{
+    let yaml = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bundled/playbooks/apb-issue-triage/playbook.yaml"),
+    )
+    .unwrap();
+    let ctx = github_facts();
+    let p = Playbook::from_yaml(&yaml).unwrap();
+    let labels = p.node("label_bug").expect("a labelling node");
+    assert!(labels.list().is_some(), "labels are applied per item");
+    assert!(
+        labels
+            .list()
+            .and_then(|l| l.connector_check())
+            .and_then(|c| c.accept_when.contains.as_ref())
+            .is_some(),
+        "the engine reads each label back"
+    );
+    assert_eq!(list_issues(&yaml, &ctx), vec![], "list rules hold");
+    let undeclared = yaml.replace("functions: [add_labels]", "functions: [add_assignees]");
+    assert_ne!(undeclared, yaml);
+    assert!(
+        list_issues(&undeclared, &ctx).contains(&("V88", Severity::Error)),
+        "add_assignees declares no idempotency"
+    );
+}
+
+/// A repeatable write (github's `add_labels`) may serve a list step where
+/// an undeclared one may not, and `on_unknown` over it is refused (V69):
+/// there is no unknown send to act on.
+#[test]
+fn v88_accepts_a_repeatable_write_and_v69_refuses_on_unknown_over_it() {
+    let ctx = github_facts();
+    let labels = GITHUB_LIST.replace("FUNCTION", "add_labels");
+    assert!(
+        !list_issues(&labels, &ctx).contains(&("V88", Severity::Error)),
+        "a repeatable write may serve a list step"
+    );
+    let assignees = GITHUB_LIST.replace("FUNCTION", "add_assignees");
+    assert!(
+        list_issues(&assignees, &ctx).contains(&("V88", Severity::Error)),
+        "an undeclared write may not"
+    );
+    // `on_unknown` has nothing to act on over a repeatable-only grant: the
+    // call is retried anyway, so V69 refuses it as for an undeclared one.
+    for policy in ["resend", "refuse"] {
+        let resend = labels.replace(
+            "functions: [add_labels] }",
+            &format!("functions: [add_labels], on_unknown: {policy} }}"),
+        );
+        assert_ne!(resend, labels);
+        let p = Playbook::from_yaml(&resend).unwrap();
+        assert!(
+            validate(&p, &ctx)
+                .issues
+                .iter()
+                .any(|i| i.code == "V69" && i.severity == Severity::Error),
+            "on_unknown: {policy}"
+        );
+    }
+}
+
+/// GitHub connector 0.2.1 declares `repeatable` on both label functions;
+/// an apb older than that mode cannot read it (its parser denies an unknown
+/// mode) and needs the 0.2.0 manifest back (docs/CONNECTORS.md). This apb
+/// reads both: the 0.2.0 form (no declaration) parses and stays untracked
+/// as before, only without the list-step use.
+#[test]
+fn the_github_manifest_parses_with_and_without_the_repeatable_declaration() {
+    let current = include_str!("../../../../connectors/github/connector.yaml");
+    let declaration = "    idempotency: { mode: repeatable }\n";
+    let earlier = current
+        .replace(declaration, "")
+        .replacen("version: 0.2.1", "version: 0.2.0", 1);
+    for (text, repeatable) in [(current, true), (earlier.as_str(), false)] {
+        let doc = apb_core::connector::def::ConnectorDoc::from_yaml(text, "github").unwrap();
+        for name in ["add_labels", "remove_label"] {
+            let f = doc.functions.iter().find(|f| f.name == name).unwrap();
+            assert_eq!(f.is_repeatable(), repeatable, "{name}");
+            assert!(f.send_once().is_none(), "{name}: never tracked as a send");
+        }
+    }
+}
+
+/// A list step granted one github write, `FUNCTION`.
+const GITHUB_LIST: &str = r#"schema: 2
+id: label-each
+name: Label each
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - id: each
+    type: agent_task
+    prompt: Label the issue named in the item section.
+    profile: x
+    list:
+      items: { inline: [ { id: a }, { id: b } ] }
+    connectors:
+      - { name: github, accounts: [default], functions: [FUNCTION] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: each }
+  - { from: each, to: done }
+"#;
+
+#[test]
 fn v88_a_list_step_writes_only_through_send_once() {
     let undeclared = GOOD.replace(
         "functions: [get_message, mark_read]",

@@ -223,6 +223,13 @@ fn a_people_block_names_string_args_of_a_function_that_sends() {
 
     let brief_only = doc(&format!("{SEND}    people: {{ text: text }}\n")).unwrap();
     assert!(!brief_only.function("send").unwrap().carries_notices());
+    // A repeatable function is not sent once, so a restart could repeat a
+    // notice: it carries none.
+    let repeatable = doc(&format!(
+        "{SEND}    people: {{ to: to, text: text }}\n    idempotency: {{ mode: repeatable }}\n"
+    ))
+    .unwrap();
+    assert!(!repeatable.function("send").unwrap().carries_notices());
 
     let not_string = doc(&format!("{SEND}    people: {{ text: n }}\n")).unwrap_err();
     assert!(not_string.contains("people.text"), "{not_string}");

@@ -222,18 +222,18 @@ fn connector(
         Err(why) => return Checked::of("connector", None, why),
     };
     let w = &c.accept_when;
-    let holds = match (&w.equals, w.exists) {
-        (Some(equals), _) => apb_core::baseline::extract::holds(
-            &body,
-            &w.path,
-            &render_value(equals, item, outputs, &run.ctx.cfg.params),
-        ),
-        (None, Some(want)) => {
+    let render = |v: &Value| render_value(v, item, outputs, &run.ctx.cfg.params);
+    let holds = match (&w.equals, w.exists, &w.contains) {
+        (Some(equals), _, _) => apb_core::baseline::extract::holds(&body, &w.path, &render(equals)),
+        (None, Some(want), _) => {
             let found = apb_core::connector::common::value_at_path(&body, &w.path)
                 .is_some_and(|v| !v.is_null());
             found == want
         }
-        (None, None) => false,
+        (None, None, Some(member)) => {
+            apb_core::baseline::extract::contains(&body, &w.path, &render(member))
+        }
+        (None, None, None) => false,
     };
     let target = format!("{}.{}", c.name, c.function);
     if holds {

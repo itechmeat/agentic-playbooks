@@ -34,14 +34,7 @@ impl OfficialConnector {
     /// parents), atomically per file. `dir` is the connector folder itself
     /// (e.g. `<config_dir>/connectors/<name>`); the caller decides placement.
     pub fn write_to(&self, dir: &Path) -> std::io::Result<()> {
-        for (rel, bytes) in &self.files {
-            let path = dir.join(rel);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            crate::fsutil::atomic_write(&path, bytes)?;
-        }
-        Ok(())
+        crate::tree_install::write_files(dir, &self.files)
     }
 
     /// This connector's parsed manifest, from the embedded `connector.yaml`.
@@ -87,24 +80,12 @@ impl OfficialConnector {
 /// not a valid slug, that has no `connector.yaml`, or whose manifest does not
 /// parse (or whose `name` does not match the folder) is skipped.
 pub fn list() -> Vec<OfficialConnector> {
-    let mut grouped: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
-    for path in OfficialAssets::iter() {
-        let path = path.as_ref();
-        // Only files nested under a connector folder count; a stray top-level
-        // file has no `<name>/` prefix and is ignored.
-        let Some((name, rel)) = path.split_once('/') else {
-            continue;
-        };
-        if crate::profile::validate_profile_name(name).is_err() {
-            continue;
-        }
-        if let Some(file) = OfficialAssets::get(path) {
-            grouped
-                .entry(name.to_string())
-                .or_default()
-                .insert(rel.to_string(), file.data.into_owned());
-        }
-    }
+    // Only files nested under a connector folder count; a stray top-level
+    // file has no `<name>/` prefix and is ignored.
+    let grouped = crate::tree_install::group_by_folder(OfficialAssets::iter().filter_map(|path| {
+        let file = OfficialAssets::get(path.as_ref())?;
+        Some((path.into_owned(), file.data.into_owned()))
+    }));
 
     let mut out = Vec::new();
     for (name, files) in grouped {
@@ -143,7 +124,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "github")
             .expect("embedded `github` connector must be present");
-        assert_eq!(github.version, "0.2.0");
+        assert_eq!(github.version, "0.2.1");
         assert!(github.files.contains_key("connector.yaml"));
         assert!(github.files.contains_key("tests.yaml"));
         assert!(github.files.contains_key("PUBLIC.md"));
@@ -225,7 +206,7 @@ mod tests {
         let c = get("github").expect("github present");
         let yaml = std::str::from_utf8(c.files.get("connector.yaml").unwrap()).unwrap();
         let doc = crate::connector::def::ConnectorDoc::from_yaml(yaml, "github").unwrap();
-        assert_eq!(doc.version, "0.2.0");
+        assert_eq!(doc.version, "0.2.1");
     }
 
     #[test]

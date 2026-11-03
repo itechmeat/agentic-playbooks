@@ -8,6 +8,7 @@ use std::io;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
     Intent,
+    Target,
     Supersede,
     Current,
     PointerClear,

@@ -128,6 +128,21 @@ impl Kind {
     }
 }
 
+/// Records the trust of content that came out of the running binary (an
+/// official connector, a bundled playbook): `digest` approved for `id` of
+/// `kind` with origin [`OriginKind::Bundled`]. The bytes are the ones the
+/// user already runs, so no separate approval is asked of them. Only ever
+/// called with the digest of exactly the shipped bytes. Returns the warning
+/// text when the record could not be written: the content is installed and
+/// usable either way, the user is then asked to approve it through the
+/// normal flow.
+pub fn record_bundled(digest: &str, id: &str, kind: Kind) -> Option<String> {
+    TrustStore::load()
+        .approve_kind(digest, id, kind, OriginKind::Bundled)
+        .err()
+        .map(|e| e.to_string())
+}
+
 /// Trust record id for a connector account approval: `"connector/account"`,
 /// e.g. `"jira/project-board"`. Used as the `id` field of a `TrustRecord`
 /// with `Kind::ConnectorAccount`; approval itself stays keyed by digest.

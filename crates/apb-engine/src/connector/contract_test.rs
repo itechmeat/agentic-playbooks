@@ -268,7 +268,7 @@ fn eval_reconcile(
         reconcile: spec,
         format,
         ..
-    }) = &function.idempotency
+    }) = function.send_once()
     else {
         return Err(format!(
             "function `{}` declares no marker idempotency but the case expects a reconciliation",

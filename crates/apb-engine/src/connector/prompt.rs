@@ -82,7 +82,7 @@ pub fn instruction_block(
         );
     }
 
-    if granted_functions(grants, docs).any(|f| f.idempotency.is_some()) {
+    if granted_functions(grants, docs).any(|f| f.send_once().is_some()) {
         out.push_str(&format!("\n{SEND_ONCE_PARAGRAPH}\n"));
     }
 
@@ -139,7 +139,7 @@ pub fn instruction_block(
                         Some(reason) => format!(" (deprecated: {reason})"),
                         None => String::new(),
                     };
-                    let once = if f.idempotency.is_some() {
+                    let once = if f.send_once().is_some() {
                         SEND_ONCE_TAG
                     } else {
                         ""
@@ -346,6 +346,12 @@ functions:
     url: "https://example.com/notes"
     body: "{{args}}"
     idempotency: { mode: none }
+  - name: add_label
+    description: Add a label
+    method: POST
+    url: "https://example.com/labels"
+    body: "{{args}}"
+    idempotency: { mode: repeatable }
 "#;
         let docs = BTreeMap::from([(
             "mock-tracker".to_string(),
@@ -359,9 +365,12 @@ functions:
         assert!(out.contains(&format!("- post_note{SEND_ONCE_TAG}: Post a note")));
         assert!(out.contains("- list_items: List items"));
         assert_eq!(out.matches(SEND_ONCE_PARAGRAPH).count(), 1);
-        // A grant without such a function gets neither.
-        let plain = instruction_block(&[grant(&["list_items"])], &[sample_connector()], &docs);
-        assert!(!plain.contains("send-once"));
+        // A grant without such a function gets neither; a repeatable write
+        // is not one.
+        for functions in [&["list_items"][..], &["list_items", "add_label"][..]] {
+            let plain = instruction_block(&[grant(functions)], &[sample_connector()], &docs);
+            assert!(!plain.contains("send-once"), "{functions:?}: {plain}");
+        }
     }
 
     #[test]
