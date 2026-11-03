@@ -291,6 +291,9 @@ fn policy_actions(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
                 Remedy::Manual {
                     detail: match refusal["requirement"].as_str() {
                         Some("cli_execution") => "start the unattended run with execution: cli",
+                        Some("unattended_caller") => {
+                            "start it attended, or start the outer run unattended"
+                        }
                         _ => "start the unattended run without supervision",
                     }
                     .into(),

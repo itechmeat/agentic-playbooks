@@ -585,8 +585,9 @@ The mode grants nothing. Trust, the irreversible consent and the launch
 policy are asked as for any start. A start that also passes `execution:
 "host"` (or resolves to host execution from the project's settings) or
 `supervise: "self"` is refused before any run file exists, with
-`policy_refusal` `unattended_unsupported` (`requirement` `cli_execution` or
-`autonomous_mode`, and a `detail`) and a `fix_requirement` start action with
+`policy_refusal` `unattended_unsupported` (`requirement` `cli_execution`,
+`autonomous_mode`, or `unattended_caller` for a start from a run step of an
+attended run, and a `detail`) and a `fix_requirement` start action with
 a `manual` remedy.
 An unattended run never falls back to host tasks. `run_status` carries
 `unattended: true`, and every next action says what the mode does at its

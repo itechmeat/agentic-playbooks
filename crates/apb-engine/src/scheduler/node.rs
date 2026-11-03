@@ -2086,9 +2086,12 @@ fn execute_node_kind(
                     // A read-only node's tree, compared before protect puts
                     // anything back, so a change to a protected path is seen
                     // as the read-only violation it is.
+                    // An error of the check (its evidence or journal) is
+                    // raised only after protect ran, so a protected path is
+                    // put back whatever the check met.
                     let read_only_violation = match read_only_before {
-                        Some(before) => before.finish(run_dir, workdir, journal)?,
-                        None => None,
+                        Some(before) => before.finish(run_dir, workdir, journal),
+                        None => Ok(None),
                     };
                     // --- 0.23.0 protected paths (C6): undo and name any change
                     // to a protected file before anything else reads the tree. ---
@@ -2096,6 +2099,7 @@ fn execute_node_kind(
                         Some(snapshot) => snapshot.check_and_restore(journal)?,
                         None => None,
                     };
+                    let read_only_violation = read_only_violation?;
                     // A sandboxed attempt's changes to what redirects git
                     // are put back and fail it like a protected path.
                     let protect_violation = super::protect::Violation::join(
@@ -4113,6 +4117,15 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
         && !(parallel::is_join(playbook, node) && parallel::requires_all_succeeded(playbook, node))
 }
 
+/// Whether `node` is read-only in a tier that may be the detected one.
+fn detected_read_only(node: &apb_core::schema::Node) -> bool {
+    node.read_only
+        && node
+            .kind
+            .isolation()
+            .is_none_or(|i| i.level != apb_core::isolation::Level::Full)
+}
+
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
 /// full context exceeds the threshold, old sections are compacted by a cheap model
 /// into context_compact.md, and a ContextCompacted event is returned, which drive
@@ -4123,15 +4136,6 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
 /// Returns None when compaction is disabled, the threshold is not exceeded, or
 /// everything old is already compacted (idempotent on resume). A model failure is
 /// not critical: it also returns None then, and the run works on the full context.
-/// Whether `node` is read-only in a tier that may be the detected one.
-fn detected_read_only(node: &apb_core::schema::Node) -> bool {
-    node.read_only
-        && node
-            .kind
-            .isolation()
-            .is_none_or(|i| i.level != apb_core::isolation::Level::Full)
-}
-
 pub(crate) fn maybe_compact_context(
     run_dir: &Path,
     workdir: &Path,

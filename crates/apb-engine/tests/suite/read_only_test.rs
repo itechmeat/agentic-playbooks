@@ -739,6 +739,28 @@ fn protect_still_restores_a_read_only_node_s_change() {
     let out = &finished(&events, "work")[0].1;
     assert!(out.starts_with("read_only_dirty: "), "{out}");
     assert!(out.contains("protected path modified: a.txt"), "{out}");
+
+    // The evidence cannot be written (a file stands where its directory
+    // goes): the check's error still leaves protect to put the file back.
+    let f = line(
+        "{ id: work, type: agent_task, prompt: \"read\", read_only: true, protect: [\"a.txt\"] }",
+    );
+    let _lock = common::env_lock();
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", &f.agent),
+        EnvVar::set(
+            "RO_AGENT",
+            "echo tampered > a.txt; : > .apb/runs/$APB_RUN_ID/read_only",
+        ),
+        EnvVar::set("RO_SCRATCH", &f.scratch),
+    ];
+    let res = run(&f.root, "ro", None, RunOptions::default());
+    assert!(
+        res.as_ref()
+            .map_or(true, |r| r.outcome != RunStatus::Succeeded),
+        "the run went on past a check that could not finish"
+    );
+    assert_eq!(fs::read_to_string(f.root.join("a.txt")).unwrap(), "alpha\n");
 }
 
 /// A detected-tier read-only node never joins a batch, so a sibling's write
