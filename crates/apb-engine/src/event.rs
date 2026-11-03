@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::EngineError;
 
 mod deferral_guard;
+mod run_guard;
 pub(crate) use deferral_guard::close as close_deferrals;
 use deferral_guard::{Change, DeferralTracker};
+use run_guard::RunGuardTracker;
 mod survey;
 pub use survey::{BadLine, DeferralGuardState, JournalSurvey, survey};
 
@@ -46,6 +48,11 @@ pub mod supervisor_action {
     pub const RUN_CONTINUE_FROM: &str = "run_continue_from";
     /// A note appended to the run context.
     pub const CONTEXT_APPEND: &str = "context_append";
+    /// A `node_retry` or `run_continue_from` the engine refused because it
+    /// would skip a person-only or approving gate (`approval_weakened`);
+    /// `node` is the directive's target, `detail` the refusal. The run
+    /// stays where it was.
+    pub const DIRECTIVE_REFUSED: &str = "directive_refused";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,6 +626,22 @@ pub enum EventPayload {
         /// request. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_digest: Option<String>,
+        /// The result snapshots a gate with `approves:` bound this request
+        /// to; an approving decision must carry its nonce. `None` for a gate
+        /// without `approves:` and for old logs; a shape this binary cannot
+        /// read is dropped. An older apb drops it too, which the run's
+        /// `run_guard` answers. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        binding: Option<crate::approval::ReviewBinding>,
+        /// The gate takes a decision only from a person's channel
+        /// ([`crate::decision_channel::DecisionChannel::is_person_channel`]).
+        /// Additive; guarded by `run_guard` like `binding`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        person_only: bool,
     },
     ReviewDecided {
         node: String,
@@ -639,6 +662,20 @@ pub enum EventPayload {
             deserialize_with = "lenient_decided_by"
         )]
         decided_by: Option<DecidedBy>,
+        /// The binding nonce the decision answered, for a bound request.
+        /// Display only. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<String>,
+        /// The surface the decision came through. `None` for the engine's
+        /// own decisions (they carry `decided_by`) and old logs; a name this
+        /// binary does not know reads as `unknown`, never as a person's
+        /// channel. Display only. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::decision_channel::lenient_channel"
+        )]
+        via: Option<crate::decision_channel::DecisionChannel>,
     },
     /// An open review request that will never be decided: a supervisor's
     /// directive (`node_retry`, `run_continue_from`) moved the run off the
@@ -1974,6 +2011,18 @@ pub enum EventPayload {
         #[serde(default)]
         open: Vec<String>,
     },
+    /// The features of the run's definition an older apb would silently
+    /// drop (`apb_core::validate::GuardedFeature` names). Written after
+    /// `run_provenance` and after each `patch_applied` (an empty list ends
+    /// the guard), and while the latest one is non-empty, after every
+    /// checkpoint in the same write. An apb that does not know it finds an
+    /// unknown event after the last checkpoint and refuses to continue the
+    /// run; one that does not know a feature it names refuses the same way.
+    /// Not a checkpoint. Additive.
+    RunGuard {
+        #[serde(default)]
+        requires: Vec<String>,
+    },
     /// The driver stopped with only deferred retries left and freed the
     /// run's busy lock; a waker resumes the run at `wake_at_ms` (epoch
     /// milliseconds). The run stays `running`. Not a checkpoint. Additive.
@@ -2045,8 +2094,29 @@ impl EventPayload {
         }
     }
 
+    /// A `review_requested` of a plain gate: no title, prompt,
+    /// recommendation, plan or binding. Fields added later default here, so
+    /// a construction does not name them.
+    pub fn review_requested(
+        node: impl Into<String>,
+        options: Vec<String>,
+        instruction: impl Into<String>,
+    ) -> Self {
+        EventPayload::ReviewRequested {
+            node: node.into(),
+            options,
+            title: None,
+            instruction: instruction.into(),
+            prompt: None,
+            recommendation: None,
+            plan_digest: None,
+            binding: None,
+            person_only: false,
+        }
+    }
+
     /// A `review_decided` as a review channel decision makes it: no
-    /// `decided_by`.
+    /// `decided_by`, binding or channel.
     pub fn review_decided(
         node: impl Into<String>,
         decision: impl Into<String>,
@@ -2059,6 +2129,8 @@ impl EventPayload {
             note: note.into(),
             plan_digest,
             decided_by: None,
+            binding: None,
+            via: None,
         }
     }
 }
@@ -2251,6 +2323,9 @@ pub struct EventLog {
     /// The run's open deferred retries, kept in step with the file so every
     /// checkpoint appended while one is open carries its guard.
     deferrals: DeferralTracker,
+    /// Whether the run's definition is guarded, kept in step with the file
+    /// so every checkpoint appended while it is carries its `run_guard`.
+    run_guard: RunGuardTracker,
     /// Test seam: the next append leaves this many bytes at the end of its
     /// buffer unwritten and fails, as a writer that dies mid-write would.
     #[cfg(test)]
@@ -2326,6 +2401,12 @@ impl EventLog {
         let (journal, whole_len) = read_journal_snapshot(run_dir, tolerate_torn_tail)?;
         settle_unknown(&journal, policy)?;
         let deferrals = DeferralTracker::new(fold_open_deferrals(&journal.events), whole_len);
+        let run_guard = RunGuardTracker::fold(
+            journal
+                .events
+                .iter()
+                .map(|e| e.payload.run_guard_requires()),
+        );
         let next_seq = journal
             .events
             .iter()
@@ -2347,6 +2428,7 @@ impl EventLog {
             known_len,
             last_append: AppendMark::NotWritten,
             deferrals,
+            run_guard,
             #[cfg(test)]
             fault_write_short: None,
         };
@@ -2519,6 +2601,18 @@ impl EventLog {
                 payload: EventPayload::DeferredRetryGuard { open },
             });
         }
+        // While the definition is guarded, a checkpoint is never the
+        // journal's last event either: the run guard follows it (after any
+        // deferral guard) in the same write.
+        if lines[0].payload.is_checkpoint()
+            && let Some(requires) = self.run_guard.requires_after_checkpoint()
+        {
+            lines.push(Event {
+                seq: self.next_seq + lines.len() as u64,
+                ts,
+                payload: EventPayload::RunGuard { requires },
+            });
+        }
         let mut buf = Vec::new();
         for line in &lines {
             serde_json::to_writer(&mut buf, line).map_err(|e| EngineError::Yaml(e.to_string()))?;
@@ -2534,6 +2628,7 @@ impl EventLog {
         self.known_len = self.file.metadata().map_or(0, |m| m.len());
         for line in &lines {
             self.deferrals.apply(line.payload.deferral_change());
+            self.run_guard.apply(line.payload.run_guard_requires());
         }
         self.deferrals.set_folded_to(self.known_len);
         let event = lines.swap_remove(0);
@@ -2564,6 +2659,7 @@ impl EventLog {
         }
         if len < self.deferrals.folded_to() {
             self.deferrals.reset();
+            self.run_guard = RunGuardTracker::default();
         }
         let from = self.deferrals.folded_to();
         let mut reader = File::open(&self.path)?;
@@ -2574,6 +2670,7 @@ impl EventLog {
         for line in bytes[..whole].split(|b| *b == b'\n') {
             if let Ok(event) = serde_json::from_slice::<Event>(line) {
                 self.deferrals.apply(event.payload.deferral_change());
+                self.run_guard.apply(event.payload.run_guard_requires());
             }
         }
         self.deferrals.set_folded_to(from + whole as u64);
@@ -3088,8 +3185,25 @@ fn is_event_tag(kind: &str) -> bool {
 /// at all, stays an error.
 fn push_line(line: &str, out: &mut JournalRead) -> Result<(), EngineError> {
     let err = match serde_json::from_str::<Event>(line) {
+        // A guard naming a feature a newer apb added is as unknown to this
+        // binary as a newer event type.
         Ok(ev) => {
-            out.events.push(ev);
+            match ev
+                .payload
+                .run_guard_requires()
+                .and_then(run_guard::newer_feature)
+            {
+                Some(feature) => out.unknown.push(UnknownEvent {
+                    seq: ev.seq,
+                    ts: ev.ts,
+                    kind: if is_event_tag(feature) {
+                        format!("run_guard {feature}")
+                    } else {
+                        "run_guard".to_string()
+                    },
+                }),
+                None => out.events.push(ev),
+            }
             return Ok(());
         }
         Err(e) => EngineError::Yaml(e.to_string()),
@@ -3140,6 +3254,15 @@ impl EventPayload {
             // a debug build); a journal that does reads none open after it.
             EventPayload::RunAborted { .. } | EventPayload::RunFinished { .. } => Change::CloseAll,
             _ => Change::None,
+        }
+    }
+
+    /// The `requires` of a `run_guard`; `None` for every other event. The
+    /// one input of the event log's run guard state.
+    fn run_guard_requires(&self) -> Option<&[String]> {
+        match self {
+            EventPayload::RunGuard { requires } => Some(requires),
+            _ => None,
         }
     }
 

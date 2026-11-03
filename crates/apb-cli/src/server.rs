@@ -58,6 +58,7 @@ fn issue_cmd() -> ExitCode {
             println!();
             println!("key id: {}", record.id);
             println!("This key is shown once and is stored only as a hash. Save it now.");
+            println!("{}", apb_core::doctor::SERVER_KEY_NOTE);
             println!(
                 "A running dashboard picks the change up within a minute, and immediately after any failed request."
             );

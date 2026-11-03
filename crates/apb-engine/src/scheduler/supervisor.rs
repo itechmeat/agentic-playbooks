@@ -450,6 +450,36 @@ pub(crate) fn monitor_supervisor_heartbeat(
     Ok(())
 }
 
+/// Refuses a move directive (`Retry`, `ContinueFrom`) whose target a
+/// person-only or approving gate of `playbook` stands before with no
+/// decision passing it ([`super::approval::skips_gate`]): journals the
+/// refusal as a `directive_refused` supervisor action, consumes the
+/// directive and leaves the run where it is (an open request stays open).
+/// `Ok(false)` for any other command or a directive that skips nothing.
+pub(crate) fn refuse_gate_skip(
+    run_dir: &Path,
+    log: &mut EventLog,
+    control_cursor: &mut Option<u64>,
+    playbook: &Playbook,
+    cmd: &Control,
+    seq: u64,
+) -> Result<bool, EngineError> {
+    let (Control::Retry { node, .. } | Control::ContinueFrom { node }) = cmd else {
+        return Ok(false);
+    };
+    let Some(why) = super::approval::skips_gate(playbook, &read_all(run_dir)?, node) else {
+        return Ok(false);
+    };
+    log.append(EventPayload::SupervisorAction {
+        action: crate::event::supervisor_action::DIRECTIVE_REFUSED.into(),
+        node: Some(node.clone()),
+        detail: super::approval::refusal_line(&why),
+    })?;
+    *control_cursor = Some(seq);
+    write_control_cursor(run_dir, seq)?;
+    Ok(true)
+}
+
 /// Applies a directive that moves the run to a named node - `Retry` (run it
 /// again, optionally with a one-shot prompt override) or `ContinueFrom` - and
 /// consumes it: journals the `SupervisorAction`, then persists the cursor, then
@@ -678,6 +708,9 @@ pub(crate) fn park_for_supervisor(
             Control::ContextAppend { .. } => continue,
             Control::Progress { .. } => continue,
             directive @ (Control::Retry { .. } | Control::ContinueFrom { .. }) => {
+                if refuse_gate_skip(run_dir, log, control_cursor, playbook, &directive, seq)? {
+                    continue;
+                }
                 apply_move_directive(
                     run_dir,
                     log,

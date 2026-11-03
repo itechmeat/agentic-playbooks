@@ -130,6 +130,26 @@ pub(crate) fn ask_terminal(lines: &[String], question: &str) -> Option<bool> {
     Some(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
+/// Prints `lines` and asks `question` on the controlling terminal, giving
+/// back the line typed (trimmed); `None` when there is no person to ask
+/// (stdin or stderr is not a terminal, or the terminal does not open).
+pub(crate) fn ask_typed(lines: &[String], question: &str) -> Option<String> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return None;
+    }
+    let tty = open_tty()?;
+    let mut err = std::io::stderr();
+    for l in lines {
+        let _ = writeln!(err, "{l}");
+    }
+    let _ = write!(err, "{question} ");
+    let _ = err.flush();
+    let mut line = String::new();
+    std::io::BufReader::new(tty).read_line(&mut line).ok()?;
+    Some(line.trim().to_string())
+}
+
 #[cfg(unix)]
 pub(crate) fn open_tty() -> Option<std::fs::File> {
     std::fs::File::open("/dev/tty").ok()

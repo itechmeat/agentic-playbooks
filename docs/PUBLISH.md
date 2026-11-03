@@ -42,6 +42,49 @@ irreversible playbook ("this run may publish"), a triggered start of it is
 refused, and an automatic review decision upstream of it is refused (V73).
 The step's own consent covers "publish exactly this".
 
+### Acting on an approval, and a person-only consent
+
+```yaml
+  - id: review
+    type: human_review
+    approves: { results: [implement] }
+  - id: publish
+    type: publish
+    from: implement
+    remote: origin
+    requires_approval: { gate: review }   # optional
+    person_only: true                      # optional
+```
+
+`requires_approval` makes the publish node act only on the approval of
+gate `review`. Before every plan, after a resume and again before the push
+that follows a consent, the node checks that approval exactly like any
+node that requires one (the approving decision binds every required node,
+nothing of it ran again, its snapshots verify and are complete, and with
+`live: check` every bound file still hashes to its approved digest); a
+failure finishes the node failed with the approval code (for example
+`approval_stale: implement ran again after approval`) before anything is
+planned. When `from` is among the approved nodes, `HEAD` must be the
+commit its bound snapshot recorded, else the plan refuses with
+`approval_mismatch`; a bound snapshot that recorded no commit (its tree
+had none yet when it settled) refuses it too, since there is nothing
+approved to compare `HEAD` with. The plan digest then gains one line,
+`approval=<binding nonce>`, so the consent names what was approved; a plan
+of a node without `requires_approval` keeps exactly the digest it had
+before. An approval is never a consent: the push still needs a `publish`
+decision with the plan's nonce. An older apb reads `approval_mismatch` as
+`unrecognized`.
+
+`person_only: true` makes the consent a person's: only `apb publish
+approve` (or `apb review`) at an
+interactive terminal outside a run step, after the typed confirmation, and
+the dashboard with a signed-in session decide it. MCP, the CLI without a
+terminal, the HTTP API with a bearer key, a dashboard without keys and a run
+step are refused before anything is queued, and the drive consumes no
+channel entry that was not posted through a person's channel. The request
+carries `person_only`, and the decision records the channel it came
+through (`review_decided.via`).
+
 ## The flow
 
 1. **Pin.** Before the first acting node runs, apb reads the remote's push
@@ -175,6 +218,7 @@ journaled; an accepted one is safe to journal and show.
 | `url_rewritten` | The git configuration rewrites the remote URL to another address. |
 | `remote_writable` | The file remote lies inside the working tree or a path a node may write, so its hooks are not the operator's. Also when its path cannot be resolved, and every file remote when a `~` writable path has no home to resolve against. |
 | `history_unreadable` | The commits the push would carry could not be read from the tree. |
+| `approval_mismatch` | The commit to push is not the commit the approved result was taken at, or the approved result recorded no commit (`requires_approval`; the detail names both commits, or says none was recorded). |
 | `unrecognized` | The run recorded a refusal this apb does not know (the detail names its code). |
 
 ## Deciding

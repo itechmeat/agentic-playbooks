@@ -149,21 +149,31 @@ pub struct RunWaitResult {
 pub const REVIEW_NEXT: &str =
     "relay pending_review to the user, record it with review_decide, then call run_wait again";
 
+/// What a caller does at a gate only a person decides (`person_only`): no
+/// agent channel records the decision, so the host asks and waits.
+pub const PERSON_ONLY_NEXT: &str = "only a person decides pending_review: ask the user to decide at an interactive terminal (pending_review.how_to_decide) or on the run page of a dashboard where they are signed in; do not call review_decide, which is refused for this gate; then call run_wait again";
+
 /// What a caller does at an open publish gate: the person consents to the
 /// exact plan, so the plan is shown before the nonce is passed on.
 pub const PUBLISH_NEXT: &str = "relay pending_review.publish (the exact plan: URL, branch, commits, remote state) to the user; only after they saw it, record their decision with review_decide and the plan's nonce, then call run_wait again";
 
 impl RunWaitResult {
     /// The next step at the open review gate the wait stopped on:
+    /// [`PERSON_ONLY_NEXT`] for a gate only a person decides, else
     /// [`PUBLISH_NEXT`] for a publish gate, else [`REVIEW_NEXT`].
     pub fn review_next(&self) -> &'static str {
-        let publish = self
+        let pending = self
             .view
             .progress
             .as_ref()
-            .and_then(|p| p.pending_review.as_ref())
-            .is_some_and(|r| r.publish.is_some());
-        if publish { PUBLISH_NEXT } else { REVIEW_NEXT }
+            .and_then(|p| p.pending_review.as_ref());
+        if pending.is_some_and(|r| r.person_only) {
+            PERSON_ONLY_NEXT
+        } else if pending.is_some_and(|r| r.publish.is_some()) {
+            PUBLISH_NEXT
+        } else {
+            REVIEW_NEXT
+        }
     }
 
     /// The pause of a paused (or pausing) run: reason, who, since and until.

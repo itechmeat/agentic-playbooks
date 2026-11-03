@@ -109,6 +109,8 @@ mod scope_move_test;
 mod send_policy_validate_test;
 #[path = "suite/server_auth_test.rs"]
 mod server_auth_test;
+#[path = "suite/validate_approval_test.rs"]
+mod validate_approval_test;
 #[path = "suite/validate_audience_test.rs"]
 mod validate_audience_test;
 #[path = "suite/validate_baseline_test.rs"]

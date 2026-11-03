@@ -7,7 +7,9 @@
 //! the pinned one and the operator's config rewrites it nowhere else;
 //! `HEAD` is the source's `after`, on the branch it committed on; the
 //! branch is a valid name; the remote can be listed; and the push is a
-//! fast-forward of what the remote holds.
+//! fast-forward of what the remote holds. A node that requires an approval
+//! also needs `HEAD` to be the commit its approved source result was taken
+//! at, and the plan digest names that approval.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +40,22 @@ pub struct PlanInput<'a> {
     pub writable: &'a [PathBuf],
     pub scrub: &'a [String],
     pub abort: Option<&'a std::sync::atomic::AtomicBool>,
+    /// The approval the node acts on, when it declares `requires_approval`.
+    pub approval: Option<PlanApproval<'a>>,
+}
+
+/// The approval a publish node with `requires_approval` acts on, as the
+/// drive checked it before planning.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanApproval<'a> {
+    /// The binding nonce of the approving decision: a line of the plan
+    /// digest.
+    pub nonce: &'a str,
+    /// The commit the approved result of the source node was taken at:
+    /// `None` when the source is not among the approved nodes, `Some(None)`
+    /// when it is but its snapshot recorded no commit (nothing to compare
+    /// `HEAD` with, so the plan is refused).
+    pub head: Option<Option<&'a str>>,
 }
 
 /// A plan a person can consent to.
@@ -220,6 +238,28 @@ fn plan_inner(input: &PlanInput<'_>) -> Result<Planned, Refused> {
         None => return Err(Refusal::RemoteUnreachable.into()),
     }
     let head = provenance::head(input.tree).ok_or(Refusal::HeadMoved)?;
+    match input.approval.and_then(|a| a.head) {
+        Some(Some(approved)) if approved != head => {
+            return Err(Refused(
+                Refusal::ApprovalMismatch,
+                Some(format!(
+                    "(approved at {}, HEAD is {})",
+                    apb_core::publish::short_sha(approved),
+                    apb_core::publish::short_sha(&head)
+                )),
+            ));
+        }
+        Some(None) => {
+            return Err(Refused(
+                Refusal::ApprovalMismatch,
+                Some(format!(
+                    "(the approved result recorded no commit, HEAD is {})",
+                    apb_core::publish::short_sha(&head)
+                )),
+            ));
+        }
+        _ => {}
+    }
     let local_branch = provenance::branch(input.tree);
     let heads = remote.heads(None).ok_or(Refusal::RemoteUnreachable)?;
     drop(remote);
@@ -301,14 +341,17 @@ fn plan_inner(input: &PlanInput<'_>) -> Result<Planned, Refused> {
     // Every commit of the run the push carries, listed or not.
     let this_run = made_off_remote.len();
     let shas: Vec<String> = commits.iter().map(|c| c.commit.sha.clone()).collect();
-    let digest = apb_core::publish::plan_digest(&PlanFacts {
-        node: input.node,
-        url: url.as_str(),
-        branch: &branch,
-        after: &after,
-        remote_before: remote_before.as_deref(),
-        commits: &shas,
-    });
+    let digest = apb_core::publish::plan_digest_with(
+        &PlanFacts {
+            node: input.node,
+            url: url.as_str(),
+            branch: &branch,
+            after: &after,
+            remote_before: remote_before.as_deref(),
+            commits: &shas,
+        },
+        input.approval.map(|a| a.nonce),
+    );
     Ok(Planned::Ready(Box::new(Plan {
         nonce: apb_core::publish::nonce(&digest),
         digest,

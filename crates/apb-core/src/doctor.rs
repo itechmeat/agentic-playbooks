@@ -135,7 +135,8 @@ pub fn diagnose(root: &Path) -> DoctorReport {
 
     // The launch floors of this project's playbooks, and the other apb
     // binaries a person could run here: an older one ignores every launch
-    // setting.
+    // setting, and starts a playbook with approvals or person-only gates
+    // as plain gates (the run guard only stops it continuing such a run).
     let (floors_ok, floors_detail) = launch_floors_line(root);
     r.push(
         if floors_ok {
@@ -147,7 +148,23 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         floors_detail,
     );
     if let Some(other) = crate::launch::other_binaries_line() {
-        r.push(CheckStatus::Warn, "launch policy", other);
+        r.push(
+            CheckStatus::Warn,
+            "launch policy",
+            format!(
+                "{other}; an older apb also starts a playbook that uses `approves`, `requires_approval` or `person_only` with plain gates"
+            ),
+        );
+    }
+
+    // A dashboard key is a person's credential: its holder can sign in and
+    // decide a person-only gate there (the bearer refusal guards against
+    // mistakes only).
+    if let Some(line) = crate::server_auth::load()
+        .ok()
+        .and_then(|f| server_keys_line(f.keys.len()))
+    {
+        r.push(CheckStatus::Ok, "server keys", line);
     }
 
     let reg = match Registry::open(root) {
@@ -388,6 +405,18 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     r
 }
 
+/// What a dashboard key is, said where a key is issued and by `apb
+/// doctor` while any is issued: a key is a person's credential, since its
+/// holder can sign in to the dashboard, and a signed-in session decides
+/// person-only gates. A bearer request is refused there, which guards
+/// against mistakes only.
+pub const SERVER_KEY_NOTE: &str = "A server key is a person's credential: whoever holds it can sign in to the dashboard and decide person-only gates there. Do not hand it to an agent, a script or CI that must not decide them.";
+
+/// The `server keys` line of `apb doctor`: `None` while no key is issued.
+fn server_keys_line(keys: usize) -> Option<String> {
+    (keys > 0).then(|| format!("{keys} issued. {SERVER_KEY_NOTE}"))
+}
+
 /// The launch floors line of `apb doctor`: `(ok, detail)`, not ok when the
 /// floor file does not read. Names the floor of each playbook of the
 /// project at `root` that has one (its record, else its store's scan).
@@ -426,4 +455,25 @@ fn launch_floors_line(root: &Path) -> (bool, String) {
         floors.join(", ")
     };
     (true, detail)
+}
+
+#[cfg(test)]
+mod server_key_tests {
+    use super::*;
+
+    /// The doctor says what a key is while one is issued, and nothing
+    /// without one.
+    #[test]
+    fn the_server_keys_line_names_a_key_a_persons_credential() {
+        assert_eq!(server_keys_line(0), None);
+        let line = server_keys_line(2).unwrap();
+        assert!(
+            line.starts_with("2 issued. A server key is a person's credential"),
+            "{line}"
+        );
+        assert!(
+            line.contains("Do not hand it to an agent, a script or CI"),
+            "{line}"
+        );
+    }
 }

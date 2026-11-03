@@ -276,14 +276,16 @@ pub(crate) struct WorkspaceQuery {
 }
 
 /// The status a tool-layer refusal answers with: 404 for what is not
-/// there, 409 for a conflict (a run step, a live run, a stale state), 422
-/// for anything else the tool refused.
+/// there, 409 for a conflict (a run step, a live run, a stale state), 403
+/// for a channel that may not take it, 422 for anything else the tool
+/// refused.
 pub(crate) fn tool_refusal(e: apb_mcp::tools::ToolError) -> Response {
     use apb_mcp::tools::ToolError;
     match e {
         ToolError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
         ToolError::Conflict(what) => (StatusCode::CONFLICT, what).into_response(),
         ToolError::Engine(what) => (StatusCode::UNPROCESSABLE_ENTITY, what).into_response(),
+        e @ ToolError::Refused { .. } => (StatusCode::FORBIDDEN, e.to_string()).into_response(),
     }
 }
 

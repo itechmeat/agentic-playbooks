@@ -798,3 +798,160 @@ async fn a_keyless_dashboard_refuses_a_cross_site_write() {
         assert_ne!(status, StatusCode::FORBIDDEN, "{extra:?}: {body}");
     }
 }
+
+const PERSON_ONLY: &str = "schema: 2\nid: po\nname: po\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: gate, type: human_review, person_only: true }\n  - { id: ok, type: finish, outcome: success }\nedges:\n  - { from: start, to: gate }\n  - { from: gate, to: ok }\n";
+
+/// Run `r1` of [`PERSON_ONLY`] with its gate's request open.
+fn person_only_run(root: &std::path::Path) -> std::path::PathBuf {
+    use apb_engine::event::{EventLog, EventPayload};
+    let dir = root.join(".apb/runs/r1");
+    let mut log = EventLog::create(&dir).unwrap();
+    std::fs::write(dir.join("playbook.yaml"), PERSON_ONLY).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "po".into(),
+        version: "1.0.0".into(),
+        definition: None,
+    })
+    .unwrap();
+    let mut req = EventPayload::review_requested(
+        "gate",
+        vec!["approve".into(), "reject".into()],
+        String::new(),
+    );
+    if let EventPayload::ReviewRequested { person_only, .. } = &mut req {
+        *person_only = true;
+    }
+    log.append(req).unwrap();
+    dir
+}
+
+fn decision(extra: &[(&str, &str)]) -> Request<Body> {
+    let mut req = Request::post("/api/runs/r1/review")
+        .header("host", "127.0.0.1:7321")
+        .header("content-type", "application/json");
+    for (k, v) in extra {
+        req = req.header(*k, *v);
+    }
+    req.body(Body::from(r#"{"node":"gate","decision":"approve"}"#))
+        .unwrap()
+}
+
+/// A person-only gate takes a decision from a signed-in browser session
+/// only: a dashboard without keys and a bearer key are refused with 403
+/// and queue nothing; the session's decision is stamped with its channel.
+/// The session here is signed in with the very key the bearer request
+/// carried: a key is a person's credential, so the bearer refusal guards
+/// against mistakes only (docs/GUARDRAILS.md).
+#[tokio::test]
+async fn a_person_only_gate_takes_only_a_dashboard_session() {
+    let dir = seed();
+    let run = person_only_run(dir.path());
+
+    let keyless = AppState::new(dir.path().to_path_buf());
+    let res = build_router(keyless.clone())
+        .oneshot(decision(&[(CSRF_HEADER, CSRF_VALUE)]))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "keyless");
+    assert!(!run.join("reviews.jsonl").exists());
+
+    let (key, state) = authed(dir.path().to_path_buf());
+    let bearer = format!("Bearer {key}");
+    let res = build_router(state.clone())
+        .oneshot(decision(&[("authorization", &bearer)]))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "bearer");
+    assert!(!run.join("reviews.jsonl").exists());
+
+    let login = Request::post("/api/auth/login")
+        .header("host", "127.0.0.1:7321")
+        .header("content-type", "application/json")
+        .header(CSRF_HEADER, CSRF_VALUE)
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "key": key.to_string() })).unwrap(),
+        ))
+        .unwrap();
+    let res = build_router(state.clone()).oneshot(login).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "login with the key");
+    let cookie = res
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| c.split(';').next())
+        .expect("a session cookie")
+        .to_string();
+    assert!(
+        cookie.starts_with(&format!("{SESSION_COOKIE}=")),
+        "{cookie}"
+    );
+    let res = build_router(state.clone())
+        .oneshot(decision(&[("cookie", &cookie), (CSRF_HEADER, CSRF_VALUE)]))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "session");
+    let queued = apb_engine::review::read_reviews_after(&run, None).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(
+        queued[0].channel,
+        Some(apb_engine::decision_channel::DecisionChannel::DashboardSession)
+    );
+}
+
+/// The run payload says who may take a person-only gate's action here: a
+/// dashboard without keys and a bearer key cannot (`keyless_dashboard`,
+/// `bearer_key`), a signed-in session can.
+#[tokio::test]
+async fn the_run_payload_names_the_callers_refusal() {
+    let dir = seed();
+    person_only_run(dir.path());
+    let refusal = |body: &serde_json::Value| {
+        body["next_actions"]["actions"]
+            .as_array()
+            .and_then(|a| a.iter().find(|a| a["code"] == "decide_review"))
+            .map(|a| a["caller_refusal"].clone())
+            .expect("a decide_review action")
+    };
+
+    let keyless = AppState::new(dir.path().to_path_buf());
+    let (status, body) = send(
+        &keyless,
+        Request::get("/api/runs/r1")
+            .header("host", "127.0.0.1:7321")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refusal(&body), "keyless_dashboard", "{body}");
+
+    let (key, state) = authed(dir.path().to_path_buf());
+    let (_, body) = send(
+        &state,
+        Request::get("/api/runs/r1")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refusal(&body), "bearer_key", "{body}");
+
+    let token = server_auth::random_token().unwrap();
+    {
+        let key_id = state.auth.live_key_ids().into_iter().next().unwrap();
+        state.auth.sessions().insert(
+            server_auth::hash_hex(&token),
+            apb_core::clock::now_ms(),
+            key_id,
+        );
+    }
+    let (_, body) = send(
+        &state,
+        Request::get("/api/runs/r1")
+            .header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(refusal(&body).is_null(), "{body}");
+}

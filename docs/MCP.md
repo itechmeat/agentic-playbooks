@@ -106,7 +106,7 @@ Mutations (destructive):
 | `run_notify` | Change whether a person hears about a live run: `notify` `true` (the run's current target, or the machine's), `false`, or `{ on, finished }` with only transitions and end-of-run outcomes it notifies about already. Never a target (the argument has no such field, so the call fails as invalid parameters), never a wider list (`invalid_notify`; on a run that is off, the bound is the list it last had, or else the default): the person changes those in the dashboard or with `apb notify`. The target is checked now and its digests pinned; `notify_unavailable` when it cannot be used, `run_ended` for a run that ended. Answers with the run's `notify` block. Not offered to a supervisor session. See Notifications below |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `run_intent_resolve` | Records a person's decision on a send whose outcome is not known (`run_id`, `intent`: the `si-...` id the outcome's `call outcome unknown` gap and `apb intent list` name, not the `--intent` label; `sent`, optional `note`): `sent: true` makes a repeat of the send answer `already_sent`, `false` lets it go out again. Ask the user first and pass on only their answer, never decide it alone. Refused for a send whose outcome is known or that is still in flight. A subagent (a host task's or an agent step's) must never call it and reports the send as a finding instead; like `review_decide` this is an instruction, since the server cannot tell a person's session from a subagent sharing it (the CLI `apb intent resolve` refuses inside a run). See Run outcome below and "Sending once" in CONNECTORS.md |
-| `review_decide` | Decide a run's gate: a human_review node, or a publish node (`run_id`, `node`, `decision`, optional `note`, and for a publish node `nonce`). A publish gate's `pending_review` carries `publish` (the plan: `url`, `branch`, `after`, `remote_before`, `commits` with `this_run` and `apb_run`, `omitted`, `this_run`: how many of all the commits the push carries this run made, `outside_push_suspected`, `plan_digest`, `nonce`): show the person that exact plan first, then pass `decision: publish` with `nonce` only after they saw it and agreed; never decide it alone. A missing nonce is refused, a stale one is a conflict that names the current plan (show it and ask again); `skip` needs no nonce. A subagent must never call it for a publish gate. See `docs/PUBLISH.md`. Optional `request`: the journal seq of the review request you decide (a next action's `arguments.request`); a request a later round replaced, or one already decided, is refused as a conflict |
+| `review_decide` | Decide a run's gate: a human_review node, or a publish node (`run_id`, `node`, `decision`, optional `note`, and for a publish node `nonce`). A publish gate's `pending_review` carries `publish` (the plan: `url`, `branch`, `after`, `remote_before`, `commits` with `this_run` and `apb_run`, `omitted`, `this_run`: how many of all the commits the push carries this run made, `outside_push_suspected`, `plan_digest`, `nonce`): show the person that exact plan first, then pass `decision: publish` with `nonce` only after they saw it and agreed; never decide it alone. A missing nonce is refused, a stale one is a conflict that names the current plan (show it and ask again); `skip` needs no nonce. A subagent must never call it for a publish gate. See `docs/PUBLISH.md`. Optional `request`: the journal seq of the review request you decide (a next action's `arguments.request`); a request a later round replaced, or one already decided, is refused as a conflict. A gate with `approves` carries `pending_review.binding` (the bound snapshots and their `nonce`): an approving decision needs that `nonce`, a stale one is a conflict naming the current binding. A gate with `pending_review.person_only` refuses this tool (`refused (agent_channel)`, and `run_step` inside a run step); ask the person to decide at a terminal or on the dashboard. From inside a run step, a gate of the step's own run tree is refused (`run_step_own_run`). See Approvals and person-only gates below |
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
 | `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`, or a host task submitted as `blocked`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"`. Optional `request`: the journal seq of the question you answer (a next action's `arguments.request`); an answer to a question a later round replaced, or to one that already has an answer, is refused as a conflict |
 | `run_task_submit` | Host execution mode: submit a subagent's reply to a pending host task (`run_id`, `task_id`, `status` `succeeded`, `failed` or `blocked`, `output` verbatim, optional `usage`, `note`, `model`, and `findings` and `warnings`: problems the subagent saw and did not fix, and what a person should check, in the shapes of Run outcome below; malformed entries are dropped and counted as `notes_dropped` in the answer, with `notes_dropped_reasons` saying why, and none of them changes the task's result); attributed `submitted_by: host` with the MCP client name. A parent run accepts its sub-playbook runs' tasks |
@@ -456,7 +456,10 @@ run is parked on an undecided `human_review` gate, the moment a supervisor
 often notices that an earlier node went wrong: the driver withdraws the open
 review (a `review_withdrawn` event; the gate is no longer pending and the
 decision surfaces refuse it), moves to the named node, and asks for the review
-again when the gate is reached anew. A `supervisor_patch_playbook` queued behind
+again when the gate is reached anew. A directive to a node behind a
+person-only or approving gate no decision passed is refused instead
+(`directive_refused`, see "Approvals and person-only gates"); a node before
+the gate, the producer of what it approves for one, is always allowed. A `supervisor_patch_playbook` queued behind
 such a directive is applied right after it.
 
 `rebind` gates `supervisor_rebind_profile { token, node, profile, scope?,
@@ -552,8 +555,12 @@ index of the one to lead with, and `stop` is one verdict over all of them:
   supply (`options` and `default` for a choice, `hint` for free text, and
   `token` for a supervisor tool);
 - `principals`: whom the run takes it from (`person`, `operator`, `host`,
-  `supervisor`), `available_to_caller` and `caller_refusal` for this session
-  (a supervisor session takes only the supervisor's actions), and
+  `supervisor`; `person` alone for a person-only gate),
+  `available_to_caller` and `caller_refusal` for this session (a code from
+  a closed list: a supervisor session takes only the supervisor's actions,
+  a person-only gate refuses this server, a run step never takes its own
+  run's; see Approvals and person-only gates below), `person_only` on a
+  gate only a person decides, and
   `relay_to_person` when you pass the choice to your person rather than
   make it;
 - `ready` and `not_ready`, `auto` (what happens without anyone: `at` with
@@ -566,7 +573,7 @@ index of the one to lead with, and `stop` is one verdict over all of them:
   such as an operator pause), and `reason`, one line.
 
 An action never carries a param value or a token; a nonce appears only on
-the publish gate it answers, and every text is redacted with the secret
+the publish gate or the bound review gate it answers, and every text is redacted with the secret
 values of the run it acts on. The tool that takes an action checks
 everything again, so an action shown as available can still be refused. A
 start that is refused before a run exists answers `start_actions` beside
@@ -577,6 +584,74 @@ start that is refused before a run exists answers `start_actions` beside
 `run_doctor`, `manual`). `playbook_adopt_report`'s `fit` and the catalog's
 `fit: true` entries carry the same `start_actions` for what a start would
 need.
+
+## Approvals and person-only gates
+
+A `human_review` may declare `approves: { results: [<node>...] }`: its
+request is bound to the latest stored result snapshots of those nodes, and
+a later node with `requires_approval: { gate: <review> }` starts only on an
+approval of exactly those bytes (docs/HOWTO-authoring.md "Approving exact
+results", docs/GUARDRAILS.md "Approvals and person-only gates").
+
+- **Reading.** `pending_review.binding` (in `run_status`, `run_wait` and
+  `run_report`) lists the bound snapshots (`node`, `execution`, `item`,
+  `settlement_seq`, `snapshot_id`, `incomplete`, `redacted`, `omitted`),
+  the named nodes with nothing to bind (`missing`: `not_run` or
+  `no_snapshot`; approving does not approve them) and the binding `nonce`.
+  `run_results` and `run_result_read` show the snapshots themselves.
+- **Deciding.** Show the person what the binding names, then pass
+  `review_decide` with the approving option and `nonce`. A missing nonce is
+  refused naming the binding; a nonce of an earlier request is a conflict
+  that names the current one (a loop asks anew, even when the snapshots are
+  the same); a non-approving option needs no nonce.
+- **What fails later.** A node whose approval check fails finishes failed
+  with `approval_missing`, `approval_stale`, `approval_snapshot_unreadable`,
+  `approval_incomplete`, `approval_unverifiable` or, for a publish node,
+  `approval_mismatch`, before any attempt: when its visit is admitted and
+  again as each execution begins (a resume after a pause, a deferred retry,
+  a list item). An approval never replaces the
+  publish consent.
+
+A gate with `person_only: true` (`pending_review.person_only`) is decided
+only through a person's channel: `apb review` at an interactive terminal
+after the typed confirmation, or the dashboard with a signed-in session.
+This server is never one: `review_decide` answers a tool error `refused
+(agent_channel): ...` naming both ways (`run_step` when the server runs
+inside a run step), and nothing is queued. `run_wait`'s `instruction` at
+such a gate says to ask the person to decide at a terminal
+(`pending_review.how_to_decide`) or on the dashboard, never to call
+`review_decide`, then to wait again; its next action has `principals:
+[person]`, `available_to_caller: false` and `caller_refusal:
+agent_channel`.
+
+From inside a run step (`APB_RUN_ID` or `APB_HOST_TASK` in the server's
+environment), `review_decide`, `run_answer` for a question a person
+answers and `run_intent_resolve` refuse the step's own run tree with
+`run_step_own_run`, on every gate: the run, its ancestors and every
+descendant of them, siblings included; a tree that cannot be read whole
+refuses the step too.
+
+A dashboard key from `apb server key issue` is a person's credential:
+whoever holds it can sign in to the dashboard and decide a person-only gate
+there, so the HTTP `bearer_key` refusal guards against mistakes only. Never
+hand a key to a host agent or a script that must not decide person-only
+gates. `supervisor_patch_playbook` (either scope) refuses a patch that
+weakens a person-only gate or an approval (`approval_weakened`); an in-run
+patch also when it changes where an option of such a gate routes, or
+continues past such a gate no passing decision of the current visit
+answered. The same check holds `supervisor_run_continue_from` and
+`supervisor_node_retry`: a directive past such a gate is refused, journaled
+as a `supervisor_action` `directive_refused`, and the run stays where it
+was (an open request stays open). `run_resume` with a `from_node` past such
+a gate is refused with `agent_channel` (`run_step` inside a run step): only
+a person resumes past it, at a terminal or on a signed-in dashboard
+(docs/GUARDRAILS.md "Moving a run past a gate").
+
+The `caller_refusal` codes, the same on MCP, the HTTP API and the CLI:
+`read_only_server`, `supervisor_only`, `relay_to_person`,
+`not_this_caller`, `agent_channel`, `run_step`, `no_terminal`,
+`keyless_dashboard`, `bearer_key`, `run_step_own_run` (meanings in
+docs/GUARDRAILS.md "Caller refusal codes").
 
 ## Unattended runs
 

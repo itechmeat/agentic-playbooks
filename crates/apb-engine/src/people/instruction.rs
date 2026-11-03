@@ -31,6 +31,41 @@ pub fn review_instruction(
     options: &[String],
     prompt: Option<&str>,
 ) -> String {
+    review_instruction_for(node_id, title, options, prompt, false)
+}
+
+/// The decision mechanics of a gate only a person decides
+/// (`person_only`), or of one whose open request binds snapshots (`nonce`,
+/// the binding nonce an approving decision carries). A person-only gate
+/// names the terminal and the dashboard only: no agent channel decides it.
+pub fn gate_how_to_decide(node_id: &str, person_only: bool, nonce: Option<&str>) -> String {
+    let with_nonce = nonce.map(|n| format!(" --nonce {n}")).unwrap_or_default();
+    if person_only {
+        format!(
+            "Only a person decides this gate: run `apb review <run-id> {node_id} --decision <option>{with_nonce}` \
+             at an interactive terminal outside a run step and type the option to confirm, or decide on the run page \
+             of a dashboard where you are signed in. An agent cannot decide it: ask the person, then wait."
+        )
+    } else if let Some(n) = nonce {
+        format!(
+            "To decide, run `apb review <run-id> {node_id} --decision <option>{with_nonce}` \
+             or call the review_decide MCP tool with the same node and decision and nonce `{n}`."
+        )
+    } else {
+        review_how_to_decide(node_id)
+    }
+}
+
+/// [`review_instruction`] of a gate only a person decides when
+/// `person_only` is set: the same line with [`gate_how_to_decide`]'s
+/// mechanics.
+pub fn review_instruction_for(
+    node_id: &str,
+    title: Option<&str>,
+    options: &[String],
+    prompt: Option<&str>,
+    person_only: bool,
+) -> String {
     let label = title
         .map(str::trim)
         .filter(|t| !t.is_empty())
@@ -44,14 +79,29 @@ pub fn review_instruction(
     format!(
         "The run is paused at the human-review gate \"{label}\" and needs your decision.{guidance} \
          Available decisions: {opts}. {}",
-        review_how_to_decide(node_id)
+        gate_how_to_decide(node_id, person_only, None)
     )
 }
 
 /// The decision mechanics for a publish gate: a consent carries the nonce
 /// of the exact plan the person saw.
 pub fn publish_how_to_decide(node_id: &str, nonce: &str) -> String {
+    publish_how_to_decide_for(node_id, nonce, false)
+}
+
+/// [`publish_how_to_decide`] of a publish node only a person consents to
+/// when `person_only` is set: the terminal and the dashboard, no agent
+/// channel.
+pub fn publish_how_to_decide_for(node_id: &str, nonce: &str, person_only: bool) -> String {
     let node = apb_core::publish::shell_word(node_id);
+    if person_only {
+        return format!(
+            "Only a person consents to this push: run `apb publish approve <run-id> --node {node} --nonce {nonce}` \
+             (or `apb publish skip <run-id> --node {node}`) at an interactive terminal outside a run step and type \
+             the decision to confirm, or decide on the run page of a dashboard where you are signed in. \
+             An agent cannot decide it: ask the person, then wait."
+        );
+    }
     format!(
         "To publish exactly this plan, run `apb publish approve <run-id> --node {node} --nonce {nonce}` \
          or call the review_decide MCP tool with node `{node_id}`, decision `publish` and that nonce; \
@@ -73,6 +123,7 @@ pub fn publish_instruction(
     outside_push_suspected: bool,
     prompt: Option<&str>,
     nonce: &str,
+    person_only: bool,
 ) -> String {
     let label = title
         .map(str::trim)
@@ -97,7 +148,7 @@ pub fn publish_instruction(
         "The run is paused at the publish step \"{label}\" and needs your consent: push {commits} commit(s) up to {} to `{url}` branch `{branch}` {over}.{warning}{guidance} \
          Available decisions: publish, skip. {}",
         short(after),
-        publish_how_to_decide(node_id, nonce)
+        publish_how_to_decide_for(node_id, nonce, person_only)
     )
 }
 

@@ -1287,6 +1287,12 @@ pub(crate) fn prepare_placed(
         remembered,
         apb: crate::event::apb_version(),
     })?;
+    // A definition using a feature an older apb would drop is guarded from
+    // here on: every checkpoint carries the guard, so such an apb refuses
+    // to continue the run.
+    if let Some(guard) = run_guard(&playbook) {
+        log.append(guard)?;
+    }
     // The known problems this run shows its agents, rechecked where their
     // source changed, journaled once (only for a playbook whose
     // `known_problems:` block shows anything).
@@ -1559,4 +1565,14 @@ pub(super) fn decision_settings(
             Some(settings)
         }
     }
+}
+
+/// The `run_guard` a run of `playbook` journals, `None` when it uses no
+/// guarded feature (`apb_core::validate::guarded_features`).
+pub(crate) fn run_guard(playbook: &Playbook) -> Option<EventPayload> {
+    let requires: Vec<String> = apb_core::validate::guarded_features(playbook)
+        .into_iter()
+        .map(|f| f.as_str().to_string())
+        .collect();
+    (!requires.is_empty()).then_some(EventPayload::RunGuard { requires })
 }

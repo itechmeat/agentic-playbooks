@@ -783,13 +783,12 @@ fn an_unspent_consent_pushes_an_identical_plan_once_after_a_crash() {
     assert_eq!(finished(&rx).outcome, RunStatus::Paused);
     // The drive journaled the consent and died before recording the push.
     let mut log = EventLog::open(&dir).unwrap();
-    log.append(EventPayload::ReviewDecided {
-        node: "publish".into(),
-        decision: "publish".into(),
-        note: String::new(),
-        plan_digest: Some(plan.digest.clone()),
-        decided_by: None,
-    })
+    log.append(EventPayload::review_decided(
+        "publish",
+        "publish",
+        String::new(),
+        Some(plan.digest.clone()),
+    ))
     .unwrap();
     drop(log);
     let res = resume(&f.root, &run_id, None).unwrap();
@@ -840,13 +839,12 @@ fn a_push_its_recorder_left_running_is_reconciled_only_after_its_deadline() {
     // the deadline, so a loaded machine does not turn this into a race.
     let deadline_ms = apb_core::clock::now_ms_u64() + 6_000;
     let mut log = EventLog::open(&dir).unwrap();
-    log.append(EventPayload::ReviewDecided {
-        node: "publish".into(),
-        decision: "publish".into(),
-        note: String::new(),
-        plan_digest: Some(plan.digest.clone()),
-        decided_by: None,
-    })
+    log.append(EventPayload::review_decided(
+        "publish",
+        "publish",
+        String::new(),
+        Some(plan.digest.clone()),
+    ))
     .unwrap();
     log.append(EventPayload::SendIntentRecorded {
         item: None,
@@ -1460,15 +1458,11 @@ fn bare_run(payloads: Vec<EventPayload>, playbook: Option<&str>) -> (tempfile::T
 }
 
 fn requested(node: &str, options: &[&str]) -> EventPayload {
-    EventPayload::ReviewRequested {
-        node: node.into(),
-        options: options.iter().map(|o| o.to_string()).collect(),
-        title: None,
-        instruction: String::new(),
-        prompt: None,
-        recommendation: None,
-        plan_digest: None,
-    }
+    EventPayload::review_requested(
+        node,
+        options.iter().map(|o| o.to_string()).collect(),
+        String::new(),
+    )
 }
 
 #[test]
@@ -1605,13 +1599,12 @@ fn a_confirmed_push_of_this_commit_counts_without_its_effect_reference() {
             "response",
             None,
         );
-        log.append(EventPayload::ReviewDecided {
-            node: "publish".into(),
-            decision: "publish".into(),
-            note: String::new(),
-            plan_digest: Some(plan.digest.clone()),
-            decided_by: None,
-        })
+        log.append(EventPayload::review_decided(
+            "publish",
+            "publish",
+            String::new(),
+            Some(plan.digest.clone()),
+        ))
         .unwrap();
         drop(log);
         let res = resume(&f.root, &run_id, None).unwrap();
@@ -1620,4 +1613,317 @@ fn a_confirmed_push_of_this_commit_counts_without_its_effect_reference() {
         assert_eq!(output(&events), "published");
         assert_eq!(intents(&events), 2, "nothing was pushed again");
     }
+}
+
+/// `start -> work -> ok -> {mid} -> publish -> done`: the gate `ok`
+/// approves `work`'s result and the publish node requires that approval.
+/// `mid`, when given, runs after the approval.
+fn seed_approved(f: &Fixture, mid: Option<&str>) {
+    init_project(&f.root).unwrap();
+    let dir = f.root.join(".apb/playbooks/pub/1.0.0");
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(dir.join("scripts/work.sh"), WORK).unwrap();
+    let mut nodes = vec![
+        "  - { id: start, type: start }".to_string(),
+        "  - { id: work, type: script, script: \"scripts/work.sh\", runner: sh }".to_string(),
+        "  - { id: ok, type: human_review, approves: { results: [work] } }".to_string(),
+    ];
+    let mut chain = vec!["start", "work", "ok"];
+    if let Some(body) = mid {
+        fs::write(dir.join("scripts/mid.sh"), body).unwrap();
+        nodes.push(
+            "  - { id: mid, type: script, script: \"scripts/mid.sh\", runner: sh }".to_string(),
+        );
+        chain.push("mid");
+    }
+    nodes.push("  - { id: publish, type: publish, from: work, remote: origin, branch: \"apb/out\", requires_approval: { gate: ok } }".to_string());
+    nodes.push("  - { id: done, type: finish, outcome: success }".to_string());
+    chain.extend(["publish", "done"]);
+    let edges: Vec<String> = chain
+        .windows(2)
+        .map(|w| format!("  - {{ from: {}, to: {} }}", w[0], w[1]))
+        .collect();
+    let yaml = format!(
+        "schema: 2\nid: pub\nname: Publish\nversion: 1.0.0\nnodes:\n{}\nedges:\n{}\n",
+        nodes.join("\n"),
+        edges.join("\n")
+    );
+    fs::write(dir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(f.root.join(".apb/playbooks/pub/current"), "1.0.0").unwrap();
+}
+
+/// The binding nonce of gate `ok`'s first request, once it is journaled.
+fn approval_nonce(dir: &Path) -> String {
+    poll("the approval request", || {
+        read_all(dir)
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::ReviewRequested {
+                    node,
+                    binding: Some(b),
+                    ..
+                } if node == "ok" => Some(b.nonce),
+                _ => None,
+            })
+    })
+}
+
+fn decide_gate(dir: &Path, decision: &str, nonce: Option<&str>) {
+    apb_engine::review::post_decision_via(
+        dir,
+        ReviewCommand {
+            node: "ok".into(),
+            decision: decision.into(),
+            note: String::new(),
+        },
+        nonce.map(str::to_string),
+        None,
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    )
+    .unwrap();
+}
+
+/// The facts of the run's first plan, as a digest reads them.
+fn first_plan_facts(
+    events: &[Event],
+) -> (String, String, String, String, Option<String>, Vec<String>) {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::PublishPlanned {
+                url,
+                branch,
+                after,
+                remote_before,
+                commits,
+                plan_digest,
+                ..
+            } => Some((
+                plan_digest.clone(),
+                url.clone(),
+                branch.clone(),
+                after.clone(),
+                remote_before.clone(),
+                commits.iter().map(|c| c.commit.sha.clone()).collect(),
+            )),
+            _ => None,
+        })
+        .expect("a plan was journaled")
+}
+
+#[test]
+fn an_approval_is_bound_into_the_plan_and_the_push_still_needs_its_consent() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    seed_approved(&f, None);
+    let rx = start(&f.root);
+    let dir = run_dir(&f.root);
+    let approval = approval_nonce(&dir);
+    decide_gate(&dir, "approve", Some(&approval));
+    let plan = asked(&dir, 1);
+
+    let events = read_all(&dir).unwrap();
+    let (digest, url, branch, after, remote_before, shas) = first_plan_facts(&events);
+    let facts = apb_core::publish::PlanFacts {
+        node: "publish",
+        url: &url,
+        branch: &branch,
+        after: &after,
+        remote_before: remote_before.as_deref(),
+        commits: &shas,
+    };
+    // The push consent names what was approved: the digest is not the
+    // plain plan's, it is the plan's with the approval line.
+    assert_ne!(digest, apb_core::publish::plan_digest(&facts));
+    assert_eq!(
+        digest,
+        apb_core::publish::plan_digest_with(&facts, Some(&approval))
+    );
+    // The approval is no consent: publishing still needs the plan's nonce.
+    assert!(matches!(
+        decide(&dir, "publish", None),
+        Err(EngineError::Invalid(_))
+    ));
+    assert!(matches!(
+        decide(&dir, "publish", Some(&approval)),
+        Err(EngineError::Conflict(_))
+    ));
+    decide(&dir, "publish", Some(&plan.nonce)).unwrap();
+    let res = finished(&rx);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded, "{}", output(&events));
+    assert_eq!(
+        f.remote_ref("apb/out").as_deref(),
+        Some(plan.after.as_str())
+    );
+}
+
+#[test]
+fn a_head_moved_after_the_approval_is_approval_mismatch() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    // A node after the gate commits again: what would be pushed is not the
+    // commit the approved result was taken at.
+    seed_approved(
+        &f,
+        Some(
+            "printf later > later.txt\ngit add later.txt\ngit -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m later\n",
+        ),
+    );
+    let rx = start(&f.root);
+    let dir = run_dir(&f.root);
+    let approval = approval_nonce(&dir);
+    decide_gate(&dir, "approve", Some(&approval));
+    let res = finished(&rx);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let out = output(&events);
+    assert!(
+        out.starts_with("publish_refused: approval_mismatch: "),
+        "{out}"
+    );
+    assert!(plans(&events).is_empty(), "nothing was planned");
+    assert_eq!(intents(&events), 0);
+    assert_eq!(f.remote_ref("apb/out"), None);
+}
+
+/// An approved result whose snapshot recorded no commit (its tree had no
+/// commit yet when it settled) leaves nothing to compare `HEAD` with: the
+/// plan is refused `approval_mismatch`, never pushed unchecked.
+#[test]
+fn an_approved_result_without_a_commit_is_approval_mismatch() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    // `work` leaves its file on a branch with no commit yet; `mid` makes
+    // the first commit after the approval.
+    seed_approved(
+        &f,
+        Some(
+            "git add work.txt\ngit -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m later\n",
+        ),
+    );
+    fs::write(
+        f.root.join(".apb/playbooks/pub/1.0.0/scripts/work.sh"),
+        "git checkout -q --orphan fresh\ngit rm -rq --cached .\nprintf '%s' \"$APB_RUN_ID\" > work.txt\n",
+    )
+    .unwrap();
+    let rx = start(&f.root);
+    let dir = run_dir(&f.root);
+    let approval = approval_nonce(&dir);
+    decide_gate(&dir, "approve", Some(&approval));
+    let res = finished(&rx);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let out = output(&events);
+    assert!(
+        out.starts_with("publish_refused: approval_mismatch: ")
+            && out.contains("the approved result recorded no commit"),
+        "{out}"
+    );
+    assert!(plans(&events).is_empty(), "nothing was planned");
+    assert_eq!(f.remote_ref("apb/out"), None);
+}
+
+#[test]
+fn a_publish_whose_gate_did_not_approve_plans_nothing() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    seed_approved(&f, None);
+    let rx = start(&f.root);
+    let dir = run_dir(&f.root);
+    approval_nonce(&dir);
+    decide_gate(&dir, "reject", None);
+    let res = finished(&rx);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let out = output(&events);
+    assert!(out.starts_with("approval_missing: "), "{out}");
+    assert!(plans(&events).is_empty(), "nothing was planned");
+    assert_eq!(intents(&events), 0);
+}
+
+/// Appends a channel entry by hand, stamped as `channel` would be.
+fn forge_entry(dir: &Path, seq: u64, nonce: &str, channel: &str) {
+    use std::io::Write;
+    let line = serde_json::json!({
+        "seq": seq,
+        "node": "publish",
+        "decision": "publish",
+        "note": "",
+        "nonce": nonce,
+        "channel": channel,
+    });
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(dir.join("reviews.jsonl"))
+        .unwrap();
+    writeln!(file, "{line}").unwrap();
+}
+
+#[test]
+fn a_person_only_publish_takes_only_a_persons_consent() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    seed(&f, WORK, &[], ", person_only: true");
+    let rx = start(&f.root);
+    let dir = run_dir(&f.root);
+    let plan = asked(&dir, 1);
+    let events = read_all(&dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.payload,
+            EventPayload::ReviewRequested { node, person_only: true, .. } if node == "publish")),
+        "the request says only a person decides it"
+    );
+    // A surface that is not a person's is refused before anything is
+    // queued.
+    let mcp = apb_engine::review::post_decision_via(
+        &dir,
+        ReviewCommand {
+            node: "publish".into(),
+            decision: "publish".into(),
+            note: String::new(),
+        },
+        Some(plan.nonce.clone()),
+        None,
+        apb_engine::decision_channel::DecisionChannel::Mcp,
+    );
+    assert!(
+        matches!(mcp, Err(EngineError::ChannelRefused { .. })),
+        "{mcp:?}"
+    );
+    // A line stamped with an agent's channel is never consumed.
+    forge_entry(&dir, 0, &plan.nonce, "mcp");
+    std::thread::sleep(Duration::from_millis(1500));
+    let events = read_all(&dir).unwrap();
+    assert_eq!(
+        count(
+            &events,
+            |p| matches!(p, EventPayload::ReviewDecided { node, .. } if node == "publish")
+        ),
+        0,
+        "an agent's consent decides nothing"
+    );
+    assert_eq!(intents(&events), 0);
+    // A person's consent is.
+    forge_entry(&dir, 1, &plan.nonce, "terminal");
+    let res = finished(&rx);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded, "{}", output(&events));
+    let via = events.iter().find_map(|e| match &e.payload {
+        EventPayload::ReviewDecided { node, via, .. } if node == "publish" => Some(*via),
+        _ => None,
+    });
+    assert_eq!(
+        via,
+        Some(Some(
+            apb_engine::decision_channel::DecisionChannel::Terminal
+        ))
+    );
 }

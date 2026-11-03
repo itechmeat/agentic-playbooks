@@ -51,3 +51,15 @@ describe('PlaybookNode retry badge', () => {
     expect(badge()).toBeNull()
   })
 })
+
+describe('PlaybookNode approval refusal', () => {
+  it('says why the approval check refused the node, with its code', () => {
+    show({
+      status: 'failed',
+      approval: { code: 'approval_incomplete', text: 'An approved snapshot is incomplete.', detail: 'implement' },
+    })
+    const line = document.querySelector<HTMLElement>('[data-testid="node-approval-refusal"]')
+    expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe('approval refused · approval_incomplete')
+    expect(line?.title).toBe('An approved snapshot is incomplete. (implement)')
+  })
+})

@@ -1448,8 +1448,80 @@ pub struct Node {
     /// drops it and takes no snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<Vec<ResultDecl>>,
+    /// A `human_review` or `publish` gate that only a person's channel may
+    /// decide: the CLI at an interactive terminal outside a run step, or the
+    /// dashboard with a signed-in browser session. Additive to schema 2; an
+    /// older apb drops it and takes the gate's decision from any channel,
+    /// which is why a run using it carries a run guard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub person_only: bool,
+    /// The results a `human_review` gate's approval is about (see
+    /// [`Approves`]). Additive to schema 2; an older apb drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approves: Option<Approves>,
+    /// The approval a node that does work needs before it starts (see
+    /// [`RequiresApproval`]). Additive to schema 2; an older apb drops it
+    /// and runs the node without the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_approval: Option<RequiresApproval>,
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// A `human_review` gate's `approves:` block: the nodes whose latest result
+/// snapshots a request of the gate is bound to, and the options that mean
+/// approval.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approves {
+    /// The nodes whose snapshots the gate shows and binds.
+    pub results: Vec<String>,
+    /// The options that mean approval; absent: see
+    /// [`Approves::approving_options`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
+impl Approves {
+    /// The options that mean approval for a gate declaring `gate_options`:
+    /// the declared list, else `approve` when it is an effective option,
+    /// else the gate's first effective option.
+    pub fn approving_options(&self, gate_options: &[String]) -> Vec<String> {
+        if let Some(o) = &self.options {
+            return o.clone();
+        }
+        let effective = effective_review_options(gate_options);
+        let approve = DEFAULT_REVIEW_OPTIONS[0];
+        if effective.iter().any(|o| o == approve) {
+            return vec![approve.to_string()];
+        }
+        effective.into_iter().take(1).collect()
+    }
+}
+
+/// A node's `requires_approval:` block: the gate whose approval it needs,
+/// and which of the gate's bound results.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiresApproval {
+    pub gate: String,
+    /// A subset of the gate's `approves.results`; absent: all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub live: ApprovalLive,
+}
+
+/// Whether a required approval also compares the bound files with the live
+/// tree before the node starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalLive {
+    /// Every bound file entry must still hash to its approved digest.
+    #[default]
+    Check,
+    /// The node may act on live content that differs from what was approved.
+    Ignore,
 }
 
 /// One entry of a node's `results:` list.
@@ -2061,6 +2133,76 @@ mod tests {
         .unwrap();
         let tags: Vec<&str> = pb.nodes.iter().map(|n| n.kind.type_str()).collect();
         assert_eq!(tags, NODE_TYPES);
+    }
+
+    /// The approval and person-only declarations (PR 20b) sit on the node:
+    /// they parse with their defaults, a typo inside either block is refused
+    /// rather than dropped, and a node without them writes none of the keys.
+    #[test]
+    fn approval_declarations_parse_with_defaults_and_refuse_typos() {
+        let pb = |extra_gate: &str, extra_work: &str| {
+            Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: w, type: script, script: s, runner: sh }}\n  - {{ id: g, type: human_review{extra_gate} }}\n  - {{ id: d, type: script, script: s, runner: sh{extra_work} }}\nedges: []\n"
+            ))
+        };
+        let parsed = pb(
+            ", person_only: true, approves: { results: [w] }",
+            ", requires_approval: { gate: g }",
+        )
+        .unwrap();
+        let g = parsed.node("g").unwrap();
+        assert!(g.person_only);
+        let approves = g.approves.as_ref().unwrap();
+        assert_eq!(approves.results, ["w"]);
+        assert_eq!(approves.options, None);
+        let req = parsed
+            .node("d")
+            .unwrap()
+            .requires_approval
+            .as_ref()
+            .unwrap();
+        assert_eq!(req.gate, "g");
+        assert_eq!(req.of, None);
+        assert_eq!(req.live, ApprovalLive::Check);
+
+        for (gate, work) in [
+            (", approves: { results: [w], option: [ok] }", ""),
+            ("", ", requires_approval: { gate: g, live: maybe }"),
+            ("", ", requires_approval: { gate: g, liv: ignore }"),
+        ] {
+            assert!(pb(gate, work).is_err(), "{gate}{work}");
+        }
+
+        let plain = pb("", "").unwrap();
+        let wire = serde_json::to_value(plain.node("g").unwrap()).unwrap();
+        for key in ["person_only", "approves", "requires_approval"] {
+            assert!(wire.get(key).is_none(), "{key}");
+        }
+    }
+
+    /// The options that mean approval: the declared list, else `approve`
+    /// when the gate offers it, else the gate's first option.
+    #[test]
+    fn approving_options_default_to_approve_or_the_first_option() {
+        let approves = |options: Option<Vec<&str>>| Approves {
+            results: vec!["w".into()],
+            options: options.map(|o| o.into_iter().map(String::from).collect()),
+        };
+        let gate = |o: &[&str]| o.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(approves(None).approving_options(&[]), ["approve"]);
+        assert_eq!(
+            approves(None).approving_options(&gate(&["ship", "approve"])),
+            ["approve"]
+        );
+        assert_eq!(
+            approves(None).approving_options(&gate(&["ship", "hold"])),
+            ["ship"]
+        );
+        assert_eq!(
+            approves(Some(vec!["ship", "ship_now"]))
+                .approving_options(&gate(&["ship", "ship_now", "hold"])),
+            ["ship", "ship_now"]
+        );
     }
 
     /// The new-playbook starter is a current, valid playbook.

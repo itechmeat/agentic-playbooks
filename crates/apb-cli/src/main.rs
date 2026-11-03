@@ -479,7 +479,9 @@ enum Command {
     Stop { run_id: String },
     /// Post a supervisor note (ContextAppend) to a run's control channel
     Note { run_id: String, text: String },
-    /// Decide a human_review or publish node of a running run
+    /// Decide a human_review or publish node of a running run. A gate
+    /// marked person_only is decided only at an interactive terminal
+    /// outside a run step, after typing the option to confirm
     Review {
         run_id: String,
         node_id: String,
@@ -487,8 +489,9 @@ enum Command {
         decision: String,
         #[arg(long, default_value = "")]
         note: String,
-        /// A publish node only: the nonce of the plan you checked (see
-        /// `apb publish show`)
+        /// The nonce of what you checked: a publish node's plan (see `apb
+        /// publish show`), or the result snapshots a gate with `approves`
+        /// binds (an approving decision needs it; see `apb runs <id>`)
         #[arg(long)]
         nonce: Option<String>,
         /// The request this answers, as a next action names it

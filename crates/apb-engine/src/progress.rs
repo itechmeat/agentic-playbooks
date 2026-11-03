@@ -114,6 +114,16 @@ pub struct PendingReview {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub publish: Option<crate::publish::view::PlanView>,
+    /// For a gate with `approves:`: the snapshots the open request is bound
+    /// to, with the nonce an approving decision must carry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub binding: Option<crate::approval::ReviewBinding>,
+    /// Only a person's channel decides this gate: the CLI at a terminal or
+    /// the dashboard with a signed-in session.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub person_only: bool,
 }
 
 /// The pending block of an open publish gate: the request's own
@@ -123,12 +133,13 @@ fn pending_publish(
     node: &apb_core::schema::Node,
 ) -> Option<PendingReview> {
     let plan = crate::publish::view::plan_of(events, &node.id)?;
-    let instruction = events.iter().rev().find_map(|e| match &e.payload {
+    let (instruction, person_only) = events.iter().rev().find_map(|e| match &e.payload {
         crate::event::EventPayload::ReviewRequested {
             node: n,
             instruction,
+            person_only,
             ..
-        } if *n == node.id => Some(instruction.clone()),
+        } if *n == node.id => Some((instruction.clone(), *person_only)),
         _ => None,
     })?;
     let prompt = match &node.kind {
@@ -140,26 +151,82 @@ fn pending_publish(
         title: node.title.clone(),
         instruction,
         options: apb_core::publish::OPTIONS.map(str::to_string).to_vec(),
-        how_to_decide: instruction::publish_how_to_decide(&node.id, &plan.nonce),
+        how_to_decide: instruction::publish_how_to_decide_for(&node.id, &plan.nonce, person_only),
         prompt,
         recommendation: None,
         publish: Some(plan),
+        binding: None,
+        person_only,
     })
 }
 
-/// The recommendation carried by a gate's latest `review_requested`.
-fn open_recommendation(
-    events: &[crate::event::Event],
-    node: &str,
-) -> Option<crate::event::ReviewRecommendation> {
+/// What a gate's latest `review_requested` carries beside its options:
+/// the recommendation, the snapshots it binds and whether only a person
+/// decides it.
+struct OpenRequest {
+    recommendation: Option<crate::event::ReviewRecommendation>,
+    binding: Option<crate::approval::ReviewBinding>,
+    person_only: bool,
+}
+
+/// The [`OpenRequest`] of gate `node`'s latest `review_requested`.
+fn open_request(events: &[crate::event::Event], node: &str) -> Option<OpenRequest> {
     events.iter().rev().find_map(|e| match &e.payload {
         crate::event::EventPayload::ReviewRequested {
             node: n,
             recommendation,
+            binding,
+            person_only,
             ..
-        } if n == node => Some(recommendation.clone()),
+        } if n == node => Some(OpenRequest {
+            recommendation: recommendation.clone(),
+            binding: binding.clone(),
+            person_only: *person_only,
+        }),
         _ => None,
-    })?
+    })
+}
+
+/// The pending block of an open `human_review` gate: the instruction and
+/// the mechanics of the request it holds open (only a person decides a
+/// `person_only` request; a bound one names its snapshots and the nonce an
+/// approving decision carries), and its recommendation.
+fn pending_gate(
+    events: &[crate::event::Event],
+    node: &apb_core::schema::Node,
+    options: &[String],
+    prompt: Option<&str>,
+) -> PendingReview {
+    let mut pr = pending_review(&node.id, node.title.as_deref(), options, prompt);
+    let Some(open) = open_request(events, &node.id) else {
+        return pr;
+    };
+    if open.person_only || open.binding.is_some() {
+        pr.instruction = instruction::review_instruction_for(
+            &node.id,
+            node.title.as_deref(),
+            options,
+            prompt,
+            open.person_only,
+        );
+        pr.how_to_decide = instruction::gate_how_to_decide(
+            &node.id,
+            open.person_only,
+            open.binding.as_ref().map(|b| b.nonce.as_str()),
+        );
+    }
+    if let Some(b) = &open.binding {
+        pr.instruction
+            .push_str(&crate::scheduler::approval::binding_line(b));
+    }
+    if let Some(r) = open.recommendation {
+        pr.instruction
+            .push_str(&crate::decision::review_triage::instruction_line(&r));
+        pr.recommendation = Some(r);
+    }
+    pr.binding = open.binding;
+    pr.person_only = open.person_only;
+    pr
 }
 
 /// Assembles the `PendingReview` block for a gate node from its id, title,
@@ -186,6 +253,8 @@ pub fn pending_review(
             .map(str::to_string),
         recommendation: None,
         publish: None,
+        binding: None,
+        person_only: false,
     }
 }
 
@@ -908,13 +977,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         .iter()
         .filter_map(|(n, _)| match &n.kind {
             NodeKind::HumanReview { options, prompt } => {
-                let mut pr = pending_review(&n.id, n.title.as_deref(), options, prompt.as_deref());
-                if let Some(r) = open_recommendation(events, &n.id) {
-                    pr.instruction
-                        .push_str(&crate::decision::review_triage::instruction_line(&r));
-                    pr.recommendation = Some(r);
-                }
-                Some(pr)
+                Some(pending_gate(events, n, options, prompt.as_deref()))
             }
             NodeKind::Publish { .. } => pending_publish(events, n),
             _ => None,
@@ -1358,6 +1421,8 @@ edges:
                     prompt: Some("Check the changelog first.".into()),
                     recommendation: None,
                     plan_digest: None,
+                    binding: None,
+                    person_only: false,
                 },
             ),
         ];
@@ -1398,15 +1463,7 @@ edges:
                 ),
                 ev(
                     1,
-                    EventPayload::ReviewRequested {
-                        node: "r".into(),
-                        options: vec![],
-                        title: None,
-                        instruction: String::new(),
-                        prompt: None,
-                        recommendation: None,
-                        plan_digest: None,
-                    },
+                    EventPayload::review_requested("r", vec![], String::new()),
                 ),
             ];
             let pr = compute(&pb, &events)
@@ -1433,15 +1490,7 @@ edges:
              \x20 - { from: r1, to: f }\n  - { from: r2, to: f }\n  - { from: w, to: f }\n",
         )
         .unwrap();
-        let requested = |node: &str| EventPayload::ReviewRequested {
-            node: node.into(),
-            options: vec![],
-            title: None,
-            instruction: String::new(),
-            prompt: None,
-            recommendation: None,
-            plan_digest: None,
-        };
+        let requested = |node: &str| EventPayload::review_requested(node, vec![], String::new());
         let events: Vec<Event> = [
             EventPayload::RunStarted {
                 playbook: "p".into(),
@@ -1494,15 +1543,11 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::ReviewRequested {
-                    node: "r".into(),
-                    options: vec!["approve".into(), "reject".into()],
-                    title: None,
-                    instruction: String::new(),
-                    prompt: None,
-                    recommendation: None,
-                    plan_digest: None,
-                },
+                EventPayload::review_requested(
+                    "r",
+                    vec!["approve".into(), "reject".into()],
+                    String::new(),
+                ),
             ),
         ];
         let p = compute(&pb, &events);
@@ -1524,15 +1569,11 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::ReviewRequested {
-                    node: "r".into(),
-                    options: vec!["approve".into(), "reject".into()],
-                    title: None,
-                    instruction: String::new(),
-                    prompt: None,
-                    recommendation: None,
-                    plan_digest: None,
-                },
+                EventPayload::review_requested(
+                    "r",
+                    vec!["approve".into(), "reject".into()],
+                    String::new(),
+                ),
             ),
             ev(
                 2,
@@ -1543,13 +1584,7 @@ edges:
             ),
             ev(
                 3,
-                EventPayload::ReviewDecided {
-                    node: "r".into(),
-                    decision: "approve".into(),
-                    note: String::new(),
-                    plan_digest: None,
-                    decided_by: None,
-                },
+                EventPayload::review_decided("r", "approve", String::new(), None),
             ),
         ];
         let p = compute(&pb, &events);
@@ -1667,15 +1702,11 @@ edges:
             ),
             ev(
                 1,
-                EventPayload::ReviewRequested {
-                    node: "r".into(),
-                    options: vec!["approve".into(), "reject".into()],
-                    title: None,
-                    instruction: String::new(),
-                    prompt: None,
-                    recommendation: None,
-                    plan_digest: None,
-                },
+                EventPayload::review_requested(
+                    "r",
+                    vec!["approve".into(), "reject".into()],
+                    String::new(),
+                ),
             ),
         ];
         let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");

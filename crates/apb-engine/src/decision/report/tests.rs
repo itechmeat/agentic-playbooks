@@ -638,13 +638,7 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
                 ),
                 ev(
                     4,
-                    EventPayload::ReviewDecided {
-                        node: "g".into(),
-                        decision: decided.into(),
-                        note: String::new(),
-                        plan_digest: None,
-                        decided_by: None,
-                    },
+                    EventPayload::review_decided("g", decided, String::new(), None),
                 ),
             ],
             provider_kinds: BTreeMap::new(),

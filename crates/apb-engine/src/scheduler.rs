@@ -39,6 +39,7 @@ use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree}
 /// every caller expects to find it.
 pub use crate::run_config::RunMode;
 
+pub(crate) mod approval;
 mod attempt_memory;
 mod attempt_notes;
 mod baseline;
@@ -255,6 +256,37 @@ fn dead_end_reason(
         reason.push_str(&format!("; exhausted: {}", exhausted.join(", ")));
     }
     reason
+}
+
+/// The approval check of `node` as the drive admits a new visit
+/// ([`approval::check_before`]): `None` for a node without
+/// `requires_approval`, for a visit already open (a resume, a gate spin)
+/// and for a delayed retry that continues its execution: those passed the
+/// check when they were admitted, and `node::execute_node_kind` checks
+/// them again as their execution begins. A publish node is checked by
+/// its own arm before every plan (`publish::step`): it journals
+/// `node_started` only when it finishes, so a check here would run on
+/// every look while its consent is awaited and could settle the node with
+/// its request still open.
+fn approval_gate(
+    run_dir: &Path,
+    playbook: &Playbook,
+    node: &apb_core::schema::Node,
+    state: &RunState,
+) -> Result<Option<crate::approval::ApprovalFailure>, EngineError> {
+    if node.requires_approval.is_none()
+        || matches!(node.kind, NodeKind::Publish { .. })
+        || state.deferred.contains_key(node.id.as_str())
+    {
+        return Ok(None);
+    }
+    let events = read_all(run_dir)?;
+    if journal::node_started_count(&events, &node.id)
+        > journal::node_finished_count(&events, &node.id)
+    {
+        return Ok(None);
+    }
+    Ok(approval::check_before(run_dir, playbook, node, &events).err())
 }
 
 /// [`stop_on_unhandled_failure`] with its reason given verbatim.
@@ -522,13 +554,20 @@ fn scripted_review(run_dir: &Path, node: &str) -> Result<bool, EngineError> {
     match crate::scenario::session::at_run(run_dir, BoundaryKind::Review, &key) {
         Resolution::Real | Resolution::Skip => Ok(false),
         Resolution::Answer(Answer::Review(a)) => {
-            crate::review::post_review(
+            // The script answers the open request with its binding, as a
+            // person shown those snapshots would.
+            let events = read_all(run_dir)?;
+            let open = crate::review::open_request(&events, node);
+            crate::review::post_decision_via(
                 run_dir,
                 crate::review::ReviewCommand {
                     node: node.to_string(),
                     decision: a.decision,
                     note: a.note.unwrap_or_default(),
                 },
+                open.and_then(|(_, b)| b.map(|b| b.nonce.clone())),
+                None,
+                crate::decision_channel::DecisionChannel::Scenario,
             )?;
             Ok(true)
         }
@@ -1108,10 +1147,16 @@ fn drive_inner(
             // The top of the loop ends the run.
             budget_gate::Admission::Exhausted => continue,
         }
+        // The approval a node with `requires_approval` needs, checked as the
+        // drive admits a new visit, before `node_started` and any attempt:
+        // a refused node runs nothing and settles failed below.
+        let mut approval_refused =
+            approval_gate(run_dir, &playbook, current_node, &state)?.map(|f| f.to_string());
 
-        if let NodeKind::Finish {
-            outcome: o, prompt, ..
-        } = &node_kind
+        if approval_refused.is_none()
+            && let NodeKind::Finish {
+                outcome: o, prompt, ..
+            } = &node_kind
         {
             // A finish-with-prompt composes the run answer via an agent (spec
             // B); a finish without a prompt is instant with an empty output
@@ -1332,7 +1377,7 @@ fn drive_inner(
         // sequential is the SUPERVISION: every member runs to completion and the
         // failures then park one at a time, in batch order, at the batch tail
         // below (per-branch live parking is out of scope, spec 1.3).
-        if is_batchable(&playbook, &current) {
+        if approval_refused.is_none() && is_batchable(&playbook, &current) {
             let mut batch: Vec<String> = vec![current.clone()];
             for n in &frontier {
                 if is_batchable(&playbook, n) && !batch.contains(n) && !held.contains_key(n) {
@@ -1525,6 +1570,34 @@ fn drive_inner(
                                 // it just ran once before. The lookup, the
                                 // artifact restore and the store stay on this
                                 // (the drive) thread.
+                                // A member that requires an approval it
+                                // does not have runs nothing and settles
+                                // failed, like a member that failed.
+                                if cont.is_none()
+                                    && n != current
+                                    && let Some(member) = playbook.node(&n)
+                                    && let Some(f) =
+                                        approval_gate(run_dir, &playbook, member, &state_now)?
+                                {
+                                    journal.append(EventPayload::NodeStarted {
+                                        node: n.clone(),
+                                        attempt: 1,
+                                    })?;
+                                    journal.append(EventPayload::node_finished(
+                                        n.clone(),
+                                        NodeStatus::Failed.as_str(),
+                                        1,
+                                        f.to_string(),
+                                    ))?;
+                                    batch_results.push((
+                                        n.clone(),
+                                        NodeStatus::Failed,
+                                        f.to_string(),
+                                    ));
+                                    reserved.release(&n);
+                                    done.push((n, NodeStatus::Failed));
+                                    continue;
+                                }
                                 if cont.is_none() {
                                     journal.append(EventPayload::NodeStarted {
                                         node: n.clone(),
@@ -2200,7 +2273,17 @@ fn drive_inner(
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
         // A cache hit's snapshot holds the restored bytes, marked as such.
         let mut node_cache_hit = false;
-        let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
+        // A node refused before it ran settles without a snapshot.
+        let mut node_unsnapshotted = false;
+        let (status, output) = if let Some(reason) = approval_refused.take() {
+            steps += 1;
+            log.append(EventPayload::NodeStarted {
+                node: current.clone(),
+                attempt: 1,
+            })?;
+            node_unsnapshotted = true;
+            (NodeStatus::Failed, reason)
+        } else if let NodeKind::HumanReview { options, prompt } = &node_kind {
             let current_id = current.clone();
             let unattended_decision = match cfg.unattended {
                 false => None,
@@ -2231,6 +2314,14 @@ fn drive_inner(
                     outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
                 });
             }
+            // A gate that binds snapshots or that only a person decides
+            // consumes only entries stamped with its open request.
+            let consume = match playbook.node(&current) {
+                Some(g) if crate::review::is_stamped_gate(g) => review_gate::Consume::Stamped {
+                    person_only: g.person_only,
+                },
+                _ => review_gate::Consume::Nth,
+            };
             let step = review_gate::await_decision(
                 &mut review_gate::GateDrive {
                     run_dir,
@@ -2241,10 +2332,12 @@ fn drive_inner(
                     prompt_overrides: &mut prompt_overrides,
                     frontier: &mut frontier,
                 },
-                review_gate::Consume::Nth,
+                consume,
                 |log, events| {
                     if let Some(decision) = unattended_decision {
                         return Ok(review_gate::unattended_review_request(
+                            run_dir,
+                            events,
                             &playbook,
                             &current_id,
                             options,
@@ -2267,18 +2360,42 @@ fn drive_inner(
             )?;
             match step {
                 review_gate::GateStep::Decided(entry) => {
+                    // Nothing is decided on content apb can no longer show:
+                    // every bound snapshot is re-verified first.
+                    let events = read_all(run_dir)?;
+                    if let Some((_, Some(b))) = crate::review::open_request(&events, &current)
+                        && let Err(f) = approval::verify_binding(run_dir, b)
+                    {
+                        return Ok(RunResult {
+                            run_id,
+                            outcome: stop_with_reason(log, &current, f.to_string(), &mut frontier)?,
+                        });
+                    }
                     steps += 1;
                     log.append(EventPayload::NodeStarted {
                         node: current.clone(),
                         attempt: 1,
                     })?;
-                    log.append(EventPayload::ReviewDecided {
-                        node: current.clone(),
-                        decision: entry.cmd.decision.clone(),
-                        note: entry.cmd.note.clone(),
-                        plan_digest: None,
-                        decided_by: entry.by,
-                    })?;
+                    let mut decided = EventPayload::review_decided(
+                        current.clone(),
+                        entry.cmd.decision.clone(),
+                        entry.cmd.note.clone(),
+                        None,
+                    );
+                    if let EventPayload::ReviewDecided {
+                        decided_by,
+                        binding,
+                        via,
+                        ..
+                    } = &mut decided
+                    {
+                        *decided_by = entry.by;
+                        *binding = entry.nonce.clone();
+                        *via = entry
+                            .channel
+                            .filter(|c| entry.by.is_none() && c.is_surface());
+                    }
+                    log.append(decided)?;
                     (NodeStatus::Succeeded, entry.cmd.decision)
                 }
                 review_gate::GateStep::Moved => continue,
@@ -3205,15 +3322,18 @@ fn drive_inner(
                 (st, out)
             }
         };
-        let taken = result::of_node(
-            &playbook,
-            run_dir,
-            &workdir,
-            &current,
-            status,
-            &output,
-            node_cache_hit,
-        );
+        let taken = match node_unsnapshotted {
+            true => None,
+            false => result::of_node(
+                &playbook,
+                run_dir,
+                &workdir,
+                &current,
+                status,
+                &output,
+                node_cache_hit,
+            ),
+        };
         result::journal(taken, |stamp| {
             log.append(EventPayload::node_settled(
                 current.clone(),

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
 use apb_engine::RunResult;
-use apb_engine::event::{EventPayload, read_all};
+use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::review::{ReviewCommand, post_review};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
@@ -399,15 +399,11 @@ fn synthetic_run_dir(yaml: &str, payloads: &[EventPayload]) -> tempfile::TempDir
 }
 
 fn review_requested(node: &str) -> EventPayload {
-    EventPayload::ReviewRequested {
-        node: node.into(),
-        options: vec!["approved".into(), "rejected".into()],
-        title: None,
-        instruction: String::new(),
-        prompt: None,
-        recommendation: None,
-        plan_digest: None,
-    }
+    EventPayload::review_requested(
+        node,
+        vec!["approved".into(), "rejected".into()],
+        String::new(),
+    )
 }
 
 fn decide_on(run_dir: &Path, node: &str) -> Result<u64, apb_engine::EngineError> {
@@ -461,13 +457,7 @@ fn post_review_on_a_gate_that_is_not_pending_is_a_conflict() {
         WF_REVIEW,
         &[
             review_requested("gate"),
-            EventPayload::ReviewDecided {
-                node: "gate".into(),
-                decision: "approved".into(),
-                note: String::new(),
-                plan_digest: None,
-                decided_by: None,
-            },
+            EventPayload::review_decided("gate", "approved", String::new(), None),
         ],
     );
     let err = decide_on(dir.path(), "gate").unwrap_err();
@@ -540,13 +530,12 @@ fn a_new_request_after_the_queued_decision_is_consumed_accepts_a_new_decision() 
     assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
 
     let mut log = apb_engine::event::EventLog::open(dir.path()).unwrap();
-    log.append(EventPayload::ReviewDecided {
-        node: "gate".into(),
-        decision: "approved".into(),
-        note: String::new(),
-        plan_digest: None,
-        decided_by: None,
-    })
+    log.append(EventPayload::review_decided(
+        "gate",
+        "approved",
+        String::new(),
+        None,
+    ))
     .unwrap();
     log.append(review_requested("gate")).unwrap();
     drop(log);
@@ -589,4 +578,126 @@ fn concurrent_decisions_for_one_pending_gate_queue_only_one() {
         let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
         assert_eq!(channel.lines().count(), 1, "{channel}");
     }
+}
+
+/// The channel file's entry (PR 20b): an old line without the request and
+/// channel stamps reads as unstamped and writes back as it was, a stamped
+/// line round trips, and a channel this binary does not know reads as
+/// `unknown`, which is never a person's channel.
+#[test]
+fn a_review_entry_keeps_old_lines_and_reads_unknown_channels_as_not_a_person() {
+    use apb_engine::decision_channel::DecisionChannel;
+    use apb_engine::review::ReviewEntry;
+    let old = r#"{"seq":0,"node":"gate","decision":"approve","note":""}"#;
+    let e: ReviewEntry = serde_json::from_str(old).unwrap();
+    assert_eq!((e.request, e.channel), (None, None));
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+
+    let stamped = r#"{"seq":1,"node":"gate","decision":"approve","note":"","nonce":"approval-1","request":7,"channel":"dashboard_session"}"#;
+    let e: ReviewEntry = serde_json::from_str(stamped).unwrap();
+    assert_eq!(
+        (e.request, e.channel),
+        (Some(7), Some(DecisionChannel::DashboardSession))
+    );
+    assert_eq!(serde_json::to_string(&e).unwrap(), stamped);
+
+    for newer in [r#""pager""#, r#"{"kind":"pager"}"#] {
+        let line = stamped.replace(r#""dashboard_session""#, newer);
+        let e: ReviewEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(e.channel, Some(DecisionChannel::Unknown), "{newer}");
+        assert!(!DecisionChannel::Unknown.is_person_channel());
+    }
+}
+
+/// The approval and person-only fields of the review events (PR 20b): an
+/// old line writes back byte for byte, set fields round trip, a binding of a
+/// shape this binary does not know reads as absent instead of failing the
+/// journal, a channel it does not know reads as `unknown` (never a person's
+/// channel), and the request constructor writes the old shape.
+#[test]
+fn review_lines_keep_their_shape_with_the_approval_fields() {
+    use apb_engine::decision_channel::DecisionChannel;
+    let old = [
+        r#"{"seq":1,"ts":2,"type":"review_requested","node":"g","options":["approve","reject"],"instruction":"i"}"#,
+        r#"{"seq":2,"ts":3,"type":"review_decided","node":"g","decision":"approve","note":""}"#,
+    ];
+    for line in old {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+    }
+    let e: Event = serde_json::from_str(old[0]).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewRequested {
+            binding: None,
+            person_only: false,
+            ..
+        }
+    ));
+
+    let bound = r#"{"seq":1,"ts":2,"type":"review_requested","node":"g","options":["approve","reject"],"instruction":"i","binding":{"nonce":"approval-0123","snapshots":[{"node":"w","execution":2,"settlement_seq":9,"snapshot_id":"ab","omitted":1,"incomplete":true}],"missing":[{"node":"x","reason":"not_run"}]},"person_only":true}"#;
+    let e: Event = serde_json::from_str(bound).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), bound);
+    let EventPayload::ReviewRequested {
+        binding: Some(b),
+        person_only: true,
+        ..
+    } = &e.payload
+    else {
+        panic!("binding and person_only decode: {:?}", e.payload);
+    };
+    assert_eq!(b.nonce, "approval-0123");
+    assert_eq!(b.snapshots[0].settlement_seq, 9);
+    assert!(b.snapshots[0].incomplete && !b.snapshots[0].redacted);
+
+    // A binding a newer apb shaped differently is dropped, not fatal.
+    let newer = bound
+        .replace(r#""snapshots":[{"#, r#""snapshots":{"v2":[{"#)
+        .replace(r#""incomplete":true}]"#, r#""incomplete":true}]}"#);
+    let e: Event = serde_json::from_str(&newer).unwrap();
+    assert!(matches!(
+        e.payload,
+        EventPayload::ReviewRequested {
+            binding: None,
+            person_only: true,
+            ..
+        }
+    ));
+
+    let decided = r#"{"seq":2,"ts":3,"type":"review_decided","node":"g","decision":"approve","note":"","binding":"approval-0123","via":"terminal"}"#;
+    let e: Event = serde_json::from_str(decided).unwrap();
+    assert_eq!(serde_json::to_string(&e).unwrap(), decided);
+    for (via, want) in [
+        (r#""terminal""#, Some(DecisionChannel::Terminal)),
+        (r#""carrier_pigeon""#, Some(DecisionChannel::Unknown)),
+        (r#"{"kind":"x"}"#, Some(DecisionChannel::Unknown)),
+        ("null", None),
+    ] {
+        let line = decided.replace(r#""terminal""#, via);
+        let e: Event = serde_json::from_str(&line).unwrap();
+        let EventPayload::ReviewDecided { via: got, .. } = e.payload else {
+            panic!("review_decided");
+        };
+        assert_eq!(got, want, "{via}");
+    }
+    // Only the two channels apb counts as a person's are; a name this
+    // binary does not know never is.
+    for c in DecisionChannel::ALL
+        .iter()
+        .copied()
+        .chain([DecisionChannel::Unknown])
+    {
+        let person = matches!(
+            c,
+            DecisionChannel::Terminal | DecisionChannel::DashboardSession
+        );
+        assert_eq!(c.is_person_channel(), person, "{c:?}");
+    }
+
+    let built = EventPayload::review_requested("g", vec!["approve".into(), "reject".into()], "i");
+    let wire = serde_json::to_value(&built).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"type": "review_requested", "node": "g", "options": ["approve", "reject"], "instruction": "i"})
+    );
 }

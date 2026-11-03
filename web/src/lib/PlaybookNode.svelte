@@ -267,6 +267,15 @@
     {#if data.notRun}
       <div class="run-note" title={data.notRun.title} data-testid="node-not-run">not run · {data.notRun.word}</div>
     {/if}
+    {#if data.approval}
+      <div
+        class="approval-refusal"
+        title={data.approval.detail ? `${data.approval.text} (${data.approval.detail})` : data.approval.text}
+        data-testid="node-approval-refusal"
+      >
+        approval refused · <span class="code">{data.approval.code}</span>
+      </div>
+    {/if}
     {#if data.retryWait}
       <div
         class="retry-wait"
@@ -407,6 +416,19 @@
   .node-issue.error {
     border-color: var(--c-red);
     color: var(--c-red);
+  }
+  /* A node its approval check refused before any attempt: the code on the
+     card, the sentence and what it is about in its tooltip. */
+  .approval-refusal {
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--c-red);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .approval-refusal .code {
+    font-family: var(--font-mono, ui-monospace, monospace);
   }
   .run-note,
   .layer-line {

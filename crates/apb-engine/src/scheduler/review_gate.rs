@@ -19,8 +19,52 @@ pub(crate) enum Consume<'a> {
     /// queued for a replaced plan never answers a different one (the nonce
     /// names the plan, so one queued for a withdrawn request answers only
     /// an identical later plan). `consumed` is how many decisions with this
-    /// nonce were already applied.
-    Nonce { nonce: &'a str, consumed: usize },
+    /// nonce were already applied. On a person-only node only an entry
+    /// through a person's channel answers; any other is never consumed.
+    Nonce {
+        nonce: &'a str,
+        consumed: usize,
+        person_only: bool,
+    },
+    /// The first decision stamped with the open request (and, on a bound
+    /// request, with its binding nonce); for a person-only gate only one
+    /// through a person's channel. Unstamped and refused entries are never
+    /// consumed: `apb doctor --run` lists them.
+    Stamped { person_only: bool },
+}
+
+/// The queued decision that answers gate `node`'s open request under
+/// `consume`, if any.
+fn queued_decision(
+    run_dir: &Path,
+    events: &[Event],
+    node: &str,
+    consume: &Consume<'_>,
+) -> Result<Option<ReviewEntry>, EngineError> {
+    let mut for_node = read_reviews_after(run_dir, None)?
+        .into_iter()
+        .filter(|e| e.cmd.node == node);
+    Ok(match consume {
+        Consume::Nth => for_node.nth(review_decided_count(events, node)),
+        Consume::Nonce {
+            nonce,
+            consumed,
+            person_only,
+        } => for_node
+            .filter(|e| e.nonce.as_deref() == Some(*nonce))
+            .filter(|e| {
+                !*person_only || crate::review::channel::decides_person_only(run_dir, e.channel)
+            })
+            .nth(*consumed),
+        Consume::Stamped { person_only } => {
+            let Some((request, binding)) = crate::review::open_request(events, node) else {
+                return Ok(None);
+            };
+            for_node.find(|e| {
+                crate::review::answers_stamped(run_dir, e, request, binding, *person_only)
+            })
+        }
+    })
 }
 
 /// The request a gate declares once per visit: the `ReviewRequested` event,
@@ -86,16 +130,7 @@ pub(crate) fn await_decision(
     } = d;
     let (run_dir, playbook) = (*run_dir, *playbook);
     let events = read_all(run_dir)?;
-    let mut for_current = read_reviews_after(run_dir, None)?
-        .into_iter()
-        .filter(|e| e.cmd.node == **current);
-    let found = match consume {
-        Consume::Nth => for_current.nth(review_decided_count(&events, current)),
-        Consume::Nonce { nonce, consumed } => for_current
-            .filter(|e| e.nonce.as_deref() == Some(nonce))
-            .nth(consumed),
-    };
-    if let Some(entry) = found {
+    if let Some(entry) = queued_decision(run_dir, &events, current, &consume)? {
         return Ok(GateStep::Decided(entry));
     }
     // No decision yet: declare the request once, then wait (poll). The event
@@ -124,10 +159,8 @@ pub(crate) fn await_decision(
             // enforced recommendation that fails to post waits for the
             // person (fail-closed).
             if by == crate::event::DecidedBy::Unattended
-                && let Some(entry) = read_reviews_after(run_dir, None)?
-                    .into_iter()
-                    .filter(|e| e.cmd.node == **current)
-                    .nth(review_decided_count(&events, current))
+                && let Some(entry) =
+                    queued_decision(run_dir, &read_all(run_dir)?, current, &consume)?
             {
                 return Ok(GateStep::Decided(entry));
             }
@@ -148,6 +181,18 @@ pub(crate) fn await_decision(
             Control::Retry { .. } | Control::ContinueFrom { .. }
         )
     {
+        // A directive past a person-only or approving gate no decision
+        // passed is refused and journaled; the request stays open.
+        if supervisor::refuse_gate_skip(
+            run_dir,
+            log,
+            control_cursor,
+            playbook,
+            &entry.cmd,
+            entry.seq,
+        )? {
+            return Ok(GateStep::Waiting);
+        }
         let reason = match &entry.cmd {
             Control::Retry { node, .. } => format!("node_retry `{node}`"),
             Control::ContinueFrom { node } => format!("run_continue_from `{node}`"),
@@ -240,8 +285,14 @@ pub(crate) fn human_review_request(
     events: &[Event],
 ) -> Result<GateRequest, EngineError> {
     let title = playbook.node(gate).and_then(|n| n.title.clone());
-    let mut instruction =
-        crate::people::instruction::review_instruction(gate, title.as_deref(), options, prompt);
+    let mut instruction = crate::people::instruction::review_instruction_for(
+        gate,
+        title.as_deref(),
+        options,
+        prompt,
+        playbook.node(gate).is_some_and(|n| n.person_only),
+    );
+    let (binding, person_only) = gate_binding(run_dir, playbook, gate, events, &mut instruction);
     let rec = match decisions {
         Some(runner) => {
             let journal = Journal::new(&mut *log);
@@ -261,12 +312,19 @@ pub(crate) fn human_review_request(
             prompt: prompt.map(str::to_string),
             recommendation: rec.recommendation,
             plan_digest: None,
+            binding,
+            person_only,
         },
-        auto: rec.auto.map(|(decision, note)| AutoDecision {
-            decision,
-            note,
-            by: crate::event::DecidedBy::Model,
-        }),
+        // Only a person decides a person-only gate: a recommendation stays
+        // advice there, never a decision.
+        auto: rec
+            .auto
+            .filter(|_| !person_only)
+            .map(|(decision, note)| AutoDecision {
+                decision,
+                note,
+                by: crate::event::DecidedBy::Model,
+            }),
     })
 }
 
@@ -274,6 +332,8 @@ pub(crate) fn human_review_request(
 /// it with its declared option: the same instruction, no recommendation,
 /// and the decision posted at once as `unattended`.
 pub(crate) fn unattended_review_request(
+    run_dir: &Path,
+    events: &[Event],
     playbook: &Playbook,
     gate: &str,
     options: &[String],
@@ -281,8 +341,14 @@ pub(crate) fn unattended_review_request(
     decision: (String, String),
 ) -> GateRequest {
     let title = playbook.node(gate).and_then(|n| n.title.clone());
-    let instruction =
-        crate::people::instruction::review_instruction(gate, title.as_deref(), options, prompt);
+    let mut instruction = crate::people::instruction::review_instruction_for(
+        gate,
+        title.as_deref(),
+        options,
+        prompt,
+        playbook.node(gate).is_some_and(|n| n.person_only),
+    );
+    let (binding, person_only) = gate_binding(run_dir, playbook, gate, events, &mut instruction);
     GateRequest {
         event: EventPayload::ReviewRequested {
             node: gate.to_string(),
@@ -292,6 +358,8 @@ pub(crate) fn unattended_review_request(
             prompt: prompt.map(str::to_string),
             recommendation: None,
             plan_digest: None,
+            binding,
+            person_only,
         },
         auto: Some(AutoDecision {
             decision: decision.0,
@@ -299,6 +367,28 @@ pub(crate) fn unattended_review_request(
             by: crate::event::DecidedBy::Unattended,
         }),
     }
+}
+
+/// The binding and the `person_only` flag of gate `gate`'s next request,
+/// with the binding named in the instruction.
+fn gate_binding(
+    run_dir: &Path,
+    playbook: &Playbook,
+    gate: &str,
+    events: &[Event],
+    instruction: &mut String,
+) -> (Option<crate::approval::ReviewBinding>, bool) {
+    let Some(node) = playbook.node(gate) else {
+        return (None, false);
+    };
+    let binding = node
+        .approves
+        .as_ref()
+        .map(|a| super::approval::bind_request(run_dir, gate, a, events));
+    if let Some(b) = &binding {
+        instruction.push_str(&super::approval::binding_line(b));
+    }
+    (binding, node.person_only)
 }
 
 /// The effects of every sub-playbook the playbook runs, recursively and in

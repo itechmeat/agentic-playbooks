@@ -259,17 +259,22 @@ pub mod testing {
     ) {
         if std::env::var(SCENARIO_CHILD_ENV).as_deref() == Ok(path) {
             // A fresh directory of this child process (the feature has no
-            // `tempfile`), removed after the body.
+            // `tempfile`), removed after the body, also when it panics.
+            struct Removed(std::path::PathBuf);
+            impl Drop for Removed {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
             let root = std::env::temp_dir().join(format!(
                 "apb-scenario-child-{}-{}",
                 std::process::id(),
                 crate::clock::now_ms()
             ));
             std::fs::create_dir_all(&root).expect("a write root");
-            let root = root.canonicalize().expect("the canonical root");
-            super::enter_scenario(level, &root).expect("enters scenario mode");
-            body(&root);
-            let _ = std::fs::remove_dir_all(&root);
+            let root = Removed(root.canonicalize().expect("the canonical root"));
+            super::enter_scenario(level, &root.0).expect("enters scenario mode");
+            body(&root.0);
             return;
         }
         run_child(path, SCENARIO_CHILD_ENV, "scenario");

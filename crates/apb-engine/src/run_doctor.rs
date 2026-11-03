@@ -28,6 +28,7 @@ mod drift;
 mod env;
 mod exposure;
 mod isolation;
+mod review;
 
 pub use check::{FAIL, OK, RunCheck, WARN};
 
@@ -35,9 +36,9 @@ pub use check::{FAIL, OK, RunCheck, WARN};
 ///
 /// Returns the checks in a fixed order - run, nodes, journal drift (the
 /// binaries, unknown and undecodable records, deferred retries), attempts,
-/// autonomy, models, process env, tool exposure, result store, driver,
-/// workdir lock, control backlog, supervisor actions, file modes - so two
-/// reports of the same run are comparable line by line.
+/// autonomy, models, process env, tool exposure, result store, review
+/// channel, driver, workdir lock, control backlog, supervisor actions, file
+/// modes - so two reports of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -99,6 +100,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(exposure::exposure_checks(events));
     checks.extend(isolation::isolation_checks(events));
     checks.extend(results::results_check(&run_dir, run_id));
+    checks.extend(review::review_check(&run_dir, events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(
         root,

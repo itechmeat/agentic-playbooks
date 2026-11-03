@@ -16,6 +16,15 @@ pub enum EngineError {
     /// journaled: a second one would answer nothing (or a later round).
     #[error("already answered: {0}")]
     AlreadyAnswered(String),
+    /// A decision surface the gate does not take a decision from: a
+    /// person-only gate and a channel apb does not count as a person's, or a
+    /// run step deciding its own run. The message names how a person
+    /// decides instead. Surfaces map it to HTTP 403 and an MCP tool error.
+    #[error("{message}")]
+    ChannelRefused {
+        refusal: crate::decision_channel::CallerRefusal,
+        message: String,
+    },
     #[error("workdir busy: {0}")]
     WorkdirBusy(String),
     #[error("agent adapter error: {0}")]

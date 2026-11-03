@@ -520,6 +520,8 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
                 prompt: Some("Check the diff line by line".into()),
                 recommendation: None,
                 plan_digest: None,
+                binding: None,
+                person_only: false,
             },
         ),
     ];
@@ -624,6 +626,8 @@ fn open_action(code: ActionCode, node: &str, kind: RequestKind, seq: u64, arg: &
         reason: String::new(),
         command: None,
         unattended: None,
+        person_only: false,
+        caller_refusal: None,
     }
 }
 
@@ -816,6 +820,8 @@ fn a_review_title_reaches_a_notice_as_plain_text() {
                 prompt: None,
                 recommendation: None,
                 plan_digest: None,
+                binding: None,
+                person_only: false,
             },
         ),
     ];

@@ -60,6 +60,8 @@ export type FlowNodeData = {
   notRun?: { word: string; title: string }
   /** Run view: the node's retry waits out its delay (`retryBadge`). */
   retryWait?: { text: string; title: string; frozen: boolean }
+  /** Run view: why the node's approval check refused it (`nodeApprovalRefusals`). */
+  approval?: { code: string; text: string; detail: string }
   /** Run view: a judge node's latest answers (`judgeCard`). */
   judge?: { lines: string[]; more: number; routed: string[]; shadow: boolean; title: string }
   /** A layer line under the card (the playbook page's counts layer). */

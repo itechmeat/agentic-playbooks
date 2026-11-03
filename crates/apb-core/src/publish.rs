@@ -102,6 +102,10 @@ refusals! {
         "The file remote lies inside the working tree or a path a node may write, so its hooks are not the operator's.";
     HistoryUnreadable => "history_unreadable",
         "The commits the push would carry could not be read from the tree.";
+    /// The node requires an approval whose bound result was taken at
+    /// another commit (`requires_approval`).
+    ApprovalMismatch => "approval_mismatch",
+        "The commit to push is not the commit the approved result was taken at.";
     /// A code journaled by another apb version; the detail names it.
     Unrecognized => "unrecognized", "The run recorded a refusal this apb does not know.";
 }
@@ -128,6 +132,14 @@ pub struct PlanFacts<'a> {
 
 /// The plan digest: a sha256 over every fact the person saw.
 pub fn plan_digest(f: &PlanFacts<'_>) -> String {
+    plan_digest_with(f, None)
+}
+
+/// [`plan_digest`] of a node that requires an approval: the binding nonce
+/// of the approval it acts on is one more line, `approval=<nonce>`, so the
+/// push consent names what was approved. `None` keeps exactly the digest
+/// input of a plan without one.
+pub fn plan_digest_with(f: &PlanFacts<'_>, approval: Option<&str>) -> String {
     let mut input = format!(
         "publish-plan-v1\nnode={}\nurl={}\nbranch={}\nafter={}\nremote_before={}\n",
         f.node,
@@ -139,6 +151,11 @@ pub fn plan_digest(f: &PlanFacts<'_>) -> String {
     for c in f.commits {
         input.push_str("commit=");
         input.push_str(c);
+        input.push('\n');
+    }
+    if let Some(nonce) = approval {
+        input.push_str("approval=");
+        input.push_str(nonce);
         input.push('\n');
     }
     crate::content::sha256_hex(input.as_bytes())
@@ -237,6 +254,19 @@ mod tests {
         for v in variants {
             assert_ne!(nonce(&plan_digest(&v)), n, "{v:?}");
         }
+    }
+
+    #[test]
+    fn a_plan_without_an_approval_keeps_its_earlier_digest() {
+        let commits = vec!["a1".to_string()];
+        let base = facts(&commits);
+        // The digest input of a plan before approvals existed.
+        let earlier = "sha256:599259263a3a91d40dfcb0dfe07408b5998274272aaae7c0cd11d44a70df100c";
+        assert_eq!(plan_digest(&base), earlier);
+        assert_eq!(plan_digest_with(&base, None), earlier);
+        let approved = plan_digest_with(&base, Some("approval-0123"));
+        assert_ne!(approved, earlier);
+        assert_ne!(approved, plan_digest_with(&base, Some("approval-4567")));
     }
 
     #[test]

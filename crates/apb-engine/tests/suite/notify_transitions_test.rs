@@ -52,15 +52,7 @@ fn started() -> Event {
 fn review(seq: u64, node: &str) -> Event {
     ev(
         seq,
-        EventPayload::ReviewRequested {
-            node: node.into(),
-            options: vec![],
-            title: None,
-            instruction: String::new(),
-            prompt: None,
-            recommendation: None,
-            plan_digest: None,
-        },
+        EventPayload::review_requested(node, vec![], String::new()),
     )
 }
 
@@ -157,13 +149,7 @@ fn an_open_review_is_due_and_a_decided_one_is_not() {
     assert_eq!(ids(&events), ["review.2"]);
     events.push(ev(
         3,
-        EventPayload::ReviewDecided {
-            node: "gate".into(),
-            decision: "approve".into(),
-            note: String::new(),
-            plan_digest: None,
-            decided_by: None,
-        },
+        EventPayload::review_decided("gate", "approve", String::new(), None),
     ));
     assert!(ids(&events).is_empty());
 }

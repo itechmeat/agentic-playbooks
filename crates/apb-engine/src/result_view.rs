@@ -603,6 +603,22 @@ fn stamped_manifest(
     Ok((b, events, manifest))
 }
 
+/// The manifest of a snapshot a stamp of the run names, with the manifest
+/// and every object it names re-hashed: an approval binds and re-checks
+/// only snapshots that still verify whole.
+pub(crate) fn verified_manifest(
+    run_dir: &Path,
+    snapshot_id: &str,
+) -> Result<SnapshotManifest, ResultReadError> {
+    let (b, _, m) = stamped_manifest(run_dir, snapshot_id)?;
+    for e in &m.entries {
+        if read_object(&b, e)?.is_none() {
+            return Err(ResultReadError::Corrupt);
+        }
+    }
+    Ok(m)
+}
+
 /// The entry a reader names by its shown id ([`shown_ids`]), with whether
 /// its path is redacted on read.
 fn find_entry<'m>(
@@ -730,6 +746,45 @@ fn live_root(run_dir: &Path, events: &[Event]) -> Option<PathBuf> {
         .or_else(|| crate::run_config::project_root_of(run_dir))
 }
 
+/// How a stored file entry compares with its live copy now, for an
+/// approval's `live: check`: a workspace file against the tree it was read
+/// from, a run-scope file against the run directory. Output, fields and
+/// redacted entries are `not_comparable`.
+pub(crate) fn live_state(run_dir: &Path, events: &[Event], e: &SnapshotEntry) -> LiveComparison {
+    let root = match (e.part, e.scope) {
+        (EntryPart::File, Some(ResultScope::Workspace)) => live_root(run_dir, events),
+        (EntryPart::File, Some(ResultScope::Run)) => Some(run_dir.to_path_buf()),
+        _ => return LiveComparison::NotComparable,
+    };
+    match (e.path.as_deref(), root) {
+        (Some(p), Some(root)) if !e.redacted && !p.starts_with(REDACTED_PATH_PREFIX) => {
+            compare_at(&root, p, &e.digest)
+        }
+        (_, None) => LiveComparison::Missing,
+        _ => LiveComparison::NotComparable,
+    }
+}
+
+/// The live file at `path` beneath `root` against `digest`, through a
+/// descriptor walk that follows no link.
+fn compare_at(root: &Path, path: &str, digest: &str) -> LiveComparison {
+    let b = match Beneath::open(root) {
+        Ok(b) => b,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return LiveComparison::Missing,
+        Err(_) => return LiveComparison::Unreadable,
+    };
+    match b.read_regular_capped(path, MAX_FILE_BYTES) {
+        Ok(CappedRead::Read { digest: d, .. }) if d == digest => LiveComparison::Same,
+        Ok(CappedRead::Read { .. }) | Ok(CappedRead::Refused(ReadRefusal::TooLarge { .. })) => {
+            LiveComparison::Differs
+        }
+        Ok(CappedRead::Refused(ReadRefusal::Missing)) => LiveComparison::Missing,
+        Ok(CappedRead::Refused(_)) => LiveComparison::Unreadable,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => LiveComparison::Missing,
+        Err(_) => LiveComparison::Unreadable,
+    }
+}
+
 /// Compares a stored workspace file with the live file, by digest, through
 /// a descriptor walk that follows no link. Only the word is answered. The
 /// stored object is re-hashed first, as on every read (`Corrupt`
@@ -763,19 +818,5 @@ pub fn compare_live(
     let Some(root) = live_root(run_dir, &events) else {
         return Ok(LiveComparison::Missing);
     };
-    let b = match Beneath::open(&root) {
-        Ok(b) => b,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(LiveComparison::Missing),
-        Err(_) => return Ok(LiveComparison::Unreadable),
-    };
-    Ok(match b.read_regular_capped(path, MAX_FILE_BYTES) {
-        Ok(CappedRead::Read { digest, .. }) if digest == e.digest => LiveComparison::Same,
-        Ok(CappedRead::Read { .. }) | Ok(CappedRead::Refused(ReadRefusal::TooLarge { .. })) => {
-            LiveComparison::Differs
-        }
-        Ok(CappedRead::Refused(ReadRefusal::Missing)) => LiveComparison::Missing,
-        Ok(CappedRead::Refused(_)) => LiveComparison::Unreadable,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => LiveComparison::Missing,
-        Err(_) => LiveComparison::Unreadable,
-    })
+    Ok(compare_at(&root, path, &e.digest))
 }

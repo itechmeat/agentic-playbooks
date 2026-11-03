@@ -82,6 +82,14 @@ fn render_types() -> String {
         apb_engine::publish::view::PushState::decl(&cfg),
         apb_engine::publish::view::PushView::decl(&cfg),
         apb_engine::publish::view::PublishView::decl(&cfg),
+        // Approval of an exact snapshot set: what a gate's request is
+        // bound to.
+        apb_engine::approval::BindingMissingReason::decl(&cfg),
+        apb_engine::approval::BindingMissing::decl(&cfg),
+        apb_engine::approval::BoundSnapshot::decl(&cfg),
+        apb_engine::approval::ReviewBinding::decl(&cfg),
+        apb_engine::approval::ApprovalRefusal::decl(&cfg),
+        apb_engine::decision_channel::DecisionChannel::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
         // List mode: a list node's counts and its items.
@@ -228,6 +236,7 @@ fn render_types() -> String {
         // needs.
         apb_engine::next_action::ActionCode::decl(&cfg),
         apb_engine::next_action::Principal::decl(&cfg),
+        apb_engine::next_action::CallerRefusal::decl(&cfg),
         apb_engine::next_action::RequestKind::decl(&cfg),
         apb_engine::next_action::RequestRef::decl(&cfg),
         apb_engine::next_action::ActionTarget::decl(&cfg),
@@ -575,6 +584,7 @@ fn render_consts() -> String {
     ));
     render_isolation_consts(&mut out);
     render_publish_consts(&mut out);
+    render_approval_consts(&mut out);
     render_route_consts(&mut out);
     render_check_consts(&mut out);
     out.push_str(&format!(
@@ -651,6 +661,37 @@ fn render_result_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** The most bytes of one entry an inline result read returns. */\nexport const RESULT_DISPLAY_CAP = {}\n",
         apb_engine::result_view::DISPLAY_CAP
+    ));
+}
+
+/// The decision channels, the caller refusals every facade renders and the
+/// approval refusals with their sentences, so the dashboard words each one
+/// the server can send.
+fn render_approval_consts(out: &mut String) {
+    use apb_engine::approval::ApprovalRefusal;
+    use apb_engine::decision_channel::{CallerRefusal, DecisionChannel};
+    let channels: Vec<&str> = DecisionChannel::ALL.iter().map(|c| c.as_str()).collect();
+    let callers: Vec<&str> = CallerRefusal::ALL.iter().map(|c| c.as_str()).collect();
+    let refusals: Vec<&str> = ApprovalRefusal::ALL.iter().map(|r| r.as_str()).collect();
+    out.push_str(&format!(
+        "\n/** Every channel a gate decision can arrive through. */\nexport const DECISION_CHANNELS = {}\n",
+        ts_string_array(&channels)
+    ));
+    out.push_str(&format!(
+        "\n/** Every reason a surface does not offer an action to its caller. */\nexport const CALLER_REFUSALS = {}\n",
+        ts_string_array(&callers)
+    ));
+    out.push_str(&format!(
+        "\n/** Every reason an approval check refuses a node. */\nexport const APPROVAL_REFUSALS = {}\n",
+        ts_string_array(&refusals)
+    ));
+    out.push_str(&format!(
+        "\n/** Why an approval check refused a node, in words. */\nexport const APPROVAL_REFUSAL_TEXTS = {{ {} }} as const\n",
+        label_entries(
+            ApprovalRefusal::ALL
+                .iter()
+                .map(|r| (r.as_str().to_string(), r.sentence()))
+        )
     ));
 }
 

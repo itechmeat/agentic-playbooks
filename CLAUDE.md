@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves` or a `requires_approval` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`); `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -305,9 +305,28 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb eval` (`eval/`), the reading view of a run's result snapshots every
   surface answers through (`result_view.rs`: rows by node, execution and
   item, every manifest and object re-hashed on every read, text through the
-  run redactor, `compare_live` a word only) and their cleanup
+  run redactor, `compare_live` a word only, `verified_manifest` and
+  `live_state` for an approval) and their cleanup
   (`result_clean.rs`: dead transactions resolved by the journal, only what
   no stamp and no open transaction names removed, `survey` writing nothing),
+  the approval of an exact snapshot set (`approval.rs`: `ReviewBinding`
+  with its `BoundSnapshot`s and `BindingMissing` nodes, the binding nonce
+  over run, gate, visit and every bound snapshot, `ApprovalRefusal` with
+  its sentences, `ApprovalFailure`; `scheduler/review_gate.rs` binds a
+  request and re-verifies its snapshots when it consumes the decision,
+  `approval_snapshot_unreadable` ending the run; `scheduler/approval.rs`
+  `check_before`, the re-check of a `requires_approval` node at admission
+  before `node_started`, sequential and batch, and `approved_binding` and
+  `approved_head`, which the publish arm reads for its own check before
+  every plan), the decision channels (`decision_channel.rs`:
+  `DecisionChannel`, a person's only `terminal` and `dashboard_session`,
+  and `CallerRefusal`, the closed list every facade renders;
+  `review/channel.rs`: `decides_person_only`, `refuse_for_person_only` and
+  `refuse_own_run`, a run step never deciding or answering for its own run,
+  its ancestors or descendants at depth 8, checked by
+  `question::post_answer_to` too; `review::post_decision_via`, the one
+  entry that states a channel and stamps `request` and `channel` on the
+  entry),
   the operator pause: who paused a run and how, the pause every run surface
   reports, and the paused-interval clock every deadline, timeout and
   duration goes through (`pause.rs`; `pause/`: `kind` the journal-facing
@@ -346,7 +365,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   retry-now, wake-hold and expedite-actor types sit in the leaf module
   `resume_kind.rs`), the text apb writes for people (`people/`: `brief` the writing
   brief and where it applies, `instruction` the review and supervisor
-  instructions, `link` a run's dashboard link), the run report as one
+  instructions with `gate_how_to_decide` for a person-only or bound gate,
+  `link` a run's dashboard link), the run report as one
   self-contained HTML page (`report_html/`), run quality (`grade/`:
   `sources` every view of a run a grader reads, `reader` the bounded,
   redacting, traced reader, `evidence` the one validator every grader's
@@ -381,7 +401,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   verdict, `deadlines` on the paused-interval clock, `types` the action
   shapes, `command` the one command-line renderer every surface prints,
   `unattended` what an unattended run would do at each wait (the
-  `unattended` field of every next action),
+  `unattended` field of every next action), `caller_refusal` and
+  `mark_for_caller` what a surface's channel may not take (a person-only
+  gate, a step's own run),
   `start` and `start_action` the start actions of a refused start and of
   the fit report with their remedies), known problems (`known_problems/`: `observe`
   at a run's end, `at_start` what a starting run shows and journals once,
@@ -452,7 +474,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   one agent step and its `agent_env_applied` event (`agent_env.rs`; the
   per-step wiring in `scheduler/node/step_env`), the per-run doctor
   (`run_doctor.rs`, `run_doctor/env` the process env rows, `run_doctor/exposure`
-  the tool exposure rows, `run_doctor/isolation` the isolation rows, its inline `results` module the result store's leftovers, `run_doctor/drift` the journal
+  the tool exposure rows, `run_doctor/isolation` the isolation rows, its inline `results` module the result store's leftovers, `run_doctor/review` the channel entries no gate consumes (unstamped, another request or binding, not a person's on a person-only gate), `run_doctor/drift` the journal
   format drift: the binaries that drove the run, a downgrade, unknown,
   undecodable and torn lines, open deferrals and their guard; the binaries
   themselves in `run_binaries.rs`), the paid agent probe behind `apb doctor
@@ -462,7 +484,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   without failing and the guard state of its deferrals; `event/deferral_guard`
   the open deferred retries, the one closing rule the run state shares, and
   the guard written with every checkpoint while one is open, added on open
-  when a crash left it out), connector execution (`connector/`, with `call/` split into
+  when a crash left it out; `event/run_guard` the run guard: the latest
+  `run_guard` names the features a run relies on and is written in the same
+  write as every checkpoint while it names any, after the deferral guard;
+  `scheduler/prepare.rs` writes it after `run_provenance`, `scheduler/patch.rs`
+  before and after `patch_applied`, and a feature this binary does not know
+  reads as an unknown event, so resume refuses and stop goes through),
+  connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping, `attempt` the
   call's attempt binding, `target` the snapshot grant or the live
   trust-gated target a call resolves first, and `send_once` the send-once
@@ -512,7 +540,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   in) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `actions` the next actions and start actions as tool calls with
-  `available_to_caller`,
+  `available_to_caller`, `caller_refusal` and `mcp_channel` (the channel of
+  a decision through MCP, a run step's inside one),
   `meta`, `intent` for `run_intent_resolve` and `apb intent`, `budget` for the
   budget arguments, the pre-start decision and the estimate and budget blocks
   the HTTP API reuses, `memory` for `playbook_memory` and the `remember` of a
@@ -580,7 +609,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb
   memory`, `make_global.rs` is `apb make-global`, `version.rs` is `apb
   version list|use|history`, `publish.rs` is `apb
-  publish show|approve|skip` (thin wrappers over the review channel), `import_preview.rs` prints
+  publish show|approve|skip` (thin wrappers over the review channel; a
+  person-only gate takes them only at a terminal after the typed
+  confirmation of `consent::ask_typed`, else as `cli_unattended` or
+  `run_step`), `import_preview.rs` prints
   the preview `apb import` shows before it asks for acceptance. `notify.rs`
   is `apb notify` and the notify flags of `apb run` (forwarded to the
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
@@ -614,8 +646,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   a playbook's known problems, `results` for a run's result snapshots
   (the listing, one entry, the raw download and the live comparison),
   `discover` for history discovery, loopback
-  only; `state.rs` also holds the tool-layer
-  answer and refusal mapping they share;
+  only; `auth.rs` inserts the `RequestChannel` (keyless, bearer, session)
+  a decision route maps to its channel; `state.rs` also holds the tool-layer
+  answer and refusal mapping they share (`ToolError::Refused` is 403);
   `runs` also serves the report page), shared request state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
@@ -705,6 +738,44 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `artifacts_committed.attempts` records each attempt's head, so commit
   rows say which attempt made a commit. All new fields are
   `serde(default)` and display or storage only.
+- **Approvals and person-only gates** (spec
+  `docs/superpowers/specs/2026-11-03-approvals-design.md`): a
+  `human_review` with `approves: { results }` binds its request to the
+  latest stamped snapshots of those nodes (`review_requested.binding`), and
+  an approving decision carries the binding nonce in the field a publish
+  consent uses; the drive consumes only an entry stamped with the open
+  request and re-verifies every bound snapshot first. A node with
+  `requires_approval: { gate, of?, live }` is re-checked at admission and
+  again as each execution begins (`node::execute_node_kind`: a resume, a
+  deferred retry, a list item) (`approval_missing`, `approval_stale`,
+  `approval_snapshot_unreadable`, `approval_incomplete`,
+  `approval_unverifiable`) and finishes failed with no attempt when
+  refused; a publish node adds `approval_mismatch` (also when the approved
+  snapshot recorded no commit) and the plan digest line
+  `approval=<nonce>`. An approval is a fact about stored
+  bytes and never a consent. A gate marked `person_only` takes a decision
+  only through `terminal` or `dashboard_session` (a scenario run's script
+  in a scenario run); every surface states its channel, MCP and run steps
+  are refused (`ChannelRefused`, MCP tool error, HTTP 403), and a run step
+  never decides or answers for its own run tree (siblings included; a tree
+  that does not read refuses) on any gate. A server key signs in, so it is
+  a person's credential and the bearer refusal guards against mistakes
+  only. A supervisor patch, in-run or forward, never weakens these fields,
+  and an in-run one never re-points such a gate's options
+  (`approval_weakened`, `scheduler::approval::patch_refusal`). Every move
+  to a named node (a patch's `continue_from`, `node_retry`,
+  `run_continue_from`, a resume's `from_node`) goes through one check,
+  `scheduler::approval::skips_gate`: a gate is passed only by its latest decision,
+  passing (approving on the current binding, or not `reject`), routed
+  toward the target and of the current visit; a refused directive is
+  journaled `directive_refused`, and only a person's resume (terminal,
+  `dashboard_session`) goes past (`refuse_resume_skip`). An unattended
+  or enforced decision on a bound gate is stamped with the nonce and
+  satisfies `requires_approval`, labelled by `decided_by`. A run that uses
+  any of these carries the run guard, so an older apb refuses to continue
+  it; an older apb that starts such a playbook drops the fields, and one
+  that stopped such a run can resume it past its gates (its stop leaves no
+  guard), which is documented, not prevented.
 
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge

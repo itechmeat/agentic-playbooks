@@ -248,6 +248,8 @@ fn finished(obs: &Observation, out: &mut Vec<Wait>) {
                 auto: None,
                 command: None,
                 unattended: None,
+                person_only: false,
+                caller_refusal: None,
                 reason: intent.resolve_reason(),
             },
         });
@@ -268,6 +270,8 @@ fn finished(obs: &Observation, out: &mut Vec<Wait>) {
             auto: None,
             command: None,
             unattended: None,
+            person_only: false,
+            caller_refusal: None,
             reason: format!(
                 "the run finished ({}); read its report",
                 obs.status().as_str()
@@ -318,6 +322,8 @@ impl RunCx<'_> {
             auto: None,
             command: None,
             unattended: None,
+            person_only: false,
+            caller_refusal: None,
             reason: self.reason(line),
         }
     }
@@ -372,9 +378,11 @@ impl RunCx<'_> {
                     given("nonce", &plan.nonce),
                 ];
                 a.principals = vec![Principal::Person];
+                a.person_only = r.person_only;
                 (Kind::Publish, a)
             }
             None => {
+                let nonce = r.binding.as_ref().map(|b| b.nonce.clone());
                 let mut a = self.action(
                     ActionCode::DecideReview,
                     ActionTarget {
@@ -382,18 +390,26 @@ impl RunCx<'_> {
                         request: Some(RequestRef {
                             kind: RequestKind::Review,
                             seq,
-                            nonce: None,
+                            nonce: nonce.clone(),
                         }),
                         ..ActionTarget::default()
                     },
-                    format!("node `{}` waits for a human review decision", r.node),
+                    review_reason(r),
                 );
                 let options: Vec<&str> = r.options.iter().map(String::as_str).collect();
                 a.args = vec![
                     choice("decision", &options, None),
                     optional("note", "a note"),
                 ];
-                a.principals = vec![Principal::Person, Principal::Operator];
+                if let Some(n) = &nonce {
+                    a.args.push(given("nonce", n));
+                }
+                a.principals = if r.person_only {
+                    vec![Principal::Person]
+                } else {
+                    vec![Principal::Person, Principal::Operator]
+                };
+                a.person_only = r.person_only;
                 (Kind::Review, a)
             }
         };
@@ -796,4 +812,35 @@ fn optional(name: &str, hint: &str) -> ActionArg {
         required: false,
         ..supplied(name, hint)
     }
+}
+
+/// The reason of a `human_review` gate's action: that it waits, the
+/// snapshots its open request binds, and when only a person decides it,
+/// where.
+fn review_reason(r: &crate::progress::PendingReview) -> String {
+    let mut line = format!("node `{}` waits for a human review decision", r.node);
+    if let Some(b) = &r.binding {
+        let bound: Vec<String> = b
+            .snapshots
+            .iter()
+            .map(|s| {
+                let id = s.snapshot_id.get(..12).unwrap_or(&s.snapshot_id);
+                match &s.item {
+                    Some(item) => format!("{} item {item} snapshot {id}", s.node),
+                    None => format!("{} snapshot {id}", s.node),
+                }
+            })
+            .collect();
+        if bound.is_empty() {
+            line.push_str("; an approval binds no snapshot");
+        } else {
+            line.push_str(&format!("; an approval binds {}", bound.join(", ")));
+        }
+    }
+    if r.person_only {
+        line.push_str(
+            "; only a person decides it, at an interactive terminal or on the dashboard run page where they are signed in",
+        );
+    }
+    line
 }

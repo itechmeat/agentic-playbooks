@@ -52,6 +52,50 @@ pub fn for_surface(
     actions
 }
 
+/// Why a caller posting through `channel` (from inside the run step
+/// `step`, if any) does not take `a`, the action of the run at `run_dir`:
+/// a step never decides a gate, answers a question or resolves a send of
+/// its own run tree (`run_step_own_run`), and a person-only gate refuses
+/// every channel that is not a person's. `None` when the caller may take
+/// it; the path that executes it checks everything again.
+pub fn caller_refusal(
+    a: &NextAction,
+    run_dir: &std::path::Path,
+    channel: crate::decision_channel::DecisionChannel,
+    step: &apb_core::step_env::StepCaller,
+) -> Option<CallerRefusal> {
+    let decides = matches!(
+        a.code,
+        ActionCode::DecideReview
+            | ActionCode::DecidePublish
+            | ActionCode::AnswerQuestion
+            | ActionCode::ResolveIntent
+    );
+    if decides && crate::review::channel::refuse_own_run(run_dir, step).is_err() {
+        return Some(CallerRefusal::RunStepOwnRun);
+    }
+    let gate = matches!(a.code, ActionCode::DecideReview | ActionCode::DecidePublish);
+    if gate && a.person_only {
+        return channel.person_only_refusal();
+    }
+    None
+}
+
+/// Marks every action of `actions` with [`caller_refusal`] for a caller
+/// posting through `channel` from `step`; `runs_dir` holds the runs the
+/// actions name. Every surface marks the actions it shows.
+pub fn mark_for_caller(
+    actions: &mut RunActions,
+    runs_dir: &std::path::Path,
+    channel: crate::decision_channel::DecisionChannel,
+    step: &apb_core::step_env::StepCaller,
+) {
+    for a in &mut actions.actions {
+        let dir = runs_dir.join(&a.run_id);
+        a.caller_refusal = caller_refusal(a, &dir, channel, step);
+    }
+}
+
 /// The next actions of the observed run and its live children.
 pub fn next_actions(obs: &Observation) -> RunActions {
     let waits = verdict::collect(obs);

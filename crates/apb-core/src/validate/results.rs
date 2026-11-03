@@ -13,21 +13,33 @@ use super::*;
 use crate::result_store::{MAX_DECLARATIONS, ResultScope, is_reserved_first};
 
 /// The nodes whose executions take a snapshot: every node that declares
-/// `results:` (an empty list included). The one place later references to
-/// a node's results (approvals, evidence) extend.
+/// `results:` (an empty list included), and every node a gate's
+/// `approves.results` or a node's `requires_approval.of` names (without
+/// its own `results:`, its snapshot keeps the output and fields only). The
+/// one place later references to a node's results (evidence) extend.
 pub fn snapshotted_nodes(playbook: &Playbook) -> BTreeSet<String> {
+    let named = playbook.nodes.iter().flat_map(|n| {
+        let approved = n.approves.iter().flat_map(|a| a.results.iter());
+        let required = n
+            .requires_approval
+            .iter()
+            .flat_map(|q| q.of.iter().flatten());
+        approved.chain(required)
+    });
     playbook
         .nodes
         .iter()
         .filter(|n| n.results.is_some())
-        .map(|n| n.id.clone())
+        .map(|n| &n.id)
+        .chain(named.filter(|id| playbook.node(id).is_some()))
+        .cloned()
         .collect()
 }
 
 /// Whether a node of this kind settles work a snapshot can hold: an
 /// `agent_task` or `script` (a list node is one of them) or a `finish` that
-/// composes an answer.
-fn kind_takes_results(kind: &NodeKind) -> bool {
+/// composes an answer. A gate's `approves` names only such nodes.
+pub(super) fn kind_takes_results(kind: &NodeKind) -> bool {
     matches!(
         kind,
         NodeKind::AgentTask { .. }

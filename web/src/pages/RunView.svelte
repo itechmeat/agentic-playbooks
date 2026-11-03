@@ -19,7 +19,8 @@
   import { interventionJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
   import { listProgressByNode } from '../lib/listprogress'
-  import { runGates, type QuestionEntry } from '../lib/rungates'
+  import { liveRefusals, refusalKey, refusalSentence, runGates, type QuestionEntry } from '../lib/rungates'
+  import { nodeApprovalRefusals } from '../lib/approval'
   import { postDecision, postReply, type PostTarget } from '../lib/runposts'
   import { formatCost, formatTokens, runCostNote, runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import {
@@ -106,6 +107,9 @@
   let report = $state<string | null>(null)
   let tab = $state<'events' | 'journal' | 'report'>('events')
   let deciding = $state<string | null>(null)
+  // The server's sentence for a review decision it refused, per gate run,
+  // node and request (`refusalKey`).
+  let reviewRefusals = $state<Record<string, string>>({})
   let answering = $state(false)
   let projectName = $state('')
   let now = $state(Date.now())
@@ -243,8 +247,9 @@
   const graphNodeData = $derived.by(() => {
     const out = new Map<string, Partial<FlowNode['data']>>()
     const g = detail ? graphOf(detail.graph) : null
+    if (detail) for (const [node, approval] of nodeApprovalRefusals(detail)) out.set(node, { approval })
     if (!g) return withRetryBadges(out, detail?.retry_waits)
-    for (const n of g.nodes) if (n.executions > 0) out.set(n.node, { runCount: nodeCounts(n) })
+    for (const n of g.nodes) if (n.executions > 0) out.set(n.node, { ...out.get(n.node), runCount: nodeCounts(n) })
     for (const n of g.not_run) {
       out.set(n.node, { ...out.get(n.node), notRun: { word: classWord(n.class), title: notRunTitle(n) } })
     }
@@ -310,19 +315,23 @@
   // A gate decision, posted to the gate's own run and naming its request
   // (`runposts`, shared with the next actions panel); a publish gate's
   // target carries the nonce of the plan shown.
-  async function decide(target: PostTarget, decision: string) {
-    const nonce = target.nonce
+  async function decide(target: PostTarget, decision: string, publish = false) {
     deciding = `${target.node}:${decision}`
     try {
       await postDecision(target, decision, workspace)
+      if (!publish) {
+        const { [refusalKey(target)]: _done, ...rest } = reviewRefusals
+        reviewRefusals = rest
+      }
       await load()
     } catch (e) {
       // A publish decision fails when the plan moved on (a stale nonce), and
       // any decision when its request was replaced: load the run again so
-      // the page shows what holds now.
-      toast.error(nonce ? 'Publish decision failed' : 'Review failed', {
-        description: String(e),
-      })
+      // the page shows what holds now. A refused review keeps the server's
+      // sentence on its gate (a person-only gate names where to decide).
+      const why = refusalSentence(e)
+      if (!publish) reviewRefusals = { ...reviewRefusals, [refusalKey(target)]: why }
+      toast.error(publish ? 'Publish decision failed' : 'Review failed', { description: why })
       await load().catch(() => {})
     } finally {
       deciding = null
@@ -334,7 +343,7 @@
     const gate = publishes.find((g) => g.node === node)
     const target: PostTarget = { runId: gate?.runId ?? id, node, nonce }
     if (gate?.request !== undefined) target.request = gate.request
-    return decide(target, decision)
+    return decide(target, decision, true)
   }
 
   async function answer(question: QuestionEntry, value: string) {
@@ -425,6 +434,8 @@
       detail = d
       loadError = null
       now = Date.now()
+      // A refusal stays only while its gate's request is still open.
+      reviewRefusals = liveRefusals(reviewRefusals, pending)
       // The definition the graph's shown segment ran, so edge states match
       // the bytes that ran; the mutable snapshot only when none is known.
       const model = d.graph_model ?? d.model
@@ -761,7 +772,7 @@
 
       <PublishPanel runId={id} views={detail.publish} gates={publishes} posting={deciding} onDecide={decidePublish} />
 
-      <ReviewPanel reviews={pending} posting={deciding} onDecide={decide} />
+      <ReviewPanel reviews={pending} posting={deciding} refusals={reviewRefusals} onDecide={(r, o) => decide(r, o)} />
 
       {#if supervisor}
         <section class="box glow flex flex-col gap-2 px-4 pt-4 pb-3 text-xs" style:--k="var(--c-amber)">
