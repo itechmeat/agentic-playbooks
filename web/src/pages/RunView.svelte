@@ -831,7 +831,7 @@
         <ListProgressPanel lists={detail.lists} />
       {/key}
       <DecisionsPanel decisions={detail.decisions} events={detail.events} runId={id} {workspace} />
-      <AttemptModelsPanel models={detail.attempt_models} {current} />
+      <AttemptModelsPanel models={detail.attempt_models} hintFollow={detail.hint_follow} {current} />
       <AttemptIsolationPanel rows={detail.isolation} readOnly={detail.read_only} />
       <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />

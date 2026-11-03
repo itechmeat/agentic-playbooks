@@ -8,7 +8,7 @@ use apb_core::schema::Node;
 
 use super::sample::{AttemptSpend, RunSample};
 use super::types::{
-    AttemptMedian, EstimateBasis, EstimateTarget, ItemsBasis, ListEstimate, NodeEstimate,
+    AttemptMedian, EstimateBasis, EstimateTarget, ItemsBasis, KeyPart, ListEstimate, NodeEstimate,
     NodeSpread, SpendEstimate, Spread, SpreadKind, TimeEstimate,
 };
 use crate::decision::report::stats::quantile;
@@ -315,9 +315,10 @@ pub(super) fn time(target: &EstimateTarget, succeeded: &[&RunSample]) -> TimeEst
     }
 }
 
-/// The runs whose binding of `node` is the target's: the same profile
-/// digest (both absent for a node without a profile). Returns them and how
-/// many comparable runs bound it otherwise.
+/// The runs whose binding of `node` is the target's: the same profile,
+/// bundle and executor digest (all absent for a node without a profile).
+/// Returns them and, for each run that bound it otherwise, the outermost
+/// part of the key it differed in, so every mismatched run is counted once.
 pub(super) fn matching<'a>(
     target: &EstimateTarget,
     node: &str,
@@ -325,18 +326,35 @@ pub(super) fn matching<'a>(
         &'a RunSample,
         &'a BTreeMap<String, crate::manifest::NodeDigests>,
     )],
-) -> (Vec<&'a RunSample>, u32) {
-    let want = target.node_profiles.get(node);
+) -> (Vec<&'a RunSample>, Vec<KeyPart>) {
+    let want = target.node_keys.get(node);
     let mut out = Vec::new();
-    let mut mismatch = 0;
+    let mut mismatch = Vec::new();
     for (sample, digests) in runs {
-        if digests.get(node).map(|d| &d.profile) == want {
-            out.push(*sample);
-        } else {
-            mismatch += 1;
+        match differing_part(want, digests.get(node)) {
+            None => out.push(*sample),
+            Some(part) => mismatch.push(part),
         }
     }
     (out, mismatch)
+}
+
+/// The outermost part of the key `want` that `have` differs in.
+fn differing_part(
+    want: Option<&crate::execution_identity::digest::NodeExecKey>,
+    have: Option<&crate::manifest::NodeDigests>,
+) -> Option<KeyPart> {
+    match (want, have) {
+        (None, None) => None,
+        (Some(w), Some(h)) if w.profile != h.profile => Some(KeyPart::Profile),
+        (Some(w), Some(h)) if w.bundle != h.bundle => Some(KeyPart::Bundle),
+        (Some(w), Some(h)) if w.executor != h.executor => Some(KeyPart::Executor),
+        (Some(_), Some(_)) => None,
+        // One side has no profile: the node gained or lost its profile,
+        // which is a difference in the profile itself (before the executor
+        // key, a missing profile matched only a missing one, too).
+        _ => Some(KeyPart::Profile),
+    }
 }
 
 #[cfg(test)]
@@ -367,7 +385,7 @@ mod tests {
             version: p.version.clone(),
             playbook: p,
             execution: "cli".into(),
-            node_profiles: BTreeMap::new(),
+            node_keys: BTreeMap::new(),
             exclude_run: None,
         }
     }

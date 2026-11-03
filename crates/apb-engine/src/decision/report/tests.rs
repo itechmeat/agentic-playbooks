@@ -666,3 +666,108 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
         )
     );
 }
+
+/// A run where retry advice judged attempt 1 of `w` and attempt 2 then
+/// failed on the same executor; with `exec` on both attempts or on none.
+fn retry_run(id: &str, with_exec: bool) -> RunJournal {
+    let exec = |step: u32| {
+        with_exec.then(|| serde_json::json!({"binding": "sha256:b1", "step": step, "source": {"kind": "primary"}, "executed_by": "cli"}))
+    };
+    let started = |attempt: u32| {
+        let mut v = serde_json::json!({"type": "attempt_started", "node": "w", "attempt": attempt, "agent": "claude", "model": "m"});
+        if let Some(x) = exec(0) {
+            v["exec"] = x;
+        }
+        v
+    };
+    let lines = [
+        serde_json::json!({"type": "run_started", "playbook": "p", "version": "1.0.0"}),
+        serde_json::json!({"type": "node_started", "node": "w", "attempt": 1}),
+        started(1),
+        serde_json::json!({"type": "attempt_finished", "node": "w", "attempt": 1, "status": "failed"}),
+        serde_json::json!({"type": "decision_made", "use_site": "retry_advice", "node": "w", "attempt": 1,
+            "provider": "main", "model": "jev-1.13.0", "calibrated": true, "mode": "shadow",
+            "questions_digest": "sha256:q", "state_digest": "sha256:s", "state_bytes": 1,
+            "answers": {"next": {"value": "switch_executor", "p": 0.9, "confidence": 0.9}},
+            "applied": false, "latency_ms": 1, "cached": false, "error": null}),
+        started(2),
+        serde_json::json!({"type": "attempt_finished", "node": "w", "attempt": 2, "status": "failed"}),
+    ];
+    RunJournal {
+        run_id: id.into(),
+        playbook: "p".into(),
+        events: lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| Event {
+                seq: i as u64,
+                ts: 1_000 + i as u128,
+                payload: serde_json::from_value(v).unwrap(),
+            })
+            .collect(),
+        provider_kinds: BTreeMap::new(),
+    }
+}
+
+/// Card A8 and design 2.10 items 2 and 5: retry advice labelled under
+/// `exec/1` and under `exec/0` are two rows; the "stored" column reads the
+/// v2 file for the current rule and the legacy file for the old one, and a
+/// row of the old rule is never eligible for enforce.
+#[test]
+fn retry_advice_rows_split_by_rule_and_read_the_threshold_of_their_file() {
+    use apb_core::decision_thresholds::{
+        RETRY_ADVICE_LEGACY_RULE, RETRY_ADVICE_RULE, VersionedThreshold,
+    };
+    let journals = vec![retry_run("new", true), retry_run("old", false)];
+    let settings = ReportSettings {
+        stored: vec![apb_core::decision_thresholds::StoredThreshold {
+            use_name: "retry_advice".into(),
+            provider: "main".into(),
+            model: "jev-1.13.0".into(),
+            threshold: 0.5,
+            set_at_ms: 0,
+        }],
+        stored_v2: vec![VersionedThreshold {
+            use_name: "retry_advice".into(),
+            provider: "main".into(),
+            model: "jev-1.13.0".into(),
+            rule: RETRY_ADVICE_RULE.into(),
+            threshold: 0.7,
+            set_at_ms: 0,
+        }],
+        ..Default::default()
+    };
+    let r = build(&journals, &ReportFilter::default(), &settings);
+    let rows: Vec<_> = r
+        .groups
+        .iter()
+        .map(|g| {
+            (
+                g.rule.as_deref(),
+                g.decisions,
+                g.act_labels,
+                g.threshold,
+                g.threshold_source.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (Some(RETRY_ADVICE_LEGACY_RULE), 1, 1, 0.5, "stored"),
+            (Some(RETRY_ADVICE_RULE), 1, 1, 0.7, "stored"),
+        ]
+    );
+    let old = &r.groups[0];
+    assert!(!old.eligible);
+    assert!(
+        old.eligibility
+            .iter()
+            .any(|e| e.contains("not the current rule")),
+        "{:?}",
+        old.eligibility
+    );
+    let text = render_text(&r);
+    assert!(text.contains("rule exec/1"), "{text}");
+    assert!(text.contains("rule exec/0"), "{text}");
+}

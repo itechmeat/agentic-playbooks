@@ -2,7 +2,7 @@
 name: apb-test-audit
 description: A value gate for tests. Use before writing or changing any test (authoring mode), and on every test a diff adds or changes when reviewing it (audit mode). A test earns its place only when it protects a distinct, meaningful behavior and fails when that behavior breaks.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Audit tests
@@ -51,6 +51,10 @@ Then hold the test against these rules:
   are reordered (where order is not observable) is coupled to the
   implementation.
 - **Honest names.** The name promises exactly what the assertions check.
+- **Leaves nothing behind.** A test that creates temporary directories,
+  files, processes or servers creates them under a parent it owns and
+  removes them in its teardown, also when it fails. A leak is a defect of
+  the test.
 - **Negative cases fail for the right reason.** A rejection test asserts the
   specific refusal, not just that something failed.
 
@@ -92,4 +96,6 @@ have found a real defect: report it as such.
 
 List the findings, then one line per test that passed the bar. Say which
 tests you ran and their result, or that you ran none and why. A test you did
-not read is not covered.
+not read is not covered. Before you report, delete the scratch output of
+the runs you made (temporary directories, logs) and stop any process they
+left running, only your own.

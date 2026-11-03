@@ -152,6 +152,8 @@ fn run_status_has_budget_block() {
     assert_eq!(budget["paused"]["node"], "b");
     assert_eq!(out["pause"]["cause"], "budget");
     assert_eq!(out["estimate"]["comparable"]["runs"], 1);
+    // The start snapshot names the key its history was matched by.
+    assert_eq!(out["estimate"]["comparable"]["key_version"], 2);
     assert!(
         out["estimate"]["summary"]
             .as_str()

@@ -18,9 +18,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::attempt_models::{AttemptModel, AttemptWalk, EXECUTED_BY_HOST};
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
+use crate::execution_identity::fold::{ExecutionIdentity, IdentityWalk, ReportedModel};
 use crate::manifest::RunExecutionManifest;
 use crate::run_outcome::{RunGoal, goal_from};
 use crate::run_stats::{Rate, StatsFilter, StatsRun};
@@ -42,9 +42,11 @@ pub struct AttemptRetro {
     /// The model the attempt actually ran on, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Where `model` comes from: `cli` (the binding the CLI was started
-    /// with), `host` (the model the host reported on submission) or
-    /// `unreported` (a host task whose host named no model).
+    /// Where `model` comes from: `cli` (the model apb started the CLI
+    /// with), `host` (every host task of the attempt reported the same
+    /// model), `mixed` (they reported different ones), `partial` (some task
+    /// reported none) or `unreported` (no task reported one). Only `cli` and
+    /// `host` name a model.
     pub model_source: String,
     /// For a host attempt: the model the profile or a fallback hint
     /// declared, which the host was free to ignore.
@@ -94,6 +96,10 @@ pub struct NodeRetro {
     pub reentries: usize,
     pub retries: usize,
     pub fallbacks: usize,
+    /// Why each chain transition happened, by close reason; `not_recorded`
+    /// for a transition an older apb journaled without one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub fallback_reasons: BTreeMap<String, usize>,
     /// Time over its finished executions, summed.
     pub duration_ms: u64,
     /// The declared `expected_duration`, in seconds.
@@ -253,7 +259,7 @@ pub fn retro(root: &Path, run_dir: &Path, compare_last: usize) -> Result<RetroRe
 }
 
 /// One attempt while the journal is walked; its actual model comes from
-/// the shared `AttemptWalk` slot of the same index.
+/// the shared identity walk's slot of the same index.
 struct Open {
     node: String,
     rec: AttemptRetro,
@@ -265,6 +271,7 @@ struct NodeAcc {
     executions: usize,
     retries: usize,
     fallbacks: usize,
+    fallback_reasons: BTreeMap<String, usize>,
     duration_ms: u64,
     status: Option<String>,
     open_since: Option<u128>,
@@ -304,7 +311,7 @@ struct Walk {
     order: Vec<String>,
     nodes: BTreeMap<String, NodeAcc>,
     attempts: Vec<Open>,
-    models: AttemptWalk,
+    models: IdentityWalk,
     /// Host task id -> its request ts.
     requested: BTreeMap<String, u128>,
     /// The run's paused intervals (issue #200): node durations leave them out.
@@ -331,11 +338,11 @@ impl Walk {
     /// The attempt record of the model slot `i`, created on first sight.
     fn attempt(&mut self, i: usize) -> &mut Open {
         while self.attempts.len() <= i {
-            let m = self.models.get(self.attempts.len());
+            let (node, attempt) = self.models.key(self.attempts.len());
             self.attempts.push(Open {
-                node: m.node.clone(),
+                node: node.to_string(),
                 rec: AttemptRetro {
-                    attempt: m.attempt,
+                    attempt,
                     ..Default::default()
                 },
                 host_hint: None,
@@ -366,8 +373,27 @@ impl Walk {
                 n.status = Some(status.clone());
             }
             EventPayload::RetryStarted { node, .. } => self.node(node).retries += 1,
-            EventPayload::FallbackTriggered { node, .. }
-            | EventPayload::ExecutionFallback { node, .. } => self.node(node).fallbacks += 1,
+            EventPayload::FallbackTriggered { node, reason, .. } => {
+                let reason = reason.as_ref().map_or(
+                    crate::run_stats::executors::NOT_RECORDED,
+                    crate::execution_identity::CloseReason::label,
+                );
+                let n = self.node(node);
+                n.fallbacks += 1;
+                *n.fallback_reasons.entry(reason.to_string()).or_default() += 1;
+            }
+            // The host step a CLI run takes when no CLI could start.
+            EventPayload::ExecutionFallback { node, .. } => {
+                let n = self.node(node);
+                n.fallbacks += 1;
+                *n.fallback_reasons
+                    .entry(
+                        crate::execution_identity::CloseReason::Unstartable
+                            .label()
+                            .to_string(),
+                    )
+                    .or_default() += 1;
+            }
             EventPayload::AttemptStarted {
                 node, agent, model, ..
             } => {
@@ -433,13 +459,14 @@ impl Walk {
     }
 }
 
-/// Settles an attempt's model from its shared slot `m`: a CLI attempt ran
-/// on the model it was started with, a host attempt on the one its host
-/// reported (`unreported` when it named none), and the declared model of a
-/// host attempt is the hint it was handed, else the profile's.
-fn settle_model(o: &mut Open, m: &AttemptModel) {
-    if m.executed_by != EXECUTED_BY_HOST {
-        o.rec.model = m.model.clone();
+/// Settles an attempt's model from its shared slot `id`: a CLI attempt ran
+/// on the model apb started it with; a host attempt on a model only when
+/// every one of its host tasks reported the same one (a hint or one task's
+/// report is never credited); the declared model of a host attempt is the
+/// hint it was handed, else the profile's.
+fn settle_model(o: &mut Open, id: &ExecutionIdentity) {
+    if !id.is_host() {
+        o.rec.model = id.model_requested_by_apb.clone();
         o.rec.declared_model = None;
         o.rec.model_source = "cli".to_string();
         return;
@@ -447,13 +474,14 @@ fn settle_model(o: &mut Open, m: &AttemptModel) {
     if o.host_hint.is_some() {
         o.rec.declared_model.clone_from(&o.host_hint);
     }
-    o.rec.model = m.model.clone();
-    o.rec.model_source = if m.model.is_some() {
-        "host"
-    } else {
-        "unreported"
-    }
-    .to_string();
+    let (model, source) = match id.reported_model() {
+        ReportedModel::One { model } => (Some(model), "host"),
+        ReportedModel::Mixed { .. } => (None, "mixed"),
+        ReportedModel::Partial { .. } => (None, "partial"),
+        ReportedModel::None => (None, "unreported"),
+    };
+    o.rec.model = model;
+    o.rec.model_source = source.to_string();
 }
 
 /// Run outcome and the ts it ended at, from the journal.
@@ -547,9 +575,9 @@ pub fn build(run: &RetroRun, history: &[StatsRun], compare_last: usize) -> Retro
 }
 
 fn node_reports(run: &RetroRun, mut w: Walk) -> Vec<NodeRetro> {
-    let models = std::mem::take(&mut w.models).finish(&BTreeMap::new());
-    for (o, m) in w.attempts.iter_mut().zip(&models) {
-        settle_model(o, m);
+    let models = std::mem::take(&mut w.models).finish();
+    for (o, (_, id)) in w.attempts.iter_mut().zip(&models) {
+        settle_model(o, id);
         o.rec.verdict = run.verdicts.get(&(o.node.clone(), o.rec.attempt)).cloned();
     }
     // A status file holds the latest execution of its attempt number only.
@@ -594,6 +622,7 @@ fn node_report(run: &RetroRun, id: &str, acc: NodeAcc, attempts: Vec<AttemptRetr
         reentries: acc.executions.saturating_sub(1),
         retries: acc.retries,
         fallbacks: acc.fallbacks,
+        fallback_reasons: acc.fallback_reasons,
         duration_ms: acc.duration_ms,
         over_expected: expected_s.map(|s| acc.duration_ms > s.saturating_mul(1000)),
         expected_s,
@@ -691,4 +720,113 @@ fn node_medians(history: &[StatsRun], run_ids: &[String]) -> BTreeMap<String, u6
         .into_iter()
         .filter_map(|(k, mut v)| median(&mut v).map(|m| (k, m)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(seq: u64, v: serde_json::Value) -> Event {
+        let mut v = v;
+        v["seq"] = seq.into();
+        v["ts"] = seq.into();
+        serde_json::from_value(v).expect("event")
+    }
+
+    fn report(events: Vec<Event>) -> RetroReport {
+        build(
+            &RetroRun {
+                run_id: "r".into(),
+                events,
+                ..RetroRun::default()
+            },
+            &[],
+            0,
+        )
+    }
+
+    /// Design 2.9 item 6: the retro names why each transition happened; an
+    /// older apb's transition without a reason reads `not_recorded`, and
+    /// the host step of a CLI run is `unstartable`.
+    #[test]
+    fn the_retro_counts_transitions_by_reason() {
+        let r = report(vec![
+            ev(
+                1,
+                serde_json::json!({"type": "node_started", "node": "w", "attempt": 1}),
+            ),
+            ev(
+                2,
+                serde_json::json!({"type": "fallback_triggered", "node": "w", "from": "claude", "to": "codex", "reason": "check_rejected", "executed_by": "cli"}),
+            ),
+            ev(
+                3,
+                serde_json::json!({"type": "fallback_triggered", "node": "w", "from": "codex", "to": "claude"}),
+            ),
+            ev(
+                4,
+                serde_json::json!({"type": "execution_fallback", "node": "w", "attempt": 3, "reason": "binary missing"}),
+            ),
+            ev(
+                5,
+                serde_json::json!({"type": "fallback_triggered", "node": "w", "from": "a", "to": "b", "reason": "Not A Slug"}),
+            ),
+        ]);
+        let w = &r.nodes[0];
+        assert_eq!(w.fallbacks, 4);
+        assert_eq!(
+            w.fallback_reasons,
+            BTreeMap::from([
+                ("check_rejected".to_string(), 1),
+                ("not_recorded".to_string(), 1),
+                ("unstartable".to_string(), 1),
+                ("other".to_string(), 1),
+            ])
+        );
+        let text = text::render(&r);
+        assert!(
+            text.contains(
+                "fallback reasons: check rejected 1, not recorded 1, other 1, unstartable 1"
+            ),
+            "{text}"
+        );
+    }
+
+    /// Card A5: a host attempt whose blocked task reported no model and
+    /// whose follow-up reported one is not credited to that model.
+    #[test]
+    fn a_partly_reported_host_attempt_names_no_model() {
+        let r = report(vec![
+            ev(
+                1,
+                serde_json::json!({"type": "host_task_requested", "task_id": "t1", "node": "w", "attempt": 1, "model_hint": "sonnet"}),
+            ),
+            ev(
+                2,
+                serde_json::json!({"type": "attempt_started", "node": "w", "attempt": 1, "agent": "host"}),
+            ),
+            ev(
+                3,
+                serde_json::json!({"type": "host_task_submitted", "task_id": "t1", "status": "blocked", "submitted_by": "host"}),
+            ),
+            ev(
+                4,
+                serde_json::json!({"type": "host_task_requested", "task_id": "t2", "node": "w", "attempt": 1}),
+            ),
+            ev(
+                5,
+                serde_json::json!({"type": "host_task_submitted", "task_id": "t2", "status": "succeeded", "submitted_by": "host", "model": "opus"}),
+            ),
+            ev(
+                6,
+                serde_json::json!({"type": "attempt_finished", "node": "w", "attempt": 1, "status": "succeeded"}),
+            ),
+        ]);
+        let a = &r.nodes[0].attempts[0];
+        assert_eq!(a.model, None);
+        assert_eq!(a.model_source, "partial");
+        assert_eq!(a.declared_model.as_deref(), Some("sonnet"));
+        assert_eq!(a.host_tasks, 2);
+        assert!(r.nodes[0].models.is_empty(), "no model is credited");
+    }
 }

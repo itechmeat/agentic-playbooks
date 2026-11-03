@@ -9,6 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::execution_identity::CloseReason;
+use crate::failure_class::FailureKind;
+
 /// The chain step a host task runs, as the profile declares it.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,17 +33,19 @@ pub enum HintSource {
 }
 
 /// Why a task of a later chain step exists: the attempt that closed the
-/// previous step and how it closed (`failed`, `expired`, `timed_out`,
-/// `interrupted`, `cancelled`, `question_timeout`, `unstartable`).
+/// previous step and how it closed (`crate::execution_identity::CloseReason`,
+/// its plain journal string on the wire).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FallbackOf {
     pub attempt: u32,
-    pub reason: String,
+    #[cfg_attr(feature = "ts", ts(as = "String"))]
+    pub reason: CloseReason,
 }
 
-/// How an attempt ended, as the drive saw it.
-#[derive(Debug, Clone, Copy, Default)]
+/// How an attempt ended, as the drive saw it at the attempt's final
+/// verdict.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct AttemptEnd<'a> {
     /// The host task's closing status (`succeeded`, `failed`, `expired`,
     /// `interrupted`, `cancelled`, `question_timeout`), for a host attempt.
@@ -52,30 +57,81 @@ pub(crate) struct AttemptEnd<'a> {
     pub interrupted: bool,
     /// A CLI attempt that could not start (binary missing, logged out).
     pub unstartable: bool,
+    /// The close reason of the stop that closed the attempt, as the
+    /// drive's stop context read it (`run_paused`, `run_aborted`,
+    /// `supervisor_interrupted`).
+    pub stop: Option<CloseReason>,
+    /// The attempt changed a protected path.
+    pub protected: bool,
+    /// A `success_check`, the completion check or a required verdict
+    /// rejected the attempt's reply.
+    pub check_rejected: bool,
+    /// The failure classification of a failed process.
+    pub failure_kind: Option<FailureKind>,
+    /// The agent or the host reported failure.
+    pub agent_reported_failure: bool,
 }
 
-/// The `fallback_of.reason` of an attempt that did not succeed: the host
-/// task's own closure first (a `succeeded` reply that was then rejected
-/// counts as `failed`), then what the drive observed.
-pub(crate) fn close_reason(end: AttemptEnd<'_>) -> &str {
+/// The close reason of an attempt that did not succeed. First match wins:
+/// the stop reason; a host closure other than `succeeded` and `failed`;
+/// `unstartable`; `protected_paths`; `check_rejected`; `quota`, `auth`,
+/// `budget`, `transient` from the failure classification; `timed_out`;
+/// `interrupted`; `agent_failed`; `failed`. Nothing the agent wrote is read.
+pub(crate) fn close_reason(end: &AttemptEnd<'_>) -> CloseReason {
+    if let Some(stop) = &end.stop {
+        return stop.clone();
+    }
     match end.host_closed {
-        Some(s) if s != "succeeded" => s,
-        _ if end.unstartable => "unstartable",
-        _ if end.interrupted => "interrupted",
-        _ if end.replied => "failed",
-        _ if end.timed_out => "timed_out",
-        _ => "failed",
+        Some(s) if s != "succeeded" && s != "failed" => return CloseReason::parse(s),
+        _ => {}
+    }
+    let kind = end.failure_kind.and_then(|k| match k {
+        FailureKind::Quota => Some(CloseReason::Quota),
+        FailureKind::Auth => Some(CloseReason::Auth),
+        FailureKind::Budget => Some(CloseReason::Budget),
+        FailureKind::Transient => Some(CloseReason::Transient),
+        FailureKind::Agent => None,
+    });
+    if end.unstartable {
+        CloseReason::Unstartable
+    } else if end.protected {
+        CloseReason::ProtectedPaths
+    } else if end.check_rejected {
+        CloseReason::CheckRejected
+    } else if let Some(reason) = kind {
+        reason
+    } else if end.timed_out && !end.replied {
+        CloseReason::TimedOut
+    } else if end.interrupted {
+        CloseReason::Interrupted
+    } else if end.agent_reported_failure || end.host_closed == Some("failed") {
+        CloseReason::AgentFailed
+    } else {
+        CloseReason::Failed
     }
 }
 
-fn closed_phrase(reason: &str) -> String {
+fn closed_phrase(reason: &CloseReason) -> String {
     match reason {
-        "failed" | "expired" => reason.to_string(),
-        "timed_out" => "timed out".to_string(),
-        "interrupted" | "cancelled" | "superseded" => format!("was {reason}"),
-        "question_timeout" => "got no answer to its question in time".to_string(),
-        "unstartable" => "could not start".to_string(),
-        other => format!("ended ({other})"),
+        CloseReason::Failed | CloseReason::Expired => reason.as_str().to_string(),
+        CloseReason::TimedOut => "timed out".to_string(),
+        CloseReason::Interrupted | CloseReason::Cancelled | CloseReason::Superseded => {
+            format!("was {}", reason.as_str())
+        }
+        CloseReason::QuestionTimeout => "got no answer to its question in time".to_string(),
+        CloseReason::Unstartable => "could not start".to_string(),
+        CloseReason::CheckRejected => "was rejected by its check".to_string(),
+        CloseReason::ProtectedPaths => "changed a protected path".to_string(),
+        CloseReason::Quota => "hit a provider quota".to_string(),
+        CloseReason::Auth => "failed to authenticate".to_string(),
+        CloseReason::Budget => "hit a spend limit".to_string(),
+        CloseReason::Transient => "failed after its infrastructure retries".to_string(),
+        CloseReason::AgentFailed => "reported failure".to_string(),
+        CloseReason::Routing => "was routed up a tier".to_string(),
+        CloseReason::RunPaused => "was paused".to_string(),
+        CloseReason::RunAborted => "was stopped with the run".to_string(),
+        CloseReason::SupervisorInterrupted => "was interrupted by the supervisor".to_string(),
+        CloseReason::Other(_) => format!("ended ({})", reason.label()),
     }
 }
 
@@ -133,7 +189,7 @@ mod tests {
     fn after(attempt: u32, reason: &str) -> FallbackOf {
         FallbackOf {
             attempt,
-            reason: reason.into(),
+            reason: CloseReason::parse(reason),
         }
     }
 
@@ -202,7 +258,22 @@ mod tests {
             ("superseded", "was superseded"),
             ("question_timeout", "got no answer to its question in time"),
             ("unstartable", "could not start"),
+            ("check_rejected", "was rejected by its check"),
+            ("protected_paths", "changed a protected path"),
+            ("quota", "hit a provider quota"),
+            ("auth", "failed to authenticate"),
+            ("budget", "hit a spend limit"),
+            ("transient", "failed after its infrastructure retries"),
+            ("agent_failed", "reported failure"),
+            ("routing", "was routed up a tier"),
+            ("run_paused", "was paused"),
+            ("run_aborted", "was stopped with the run"),
+            (
+                "supervisor_interrupted",
+                "was interrupted by the supervisor",
+            ),
             ("something_new", "ended (something_new)"),
+            ("Not A Slug", "ended (other)"),
         ] {
             assert_eq!(
                 describe(Some("m"), Some(&source), Some(&after(3, reason))).as_deref(),
@@ -225,26 +296,128 @@ mod tests {
             timed_out: true,
             ..Default::default()
         };
-        assert_eq!(close_reason(end(Some("expired"))), "expired");
-        // A reply the status file or a success_check rejected.
-        assert_eq!(close_reason(end(Some("succeeded"))), "failed");
-        assert_eq!(close_reason(end(None)), "failed");
+        assert_eq!(close_reason(&end(Some("expired"))), CloseReason::Expired);
+        // A reply the status file or a success_check rejected, without the
+        // drive naming which: nothing more is established.
+        assert_eq!(close_reason(&end(Some("succeeded"))), CloseReason::Failed);
+        assert_eq!(close_reason(&end(None)), CloseReason::Failed);
         let cli = AttemptEnd {
             timed_out: true,
             ..Default::default()
         };
-        assert_eq!(close_reason(cli), "timed_out");
+        assert_eq!(close_reason(&cli), CloseReason::TimedOut);
         let unstartable = AttemptEnd {
             unstartable: true,
             ..Default::default()
         };
-        assert_eq!(close_reason(unstartable), "unstartable");
+        assert_eq!(close_reason(&unstartable), CloseReason::Unstartable);
         let interrupted = AttemptEnd {
             interrupted: true,
             replied: true,
             ..Default::default()
         };
-        assert_eq!(close_reason(interrupted), "interrupted");
+        assert_eq!(close_reason(&interrupted), CloseReason::Interrupted);
+    }
+
+    /// Design 2.2 item 2: the first fact in the precedence wins, so a
+    /// stop is never read as a check, a check never as the agent's own
+    /// failure, and a failure the drive cannot name reads `failed`.
+    #[test]
+    fn each_close_wins_over_every_fact_below_it() {
+        let ladder: Vec<(CloseReason, AttemptEnd<'static>)> = vec![
+            (
+                CloseReason::RunPaused,
+                AttemptEnd {
+                    stop: Some(CloseReason::RunPaused),
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::QuestionTimeout,
+                AttemptEnd {
+                    host_closed: Some("question_timeout"),
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::Unstartable,
+                AttemptEnd {
+                    unstartable: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::ProtectedPaths,
+                AttemptEnd {
+                    protected: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::CheckRejected,
+                AttemptEnd {
+                    check_rejected: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::Quota,
+                AttemptEnd {
+                    failure_kind: Some(FailureKind::Quota),
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::TimedOut,
+                AttemptEnd {
+                    timed_out: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                CloseReason::AgentFailed,
+                AttemptEnd {
+                    agent_reported_failure: true,
+                    ..Default::default()
+                },
+            ),
+        ];
+        // Each rung, with every fact of the rungs below it added, still
+        // reads as itself.
+        for (i, (want, _)) in ladder.iter().enumerate() {
+            let mut end = ladder[i].1.clone();
+            for (_, lower) in &ladder[i + 1..] {
+                end.host_closed = end.host_closed.or(lower.host_closed);
+                end.unstartable |= lower.unstartable;
+                end.protected |= lower.protected;
+                end.check_rejected |= lower.check_rejected;
+                end.failure_kind = end.failure_kind.or(lower.failure_kind);
+                end.timed_out |= lower.timed_out;
+                end.agent_reported_failure |= lower.agent_reported_failure;
+            }
+            assert_eq!(&close_reason(&end), want, "rung {i}");
+        }
+        assert_eq!(close_reason(&AttemptEnd::default()), CloseReason::Failed);
+        for (kind, want) in [
+            (FailureKind::Auth, CloseReason::Auth),
+            (FailureKind::Budget, CloseReason::Budget),
+            (FailureKind::Transient, CloseReason::Transient),
+            // The agent's own failure has no class of its own.
+            (FailureKind::Agent, CloseReason::Failed),
+        ] {
+            let end = AttemptEnd {
+                failure_kind: Some(kind),
+                ..Default::default()
+            };
+            assert_eq!(close_reason(&end), want);
+        }
+        // A host task the host closed `failed` is the agent's own report.
+        let host_failed = AttemptEnd {
+            host_closed: Some("failed"),
+            replied: true,
+            ..Default::default()
+        };
+        assert_eq!(close_reason(&host_failed), CloseReason::AgentFailed);
     }
 
     /// A declared model read as an order once made a host shell out to the

@@ -332,13 +332,21 @@ pub enum EventPayload {
         from_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_model: Option<String>,
-        /// Why the chain moved on when it was not an ordinary failure:
-        /// `routing` for a tier-routing cascade (issue #165 Part 14.5), when
-        /// an agent failure on a routed lower tier goes up a tier before the
-        /// profile's own fallbacks. `None` for every ordinary fallback and for
-        /// old logs. Additive.
+        /// Why the chain moved on: how the step before closed
+        /// ([`crate::execution_identity::CloseReason`]), `routing` for a
+        /// tier-routing cascade (issue #165 Part 14.5), when an agent failure
+        /// on a routed lower tier goes up a tier before the profile's own
+        /// fallbacks. A plain string on the wire, read from any string, so a
+        /// reason a newer apb names never fails the journal. `None` for old
+        /// logs. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
+        reason: Option<crate::execution_identity::CloseReason>,
+        /// Who ran the steps: `cli`, `host` or `scenario`
+        /// (`crate::execution_identity`). In host mode `from` and `to` are
+        /// `host` and the models are the profile's hints. `None` for old
+        /// logs. Additive; an older apb drops it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executed_by: Option<String>,
     },
     RunPaused {
         reason: String,
@@ -2091,6 +2099,31 @@ impl EventPayload {
             output: output.into(),
             artifacts,
             result,
+        }
+    }
+
+    /// A `fallback_triggered`: the one construction, so a field added later
+    /// defaults here. `models` are the closed step's model and the model of
+    /// the step taken instead (in host mode, the profile's hints).
+    pub fn fallback_triggered(
+        node: impl Into<String>,
+        from: String,
+        to: String,
+        profile: Option<String>,
+        models: (Option<String>, Option<String>),
+        reason: Option<crate::execution_identity::CloseReason>,
+        executed_by: Option<String>,
+    ) -> Self {
+        let (from_model, to_model) = models;
+        EventPayload::FallbackTriggered {
+            node: node.into(),
+            from,
+            to,
+            profile,
+            from_model,
+            to_model,
+            reason,
+            executed_by,
         }
     }
 
@@ -3898,39 +3931,92 @@ mod tests {
             EventPayload::FallbackTriggered {
                 from_model,
                 to_model,
+                reason,
+                executed_by,
                 ..
             } => {
                 assert_eq!(from_model, None);
                 assert_eq!(to_model, None);
+                assert_eq!(reason, None);
+                assert_eq!(executed_by, None);
             }
             other => panic!("expected FallbackTriggered, got {other:?}"),
         }
     }
 
+    /// The one constructor writes exactly the line older binaries wrote
+    /// when no reason and no `executed_by` is given: neither key appears.
     #[test]
-    fn fallback_triggered_with_models_round_trips() {
-        let payload = EventPayload::FallbackTriggered {
-            node: "a".into(),
-            from: "claude".into(),
-            to: "claude".into(),
-            profile: Some("project/main".into()),
-            from_model: Some("haiku".into()),
-            to_model: Some("opus".into()),
-            reason: None,
-        };
-        let line = serde_json::to_string(&payload).unwrap();
-        let back: EventPayload = serde_json::from_str(&line).unwrap();
-        match back {
-            EventPayload::FallbackTriggered {
-                from_model,
-                to_model,
-                ..
-            } => {
-                assert_eq!(from_model.as_deref(), Some("haiku"));
-                assert_eq!(to_model.as_deref(), Some("opus"));
+    fn fallback_triggered_without_new_fields_writes_the_old_line() {
+        let payload = EventPayload::fallback_triggered(
+            "a",
+            "claude".into(),
+            "claude".into(),
+            Some("project/main".into()),
+            (Some("haiku".into()), Some("opus".into())),
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"type":"fallback_triggered","node":"a","from":"claude","to":"claude","profile":"project/main","from_model":"haiku","to_model":"opus"}"#
+        );
+    }
+
+    /// `fallback_triggered` is not decoded leniently, so a reason is read
+    /// from any string: a reason a newer apb names must not fail the
+    /// journal, and every reason is written back byte for byte.
+    #[test]
+    fn fallback_triggered_reasons_and_executed_by_round_trip_byte_for_byte() {
+        use crate::execution_identity::CloseReason;
+        for (reason, want) in [
+            ("check_rejected", CloseReason::CheckRejected),
+            ("routing", CloseReason::Routing),
+            ("run_paused", CloseReason::RunPaused),
+            (
+                "a_reason_from_a_newer_apb",
+                CloseReason::Other("a_reason_from_a_newer_apb".into()),
+            ),
+            ("Not A Slug", CloseReason::Other("Not A Slug".into())),
+        ] {
+            let line = format!(
+                r#"{{"type":"fallback_triggered","node":"a","from":"host","to":"host","reason":"{reason}","executed_by":"host"}}"#
+            );
+            let back: EventPayload = serde_json::from_str(&line).unwrap();
+            match &back {
+                EventPayload::FallbackTriggered {
+                    reason: Some(r),
+                    executed_by,
+                    ..
+                } => {
+                    assert_eq!(r, &want);
+                    assert_eq!(executed_by.as_deref(), Some("host"));
+                }
+                other => panic!("expected FallbackTriggered, got {other:?}"),
             }
-            other => panic!("expected FallbackTriggered, got {other:?}"),
+            assert_eq!(serde_json::to_string(&back).unwrap(), line);
         }
+    }
+
+    /// `exec.entered` is new inside the lenient `exec`: a reason this apb
+    /// does not know keeps the step instead of dropping the whole `exec`.
+    #[test]
+    fn attempt_started_keeps_exec_whose_entry_names_an_unknown_reason() {
+        use crate::execution_identity::{CloseReason, StepEntry};
+        let line = r#"{"seq":3,"ts":1,"type":"attempt_started","node":"a","attempt":1,"agent":"claude","pid":null,"spawn_ms":null,"exec":{"binding":"ab","step":1,"source":{"kind":"fallback","index":1,"of":1},"executed_by":"cli","entered":{"from_step":0,"closed_attempt":2,"reason":"a_reason_from_a_newer_apb"}}}"#;
+        let e: Event = serde_json::from_str(line).unwrap();
+        match &e.payload {
+            EventPayload::AttemptStarted { exec: Some(x), .. } => assert_eq!(
+                x.entered,
+                Some(StepEntry {
+                    from_step: 0,
+                    closed_attempt: 2,
+                    reason: CloseReason::Other("a_reason_from_a_newer_apb".into()),
+                })
+            ),
+            other => panic!("expected AttemptStarted with exec, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
     }
 
     #[test]

@@ -14,7 +14,6 @@ pub mod approval;
 pub mod baseline;
 pub mod budget;
 // candidate trials (issue #192)
-pub mod attempt_models;
 pub mod candidate;
 pub mod capture;
 pub mod connector;

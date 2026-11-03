@@ -272,7 +272,7 @@ fn apb_tasks_labels_a_fallback_hint_with_its_source_and_reason() {
     );
     assert_eq!(
         fallback["fallback_of"],
-        json!({ "attempt": 1, "reason": "failed" })
+        json!({ "attempt": 1, "reason": "agent_failed" })
     );
     let listing = crate::common::apb_std()
         .args(["tasks", &run_id])
@@ -281,7 +281,7 @@ fn apb_tasks_labels_a_fallback_hint_with_its_source_and_reason() {
         .unwrap();
     let text = String::from_utf8_lossy(&listing.stdout);
     let header = format!(
-        "{run_id}  {}  node plan  attempt 2  advisory: model hint sonnet (fallback 1 of 1 declared by profile main after attempt 1 failed; the host picks its own model)",
+        "{run_id}  {}  node plan  attempt 2  advisory: model hint sonnet (fallback 1 of 1 declared by profile main after attempt 1 reported failure; the host picks its own model)",
         fallback["task_id"].as_str().unwrap()
     );
     assert!(
@@ -894,14 +894,19 @@ fn apb_decide_from_a_host_task_is_journaled_and_the_actual_model_shows() {
     };
     let runs = text(&["runs", &run_id]);
     assert!(
-        runs.contains("model plan attempt 1: GLM-5.3-Flash (host), profile names haiku: mismatch"),
+        runs.contains(
+            "model plan attempt 1 (host): GLM-5.3-Flash reported by the host, profile names haiku: mismatch"
+        ),
         "{runs}"
     );
     assert!(
-        runs.contains("model build attempt 1: haiku-4 (host)"),
+        runs.contains("model build attempt 1 (host): haiku-4 reported by the host"),
         "{runs}"
     );
-    assert!(!runs.contains("haiku-4 (host), profile"), "{runs}");
+    assert!(
+        !runs.contains("haiku-4 reported by the host, profile"),
+        "{runs}"
+    );
     let doctor = text(&["doctor", "--run", &run_id]);
     assert!(doctor.contains("GLM-5.3-Flash"), "{doctor}");
     let stats: Value = serde_json::from_str(&text(&["stats", "--json"])).unwrap();

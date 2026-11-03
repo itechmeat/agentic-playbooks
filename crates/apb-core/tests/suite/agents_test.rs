@@ -219,7 +219,7 @@ const LITERALS_ALLOWED: &[(&str, &str, &str)] = &[
         "a history agent's config spelling, the store history discovery reads",
     ),
     (
-        "apb-engine/src/attempt_models.rs",
+        "apb-engine/src/execution_identity/fold.rs",
         "\"claude\"",
         "a vendor word inside model ids, not the agent",
     ),

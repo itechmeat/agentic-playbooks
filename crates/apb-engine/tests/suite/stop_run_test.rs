@@ -1615,3 +1615,182 @@ fn stop_of_a_parent_driven_child_leaves_the_journal_to_the_live_parent_drive() {
         "the live parent drive owns the child's terminal event, got {events:?}"
     );
 }
+
+// --- PR 21a: what a stop does to the walk of a profile's chain ---
+
+/// A stub agent that succeeds at once when its argv names the fallback
+/// model `opus`, and otherwise counts its call, announces itself and sleeps.
+fn chain_agent(dir: &Path) -> String {
+    let path = dir.join("chain.sh");
+    let d = dir.display();
+    let body = format!(
+        "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = opus ]; then echo done; exit 0; fi\ndone\necho x >> '{d}/primary_calls'\ntouch '{d}/primary_running'\nsleep {s}\necho done\n",
+        s = AGENT_SLEEP_SECS
+    );
+    fs::write(&path, body).unwrap();
+    set_executable(&path);
+    path.to_string_lossy().to_string()
+}
+
+fn primary_calls(dir: &Path) -> usize {
+    fs::read_to_string(dir.join("primary_calls"))
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+fn seed_chain(root: &Path, id: &str, node_extra: &str) {
+    seed(root, id);
+    let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
+    let yaml = fs::read_to_string(vdir.join("playbook.yaml"))
+        .unwrap()
+        .replace(
+            "prompt: \"do\" }",
+            &format!("prompt: \"do\"{node_extra} }}"),
+        );
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    common::seed_profile(root, "main", "claude-code", "haiku", &[("claude", "opus")]);
+}
+
+fn spawn(root: &Path, id: &str) -> mpsc::Receiver<Result<RunResult, EngineError>> {
+    let (tx, rx) = mpsc::channel();
+    let (root, id) = (root.to_path_buf(), id.to_string());
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, &id, None, RunOptions::default()));
+    });
+    rx
+}
+
+fn walk_events(root: &Path, run_id: &str) -> (usize, Vec<EventPayload>) {
+    let events = read_all(&root.join(".apb/runs").join(run_id)).unwrap();
+    let attempts = events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "work"),
+        )
+        .count();
+    let fallbacks = events
+        .into_iter()
+        .filter(|e| matches!(e.payload, EventPayload::FallbackTriggered { .. }))
+        .map(|e| e.payload)
+        .collect();
+    (attempts, fallbacks)
+}
+
+/// Card A3: an abort during the primary ends the walk. No transition, no
+/// fallback attempt.
+#[cfg(unix)]
+#[test]
+fn an_abort_during_the_primary_ends_the_chain_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_chain(root, "abortchain", "");
+    let _env = AgentEnv::set(&chain_agent(root));
+    let rx = spawn(root, "abortchain");
+    let run_id = find_run_id(root, "abortchain-");
+    poll_until("the primary to start", || {
+        root.join("primary_running").is_file().then_some(())
+    });
+    stop_run(root, &run_id).unwrap();
+    let res = rx.recv_timeout(ABORT_DEADLINE).unwrap().unwrap();
+    assert_eq!(res.outcome, RunStatus::Aborted);
+    let (attempts, fallbacks) = walk_events(root, &run_id);
+    assert_eq!(attempts, 1, "no fallback attempt after an abort");
+    assert!(fallbacks.is_empty(), "no transition after an abort");
+}
+
+/// Card A3: a `--now` pause during the primary ends the walk the same way;
+/// the attempt status reads `interrupted` like an abort's.
+#[cfg(unix)]
+#[test]
+fn a_now_pause_during_the_primary_ends_the_chain_walk() {
+    use apb_engine::pause::{PauseBy, PauseMode, PauseRequest, request_pause};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_chain(root, "pausechain", "");
+    let _env = AgentEnv::set(&chain_agent(root));
+    unsafe { std::env::set_var("APB_PAUSE_GRACE_MS", "200") };
+    let rx = spawn(root, "pausechain");
+    let run_id = find_run_id(root, "pausechain-");
+    poll_until("the primary to start", || {
+        root.join("primary_running").is_file().then_some(())
+    });
+    request_pause(
+        root,
+        &run_id,
+        &PauseRequest {
+            by: Some(PauseBy::Operator),
+            mode: PauseMode::Now,
+            ..PauseRequest::default()
+        },
+    )
+    .unwrap();
+    let res = rx.recv_timeout(ABORT_DEADLINE).unwrap().unwrap();
+    unsafe { std::env::remove_var("APB_PAUSE_GRACE_MS") };
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let (attempts, fallbacks) = walk_events(root, &run_id);
+    assert_eq!(attempts, 1, "no fallback attempt after a pause");
+    assert!(fallbacks.is_empty(), "no transition after a pause");
+}
+
+/// Card A3: a supervisor interrupt is no stop of the run. The walk goes on
+/// to the fallback, and the transition names the interrupt.
+#[cfg(unix)]
+#[test]
+fn a_supervisor_interrupt_falls_back_as_supervisor_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_chain(root, "interruptchain", ", max_retries: 1");
+    let _env = AgentEnv::set(&chain_agent(root));
+    let rx = spawn(root, "interruptchain");
+    let run_id = find_run_id(root, "interruptchain-");
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    // Interrupt every primary attempt once it runs, until the drive ends.
+    let mut interrupted = 0;
+    let deadline = Instant::now() + POLL_DEADLINE * 3;
+    let res = loop {
+        if let Ok(res) = rx.try_recv() {
+            break res.unwrap();
+        }
+        assert!(Instant::now() < deadline, "the drive did not end");
+        if primary_calls(root) > interrupted && root.join("primary_running").is_file() {
+            fs::remove_file(root.join("primary_running")).unwrap();
+            apb_engine::control::post_control(
+                &run_dir,
+                Control::Interrupt {
+                    reason: "wedged".into(),
+                    node: None,
+                },
+            )
+            .unwrap();
+            interrupted += 1;
+        }
+        std::thread::sleep(POLL_STEP);
+    };
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    let (fallback_seq_entry, last_primary_seq) = {
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::AttemptStarted { node, exec, .. } if node == "work" => {
+                    Some((e.seq, exec.clone().and_then(|x| x.entered)))
+                }
+                _ => None,
+            })
+            .collect();
+        (starts.last().unwrap().1.clone(), starts[starts.len() - 2].0)
+    };
+    let entry = fallback_seq_entry.expect("the fallback's first attempt names its entry");
+    assert_eq!(entry.from_step, 0);
+    assert_eq!(entry.closed_attempt, last_primary_seq);
+    assert_eq!(entry.reason.as_str(), "supervisor_interrupted");
+    let (_, fallbacks) = walk_events(root, &run_id);
+    assert!(
+        matches!(
+            fallbacks.as_slice(),
+            [EventPayload::FallbackTriggered { reason: Some(r), .. }]
+                if r.as_str() == "supervisor_interrupted"
+        ),
+        "{fallbacks:?}"
+    );
+}

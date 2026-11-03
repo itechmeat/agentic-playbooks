@@ -262,3 +262,98 @@ fn replay_honours_the_projects_narrowing_and_the_kill_switch() {
     assert_eq!(code, Some(2));
     assert!(stderr.contains("APB_DECISIONS=off"), "{stderr}");
 }
+
+/// Card A8 through the binary: `apb decisions thresholds set --use
+/// retry_advice` writes the v2 file under rule `exec/1` and says so, the
+/// legacy file stays byte for byte, a stale `--rule` is refused, `list`
+/// shows both files, and inside a run step (`APB_RUN_ID` or
+/// `APB_HOST_TASK` set) the command exits 3 and writes nothing.
+#[test]
+fn retry_advice_thresholds_go_to_the_v2_file_and_a_run_step_is_refused() {
+    use apb_core::decision_thresholds::{THRESHOLDS_FILE, THRESHOLDS_V2_FILE};
+    let dir = project(false);
+    let cfg = tempfile::tempdir().unwrap();
+    let legacy = "version: 1\nthresholds:\n- use: retry_advice\n  provider: main\n  model: jev-1.13.0\n  threshold: 0.6\n";
+    fs::write(cfg.path().join(THRESHOLDS_FILE), legacy).unwrap();
+    let set = |use_site: &str, extra: &[&str], env: Option<(&str, &str)>| {
+        let mut c = apb();
+        c.args([
+            "decisions",
+            "thresholds",
+            "set",
+            "--use",
+            use_site,
+            "--provider",
+            "main",
+            "--model",
+            "jev-1.13.0",
+            "--threshold",
+            "0.7",
+        ])
+        .args(extra)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .env_remove("APB_RUN_ID")
+        .env_remove("APB_HOST_TASK")
+        .current_dir(dir.path());
+        if let Some((k, v)) = env {
+            c.env(k, v);
+        }
+        c.assert()
+    };
+    for step in [("APB_RUN_ID", "r-1"), ("APB_HOST_TASK", "w-1")] {
+        for use_site in ["retry_advice", "completion_check"] {
+            set(use_site, &[], Some(step))
+                .code(3)
+                .stderr(predicate::str::contains("refused inside"));
+        }
+    }
+    assert!(!cfg.path().join(THRESHOLDS_V2_FILE).exists());
+    assert_eq!(
+        fs::read_to_string(cfg.path().join(THRESHOLDS_FILE)).unwrap(),
+        legacy
+    );
+    set("retry_advice", &["--rule", "exec/0"], None)
+        .code(2)
+        .stderr(predicate::str::contains(
+            "labels are measured under rule exec/1 now",
+        ));
+    set("retry_advice", &[], None)
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "under rule exec/1 in {THRESHOLDS_V2_FILE}"
+        )));
+    assert_eq!(
+        fs::read_to_string(cfg.path().join(THRESHOLDS_FILE)).unwrap(),
+        legacy,
+        "the legacy file is byte-identical"
+    );
+    let v2 = fs::read_to_string(cfg.path().join(THRESHOLDS_V2_FILE)).unwrap();
+    assert!(v2.contains("rule: exec/1"), "{v2}");
+    apb()
+        .args(["decisions", "thresholds", "list"])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "retry_advice\tmain/jev-1.13.0\t0.6\tlegacy, not enforced: re-measure under rule exec/1\n",
+        ))
+        .stdout(predicate::str::contains(
+            "retry_advice\tmain/jev-1.13.0\t0.7\trule exec/1\n",
+        ));
+    let out = apb()
+        .args(["decisions", "thresholds", "list", "--json"])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0]["enforced"], false, "the legacy entry: {rows:?}");
+    assert_eq!(rows[0]["legacy"], true);
+    assert!(rows[1].get("enforced").is_none(), "a v2 entry is unchanged");
+}

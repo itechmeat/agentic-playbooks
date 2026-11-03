@@ -96,6 +96,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(attempt_checks(events));
     checks.extend(autonomy_check(&run_dir));
     checks.extend(model_check(&run_dir, events));
+    checks.extend(step_entry_check(&run_dir, events));
     checks.extend(env::env_checks(&run_dir, events));
     checks.extend(exposure::exposure_checks(events));
     checks.extend(isolation::isolation_checks(events));
@@ -136,11 +137,59 @@ fn file_modes_check(run_dir: &Path) -> RunCheck {
 /// another), so a run whose figures look off says why. Nothing when every
 /// attempt matches or no model is known.
 fn model_check(run_dir: &Path, events: &[Event]) -> Vec<RunCheck> {
-    let models = crate::attempt_models::run_attempt_models(run_dir, events);
-    crate::attempt_models::mismatch_lines(&models)
-        .into_iter()
-        .map(|line| RunCheck::new(WARN, "model", line))
+    crate::execution_identity::fold::views(run_dir, events)
+        .iter()
+        .filter(|v| v.mismatch)
+        .map(|v| RunCheck::new(WARN, "model", mismatch_line(v)))
         .collect()
+}
+
+/// One row per attempt that entered a later chain step, with the reason
+/// the step before closed, as the journal recorded it: `node attempt 1
+/// entered step 1 fallback 1 of 2 from step 0: check_rejected`. An old
+/// journal records none, so it shows no row rather than a guess.
+fn step_entry_check(run_dir: &Path, events: &[Event]) -> Vec<RunCheck> {
+    crate::execution_identity::fold::views(run_dir, events)
+        .iter()
+        .filter_map(|v| {
+            let s = v.step.as_ref()?;
+            let e = s.entered.as_ref()?;
+            Some(RunCheck::new(
+                OK,
+                "step",
+                format!(
+                    "{} attempt {} entered step {} {} from step {}: {}",
+                    v.node,
+                    v.attempt,
+                    s.step,
+                    s.source.words(),
+                    e.from_step,
+                    e.reason
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// `node attempt 1: requested by apb M (cli), the profile names P`, or for
+/// a host attempt `node attempt 1: the host reported M, ...`: a CLI reports
+/// no model of its own, so its line never claims what ran.
+fn mismatch_line(v: &crate::execution_identity::fold::ExecutionIdentityView) -> String {
+    use crate::execution_identity::fold::ReportedModel;
+    let what = match &v.reported {
+        ReportedModel::One { model } => format!("the host reported {model}"),
+        _ => format!(
+            "requested by apb {} ({})",
+            v.requested_model.as_deref().unwrap_or("?"),
+            v.executed_by
+        ),
+    };
+    format!(
+        "{} attempt {}: {what}, the profile names {}",
+        v.node,
+        v.attempt,
+        v.expected.as_deref().unwrap_or("?")
+    )
 }
 
 /// Whether any check is blocking, for the caller's exit code.

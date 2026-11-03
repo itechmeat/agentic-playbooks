@@ -81,6 +81,7 @@ mod revive;
 mod run_ref;
 mod skills_copy;
 mod status_file;
+mod stop_context;
 mod supervisor;
 mod transcript;
 mod unattended;
@@ -1177,6 +1178,10 @@ fn drive_inner(
                 // The journal borrows `log` so finish-answer can append its
                 // attempt_started at spawn time; the block scopes that borrow so
                 // `log` is free again for the return-batch and NodeFinished writes.
+                // The composer's own kill flag, like an agent node's: an
+                // abort and a `--now` pause both latch it.
+                let finish_kill = Arc::new(AtomicBool::new(false));
+                let _finish_fan = fanout.register_pausable(&finish_kill);
                 let (st, out, evs) = {
                     let journal = Journal::new(&mut *log);
                     execute_finish_answer(
@@ -1188,13 +1193,21 @@ fn drive_inner(
                         &state,
                         cfg,
                         p,
-                        &run_cancel,
+                        &finish_kill,
                         &env_scrub,
                         &journal,
                     )?
                 };
                 for ev in evs {
                     log.append(ev)?;
+                }
+                // A pause or an abort stopped the composer: no answer, no
+                // `node_finished`, no result snapshot. The control scan at
+                // the top of the loop applies the stop; a resume composes
+                // again from the first step.
+                if st == NodeStatus::Cancelled {
+                    steps += 1;
+                    continue;
                 }
                 let answer = if st != NodeStatus::Succeeded {
                     // The CLOSING answer failed to compose. This must NOT flip

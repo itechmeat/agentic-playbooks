@@ -1,6 +1,7 @@
 //! `apb stats` by executor digest: when a node of one version ran under
-//! more than one profile or bundle digest (a profile, its model, its SOUL or
-//! its skills changed between runs), its figures per digest pair, and in
+//! more than one profile, bundle or executor digest (a profile, its model,
+//! its SOUL, its skills or a run override changed between runs), its
+//! figures per digest triple, and in
 //! `--compare` the nodes whose latest executor differs between the two
 //! versions.
 
@@ -18,10 +19,10 @@ use crate::run_estimate::sample::RunSample;
 /// How many hex characters of a digest the report shows.
 const SHORT: usize = 12;
 
-/// The digest's first [`SHORT`] hex characters, its algorithm prefix
-/// (`sha256:`) left out.
-fn short(d: &str) -> String {
-    let hex = d.split_once(':').map_or(d, |(_, h)| h);
+/// The digest's first [`SHORT`] hex characters, its prefixes (`sha256:`,
+/// and `x1:` of an executor digest) left out.
+pub(super) fn short(d: &str) -> String {
+    let hex = d.rsplit(':').next().unwrap_or(d);
     hex.chars().take(SHORT).collect()
 }
 
@@ -33,6 +34,15 @@ pub struct DigestStats {
     pub profile: String,
     /// The bundle digest (profile plus skills), shortened.
     pub bundle: String,
+    /// The executor digest (chain, tiers, `ephemeral`), shortened; empty
+    /// only for a binding no manifest recorded.
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub executor: String,
+    /// The group is a run-local ephemeral override.
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
     /// Runs the node ran in under this executor.
     pub runs: usize,
     /// Runs where the node passed on its one visit and first attempt,
@@ -54,6 +64,14 @@ pub struct ExecutorChange {
     pub against_profile: String,
     pub base_bundle: String,
     pub against_bundle: String,
+    /// The executor digests, shortened; empty only for a binding no
+    /// manifest recorded.
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub base_executor: String,
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub against_executor: String,
 }
 
 /// The digests of `node` per run that bound it.
@@ -83,7 +101,7 @@ pub(super) fn node_digests(
 ) -> Vec<DigestStats> {
     let mut bound = bound(node, runs);
     bound.sort_by_cached_key(|(r, _)| r.started_ms());
-    let mut groups: Vec<(&NodeDigests, Vec<&RunSample>)> = Vec::new();
+    let mut groups: Vec<(&NodeDigests, bool, Vec<&RunSample>)> = Vec::new();
     for (run, d) in bound {
         let Some(s) = samples
             .get(&run.run_id)
@@ -91,9 +109,9 @@ pub(super) fn node_digests(
         else {
             continue;
         };
-        match groups.iter_mut().find(|(g, _)| *g == d) {
-            Some((_, v)) => v.push(s),
-            None => groups.push((d, vec![s])),
+        match groups.iter_mut().find(|(g, _, _)| *g == d) {
+            Some((_, _, v)) => v.push(s),
+            None => groups.push((d, run.ephemeral_nodes.contains(node), vec![s])),
         }
     }
     if groups.len() < 2 {
@@ -101,7 +119,7 @@ pub(super) fn node_digests(
     }
     groups
         .into_iter()
-        .map(|(d, runs)| {
+        .map(|(d, ephemeral, runs)| {
             let visits: Vec<_> = runs.iter().flat_map(|r| &r.visits[node]).collect();
             let first_pass = runs
                 .iter()
@@ -117,6 +135,8 @@ pub(super) fn node_digests(
             DigestStats {
                 profile: short(&d.profile),
                 bundle: short(&d.bundle),
+                executor: short(&d.executor),
+                ephemeral,
                 runs: runs.len(),
                 first_pass: Rate::new(first_pass, runs.len()),
                 duration: Waits::of(visits.iter().map(|v| v.active_ms).collect()),
@@ -152,6 +172,8 @@ pub(super) fn executor_changes(base: &[&StatsRun], against: &[&StatsRun]) -> Vec
                 against_profile: short(&y.profile),
                 base_bundle: short(&x.bundle),
                 against_bundle: short(&y.bundle),
+                base_executor: short(&x.executor),
+                against_executor: short(&y.executor),
             })
         })
         .collect()

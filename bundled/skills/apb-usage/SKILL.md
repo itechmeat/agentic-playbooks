@@ -2,7 +2,7 @@
 name: apb-usage
 description: How a host agent uses apb to find, run, follow and supervise playbooks, and when to offer saving a repeated process as a playbook. Use when a task names a doable action that a playbook may cover, when a run waits for input, or when the user asks about apb.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Using apb
@@ -92,6 +92,26 @@ session, use the matching `apb` command instead.
 - Keep apart what apb checked (goal criteria, list counts, baseline) and
   what nobody checked (manual criteria).
 - Report sends with an unknown outcome. Only a person resolves them.
+
+## 6a. Clean up
+
+The work a run or you did leaves things behind, in code work and in any
+other routine. Before you report done, and after a merge:
+
+- Remove the worktrees and merged branches of a finished change (in git:
+  `git worktree remove`, `git branch -d`, `git worktree prune`) and the
+  build output they used. Keep a worktree a paused run or an open pull
+  request still needs.
+- Delete the temporary files, logs, downloads, browser profiles and
+  sessions the task created. Keep what must survive in a named cache
+  directory.
+- Create temporary data under one parent directory named for the task and
+  remove it on exit, also on failure.
+- Delete only what the task created, never by a wide pattern: other
+  sessions may share the machine. Leave apb's own run records alone.
+- Stop the background processes the task started.
+- Prune old build artifacts rather than wiping a build cache (a build cache
+  pruner such as cargo sweep for Rust projects).
 
 ## 7. Offer to save a playbook
 

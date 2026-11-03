@@ -15,7 +15,7 @@ const HOST_POLL: Duration = Duration::from_millis(100);
 /// The agent id journaled for a host-task attempt (`attempt_started.agent`,
 /// fallback events): the host executes it, not the profile's CLI. One
 /// constant with the readers of that field.
-pub(crate) use crate::attempt_models::HOST_AGENT;
+pub(crate) use crate::execution_identity::HOST_AGENT;
 
 /// `session_handoff.reason` of a `continue_session` node in host mode.
 pub(crate) const HOST_MODE_REASON: &str = "host_mode";

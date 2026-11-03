@@ -130,3 +130,84 @@ fn planted_newer_run_directories_take_no_place_under_the_scan_cap() {
         verified
     );
 }
+
+/// The resolved project playbook `bud`.
+fn resolved(p: &crate::budget_gate_test::Project) -> apb_core::store::ResolvedPlaybook {
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: "bud".into(),
+        version: None,
+    };
+    apb_core::store::resolve(p.root(), &wref).unwrap()
+}
+
+/// Card A7: an ephemeral override with the very agent and model of the base
+/// profile is another executor, so the base chain's history of its node is
+/// counted under `executor_mismatch`, never matched; without the override
+/// the same history matches.
+#[test]
+fn an_override_equal_to_the_base_counts_base_history_under_executor_mismatch() {
+    use apb_engine::run_estimate::{ESTIMATE_KEY_VERSION, EstimateTarget, estimate};
+    let p = project(LINE);
+    p.history(3);
+    let roots = [p.root().to_path_buf()];
+    let r = resolved(&p);
+    let none = apb_core::overrides::RunOverrides::default();
+    let base = estimate(
+        &roots,
+        &EstimateTarget::for_resolved(&r, "cli", &none).unwrap(),
+    );
+    assert!(base.comparable.executor_mismatch.is_empty());
+    assert!(base.unestimated.is_empty());
+    assert_eq!(base.comparable.key_version, ESTIMATE_KEY_VERSION);
+    let same = apb_core::overrides::RunOverrides::from_yaml(
+        "nodes:\n  a:\n    ephemeral_executor: { agent: claude-code, model: haiku }\n",
+    )
+    .unwrap();
+    let e = estimate(
+        &roots,
+        &EstimateTarget::for_resolved(&r, "cli", &same).unwrap(),
+    );
+    assert_eq!(e.comparable.executor_mismatch.get("a"), Some(&3));
+    assert!(e.comparable.profile_mismatch.is_empty());
+    assert!(e.comparable.bundle_mismatch.is_empty());
+    assert_eq!(e.unestimated, vec!["a"]);
+    assert!(
+        render_lines(&e)
+            .iter()
+            .any(|l| l.contains("a (no history with this executor)")),
+        "{:?}",
+        render_lines(&e)
+    );
+}
+
+/// Card A7: a start snapshot written before the full key (no
+/// `key_version`) reads as the profile-only key, and its text says so.
+#[test]
+fn an_estimate_snapshot_without_key_version_reads_as_the_profile_only_key() {
+    use apb_engine::run_estimate::snapshot;
+    let p = project(LINE);
+    p.history(1);
+    let e = for_playbook(p.root(), "bud", None, "cli").unwrap();
+    let mut v = serde_json::to_value(&e).unwrap();
+    v["comparable"]
+        .as_object_mut()
+        .unwrap()
+        .remove("key_version");
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("estimate.json"), v.to_string()).unwrap();
+    let old = snapshot::read(dir.path()).unwrap();
+    assert_eq!(old.comparable.key_version, 1);
+    assert!(
+        render_lines(&old)
+            .iter()
+            .any(|l| l.contains("profile-only key")),
+        "{:?}",
+        render_lines(&old)
+    );
+    assert!(
+        !render_lines(&e)
+            .iter()
+            .any(|l| l.contains("profile-only key"))
+    );
+}

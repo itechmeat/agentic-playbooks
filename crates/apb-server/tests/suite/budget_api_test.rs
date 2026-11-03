@@ -128,6 +128,8 @@ async fn estimate_route() {
     let (status, e) = call(&app, "GET", "/api/playbooks/bud/estimate", None).await;
     assert_eq!(status, StatusCode::OK, "{e}");
     assert_eq!(e["comparable"]["runs"], 1);
+    // The full key (profile, bundle, executor) the history was matched by.
+    assert_eq!(e["comparable"]["key_version"], 2);
     assert_eq!(e["tokens"]["spread"]["p50"], 400);
     assert_eq!(e["nodes"][0]["node"], "a");
     assert!(e["summary"].as_str().unwrap().contains("tokens  ~400"));
@@ -228,4 +230,5 @@ async fn run_detail_budget() {
     assert_eq!(d["budget"]["paused"]["node"], "b");
     assert_eq!(d["pause"]["cause"], "budget");
     assert_eq!(d["estimate"]["comparable"]["runs"], 1);
+    assert_eq!(d["estimate"]["comparable"]["key_version"], 2);
 }

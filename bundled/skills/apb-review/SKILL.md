@@ -2,7 +2,7 @@
 name: apb-review
 description: Independent, role-based, read-only review of a concrete change against its original request, with verified findings and at most two repair rounds. Use for substantive changes, review findings or an explicit review request. It grants no authority to merge or publish.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Review a change
@@ -134,6 +134,16 @@ Every finding gets one class:
   old evidence without a reason it is still valid.
 - After the second repair round, or after repeated regressions, stop and
   reconsider the approach with the task issuer. Do not loop again.
+
+## 5a. Clean up
+
+Checks and helpers leave scratch output behind: temporary directories, logs,
+build output outside the project's usual build directory, servers or browser
+sessions started for a check. Before you report, delete what this review
+created under one parent directory named for it and stop the processes it
+started. Delete only your own, never by a wide pattern: other sessions may
+share the machine. Findings keep their evidence as text, not as files left
+behind.
 
 ## 6. Report
 

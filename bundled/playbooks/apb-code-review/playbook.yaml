@@ -7,7 +7,7 @@ description: >-
   project's own checks run side by side, then one report merges their
   verified findings. No file is changed and nothing is committed or
   published. A report is evidence that the review ran, not an approval.
-version: 1.1.0
+version: 1.1.1
 agent_launch: ask
 params:
   - name: target
@@ -143,7 +143,9 @@ nodes:
       sandbox, record each as not run with that reason instead. A helper
       that fails to run is recorded as failed with its error excerpt, never
       skipped or left out; do not try to repair it here, and set fresh to
-      false. Do not change tracked files and do not fix anything. Write the outputs results (a
+      false. Do not change tracked files and do not fix anything. When the
+      checks are done, delete the temporary files and logs this step
+      created and stop any process it left running, only those. Write the outputs results (a
       JSON array: command, result passed, failed or not run, and a short
       excerpt of any failure) and fresh (true when every check ran on
       exactly this candidate).

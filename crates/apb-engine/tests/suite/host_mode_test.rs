@@ -485,7 +485,7 @@ fn fallback(index: u32, of: u32) -> Option<HintSource> {
 fn closed(attempt: u32, reason: &str) -> Option<FallbackOf> {
     Some(FallbackOf {
         attempt,
-        reason: reason.into(),
+        reason: apb_engine::execution_identity::CloseReason::parse(reason),
     })
 }
 
@@ -520,7 +520,7 @@ fn a_failed_submission_retries_and_then_walks_the_fallback_with_a_model_hint() {
     assert_eq!(fb1.attempt, 3);
     assert_eq!(fb1.model_hint.as_deref(), Some("sonnet"));
     assert_eq!(fb1.hint_source, fallback(1, 2));
-    assert_eq!(fb1.fallback_of, closed(2, "failed"));
+    assert_eq!(fb1.fallback_of, closed(2, "agent_failed"));
     assert_labelled(&fb1);
     let dir = h.run_dir(&run_id);
     assert_eq!(
@@ -541,11 +541,18 @@ fn a_failed_submission_retries_and_then_walks_the_fallback_with_a_model_hint() {
     let fb2 = next_task(&h, &run_id, &fb1_retry.task_id);
     assert_eq!(fb2.model_hint.as_deref(), Some("opus"));
     assert_eq!(fb2.hint_source, fallback(2, 2));
-    assert_eq!(fb2.fallback_of, closed(fb1_retry.attempt, "failed"));
+    assert_eq!(fb2.fallback_of, closed(fb1_retry.attempt, "agent_failed"));
     assert_labelled(&fb2);
     h.submit_on_model(&run_id, &fb2.task_id, "done", "host-model-x");
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
+    assert_host_transitions(
+        &events,
+        &[
+            (None, Some("sonnet"), "agent_failed"),
+            (Some("sonnet"), Some("opus"), "agent_failed"),
+        ],
+    );
     assert_eq!(
         count(&events, |p| matches!(
             p,
@@ -629,11 +636,66 @@ fn the_closing_answer_labels_its_fallback_task() {
     assert_eq!(fb.node, "done");
     assert_eq!(fb.model_hint.as_deref(), Some("sonnet"));
     assert_eq!(fb.hint_source, fallback(1, 1));
-    assert_eq!(fb.fallback_of, closed(first.attempt, "failed"));
+    assert_eq!(fb.fallback_of, closed(first.attempt, "agent_failed"));
     assert_labelled(&fb);
     h.submit(&run_id, &fb.task_id, SubmitStatus::Succeeded, "the answer");
-    let (status, _) = h.finish(&run_id);
+    let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
+    // Card A4: the composer names the host, not the chain's agents, and its
+    // models are the hints the profile declares.
+    assert_host_transitions(&events, &[(None, Some("sonnet"), "agent_failed")]);
+    let hinted: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AttemptStarted {
+                node, model, exec, ..
+            } if node == "done" => {
+                assert_eq!(exec.as_ref().map(|x| x.executed_by.as_str()), Some("host"));
+                Some(model.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hinted, vec![None, Some("sonnet".to_string())]);
+}
+
+/// Every `fallback_triggered` of a host run: `from` and `to` are the host,
+/// the models are the hints, `executed_by` is `host`.
+fn assert_host_transitions(
+    events: &[apb_engine::event::Event],
+    want: &[(Option<&str>, Option<&str>, &str)],
+) {
+    let got: Vec<(Option<String>, Option<String>, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::FallbackTriggered {
+                from,
+                to,
+                from_model,
+                to_model,
+                reason,
+                executed_by,
+                ..
+            } => {
+                assert_eq!((from.as_str(), to.as_str()), ("host", "host"));
+                assert_eq!(executed_by.as_deref(), Some("host"));
+                Some((
+                    from_model.clone(),
+                    to_model.clone(),
+                    reason
+                        .as_ref()
+                        .map(|r| r.as_str().to_string())
+                        .unwrap_or_default(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    let want: Vec<(Option<String>, Option<String>, String)> = want
+        .iter()
+        .map(|(f, t, r)| (f.map(str::to_string), t.map(str::to_string), r.to_string()))
+        .collect();
+    assert_eq!(got, want);
 }
 
 #[test]
@@ -1586,11 +1648,16 @@ fn a_host_task_asks_a_decision_journaled_in_the_run_and_reports_its_model() {
     assert_eq!(seqs.len(), events.len(), "a seq was reused");
     assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
 
-    let models = apb_engine::attempt_models::run_attempt_models(&h.run_dir(&run_id), &events);
+    let models = apb_engine::execution_identity::fold::views(&h.run_dir(&run_id), &events);
     assert_eq!(models.len(), 1, "{models:?}");
     let m = &models[0];
     assert_eq!(m.executed_by, "host");
-    assert_eq!(m.model.as_deref(), Some("GLM-5.3-Flash"));
+    assert_eq!(
+        m.reported,
+        apb_engine::execution_identity::fold::ReportedModel::One {
+            model: "GLM-5.3-Flash".into()
+        }
+    );
     assert_eq!(m.expected.as_deref(), Some("haiku"));
     assert!(m.mismatch);
     let doctor = apb_engine::run_doctor::diagnose_run(h.root.path(), &run_id).unwrap();
@@ -1781,10 +1848,10 @@ fn a_cli_attempt_shows_the_model_it_ran_on() {
     });
     let (status, events) = h.finish(&run_id);
     assert_eq!(status, RunStatus::Succeeded);
-    let models = apb_engine::attempt_models::run_attempt_models(&h.run_dir(&run_id), &events);
+    let models = apb_engine::execution_identity::fold::views(&h.run_dir(&run_id), &events);
     assert_eq!(models.len(), 1, "{models:?}");
     assert_eq!(models[0].executed_by, "cli");
-    assert_eq!(models[0].model.as_deref(), Some("haiku"));
+    assert_eq!(models[0].requested_model.as_deref(), Some("haiku"));
     assert!(!models[0].mismatch);
 }
 

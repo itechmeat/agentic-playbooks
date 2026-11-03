@@ -322,10 +322,15 @@ fn add_outcome_blocks(
     if !publish.is_empty() {
         out["publish"] = json!(publish);
     }
-    // Issue #193: the model each attempt actually ran on.
-    let models = apb_engine::attempt_models::run_attempt_models(dir, &view.events);
+    // Each attempt's identity: the model apb requested apart from what a
+    // host reported, the chain position and why a step was entered; and
+    // how often the host followed the hints.
+    let models = apb_engine::execution_identity::fold::views(dir, &view.events);
     if !models.is_empty() {
         let mismatches = models.iter().filter(|a| a.mismatch).count();
+        if let Some(h) = apb_engine::run_stats::executors::HintFollow::of_views(&models) {
+            out["hint_follow"] = json!(h);
+        }
         out["attempt_models"] = json!(models);
         if mismatches > 0 {
             out["model_mismatch"] = json!(mismatches);

@@ -38,6 +38,23 @@ pub struct QualityStats {
     pub good: Rate,
     /// Poor over determinate levels.
     pub poor: Rate,
+    /// The levels per executor group, only when the criterion's subject is
+    /// a node and the graded runs bound it to more than one executor. A
+    /// breakdown only: the comparable key and promotion never read it.
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<ExecutorQuality>>", optional))]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub by_executor: Vec<ExecutorQuality>,
+}
+
+/// One criterion's levels over the graded runs of one executor group.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExecutorQuality {
+    /// The executor digest, shortened.
+    pub executor: String,
+    pub good: Rate,
+    pub poor: Rate,
+    pub graded_runs: usize,
 }
 
 /// How one criterion moved between the two versions of `--compare`
@@ -60,9 +77,9 @@ pub struct QualityDelta {
 }
 
 /// The quality rows of a version's runs; empty when none was graded.
-pub(super) fn of_runs(runs: &[&StatsRun]) -> Vec<QualityStats> {
+pub(super) fn of_runs<'a>(runs: &[&'a StatsRun]) -> Vec<QualityStats> {
     let grades: Vec<Grade> = runs.iter().flat_map(|r| r.grades.iter().cloned()).collect();
-    let mut levels: BTreeMap<ComparableKey, (CriterionSource, Vec<Level>)> = BTreeMap::new();
+    let mut levels: BTreeMap<ComparableKey, (CriterionSource, Vec<Graded<'a>>)> = BTreeMap::new();
     for g in latest_per_run(&grades).values() {
         for c in &g.criteria {
             let key = ComparableKey {
@@ -71,16 +88,25 @@ pub(super) fn of_runs(runs: &[&StatsRun]) -> Vec<QualityStats> {
                 grader: g.grader.to_string(),
                 task_type: g.task_type.clone(),
             };
+            let executor = c
+                .subject
+                .strip_prefix("node:")
+                .and_then(|node| executor_of(runs, &g.run_id, node));
             levels
                 .entry(key)
                 .or_insert_with(|| (c.source, Vec::new()))
                 .1
-                .push(c.level);
+                .push(Graded {
+                    level: c.level,
+                    executor,
+                });
         }
     }
     levels
         .into_iter()
-        .map(|(key, (source, levels))| {
+        .map(|(key, (source, graded))| {
+            let by_executor = by_executor(&graded);
+            let levels: Vec<Level> = graded.iter().map(|g| g.level).collect();
             let tally = Tally::of_levels(&levels);
             let determinate = tally.determinate() as usize;
             QualityStats {
@@ -93,6 +119,50 @@ pub(super) fn of_runs(runs: &[&StatsRun]) -> Vec<QualityStats> {
                 grader: key.grader,
                 task_type: key.task_type,
                 digest: key.digest,
+                by_executor,
+            }
+        })
+        .collect()
+}
+
+/// One run's level of a criterion, with the executor the run bound the
+/// criterion's node to (`None` for a run criterion or an unknown binding).
+struct Graded<'a> {
+    level: Level,
+    executor: Option<&'a str>,
+}
+
+/// The executor digest the run `run_id` bound `node` to, from its manifest.
+fn executor_of<'a>(runs: &[&'a StatsRun], run_id: &str, node: &str) -> Option<&'a str> {
+    runs.iter()
+        .find(|r| r.run_id == run_id)
+        .and_then(|r| r.node_profiles.get(node))
+        .map(|d| d.executor.as_str())
+        .filter(|e| !e.is_empty())
+}
+
+/// The levels per executor, only when every level names one and they name
+/// more than one.
+fn by_executor(graded: &[Graded<'_>]) -> Vec<ExecutorQuality> {
+    let mut per: BTreeMap<&str, Vec<Level>> = BTreeMap::new();
+    for g in graded {
+        let Some(e) = g.executor else {
+            return Vec::new();
+        };
+        per.entry(e).or_default().push(g.level);
+    }
+    if per.len() < 2 {
+        return Vec::new();
+    }
+    per.into_iter()
+        .map(|(executor, levels)| {
+            let tally = Tally::of_levels(&levels);
+            let determinate = tally.determinate() as usize;
+            ExecutorQuality {
+                executor: super::digests::short(executor),
+                good: Rate::new(tally.good as usize, determinate),
+                poor: Rate::new(tally.poor as usize, determinate),
+                graded_runs: levels.len(),
             }
         })
         .collect()

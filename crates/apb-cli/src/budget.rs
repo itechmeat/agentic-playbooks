@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use apb_core::budget::{BudgetRequest, EffectiveBudget, OnNoEstimate, parse_tokens, parse_usd};
+use apb_core::overrides::RunOverrides;
 use apb_engine::budget::kind::{tokens_text, usd_text};
 use apb_engine::budget::{BUDGET_PAUSED, BudgetResume, BudgetStatus, StartCheck};
 use apb_engine::run_estimate::{RunEstimate, render_lines};
@@ -122,6 +123,11 @@ fn budget_line(b: &EffectiveBudget) -> String {
     )
 }
 
+/// A start without run overrides.
+static NO_OVERRIDES: RunOverrides = RunOverrides {
+    nodes: std::collections::BTreeMap::new(),
+};
+
 fn resolve(
     root: &Path,
     name: &str,
@@ -135,17 +141,19 @@ fn resolve(
     apb_core::store::resolve(root, &wref).map_err(|e| e.to_string())
 }
 
-/// `apb run --estimate`: prints the estimate of playbook `name` and starts
-/// nothing.
+/// `apb run --estimate`: prints the estimate of playbook `name`, its nodes
+/// keyed as a start with `overrides` binds them, and starts nothing.
 pub(crate) fn estimate_cmd(
     root: &Path,
     name: &str,
     version: Option<&str>,
     execution: &str,
     req: Option<&BudgetRequest>,
+    overrides: Option<&RunOverrides>,
 ) -> ExitCode {
     let check = resolve(root, name, version).and_then(|r| {
-        apb_engine::budget::check_resolved(&r, execution, req).map_err(|e| e.to_string())
+        apb_engine::budget::check_resolved(&r, execution, req, overrides.unwrap_or(&NO_OVERRIDES))
+            .map_err(|e| e.to_string())
     });
     match check {
         Ok(c) => {
@@ -185,9 +193,16 @@ pub(crate) fn prestart(
     version: Option<&str>,
     execution: &str,
     req: Option<BudgetRequest>,
+    overrides: Option<&RunOverrides>,
 ) -> Result<Prestart, String> {
     let check = match resolve(root, name, version).and_then(|r| {
-        apb_engine::budget::check_resolved(&r, execution, req.as_ref()).map_err(|e| e.to_string())
+        apb_engine::budget::check_resolved(
+            &r,
+            execution,
+            req.as_ref(),
+            overrides.unwrap_or(&NO_OVERRIDES),
+        )
+        .map_err(|e| e.to_string())
     }) {
         Ok(c) => c,
         Err(e) if req.is_some() => return Err(format!("cannot check the budget: {e}")),

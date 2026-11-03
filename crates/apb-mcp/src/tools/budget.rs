@@ -159,7 +159,9 @@ pub fn preflight(
     execution: &str,
     req: Option<&BudgetRequest>,
 ) -> Result<Preflight, Value> {
-    let Ok(check) = apb_engine::budget::check_resolved(resolved, execution, req) else {
+    // MCP and HTTP starts take no run overrides.
+    let none = apb_core::overrides::RunOverrides::default();
+    let Ok(check) = apb_engine::budget::check_resolved(resolved, execution, req, &none) else {
         return Ok(Preflight::default());
     };
     if req.is_some() && check.budget.is_none() {

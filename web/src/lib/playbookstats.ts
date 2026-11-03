@@ -1,6 +1,8 @@
 import type {
   Comparison,
   DigestStats,
+  ExecutorGroup,
+  HintFollow,
   NodeStats,
   PerRun,
   QualityDelta,
@@ -8,11 +10,13 @@ import type {
   Rate,
   ReasonCount,
   StatsReport,
+  StepStats,
+  TransitionStats,
   VersionStats,
   Waits,
 } from './api.gen'
 import { costByBasisText, costWithBasis } from './runusage'
-import { EXPLAIN_CLASSES } from './consts.gen'
+import { CLOSE_REASON_NOT_RECORDED, EXPLAIN_CLASSES } from './consts.gen'
 import { classWord } from './runoverlay'
 import { tallyLeftOut } from './quality'
 
@@ -79,11 +83,14 @@ export function modelsText(v: Pick<VersionStats, 'models' | 'model_mismatch'>): 
   return line
 }
 
-// `profile 1a2b3c4d5e6f (bundle 9f8e7d6c5b4a): 3 runs, first pass 2/3 (67%),
-// median 1.0 min, 200 tokens per visit`: one executor group of a node, as
-// `apb stats` prints it.
+// `profile 1a2b3c4d5e6f (bundle 9f8e7d6c5b4a, executor 0a1b2c3d4e5f): 3
+// runs, first pass 2/3 (67%), median 1.0 min, 200 tokens per visit`: one
+// executor group of a node, as `apb stats` prints it; `override` marks a
+// run-local ephemeral override.
 export function digestText(d: DigestStats): string {
-  let line = `profile ${d.profile} (bundle ${d.bundle}): ${d.runs} ${d.runs === 1 ? 'run' : 'runs'}, first pass ${rateText(d.first_pass)}`
+  const executor = d.executor ? `, executor ${d.executor}` : ''
+  const override = d.ephemeral ? ', override' : ''
+  let line = `profile ${d.profile} (bundle ${d.bundle}${executor}${override}): ${d.runs} ${d.runs === 1 ? 'run' : 'runs'}, first pass ${rateText(d.first_pass)}`
   if (d.duration.median_ms !== undefined) line += `, median ${dur(d.duration.median_ms)}`
   if (d.tokens_per_visit !== undefined) line += `, ${d.tokens_per_visit} tokens per visit`
   return line
@@ -95,6 +102,82 @@ export function executorGroups(v: Pick<VersionStats, 'nodes'>): { node: string; 
   return (v.nodes ?? [])
     .filter((n) => (n.digests?.length ?? 0) > 1)
     .map((n) => ({ node: n.node, groups: (n.digests ?? []).map(digestText) }))
+}
+
+// --- the executor report: per node, per executor group, per chain step ---
+
+// `check rejected`, `not recorded`: a close or transition reason in words.
+// The engine shows an unknown reason only as a slug, so this never prints
+// free text from a journal.
+export function closeReasonWord(reason: string): string {
+  return reason === CLOSE_REASON_NOT_RECORDED ? 'not recorded' : reason.replace(/_/g, ' ')
+}
+
+// The nodes whose executor report says more than its digest line: groups
+// with more than one step, a transition, or a host group's hint line.
+export function executorReports(v: Pick<VersionStats, 'nodes'>): { node: string; groups: ExecutorGroup[] }[] {
+  return (v.nodes ?? [])
+    .map((n) => ({
+      node: n.node,
+      groups: (n.executors ?? []).filter((g) => g.steps.length > 1 || g.transitions.length > 0 || !!g.hint_follow),
+    }))
+    .filter((n) => n.groups.length > 0)
+}
+
+// `executor 0a1b2c3d4e5f, override (profile 1a2b, bundle 9f8e): 3 runs, 5
+// attempts`, as `apb stats` heads a group.
+export function groupHeadText(g: ExecutorGroup): string {
+  return `executor ${g.executor}${g.ephemeral ? ', override' : ''} (profile ${g.profile}, bundle ${g.bundle}): ${plural(g.runs, 'run')}, ${plural(g.attempts, 'attempt')}`
+}
+
+// `step 1 fallback (cli)`, or `position not recorded (cli)` for attempts
+// of an older journal.
+export function stepLabelText(s: StepStats): string {
+  const at = s.step === undefined || s.step === null ? 'position not recorded' : `step ${s.step} ${s.source.replace(/_/g, ' ')}`
+  return `${at} (${s.executed_by})`
+}
+
+// `opus x2, partial x1`: what the attempts reported, `one:` dropped.
+function reportedText(models: Record<string, number>): string {
+  return Object.entries(models)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([m, n]) => `${m.replace(/^one:/, '')} x${n}`)
+    .join(', ')
+}
+
+// `check rejected x2, quota x1`.
+function closesText(closes: Record<string, number>): string {
+  return Object.entries(closes)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([r, n]) => `${closeReasonWord(r)} x${n}`)
+    .join(', ')
+}
+
+// `3 attempts, succeeded 1/3 (33%), median 1.0 min, cost $0.0123 over 2/3
+// (67%), models: opus x2, closes: check rejected x2`, or `never ran` for a
+// declared step no attempt reached.
+export function stepText(s: StepStats): string {
+  if (s.attempts === 0) return 'never ran'
+  let line = `${plural(s.attempts, 'attempt')}, succeeded ${rateText(s.successes)}`
+  if (s.median_attempt_ms !== undefined && s.median_attempt_ms !== null) line += `, median ${dur(s.median_attempt_ms)}`
+  if (s.cost_usd !== undefined && s.cost_usd !== null) line += `, cost $${s.cost_usd.toFixed(4)} over ${rateText(s.cost_known)}`
+  const models = reportedText(s.reported_models)
+  if (models) line += `, models: ${models}`
+  const closes = closesText(s.closes_by_reason)
+  if (closes) line += `, closes: ${closes}`
+  return line
+}
+
+// `step 0 to step 1: check rejected x2`; `?` for a step no journal named.
+export function transitionText(t: Pick<TransitionStats, 'from_step' | 'to_step' | 'reason' | 'count'>): string {
+  const at = (x: number | undefined | null) => (x === undefined || x === null ? '?' : String(x))
+  return `step ${at(t.from_step)} to step ${at(t.to_step)}: ${closeReasonWord(t.reason)} x${t.count}`
+}
+
+// `hints: 3 hinted, 1 followed, 2 not followed, 0 not reported`: a host
+// group's hint follow line, as `apb stats` prints it.
+export function hintFollowText(h: HintFollow): string {
+  return `hints: ${h.hinted} hinted, ${h.followed} followed, ${h.not_followed} not followed, ${h.not_reported} not reported`
 }
 
 // The versions newest first (the API lists them oldest first).
@@ -135,6 +218,16 @@ export function qualityText(q: QualityStats): string {
   const left = tallyLeftOut(q.tally)
   if (left) line += `, ${left}`
   return line
+}
+
+// `executor 0a1b2c3d4e5f: good 2/2 (100%), poor 0/2 (0%) over 2 graded
+// runs`: a node criterion's levels per executor group, present only when
+// the graded runs bound the node to more than one executor. A breakdown
+// only: the comparison and promotion never read it.
+export function qualityExecutorTexts(q: QualityStats): string[] {
+  return (q.by_executor ?? []).map(
+    (e) => `executor ${e.executor}: good ${rateText(e.good)}, poor ${rateText(e.poor)} over ${plural(e.graded_runs, 'graded run')}`,
+  )
 }
 
 // The sign follows the rounded value, so a tiny drop never reads `0` next

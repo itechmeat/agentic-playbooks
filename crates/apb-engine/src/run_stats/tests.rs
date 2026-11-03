@@ -39,6 +39,9 @@ fn run(
         definitions: snapshot.map(known).unwrap_or_default(),
         diagnostics: Vec::new(),
         origin: crate::manifest::RunOrigin::Production,
+        identities: Vec::new(),
+        declared: BTreeMap::new(),
+        ephemeral_nodes: Default::default(),
     }
 }
 
@@ -718,6 +721,7 @@ fn bind(mut r: StatsRun, profile: &str) -> StatsRun {
         crate::manifest::NodeDigests {
             profile: format!("{profile}0123456789abcdef"),
             bundle: format!("b{profile}0123456789abcdef"),
+            ..Default::default()
         },
     );
     r
@@ -1169,4 +1173,439 @@ fn only_production_runs_count_in_the_statistics() {
         v.spend,
         build(&runs[..1], &StatsFilter::default()).versions[0].spend
     );
+}
+
+// --- the executor report (PR 21a part B) ---
+
+fn attempt_started(attempt: u32, exec: Option<serde_json::Value>) -> serde_json::Value {
+    let mut v = serde_json::json!({"type": "attempt_started", "node": "work", "attempt": attempt, "agent": "claude", "model": "haiku"});
+    if let Some(x) = exec {
+        v["exec"] = x;
+    }
+    v
+}
+
+fn attempt_done(attempt: u32, status: &str, ms: u64, cost: Option<f64>) -> serde_json::Value {
+    let mut v = serde_json::json!({"type": "attempt_finished", "node": "work", "attempt": attempt, "status": status, "duration_ms": ms});
+    if let Some(c) = cost {
+        v["usage"] = serde_json::json!({"input_tokens": 10, "output_tokens": 0, "cost_usd": c, "source": "reported"});
+    }
+    v
+}
+
+fn exec(
+    step: u32,
+    source: serde_json::Value,
+    entered: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({"binding": "sha256:b1b1b1b1b1b1b1b1", "step": step, "source": source, "executed_by": "cli"});
+    if let Some(e) = entered {
+        v["entered"] = e;
+    }
+    v
+}
+
+/// A run's identities as `StatsRun::load` reads them, every attempt bound
+/// to the executor digests given.
+fn with_identities(mut r: StatsRun, executor: &str, ephemeral: bool) -> StatsRun {
+    r.identities = crate::execution_identity::fold::fold(&r.events);
+    for id in &mut r.identities {
+        id.profile_digest = Some("sha256:pppppppppppppppp".into());
+        id.bundle_digest = Some("sha256:bbbbbbbbbbbbbbbb".into());
+        id.executor_digest = Some(executor.into());
+        id.ephemeral = ephemeral;
+    }
+    r
+}
+
+fn group_of(r: &StatsReport) -> &[executors::ExecutorGroup] {
+    &node_of(r, "work").executors
+}
+
+/// Card A1 and design 2.9: step rows per chain position, the close reason
+/// of the step left and the transition between them, a declared step that
+/// never ran listed with no attempt, cost summed per step.
+#[test]
+fn the_executor_report_splits_steps_and_names_transition_reasons() {
+    let entered =
+        serde_json::json!({"from_step": 0, "closed_attempt": 2, "reason": "check_rejected"});
+    let r = run(
+        "r1",
+        "1.0.0",
+        None,
+        &[
+            (1_000, started("work")),
+            (
+                1_000,
+                attempt_started(
+                    1,
+                    Some(exec(0, serde_json::json!({"kind": "primary"}), None)),
+                ),
+            ),
+            (2_000, attempt_done(1, "failed", 1_000, Some(0.5))),
+            (
+                2_000,
+                serde_json::json!({"type": "fallback_triggered", "node": "work", "from": "claude", "to": "codex", "reason": "check_rejected", "executed_by": "cli"}),
+            ),
+            (
+                2_000,
+                attempt_started(
+                    1,
+                    Some(exec(
+                        1,
+                        serde_json::json!({"kind": "fallback", "index": 1, "of": 2}),
+                        Some(entered),
+                    )),
+                ),
+            ),
+            (5_000, attempt_done(1, "succeeded", 3_000, Some(0.25))),
+            (5_000, finished("work", "succeeded", 1)),
+            (6_000, end("succeeded")),
+        ],
+    );
+    let mut r = with_identities(r, "x1:eeeeeeeeeeeeeeee", false);
+    r.declared.insert(
+        "x1:eeeeeeeeeeeeeeee".into(),
+        vec!["primary".into(), "fallback".into(), "fallback".into()],
+    );
+    let report = build(&[r], &StatsFilter::default());
+    let groups = group_of(&report);
+    assert_eq!(groups.len(), 1);
+    let g = &groups[0];
+    assert_eq!(
+        (g.executor.as_str(), g.runs, g.attempts),
+        ("eeeeeeeeeeee", 1, 2)
+    );
+    let steps: Vec<_> = g
+        .steps
+        .iter()
+        .map(|s| {
+            (
+                s.step,
+                s.source.as_str(),
+                s.attempts,
+                s.successes.count,
+                s.cost_usd,
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            (Some(0), "primary", 1, 0, Some(0.5)),
+            (Some(1), "fallback", 1, 1, Some(0.25)),
+            (Some(2), "fallback", 0, 0, None),
+        ]
+    );
+    assert_eq!(g.steps[0].closes_by_reason.get("check_rejected"), Some(&1));
+    assert_eq!(g.steps[1].median_attempt_ms, Some(3_000));
+    assert_eq!(g.steps[0].reported_models.get("none"), Some(&1));
+    assert_eq!(
+        g.transitions,
+        vec![executors::TransitionStats {
+            from_step: Some(0),
+            to_step: Some(1),
+            reason: "check_rejected".into(),
+            count: 1
+        }]
+    );
+    let text = render_text(&report);
+    assert!(text.contains("executor eeeeeeeeeeee"), "{text}");
+    assert!(text.contains("step 2 fallback: never ran"), "{text}");
+    assert!(text.contains("0 -> 1 check_rejected x1"), "{text}");
+}
+
+/// The drive journals `fallback_triggered` after the fallback attempt ran
+/// (its batch write), and the attempt it entered already carries the
+/// reason: one transition, `0 -> 1`, counted once; and a full `x1:`
+/// executor digest shows as its first hex characters, its prefixes left
+/// out.
+#[test]
+fn a_transition_written_after_the_attempt_it_entered_counts_once() {
+    let entered =
+        serde_json::json!({"from_step": 0, "closed_attempt": 2, "reason": "check_rejected"});
+    let r = run(
+        "r1",
+        "1.0.0",
+        None,
+        &[
+            (1_000, started("work")),
+            (
+                1_000,
+                attempt_started(
+                    1,
+                    Some(exec(0, serde_json::json!({"kind": "primary"}), None)),
+                ),
+            ),
+            (2_000, attempt_done(1, "failed", 1_000, None)),
+            (
+                2_000,
+                attempt_started(
+                    2,
+                    Some(exec(
+                        1,
+                        serde_json::json!({"kind": "fallback", "index": 1, "of": 1}),
+                        Some(entered),
+                    )),
+                ),
+            ),
+            (3_000, attempt_done(2, "succeeded", 1_000, None)),
+            (
+                3_000,
+                serde_json::json!({"type": "fallback_triggered", "node": "work", "from": "claude", "to": "claude", "reason": "check_rejected", "executed_by": "cli"}),
+            ),
+            (3_000, finished("work", "succeeded", 2)),
+            (4_000, end("succeeded")),
+        ],
+    );
+    let r = with_identities(r, "x1:sha256:0123456789abcdef0123456789abcdef", false);
+    let report = build(&[r], &StatsFilter::default());
+    let g = &group_of(&report)[0];
+    assert_eq!(
+        g.transitions,
+        vec![executors::TransitionStats {
+            from_step: Some(0),
+            to_step: Some(1),
+            reason: "check_rejected".into(),
+            count: 1
+        }]
+    );
+    assert_eq!(g.steps[0].closes_by_reason.get("check_rejected"), Some(&1));
+    assert!(g.steps[1].closes_by_reason.is_empty(), "{:?}", g.steps[1]);
+    assert_eq!(g.executor, "0123456789ab");
+}
+
+/// Plan S5: a step's cost splits by basis like the version's spend, so a
+/// subscription equivalent nobody is billed never reads as money billed.
+#[test]
+fn a_step_cost_splits_by_basis() {
+    let with_basis = |attempt: u32, cost: f64, basis: &str| {
+        let mut v = attempt_done(attempt, "failed", 1_000, Some(cost));
+        v["usage"]["cost_basis"] = serde_json::json!(basis);
+        v
+    };
+    let primary = || Some(exec(0, serde_json::json!({"kind": "primary"}), None));
+    let r = run(
+        "r1",
+        "1.0.0",
+        None,
+        &[
+            (1_000, started("work")),
+            (1_000, attempt_started(1, primary())),
+            (2_000, with_basis(1, 0.5, "billed")),
+            (2_000, attempt_started(2, primary())),
+            (3_000, with_basis(2, 0.25, "subscription_equivalent")),
+            (3_000, attempt_started(3, primary())),
+            (4_000, attempt_done(3, "succeeded", 1_000, Some(0.125))),
+            (4_000, finished("work", "succeeded", 3)),
+            (5_000, end("succeeded")),
+        ],
+    );
+    let r = with_identities(r, "x1:eeeeeeeeeeeeeeee", false);
+    let report = build(&[r], &StatsFilter::default());
+    let step = &group_of(&report)[0].steps[0];
+    assert_eq!(step.cost_usd, Some(0.875));
+    assert_eq!(
+        step.cost_by_basis,
+        crate::run_view::CostByBasis {
+            billed_usd: Some(0.5),
+            subscription_equivalent_usd: Some(0.25),
+            unknown_basis_usd: Some(0.125),
+        }
+    );
+}
+
+/// Card A9: an older journal (no `exec`, a fallback without a reason)
+/// keeps one row whose position is not recorded and a transition that
+/// reads `not_recorded`; the cascade's `routing` stays its own reason.
+#[test]
+fn an_old_journal_reads_not_recorded_and_is_never_reclassified() {
+    let r = run(
+        "r1",
+        "1.0.0",
+        None,
+        &[
+            (1_000, started("work")),
+            (1_000, attempt_started(1, None)),
+            (2_000, attempt_done(1, "failed", 1_000, None)),
+            (
+                2_000,
+                serde_json::json!({"type": "fallback_triggered", "node": "work", "from": "claude", "to": "codex"}),
+            ),
+            (2_000, attempt_started(1, None)),
+            (3_000, attempt_done(1, "failed", 1_000, None)),
+            (
+                3_000,
+                serde_json::json!({"type": "fallback_triggered", "node": "work", "from": "codex", "to": "opencode", "reason": "routing"}),
+            ),
+            (3_000, attempt_started(1, None)),
+            (4_000, attempt_done(1, "succeeded", 1_000, None)),
+            (4_000, finished("work", "succeeded", 1)),
+            (5_000, end("succeeded")),
+        ],
+    );
+    let mut r = with_identities(r, "x1:eeeeeeeeeeeeeeee", false);
+    // The manifest declares three steps; which ones ran is not recorded, so
+    // none of them is listed as never run.
+    r.declared.insert(
+        "x1:eeeeeeeeeeeeeeee".into(),
+        vec!["tier".into(), "primary".into(), "fallback".into()],
+    );
+    let report = build(&[r], &StatsFilter::default());
+    let g = &group_of(&report)[0];
+    assert_eq!(g.steps.len(), 1, "{:?}", g.steps);
+    assert_eq!(
+        (
+            g.steps[0].step,
+            g.steps[0].source.as_str(),
+            g.steps[0].attempts
+        ),
+        (None, executors::NOT_RECORDED, 3)
+    );
+    let reasons: Vec<_> = g
+        .transitions
+        .iter()
+        .map(|t| (t.reason.as_str(), t.count))
+        .collect();
+    assert_eq!(reasons, vec![("not_recorded", 1), ("routing", 1)]);
+    assert!(
+        g.transitions
+            .iter()
+            .all(|t| t.from_step.is_none() && t.to_step.is_none())
+    );
+}
+
+/// Card A6: an override whose chain equals the base is another executor:
+/// the node's digest groups and the comparison name the executor.
+#[test]
+fn an_override_equal_to_the_base_is_its_own_executor_group() {
+    let digests = |executor: &str| crate::manifest::NodeDigests {
+        profile: "sha256:pppppppppppppppp".into(),
+        bundle: "sha256:bbbbbbbbbbbbbbbb".into(),
+        executor: executor.into(),
+    };
+    let mut base = one_visit("r1", "1.0.0", 100);
+    base.node_profiles
+        .insert("work".into(), digests("x1:aaaaaaaaaaaaaaaa"));
+    let mut over = one_visit("r2", "1.0.0", 300);
+    over.node_profiles
+        .insert("work".into(), digests("x1:cccccccccccccccc"));
+    over.ephemeral_nodes.insert("work".into());
+    let mut next = one_visit("r3", "1.0.1", 300);
+    next.node_profiles
+        .insert("work".into(), digests("x1:cccccccccccccccc"));
+    let runs = vec![base.clone(), over.clone(), next];
+    let report = build(&runs, &StatsFilter::default());
+    let groups: Vec<_> = node_of(&report, "work")
+        .digests
+        .iter()
+        .map(|d| (d.executor.as_str(), d.ephemeral, d.runs))
+        .collect();
+    assert_eq!(
+        groups,
+        vec![("aaaaaaaaaaaa", false, 1), ("cccccccccccc", true, 1)]
+    );
+    let report = build(
+        &[base, runs[2].clone()],
+        &StatsFilter {
+            playbook: Some("p".into()),
+            compare: Some("1.0.0".into()),
+            ..Default::default()
+        },
+    );
+    let c = &report.compare.unwrap().executor_changes[0];
+    assert_eq!(
+        (c.base_executor.as_str(), c.against_executor.as_str()),
+        ("aaaaaaaaaaaa", "cccccccccccc")
+    );
+    assert_eq!(c.base_profile, c.against_profile);
+}
+
+/// Design 2.9 item 5: of the hinted host attempts, a report naming the
+/// hint is followed, another model is not, a task without a model is not
+/// reported; never filled from the hint.
+#[test]
+fn hint_follow_counts_followed_not_followed_and_not_reported() {
+    let host = |task: &str, attempt: u32, model: Option<&str>| {
+        vec![
+            serde_json::json!({"type": "host_task_requested", "task_id": task, "node": "work", "attempt": attempt, "model_hint": "sonnet"}),
+            serde_json::json!({"type": "attempt_started", "node": "work", "attempt": attempt, "agent": "host"}),
+            serde_json::json!({"type": "host_task_submitted", "task_id": task, "status": "failed", "submitted_by": "host", "model": model}),
+            serde_json::json!({"type": "attempt_finished", "node": "work", "attempt": attempt, "status": "failed"}),
+        ]
+    };
+    let mut body = vec![(1_000, started("work"))];
+    for (i, m) in [Some("claude-sonnet-4-5"), Some("opus"), None]
+        .iter()
+        .enumerate()
+    {
+        for v in host(&format!("t{i}"), i as u32 + 1, *m) {
+            body.push((1_000 + i as u128, v));
+        }
+    }
+    body.push((9_000, end("failed")));
+    let r = with_identities(
+        run("r1", "1.0.0", None, &body),
+        "x1:hhhhhhhhhhhhhhhh",
+        false,
+    );
+    let report = build(&[r], &StatsFilter::default());
+    let g = &group_of(&report)[0];
+    assert_eq!(
+        g.hint_follow,
+        Some(executors::HintFollow {
+            hinted: 3,
+            followed: 1,
+            not_followed: 1,
+            not_reported: 1
+        })
+    );
+    let models = &g.steps[0].reported_models;
+    assert_eq!(models.get("one:claude-sonnet-4-5"), Some(&1));
+    assert_eq!(models.get("none"), Some(&1));
+}
+
+/// Design 2.8 item 6: a node criterion's levels split by executor when
+/// its graded runs bound the node to more than one; the comparable key is
+/// untouched.
+#[test]
+fn quality_rows_of_a_node_criterion_split_by_executor() {
+    let node_grade = |run: &str, level: &str| {
+        let mut g = grade(run, "rules", 1, &[("c", "d1", level)]);
+        g.criteria[0].subject = "node:work".into();
+        g
+    };
+    let mut runs = Vec::new();
+    for (id, executor, level) in [
+        ("r1", "x1:aaaa", "good"),
+        ("r2", "x1:aaaa", "good"),
+        ("r3", "x1:cccc", "poor"),
+    ] {
+        let mut r = graded(id, "1.0.0", vec![node_grade(id, level)]);
+        r.node_profiles.insert(
+            "work".into(),
+            crate::manifest::NodeDigests {
+                profile: "p".into(),
+                bundle: "b".into(),
+                executor: executor.into(),
+            },
+        );
+        runs.push(r);
+    }
+    let report = build(&runs, &StatsFilter::default());
+    let q = &report.versions[0].quality[0];
+    assert_eq!(q.graded_runs, 3);
+    let by: Vec<_> = q
+        .by_executor
+        .iter()
+        .map(|e| {
+            (
+                e.executor.as_str(),
+                e.good.count,
+                e.poor.count,
+                e.graded_runs,
+            )
+        })
+        .collect();
+    assert_eq!(by, vec![("aaaa", 2, 0, 2), ("cccc", 0, 1, 1)]);
 }

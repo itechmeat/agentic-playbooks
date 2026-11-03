@@ -3,8 +3,15 @@ import { render } from 'svelte/server'
 import PlaybookStatsCard from './PlaybookStatsCard.svelte'
 import {
   costKnownText,
+  closeReasonWord,
   digestText,
   executorGroups,
+  executorReports,
+  groupHeadText,
+  hintFollowText,
+  stepLabelText,
+  stepText,
+  transitionText,
   modelsText,
   nodeLayer,
   nodeStatsOf,
@@ -17,13 +24,14 @@ import {
   qualityDeltas,
   qualityLabel,
   qualityLabels,
+  qualityExecutorTexts,
   qualityText,
   rateText,
   spendText,
   versionsNewestFirst,
   waitsText,
 } from './playbookstats'
-import type { NodeStats, QualityStats, StatsReport, VersionStats } from './api.gen'
+import type { ExecutorGroup, NodeStats, QualityStats, StatsReport, StepStats, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
   playbook: 'p',
@@ -163,6 +171,9 @@ describe('executor digests', () => {
       'profile 1a2b3c4d5e6f (bundle 1a2b3c4d5e6fb): 2 runs, first pass 2/2 (100%), median 1.0 min, 200 tokens per visit',
     )
     expect(digestText(group('aaa', 1))).toBe('profile aaa (bundle aaab): 1 run, first pass 1/1 (100%), median 1.0 min')
+    expect(digestText({ ...group('aaa', 1), executor: 'x1abc', ephemeral: true })).toBe(
+      'profile aaa (bundle aaab, executor x1abc, override): 1 run, first pass 1/1 (100%), median 1.0 min',
+    )
     const v = { nodes: [node('a', [group('aaa', 1), group('bbb', 1)]), node('b', [group('ccc', 2)])] }
     expect(executorGroups(v)).toEqual([
       { node: 'a', groups: [digestText(group('aaa', 1)), digestText(group('bbb', 1))] },
@@ -192,6 +203,24 @@ describe('quality in the stats', () => {
     good: { count: 2, of: 3, rate: 0.6667 },
     poor: { count: 1, of: 3, rate: 0.3333 },
     ...extra,
+  })
+
+  it('splits a node criterion by executor only when the row carries the breakdown', () => {
+    expect(qualityExecutorTexts(row())).toEqual([])
+    const split = row({
+      by_executor: [
+        { executor: 'x1', good: { count: 2, of: 2, rate: 1 }, poor: { count: 0, of: 2, rate: 0 }, graded_runs: 2 },
+        { executor: 'x2', good: { count: 0, of: 1, rate: 0 }, poor: { count: 1, of: 1, rate: 1 }, graded_runs: 1 },
+      ],
+    })
+    expect(qualityExecutorTexts(split)).toEqual([
+      'executor x1: good 2/2 (100%), poor 0/2 (0%) over 2 graded runs',
+      'executor x2: good 0/1 (0%), poor 1/1 (100%) over 1 graded run',
+    ])
+    const body = render(PlaybookStatsCard, {
+      props: { report: { runs: 3, versions: [version('1.0.0', { quality: [split] })] } as StatsReport },
+    }).body
+    expect(body).toContain('executor x2: good 0/1 (0%)')
   })
 
   it('names a row by its key and prints it as apb stats does', () => {
@@ -336,5 +365,79 @@ describe('node statistics', () => {
     const body = render(PlaybookStatsCard, { props: { report } }).body
     expect(body).toContain('data-testid="playbook-stats-nodes"')
     expect(body).toContain('not run: seen 3')
+  })
+})
+
+describe('executor report', () => {
+  const step = (over: Partial<StepStats> = {}): StepStats => ({
+    binding: 'aaaaaaaaaaaa',
+    step: 0,
+    source: 'primary',
+    executed_by: 'cli',
+    attempts: 3,
+    successes: { count: 1, of: 3, rate: 0.3333 },
+    median_attempt_ms: 60_000,
+    cost_known: { count: 0, of: 3 },
+    reported_models: {},
+    closes_by_reason: { check_rejected: 2 },
+    ...over,
+  })
+  const group = (over: Partial<ExecutorGroup> = {}): ExecutorGroup => ({
+    profile: 'p1',
+    bundle: 'b1',
+    executor: 'x1',
+    ephemeral: false,
+    runs: 3,
+    attempts: 5,
+    steps: [step(), step({ step: 1, source: 'fallback', attempts: 2, successes: { count: 2, of: 2, rate: 1 }, closes_by_reason: {}, cost_usd: 0.0123, cost_known: { count: 2, of: 2, rate: 1 } })],
+    transitions: [
+      { from_step: 0, to_step: 1, reason: 'check_rejected', count: 1 },
+      { from_step: 0, to_step: 1, reason: 'not_recorded', count: 1 },
+    ],
+    ...over,
+  })
+
+  it('words a group, its steps and transitions as apb stats does', () => {
+    expect(groupHeadText(group())).toBe('executor x1 (profile p1, bundle b1): 3 runs, 5 attempts')
+    expect(groupHeadText(group({ ephemeral: true }))).toBe('executor x1, override (profile p1, bundle b1): 3 runs, 5 attempts')
+    expect(stepLabelText(step())).toBe('step 0 primary (cli)')
+    expect(stepLabelText(step({ step: undefined, source: 'not_recorded' }))).toBe('position not recorded (cli)')
+    expect(stepText(step())).toBe('3 attempts, succeeded 1/3 (33%), median 1.0 min, closes: check rejected x2')
+    expect(stepText(group().steps[1])).toBe('2 attempts, succeeded 2/2 (100%), median 1.0 min, cost $0.0123 over 2/2 (100%)')
+    expect(stepText(step({ attempts: 0 }))).toBe('never ran')
+    expect(stepText(step({ reported_models: { 'one:opus': 2, partial: 1 }, closes_by_reason: {} }))).toBe(
+      '3 attempts, succeeded 1/3 (33%), median 1.0 min, models: opus x2, partial x1',
+    )
+    expect(transitionText(group().transitions[0])).toBe('step 0 to step 1: check rejected x1')
+    expect(transitionText({ reason: 'not_recorded', count: 3 })).toBe('step ? to step ?: not recorded x3')
+    expect(closeReasonWord('supervisor_interrupted')).toBe('supervisor interrupted')
+    expect(hintFollowText({ hinted: 3, followed: 1, not_followed: 2, not_reported: 0 })).toBe(
+      'hints: 3 hinted, 1 followed, 2 not followed, 0 not reported',
+    )
+  })
+
+  it('lists a node only for groups with more than one step, a transition or a hint line', () => {
+    const base = { runs: 1, in_runs: 1, in_runs_unknown: 0, not_run: [], executions: 1, completed: 1, open: 0, failed: 0, cancelled: 0, first_pass: { count: 1, of: 1 }, retries: 0, fallbacks: 0, reentries: 0, duration: { count: 0 }, deliverable_missing: 0, output_fields_missing: 0, digests: [], models: {}, model_mismatch: 0 }
+    const single = group({ steps: [step()], transitions: [] })
+    const hosted = group({ steps: [step({ executed_by: 'host' })], transitions: [], hint_follow: { hinted: 1, followed: 1, not_followed: 0, not_reported: 0 } })
+    const v = {
+      nodes: [
+        { ...base, node: 'a', executors: [group(), single] },
+        { ...base, node: 'b', executors: [single] },
+        { ...base, node: 'c', executors: [hosted] },
+        { ...base, node: 'd' },
+      ],
+    }
+    expect(executorReports(v)).toEqual([
+      { node: 'a', groups: [group()] },
+      { node: 'c', groups: [hosted] },
+    ])
+  })
+
+  it('shows the executor report in the card', () => {
+    const n = { node: 'a', runs: 1, in_runs: 1, in_runs_unknown: 0, not_run: [], executions: 1, completed: 1, open: 0, failed: 0, cancelled: 0, first_pass: { count: 1, of: 1 }, retries: 0, fallbacks: 0, reentries: 0, duration: { count: 0 }, deliverable_missing: 0, output_fields_missing: 0, digests: [], models: {}, model_mismatch: 0, executors: [group()] }
+    const body = render(PlaybookStatsCard, { props: { report: { runs: 1, versions: [version('1.0.0', { nodes: [n] })] } as StatsReport } }).body
+    expect(body).toContain('playbook-stats-executor-report')
+    expect(body).toContain('step 0 to step 1: not recorded x1')
   })
 })

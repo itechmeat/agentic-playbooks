@@ -30,6 +30,11 @@ pub struct ManifestSkill {
 pub struct ManifestProfile {
     pub scope: String,
     pub name: String,
+    /// The digest of the profile's `profile.yaml` and SOUL: the profile
+    /// content the trust gate and the run permit compare. For an
+    /// `ephemeral` entry it is the base profile's, whose SOUL and skills the
+    /// override keeps, so it does not describe the executor that ran; that
+    /// is [`ManifestProfile::executor_digest`].
     pub profile_digest: String,
     pub bundle_digest: String,
     pub soul: String,
@@ -100,6 +105,135 @@ impl ManifestProfile {
     pub fn key(&self) -> String {
         format!("{}/{}", self.scope, self.name)
     }
+
+    /// What ran, as opposed to the profile content: `x1:` plus the sha256
+    /// over the chain in order, each invocation as `(agent_id, model, spec,
+    /// soul_delivery)`; the tiers in manifest order, each as `(name, for,
+    /// invocation or the marker "executor")`; the `ephemeral` flag. Machine
+    /// fields (`canonical_executable`, `executable_fingerprint`) are left
+    /// out. A pure function of the entry, so old manifests get it too.
+    pub fn executor_digest(&self) -> String {
+        executor_digest_of(&self.chain, &self.tiers, self.ephemeral)
+    }
+}
+
+/// The algorithm prefix of the executor digest: a later change of the
+/// canonical form starts new groups instead of mixing.
+pub const EXECUTOR_DIGEST_PREFIX: &str = "x1:";
+
+/// The executor digest over the parts of an entry: the one algorithm of
+/// `ManifestProfile::executor_digest` and of a pre-start key.
+pub fn executor_digest_of(
+    chain: &[ResolvedInvocation],
+    tiers: &[ManifestTier],
+    ephemeral: bool,
+) -> String {
+    let invocation = |ri: &ResolvedInvocation| {
+        serde_json::json!([ri.agent_id, ri.model, ri.spec, ri.soul_delivery])
+    };
+    let chain: Vec<serde_json::Value> = chain.iter().map(invocation).collect();
+    let tiers: Vec<serde_json::Value> = tiers
+        .iter()
+        .map(|t| {
+            serde_json::json!([
+                t.name,
+                t.for_work,
+                t.invocation
+                    .as_ref()
+                    .map_or_else(|| serde_json::json!("executor"), invocation)
+            ])
+        })
+        .collect();
+    let form = serde_json::json!([chain, tiers, ephemeral]);
+    // A `serde_json::Value` serializes its object keys sorted, so the bytes
+    // are canonical; the form above holds arrays and the spec's own objects.
+    let bytes = serde_json::to_vec(&form).unwrap_or_default();
+    format!(
+        "{EXECUTOR_DIGEST_PREFIX}{}",
+        apb_core::content::sha256_hex(&bytes)
+    )
+}
+
+/// The executor of a profile as a run start binds it: the chain (the
+/// ephemeral override's one invocation in place of the profile's executor
+/// and fallbacks), filtered by the SOUL requirement, and the tiers. The one
+/// resolver of the run start, a rebind and
+/// `crate::execution_identity::digest::expected_exec_key`, so a pre-start
+/// key and a started run's manifest cannot diverge. A profile with a
+/// problem refuses, as the start does.
+pub fn resolve_executor(
+    loaded: &apb_core::profile_store::LoadedProfile,
+    eph: Option<&apb_core::overrides::EphemeralExecutor>,
+    global: &apb_core::config::GlobalConfig,
+) -> Result<(Vec<ResolvedInvocation>, Vec<ManifestTier>), EngineError> {
+    let mut chain = Vec::new();
+    if let Some(e) = eph {
+        let program = crate::invocation::program_for(&e.agent, global);
+        chain.push(crate::invocation::resolve_invocation(
+            &e.agent, &e.model, &program, global,
+        )?);
+    } else {
+        let ex = &loaded.doc.executor;
+        let program = crate::invocation::program_for(&ex.agent, global);
+        chain.push(crate::invocation::resolve_invocation(
+            &ex.agent, &ex.model, &program, global,
+        )?);
+        for f in &ex.fallbacks {
+            let p = crate::invocation::program_for(&f.agent, global);
+            chain.push(crate::invocation::resolve_invocation(
+                &f.agent, &f.model, &p, global,
+            )?);
+        }
+    }
+    let soul_empty = loaded.soul.trim().is_empty();
+    let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
+    // Executor tiers (issue #165 Part 12), resolved like the chain so an
+    // unknown agent fails the run start the same way. An ephemeral executor
+    // replaces the chain, so its entry is never routed and only the
+    // profile's other problems (its `process_env`, which applies to an
+    // ephemeral executor too) refuse the start.
+    let mut tiers = Vec::new();
+    let problems: Vec<String> = loaded
+        .doc
+        .problems()
+        .iter()
+        .filter(|p| eph.is_none() || p.code != apb_core::profile::PROFILE_TIERS_INVALID)
+        .map(ToString::to_string)
+        .collect();
+    if !problems.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "profile `{}/{}`: {}",
+            apb_core::profile_store::scope_str(loaded.scope),
+            loaded.name,
+            problems.join("; ")
+        )));
+    }
+    if eph.is_none() {
+        for (name, t) in loaded.doc.tiers.iter() {
+            let invocation = match t.executor() {
+                Some((agent, model)) => {
+                    let program = crate::invocation::program_for(agent, global);
+                    let ri = crate::invocation::resolve_invocation(agent, model, &program, global)?;
+                    // A tier whose agent cannot carry a required native
+                    // SOUL is left out, as `filter_chain` drops such a step.
+                    if loaded.doc.soul == apb_core::profile::SoulRequirement::NativeRequired
+                        && !soul_empty
+                        && ri.soul_delivery != apb_core::config::SoulDelivery::Native
+                    {
+                        continue;
+                    }
+                    Some(ri)
+                }
+                None => None,
+            };
+            tiers.push(ManifestTier {
+                name: name.clone(),
+                for_work: t.for_work.clone(),
+                invocation,
+            });
+        }
+    }
+    Ok((chain, tiers))
 }
 
 /// A connector account recorded in the manifest: identity + non-secret field
@@ -149,12 +283,16 @@ pub struct ManifestConnectorGrant {
     pub on_unknown: Option<apb_core::schema::OnUnknown>,
 }
 
-/// A node's executor digests in a run: its profile (`profile.yaml` plus
-/// SOUL, so the model and run overrides) and its bundle (plus skills).
+/// A node's digests in a run: its profile (`profile.yaml` plus SOUL), its
+/// bundle (plus skills) and its executor (the chain, the tiers and the
+/// `ephemeral` flag, [`ManifestProfile::executor_digest`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeDigests {
     pub profile: String,
     pub bundle: String,
+    /// Recomputed from the manifest entry, so an old manifest has it too.
+    #[serde(default)]
+    pub executor: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -434,8 +572,9 @@ impl RunExecutionManifest {
         self.origin.clone().unwrap_or(RunOrigin::Production)
     }
 
-    /// Each bound node's profile and bundle digests (the supervisor's
-    /// binding included), through the profiles the bindings name.
+    /// Each bound node's profile, bundle and executor digests (the
+    /// supervisor's binding included), through the profiles the bindings
+    /// name.
     pub fn node_digests(&self) -> BTreeMap<String, NodeDigests> {
         self.node_bindings
             .keys()
@@ -446,6 +585,7 @@ impl RunExecutionManifest {
                     NodeDigests {
                         profile: p.profile_digest.clone(),
                         bundle: p.bundle_digest.clone(),
+                        executor: p.executor_digest(),
                     },
                 ))
             })

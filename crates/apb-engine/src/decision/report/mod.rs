@@ -75,6 +75,9 @@ pub struct ReportSettings {
     /// `uses.<name>.thresholds` from `decisions.yaml`, when it loads.
     pub use_thresholds: BTreeMap<String, BTreeMap<String, f64>>,
     pub stored: Vec<apb_core::decision_thresholds::StoredThreshold>,
+    /// The thresholds measured under a versioned labelling rule
+    /// (`decisions-thresholds-v2.yaml`).
+    pub stored_v2: Vec<apb_core::decision_thresholds::VersionedThreshold>,
 }
 
 impl ReportSettings {
@@ -95,17 +98,36 @@ impl ReportSettings {
             })
             .unwrap_or_default();
         let stored = apb_core::decision_thresholds::load_in(dir).unwrap_or_default();
+        let stored_v2 = apb_core::decision_thresholds::load_v2_in(dir).unwrap_or_default();
         ReportSettings {
             use_thresholds,
             stored,
+            stored_v2,
         }
     }
 
-    fn stored_for(&self, use_site: &str, provider: &str, model: &str) -> Option<f64> {
-        self.stored
-            .iter()
-            .find(|t| t.use_name == use_site && t.provider == provider && t.model == model)
-            .map(|t| t.threshold)
+    /// The stored threshold of a group: for a row with a labelling rule
+    /// other than the legacy one, the v2 entry of that rule; otherwise the
+    /// legacy file's entry (measured before rule versions).
+    fn stored_for(&self, key: &GroupKey) -> Option<f64> {
+        let (use_site, provider, model) = (&key.use_site, &key.provider, &key.model);
+        match key.rule.as_deref() {
+            Some(rule) if rule != apb_core::decision_thresholds::RETRY_ADVICE_LEGACY_RULE => self
+                .stored_v2
+                .iter()
+                .find(|t| {
+                    &t.use_name == use_site
+                        && &t.provider == provider
+                        && &t.model == model
+                        && t.rule == rule
+                })
+                .map(|t| t.threshold),
+            _ => self
+                .stored
+                .iter()
+                .find(|t| &t.use_name == use_site && &t.provider == provider && &t.model == model)
+                .map(|t| t.threshold),
+        }
     }
 
     fn target(&self, use_site: &str) -> f64 {
@@ -299,6 +321,10 @@ pub struct GroupReport {
     pub use_site: String,
     pub provider: String,
     pub model: String,
+    /// The labelling rule of the row (`exec/0`, `exec/1`), for a use whose
+    /// labels have rule versions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
     pub provider_kind: Option<String>,
     pub calibrated: bool,
     /// An LLM emulation: its own group, never pooled with a decision model.
@@ -541,7 +567,7 @@ fn group_report(
             }
         }
     }
-    let stored = settings.stored_for(&key.use_site, &key.provider, &key.model);
+    let stored = settings.stored_for(key);
     let (threshold, threshold_source) = match stored {
         Some(t) => (t, "stored"),
         None => (settings.configured(l), "configured"),
@@ -630,6 +656,7 @@ fn group_report(
         use_site: key.use_site.clone(),
         provider: key.provider.clone(),
         model: key.model.clone(),
+        rule: key.rule.clone(),
         provider_kind: key.provider_kind.clone(),
         calibrated: key.calibrated,
         emulation: key.emulation,
@@ -703,6 +730,17 @@ fn eligibility(i: &EligibilityInput) -> (bool, Vec<String>) {
     if i.labeller_pending {
         why.push("no labeller for this use yet".to_string());
     }
+    // A row labelled under an older rule describes labels enforcement no
+    // longer reads: only a threshold measured under the current rule acts.
+    if let (Some(rule), Some(current)) = (
+        i.key.rule.as_deref(),
+        apb_core::decision_thresholds::versioned_use(&i.key.use_site),
+    ) && rule != current
+    {
+        why.push(format!(
+            "labelled under rule {rule}, not the current rule {current}: measure under {current}"
+        ));
+    }
     // A judge node or edge enforces with its declared thresholds: no
     // stored threshold is read, so none is asked for.
     if apb_core::decision_thresholds::reads_stored_threshold(&i.key.use_site) && i.stored.is_none()
@@ -757,12 +795,15 @@ struct GroupKey {
     use_site: String,
     provider: String,
     model: String,
+    /// The labelling rule, for a use whose labels have rule versions: each
+    /// rule is its own sample, row and eligibility verdict.
+    rule: Option<String>,
     calibrated: bool,
     provider_kind: Option<String>,
 }
 
 impl GroupKey {
-    fn of(r: &DecisionRecord) -> Self {
+    fn of(r: &DecisionRecord, rule: Option<&str>) -> Self {
         let emulation = match r.provider_kind.as_deref() {
             Some(kind) => kind == EMULATION_KIND,
             None => !r.calibrated && r.provider.is_some(),
@@ -772,6 +813,7 @@ impl GroupKey {
             use_site: r.use_site.clone(),
             provider: r.provider.clone().unwrap_or_else(|| "none".to_string()),
             model: r.model.clone().unwrap_or_else(|| "unknown".to_string()),
+            rule: rule.map(str::to_string),
             calibrated: r.calibrated,
             provider_kind: r.provider_kind.clone(),
         }
@@ -793,44 +835,47 @@ pub fn build(
     let mut durations: Vec<u64> = kept.iter().flat_map(|j| j.attempt_durations()).collect();
     let median_attempt_ms = median(&mut durations);
     let mut labellers: BTreeMap<String, Box<dyn Labeller>> = BTreeMap::new();
-    let mut labelled: Vec<(DecisionRecord, Label)> = Vec::new();
+    let mut labelled: Vec<(DecisionRecord, Label, Option<&'static str>)> = Vec::new();
     for j in journals {
         for r in j.records().into_iter().filter(|r| filter.keeps(r)) {
             let l = labellers
                 .entry(r.use_site.clone())
                 .or_insert_with(|| labeller_for(&r.use_site));
+            // The rule comes from the journal, answered or not, so an
+            // error joins the row of its rule.
+            let (label, rule) = l.label_with_rule(&r, &j.events);
             let label = if r.answered() {
-                l.label(&r, &j.events)
+                label
             } else {
                 Label::Unlabelled("not answered")
             };
-            labelled.push((r, label));
+            labelled.push((r, label, rule));
         }
     }
     // Errors carry no model: they join the group of an answered decision of
     // the same provider, in the same run when there is one.
     let mut groups: BTreeMap<GroupKey, Vec<(&DecisionRecord, Label)>> = BTreeMap::new();
-    let mut like_in_run: BTreeMap<(&str, &str, &str), GroupKey> = BTreeMap::new();
-    let mut like_any: BTreeMap<(&str, &str), GroupKey> = BTreeMap::new();
-    for (r, _) in labelled.iter().filter(|(r, _)| r.answered()) {
+    let mut like_in_run: BTreeMap<(&str, &str, &str, Option<&str>), GroupKey> = BTreeMap::new();
+    let mut like_any: BTreeMap<(&str, &str, Option<&str>), GroupKey> = BTreeMap::new();
+    for (r, _, rule) in labelled.iter().filter(|(r, _, _)| r.answered()) {
         let provider = r.provider.as_deref().unwrap_or_default();
         like_in_run
-            .entry((r.run_id.as_str(), r.use_site.as_str(), provider))
-            .or_insert_with(|| GroupKey::of(r));
+            .entry((r.run_id.as_str(), r.use_site.as_str(), provider, *rule))
+            .or_insert_with(|| GroupKey::of(r, *rule));
         like_any
-            .entry((r.use_site.as_str(), provider))
-            .or_insert_with(|| GroupKey::of(r));
+            .entry((r.use_site.as_str(), provider, *rule))
+            .or_insert_with(|| GroupKey::of(r, *rule));
     }
-    for (r, label) in &labelled {
+    for (r, label, rule) in &labelled {
         let provider = r.provider.as_deref().unwrap_or_default();
         let key = if r.model.is_some() {
-            GroupKey::of(r)
+            GroupKey::of(r, *rule)
         } else {
             like_in_run
-                .get(&(r.run_id.as_str(), r.use_site.as_str(), provider))
-                .or_else(|| like_any.get(&(r.use_site.as_str(), provider)))
+                .get(&(r.run_id.as_str(), r.use_site.as_str(), provider, *rule))
+                .or_else(|| like_any.get(&(r.use_site.as_str(), provider, *rule)))
                 .cloned()
-                .unwrap_or_else(|| GroupKey::of(r))
+                .unwrap_or_else(|| GroupKey::of(r, *rule))
         };
         groups.entry(key).or_default().push((r, label.clone()));
     }

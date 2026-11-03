@@ -19,6 +19,7 @@ const estimate = (extra: Partial<RunEstimate> = {}): RunEstimate => ({
   version: '1.0.0',
   execution: 'cli',
   comparable: {
+    key_version: 2,
     runs: 7,
     succeeded: 6,
     window: 50,
@@ -79,6 +80,18 @@ describe('runestimate', () => {
       'triage (no history with this profile)',
       'fix (no history)',
     ])
+  })
+
+  it('names the part of the key a node history differs in, outermost first, and an old key', () => {
+    const c = estimate().comparable
+    const e = estimate({
+      comparable: { ...c, profile_mismatch: {}, bundle_mismatch: { triage: 1 }, executor_mismatch: { triage: 2, fix: 3 } },
+    })
+    expect(unestimatedText(e)).toEqual(['triage (no history with this skill set)', 'fix (no history with this executor)'])
+    expect(comparableText(e)).toBe('7 comparable runs (cli); 3 attempts without usage')
+    expect(comparableText(estimate({ comparable: { ...c, key_version: 1 } }))).toBe(
+      '7 comparable runs (cli); 3 attempts without usage; matched by the profile-only key (written before executors were compared)',
+    )
   })
 
   it('asks for a policy under ask per limited dimension, and when the estimate failed', () => {

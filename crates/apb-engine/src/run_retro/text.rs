@@ -134,6 +134,15 @@ fn node_line(n: &NodeRetro) -> String {
             n.retries, n.fallbacks, n.reentries
         ));
     }
+    // Why the walk moved on: ` (fallback reasons: check rejected 2, quota 1)`.
+    if !n.fallback_reasons.is_empty() {
+        let reasons: Vec<String> = n
+            .fallback_reasons
+            .iter()
+            .map(|(r, c)| format!("{} {c}", r.replace('_', " ")))
+            .collect();
+        line.push_str(&format!(" (fallback reasons: {})", reasons.join(", ")));
+    }
     if let Some(t) = n.tokens {
         line.push_str(&format!(", {t} tokens"));
     }
@@ -162,6 +171,10 @@ fn attempt_line(a: &AttemptRetro) -> String {
     match (&a.model, a.model_source.as_str()) {
         (Some(m), src) => line.push_str(&format!(", model {m} ({src})")),
         (None, "unreported") => line.push_str(", model not reported by the host"),
+        (None, "partial") => {
+            line.push_str(", model not reported by every host task, so none is credited")
+        }
+        (None, "mixed") => line.push_str(", host tasks reported different models"),
         _ => {}
     }
     if let Some(v) = &a.verdict {

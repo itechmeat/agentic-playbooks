@@ -314,6 +314,9 @@ mod edge_route_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
 #[cfg(unix)]
+#[path = "suite/execution_identity_test.rs"]
+mod execution_identity_test;
+#[cfg(unix)]
 #[path = "suite/failure_class_test.rs"]
 mod failure_class_test;
 #[path = "suite/failure_reason_test.rs"]
