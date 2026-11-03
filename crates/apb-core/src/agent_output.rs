@@ -7,7 +7,7 @@
 //! that does not have the expected shape yields `None`, and the caller keeps
 //! the raw stdout as the reply and records no usage.
 
-pub use crate::agents::{AgentUsage, Reply, UsageSource};
+pub use crate::agents::{AgentUsage, CostBasis, Reply, UsageSource};
 
 /// The reply in `stdout`, `None` when the output is not the machine format
 /// of `agent` (see the module docs).

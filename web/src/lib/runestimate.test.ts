@@ -62,7 +62,7 @@ describe('runestimate', () => {
     expect(estimateRows(single).map((r) => r.value)).toEqual([
       '~30 s (declared expected durations)',
       'unknown: no comparable attempt reported usage',
-      '~$0.50',
+      '~$0.50 if billed',
     ])
   })
 

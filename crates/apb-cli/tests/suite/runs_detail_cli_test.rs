@@ -55,7 +55,7 @@ fn runs_with_an_id_shows_the_usage_totals_and_the_note() {
         .stdout(predicate::str::contains("demo-1\tdemo 1.0.0\tsucceeded"))
         .stdout(predicate::str::contains("  w\tsucceeded"))
         .stdout(predicate::str::contains(
-            "  usage: 1200 input, 300 output, 5000 cache read, 0 cache write tokens over 1 attempt, $0.0123 reported",
+            "  usage: 1200 input, 300 output, 5000 cache read, 0 cache write tokens over 1 attempt, cost $0.0123 basis unknown",
         ))
         .stdout(predicate::str::contains("  1 unknown event (newer apb?)"));
 }
@@ -503,6 +503,37 @@ fn the_route_block_neutralizes_control_characters_from_the_journal() {
     assert!(stdout.contains("judge triage #1: decided by x"), "{stdout}");
     assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
     assert!(!stdout.lines().any(|l| l.starts_with("forged")), "{stdout}");
+}
+
+/// Every dollar figure says what it is: the run's cost is split by basis in
+/// plain words, so a subscription equivalent never reads as money spent.
+#[test]
+fn runs_with_an_id_splits_the_cost_by_basis() {
+    let dir = project();
+    let attempt = |seq: u64, cost: f64, basis: &str| {
+        format!(
+            r#"{{"seq":{seq},"ts":1790000000002,"type":"attempt_finished","node":"w","attempt":{seq},"status":"succeeded","duration_ms":10,"usage":{{"input_tokens":10,"output_tokens":5,"cost_usd":{cost},"source":"reported","cost_basis":"{basis}"}}}}"#
+        )
+    };
+    let journal = [
+        r#"{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#
+            .to_string(),
+        attempt(1, 0.01, "billed"),
+        attempt(2, 0.0125, "subscription_equivalent"),
+        r#"{"seq":3,"ts":1790000000005,"type":"run_finished","outcome":"succeeded"}"#.to_string(),
+    ]
+    .join("\n");
+    let run = dir.path().join(".apb/runs/demo-2");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("events.jsonl"), journal + "\n").unwrap();
+    apb()
+        .args(["runs", "demo-2"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "over 2 attempts, cost $0.0100 billed; $0.0125 subscription equivalent, not billed",
+        ));
 }
 
 // --- read-only node: one line per checked attempt ---

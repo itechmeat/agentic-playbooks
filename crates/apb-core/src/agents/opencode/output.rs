@@ -69,6 +69,7 @@ impl OutputFormat for OpencodeOutput {
             cache_write_tokens: sum(&|p| cache(p, "write")),
             cost_usd: cost((!costs.is_empty()).then(|| costs.iter().sum())),
             source: UsageSource::Reported,
+            cost_basis: Default::default(),
         })
     }
 

@@ -139,12 +139,22 @@ Never waive a check the project requires.
 - Use [references/result-template.md](references/result-template.md) inside
   the existing task record or the project's spec workflow artifacts. It is
   not a new mandatory file.
+- Give one cost line per role that ran: the implementer, every reviewer and
+  every audit. Each line names the role, the figure, its basis (billed,
+  subscription equivalent and not billed, or basis unknown) and the class of
+  login the executor loaded (an api key, a subscription login, a cloud
+  account, or unknown). Take the basis from the run's usage when apb ran the
+  role (`cost_basis` of `attempt_finished.usage`, the split of `apb runs
+  <id>` or `run_status`), never from a guess. Never write a key, a token or
+  any other secret value; name the class only. A role with no reported
+  figure says "no figure" and its login class.
 
 ## Measurements per change
 
 Record: change kind, risk triggers hit, findings per review role (accepted
 and rejected), repair rounds, findings that escaped to later checks, wall
-time, tokens or cost when measured. Unknown stays unknown.
+time, tokens or cost when measured, each cost with its basis. Unknown stays
+unknown.
 
 ## Questions and authority
 

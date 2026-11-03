@@ -302,7 +302,12 @@ pub fn render_lines(e: &RunEstimate) -> Vec<String> {
         "  cost    {}",
         e.cost_usd.as_ref().map_or_else(
             || "unknown: no comparable attempt reported a cost".to_string(),
-            |c| spread_text(&c.spread, |x| format!("${x:.2}"), ""),
+            // The price of the work when billed, the figure a dollar limit
+            // weighs before a node; only money spends the limit.
+            |c| {
+                let figure = spread_text(&c.spread, |x| format!("${x:.2}"), "");
+                format!("{figure} if billed")
+            },
         )
     ));
     if !e.unestimated.is_empty() {

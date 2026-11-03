@@ -94,6 +94,10 @@ pub fn render_text(r: &StatsReport) -> String {
             }
             out.push_str(&line);
             out.push('\n');
+            if !s.cost_by_basis.is_empty() {
+                let split = s.cost_by_basis.describe(|v| format!("${v:.4}"));
+                out.push_str(&format!("  cost by basis: {split}\n"));
+            }
         }
         if v.deliverable_missing + v.output_fields_missing > 0 {
             out.push_str(&format!(

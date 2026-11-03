@@ -53,6 +53,10 @@ function timeValue(e: RunEstimate): string {
   return spreadText(time, minutesText) + waits
 }
 
+// What the estimate's dollar figure is: the price of the work when billed,
+// whatever the login of the runs it was learned from.
+const PRICE = 'if billed'
+
 export function estimateRows(e: RunEstimate): EstimateRow[] {
   const time = e.time.spread
   return [
@@ -64,7 +68,9 @@ export function estimateRows(e: RunEstimate): EstimateRow[] {
     },
     {
       label: 'cost',
-      value: e.cost_usd ? spreadText(e.cost_usd.spread, usdText) : 'unknown: no comparable attempt reported a cost',
+      // The figure a dollar limit weighs before a node; only money spends
+      // the limit.
+      value: e.cost_usd ? `${spreadText(e.cost_usd.spread, usdText)} ${PRICE}` : 'unknown: no comparable attempt reported a cost',
       known: !!e.cost_usd,
     },
   ]

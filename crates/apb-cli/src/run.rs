@@ -1827,7 +1827,7 @@ fn outcome_text(lines: Vec<String>) -> Vec<String> {
 }
 
 /// One line of token totals: `1200 input, 300 output, 5000 cache read, 0
-/// cache write tokens over 2 attempts, $0.0123 reported`.
+/// cache write tokens over 2 attempts, cost $0.0123 billed`.
 fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
     let attempts = if u.attempts == 1 {
         "attempt"
@@ -1846,10 +1846,13 @@ fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
     if u.estimated {
         line.push_str(" (partly estimated by apb)");
     }
-    if let Some(cost) = u.cost_usd {
-        line.push_str(&format!(", ${cost:.4} reported"));
+    // The cost split by what each figure is, never one sum that mixes
+    // money with a subscription equivalent nobody is billed.
+    if !u.cost_by_basis.is_empty() {
+        line.push_str(", cost ");
+        line.push_str(&u.cost_by_basis.describe(|c| format!("${c:.4}")));
         if u.cost_attempts < u.attempts {
-            line.push_str(&format!(" by {} of them", u.cost_attempts));
+            line.push_str(&format!(" (reported by {} of them)", u.cost_attempts));
         }
     }
     line

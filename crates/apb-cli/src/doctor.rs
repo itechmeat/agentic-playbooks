@@ -301,7 +301,7 @@ fn print_probe(report: &apb_engine::agent_probe::ProbeReport) {
     if let Some(u) = &report.usage {
         let cost = u
             .cost_usd
-            .map(|c| format!(", cost ${c:.4}"))
+            .map(|c| format!(", cost ${c:.4} {}", u.cost_basis.label()))
             .unwrap_or_default();
         line(
             OK,

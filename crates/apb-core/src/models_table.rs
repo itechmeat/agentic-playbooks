@@ -178,6 +178,15 @@ pub struct Subscription {
     pub coverage: Coverage,
 }
 
+impl Subscription {
+    /// Whether this subscription covers all the work of `name` (an agent or
+    /// a provider): it names it and is not declared `partial`. What a cost
+    /// on it is follows (`crate::agents::cost_basis`).
+    pub fn covers_all(&self, name: &str) -> bool {
+        self.agent == name && self.coverage != Coverage::Partial
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelsTable {
     #[serde(default)]

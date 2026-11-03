@@ -61,7 +61,11 @@ Per playbook version:
   run spent paused (`run_paused` to the next `run_resumed`, issue #200). Median and count.
 - **tokens and cost** per run, over the runs whose attempts reported usage
   (`attempt_finished.usage`); the cost is what the agent CLIs reported, over
-  the runs that reported one. Usage marked `estimated` (a source reserved for
+  the runs that reported one, whatever its basis, and `spend.cost_by_basis`
+  splits it (`billed_usd`, `subscription_equivalent_usd`,
+  `unknown_basis_usd`; the text line `cost by basis: $0.0200 billed; $0.0300
+  subscription equivalent, not billed`). See "What counts as money" in
+  `docs/HOWTO-authoring.md`. Usage marked `estimated` (a source reserved for
   counts apb makes itself; nothing records it yet) is summed together with
   reported usage and is not marked apart in these figures. **cost known**:
   the finished attempts that reported a cost over every finished attempt,

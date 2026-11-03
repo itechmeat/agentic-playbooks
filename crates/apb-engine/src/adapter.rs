@@ -625,6 +625,55 @@ pub fn exposed_tools(agent_id: &str, raw: &str) -> Option<apb_core::agents::Expo
         .exposed_tools(raw)
 }
 
+/// What the process `task` spawns sees about its login, with the person's
+/// declared subscriptions (`apb_core::agents::cost_basis::resolve`). An
+/// overlay that does not read declares nothing, so the basis stays unknown
+/// rather than guessed.
+fn read_cost_basis(task: &AgentTask) -> apb_core::agents::cost_basis::CostReading {
+    let env = task.spawn_env;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let system_root = system_root();
+    let facts = apb_core::agents::cost_basis::CostFacts {
+        present: &|name| env.reaches(name),
+        setting: &|name| env.sees(name),
+        home: home.as_deref(),
+        workdir: Some(task.workdir),
+        hermetic: task.hermetic_settings.is_some() && agent_supports_hermetic(task.agent),
+        system_root: &system_root,
+    };
+    let subscriptions = apb_core::models_table::load_merged()
+        .map(|t| t.subscriptions)
+        .unwrap_or_default();
+    let declared = |name: &str| subscriptions.iter().any(|s| s.covers_all(name));
+    apb_core::agents::cost_basis::resolve(task.agent, task.model, &facts, &declared)
+}
+
+/// Sets the basis of the cost in `usage`: what was read before the spawn
+/// (`before`) and is read again now, after the exit, when both agree, else
+/// unknown (`CostReading::across`).
+fn stamp_cost_basis(
+    task: &AgentTask,
+    before: &apb_core::agents::cost_basis::CostReading,
+    usage: Option<&mut apb_core::agent_output::AgentUsage>,
+) {
+    let Some(usage) = usage else {
+        return;
+    };
+    let after = read_cost_basis(task);
+    usage.cost_basis = apb_core::agents::cost_basis::CostReading::across(before, &after);
+}
+
+/// The root machine-wide agent files are read under: `/`, or in the
+/// engine's own test builds `APB_TEST_SYSTEM_ROOT`, so a test never reads
+/// the developer machine's managed settings.
+fn system_root() -> PathBuf {
+    #[cfg(any(test, feature = "testing"))]
+    if let Some(root) = std::env::var_os("APB_TEST_SYSTEM_ROOT") {
+        return PathBuf::from(root);
+    }
+    PathBuf::from("/")
+}
+
 pub trait AgentAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure>;
 
@@ -1723,9 +1772,25 @@ impl AgentAdapter for ClaudeAdapter {
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, AgentFailure> {
-        match self.spec.transport {
+        // The login facts are read before the spawn and again after the
+        // exit: claude reloads its settings while it runs, so a basis holds
+        // only when the agent ran on the same facts throughout.
+        let before = read_cost_basis(task);
+        let result = match self.spec.transport {
             Transport::Headless => self.run_headless(task, cancel, on_spawn, live, stall, control),
             Transport::Acp => self.run_acp(task, cancel, on_spawn, live, stall, control),
+        };
+        // Every usage an attempt reports, succeeded or failed, says what
+        // its cost is.
+        match result {
+            Ok(mut report) => {
+                stamp_cost_basis(task, &before, report.usage.as_mut());
+                Ok(report)
+            }
+            Err(mut failure) => {
+                stamp_cost_basis(task, &before, failure.usage.as_deref_mut());
+                Err(failure)
+            }
         }
     }
 

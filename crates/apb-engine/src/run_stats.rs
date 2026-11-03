@@ -90,10 +90,20 @@ pub struct Spend {
     /// Finished attempts that reported a cost, over every finished attempt:
     /// how much of the spend the cost figures cover.
     pub cost_known: Rate,
+    /// The reported costs of every run, whatever their basis;
+    /// `cost_by_basis` splits it.
     pub cost_usd: f64,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_run_usd: Option<f64>,
+    /// `cost_usd` split by what each figure is: billed, a subscription
+    /// equivalent nobody is billed, or of unknown basis.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<crate::run_view::CostByBasis>", optional)
+    )]
+    #[serde(skip_serializing_if = "crate::run_view::CostByBasis::is_empty")]
+    pub cost_by_basis: crate::run_view::CostByBasis,
 }
 
 /// One goal criterion over the runs that checked it.
@@ -653,6 +663,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
             if let Some(c) = u.cost_usd {
                 spend.runs_with_cost += 1;
                 cost += c;
+                spend.cost_by_basis.merge(&u.cost_by_basis);
             }
         }
     }

@@ -53,11 +53,16 @@ fn header(r: &RetroReport) -> String {
     if let Some(t) = r.tokens {
         line.push_str(&format!(", {t} tokens"));
     }
-    if let Some(c) = r.cost_usd {
-        line.push_str(&format!(", ${c:.4}"));
+    if !r.cost_by_basis.is_empty() {
+        line.push_str(&format!(", cost {}", money_by_basis(&r.cost_by_basis)));
     }
     line.push('\n');
     line
+}
+
+/// The cost split by basis in plain words.
+fn money_by_basis(c: &crate::run_view::CostByBasis) -> String {
+    c.describe(|v| format!("${v:.4}"))
 }
 
 fn baseline_line(r: &RetroReport) -> String {
@@ -79,7 +84,7 @@ fn baseline_line(r: &RetroReport) -> String {
         line.push_str(&format!(", median {t} tokens"));
     }
     if let Some(c) = b.median_cost_usd {
-        line.push_str(&format!(", median ${c:.4}"));
+        line.push_str(&format!(", median ${c:.4} reported, any basis"));
     }
     line.push('\n');
     line
@@ -132,8 +137,8 @@ fn node_line(n: &NodeRetro) -> String {
     if let Some(t) = n.tokens {
         line.push_str(&format!(", {t} tokens"));
     }
-    if let Some(c) = n.cost_usd {
-        line.push_str(&format!(", ${c:.4}"));
+    if !n.cost_by_basis.is_empty() {
+        line.push_str(&format!(", cost {}", money_by_basis(&n.cost_by_basis)));
     }
     if !n.models.is_empty() {
         line.push_str(&format!(", model {}", n.models.join(", ")));

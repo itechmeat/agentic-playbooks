@@ -146,7 +146,7 @@ pub(super) fn node_estimate(node: &Node, runs: &[&RunSample]) -> NodeEstimate {
                 .collect(),
         )
         .map(|t| t.round() as u64),
-        cost_usd: median_f(attempts.iter().filter_map(|a| a.cost).collect()),
+        cost_usd: median_f(attempts.iter().filter_map(|a| a.price).collect()),
     };
     let visits_p50 = median_f(
         runs.iter()
@@ -180,7 +180,7 @@ fn list_estimate(spec: &apb_core::list::ListSpec, id: &str, runs: &[&RunSample])
     ListEstimate {
         per_item: NodeSpread {
             tokens: tokens_of(items.iter().map(|i| i.tokens)),
-            cost_usd: cost_of(items.iter().map(|i| i.cost)),
+            cost_usd: cost_of(items.iter().map(|i| i.price)),
             ms: None,
         },
         items: count,
@@ -388,7 +388,7 @@ mod tests {
                         batch_ms: vec![5],
                         items: vec![AttemptSpend {
                             tokens: Some(*t),
-                            cost: None,
+                            ..AttemptSpend::default()
                         }],
                     }],
                 )]),

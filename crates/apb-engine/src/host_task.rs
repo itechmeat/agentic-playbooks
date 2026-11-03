@@ -118,6 +118,7 @@ impl SubmittedUsage {
             cache_write_tokens: self.cache_write_tokens,
             cost_usd: self.cost_usd.filter(|c| *c > 0.0),
             source: apb_core::agent_output::UsageSource::Reported,
+            cost_basis: Default::default(),
         }
     }
 }

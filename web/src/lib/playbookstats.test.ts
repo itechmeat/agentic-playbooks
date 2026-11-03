@@ -61,7 +61,7 @@ const report: StatsReport = {
         { index: 0, description: 'tests pass', check: 'script', checked: 1, passed: { count: 1, of: 1, rate: 1 }, failed: 0, errors: 0, manual: 0 },
         { index: 1, description: 'a person reads it', check: 'manual', checked: 1, passed: { count: 0, of: 0 }, failed: 0, errors: 0, manual: 1 },
       ],
-      spend: { runs_with_usage: 1, tokens: { total: 1500, runs: 1, per_run: 1500 }, runs_with_cost: 1, cost_known: { count: 1, of: 1, rate: 1 }, cost_usd: 0.02, cost_per_run_usd: 0.02 },
+      spend: { runs_with_usage: 1, tokens: { total: 1500, runs: 1, per_run: 1500 }, runs_with_cost: 1, cost_known: { count: 1, of: 1, rate: 1 }, cost_usd: 0.02, cost_per_run_usd: 0.02, cost_by_basis: { subscription_equivalent_usd: 0.02 } },
     }),
   ],
 }
@@ -76,7 +76,7 @@ describe('playbook stats formatting', () => {
     expect(waitsText({ count: 0 })).toBe('none')
     expect(spendText(report.versions[0])).toBeNull()
     expect(spendText(report.versions[1])).toBe(
-      '1500.00 tokens per run (1500 over 1 runs), $0.0200 per run reported by 1 of 4 runs',
+      '1500.00 tokens per run (1500 over 1 runs), $0.0200 per run reported by 1 of 4 runs (in all $0.0200 subscription equivalent, not billed)',
     )
     expect(versionsNewestFirst(report).map((v) => v.version)).toEqual(['1.1.0', '1.0.0'])
     expect(versionsNewestFirst(null)).toEqual([])

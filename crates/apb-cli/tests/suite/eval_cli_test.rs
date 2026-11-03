@@ -1349,6 +1349,41 @@ fn a_spent_invocation_budget_stops_the_next_repetition() {
     );
 }
 
+/// The invocation's total cost is split by basis, in the stored result and
+/// in the text, like every repetition's: an api key's cost reads as billed.
+#[test]
+fn the_eval_total_is_split_by_basis() {
+    let env = setup(PLAYBOOK);
+    write(
+        &env.stub,
+        "#!/bin/sh\necho 'the review names lib.txt' > report.md\nprintf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"REPORT-OK\\n```yaml\\nstatus: success\\nsummary: done\\n```\",\"total_cost_usd\":0.6,\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}'\n",
+    );
+    let key = [("ANTHROPIC_API_KEY", "set-by-test")];
+    let (code, v) = env.eval_json_with(&["--repeat", "2"], &key);
+    assert_eq!(code, 0, "{v:#}");
+    assert_eq!(
+        v["result"]["total_cost_by_basis"],
+        serde_json::json!({ "billed_usd": 1.2 }),
+        "{v:#}"
+    );
+    let out = apb()
+        .args(["eval", "rev", "--yes", "--repeat", "1"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .env("APB_AGENT_CMD", &env.stub)
+        .env("APB_NO_REGISTRY", "1")
+        .env_remove("APB_RUN_ID")
+        .env_remove("APB_HOST_TASK")
+        .env("ANTHROPIC_API_KEY", "set-by-test")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("reported cost $0.6000 (any basis): $0.6000 billed"),
+        "{text}"
+    );
+}
+
 /// A fixture's own `.apb` never replaces what the eval checked: the run
 /// uses the project's playbook even when the fixture ships another version
 /// of it, and a change overlay that carries `.apb` is refused. The fixture

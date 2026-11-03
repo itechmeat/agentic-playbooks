@@ -2043,6 +2043,7 @@ fn run_eval(
     // up as a configuration change in a later comparison.
     let started = key.is_some();
     let config = key.unwrap_or_default();
+    let total_cost_by_basis = EvalResult::cost_by_basis(&results);
     let result = EvalResult {
         eval_id: eval_id.to_string(),
         playbook: args.id.clone(),
@@ -2056,6 +2057,7 @@ fn run_eval(
         cases: results,
         incomplete,
         total_cost_usd: (spent * 1e6).round() / 1e6,
+        total_cost_by_basis,
         total_tokens: tokens,
         journal_agent_writable: true,
     };

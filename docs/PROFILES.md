@@ -406,6 +406,12 @@ price is visible rather than implied as authoritative; a user overlay at
 `<config_dir>/models.yaml` merges field-wise per model (setting one price does
 not reset the other fields). Declare which subscriptions you have with
 `subscriptions_set` (or `apb subscriptions`) so advice matches your access.
+A declared subscription also tells what a cost an agent reports is when the
+agent has no module that knows its logins (a custom agent, or a provider of
+its model): a cost on it reads as a subscription equivalent, not billed, and
+does not spend a run budget's `usd` limit. claude's module decides from the
+login it finds and does not take a declaration as one (see "What counts as
+money" in `docs/HOWTO-authoring.md`).
 
 Not every agent can run unattended. apb passes a non-interactive permission flag
 where the agent has one: `--permission-mode bypassPermissions` for claude and

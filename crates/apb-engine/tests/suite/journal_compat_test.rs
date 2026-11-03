@@ -239,6 +239,46 @@ fn an_attempt_usage_block_of_a_newer_shape_does_not_break_the_journal() {
     apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
 }
 
+/// The basis of a reported cost is additive: a usage block an older apb
+/// wrote has none and reads as unknown, and a basis a newer apb wrote reads
+/// as unknown too, whatever its shape, keeping the tokens and the figure
+/// rather than dropping the whole block.
+#[test]
+fn a_cost_basis_of_an_older_or_newer_apb_reads_as_unknown_and_keeps_the_usage() {
+    use apb_core::agent_output::CostBasis;
+    for basis in [
+        "",
+        r#","cost_basis":"metered_by_a_newer_apb""#,
+        r#","cost_basis":{"kind":"metered"}"#,
+        r#","cost_basis":null"#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let line = |seq: u64, body: &str| format!(r#"{{"seq":{seq},"ts":1,{body}}}"#);
+        let journal = [
+            line(0, r#""type":"run_started","playbook":"p","version":"1.0.0""#),
+            line(
+                1,
+                &format!(
+                    r#""type":"attempt_finished","node":"w","attempt":1,"status":"succeeded","usage":{{"input_tokens":1,"output_tokens":2,"cost_usd":0.5,"source":"reported"{basis}}}"#
+                ),
+            ),
+        ]
+        .join("\n");
+        std::fs::write(dir.path().join("events.jsonl"), journal + "\n").unwrap();
+        let events = apb_engine::event::read_all(dir.path()).expect("journal reads");
+        let usage = events.iter().find_map(|e| match &e.payload {
+            apb_engine::event::EventPayload::AttemptFinished { usage, .. } => usage.clone(),
+            _ => None,
+        });
+        let usage = usage.unwrap_or_else(|| panic!("usage dropped for {basis:?}"));
+        assert_eq!(
+            (usage.output_tokens, usage.cost_usd, usage.cost_basis),
+            (2, Some(0.5), CostBasis::Unknown),
+            "{basis:?}"
+        );
+    }
+}
+
 /// The same for the output loss list: an entry shape this binary cannot
 /// decode reads as no recorded loss, and the attempt still reads.
 #[test]

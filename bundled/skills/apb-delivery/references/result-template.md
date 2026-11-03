@@ -34,6 +34,10 @@ Repair rounds:
 Findings that escaped to later checks or external review:
 Wall time and what it covers:
 Tokens or cost and their source:
+
+| Role (implementer, each reviewer, each audit) | Cost figure or "no figure" | Basis: billed, subscription equivalent (not billed) or unknown | Login class: api key, subscription login, cloud account or unknown |
+| --- | --- | --- | --- |
+
 Required project checks and their results; checks that could not run:
 
 ## Integration state

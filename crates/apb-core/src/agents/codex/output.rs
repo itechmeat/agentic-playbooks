@@ -64,6 +64,7 @@ impl OutputFormat for CodexOutput {
             cache_write_tokens: written,
             cost_usd: None,
             source: UsageSource::Reported,
+            cost_basis: Default::default(),
         })
     }
 

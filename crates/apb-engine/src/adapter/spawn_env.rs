@@ -124,6 +124,22 @@ impl SpawnEnv {
             && self.process.as_ref().is_none_or(|p| p.keeps(name))
     }
 
+    /// The value of `name` the spawned process gets from apb's own
+    /// environment or the overlay; `None` when it gets none. Read only for
+    /// a path or a switch, never a credential (`passes` answers presence).
+    pub fn sees(&self, name: &str) -> Option<std::ffi::OsString> {
+        if let Some((_, v)) = self.overlay.iter().rev().find(|(k, _)| k == name) {
+            return Some(v.into());
+        }
+        self.passes(name).then(|| std::env::var_os(name)).flatten()
+    }
+
+    /// Whether `name` reaches the spawned process, from apb's environment or
+    /// the overlay. Presence only.
+    pub fn reaches(&self, name: &str) -> bool {
+        self.overlay.iter().any(|(k, _)| k == name) || self.passes(name)
+    }
+
     /// Applies the plan, the scrub, the run-context env, the pager and the
     /// overlay to `cmd`. Called at every agent spawn site.
     pub fn apply(&self, cmd: &mut Command) {

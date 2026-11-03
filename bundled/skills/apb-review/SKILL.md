@@ -61,6 +61,12 @@ that did not run.
 - A usage limit is a routing signal, not a stop. Do not wait without a bound.
 - Record the actual executor and rung. A configured model is a request, not
   proof of what ran.
+- Record each reviewer's and each audit's cost line: the figure or "no
+  figure", its basis (billed, subscription equivalent and not billed, or
+  basis unknown) and the class of login the executor loaded (an api key, a
+  subscription login, a cloud account, or unknown). Take the basis from the
+  run's usage when apb ran the role, never from a guess, and never write a
+  secret value.
 
 ## 3. Run the reviewers
 

@@ -39,6 +39,7 @@ impl OutputFormat for ZcodeOutput {
             // Printed by the CLI, so reported, whatever zcode's own `source`
             // label says (see the module docs).
             source: UsageSource::Reported,
+            cost_basis: Default::default(),
         })
     }
 
