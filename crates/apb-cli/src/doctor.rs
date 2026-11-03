@@ -221,11 +221,13 @@ fn doctor_probe(root: &Path, agent: &str, model: Option<&str>) -> ExitCode {
         }
     };
     eprintln!("doctor: {COST_NOTICE}");
+    let initiator = apb_engine::gate::launch::Initiator::cli(crate::launch::at_terminal());
     let req = ProbeRequest {
         agent,
         model,
         timeout: PROBE_TIMEOUT,
         project: root,
+        initiator: &initiator,
     };
     crate::interrupt::install();
     let report = match probe(&req, &global, &crate::interrupt::INTERRUPTED) {

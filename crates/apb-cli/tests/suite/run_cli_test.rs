@@ -577,6 +577,7 @@ fn drive_supervised_takes_its_consent_only_from_its_parents_handoff() {
                     confirmation: None,
                     policy: apb_core::launch::LaunchPolicy::Allow,
                     sources: vec![],
+                    billing: None,
                 },
                 binding: HandoffBinding::Nonce { nonce: "x".into() },
                 config_dir: None,

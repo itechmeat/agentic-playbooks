@@ -97,6 +97,17 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
         program: ri.canonical_executable.to_string_lossy().into_owned(),
         spec: ri.spec.clone(),
     };
+    // A probe is agent work like any attempt: the basis it would be paid on
+    // must be covered by the run's billing record (or the settings in force
+    // for a run without one) before it is sent. Held work is not probed; the
+    // node's own spawn check pauses the run for a person when it wakes.
+    let basis = crate::adapter::read_cost_basis(&task).basis;
+    if let Some(hold) = crate::pause::billing::spawn_hold(run_dir, &ri.agent_id, basis) {
+        return ProbeRun::Unavailable(format!(
+            "{}: the probe is not sent",
+            hold.reason.unwrap_or_default()
+        ));
+    }
     match adapter.run(&task) {
         Ok(_) => ProbeRun::Answered,
         Err(f) => ProbeRun::Failed(f.message),

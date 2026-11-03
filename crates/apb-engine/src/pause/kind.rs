@@ -68,6 +68,9 @@ pub enum PauseCause {
     Quota,
     /// The run's budget (see `pause::budget`).
     Budget,
+    /// Agent work billed or of unknown basis the run has no confirmation
+    /// for (see `pause::billing`).
+    Billing,
 }
 
 impl PauseCause {
@@ -75,6 +78,7 @@ impl PauseCause {
         match self {
             PauseCause::Quota => "quota",
             PauseCause::Budget => "budget",
+            PauseCause::Billing => "billing",
         }
     }
 }

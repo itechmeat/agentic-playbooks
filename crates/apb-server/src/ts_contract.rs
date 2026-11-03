@@ -177,6 +177,8 @@ fn render_types() -> String {
         // The launch policy of agents.
         apb_core::launch::LaunchPolicy::decl(&cfg),
         apb_core::launch::LaunchRecord::decl(&cfg),
+        apb_core::billing::BillingRecord::decl(&cfg),
+        apb_core::billing::BillingEntry::decl(&cfg),
         // Run outputs: the projection and the result identity it cites.
         apb_engine::identity::ExecutionRef::decl(&cfg),
         apb_engine::identity::ListVisitRef::decl(&cfg),

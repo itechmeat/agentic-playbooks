@@ -629,23 +629,42 @@ pub fn exposed_tools(agent_id: &str, raw: &str) -> Option<apb_core::agents::Expo
 /// declared subscriptions (`apb_core::agents::cost_basis::resolve`). An
 /// overlay that does not read declares nothing, so the basis stays unknown
 /// rather than guessed.
-fn read_cost_basis(task: &AgentTask) -> apb_core::agents::cost_basis::CostReading {
-    let env = task.spawn_env;
+pub fn read_cost_basis(task: &AgentTask) -> apb_core::agents::cost_basis::CostReading {
+    cost_reading(
+        task.agent,
+        task.model,
+        task.spawn_env,
+        Some(task.workdir),
+        task.hermetic_settings.is_some(),
+    )
+}
+
+/// The basis `agent` on `model` would be paid on, from what a process
+/// spawned with `env` in `workdir` sees (`hermetic`: under apb's minimal
+/// environment). The run gate predicts with it before a run starts, and
+/// every spawn reads it again ([`read_cost_basis`]).
+pub fn cost_reading(
+    agent: &str,
+    model: &str,
+    env: &SpawnEnv,
+    workdir: Option<&Path>,
+    hermetic: bool,
+) -> apb_core::agents::cost_basis::CostReading {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let system_root = system_root();
     let facts = apb_core::agents::cost_basis::CostFacts {
         present: &|name| env.reaches(name),
         setting: &|name| env.sees(name),
         home: home.as_deref(),
-        workdir: Some(task.workdir),
-        hermetic: task.hermetic_settings.is_some() && agent_supports_hermetic(task.agent),
+        workdir,
+        hermetic: hermetic && agent_supports_hermetic(agent),
         system_root: &system_root,
     };
     let subscriptions = apb_core::models_table::load_merged()
         .map(|t| t.subscriptions)
         .unwrap_or_default();
     let declared = |name: &str| subscriptions.iter().any(|s| s.covers_all(name));
-    apb_core::agents::cost_basis::resolve(task.agent, task.model, &facts, &declared)
+    apb_core::agents::cost_basis::resolve(agent, model, &facts, &declared)
 }
 
 /// Sets the basis of the cost in `usage`: what was read before the spawn

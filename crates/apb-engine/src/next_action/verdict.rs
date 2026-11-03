@@ -615,8 +615,11 @@ impl RunCx<'_> {
             a.principals = vec![Principal::Person, Principal::Operator];
             a
         } else {
+            let billing = pause.and_then(|p| p.cause) == Some(crate::pause::PauseCause::Billing);
             let released = self.run.view.released();
-            let line = if self.run.status() == RunStatus::Paused {
+            let line = if billing {
+                "the run is paused before agent work that is billed or of unknown basis; a person confirms it when resuming (the resume's refusal carries the nonce)".to_string()
+            } else if self.run.status() == RunStatus::Paused {
                 "the run is paused; resume it".to_string()
             } else if let Some(r) = released {
                 format!(

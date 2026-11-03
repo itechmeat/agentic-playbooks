@@ -1,3 +1,11 @@
+// The `testing` feature compiles test seams (the system root of agent files, the diagnostics writer's test hooks) that no person's
+// apb may carry; like apb-core's, it is refused in any build without debug
+// assertions, so a release or dist binary never holds one.
+#[cfg(all(feature = "testing", not(debug_assertions)))]
+compile_error!(
+    "the apb-engine `testing` feature is for test builds only and is refused in a build without debug assertions (a release or dist profile)"
+);
+
 pub mod adapter;
 pub mod agent_env;
 mod agent_home;

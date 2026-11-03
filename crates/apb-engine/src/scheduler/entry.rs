@@ -376,7 +376,7 @@ pub(crate) fn prepare_supervised_background_target(
     version: Option<&str>,
     opts: RunOptions,
 ) -> Result<PreparedRun, EngineError> {
-    let p = prepare_run_target(t, id, version, opts)?;
+    let mut p = prepare_run_target(t, id, version, opts)?;
 
     // Initial spawn of the background agent: only for runs that explicitly
     // expect one (CLI --supervise, future web requests) - not for supervise:"self"
@@ -385,9 +385,16 @@ pub(crate) fn prepare_supervised_background_target(
     // effort: a spawn failure (no executor, agent program not found) must not
     // bring down the run itself - drive will continue without external oversight,
     // and heartbeat monitoring (agent-supervised runs) will log SupervisorLost
-    // and attempt a respawn itself.
+    // and attempt a respawn itself. A supervisor the run's billing holds is
+    // journaled and pauses the run before its first node: a supervised run
+    // never waits for a supervisor that was not started.
     if p.mode.expects_supervisor_agent() {
-        let _ = spawn_supervisor_agent(&t.execution_root, &p.run_id, &p.playbook);
+        let _ = supervisor::spawn_supervisor_or_hold(
+            &t.execution_root,
+            &p.run_id,
+            &p.playbook,
+            &mut p.log,
+        );
     }
 
     Ok(PreparedRun(p))

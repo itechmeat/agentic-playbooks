@@ -33,14 +33,16 @@ pub use view::{BudgetStatus, DimStatus, PausedAt};
 use crate::error::EngineError;
 use crate::event::{EventLog, EventPayload};
 
-/// The `budget_set` a budget in force at start journals.
-pub fn set_event(eff: &EffectiveBudget) -> EventPayload {
+/// The `budget_set` a budget in force at start journals; `counts_subscription`
+/// is `billing.budget_counts_subscription` of the run's workspace.
+pub fn set_event(eff: &EffectiveBudget, counts_subscription: bool) -> EventPayload {
     EventPayload::BudgetSet {
         tokens: eff.limit.tokens,
         usd: eff.limit.usd,
         on_no_estimate: eff.on_no_estimate,
         source: Some(eff.source),
         by: None,
+        counts_subscription: Some(counts_subscription),
     }
 }
 
@@ -51,10 +53,11 @@ pub(crate) fn record_start(
     log: &mut EventLog,
     block: Option<&BudgetBlock>,
     req: Option<&BudgetRequest>,
+    counts_subscription: bool,
 ) -> Result<Option<EffectiveBudget>, EngineError> {
     let eff = apb_core::budget::effective(block, req);
     if let Some(e) = &eff {
-        log.append(set_event(e))?;
+        log.append(set_event(e, counts_subscription))?;
     }
     Ok(eff)
 }

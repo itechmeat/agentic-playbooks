@@ -3118,7 +3118,9 @@ project that runs it; a project playbook's floor is keyed by the workspace
 that owns it.
 
 **Settings.** The machine's `<config dir>/policy.yaml` and the project's
-`.apb/policy.yaml` take a `launch:` section beside `notify:`:
+`.apb/policy.yaml` take a `launch:` section beside `notify:` and
+`billing:` (the `billing:` section is described in GUARDRAILS.md "Billed
+use"):
 
 ```yaml
 launch:
@@ -3219,7 +3221,7 @@ comparable past runs, and pauses the run before the node when it does not.
 ```yaml
 budget:
   tokens: 400000          # input plus output tokens of the run's agent attempts (cache excluded)
-  usd: 4.00               # money the agent attempts cost, in US dollars (see "What counts as money")
+  usd: 4.00               # what the agent attempts cost, in US dollars (see "What counts as money")
   on_no_estimate: ask     # ask (default) | pause | continue
 ```
 
@@ -3247,9 +3249,20 @@ of the model (`subscriptions:` in `<config_dir>/models.yaml`, written by
 `apb subscriptions` or MCP `subscriptions_set`; one declared with
 `coverage: partial` decides nothing); else it stays `unknown`.
 
-Today only claude's module tells a basis, and it decides every case itself
-(a declaration says what you pay for, not how the process logs in). It
-reads the login variables that reach claude and the same names in the
+Two modules tell a basis today, and each decides every case itself (a
+declaration says what you pay for, not how the process logs in).
+
+codex's module reads, by name only, the login variables that reach codex
+(`CODEX_API_KEY`, `OPENAI_API_KEY`: `billed`) and `OPENAI_BASE_URL`
+(`unknown`), whether `config.toml` in codex's config root (`$CODEX_HOME`,
+else `~/.codex`) names a `model_provider` anywhere (`unknown`), and the
+top-level keys of `auth.json` there: an `OPENAI_API_KEY` key with a value
+is an api key login (`billed`), a `tokens` key with a value an account
+login (a subscription equivalent); no login file or an unfamiliar one is
+`unknown`.
+
+claude's module reads the login variables that reach claude and the same
+names in the
 `env` block of every settings file claude loads (the managed ones, your
 user settings unless the profile runs in the minimal environment, which
 leaves them out, the project's `.claude/settings.json` and
@@ -3271,15 +3284,20 @@ file reached through a link) is `unknown`; a subscription token
 plan is a subscription equivalent; anything else is `unknown`. A host
 task's usage (host execution mode) has an unknown basis.
 
-The `usd` limit counts `billed` costs and costs of `unknown` basis (the
-conservative reading, as an attempt that reported no cost is estimated,
-never zero); a subscription equivalent never spends it (it counts as `0`,
-a known amount). The estimate's dollar figure is different: it is the price
-the work was reported at, whatever the login of the runs it was learned
-from, so the gate weighs a node at what it would cost when billed. History
-recorded on a subscription therefore never lets the same work through as
-free on an api key; a run on a subscription is weighed at list price before
-a node while spending nothing. There is no separate limit for subscription
+The `usd` limit counts every reported cost, whatever its basis: a
+subscription can bill extra usage under the same login once its own
+allowance is used up, so a subscription equivalent may be money too. A
+person who knows their plan never bills extra sets
+`budget_counts_subscription: false` in the `billing:` section of the
+machine's `policy.yaml` (GUARDRAILS.md "Billed use"); the limit then counts
+`billed` costs and costs of `unknown` basis only, and a subscription
+equivalent counts as `0`, a known amount. A project's file can turn the
+setting back to `true`, never to `false`. The run records the setting in
+force on its `budget_set`, at start and at each resume that changes the
+budget. An attempt that reported no cost is estimated, never zero. The
+estimate's dollar figure is the price the work was reported at, whatever
+the login of the runs it was learned from, so the gate weighs a node at
+what it would cost when billed. There is no separate limit for subscription
 equivalents.
 
 **Precedence.** A run argument overrides the block per field: MCP

@@ -156,6 +156,127 @@ every playbook as `allow`. The policy holds only while every apb on the
 machine is this release or newer; `apb doctor` warns when another apb is on
 `PATH`.
 
+## Billed use
+
+Agent work can be paid for in two ways: on a subscription login, or billed
+(an api key, a cloud account, metered usage). Which one a person accepts
+differs from person to person, so apb starts billed work only on a
+person's explicit command, unless the settings say otherwise. The
+`billing:` section of `policy.yaml` decides it, the machine's file
+(`<config dir>/policy.yaml`) first and a project's (`.apb/policy.yaml`) only
+narrowing it, like the `launch:` section:
+
+```yaml
+billing:
+  billed: ask                       # allow | ask | deny (default ask)
+  unknown_basis: ask                # allow | ask | deny (default ask)
+  budget_counts_subscription: true  # true | false (default true)
+```
+
+- `billed` decides agent work whose cost is billed, `unknown_basis` work
+  whose basis apb cannot tell (HOWTO-authoring.md "What counts as money"
+  says how each agent's basis is read). Work on a subscription login is
+  never held.
+- `allow` starts it. `ask` starts it only after a person confirmed the
+  exact set of agents and bases the run would use. `deny` never starts it,
+  for anyone; the remedy is a profile whose agent runs on a subscription
+  login, or a changed machine setting.
+- `budget_counts_subscription` says whether a run budget's dollar limit
+  counts the list price of work a subscription covers (HOWTO-authoring.md
+  "budget"). The default `true` counts every reported cost, since a
+  subscription can bill extra usage under the same login; `false` is for a
+  person who knows their plan never bills extra.
+- A project's file may only make a setting stricter (`allow` to `ask` or
+  `deny`, `ask` to `deny`, `false` to `true`); a looser value there is
+  ignored. A file that does not read, the machine's or the project's,
+  fails closed: billed and unknown-basis work is denied (and a budget
+  counts every cost) until it is fixed, since the file may have said so;
+  a damaged project file never drops a machine's restriction. `apb
+  doctor` shows the effective section and the settings that produced it,
+  and flags a file that does not read.
+
+**Before a run starts.** The run gate (every launch surface: `apb run`, MCP
+`playbook_run`, `playbook_execute_plan` and `playbook_trial`, the
+dashboard, `apb eval`, and the resume of a run never authorized) predicts
+the basis of every agent the run's profiles bind, primary, fallbacks and
+tier executors, over the whole tree, and the background supervisor of a
+supervised run, from the facts a spawn would see (a node attempt under
+apb's minimal agent settings unless its profile asks for the full
+environment, the supervisor on the agent's own settings). Under `ask`, a
+billed or unknown prediction is refused with
+`billing_requires_confirmation`, a `billing` block naming the held agents
+and bases, and a nonce that covers that exact set:
+
+| Who launches | `ask` | `deny` |
+|---|---|---|
+| Agent over MCP | the refusal's nonce (`confirm_launch`) after the host asked the person | refused |
+| Run step (MCP or CLI) | refused (`billing_refused_in_run_step`) | refused |
+| CLI at a terminal | asks the person, or `--confirm-launch` | refused |
+| CLI without a terminal | `--confirm-launch` only | refused |
+| Dashboard (with or without keys) | the refusal's nonce, after the dashboard asked the person | refused |
+| Engine (waker, `resume --all`) | refused (`billing_refused_for_engine`) | refused |
+
+A run step or a CLI without a terminal whose config dir was redirected
+(`APB_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME`) is also held to the settings
+of the default config dir, the stricter of each, since a variable is not
+how a setting is changed; an eval case keeps the config dir its `apb eval`
+handed over. When the launch policy also asks, one question and one nonce
+cover both.
+A confirmation covers one start. The nonce of a billing refusal is a fresh
+challenge recorded in the workspace (`.apb/launch-challenges`) for that
+exact launch and predicted set, and it lapses after an hour. The start that
+passes it back on its own channel consumes it once the start is otherwise
+committed: right before the run's launch record is written, before a
+detached `apb run --supervise` hands its grant over, once for a whole `apb
+eval`. A start refused for another reason after the billing check (the
+irreversible consent, a missing param, the budget, an untrusted playbook)
+leaves it open, so the corrected start needs no second question. Starting
+again with a consumed nonce is refused with a new one, so a person is asked
+for every run. Without a working random source no challenge is recorded,
+and the nonce handed out confirms nothing.
+The run keeps what passed in its launch record (`launch.billing`: the bases
+the settings allowed, the agents and bases a person confirmed, how), never
+a nonce, for its whole lifetime.
+
+**At every spawn.** Right before an agent attempt starts, its basis is read
+again from the facts that spawn sees. Work the run's record does not cover
+(a login that changed to an api key mid-run, a fallback on another login)
+is not started: the engine pauses the run, `billing (<agent>: <basis>)`,
+like a budget pause; an unattended run, which has nobody to confirm it,
+fails there instead (``hitl_required: billing hold `<node>` ...``, no failure
+route, no pause). A plain resume, a supervisor and the engine are
+refused (`billing_paused`); a person resumes it at a terminal, with
+`--confirm-launch`, through MCP `run_resume` with the refusal's nonce after
+asking, or from the dashboard, which adds that agent and basis to the
+run's record. A setting changed to `allow` in the meantime lets a resume
+continue without a question. A terminal answer or a judge whose work is not
+covered fails instead of spending, and context compaction is skipped. A
+run started by an older apb holds no billing record and is checked against
+the settings in force at each spawn. The background supervisor and the
+wake-up probe of a quota pause are agent work too: each is checked the
+same way right before it starts, on the settings its process loads. A
+supervisor the record does not cover is not started, and nothing records a
+spawn for it: the run journals it (`supervisor_action`
+`supervisor_billing_hold`) and takes the billing pause, before its first
+node when it is the start's supervisor, so a supervised run never waits for
+a supervisor that is not coming. A person's resume confirms its agent and
+basis, and the resumed run starts the supervisor. A probe the record does
+not cover is not sent, and the node's own check then pauses the run for a
+person. `apb doctor --probe-agent` is started by a person, which confirms it
+under `ask`; `deny` refuses it before the agent is spawned. Without a
+terminal it is held to the default config dir's settings as a launch is,
+so a redirected config dir does not hide a `deny` there.
+
+**Limits.** The prediction reads local facts only (variable names, the
+keys of an agent's own login and settings files), never a secret value and
+never the network, so a provider that bills a subscription login for extra
+usage is not seen; that is what `budget_counts_subscription` and a run
+budget are for. A host task (host execution mode) runs in the host's own
+session and is not checked. An older apb never checks billed use: one
+without launch policies ignores `policy.yaml`, and one with them refuses
+agent launches on a machine whose file has a `billing:` section (an unknown
+section, see "Fail closed" above) until it is upgraded.
+
 ## Choosing where a rule goes
 
 - The rule is about the result of a step ("the tests pass", "the report has a

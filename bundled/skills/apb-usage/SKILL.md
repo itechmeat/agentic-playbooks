@@ -34,8 +34,18 @@ session, use the matching `apb` command instead.
   - launch policy `ask`: ask the person, then retry with the launch nonce,
     version and choice the refusal named;
   - irreversible effects: ask the person, then retry with the consent nonce;
+  - billed use (`billing_requires_confirmation`): the run would start agent
+    work that is billed, or whose basis is unknown. Name the agents and
+    bases the refusal lists, ask the person, and retry with the launch
+    nonce only after an explicit yes;
+  - `billing_denied`: report it; only the person changes the settings or
+    the profile;
   - a missing param: ask for the value.
 - Never invent a consent. Never retry with a nonce the person did not approve.
+- Never start billed agent work without the person's explicit command for
+  this run. Approval of another run, another playbook or an earlier version
+  does not carry over. Some people accept billed work and some never do;
+  ask every time apb refuses.
 - Effects beyond what the user asked for (network, secrets, deploys,
   irreversible steps) need a confirmation even when apb does not refuse.
 
@@ -49,6 +59,10 @@ session, use the matching `apb` command instead.
   - a pending question: relay it verbatim and answer with `run_answer`.
   - `pending_tasks` (host execution mode): see section 4.
   - a pause (quota or budget): report it and the next action apb names.
+  - a billing pause (`billing (<agent>: <basis>)`): the run stopped before
+    agent work it has no confirmation for. Ask the person; resume with the
+    nonce of the `billing_requires_confirmation` refusal only after an
+    explicit yes.
 - `next_actions` in an answer are ready commands. Prefer them over guessing.
 
 ## 4. Host execution mode

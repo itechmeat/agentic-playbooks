@@ -447,3 +447,105 @@ async fn a_never_authorized_run_resumes_by_the_dashboards_rules() {
         );
     }
 }
+
+/// Billed use on the HTTP API (GUARDRAILS.md "Billed use"): a start that
+/// would run billed agent work is refused with its nonce whether or not the
+/// dashboard has keys (the person confirms it in the dashboard's dialog),
+/// and the retry with that nonce starts the run and records the
+/// confirmation. codex's basis comes from `auth.json` in `$CODEX_HOME`.
+#[tokio::test]
+async fn billed_work_starts_from_the_dashboard_only_with_the_refusals_nonce() {
+    let _cfg = config_sandbox().await;
+    for keys in [true, false] {
+        let dir = project("paid", "");
+        let root = dir.path();
+        let vdir = root.join(".apb/playbooks/paid/1.0.0");
+        fs::write(
+            vdir.join("playbook.yaml"),
+            "schema: 2\nid: paid\nname: Paid\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, profile: worker, prompt: go }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+        )
+        .unwrap();
+        let prof = root.join(".apb/profiles/worker");
+        fs::create_dir_all(&prof).unwrap();
+        fs::write(
+            prof.join("profile.yaml"),
+            "name: worker\nexecutor:\n  agent: codex\n  model: gpt-6-sol\n",
+        )
+        .unwrap();
+        fs::write(prof.join("SOUL.md"), "").unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        fs::write(codex.path().join("auth.json"), r#"{"OPENAI_API_KEY":"k"}"#).unwrap();
+        let stub = root.join("agent.sh");
+        fs::write(&stub, "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let prior: Vec<_> = [
+            "APB_TEST_BILLING_DEFAULT",
+            "CODEX_HOME",
+            "APB_AGENT_CMD",
+            "CODEX_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+        ]
+        .into_iter()
+        .map(|k| (k, std::env::var_os(k)))
+        .collect();
+        // SAFETY: env mutation is serialized by the sandbox's lock.
+        unsafe {
+            for (k, _) in &prior {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("CODEX_HOME", codex.path());
+            std::env::set_var("APB_AGENT_CMD", &stub);
+        }
+        let (key, app) = if keys {
+            let (key, state) = crate::common::keyed(root.to_path_buf());
+            (Some(key), build_router(state))
+        } else {
+            (None, build_router(AppState::new(root.to_path_buf())))
+        };
+        let (status, refusal) = call(
+            &app,
+            "POST",
+            "/api/playbooks/paid/run",
+            key.as_deref(),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "keys {keys}: {refusal}");
+        assert_eq!(
+            refusal["policy"], "billing_requires_confirmation",
+            "keys {keys}: {refusal}"
+        );
+        assert_eq!(runs(root), 0, "keys {keys}: a refusal writes no run");
+        let (status, started) = call(
+            &app,
+            "POST",
+            "/api/playbooks/paid/run",
+            key.as_deref(),
+            Some(json!({
+                "confirm_launch": refusal["launch_nonce"],
+                "launch_version": refusal["launch_version"],
+                "launch_choice": refusal["launch_choice"],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "keys {keys}: {started}");
+        let run_id = started["run_id"].as_str().unwrap().to_string();
+        let _reaper = crate::driver_reaper::DriverReaper::new(root, &run_id);
+        let billing = launch_of(root, &run_id).billing.expect("a billing record");
+        assert_eq!(billing.confirmation.as_deref(), Some("dashboard_nonce"));
+        assert_eq!(billing.confirmed.len(), 1, "keys {keys}: {billing:?}");
+        // SAFETY: as above.
+        unsafe {
+            for (k, v) in prior {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}

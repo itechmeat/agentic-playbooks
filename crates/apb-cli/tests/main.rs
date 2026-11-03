@@ -12,6 +12,26 @@
 //! global config dir so a test run never writes the real `~/.config/apb`.
 //! `suite/real_config_guard_test.rs` enforces that.
 
+// Billed use (`apb_core::billing`): the stand-in agents these tests start
+// have an unknown cost basis, which the default `ask` would hold. Set for
+// the whole process before any test thread starts (and inherited by every
+// `apb` it spawns); the billing tests clear it or write their own settings.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android", target_os = "freebsd"),
+    unsafe(link_section = ".init_array")
+)]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,__mod_init_func")
+)]
+static BILLING_DEFAULT: extern "C" fn() = billing_default;
+
+extern "C" fn billing_default() {
+    // SAFETY: runs before `main`, so no other thread exists yet.
+    unsafe { std::env::set_var("APB_TEST_BILLING_DEFAULT", "allow") };
+}
+
 #[path = "suite/common.rs"]
 mod common;
 
@@ -21,6 +41,9 @@ mod advisory_cli_test;
 mod answer_cli_test;
 #[path = "suite/ask_server_cli_test.rs"]
 mod ask_server_cli_test;
+#[cfg(unix)]
+#[path = "suite/billing_cli_test.rs"]
+mod billing_cli_test;
 #[cfg(unix)]
 #[path = "suite/budget_cli_test.rs"]
 mod budget_cli_test;

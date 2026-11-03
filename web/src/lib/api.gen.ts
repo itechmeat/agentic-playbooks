@@ -1082,7 +1082,7 @@ export type PauseBy = "operator" | "supervisor" | "engine";
 
 export type PauseMode = "drain" | "now";
 
-export type PauseCause = "quota" | "budget";
+export type PauseCause = "quota" | "budget" | "billing";
 
 export type PauseInfo = { reason: string, by: PauseBy, mode: PauseMode, 
 /**
@@ -1493,7 +1493,37 @@ policy: LaunchPolicy,
 /**
  * The settings that produced it.
  */
+sources: Array<string>, 
+/**
+ * What the run may spend on (`crate::billing`): the bases the settings
+ * allowed and the agents and bases a person confirmed. Absent in a
+ * record an older apb wrote; such a run is checked against the
+ * settings in force at each spawn.
+ */
+billing?: BillingRecord, };
+
+export type BillingRecord = { 
+/**
+ * The bases the settings allowed for every agent when the run was
+ * admitted.
+ */
+allowed: Array<CostBasis>, 
+/**
+ * The agents and bases a person confirmed.
+ */
+confirmed: Array<BillingEntry>, 
+/**
+ * How the confirmation was given (`terminal_prompt`, `cli_flag`,
+ * `host_relayed`, `dashboard_nonce`, `forwarded:<kind>`); absent when
+ * nothing needed one.
+ */
+confirmation?: string, 
+/**
+ * The settings that decided it.
+ */
 sources: Array<string>, };
+
+export type BillingEntry = { agent: string, basis: CostBasis, };
 
 export type ExecutionRef = { node: string, ordinal: number, ended_seq?: number, };
 

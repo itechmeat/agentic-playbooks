@@ -237,6 +237,7 @@ mod tests {
                 confirmation: Some("host_relayed".into()),
                 policy: LaunchPolicy::Ask,
                 sources: vec![],
+                billing: None,
             },
             permit_digest: Some("p".into()),
             policy_state: Some("s".into()),
@@ -246,6 +247,7 @@ mod tests {
             nonce: None,
             version: None,
             choice: None,
+            challenge: None,
         })
     }
 

@@ -1829,6 +1829,11 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         by: Option<crate::pause::kind::PauseBy>,
+        /// Whether the dollar limit counts subscription equivalents
+        /// (`billing.budget_counts_subscription` when it was set); absent
+        /// counts every reported cost.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counts_subscription: Option<bool>,
     },
     /// One budget gate decision other than a plain admission, before a
     /// gated node or (`batch`) a list batch. A `paused` decision is always
@@ -4004,6 +4009,7 @@ mod tests {
             on_no_estimate,
             source,
             by,
+            ..
         } = set.payload
         else {
             panic!("a budget_set")

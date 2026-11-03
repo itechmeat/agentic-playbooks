@@ -862,6 +862,7 @@ pub(crate) fn prepare_placed(
             opts.expected_children.as_ref(),
             opts.launch.as_ref(),
             opts.parent_run.is_some(),
+            false,
         )?;
     }
 
@@ -1248,6 +1249,7 @@ pub(crate) fn prepare_placed(
                 opts.expected_children.as_ref(),
                 opts.launch.as_ref(),
                 opts.parent_run.is_some(),
+                true,
             ),
         )?;
     }
@@ -1359,7 +1361,8 @@ pub(crate) fn prepare_placed(
 /// and refuses (`launch_policy_changed`) when a floor or a settings file
 /// changed since the check; one without a grant (a start that bypassed
 /// every launch surface) runs only a playbook agents may launch freely, and
-/// records nothing.
+/// records nothing. With `commit` (the final check, right before the record
+/// is written) the grant's billing challenge is consumed.
 fn check_launch(
     root: &Path,
     playbook: &apb_core::schema::Playbook,
@@ -1367,6 +1370,7 @@ fn check_launch(
     pins: Option<&BTreeMap<String, crate::run_config::ChildExpectation>>,
     grant: Option<&crate::gate::launch::LaunchGrant>,
     child: bool,
+    commit: bool,
 ) -> Result<Option<apb_core::launch::LaunchRecord>, EngineError> {
     use crate::gate::launch;
     if child {
@@ -1402,6 +1406,11 @@ fn check_launch(
                         now.sources.join(", ")
                     )));
                 }
+            }
+            // The final check commits the start: a billing confirmation is
+            // spent now, not by a check that refused for another reason.
+            if commit {
+                g.consume_challenge().map_err(EngineError::Invalid)?;
             }
             Ok(Some(g.record.clone()))
         }

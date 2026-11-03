@@ -120,6 +120,19 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         policy_detail,
     );
 
+    // Billed use: the effective `billing:` section, machine narrowed by the
+    // project (`crate::billing`).
+    let (billing_ok, billing_detail) = crate::billing::doctor_line(root);
+    r.push(
+        if billing_ok {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        "billing",
+        billing_detail,
+    );
+
     // The launch floors of this project's playbooks, and the other apb
     // binaries a person could run here: an older one ignores every launch
     // setting.

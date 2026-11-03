@@ -241,12 +241,19 @@ flag. Notifications behave as for any failed run.
     an unattended run fails with a run error that starts with
     `budget_exhausted:`, and journals no pause. This holds for a node on
     its own, a node in a concurrent batch and the items of a list node.
+    Billed use is the same: where an attended run would take a billing
+    pause (agent work billed or of unknown basis that the run's record
+    does not cover, found right before its spawn), an unattended run fails
+    at that node with a run error that starts with ``hitl_required: billing
+    hold `<node>` `` and journals no pause.
 11. **A quota pause**: pauses as today and resumes at `until`; the resumed
     run is still unattended. `apb wait` exits 4 for it; `--follow-auto`
     keeps waiting up to a minute past `until`.
 12. **An operator pause**: unchanged; it is a person's act, not a wait.
 13. **A start that needs consent** (irreversible effects, `agent_launch:
-    ask`): refused before the run, as without the flag.
+    ask`, billed or unknown-basis work under `billing: ask`): refused
+    before the run, as without the flag. A person's confirmation at the
+    start covers the run, so it never waits for one later.
 
 A list item never asks a question (`interactive` is refused on a list
 node), so items have no unattended case of their own.

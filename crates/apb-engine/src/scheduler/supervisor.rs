@@ -3,42 +3,57 @@
 
 use super::*;
 
-/// Spawns a background supervisor agent for run `run_id`: mints a
-/// token, persists the session and the baseline `supervisor/spawned_at` (so
-/// heartbeat monitoring can detect the agent's silence even before its first
-/// poll), builds an English brief and asks the adapter to bring up the process.
-/// Does not write events - the sole writer of `events.jsonl` is the `drive`
-/// loop. The agent's executor is taken from the `supervisor` binding in the run
-/// manifest (profile `supervisor.profile` or `defaults.profile`); no binding ->
-/// `None` (nothing to spawn without an executor, and this is not an error -
-/// e.g. a playbook without a supervisor profile).
+/// What [`spawn_supervisor_agent`] did.
+pub enum SupervisorSpawn {
+    /// The run binds no supervisor executor: nothing to spawn, not an error.
+    NotBound,
+    /// A supervisor process is up; its session token.
+    Spawned(apb_core::secret::Secret),
+    /// No chain element was started and at least one was held by the run's
+    /// billing (`crate::pause::billing`): the run must not wait for a
+    /// supervisor that never came, so the caller journals it and takes this
+    /// billing pause ([`hold_for_supervisor`]) for a person to confirm.
+    Held {
+        pause: crate::pause::PauseRequest,
+        detail: String,
+    },
+}
+
+/// The `supervisor_action` marker of a supervisor the run's billing held.
+pub const SUPERVISOR_BILLING_HOLD: &str = "supervisor_billing_hold";
+
+/// Spawns a background supervisor agent for run `run_id`: mints a token,
+/// checks each chain element's billing, and only before the first element
+/// it really tries persists the session and the baseline
+/// `supervisor/spawned_at` (so heartbeat monitoring can detect the agent's
+/// silence even before its first poll, and never measures it from a spawn
+/// that did not happen), builds an English brief and asks the adapter to
+/// bring up the process. Does not write events - the sole writer of
+/// `events.jsonl` is the `drive` loop. The agent's executor is taken from
+/// the `supervisor` binding in the run manifest (profile `supervisor.profile`
+/// or `defaults.profile`); no binding -> [`SupervisorSpawn::NotBound`].
 pub fn spawn_supervisor_agent(
     root: &Path,
     run_id: &str,
     playbook: &Playbook,
-) -> Result<Option<apb_core::secret::Secret>, EngineError> {
+) -> Result<SupervisorSpawn, EngineError> {
     let run_dir = root.join(".apb/runs").join(run_id);
     let Some(manifest) = crate::manifest::read(&run_dir)? else {
-        return Ok(None);
+        return Ok(SupervisorSpawn::NotBound);
     };
     let Some(entry) = manifest.for_node("supervisor") else {
-        return Ok(None);
+        return Ok(SupervisorSpawn::NotBound);
     };
     if entry.chain.is_empty() {
-        return Ok(None);
+        return Ok(SupervisorSpawn::NotBound);
     }
 
     let token = crate::inspect::mint_supervisor_token()?;
     // Default capabilities for 4c - restricted by policy - to be refined
     // later (see the carry-over note in the Phase 4c plan).
     let capabilities = vec!["observe".to_string(), "retry".to_string()];
-    write_supervisor_session(root, run_id, &token, &capabilities)?;
-
-    apb_core::fsutil::atomic_write_under(
-        &run_dir,
-        &run_dir.join("supervisor").join("spawned_at"),
-        apb_core::clock::now_ms().to_string().as_bytes(),
-    )?;
+    // Written once, right before the first element that is really tried.
+    let mut session_written = false;
 
     // The supervisor profile's SOUL and skills are used in full (completion-plan
     // Task 9): SOUL is delivered per the invocation form, skill names go in as an
@@ -77,6 +92,7 @@ pub fn spawn_supervisor_agent(
             .unwrap_or_default(),
     );
     let mut last_err: Option<String> = None;
+    let mut held: Option<(crate::pause::PauseRequest, String)> = None;
     for inv in &entry.chain {
         let adapter = crate::adapter::ClaudeAdapter {
             program: inv.canonical_executable.to_string_lossy().into_owned(),
@@ -98,6 +114,33 @@ pub fn spawn_supervisor_agent(
             &inv.model,
             &scrub,
         ));
+        // Agent work like any attempt: the supervisor starts only on a basis
+        // the run's billing covers. It loads the agent's own settings (no
+        // minimal settings), so its basis is read on those. A held element is
+        // skipped, before anything is written; with none started the caller
+        // takes the billing pause.
+        let basis =
+            crate::adapter::cost_reading(&inv.agent_id, &inv.model, &step_env, Some(root), false)
+                .basis;
+        if let Some(hold) = crate::pause::billing::spawn_hold(&run_dir, &inv.agent_id, basis) {
+            if held.is_none() {
+                let detail = format!(
+                    "{}: the supervisor is not spawned",
+                    hold.reason.as_deref().unwrap_or_default()
+                );
+                held = Some((hold, detail));
+            }
+            continue;
+        }
+        if !session_written {
+            write_supervisor_session(root, run_id, &token, &capabilities)?;
+            apb_core::fsutil::atomic_write_under(
+                &run_dir,
+                &run_dir.join("supervisor").join("spawned_at"),
+                apb_core::clock::now_ms().to_string().as_bytes(),
+            )?;
+            session_written = true;
+        }
         match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &step_env) {
             Ok(()) => {
                 apb_core::fsutil::atomic_write_under(
@@ -105,14 +148,53 @@ pub fn spawn_supervisor_agent(
                     &run_dir.join("supervisor").join("executor"),
                     format!("{}:{}", inv.agent_id, inv.model).as_bytes(),
                 )?;
-                return Ok(Some(token));
+                return Ok(SupervisorSpawn::Spawned(token));
             }
             Err((_class, msg)) => last_err = Some(msg),
         }
     }
+    if let Some((pause, detail)) = held {
+        return Ok(SupervisorSpawn::Held { pause, detail });
+    }
     Err(EngineError::Adapter(last_err.unwrap_or_else(|| {
         "supervisor spawn failed with no chain element".into()
     })))
+}
+
+/// Journals a supervisor the run's billing held and queues its billing
+/// pause on the run's control channel: the drive applies it at its next
+/// boundary (before the first node, for the initial spawn), so a
+/// supervised run never parks waiting for a supervisor that was not
+/// started. A person's resume confirms the agent and basis
+/// (`crate::resume_launch`), and the resumed drive spawns the supervisor.
+pub(crate) fn hold_for_supervisor(
+    run_dir: &Path,
+    log: &mut EventLog,
+    pause: crate::pause::PauseRequest,
+    detail: String,
+) -> Result<(), EngineError> {
+    log.append(EventPayload::SupervisorAction {
+        action: SUPERVISOR_BILLING_HOLD.into(),
+        node: None,
+        detail,
+    })?;
+    super::journal::post_engine_pause(run_dir, pause)
+}
+
+/// Spawns the supervisor and acts on a billing hold; a spawn that fails
+/// outright is left to heartbeat monitoring, as before.
+pub(crate) fn spawn_supervisor_or_hold(
+    root: &Path,
+    run_id: &str,
+    playbook: &Playbook,
+    log: &mut EventLog,
+) -> Result<(), EngineError> {
+    if let Ok(SupervisorSpawn::Held { pause, detail }) =
+        spawn_supervisor_agent(root, run_id, playbook)
+    {
+        hold_for_supervisor(&root.join(".apb/runs").join(run_id), log, pause, detail)?;
+    }
+    Ok(())
 }
 
 /// The `timeout_ms` a spawned supervisor is told to pass to
@@ -320,14 +402,30 @@ pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
 /// no heartbeat to miss.
 ///
 /// The respawn happens at most once per drive: after that a repeated loss is a
-/// matter for manual review, not another automatic restart.
+/// matter for manual review, not another automatic restart. A run whose
+/// supervisor was never tried (its start was held by billing, and a person
+/// resumed it) gets it spawned once by this drive. A spawn the run's billing
+/// holds pauses the run ([`hold_for_supervisor`]).
 pub(crate) fn monitor_supervisor_heartbeat(
     root: &Path,
     run_id: &str,
     playbook: &Playbook,
     log: &mut EventLog,
     supervisor_lost_logged: &mut bool,
+    supervisor_spawn_tried: &mut bool,
 ) -> Result<(), EngineError> {
+    if !*supervisor_spawn_tried {
+        *supervisor_spawn_tried = true;
+        let never_tried = !root
+            .join(".apb/runs")
+            .join(run_id)
+            .join("supervisor")
+            .join("spawned_at")
+            .exists();
+        if never_tried {
+            return spawn_supervisor_or_hold(root, run_id, playbook, log);
+        }
+    }
     // Heartbeat monitoring: only for runs explicitly expecting an external
     // background agent (`RunMode::AgentSupervised`). Silence is measured either from
     // the last heartbeat, or (as long as the agent has never checked in) from the
@@ -347,7 +445,7 @@ pub(crate) fn monitor_supervisor_heartbeat(
             detail: "supervisor heartbeat lost".into(),
         })?;
         *supervisor_lost_logged = true;
-        let _ = spawn_supervisor_agent(root, run_id, playbook);
+        spawn_supervisor_or_hold(root, run_id, playbook, log)?;
     }
     Ok(())
 }

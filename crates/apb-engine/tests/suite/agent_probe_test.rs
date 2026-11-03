@@ -5,7 +5,8 @@
 //! goes the way a run step's does (no autonomy flags, connector variables
 //! withheld, scoped files and claude's minimal settings in the probe's own
 //! directory, which is removed afterwards), the cancel flag stops the agent,
-//! and a run step is refused.
+//! a run step is refused, and billing `deny` holds, a redirected config
+//! dir's included.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -17,6 +18,7 @@ use apb_core::agents::Conformance;
 use apb_core::config::GlobalConfig;
 use apb_core::step_env::StepCaller;
 use apb_engine::agent_probe::{ProbeError, ProbeReport, ProbeRequest, probe, refusal};
+use apb_engine::gate::launch::Initiator;
 
 use crate::common::{self, EnvVar};
 
@@ -87,28 +89,70 @@ fn seed_connector(cfg: &Path, root: &Path) {
 /// Runs the probe of `agent` under `config` with a hermetic home, config
 /// dir and project, and the connector variable set.
 fn probe_agent(agent: &str, config: &str, cancel: &AtomicBool) -> Result<ProbeReport, ProbeError> {
+    probe_under(agent, config, cancel, &Machine::default())
+}
+
+/// The machine a probe runs on: the `policy.yaml` of the config dir it
+/// reads (redirected away from the default one, as every probe here is),
+/// the default config dir's, who asks (a person at a terminal unless said
+/// otherwise), and whether an api key in the agent's environment makes its
+/// call read as billed.
+#[derive(Default)]
+struct Machine<'a> {
+    policy: Option<&'a str>,
+    default_policy: Option<&'a str>,
+    unattended: bool,
+    api_key: bool,
+}
+
+/// [`probe_agent`] on `machine`.
+fn probe_under(
+    agent: &str,
+    config: &str,
+    cancel: &AtomicBool,
+    machine: &Machine<'_>,
+) -> Result<ProbeReport, ProbeError> {
     let _env = common::env_lock();
     let sandbox = tempfile::tempdir().unwrap();
     let home = sandbox.path().join("home");
     let cfg = sandbox.path().join("config");
+    let default_cfg = sandbox.path().join("default-config");
     let project = sandbox.path().join("project");
-    for d in [&home, &cfg, &project] {
+    for d in [&home, &cfg, &default_cfg, &project] {
         fs::create_dir_all(d).unwrap();
     }
     seed_connector(&cfg, &project);
+    for (dir, policy) in [
+        (&cfg, machine.policy),
+        (&default_cfg, machine.default_policy),
+    ] {
+        if let Some(policy) = policy {
+            fs::write(dir.join("policy.yaml"), policy).unwrap();
+        }
+    }
     let _guards = [
         EnvVar::remove("APB_AGENT_CMD"),
         EnvVar::remove("CODEX_HOME"),
         EnvVar::set("HOME", &home),
         EnvVar::set("APB_CONFIG_DIR", &cfg),
+        EnvVar::set("APB_TEST_DEFAULT_CONFIG_DIR", &default_cfg),
         EnvVar::set(CONNECTOR_VAR, "1"),
+        if machine.api_key {
+            EnvVar::set("ANTHROPIC_API_KEY", "k")
+        } else {
+            EnvVar::remove("ANTHROPIC_API_KEY")
+        },
     ];
     let global: GlobalConfig = yaml_serde::from_str(config).unwrap();
+    let initiator = Initiator::CliUnattested {
+        terminal: !machine.unattended,
+    };
     let req = ProbeRequest {
         agent,
         model: Some("haiku"),
         timeout: Duration::from_secs(10),
         project: &project,
+        initiator: &initiator,
     };
     probe(&req, &global, cancel)
 }
@@ -287,4 +331,59 @@ fn a_run_step_is_refused_and_a_person_is_not() {
     };
     let why = refusal(&step).expect("refused");
     assert!(why.contains("inside run `r1`"), "{why}");
+}
+
+/// `billed: deny` holds for a person too: a probe whose call reads as
+/// billed (an api key in the agent's environment) is refused before the
+/// agent is spawned.
+#[test]
+fn a_billed_probe_is_refused_under_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = stub(dir.path(), RECORDED);
+    let err = probe_under(
+        AGENT,
+        &format!("agents:\n  {AGENT}: {{ program: {program} }}\n"),
+        &AtomicBool::new(false),
+        &Machine {
+            policy: Some("billing:\n  billed: deny\n"),
+            api_key: true,
+            ..Machine::default()
+        },
+    )
+    .expect_err("refused");
+    assert!(err.0.starts_with("billing_denied"), "{err}");
+    assert!(!dir.path().join("argv.txt").exists(), "nothing was spawned");
+}
+
+/// A redirected config dir does not hide the default one's `billed: deny`
+/// from a CLI without a terminal, exactly as at a launch: the billed probe
+/// is refused before the agent is spawned. A person at a terminal is not
+/// held to the default dir, as at a launch, and the probe runs.
+#[test]
+fn a_redirected_config_dir_does_not_hide_the_default_dirs_deny() {
+    for (unattended, refused) in [(true, true), (false, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let program = stub(dir.path(), RECORDED);
+        let out = probe_under(
+            AGENT,
+            &format!("agents:\n  {AGENT}: {{ program: {program} }}\n"),
+            &AtomicBool::new(false),
+            &Machine {
+                default_policy: Some("billing:\n  billed: deny\n"),
+                unattended,
+                api_key: true,
+                ..Machine::default()
+            },
+        );
+        let spawned = dir.path().join("argv.txt").exists();
+        if refused {
+            let err = out.expect_err("refused");
+            assert!(err.0.starts_with("billing_denied"), "{err}");
+            assert!(err.0.contains("default config dir"), "{err}");
+            assert!(!spawned, "nothing was spawned");
+        } else {
+            out.expect("a person at a terminal runs the probe");
+            assert!(spawned, "the agent was spawned");
+        }
+    }
 }

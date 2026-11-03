@@ -864,6 +864,12 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             eprintln!("run failed: {e}");
             return ExitCode::from(2);
         }
+        // The start commits here: its driver takes the grant from a handoff
+        // that carries no challenge, so a billing confirmation is spent now.
+        if let Err(e) = grant.consume_challenge() {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
         if remember {
             remember_input(root, name, &parsed, instruction.as_deref());
         }
@@ -1245,7 +1251,9 @@ pub(crate) fn drive_supervised_child(
         })) => {
             launch = launch
                 .confirmed(Some(
-                    apb_engine::gate::launch::LaunchConfirmation::Forwarded { handoff: grant },
+                    apb_engine::gate::launch::LaunchConfirmation::Forwarded {
+                        handoff: Box::new(grant),
+                    },
                 ))
                 .fixed(Some(v), Some(choice.as_str()));
             if let Some(c) = consent {

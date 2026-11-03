@@ -580,7 +580,9 @@ node, and no failure route is taken: a `human_review` without
 `default_answer`. A review with `unattended: { decide }` is decided with
 that option (its `review_decided` says `decided_by: unattended`, which is
 never a person's consent), a question with a default is answered with it,
-and a budget pause fails the run with `budget_exhausted`. Child runs
+a budget pause fails the run with `budget_exhausted`, and a billing pause
+(billed or unknown-basis agent work the run's record does not cover)
+fails it with `hitl_required` naming the node it held. Child runs
 inherit the mode, and a resume never changes it.
 
 The mode grants nothing. Trust, the irreversible consent and the launch

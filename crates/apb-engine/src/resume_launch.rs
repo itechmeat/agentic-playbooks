@@ -20,6 +20,7 @@ use apb_core::schema::{NodeKind, Playbook};
 use apb_core::scope::Origin;
 use serde_json::{Value, json};
 
+use crate::gate::billing::BillingCheck;
 use crate::gate::launch::{
     Choice, EngineResume, LaunchContext, LaunchGrant, POLICY_CHANGED, Subject, TREE_UNVERIFIED,
     Tree, decide, effective, permit_digest, policy_state, refusal_line, run_authorization,
@@ -113,8 +114,8 @@ pub fn check_resume_launch(
     if !run_dir.is_dir() {
         return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
     }
-    if run_authorization(&run_dir).is_some() {
-        return Ok(None);
+    if let Some(auth) = run_authorization(&run_dir) {
+        return billing_resume(root, &run_dir, run_id, auth, ctx);
     }
     let subject = resume_subject(root, run_id)?;
     let tolerant = !ctx.initiator.is_agent_channel();
@@ -124,7 +125,22 @@ pub fn check_resume_launch(
         &ctx.initiator,
         ctx.handed_config_dir(),
     )?;
-    let mut grant = decide(ctx, &subject.as_subject(root), &effective, tolerant)?;
+    let billing = crate::gate::billing::check_tree(
+        root,
+        &subject.playbook,
+        &subject.origin,
+        &subject.children,
+        false,
+        ctx.initiator.checks_redirect(),
+        ctx.handed_config_dir(),
+    );
+    let mut grant = decide(
+        ctx,
+        &subject.as_subject(root),
+        &effective,
+        &billing,
+        tolerant,
+    )?;
     if subject.pins_missing {
         grant.pins = Some(subject.children.clone());
     }
@@ -179,7 +195,7 @@ fn settle_resume_launch(
 ) -> Result<Option<LaunchRecord>, String> {
     let run_dir = root.join(".apb/runs").join(run_id);
     if run_authorization(&run_dir).is_some() {
-        return Ok(None);
+        return settle_billing_resume(&run_dir, run_id, grant);
     }
     let text = |v: Value| refusal_line(&v);
     let mut subject = resume_subject(root, run_id).map_err(text)?;
@@ -218,6 +234,11 @@ fn settle_resume_launch(
             now.sources.join(", ")
         ));
     }
+    // The resume commits when it persists: a billing confirmation is spent
+    // then, not by the check before it.
+    if persist {
+        g.consume_challenge()?;
+    }
     if let Some(pins) = g.pins.as_ref().filter(|_| persist) {
         let mut cfg = crate::run_config::read_run_config(&run_dir).map_err(|e| e.to_string())?;
         if cfg.expected_children.is_none() {
@@ -226,6 +247,124 @@ fn settle_resume_launch(
         }
     }
     Ok(Some(g.record.clone()))
+}
+
+/// The refusal of a plain resume of a run a billing pause holds.
+pub const BILLING_PAUSED: &str = "billing_paused";
+
+/// The resume of an authorized run: nothing to check (`Ok(None)`), unless
+/// a billing pause holds it (`crate::pause::billing`). Then the agent and
+/// basis it paused on need what a start would need: the settings allow it
+/// now, or a person confirms it (the same table as a start, with a nonce
+/// over the run, the pause and the entry); `deny` refuses. The grant
+/// carries the run's record with the entry added, journaled on the resume.
+fn billing_resume(
+    root: &Path,
+    run_dir: &Path,
+    run_id: &str,
+    auth: LaunchRecord,
+    ctx: &LaunchContext,
+) -> Result<Option<LaunchGrant>, Value> {
+    let events = crate::event::read_all(run_dir).unwrap_or_default();
+    let Some((entry, seq)) = crate::pause::billing::held_entry(&events) else {
+        return Ok(None);
+    };
+    let check = BillingCheck {
+        effective: crate::gate::billing::settings_for(
+            root,
+            ctx.initiator.checks_redirect(),
+            ctx.handed_config_dir(),
+        ),
+        predicted: vec![entry.clone()],
+    };
+    let expected = apb_core::content::short_nonce(
+        "billing-resume",
+        &[
+            root.display().to_string(),
+            run_id.to_string(),
+            seq.to_string(),
+            entry.label(),
+        ],
+    );
+    let refuse = |code: &str, nonce: Option<&str>| {
+        let mut v = crate::gate::billing::refusal(code, &check, nonce);
+        v["run_id"] = json!(run_id);
+        v["launch_kind"] = json!(ctx.kind.label());
+        v
+    };
+    let mut record = auth;
+    let mut billing = record.billing.clone().unwrap_or_default();
+    match check.required() {
+        LaunchPolicy::Deny => return Err(refuse(crate::gate::billing::BILLING_DENIED, None)),
+        LaunchPolicy::Allow => {
+            if !billing.allowed.contains(&entry.basis) {
+                billing.allowed.push(entry.basis);
+            }
+            billing
+                .sources
+                .extend(check.effective.sources.iter().cloned());
+            billing.sources.sort();
+            billing.sources.dedup();
+        }
+        LaunchPolicy::Ask => {
+            // Bound to this run and this pause already: once the run
+            // resumes, the pause no longer holds it and the nonce confirms
+            // nothing again.
+            let nonce_ok = |n: &str| apb_core::secret::ct_eq_str(n, &expected);
+            let label =
+                crate::gate::launch::billing_confirmation(ctx, &nonce_ok).map_err(|code| {
+                    refuse(
+                        code,
+                        (code == crate::gate::billing::BILLING_ASK).then_some(expected.as_str()),
+                    )
+                })?;
+            billing.confirmed.push(entry);
+            billing.confirmation = Some(label.to_string());
+        }
+    }
+    record.billing = Some(billing);
+    Ok(Some(LaunchGrant {
+        record,
+        permit_digest: None,
+        policy_state: None,
+        tolerant: false,
+        run_id: Some(run_id.to_string()),
+        pins: None,
+        nonce: Some(expected),
+        version: None,
+        choice: None,
+        challenge: None,
+    }))
+}
+
+/// [`settle_resume_launch`] for an authorized run: nothing to record,
+/// unless a billing pause holds it; then only a grant for this run whose
+/// record covers the paused entry lets it continue, and that record is
+/// journaled.
+fn settle_billing_resume(
+    run_dir: &Path,
+    run_id: &str,
+    grant: Option<&LaunchGrant>,
+) -> Result<Option<LaunchRecord>, String> {
+    let events = crate::event::read_all(run_dir).map_err(|e| e.to_string())?;
+    let Some((entry, _)) = crate::pause::billing::held_entry(&events) else {
+        return Ok(None);
+    };
+    match grant {
+        Some(g)
+            if g.run_id.as_deref() == Some(run_id)
+                && g.record
+                    .billing
+                    .as_ref()
+                    .is_some_and(|b| b.covers(&entry.agent, entry.basis)) =>
+        {
+            Ok(Some(g.record.clone()))
+        }
+        _ => Err(format!(
+            "{BILLING_PAUSED}: run `{run_id}` paused before agent work that needs a person's confirmation ({}); a person resumes it: `apb resume {run_id}` at a terminal or with --confirm-launch, MCP run_resume with confirm_launch after asking the person, or the dashboard",
+            entry.label()
+        )),
+    }
 }
 
 impl ResumeSubject {

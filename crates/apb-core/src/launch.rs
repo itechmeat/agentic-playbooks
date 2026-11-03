@@ -64,6 +64,13 @@ pub struct LaunchRecord {
     /// The settings that produced it.
     #[serde(default)]
     pub sources: Vec<String>,
+    /// What the run may spend on (`crate::billing`): the bases the settings
+    /// allowed and the agents and bases a person confirmed. Absent in a
+    /// record an older apb wrote; such a run is checked against the
+    /// settings in force at each spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub billing: Option<crate::billing::BillingRecord>,
 }
 
 /// The source of a policy nothing sets.

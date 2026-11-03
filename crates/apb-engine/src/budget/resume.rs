@@ -165,7 +165,7 @@ pub fn check_resume(
             ));
         }
     }
-    resume_events(&events, req, by).map(|_| ())
+    resume_events(&events, req, by, true).map(|_| ())
 }
 
 /// The budget events a resume by `by` journals right before its
@@ -176,6 +176,7 @@ pub(crate) fn resume_events(
     events: &[Event],
     req: Option<&BudgetResume>,
     by: PauseBy,
+    counts_subscription: bool,
 ) -> Result<Vec<EventPayload>, EngineError> {
     let req = req.filter(|r| !r.is_empty());
     let fold = BudgetFold::of(events);
@@ -216,6 +217,7 @@ pub(crate) fn resume_events(
             on_no_estimate,
             source: Some(BudgetSource::Resume),
             by: Some(by),
+            counts_subscription: Some(counts_subscription),
         });
     }
     if let Some(p) = waive {
@@ -274,6 +276,7 @@ mod tests {
             pause_open: false,
             pause_resolved: false,
             waiver: None,
+            counts_subscription: true,
         }
     }
 

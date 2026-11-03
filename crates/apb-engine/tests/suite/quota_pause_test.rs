@@ -251,6 +251,60 @@ fn a_429_with_retry_after_pauses_then_the_probe_and_resume_finish_the_node() {
 }
 
 #[cfg(unix)]
+/// The wake-up probe is agent work too. Here the run was admitted with
+/// billed work denied and its node runs on a subscription login under apb's
+/// minimal settings; the probe would load the user's own settings, whose
+/// key bills. It is not sent: the node's own spawn check is left to hold
+/// the run for a person.
+#[test]
+fn a_probe_the_runs_billing_does_not_cover_is_not_sent() {
+    use apb_engine::gate::launch::{Initiator, LaunchContext, LaunchKind};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quotabilled");
+    common::seed_main(root);
+    let prog = stub(root, &[QUOTA_429]);
+    let _env = Env::set(&prog);
+    let claude = tempfile::tempdir().unwrap();
+    fs::write(
+        claude.path().join(".credentials.json"),
+        r#"{"claudeAiOauth":{"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        claude.path().join("settings.json"),
+        r#"{"env":{"ANTHROPIC_API_KEY":"k"}}"#,
+    )
+    .unwrap();
+    let _claude = common::EnvVar::set("CLAUDE_CONFIG_DIR", claude.path());
+    let cfg = std::env::var("APB_CONFIG_DIR").unwrap();
+    fs::write(
+        Path::new(&cfg).join("policy.yaml"),
+        "billing:\n  billed: deny\n",
+    )
+    .unwrap();
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: "quotabilled".into(),
+        version: None,
+    };
+    let ctx = LaunchContext::new(Initiator::AgentMcp { client: None }, LaunchKind::Start);
+    let permit = apb_engine::gate::check_run(root, &wref, true, false, &ctx).unwrap();
+    let opts = RunOptions {
+        launch: permit.launch,
+        ..RunOptions::default()
+    };
+    let res = run(root, "quotabilled", None, opts).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let (seq, ..) = last_pause(&events(root, &res.run_id));
+    let probe = probe_before_wake(root, &res.run_id, seq).unwrap();
+    assert!(
+        matches!(&probe, WakeProbe::Skipped(why) if why.starts_with("billing (claude: billed)")),
+        "{probe:?}"
+    );
+    assert_eq!(calls(root), 1, "the attempt only, no probe");
+}
+
 #[test]
 fn without_retry_after_the_infra_retries_come_first_and_until_follows_the_schedule() {
     let dir = tempfile::tempdir().unwrap();

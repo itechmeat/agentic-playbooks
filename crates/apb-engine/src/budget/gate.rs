@@ -160,6 +160,7 @@ mod tests {
             pause_open: false,
             pause_resolved: false,
             waiver: None,
+            counts_subscription: true,
         }
     }
 

@@ -56,6 +56,10 @@ Never waive a check the project requires.
   it and give it the feature obligations.
 - Details: [references/change-kinds.md](references/change-kinds.md).
 
+Before the first commit, read the repository's commit rules (sign-off,
+commit message format, signed commits) and follow them in every commit of
+the delivery.
+
 ## 4. Decompose a large change
 
 - After design, check the decomposition triggers: more than about five card
@@ -68,13 +72,21 @@ Never waive a check the project requires.
   self-check repair round. The full review panel then reviews the
   integrated result with at most two repair rounds. The final check runs
   against the whole original card.
+- After the second repair round, later checks look only at the delta of
+  each fix. A remaining finding outside the agreed boundary goes to the
+  issuer as a scope decision, recorded in the card, not as another round.
 - When the project uses a work tracker (issues, a graph tracker or
   similar), the subtasks and their status go there. Otherwise they go into
   the task record.
 - A pull request stays within the size an external reviewer the project
   uses can read (for example a review bot's file limit). A delivery larger
   than that goes out as several pull requests in dependency order, each
-  green on its own.
+  green on its own. Count the files after the first shared subtask, not at
+  the end. The size limit never justifies dropping a test: split instead.
+- A protective feature (disclosure, authorization, isolation) states its
+  threat model and protected boundary in the card before it is built.
+  Reviewers judge findings against that boundary and mark the ones outside
+  it as such.
 - Details and where the breakdown goes:
   [references/decomposition.md](references/decomposition.md).
 
@@ -148,6 +160,10 @@ Never waive a check the project requires.
   <id>` or `run_status`), never from a guess. Never write a key, a token or
   any other secret value; name the class only. A role with no reported
   figure says "no figure" and its login class.
+- Never start a role on billed work, or on work whose basis is unknown,
+  without the person's explicit command for this delivery. When apb
+  refuses or pauses for billed use, ask; do not switch a role to another
+  login to get around it.
 
 ## Measurements per change
 

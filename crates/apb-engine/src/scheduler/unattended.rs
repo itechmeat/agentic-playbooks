@@ -19,6 +19,10 @@
 //!   unattended`;
 //! - a budget refusal fails `budget_exhausted` instead of pausing (the
 //!   gate records it, [`super::budget_gate::DriveGate::exhausted`]);
+//! - a billing hold (work billed or of unknown basis the run holds no
+//!   confirmation for, at an agent spawn or the supervisor's) fails
+//!   `hitl_required` naming the node it held, instead of the billing pause
+//!   only a person continues ([`billing_hold`], [`supervisor_held`]);
 //! - a deferred retry never releases the driver
 //!   ([`super::deferred::may_release`]);
 //! - a sub-playbook child inherits the mode (prepare reads the parent's
@@ -31,7 +35,8 @@ use apb_core::schema::{NodeKind, Playbook};
 
 use super::journal::{node_finished_count, node_started_count};
 use crate::error::EngineError;
-use crate::event::{EventLog, EventPayload, read_all};
+use crate::event::{Event, EventLog, EventPayload, read_all};
+use crate::pause::{PauseBy, PauseCause, PauseRequest};
 use crate::run_config::{BUDGET_EXHAUSTED, HITL_REQUIRED, RunConfig};
 use crate::state::NodeStatus;
 
@@ -145,4 +150,98 @@ pub(crate) fn child_stop(root: &Path, run_dir: &Path, node: &str) -> Option<Stri
             let rest = reason.strip_prefix(code)?.strip_prefix(": ")?;
             Some(format!("{code}: via child {child}: {rest}"))
         })
+}
+
+/// The run error reason of an unattended run whose `pause` is a billing
+/// pause at `node` (the billed or unknown-basis work it held); `None` for
+/// any other pause, which applies as before.
+pub(crate) fn billing_hold(pause: &PauseRequest, node: &str) -> Option<String> {
+    let reason = pause.reason.as_deref()?;
+    (crate::pause::cause_of(reason, pause.by.unwrap_or(PauseBy::Operator))
+        == Some(PauseCause::Billing))
+    .then(|| format!("{}: {reason}", hitl("billing hold", node)))
+}
+
+/// The engine id an unattended run fails at when the run's billing held
+/// its supervisor (no node holds it).
+pub(crate) const SUPERVISOR_NODE: &str = "@supervisor";
+
+/// The run error reason of an unattended run whose supervisor the run's
+/// billing held since the drive's latest start or resume; `None` when it
+/// was not held.
+pub(crate) fn supervisor_held(events: &[Event]) -> Option<String> {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| {
+            !matches!(
+                e.payload,
+                EventPayload::RunStarted { .. } | EventPayload::RunResumed { .. }
+            )
+        })
+        .find_map(|e| match &e.payload {
+            EventPayload::SupervisorAction { action, detail, .. }
+                if action == super::supervisor::SUPERVISOR_BILLING_HOLD =>
+            {
+                Some(format!(
+                    "{}: {detail}",
+                    hitl("billing hold of the supervisor", SUPERVISOR_NODE)
+                ))
+            }
+            _ => None,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_billing_pause_is_a_billing_hold() {
+        let billing = crate::pause::billing::billing_pause(&apb_core::billing::BillingEntry {
+            agent: "codex".into(),
+            basis: apb_core::agents::CostBasis::Billed,
+        });
+        assert_eq!(
+            billing_hold(&billing, "work").as_deref(),
+            Some(
+                "hitl_required: billing hold `work` has no unattended outcome: billing (codex: billed)"
+            )
+        );
+        let quota = crate::pause::quota::quota_pause("codex", "m", 1);
+        assert_eq!(billing_hold(&quota, "work"), None);
+        let operator = PauseRequest {
+            by: Some(PauseBy::Operator),
+            ..billing.clone()
+        };
+        assert_eq!(billing_hold(&operator, "work"), None);
+    }
+
+    #[test]
+    fn a_held_supervisor_counts_since_the_latest_start_or_resume() {
+        let ev = |seq, payload| Event {
+            seq,
+            ts: 1,
+            payload,
+        };
+        let hold = || EventPayload::SupervisorAction {
+            action: super::super::supervisor::SUPERVISOR_BILLING_HOLD.into(),
+            node: None,
+            detail: "claude: billed".into(),
+        };
+        let started = || {
+            serde_json::from_value::<EventPayload>(serde_json::json!({
+                "type": "run_started", "playbook": "p", "version": "1.0.0"
+            }))
+            .unwrap()
+        };
+        let held = [ev(0, started()), ev(1, hold())];
+        assert_eq!(
+            supervisor_held(&held).as_deref(),
+            Some(
+                "hitl_required: billing hold of the supervisor `@supervisor` has no unattended outcome: claude: billed"
+            )
+        );
+        assert_eq!(supervisor_held(&[ev(0, hold()), ev(1, started())]), None);
+    }
 }

@@ -713,34 +713,78 @@ fn a_shown_estimate_is_recomputed_for_the_bindings_of_run_overrides() {
     assert_eq!(snap.unestimated, vec!["a".to_string()]);
 }
 
-/// The money limit counts only money: a cost printed for a subscription
-/// login (a price nobody is billed) never spends it, while the same figure
-/// on an api key does. The history runs and the gated run share the login.
+/// The dollar limit counts every reported cost, whatever its basis: a
+/// subscription can bill extra usage under the same login, so a cost
+/// printed for a subscription login spends it like the same figure on an
+/// api key. Only a machine whose `policy.yaml` says the plan never bills
+/// extra (`billing.budget_counts_subscription: false`) leaves it out, and a
+/// project cannot say so for the machine.
 #[test]
-fn only_a_billed_cost_spends_the_money_budget() {
-    for (login, outcome) in [
-        ("CLAUDE_CODE_OAUTH_TOKEN", RunStatus::Succeeded),
-        ("ANTHROPIC_API_KEY", RunStatus::Paused),
+fn the_money_budget_counts_a_subscription_unless_the_machine_says_it_never_bills() {
+    for (login, machine, project_file, outcome, spent) in [
+        (
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            None,
+            None,
+            RunStatus::Paused,
+            0.02,
+        ),
+        ("ANTHROPIC_API_KEY", None, None, RunStatus::Paused, 0.02),
+        (
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            Some(false),
+            None,
+            RunStatus::Succeeded,
+            0.0,
+        ),
+        (
+            "ANTHROPIC_API_KEY",
+            Some(false),
+            None,
+            RunStatus::Paused,
+            0.02,
+        ),
+        (
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            None,
+            Some(false),
+            RunStatus::Paused,
+            0.02,
+        ),
     ] {
         let mut p = project(LINE);
+        let config = tempfile::tempdir().unwrap();
+        if let Some(counts) = machine {
+            fs::write(
+                config.path().join("policy.yaml"),
+                format!("billing:\n  budget_counts_subscription: {counts}\n"),
+            )
+            .unwrap();
+        }
+        if let Some(counts) = project_file {
+            fs::write(
+                p.root().join(".apb/policy.yaml"),
+                format!("billing:\n  budget_counts_subscription: {counts}\n"),
+            )
+            .unwrap();
+        }
+        p._env
+            .push(common::EnvVar::set("APB_CONFIG_DIR", config.path()));
+        apb_core::run_origin::ensure_key().unwrap();
         p._env.push(common::EnvVar::set(login, "set-by-test"));
         p.history(3);
         let res = p.run(Some(BudgetRequest {
             usd: Some(0.025),
             ..BudgetRequest::default()
         }));
-        assert_eq!(res.outcome, outcome, "{login}");
+        let case = format!("{login} machine {machine:?} project {project_file:?}");
+        assert_eq!(res.outcome, outcome, "{case}");
         let dir = p.run_dir(&res.run_id);
         let view = RunView::load(&dir, &res.run_id).unwrap();
         let usd = view.budget(&dir).and_then(|b| b.usd).expect("a usd status");
-        let expected_spent = if outcome == RunStatus::Succeeded {
-            0.0
-        } else {
-            0.02
-        };
         assert!(
-            (usd.spent - expected_spent).abs() < 1e-9,
-            "{login}: spent {}",
+            (usd.spent - spent).abs() < 1e-9,
+            "{case}: spent {}",
             usd.spent
         );
     }

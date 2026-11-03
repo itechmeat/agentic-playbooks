@@ -13,6 +13,7 @@ use std::process::ExitCode;
 
 use apb_core::launch::LaunchPolicy;
 use apb_core::launch::floor::{self, FloorKey};
+use apb_engine::gate::billing::BILLING_ASK;
 use apb_engine::gate::launch::{
     ASK_POLICY, DENY_POLICY, Initiator, LaunchConfirmation, LaunchContext, LaunchKind,
 };
@@ -86,7 +87,10 @@ pub(crate) fn with_prompt<T>(
 /// terminal, a run step, another refusal) or the person said no.
 pub(crate) fn prompt_retry(ctx: &LaunchContext, refusal: &Value) -> Option<LaunchContext> {
     let askable = matches!(ctx.initiator, Initiator::CliUnattested { terminal: true })
-        && matches!(refusal["policy"].as_str(), Some(ASK_POLICY | DENY_POLICY));
+        && matches!(
+            refusal["policy"].as_str(),
+            Some(ASK_POLICY | DENY_POLICY | BILLING_ASK)
+        );
     if !askable || ask(refusal) != Some(true) {
         return None;
     }
@@ -104,16 +108,29 @@ pub(crate) fn prompt_retry(ctx: &LaunchContext, refusal: &Value) -> Option<Launc
 fn ask(refusal: &Value) -> Option<bool> {
     let id = refusal["id"].as_str().unwrap_or_default();
     let policy = refusal["launch_policy"].as_str().unwrap_or_default();
-    let mut lines = vec![format!(
-        "playbook `{id}` is `{policy}` for agents; you are launching it from this terminal:"
-    )];
-    if let Some(sources) = refusal["launch_sources"].as_array() {
-        lines.extend(
-            sources
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|s| format!("  - {s}")),
+    let mut lines = Vec::new();
+    if refusal["policy"].as_str() != Some(BILLING_ASK) {
+        lines.push(format!(
+            "playbook `{id}` is `{policy}` for agents; you are launching it from this terminal:"
+        ));
+        if let Some(sources) = refusal["launch_sources"].as_array() {
+            lines.extend(
+                sources
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| format!("  - {s}")),
+            );
+        }
+    }
+    let held: Vec<&str> = refusal["billing"]["held"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !held.is_empty() {
+        lines.push(
+            "this run would start agent work that is billed, or whose basis is not known:".into(),
         );
+        lines.extend(held.iter().map(|h| format!("  - {h}")));
     }
     crate::consent::ask_terminal(&lines, "Launch it?")
 }

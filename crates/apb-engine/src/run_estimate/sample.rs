@@ -18,15 +18,17 @@ const CHILD_DEPTH: usize = apb_core::schema::MAX_SUBPLAYBOOK_DEPTH;
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AttemptSpend {
     pub tokens: Option<u64>,
-    /// The money the attempt cost, what a run's budget counts as spent: the
-    /// reported figure unless it is a subscription equivalent, which costs
-    /// no money (`0`, a known amount). A figure of unknown basis counts as
-    /// money, the conservative reading
-    /// (`apb_core::agents::CostBasis::counts_as_money`).
+    /// The money the attempt cost: the reported figure unless it is a
+    /// subscription equivalent, which costs no money (`0`, a known amount).
+    /// A figure of unknown basis counts as money, the conservative reading
+    /// (`apb_core::agents::CostBasis::counts_as_money`). A run budget counts
+    /// it only under `billing.budget_counts_subscription: false`.
     pub cost: Option<f64>,
     /// The reported figure whatever its basis: what the work costs when it
-    /// is billed. Estimates predict from it, so history recorded on a
-    /// subscription never lets the same work through as free on a key.
+    /// is billed, and what a run budget counts by default (a subscription
+    /// can bill extra usage under the same login). Estimates predict from
+    /// it, so history recorded on a subscription never lets the same work
+    /// through as free on a key.
     pub price: Option<f64>,
 }
 

@@ -206,7 +206,12 @@ impl DriveGate {
         let Some(fold) = BudgetFold::of(events) else {
             return Ok(Admission::Go);
         };
-        let spent = Spent::of(run_dir, events, self.estimate.as_ref());
+        let spent = Spent::of(
+            run_dir,
+            events,
+            self.estimate.as_ref(),
+            fold.counts_subscription,
+        );
         let verdict = decide(&GateInput {
             fold: &fold,
             spent: &spent,
@@ -324,7 +329,8 @@ pub(crate) struct StartRecord<'a> {
 /// effort: a failed write never fails the start, and without one the gate
 /// treats every node as unestimated.
 pub(crate) fn record_start(log: &mut EventLog, r: &StartRecord<'_>) -> Result<(), EngineError> {
-    let eff = crate::budget::record_start(log, r.playbook.budget.as_ref(), r.budget)?;
+    let counts = crate::pause::billing::settings_of(r.run_dir).budget_counts_subscription;
+    let eff = crate::budget::record_start(log, r.playbook.budget.as_ref(), r.budget, counts)?;
     if eff.is_none() && r.shown.is_none() {
         return Ok(());
     }

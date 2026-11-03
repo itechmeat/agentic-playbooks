@@ -2633,6 +2633,8 @@ fn the_run_outcome_fields_are_documented_where_they_are_returned() {
     }
 }
 
+// Billed use on the start tools.
+mod billing;
 // The run budget on the playbook tools (the pre-start decision, the start
 // answer, the plan and playbook_get estimates).
 mod budget;

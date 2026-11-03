@@ -22,6 +22,20 @@ fn seed_budgeted(root: &Path) {
     )
     .unwrap();
     fs::write(pdir.join("SOUL.md"), "").unwrap();
+    // These tests are about the budget, not billed use: the machine's
+    // settings allow every basis, so the developer's own login (or a CI
+    // runner's lack of one) never decides the answer.
+    assert!(
+        std::env::var_os("APB_CONFIG_DIR").is_some(),
+        "hold a ConfigDirGuard: never write the real config dir"
+    );
+    let policy = apb_core::policy_file::machine_path().expect("a config dir");
+    fs::create_dir_all(policy.parent().unwrap()).unwrap();
+    fs::write(
+        policy,
+        "billing:\n  billed: allow\n  unknown_basis: allow\n",
+    )
+    .unwrap();
 }
 
 fn start_args(budget: Option<BudgetArg>) -> PlaybookRunArgs {
@@ -61,7 +75,7 @@ async fn playbook_run_with_ask_and_unestimated_nodes_returns_budget_needs_decisi
     seed_budgeted(proj.path());
     let server = WfMcp::new(proj.path().to_path_buf());
     let out = start(&server, None).await;
-    assert_eq!(out["error"], "budget_needs_decision");
+    assert_eq!(out["error"], "budget_needs_decision", "{out:#}");
     assert_eq!(out["unestimated"], json!(["a"]));
     assert_eq!(out["options"], json!(["pause", "continue"]));
     assert_eq!(out["estimate"]["comparable"]["runs"], 0);
