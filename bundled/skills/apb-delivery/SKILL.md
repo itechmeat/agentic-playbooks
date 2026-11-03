@@ -2,7 +2,7 @@
 name: apb-delivery
 description: Deliver an authorized feature, bug fix or refactoring from the original request to a reviewed, checked and reported change. Use for product code changes. Inside an apb playbook, run only the stage the node names. Research and design-only tasks stay local and unpublished.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Deliver a change
@@ -141,10 +141,35 @@ the delivery.
   or an invented approval.
 - Other external effects keep their own authority.
 
+## 7a. Clean up
+
+Before you report the delivery done, and again after a merge:
+
+- After the merge, remove the task's worktrees, delete its merged branches
+  and prune the stale worktree records (in git: `git worktree remove`,
+  `git branch -d`, `git worktree prune`), with the build output directories
+  those worktrees used.
+- Delete the temporary and scratch files the task created: temporary home
+  directories, logs, downloaded archives, built binaries, browser profiles.
+  What must survive goes into a named cache directory, not a temporary one.
+- Create temporary data under one parent directory named for the task, never
+  in an anonymous temporary directory, and remove it when the work ends,
+  also on failure (for example a shell `trap` on exit). A test that creates
+  temporary data removes it in its teardown.
+- Delete only what this task created. Never delete by a wide pattern: other
+  sessions may work on the same machine at the same time.
+- Stop the background processes, servers and browser sessions the task
+  started, and only those.
+- For a build cache, prune old artifacts instead of a full clean (a build
+  cache pruner such as cargo sweep for Rust projects).
+- A worktree or branch a pull request still needs stays until the merge.
+
 ## 8. Close and report
 
 - Compare every expected outcome with the original request: delivered,
   partial or not delivered, with evidence.
+- Say what the cleanup removed, what it kept and where, and what is left for
+  after the merge.
 - Put assumptions first. Add stage conformance (done, not applicable, or
   skipped with a reason), findings and their dispositions, the real
   integration state and the next action.

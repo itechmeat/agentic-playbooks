@@ -4,8 +4,11 @@
 //!
 //! Comparable means the same playbook id and version and the same
 //! execution mode (`cli` or `host`); a node's spend samples come only from
-//! runs where that node was bound to the same profile digest (its
-//! `profile.yaml` plus SOUL, so its model and run overrides). Time comes
+//! runs where that node was bound to the same key: the profile digest (its
+//! `profile.yaml` plus SOUL), the bundle digest (plus its skills) and the
+//! executor digest (its chain and tiers, so its models, and whether a run
+//! override replaced it). A run that bound it otherwise is counted under the
+//! outermost part it differed in. Time comes
 //! from succeeded runs only, spend from every finished visit (a failed
 //! visit costs money too). A visit enters the token samples only when every
 //! attempt in it reported usage, and the cost samples only when every
@@ -28,12 +31,15 @@ mod types;
 
 use std::path::{Path, PathBuf};
 
-use apb_core::profile_store::{self, PlaybookOrigin};
+use apb_core::profile_store::PlaybookOrigin;
 use apb_core::registry::Registry;
 use apb_core::schema::Playbook;
 use apb_core::store::ResolvedPlaybook;
 
+use apb_core::overrides::RunOverrides;
+
 use crate::error::EngineError;
+use crate::execution_identity::digest::{NodeExecKey, expected_exec_key};
 use crate::manifest::RunExecutionManifest;
 use sample::RunSample;
 pub use types::*;
@@ -54,11 +60,18 @@ impl EstimateTarget {
                 .unwrap_or_default()
                 .as_str()
                 .to_string(),
-            node_profiles: manifest
+            node_keys: manifest
                 .map(|m| {
                     m.node_digests()
                         .into_iter()
-                        .map(|(n, d)| (n, d.profile))
+                        .map(|(n, d)| {
+                            let key = NodeExecKey {
+                                profile: d.profile,
+                                bundle: d.bundle,
+                                executor: d.executor,
+                            };
+                            (n, key)
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -68,7 +81,7 @@ impl EstimateTarget {
 
     /// The target before a start: playbook `id` (`version`, else current)
     /// of the project at `root`, its nodes' profiles resolved the way run
-    /// start resolves them. Run overrides are not applied.
+    /// start resolves them, without run overrides.
     pub fn resolve(
         root: &Path,
         id: &str,
@@ -82,12 +95,17 @@ impl EstimateTarget {
             id,
             version,
             execution,
+            &RunOverrides::default(),
         )
     }
 
     /// The target before a start of a resolved playbook (a project's or a
-    /// global one, run in its execution root).
-    pub fn for_resolved(r: &ResolvedPlaybook, execution: &str) -> Result<Self, EngineError> {
+    /// global one, run in its execution root) with the run's `overrides`.
+    pub fn for_resolved(
+        r: &ResolvedPlaybook,
+        execution: &str,
+        overrides: &RunOverrides,
+    ) -> Result<Self, EngineError> {
         Self::resolve_from(
             &r.definition_parent,
             &r.execution_root,
@@ -95,11 +113,14 @@ impl EstimateTarget {
             &r.id,
             Some(&r.version),
             execution,
+            overrides,
         )
     }
 
     /// [`EstimateTarget::resolve`] for a definition read from `def_parent`
-    /// (a project's `.apb` or the global store) and run in `exec_root`.
+    /// (a project's `.apb` or the global store) and run in `exec_root`,
+    /// each node keyed as a start with `overrides` binds it
+    /// ([`expected_exec_key`], the start's own resolver).
     pub fn resolve_from(
         def_parent: &Path,
         exec_root: &Path,
@@ -107,28 +128,18 @@ impl EstimateTarget {
         id: &str,
         version: Option<&str>,
         execution: &str,
+        overrides: &RunOverrides,
     ) -> Result<Self, EngineError> {
         let loaded = Registry::open_dir(def_parent)?.load(id, version)?;
         let playbook = loaded.playbook;
         // A profile that does not resolve is an error, not a node with no
         // history: the start would fail on it too.
-        let node_profiles = playbook
-            .nodes
-            .iter()
-            .filter_map(|n| Some((n, n.kind.effective_profile_ref(&playbook.defaults)?)))
-            .map(|(n, r)| {
-                profile_store::resolve_profile(exec_root, origin, &r)
-                    .map(|p| (n.id.clone(), p.profile_digest))
-                    .map_err(|e| {
-                        EngineError::Invalid(format!("the profile of node `{}`: {e}", n.id))
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+        let node_keys = expected_exec_key(exec_root, origin, &playbook, overrides)?;
         Ok(EstimateTarget {
             version: loaded.version,
             playbook,
             execution: execution.to_string(),
-            node_profiles,
+            node_keys,
             exclude_run: None,
         })
     }
@@ -166,10 +177,11 @@ pub fn estimate(roots: &[PathBuf], target: &EstimateTarget) -> RunEstimate {
         .filter(|n| n.kind.budget_gated())
     {
         let (runs, mismatch) = compose::matching(target, &node.id, &pairs);
-        if mismatch > 0 {
-            comparable
-                .profile_mismatch
-                .insert(node.id.clone(), mismatch);
+        for part in mismatch {
+            *comparable
+                .mismatch_of(part)
+                .entry(node.id.clone())
+                .or_default() += 1;
         }
         nodes.push(compose::node_estimate(node, &runs));
     }
@@ -314,15 +326,18 @@ pub fn render_lines(e: &RunEstimate) -> Vec<String> {
         let parts: Vec<String> = e
             .unestimated
             .iter()
-            .map(|n| {
-                if c.profile_mismatch.contains_key(n) {
-                    format!("{n} (no history with this profile)")
-                } else {
-                    format!("{n} (no history)")
-                }
+            .map(|n| match c.mismatch_part(n) {
+                Some(part) => format!("{n} (no history with this {})", part.word()),
+                None => format!("{n} (no history)"),
             })
             .collect();
         out.push(format!("  not estimated: {}", parts.join(", ")));
+    }
+    if c.key_version < ESTIMATE_KEY_VERSION {
+        out.push(
+            "  note: matched by the profile-only key (written before executors were compared)"
+                .to_string(),
+        );
     }
     if let Some(note) = &e.note {
         out.push(format!("  note: {note}"));

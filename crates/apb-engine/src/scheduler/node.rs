@@ -10,6 +10,7 @@ mod step_env;
 
 use super::continuation::{Continuation, continuation_prompt};
 use crate::adapter::AgentFailure;
+use crate::execution_identity::CloseReason;
 use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
 
 /// Renders a node's prompt template with the full standard context (compaction
@@ -1415,8 +1416,36 @@ fn execute_node_kind(
             // later one names, on its host task, what closed the step before.
             let mut walked: u32 = 0;
             // How the last attempt closed, carried in memory to the first
-            // task of the next chain step (`fallback_of`).
+            // attempt of the next chain step: its host task's `fallback_of`
+            // and its `exec.entered`. Rewritten at the attempt's final
+            // verdict, so a check or a protected path names the close.
             let mut last_close: Option<crate::host_task::FallbackOf> = None;
+            // The attempt id and the chain step of that closing attempt.
+            let mut last_close_seq: u64 = 0;
+            let mut last_step: u32 = 0;
+            // The hint of the step last attempted, a host transition's model.
+            let mut last_hint: Option<String> = None;
+            // What stops an attempt of this execution: `cancel` is the
+            // node's own kill flag, which an abort and a `--now` pause both
+            // latch; the pause's mark tells them apart.
+            let stop_of = |interrupt: Option<&AtomicBool>| {
+                super::stop_context::StopContext {
+                    cancel,
+                    kill: Some(cancel),
+                    interrupt,
+                }
+                .close_reason()
+            };
+            let executed_by = |step: &Step| {
+                if scripted {
+                    crate::scenario::session::SCENARIO_AGENT
+                } else if step.host {
+                    crate::execution_identity::EXECUTED_BY_HOST
+                } else {
+                    crate::execution_identity::EXECUTED_BY_CLI
+                }
+                .to_string()
+            };
             for (idx, step) in steps
                 .iter()
                 .enumerate()
@@ -1425,6 +1454,20 @@ fn execute_node_kind(
             {
                 // A delayed retry re-enters its own step: no transition.
                 let entering = entry_step == Some(idx) && walked == 0;
+                // A pause or an abort that closed the last attempt ends the
+                // walk: no transition, no next step (design 2.3 item 2).
+                let stopped = super::stop_context::StopContext {
+                    cancel,
+                    kill: Some(cancel),
+                    interrupt: None,
+                };
+                if walked > 0 && stopped.ends_chain() {
+                    return Ok(AttemptOutcome::Finished {
+                        status: NodeStatus::Cancelled,
+                        output: "cancelled".to_string(),
+                        events,
+                    });
+                }
                 // Host fallback (0.23.0): taken only when every CLI attempt of
                 // this execution failed before any model turn. It is not a
                 // chain fallback, so it journals `execution_fallback` instead
@@ -1451,28 +1494,41 @@ fn execute_node_kind(
                     {
                         continue;
                     }
-                    events.push(EventPayload::FallbackTriggered {
-                        node: node_id.into(),
-                        from: last_tried
+                    // Both models, so a claude -> claude fallback that only
+                    // changed the model is finally legible in the journal
+                    // (issue #74 finding 2). A host step's models are the
+                    // hints the profile declares, never a model that ran.
+                    let models = if step.host {
+                        (last_hint.clone(), step.model_hint.clone())
+                    } else {
+                        (
+                            Some(
+                                last_tried
+                                    .as_ref()
+                                    .map(|(_, model)| model.clone())
+                                    .unwrap_or_else(|| steps[idx - 1].model.clone()),
+                            ),
+                            Some(step.model.clone()),
+                        )
+                    };
+                    events.push(EventPayload::fallback_triggered(
+                        node_id,
+                        last_tried
                             .as_ref()
                             .map(|(agent, _)| agent.clone())
                             .unwrap_or_else(|| steps[idx - 1].agent.clone()),
-                        to: step.agent.clone(),
-                        profile: profile_key.clone(),
-                        // Both models, so a claude -> claude fallback that only
-                        // changed the model is finally legible in the journal
-                        // (issue #74 finding 2).
-                        from_model: Some(
-                            last_tried
-                                .as_ref()
-                                .map(|(_, model)| model.clone())
-                                .unwrap_or_else(|| steps[idx - 1].model.clone()),
-                        ),
-                        to_model: Some(step.model.clone()),
-                        reason: (idx - 1 < cascade).then(|| "routing".to_string()),
-                    });
+                        step.agent.clone(),
+                        profile_key.clone(),
+                        models,
+                        Some(transition_reason(
+                            (last_step as usize) < cascade,
+                            last_close.as_ref(),
+                        )),
+                        Some(executed_by(step)),
+                    ));
                 }
                 last_tried = Some((step.agent.clone(), step.model.clone()));
+                last_hint = step.model_hint.clone();
                 walked += 1;
                 let mut step_attempts: u32 = 0;
                 // The profile path builds the adapter from the fixed invocation
@@ -1894,18 +1950,24 @@ fn execute_node_kind(
                     let attempt_model = (!scripted).then(|| step.model.clone());
                     let attempt_transcript = Some(super::transcript::relative(&key.stem(attempt)));
                     let attempt_dir = Some(attempt_workdir.display().to_string());
+                    // The first attempt of a step other than the first one
+                    // walked names the close that moved the walk here.
                     let attempt_exec = Some(crate::execution_identity::ExecStep {
                         binding: binding_digest.clone(),
                         step: idx as u32,
                         source: step.exec_source.clone(),
-                        executed_by: if scripted {
-                            crate::scenario::session::SCENARIO_AGENT
-                        } else if step.host {
-                            crate::execution_identity::EXECUTED_BY_HOST
-                        } else {
-                            crate::execution_identity::EXECUTED_BY_CLI
-                        }
-                        .to_string(),
+                        executed_by: executed_by(step),
+                        entered: (walked > 1 && step_attempts == 1)
+                            .then_some(last_close.as_ref())
+                            .flatten()
+                            .map(|close| crate::execution_identity::StepEntry {
+                                from_step: last_step,
+                                closed_attempt: last_close_seq,
+                                reason: transition_reason(
+                                    (last_step as usize) < cascade,
+                                    Some(close),
+                                ),
+                            }),
                     });
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
@@ -2119,19 +2181,27 @@ fn execute_node_kind(
                             }
                             Ok(_) => false,
                         };
-                    last_close = Some(crate::host_task::FallbackOf {
-                        attempt,
-                        reason: crate::host_task::hint::close_reason(
-                            crate::host_task::hint::AttemptEnd {
-                                host_closed: host_closed.get(),
-                                replied: outcome.is_ok(),
-                                timed_out: matches!(&outcome, Err(f) if f.class == ErrorClass::Timeout),
-                                interrupted: interrupt.load(Ordering::Relaxed),
-                                unstartable,
-                            },
-                        )
-                        .to_string(),
-                    });
+                    // How the attempt ended as the process exited; the
+                    // verdict below adds what it establishes (a rejecting
+                    // check, a protected path, the failure classification)
+                    // and rewrites the close before the next step reads it.
+                    let mut end = crate::host_task::hint::AttemptEnd {
+                        host_closed: host_closed.get(),
+                        replied: outcome.is_ok(),
+                        timed_out: matches!(&outcome, Err(f) if f.class == ErrorClass::Timeout),
+                        interrupted: interrupt.load(Ordering::Relaxed),
+                        unstartable,
+                        stop: stop_of(Some(&interrupt)),
+                        ..Default::default()
+                    };
+                    let close_now = move |end: &crate::host_task::hint::AttemptEnd<'_>| {
+                        Some(crate::host_task::FallbackOf {
+                            attempt,
+                            reason: crate::host_task::hint::close_reason(end),
+                        })
+                    };
+                    last_close = close_now(&end);
+                    last_step = idx as u32;
                     if !step.host {
                         cli_attempted = true;
                         if unstartable {
@@ -2395,6 +2465,8 @@ fn execute_node_kind(
                             attempt_read_only.as_ref(),
                         )?;
                     }
+                    // The attempt id the next step's `exec.entered` names.
+                    last_close_seq = started_seq.get();
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
                     // The attempt's verdict, read ONCE for both branches (spec
                     // 2026-08-05 section 2.1). The status file is the agent's
@@ -2477,6 +2549,8 @@ fn execute_node_kind(
                                 }
                             }
                             if require_verdict && verdict.is_none() {
+                                end.check_rejected = true;
+                                last_close = close_now(&end);
                                 // Required verdict (spec 2026-08-05 section 2.2,
                                 // issue #71 item 1): the process ended normally but
                                 // recorded NO verdict, so whatever it printed is a
@@ -2548,6 +2622,9 @@ fn execute_node_kind(
                                     // The raw agent text is preserved for the
                                     // downstream `nodes.<id>.rejected_output`.
                                     Some(Rejection { reason, fatal }) => {
+                                        end.protected = protect_violation.is_some();
+                                        end.check_rejected = true;
+                                        last_close = close_now(&end);
                                         journal.append(EventPayload::AttemptFinished {
                                             item: None,
                                             output_truncated: capture.truncated.clone(),
@@ -2599,6 +2676,8 @@ fn execute_node_kind(
                                         // 14.1): a rejection is an attempt
                                         // failure, like a success_check one.
                                         if let Some(reason) = check.reject {
+                                            end.check_rejected = true;
+                                            last_close = close_now(&end);
                                             journal.append(EventPayload::AttemptFinished {
                                                 item: None,
                                                 output_truncated: capture.truncated.clone(),
@@ -2658,6 +2737,8 @@ fn execute_node_kind(
                                     }
                                 }
                             } else {
+                                end.agent_reported_failure = true;
+                                last_close = close_now(&end);
                                 journal.append(EventPayload::AttemptFinished {
                                     item: None,
                                     output_truncated: capture.truncated.clone(),
@@ -2817,6 +2898,8 @@ fn execute_node_kind(
                                             let duration_ms = duration_ms
                                                 .map(|d| d + check.elapsed.as_millis() as u64);
                                             if let Some(reason) = check.reject {
+                                                end.check_rejected = true;
+                                                last_close = close_now(&end);
                                                 // Completion enforce (issue #165
                                                 // Part 14.1), as on the Ok branch.
                                                 journal.append(EventPayload::AttemptFinished {
@@ -2862,6 +2945,9 @@ fn execute_node_kind(
                                             }
                                         }
                                         Some(Rejection { reason, fatal }) => {
+                                            end.protected = protect_violation.is_some();
+                                            end.check_rejected = true;
+                                            last_close = close_now(&end);
                                             journal.append(EventPayload::AttemptFinished {
                                                 item: None,
                                                 output_truncated: capture.truncated.clone(),
@@ -2895,6 +2981,8 @@ fn execute_node_kind(
                                 // outputs become the attempt output instead of the
                                 // raw CLI error text.
                                 Some(sfr) => {
+                                    end.agent_reported_failure = true;
+                                    last_close = close_now(&end);
                                     journal.append(EventPayload::AttemptFinished {
                                         item: None,
                                         output_truncated: capture.truncated.clone(),
@@ -2936,6 +3024,8 @@ fn execute_node_kind(
                                     if step.host && failure_kind == Some(FailureKind::Quota) {
                                         failure_kind = Some(FailureKind::Transient);
                                     }
+                                    end.failure_kind = failure_kind;
+                                    last_close = close_now(&end);
                                     if failure_kind == Some(FailureKind::Quota) && !session_lost {
                                         let fallback_left = (idx + 1..step_count).any(|j| {
                                             let s = &steps[j];
@@ -3353,6 +3443,17 @@ fn execute_node_kind(
     }
 }
 
+/// The reason a chain transition journals: `routing` when a tier-routing
+/// cascade moved the walk up, else how the closing attempt ended; `failed`
+/// when the drive established nothing more.
+fn transition_reason(routing: bool, close: Option<&crate::host_task::FallbackOf>) -> CloseReason {
+    if routing {
+        CloseReason::Routing
+    } else {
+        close.map_or(CloseReason::Failed, |c| c.reason.clone())
+    }
+}
+
 /// The defensive refusal of a kind the drive loop executes itself.
 fn drive_handled_refusal(node_id: &str, kind: &NodeKind) -> EngineError {
     EngineError::Invalid(format!(
@@ -3484,7 +3585,43 @@ pub(crate) fn execute_finish_answer(
     let sources = super::host::chain_sources(&entry);
     let mut walked: u32 = 0;
     let mut last_close: Option<crate::host_task::FallbackOf> = None;
+    // The attempt id and the chain step of the attempt that closed a step,
+    // for the next step's `exec.entered`.
+    let mut last_close_seq: u64 = 0;
+    let mut last_step: u32 = 0;
+    let mut last_hint: Option<String> = None;
+    // The binding snapshot every composer attempt names, as the agent path
+    // writes it.
+    let binding_digest = crate::execution_identity::store_binding(run_dir, &entry)?;
+    let executed_by = if host_mode {
+        crate::execution_identity::EXECUTED_BY_HOST
+    } else {
+        crate::execution_identity::EXECUTED_BY_CLI
+    };
+    // `cancel` is the composer's own kill flag: an abort and a `--now`
+    // pause both latch it, the pause's mark tells them apart.
+    let stop = super::stop_context::StopContext {
+        cancel,
+        kill: Some(cancel),
+        interrupt: None,
+    };
     for (idx, (ri, source)) in entry.chain.iter().zip(sources).enumerate() {
+        // A pause or an abort that landed after the last attempt closed on
+        // its own ends the walk too: no transition, no next step (the agent
+        // path's check, design 2.3 item 2).
+        if walked > 0 && stop.ends_chain() {
+            return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
+        }
+        // A host step's hint: the model a fallback or a tier declares; the
+        // profile's own executor gives none.
+        let hint = (!matches!(source, crate::host_task::HintSource::Primary { .. }))
+            .then(|| ri.model.clone());
+        // In host mode every step is the host; only its hint changes.
+        let step_agent = if host_mode {
+            super::host::HOST_AGENT.to_string()
+        } else {
+            ri.agent_id.clone()
+        };
         if idx > 0 {
             let same_binding = last_tried
                 .as_ref()
@@ -3492,29 +3629,41 @@ pub(crate) fn execute_finish_answer(
             if same_binding {
                 continue;
             }
-            events.push(EventPayload::FallbackTriggered {
-                node: node_id.into(),
-                from: last_tried
+            // Models, as in the agent_task chain above; a host step's are
+            // the hints, never a model that ran.
+            let models = if host_mode {
+                (last_hint.clone(), hint.clone())
+            } else {
+                (
+                    Some(
+                        last_tried
+                            .as_ref()
+                            .map(|(_, model)| model.clone())
+                            .unwrap_or_else(|| entry.chain[idx - 1].model.clone()),
+                    ),
+                    Some(ri.model.clone()),
+                )
+            };
+            let from = if host_mode {
+                super::host::HOST_AGENT.to_string()
+            } else {
+                last_tried
                     .as_ref()
                     .map(|(agent, _)| agent.clone())
-                    .unwrap_or_else(|| entry.chain[idx - 1].agent_id.clone()),
-                to: ri.agent_id.clone(),
-                profile: Some(entry.key()),
-                // Models, as in the agent_task chain above. The finish-answer
-                // composer does not classify failures (spec 2.3 targets the
-                // agent_task attempt lifecycle), so it gets the observability
-                // half only.
-                from_model: Some(
-                    last_tried
-                        .as_ref()
-                        .map(|(_, model)| model.clone())
-                        .unwrap_or_else(|| entry.chain[idx - 1].model.clone()),
-                ),
-                to_model: Some(ri.model.clone()),
-                reason: None,
-            });
+                    .unwrap_or_else(|| entry.chain[idx - 1].agent_id.clone())
+            };
+            events.push(EventPayload::fallback_triggered(
+                node_id,
+                from,
+                step_agent.clone(),
+                Some(entry.key()),
+                models,
+                Some(transition_reason(false, last_close.as_ref())),
+                Some(executed_by.to_string()),
+            ));
         }
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
+        last_hint = hint.clone();
         walked += 1;
         let cli_adapter = crate::adapter::ClaudeAdapter {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
@@ -3545,8 +3694,7 @@ pub(crate) fn execute_finish_answer(
                 attempt,
                 skills: Vec::new(),
                 outputs: None,
-                model_hint: (!matches!(source, crate::host_task::HintSource::Primary { .. }))
-                    .then(|| ri.model.clone()),
+                model_hint: hint.clone(),
                 hint_source: Some(source.clone()),
                 fallback_of,
                 closed: Some(&host_closed),
@@ -3557,11 +3705,28 @@ pub(crate) fn execute_finish_answer(
                 Some(h) => h,
                 None => &cli_adapter,
             };
-            let agent_label = if host_mode {
-                super::host::HOST_AGENT.to_string()
+            let agent_label = step_agent.clone();
+            // What apb asked for: the CLI's model, or a host step's hint.
+            let attempt_model = if host_mode {
+                hint.clone()
             } else {
-                ri.agent_id.clone()
+                Some(ri.model.clone())
             };
+            let attempt_exec = Some(crate::execution_identity::ExecStep {
+                binding: binding_digest.clone(),
+                step: idx as u32,
+                source: crate::execution_identity::StepSource::of(&source, entry.ephemeral),
+                executed_by: executed_by.to_string(),
+                entered: (walked > 1 && try_i == 0)
+                    .then_some(last_close.as_ref())
+                    .flatten()
+                    .map(|close| crate::execution_identity::StepEntry {
+                        from_step: last_step,
+                        closed_attempt: last_close_seq,
+                        reason: close.reason.clone(),
+                    }),
+            });
+            let started_seq: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
             if try_i > 0 {
                 events.push(EventPayload::RetryStarted {
                     node: node_id.into(),
@@ -3613,7 +3778,7 @@ pub(crate) fn execute_finish_answer(
             let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
             let on_spawn = |pid: u32, spawn_ms: u64| {
                 spawn_at.set(Some(std::time::Instant::now()));
-                if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                match journal.append_seq(EventPayload::AttemptStarted {
                     item: None,
                     node: node_id.to_string(),
                     attempt: cur_attempt,
@@ -3622,15 +3787,15 @@ pub(crate) fn execute_finish_answer(
                     skills_mode: None,
                     pid: Some(pid),
                     spawn_ms: Some(spawn_ms),
-                    model: None,
+                    model: attempt_model.clone(),
                     workdir: None,
                     transcript: None,
                     token: attempt_policy.attempt_token.clone(),
                     isolation: None,
-                    // The finish composer's chain position is not recorded.
-                    exec: None,
+                    exec: attempt_exec.clone(),
                 }) {
-                    *spawn_err.borrow_mut() = Some(e);
+                    Ok(seq) => started_seq.set(Some(seq)),
+                    Err(e) => *spawn_err.borrow_mut() = Some(e),
                 }
             };
             // A finish-answer node is never interactive, so it never runs the
@@ -3658,16 +3823,22 @@ pub(crate) fn execute_finish_answer(
             }
             step_env.journal(journal, node_id, attempt, &ri.agent_id)?;
             let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
+            let stopped = stop.close_reason();
             last_close = Some(crate::host_task::FallbackOf {
                 attempt,
-                reason: crate::host_task::hint::close_reason(crate::host_task::hint::AttemptEnd {
+                reason: crate::host_task::hint::close_reason(&crate::host_task::hint::AttemptEnd {
                     host_closed: host_closed.get(),
                     replied: outcome.is_ok(),
                     timed_out: matches!(&outcome, Err(f) if f.class == ErrorClass::Timeout),
+                    stop: stopped.clone(),
+                    agent_reported_failure: matches!(
+                        &outcome,
+                        Ok(r) if r.status != NodeStatus::Succeeded
+                    ),
                     ..Default::default()
-                })
-                .to_string(),
+                }),
             });
+            last_step = idx as u32;
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }
@@ -3675,7 +3846,7 @@ pub(crate) fn execute_finish_answer(
             // Spawn failed before the callback ran: still journal a started
             // (pid unknown) so every attempt_finished is preceded by a started.
             if spawn_instant.is_none() {
-                journal.append(EventPayload::AttemptStarted {
+                started_seq.set(Some(journal.append_seq(EventPayload::AttemptStarted {
                     item: None,
                     node: node_id.into(),
                     attempt,
@@ -3684,15 +3855,40 @@ pub(crate) fn execute_finish_answer(
                     skills_mode: None,
                     pid: None,
                     spawn_ms: None,
-                    model: None,
+                    model: attempt_model.clone(),
                     workdir: None,
                     transcript: None,
                     token: attempt_policy.attempt_token.clone(),
                     isolation: None,
-                    exec: None,
-                })?;
+                    exec: attempt_exec.clone(),
+                })?));
             }
+            last_close_seq = started_seq.get().unwrap_or(0);
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+            // A pause or an abort ends the composer's walk at once (design
+            // 2.5 item 1): the attempt closes `interrupted`, no step follows,
+            // and the drive journals no `node_finished`, so a resume composes
+            // again from the first step.
+            let succeeded = matches!(&outcome, Ok(r) if r.status == NodeStatus::Succeeded);
+            if let Some(reason) = stopped.filter(|_| !succeeded && stop.ends_chain()) {
+                journal.append(EventPayload::AttemptFinished {
+                    item: None,
+                    output_truncated: Vec::new(),
+                    transcript_incomplete: false,
+                    node: node_id.into(),
+                    attempt,
+                    status: "interrupted".into(),
+                    duration_ms,
+                    session: None,
+                    summary: None,
+                    rejected_output: None,
+                    partial_output: (reason == CloseReason::RunPaused)
+                        .then(|| super::journal::PAUSE_INTERRUPT_NOTE.to_string()),
+                    failure_kind: None,
+                    usage: None,
+                })?;
+                return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
+            }
             match outcome {
                 Ok(report) => {
                     journal.append(EventPayload::AttemptFinished {

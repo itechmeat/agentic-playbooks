@@ -220,7 +220,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line), the
   doctor's free per-provider request (`decision_probe.rs`), the
-  measured-threshold store (`decision_thresholds.rs`), one decoder per agent
+  measured-threshold store (`decision_thresholds.rs`, with the v2 file of a
+  use whose labels have rule versions: `retry_advice` under `exec/1`), one decoder per agent
   log format (`agent_actions/`: `claude` and `codex` lines as tool actions,
   typed requests and the working directory, kept in their agent modules and
   re-exported here, `command` the shell command
@@ -242,6 +243,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
+  `stop_context` the stop a chain step reads after a failed attempt (a pause
+  or abort ends the chain, a supervisor interrupt names itself),
   `journal` event-log folds, `status_file` the attempt verdict contract and its
   findings and warnings, `attempt_notes` their journal entry,
   `attempt_memory` the retry briefing on what earlier attempts did, `baseline` the
@@ -298,7 +301,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   run" per entry with its class, `overlay` a run laid over a playbook
   version with its alignment and per-segment mapping), the
   cross-run metrics behind `apb stats`
-  (`run_stats.rs`, `run_stats/`, `route` for membership over established
+  (`run_stats.rs`, `run_stats/`, `executors` the executor report: per node
+  and executor group the chain steps, the transitions by close reason and
+  the host's hint follow, the one hint rule the run surfaces share,
+  `stats_run` one run as the report reads it, `route` for membership over established
   definitions and the reasons a node did not run, `findings` for findings and baseline
   results, `quality` for the levels of signed grades per comparable key and
   their `--compare` deltas), the irreversible-effects consent a run
@@ -351,7 +357,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   reports; the drive side is `scheduler/budget_gate`), the run estimate
   (`run_estimate.rs`; `run_estimate/`: `history` the comparable runs,
   `sample` the per-run and per-node samples `apb stats` shares, `compose` the
-  figures, `snapshot` the `estimate.json` a run starts with), the run lookups
+  figures, `snapshot` the `estimate.json` a run starts with, `types` the key
+  a node's history matches: profile, bundle and executor, `ESTIMATE_KEY_VERSION`), the run lookups
   by id (`scheduler/run_ref`), "Notify me" (`notify/`: `start` the check
   every launch surface makes and a person's change on a live run,
   `transitions` the pure list of transitions due, `notice` the message,
@@ -456,9 +463,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   visit and attempt identity from event order (`identity.rs`), the
   definitions a run executed and the segments they cover
   (`run_definitions.rs`, over the write-once content-addressed run files of
-  `run_store.rs`), the chain position of an attempt (`execution_identity.rs`:
-  `ExecStep` on `attempt_started` and the binding snapshots under
-  `runs/<id>/bindings/`), invocation resolution
+  `run_store.rs`), the execution identity of an attempt
+  (`execution_identity/`: `mod` the `ExecStep` on `attempt_started` with
+  `entered`, the reason its step was entered, and the binding snapshots
+  under `runs/<id>/bindings/`; `close` the close reasons; `fold` every
+  attempt's identity with the model each host task reported, credited to
+  a model only when all name one, and `ExecutionIdentityView`, the row
+  every run surface shows; `digest` the `x1:` executor digest and the
+  estimate key), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/command`
   the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
   included, and `adapter/spawn_env`
@@ -474,7 +486,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `scheduler/node/sandbox`), the process-env plan of
   one agent step and its `agent_env_applied` event (`agent_env.rs`; the
   per-step wiring in `scheduler/node/step_env`), the per-run doctor
-  (`run_doctor.rs`, `run_doctor/env` the process env rows, `run_doctor/exposure`
+  (`run_doctor.rs` with the model and step rows, `run_doctor/env` the process env rows, `run_doctor/exposure`
   the tool exposure rows, `run_doctor/isolation` the isolation rows, its inline `results` module the result store's leftovers, `run_doctor/review` the channel entries no gate consumes (unstamped, another request or binding, not a person's on a person-only gate), `run_doctor/drift` the journal
   format drift: the binaries that drove the run, a downgrade, unknown,
   undecodable and torn lines, open deferrals and their guard; the binaries
@@ -1123,6 +1135,19 @@ dependency change, regenerate and commit it; CI and the release test gate run
 - Unrelated uploads, deployments, package publication and file sharing still
   require explicit authorization. A product-delivery push/PR grant is not a
   blanket permission to send other files or change infrastructure.
+
+## Daily cleanup
+
+On the first agent session of the day in this repository, check the stamp
+`${XDG_CACHE_HOME:-$HOME/.cache}/apb-cleanup/last-run`. When it does not hold
+today's date (`date +%F`), run `scripts/daily-cleanup.sh` before other work
+(`--dry-run` shows what it would remove, `--force` runs it regardless of the
+stamp). It removes worktrees whose branch is merged into the default branch
+and that hold no uncommitted change, sweeps cargo artifacts older than 7 days
+(`cargo sweep`, never a full clean), removes empty leaked test config dirs and
+this project's logs older than 7 days, then writes the stamp. Besides that,
+remove a task's worktrees and their build output as soon as its pull request
+merges, delete only paths you created, and stop only processes you started.
 
 ## Conventions
 

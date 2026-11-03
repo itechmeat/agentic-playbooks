@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use apb_core::budget::{BudgetRequest, EffectiveBudget, OnNoEstimate};
+use apb_core::overrides::RunOverrides;
 use apb_core::store::ResolvedPlaybook;
 
 use super::kind::{tokens_text, usd_text};
@@ -53,13 +54,15 @@ pub fn check(
 }
 
 /// [`check`] for a resolved playbook, from the runs of the project it runs
-/// in, in execution mode `execution` (`cli` or `host`).
+/// in, in execution mode `execution` (`cli` or `host`), each node keyed as
+/// a start with `overrides` binds it.
 pub fn check_resolved(
     resolved: &ResolvedPlaybook,
     execution: &str,
     req: Option<&BudgetRequest>,
+    overrides: &RunOverrides,
 ) -> Result<StartCheck, EngineError> {
-    let target = EstimateTarget::for_resolved(resolved, execution)?;
+    let target = EstimateTarget::for_resolved(resolved, execution, overrides)?;
     Ok(check(
         std::slice::from_ref(&resolved.execution_root),
         &target,

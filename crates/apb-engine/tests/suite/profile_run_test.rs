@@ -1104,3 +1104,183 @@ fn finish_answer_fallback_skips_identical_agent_and_model_binding() {
         "only the first (real) step of the finish-answer chain should be attempted"
     );
 }
+
+// --- PR 21a: the close that moves the walk to the next chain step ---
+
+/// The fallback's first `attempt_started` and its `exec.entered`, the seq
+/// of the attempt the entry names as closing, and the reasons of every
+/// `fallback_triggered`, for a run of node `t`.
+struct Walk {
+    entered: Vec<Option<apb_engine::execution_identity::StepEntry>>,
+    started_seqs: Vec<u64>,
+    reasons: Vec<(Option<String>, Option<String>)>,
+    /// `apb doctor --run`'s step rows.
+    doctor_steps: Vec<String>,
+}
+
+fn walk_of(run_dir: &Path) -> Walk {
+    let events = read_all(run_dir).unwrap();
+    let mut w = Walk {
+        entered: Vec::new(),
+        started_seqs: Vec::new(),
+        reasons: Vec::new(),
+        doctor_steps: Vec::new(),
+    };
+    let root = run_dir.ancestors().nth(3).expect("<root>/.apb/runs/<id>");
+    let id = run_dir.file_name().unwrap().to_str().unwrap();
+    w.doctor_steps = apb_engine::run_doctor::diagnose_run(root, id)
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.subject == "step")
+        .map(|c| c.detail)
+        .collect();
+    for e in &events {
+        match &e.payload {
+            EventPayload::AttemptStarted { node, exec, .. } if node == "t" => {
+                w.started_seqs.push(e.seq);
+                w.entered
+                    .push(exec.as_ref().and_then(|x| x.entered.clone()));
+            }
+            EventPayload::FallbackTriggered {
+                reason,
+                executed_by,
+                ..
+            } => w.reasons.push((
+                reason.as_ref().map(|r| r.as_str().to_string()),
+                executed_by.clone(),
+            )),
+            _ => {}
+        }
+    }
+    w
+}
+
+/// A stub that runs `primary` unless its argv names the fallback model
+/// `sonnet`, which prints `PASSES` and succeeds.
+fn model_stub(bin: &Path, primary: &str) -> String {
+    make_stub(
+        bin,
+        &format!(
+            "for a in \"$@\"; do\n  if [ \"$a\" = sonnet ]; then echo PASSES; exit 0; fi\ndone\n{primary}"
+        ),
+    )
+}
+
+fn run_walk(node_extra: &str, primary: &str) -> (RunStatus, Walk) {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), node_extra);
+    fs::write(proj.path().join("guard.txt"), "kept").unwrap();
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: sonnet }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &model_stub(bin.path(), primary),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+    unsafe { std::env::set_var("APB_INFRA_BACKOFF_MS", "20,20") };
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    unsafe { std::env::remove_var("APB_INFRA_BACKOFF_MS") };
+    let walk = walk_of(&proj.path().join(".apb/runs").join(&res.run_id));
+    (res.outcome, walk)
+}
+
+fn entry(
+    from_step: u32,
+    closed_attempt: u64,
+    reason: &str,
+) -> apb_engine::execution_identity::StepEntry {
+    apb_engine::execution_identity::StepEntry {
+        from_step,
+        closed_attempt,
+        reason: apb_engine::execution_identity::CloseReason::parse(reason),
+    }
+}
+
+/// Card A1: the primary's reply is rejected by its `success_check` twice,
+/// the fallback passes. The reason is the one the verdict established,
+/// journaled at the fallback's spawn and on the transition.
+#[test]
+fn a_rejecting_check_enters_the_fallback_as_check_rejected() {
+    let (outcome, w) = run_walk(
+        ", max_retries: 1, success_check: { marker: \"PASSES\" }",
+        "echo done",
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(w.entered.len(), 3, "two primary attempts, one fallback");
+    assert_eq!(w.entered[0], None, "the first step walked has no entry");
+    assert_eq!(w.entered[1], None, "a retry is no transition");
+    assert_eq!(
+        w.entered[2],
+        Some(entry(0, w.started_seqs[1], "check_rejected"))
+    );
+    assert_eq!(
+        w.reasons,
+        vec![(Some("check_rejected".into()), Some("cli".into()))]
+    );
+    assert_eq!(
+        w.doctor_steps,
+        vec!["t attempt 3 entered step 1 fallback 1 of 1 from step 0: check_rejected"]
+    );
+}
+
+/// Card A2: a change to a protected path closes the step as
+/// `protected_paths`, not as the check it also fails.
+#[test]
+fn a_protected_path_enters_the_fallback_as_protected_paths() {
+    let (outcome, w) = run_walk(
+        ", protect: [\"guard.txt\"]",
+        "echo changed > guard.txt\necho done",
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(
+        w.entered.last().cloned().flatten(),
+        Some(entry(0, w.started_seqs[0], "protected_paths"))
+    );
+    assert_eq!(
+        w.reasons,
+        vec![(Some("protected_paths".into()), Some("cli".into()))]
+    );
+}
+
+/// Card A2: a provider quota with a fallback left falls back with `quota`.
+#[test]
+fn quota_close_falls_back_with_reason() {
+    let (outcome, w) = run_walk(
+        "",
+        "echo '429 FreeUsageLimitError: Rate limit exceeded. Please try again later. Retry-After: 1' 1>&2\nexit 1",
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(
+        w.entered.last().cloned().flatten(),
+        Some(entry(0, w.started_seqs[0], "quota"))
+    );
+    assert_eq!(w.reasons, vec![(Some("quota".into()), Some("cli".into()))]);
+}
+
+/// Card A2: a failure that stays transient through every infrastructure
+/// retry falls back with `transient`.
+#[test]
+fn exhausted_infrastructure_retries_fall_back_as_transient() {
+    let (outcome, w) = run_walk("", "echo 'connection reset by peer' 1>&2\nexit 1");
+    assert_eq!(outcome, RunStatus::Succeeded);
+    let last_primary = w.started_seqs[w.started_seqs.len() - 2];
+    assert_eq!(
+        w.entered.last().cloned().flatten(),
+        Some(entry(0, last_primary, "transient"))
+    );
+    assert_eq!(
+        w.reasons,
+        vec![(Some("transient".into()), Some("cli".into()))]
+    );
+}

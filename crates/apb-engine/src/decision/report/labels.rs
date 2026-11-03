@@ -165,6 +165,18 @@ pub trait Labeller: Sync {
     }
     /// The label from the events of the decision's run.
     fn label(&self, r: &DecisionRecord, events: &[Event]) -> Label;
+    /// The label and the labelling rule it was computed under, for a use
+    /// whose labels have rule versions
+    /// ([`apb_core::decision_thresholds::versioned_use`]); `None` for every
+    /// other use. The rule is chosen per decision from its journal alone,
+    /// so a report computed twice agrees.
+    fn label_with_rule(
+        &self,
+        r: &DecisionRecord,
+        events: &[Event],
+    ) -> (Label, Option<&'static str>) {
+        (self.label(r, events), None)
+    }
     /// A stub that labels nothing yet.
     fn pending(&self) -> bool {
         false
@@ -507,93 +519,214 @@ impl Labeller for RetryAdviceLabeller {
     }
 
     fn label(&self, r: &DecisionRecord, events: &[Event]) -> Label {
+        self.label_with_rule(r, events).0
+    }
+
+    fn label_with_rule(
+        &self,
+        r: &DecisionRecord,
+        events: &[Event],
+    ) -> (Label, Option<&'static str>) {
+        use apb_core::decision_thresholds::{RETRY_ADVICE_LEGACY_RULE, RETRY_ADVICE_RULE};
         let (Some(node), Some(failed)) = (r.node.as_deref(), r.attempt) else {
-            return Label::Unlabelled("no node or attempt on the decision");
+            return (
+                Label::Unlabelled("no node or attempt on the decision"),
+                Some(RETRY_ADVICE_LEGACY_RULE),
+            );
         };
         let Some(at) = events.iter().position(|e| e.seq == r.seq) else {
-            return Label::Unlabelled("decision not in its journal");
+            return (
+                Label::Unlabelled("decision not in its journal"),
+                Some(RETRY_ADVICE_LEGACY_RULE),
+            );
         };
+        let is_visit_start = |e: &Event| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node);
+        let visit_from = events[..at].iter().rposition(is_visit_start).unwrap_or(0);
         // Attempt numbers restart at 1 on every visit of the node, so the
         // failed attempt is the one of the current visit: the latest start of
         // that number after the node's last `node_started`.
-        let failed_executor = events[..at]
+        let failed_start = events[..at]
             .iter()
             .rev()
-            .take_while(
-                |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
-            )
-            .find_map(|e| match &e.payload {
-                EventPayload::AttemptStarted {
-                    node: n,
-                    attempt: a,
-                    agent,
-                    model,
-                    ..
-                } if n == node && *a == failed => Some((agent.clone(), model.clone())),
-                _ => None,
-            });
+            .take_while(|e| !is_visit_start(e))
+            .find(|e| attempt_start(e, node, failed).is_some());
         // Up to the node's next execution: a later visit is not this retry.
         let window: Vec<&Event> = events[at + 1..]
             .iter()
-            .take_while(
-                |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
-            )
+            .take_while(|e| !is_visit_start(e))
             .collect();
-        let mut next_started = false;
-        for (i, e) in window.iter().enumerate() {
-            match &e.payload {
-                EventPayload::SupervisorAction {
-                    action,
-                    node: Some(n),
-                    ..
-                } if n == node && action == crate::decision::retry_advice::RETRY_ADVICE_ACTION => {
-                    return Label::Unlabelled("the enforced advice changed what ran next");
+        let next_start = window
+            .iter()
+            .copied()
+            .find(|e| attempt_start(e, node, failed + 1).is_some());
+        let has_exec = |e: &Event| attempt_start(e, node, 0).is_some_and(|s| s.exec.is_some());
+        let exec_rule = failed_start.is_some_and(has_exec) && next_start.is_none_or(has_exec);
+        let rule = if exec_rule {
+            RETRY_ADVICE_RULE
+        } else {
+            RETRY_ADVICE_LEGACY_RULE
+        };
+        // The identities of this visit only, folded once per decision: the
+        // attempts compared and their host tasks all sit inside it.
+        let visit = &events[visit_from..at + 1 + window.len()];
+        let ids = std::cell::OnceCell::new();
+        let same = |next: &Event| match (failed_start, exec_rule) {
+            (None, _) => SameExecutor::No,
+            (Some(f), true) => same_by_identity(
+                f,
+                next,
+                ids.get_or_init(|| crate::execution_identity::fold::fold(visit)),
+            ),
+            (Some(f), false) => {
+                let key = |e: &Event| {
+                    attempt_start(e, node, 0).map(|s| (s.agent.clone(), s.model.clone()))
+                };
+                if key(f) == key(next) {
+                    SameExecutor::Yes
+                } else {
+                    SameExecutor::No
                 }
-                EventPayload::FallbackTriggered { node: n, .. } if n == node && !next_started => {
-                    return Label::Unlabelled("the next attempt ran on another executor");
+            }
+        };
+        (outcome_after(node, failed, &window, same), Some(rule))
+    }
+}
+
+/// The fields of an `attempt_started` of `node` the retry-advice labels
+/// read; `attempt` 0 matches any attempt number.
+struct AttemptStart<'a> {
+    agent: &'a String,
+    model: &'a Option<String>,
+    exec: &'a Option<crate::execution_identity::ExecStep>,
+}
+
+fn attempt_start<'a>(e: &'a Event, node: &str, attempt: u32) -> Option<AttemptStart<'a>> {
+    match &e.payload {
+        EventPayload::AttemptStarted {
+            node: n,
+            attempt: a,
+            agent,
+            model,
+            exec,
+            ..
+        } if n == node && (attempt == 0 || *a == attempt) => {
+            Some(AttemptStart { agent, model, exec })
+        }
+        _ => None,
+    }
+}
+
+/// Whether the next attempt ran on the failed one's executor.
+enum SameExecutor {
+    Yes,
+    No,
+    /// A host attempt whose tasks did not all report one model.
+    Unknown,
+}
+
+/// Rule `exec/1`: a CLI attempt is the same executor when its binding and
+/// step are; a host attempt and a CLI attempt never are; two host attempts
+/// when both attempts' tasks reported one model and it is the same
+/// ([`crate::execution_identity::fold::same_model`]), unknown otherwise.
+/// The hint is never read as the model that ran.
+fn same_by_identity(
+    failed: &Event,
+    next: &Event,
+    ids: &[crate::execution_identity::fold::ExecutionIdentity],
+) -> SameExecutor {
+    use crate::execution_identity::fold::{ReportedModel, same_model};
+    let id = |e: &Event| ids.iter().find(|i| i.attempt == e.seq);
+    let (Some(f), Some(n)) = (id(failed), id(next)) else {
+        return SameExecutor::No;
+    };
+    if f.is_host() != n.is_host() {
+        return SameExecutor::No;
+    }
+    if f.is_host() {
+        return match (f.reported_model(), n.reported_model()) {
+            (ReportedModel::One { model: a }, ReportedModel::One { model: b }) => {
+                if same_model(&a, &b) {
+                    SameExecutor::Yes
+                } else {
+                    SameExecutor::No
                 }
-                EventPayload::AttemptStarted {
-                    node: n,
-                    attempt,
-                    agent,
-                    model,
-                    ..
-                } if n == node && *attempt == failed + 1 => {
-                    if failed_executor.as_ref() != Some(&(agent.clone(), model.clone())) {
+            }
+            _ => SameExecutor::Unknown,
+        };
+    }
+    let at = |i: &crate::execution_identity::fold::ExecutionIdentity| {
+        i.step.as_ref().map(|s| (s.binding.clone(), s.step))
+    };
+    if at(f) == at(n) {
+        SameExecutor::Yes
+    } else {
+        SameExecutor::No
+    }
+}
+
+/// The retry-advice label from the events after the decision in the
+/// node's current execution: the outcome of the next attempt when `same`
+/// says it ran on the failed attempt's executor.
+fn outcome_after(
+    node: &str,
+    failed: u32,
+    window: &[&Event],
+    same: impl Fn(&Event) -> SameExecutor,
+) -> Label {
+    let mut next_started = false;
+    for (i, e) in window.iter().enumerate() {
+        match &e.payload {
+            EventPayload::SupervisorAction {
+                action,
+                node: Some(n),
+                ..
+            } if n == node && action == crate::decision::retry_advice::RETRY_ADVICE_ACTION => {
+                return Label::Unlabelled("the enforced advice changed what ran next");
+            }
+            EventPayload::FallbackTriggered { node: n, .. } if n == node && !next_started => {
+                return Label::Unlabelled("the next attempt ran on another executor");
+            }
+            EventPayload::AttemptStarted {
+                node: n, attempt, ..
+            } if n == node && *attempt == failed + 1 => {
+                match same(e) {
+                    SameExecutor::Yes => {}
+                    SameExecutor::No => {
                         return Label::Unlabelled("the next attempt ran on another executor");
                     }
-                    next_started = true;
+                    SameExecutor::Unknown => return Label::Unlabelled("executor unknown"),
                 }
-                EventPayload::AttemptFinished {
-                    node: n,
-                    attempt,
-                    status,
-                    ..
-                } if n == node && *attempt == failed + 1 => {
-                    // An attempt a pause interrupted (issue #200) says nothing
-                    // about the executor: it neither failed nor helped, and it
-                    // runs again on resume. The pause follows it in the journal.
-                    if status == "interrupted"
-                        && window[i + 1..]
-                            .iter()
-                            .any(|f| matches!(f.payload, EventPayload::RunPaused { .. }))
-                    {
-                        return Label::Unlabelled("the next attempt was interrupted by a pause");
-                    }
-                    return match status.as_str() {
-                        "succeeded" => Label::Keep,
-                        "failed" | "timed_out" | "interrupted" => Label::Act,
-                        _ => Label::Unlabelled("the next attempt neither failed nor succeeded"),
-                    };
-                }
-                _ => {}
+                next_started = true;
             }
+            EventPayload::AttemptFinished {
+                node: n,
+                attempt,
+                status,
+                ..
+            } if n == node && *attempt == failed + 1 => {
+                // An attempt a pause interrupted (issue #200) says nothing
+                // about the executor: it neither failed nor helped, and it
+                // runs again on resume. The pause follows it in the journal.
+                if status == "interrupted"
+                    && window[i + 1..]
+                        .iter()
+                        .any(|f| matches!(f.payload, EventPayload::RunPaused { .. }))
+                {
+                    return Label::Unlabelled("the next attempt was interrupted by a pause");
+                }
+                return match status.as_str() {
+                    "succeeded" => Label::Keep,
+                    "failed" | "timed_out" | "interrupted" => Label::Act,
+                    _ => Label::Unlabelled("the next attempt neither failed nor succeeded"),
+                };
+            }
+            _ => {}
         }
-        if next_started {
-            Label::Unlabelled("the next attempt has not finished yet")
-        } else {
-            Label::Unlabelled("no further attempt of the node followed")
-        }
+    }
+    if next_started {
+        Label::Unlabelled("the next attempt has not finished yet")
+    } else {
+        Label::Unlabelled("no further attempt of the node followed")
     }
 }
 
@@ -680,6 +813,7 @@ impl Labeller for PendingLabeller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apb_core::decision_thresholds::{RETRY_ADVICE_LEGACY_RULE, RETRY_ADVICE_RULE};
 
     fn ev(seq: u64, payload: EventPayload) -> Event {
         Event {
@@ -1127,5 +1261,179 @@ mod tests {
             attempt_finished(11, "a", 2, "failed"),
         ];
         assert_eq!(l.label(&r, &events), Label::Act);
+    }
+
+    fn exec_started(seq: u64, attempt: u32, binding: &str, step: u32, by: &str) -> Event {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "attempt_started", "node": "a", "attempt": attempt,
+                "agent": if by == "host" { "host" } else { "claude" }, "model": "m",
+                "exec": {"binding": binding, "step": step, "source": {"kind": "primary"}, "executed_by": by}
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn host_task(seq: u64, task: &str, attempt: u32, hint: &str) -> Event {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "host_task_requested", "task_id": task, "node": "a", "attempt": attempt, "model_hint": hint
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn host_submitted(seq: u64, task: &str, model: Option<&str>) -> Event {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "host_task_submitted", "task_id": task, "status": "failed", "submitted_by": "host", "model": model
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// Design 2.10 item 1: under `exec/1` (both attempts journal `exec`) a
+    /// CLI attempt is the same executor when its binding and step are; a
+    /// journal without `exec` on either attempt is labelled by `exec/0`,
+    /// today's agent and model comparison, unchanged.
+    #[test]
+    fn retry_advice_rules_follow_the_journal_of_both_attempts() {
+        let l = RetryAdviceLabeller;
+        let r = answered("retry_advice", "a", 1, "next", "switch_executor", "shadow");
+        let failed = || {
+            vec![
+                started(0, "a"),
+                exec_started(1, 1, "sha256:b1", 0, "cli"),
+                attempt_finished(2, "a", 1, "failed"),
+                decision_event(3),
+            ]
+        };
+        let with_next = |binding: &str, step: u32, status: &str| {
+            let mut e = failed();
+            e.extend([
+                exec_started(4, 2, binding, step, "cli"),
+                attempt_finished(5, "a", 2, status),
+            ]);
+            e
+        };
+        assert_eq!(
+            l.label_with_rule(&r, &with_next("sha256:b1", 0, "failed")),
+            (Label::Act, Some(RETRY_ADVICE_RULE))
+        );
+        assert_eq!(
+            l.label_with_rule(&r, &with_next("sha256:b1", 0, "succeeded")),
+            (Label::Keep, Some(RETRY_ADVICE_RULE))
+        );
+        for (binding, step) in [("sha256:b1", 1), ("sha256:b2", 0)] {
+            let (label, rule) = l.label_with_rule(&r, &with_next(binding, step, "succeeded"));
+            assert_eq!(rule, Some(RETRY_ADVICE_RULE));
+            assert_eq!(
+                label,
+                Label::Unlabelled("the next attempt ran on another executor")
+            );
+        }
+        // No further attempt yet: the failed attempt's rule.
+        assert_eq!(l.label_with_rule(&r, &failed()).1, Some(RETRY_ADVICE_RULE));
+        // The next attempt without `exec` (an older binary resumed the run).
+        let mut mixed = failed();
+        mixed.extend([
+            attempt_started(4, "a", 2, "m"),
+            attempt_finished(5, "a", 2, "failed"),
+        ]);
+        assert_eq!(
+            l.label_with_rule(&r, &mixed),
+            (Label::Act, Some(RETRY_ADVICE_LEGACY_RULE))
+        );
+        let old = vec![
+            started(0, "a"),
+            attempt_started(1, "a", 1, "m"),
+            attempt_finished(2, "a", 1, "failed"),
+            decision_event(3),
+            attempt_started(4, "a", 2, "m"),
+            attempt_finished(5, "a", 2, "succeeded"),
+        ];
+        assert_eq!(
+            l.label_with_rule(&r, &old),
+            (Label::Keep, Some(RETRY_ADVICE_LEGACY_RULE))
+        );
+        // Every other use has no rule.
+        assert_eq!(
+            CompletionLabeller
+                .label_with_rule(&decision(2, "a"), &old)
+                .1,
+            None
+        );
+    }
+
+    /// Design 2.10 item 1 and 2.13 item 3: a host attempt is another
+    /// executor only when both reported one model and they differ; a changed
+    /// hint with the same reported model is the same executor, and an
+    /// attempt whose tasks did not all report one model is unlabelled.
+    #[test]
+    fn retry_advice_compares_what_the_host_reported_under_exec_1() {
+        let l = RetryAdviceLabeller;
+        let r = answered("retry_advice", "a", 1, "next", "switch_executor", "shadow");
+        let journal = |first: Option<&str>, next: Option<&str>| {
+            vec![
+                started(0, "a"),
+                host_task(1, "t1", 1, "sonnet"),
+                exec_started(2, 1, "sha256:b1", 0, "host"),
+                host_submitted(3, "t1", first),
+                attempt_finished(4, "a", 1, "failed"),
+                decision_event(5),
+                host_task(6, "t2", 2, "opus"),
+                exec_started(7, 2, "sha256:b1", 0, "host"),
+                host_submitted(8, "t2", next),
+                attempt_finished(9, "a", 2, "failed"),
+            ]
+        };
+        let mut r = r;
+        r.seq = 5;
+        assert_eq!(
+            l.label_with_rule(&r, &journal(Some("claude-sonnet-4-5"), Some("sonnet"))),
+            (Label::Act, Some(RETRY_ADVICE_RULE)),
+            "a changed hint with the same reported model"
+        );
+        assert_eq!(
+            l.label_with_rule(&r, &journal(Some("sonnet"), Some("glm-5.3-flash")))
+                .0,
+            Label::Unlabelled("the next attempt ran on another executor")
+        );
+        assert_eq!(
+            l.label_with_rule(&r, &journal(None, Some("sonnet"))).0,
+            Label::Unlabelled("executor unknown")
+        );
+    }
+
+    /// A host attempt and a CLI attempt are always two executors, whatever
+    /// the host reported: never `executor unknown`.
+    #[test]
+    fn retry_advice_host_and_cli_attempts_are_another_executor() {
+        let l = RetryAdviceLabeller;
+        let mut r = answered("retry_advice", "a", 1, "next", "switch_executor", "shadow");
+        r.seq = 5;
+        for first in [None, Some("sonnet")] {
+            let events = vec![
+                started(0, "a"),
+                host_task(1, "t1", 1, "sonnet"),
+                exec_started(2, 1, "sha256:b1", 0, "host"),
+                host_submitted(3, "t1", first),
+                attempt_finished(4, "a", 1, "failed"),
+                decision_event(5),
+                exec_started(6, 2, "sha256:b1", 1, "cli"),
+                attempt_finished(7, "a", 2, "succeeded"),
+            ];
+            assert_eq!(
+                l.label_with_rule(&r, &events),
+                (
+                    Label::Unlabelled("the next attempt ran on another executor"),
+                    Some(RETRY_ADVICE_RULE)
+                ),
+                "{first:?}"
+            );
+        }
     }
 }

@@ -1638,6 +1638,100 @@ fn run_status_says_a_resend_went_out_and_the_first_send_is_unknown() {
     assert!(report.contains(&resent_text("gap")), "{report}");
 }
 
+// --- PR 21a: the attempt identity on the run surfaces ---
+
+/// One journal for the attempt identity surfaces (PR 21a, card A5): a CLI
+/// primary that fails and a fallback entered after `check_rejected`; a
+/// host attempt whose blocked task reported no model and whose follow-up
+/// reported `glm-5.3-flash` (partial); one whose two tasks reported
+/// different models (mixed); one that reported the hinted model.
+const IDENTITY_JOURNAL: &[&str] = &[
+    r#"{"seq":0,"ts":1790000002000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
+    r#"{"seq":1,"ts":1790000002001,"type":"attempt_started","node":"a","attempt":1,"agent":"claude","model":"sonnet","exec":{"binding":"sha256:aaaaaaaaaaaaaaaaaaaaaaaa","step":0,"source":{"kind":"primary"},"executed_by":"cli"}}"#,
+    r#"{"seq":2,"ts":1790000002002,"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#,
+    r#"{"seq":3,"ts":1790000002003,"type":"attempt_started","node":"a","attempt":2,"agent":"claude","model":"haiku","exec":{"binding":"sha256:aaaaaaaaaaaaaaaaaaaaaaaa","step":1,"source":{"kind":"fallback","index":1,"of":1},"executed_by":"cli","entered":{"from_step":0,"closed_attempt":1,"reason":"check_rejected"}}}"#,
+    r#"{"seq":4,"ts":1790000002004,"type":"attempt_finished","node":"a","attempt":2,"status":"succeeded"}"#,
+    r#"{"seq":5,"ts":1790000002005,"type":"host_task_requested","task_id":"b-1","node":"b","attempt":1,"model_hint":"opus"}"#,
+    r#"{"seq":6,"ts":1790000002006,"type":"attempt_started","node":"b","attempt":1,"agent":"host","model":"opus"}"#,
+    r#"{"seq":7,"ts":1790000002007,"type":"host_task_submitted","task_id":"b-1","status":"blocked","submitted_by":"host"}"#,
+    r#"{"seq":8,"ts":1790000002008,"type":"host_task_requested","task_id":"b-2","node":"b","attempt":1}"#,
+    r#"{"seq":9,"ts":1790000002009,"type":"host_task_submitted","task_id":"b-2","status":"succeeded","submitted_by":"host","model":"glm-5.3-flash"}"#,
+    r#"{"seq":10,"ts":1790000002010,"type":"attempt_finished","node":"b","attempt":1,"status":"succeeded"}"#,
+    r#"{"seq":11,"ts":1790000002011,"type":"host_task_requested","task_id":"c-1","node":"c","attempt":1,"model_hint":"opus"}"#,
+    r#"{"seq":12,"ts":1790000002012,"type":"attempt_started","node":"c","attempt":1,"agent":"host","model":"opus"}"#,
+    r#"{"seq":13,"ts":1790000002013,"type":"host_task_submitted","task_id":"c-1","status":"blocked","submitted_by":"host","model":"opus"}"#,
+    r#"{"seq":14,"ts":1790000002014,"type":"host_task_requested","task_id":"c-2","node":"c","attempt":1}"#,
+    r#"{"seq":15,"ts":1790000002015,"type":"host_task_submitted","task_id":"c-2","status":"succeeded","submitted_by":"host","model":"sonnet"}"#,
+    r#"{"seq":16,"ts":1790000002016,"type":"attempt_finished","node":"c","attempt":1,"status":"succeeded"}"#,
+    r#"{"seq":17,"ts":1790000002017,"type":"host_task_requested","task_id":"d-1","node":"d","attempt":1,"model_hint":"opus"}"#,
+    r#"{"seq":18,"ts":1790000002018,"type":"attempt_started","node":"d","attempt":1,"agent":"host","model":"opus"}"#,
+    r#"{"seq":19,"ts":1790000002019,"type":"host_task_submitted","task_id":"d-1","status":"succeeded","submitted_by":"host","model":"claude-opus-4-1"}"#,
+    r#"{"seq":20,"ts":1790000002020,"type":"attempt_finished","node":"d","attempt":1,"status":"succeeded"}"#,
+    r#"{"seq":21,"ts":1790000002021,"type":"run_finished","outcome":"succeeded"}"#,
+];
+
+/// The attempt identity checks shared by `run_status` and `run_report`
+/// (and, through the same object, `apb runs <id> --json`).
+pub(crate) fn assert_identity_blocks(out: &serde_json::Value) {
+    let a = out["attempt_models"].as_array().expect("attempt_models");
+    assert_eq!(a.len(), 5, "{out}");
+    assert_eq!(
+        a[0],
+        serde_json::json!({
+            "node": "a", "attempt": 1, "executed_by": "cli", "agent": "claude",
+            "requested_model": "sonnet", "reported": {"kind": "none"}, "mismatch": false,
+            "step": {"binding": "aaaaaaaaaaaa", "step": 0, "source": {"kind": "primary"}},
+        })
+    );
+    assert_eq!(
+        a[1]["step"]["entered"],
+        serde_json::json!({"from_step": 0, "closed_attempt": 1, "reason": "check_rejected"})
+    );
+    assert_eq!(a[2]["requested_model"], "opus", "the hint, kept apart");
+    assert_eq!(
+        a[2]["reported"],
+        serde_json::json!({"kind": "partial", "known": ["glm-5.3-flash"], "unknown_tasks": 1})
+    );
+    assert_eq!(a[2]["host_tasks"].as_array().unwrap().len(), 2);
+    assert!(a[2].get("step").is_none(), "position not recorded");
+    assert_eq!(
+        a[3]["reported"],
+        serde_json::json!({"kind": "mixed", "models": ["opus", "sonnet"]})
+    );
+    assert_eq!(
+        a[4]["reported"],
+        serde_json::json!({"kind": "one", "model": "claude-opus-4-1"})
+    );
+    assert_eq!(
+        out["hint_follow"],
+        serde_json::json!({"hinted": 3, "followed": 1, "not_followed": 2, "not_reported": 0})
+    );
+    assert!(out.get("model_mismatch").is_none(), "{out}");
+}
+
+/// `run_status` and `run_report` carry each attempt's identity: the model
+/// apb requested apart from what the host reported, the chain position
+/// and the reason a step was entered, and the run's hint follow counts.
+#[test]
+fn run_status_and_report_carry_attempt_identities_and_the_hint_follow() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run = bare_run_dir(dir.path(), "ident-1");
+    fs::write(run.join("events.jsonl"), IDENTITY_JOURNAL.join("\n") + "\n").unwrap();
+    assert_identity_blocks(&run_status(dir.path(), "ident-1").unwrap());
+    assert_identity_blocks(&apb_mcp::tools::run_report(dir.path(), "ident-1").unwrap());
+
+    // A run with no attempt carries neither block.
+    let plain = bare_run_dir(dir.path(), "plain-1");
+    fs::write(
+        plain.join("events.jsonl"),
+        format!("{}\n", IDENTITY_JOURNAL[0]),
+    )
+    .unwrap();
+    let out = run_status(dir.path(), "plain-1").unwrap();
+    assert!(out.get("attempt_models").is_none() && out.get("hint_follow").is_none());
+}
+
 /// `run_resume` with a `from_node` behind a person-only gate no person
 /// decided: an agent never goes past it, so the tool refuses with the way a
 /// person does it and journals nothing.

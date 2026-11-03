@@ -103,7 +103,14 @@ fn render_types() -> String {
         apb_engine::run_view::RunDecisions::decl(&cfg),
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
         // Issue #193: the model each attempt actually ran on.
-        apb_engine::attempt_models::AttemptModel::decl(&cfg),
+        // PR 21a: execution identity per attempt, the model each host task
+        // reported, and how the chain came to a step.
+        apb_engine::execution_identity::StepSource::decl(&cfg),
+        apb_engine::execution_identity::StepEntry::decl(&cfg),
+        apb_engine::execution_identity::fold::ExecStepView::decl(&cfg),
+        apb_engine::execution_identity::fold::HostTaskExec::decl(&cfg),
+        apb_engine::execution_identity::fold::ReportedModel::decl(&cfg),
+        apb_engine::execution_identity::fold::ExecutionIdentityView::decl(&cfg),
         // Isolation: what each isolated attempt held and did not.
         apb_engine::event::IsolationViewEntry::decl(&cfg),
         apb_engine::event::AttemptIsolation::decl(&cfg),
@@ -123,6 +130,7 @@ fn render_types() -> String {
         apb_engine::run_stats::Spend::decl(&cfg),
         apb_engine::run_stats::models::ModelUse::decl(&cfg),
         apb_engine::run_stats::GoalStats::decl(&cfg),
+        apb_engine::run_stats::quality::ExecutorQuality::decl(&cfg),
         apb_engine::run_stats::QualityStats::decl(&cfg),
         apb_engine::run_stats::QualityDelta::decl(&cfg),
         apb_engine::run_stats::findings::KindCount::decl(&cfg),
@@ -131,6 +139,10 @@ fn render_types() -> String {
         apb_engine::run_stats::findings::BaselineStats::decl(&cfg),
         apb_engine::run_stats::digests::DigestStats::decl(&cfg),
         apb_engine::run_stats::digests::ExecutorChange::decl(&cfg),
+        apb_engine::run_stats::executors::StepStats::decl(&cfg),
+        apb_engine::run_stats::executors::TransitionStats::decl(&cfg),
+        apb_engine::run_stats::executors::HintFollow::decl(&cfg),
+        apb_engine::run_stats::executors::ExecutorGroup::decl(&cfg),
         apb_engine::run_stats::NodeStats::decl(&cfg),
         apb_engine::run_stats::VersionStats::decl(&cfg),
         apb_engine::run_stats::Comparison::decl(&cfg),
@@ -586,6 +598,7 @@ fn render_consts() -> String {
     render_publish_consts(&mut out);
     render_approval_consts(&mut out);
     render_route_consts(&mut out);
+    render_close_consts(&mut out);
     render_check_consts(&mut out);
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
@@ -708,6 +721,25 @@ fn render_route_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** Every code of a \"why it did not run\" statement. */\nexport const NOT_RUN_CODES = {}\n",
         ts_string_array(&codes)
+    ));
+}
+
+/// Every close reason a step transition or a host task's `fallback_of`
+/// names, and the label a surface shows for a reason outside the list.
+fn render_close_consts(out: &mut String) {
+    use apb_engine::execution_identity::CloseReason;
+    let reasons: Vec<&str> = CloseReason::KNOWN.iter().map(|r| r.as_str()).collect();
+    out.push_str(&format!(
+        "\n/** Every close reason of a chain step; a reason outside it shows as `other` unless it is a slug. */\nexport const CLOSE_REASONS = {}\n",
+        ts_string_array(&reasons)
+    ));
+    out.push_str(&format!(
+        "\n/** A transition whose journal recorded no reason. */\nexport const CLOSE_REASON_NOT_RECORDED = {}\n",
+        serde_json::to_string(apb_engine::run_stats::executors::NOT_RECORDED).expect("a string")
+    ));
+    out.push_str(&format!(
+        "\n/** The estimate key version that matches history by profile, skill set and executor; an older snapshot used the profile-only key. */\nexport const ESTIMATE_KEY_VERSION = {}\n",
+        apb_engine::run_estimate::ESTIMATE_KEY_VERSION
     ));
 }
 

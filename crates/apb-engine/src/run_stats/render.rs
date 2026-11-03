@@ -192,6 +192,10 @@ pub fn render_text(r: &StatsReport) -> String {
             for d in &n.digests {
                 out.push_str(&digest_line(d));
             }
+            for l in super::executors::lines(&n.executors) {
+                out.push_str(&l);
+                out.push('\n');
+            }
         }
     }
     if let Some(c) = &r.compare {
@@ -241,8 +245,14 @@ pub fn render_text(r: &StatsReport) -> String {
                 }
                 for x in &c.executor_changes {
                     out.push_str(&format!(
-                        "  executor of {}: profile {} -> {}, bundle {} -> {}\n",
-                        x.node, x.base_profile, x.against_profile, x.base_bundle, x.against_bundle
+                        "  executor of {}: profile {} -> {}, bundle {} -> {}, executor {} -> {}\n",
+                        x.node,
+                        x.base_profile,
+                        x.against_profile,
+                        x.base_bundle,
+                        x.against_bundle,
+                        x.base_executor,
+                        x.against_executor
                     ));
                 }
             }
@@ -253,10 +263,15 @@ pub fn render_text(r: &StatsReport) -> String {
 
 /// One executor group of a node.
 fn digest_line(d: &DigestStats) -> String {
+    let executor = match d.executor.as_str() {
+        "" => String::new(),
+        e => format!(", executor {e}"),
+    };
     let mut line = format!(
-        "    profile {} (bundle {}): {} runs, first pass {}",
+        "    profile {} (bundle {}{executor}{}): {} runs, first pass {}",
         d.profile,
         d.bundle,
+        if d.ephemeral { ", override" } else { "" },
         d.runs,
         d.first_pass.text()
     );

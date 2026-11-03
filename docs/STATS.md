@@ -90,19 +90,24 @@ Per playbook version:
   `baseline unowned.count: met 3/4 (75%), regressed in 1`.
 - **models**: how many attempts ran on each model, and `model_mismatch`, how
   many of them ran on another model than the node profile's primary model
-  (from the run manifest). A CLI attempt ran on the model its
-  `attempt_started` names; a host attempt (host execution mode, or the host
-  fallback) on the model the host reported in `host_task_submitted.model`,
-  or `unreported` when it named none. In host mode the profile's model is
-  only a hint, so this is where a run that went entirely to another model
-  shows. Two names count as the same model when their lowercase tokens
+  (from the run manifest). A CLI attempt counts under the model apb
+  requested of the CLI (its `attempt_started`); a host attempt (host
+  execution mode, or the host fallback) under a model only when every one
+  of its host tasks reported the same one in `host_task_submitted.model`,
+  and under `unreported` otherwise: a task that named none, or tasks that
+  named different models, are never credited to a model, and a hint never
+  counts as the model that ran. In host mode the profile's model is only a
+  hint, so this is where a run that went entirely to another model shows. Two names count as the same model when their lowercase tokens
   (split on every non-alphanumeric character) are equal, or the shorter
   name's tokens appear in order in the longer one and every extra token is
-  a version or date number or a vendor or channel word (`claude`,
+  a date (six or more digits), a vendor or channel word (`claude`,
   `anthropic`, `openai`, `google`, `gemini`, `latest`, `preview`, `exp`,
-  `experimental`, `stable`). So `opus` matches `claude-opus-5-5` and
+  `experimental`, `stable`), or a version number while the shorter name
+  carries no number at all. So `opus` matches `claude-opus-5-5` and
   `sonnet` matches `claude-sonnet-5-5`, while `glm-5.3` and
-  `glm-5.3-flash`, or `gpt-5` and `gpt-5-mini`, are different models.
+  `glm-5.3-flash`, `gpt-5` and `gpt-5-mini`, or `claude-sonnet-4` and
+  `claude-sonnet-4-5`, are different models. Tasks are credited to one
+  model only when every two of their names match, whatever their order.
 - **quality**: the levels the runs' grades gave each criterion
   (docs/QUALITY.md), one row per comparable key: the criterion, the digest
   of its definition, the grader (`rules/1`, `model/1`, `host/1`) and the
@@ -162,18 +167,79 @@ Every rate is printed with its count (`7/9 (78%)`), and a version with fewer
 than 10 runs carries a note: small samples mislead.
 
 **Per executor digest.** When the runs of one version bound a node to more
-than one executor (its profile, model, SOUL or skills changed between runs),
-the node lists its figures per digest pair: `profile` (the profile digest:
-`profile.yaml` plus SOUL) and `bundle` (the profile plus its skills), each
-shortened to 12 characters, the runs, first pass, median duration and the
-median tokens of a visit that reported usage on every attempt (`digests` in
-the JSON; text: `    profile 1a2b3c4d5e6f (bundle 9f8e7d6c5b4a): 3 runs,
-first pass 2/3 (67%), median 1.0 min, 200 tokens per visit`). With
+than one executor (its profile, model, SOUL, skills or chain changed
+between runs, or a run overrode it), the node lists its figures per digest
+group: `profile` (the profile digest: `profile.yaml` plus SOUL), `bundle`
+(the profile plus its skills) and `executor` (the executor digest: the
+chain's agents, models, invocations and SOUL delivery, the routed tiers,
+and whether the binding is a run-local `ephemeral_executor` override; the
+paths of the machine are left out, so a reinstall elsewhere keeps the
+group), each shortened to 12 characters, `ephemeral` for an override, the
+runs, first pass, median duration and the median tokens of a visit that
+reported usage on every attempt (`digests` in the JSON; text: `    profile
+1a2b3c4d5e6f (bundle 9f8e7d6c5b4a, executor 0c1d2e3f4a5b, override): 3
+runs, first pass 2/3 (67%), median 1.0 min, 200 tokens per visit`). An
+override equal to the base profile's executor is its own group: what ran
+was chosen for this run. The executor digest is recomputed from the run
+manifest, so runs an older apb made are grouped the same way. With
 `--compare`, `executor_changes` names each node whose latest executor
-differs between the two versions (`node`, `base_profile`, `against_profile`,
-`base_bundle`, `against_bundle`; text: `executor of a: profile X -> Y,
-bundle X -> Y`), so a change in the figures can be told from a change of
+differs between the two versions (`node`, `base_profile`,
+`against_profile`, `base_bundle`, `against_bundle`, `base_executor`,
+`against_executor`; text: `executor of a: profile X -> Y, bundle X -> Y,
+executor X -> Y`), so a change in the figures can be told from a change of
 model or prompt. The dashboard's stats card shows the same groups.
+
+**Executor report.** Per node, `executors` lists each executor group (the
+`profile`, `bundle` and `executor` digests, `ephemeral`, `runs`,
+`attempts`) with its chain steps and the transitions between them:
+
+- `steps`: one row per chain position an attempt ran on (`binding`, the
+  binding snapshot's shortened digest; `step`, the position; `source`:
+  `primary`, `fallback`, `tier`, `host_fallback` or `ephemeral`;
+  `executed_by`: `cli`, `host` or `scenario`), with `attempts`,
+  `successes`, `median_attempt_ms`, `cost_usd` over `cost_known` and
+  `cost_by_basis` (as the version's spend), `reported_models` (attempts by
+  `one:<model>`, `mixed`, `partial` or `none`) and `closes_by_reason` (how
+  attempts on the step ended when the chain moved on). Attempts an older
+  apb journaled without a position form one row with no `step` and
+  `source: not_recorded` ("position not recorded"). A declared step no
+  attempt reached is listed with `attempts: 0` ("never ran"), but only
+  when every attempt's position is recorded: an attempt of unknown
+  position may have run on any declared step.
+- `transitions`: moves from one step to the next by reason (`from_step`,
+  `to_step`, `reason`, `count`). The reason is how the step before closed,
+  as the drive established it at the attempt's final verdict:
+  `check_rejected` (a success check, completion check or contract
+  rejected the result), `protected_paths`, `quota`, `transient`
+  (infrastructure retries ran out), `timed_out`, `unstartable` (the CLI
+  could not start, or the host step of a `cli` run), `agent_failed` (the
+  agent reported failure), `supervisor_interrupted`, `routing` (a tier
+  cascade), `failed` when nothing more is known, and others the journal
+  names. A transition an older apb journaled without a reason reads
+  `not_recorded` and is never reclassified. A pause or an abort ends the
+  chain: no transition follows it.
+- `hint_follow` (host groups only): of the host attempts apb gave a model
+  hint, how many reported that model (`followed`), another one
+  (`not_followed`) or none (`not_reported`); an unreported model is never
+  taken for the hint.
+
+A node is listed in the text when one of its groups has more than one step,
+a transition or a hint line:
+
+```
+  executor 0c1d2e3f4a5b (profile 1a2b3c4d5e6f, bundle 9f8e7d6c5b4a): 3 runs, 5 attempts
+    step 0 primary (cli): 3 attempts, succeeded 1/3 (33%), cost 0.0300 USD over 3/3 (100%)
+    step 1 fallback (cli): 2 attempts, succeeded 2/2 (100%)
+    step 2 fallback: never ran
+    0 -> 1 check_rejected x2
+```
+
+`apb runs <id>` names each attempt's step and why it was entered
+(`model w attempt 2 (cli): haiku requested by apb, step 1 fallback 1 of 1,
+entered from step 0: check_rejected`), and `apb doctor --run <id>` has one
+`step` row per attempt that entered a later step. The retrospective
+(`run_retro_context`, `{{run.retro}}`) counts each node's
+`fallback_reasons` by the same reasons.
 
 **Quality deltas.** With `--compare`, `compare.quality` lists, for every
 comparable key both versions graded under the same definition digest (the
@@ -203,10 +269,19 @@ no history at start. The method:
   project's newest 200 run directories (by the time their journal was last
   written), so a long history is never read in full. A run whose execution
   mode this apb does not know (a newer apb's) is never comparable. A node's spend samples come only from runs where it was bound to
-  the same profile digest (its `profile.yaml` and SOUL, so its model and the
-  run's overrides): a run where another profile drove the node is left out
-  for that node alone and counted in `comparable.profile_mismatch`. Skills
-  (the bundle digest) and params are not matched.
+  the same profile digest (its `profile.yaml` and SOUL), the same bundle
+  digest (its skills) and the same executor digest (its chain, tiers and
+  any run override, resolved for the run's overrides by the resolver the
+  start uses): a run that differs is left out for that node alone and
+  counted under the outermost part that differed, in
+  `comparable.profile_mismatch`, `bundle_mismatch` or `executor_mismatch`.
+  The estimate text names it: `not estimated: a (no history with this
+  executor)` (or `profile`, or `skill set`). `apb run --estimate` takes
+  `--overrides`, so the estimate of a run with an override is the one it
+  starts with. `comparable.key_version` is `2` for this key; an
+  `estimate.json` written before it has no such field, reads as `1`, and
+  its text says it was matched by the profile-only key. Params are not
+  matched.
 - **Samples.** Time comes from succeeded runs only (active time, paused time
   left out; `human_wait_p50_ms` is the part spent waiting for gates and
   questions). Spend comes from every finished visit, failed ones too. A
@@ -280,7 +355,24 @@ no history at start. The method:
                    "duration": { "count": 2, "median_ms": 4000, "max_ms": 4000 },
                    "expected_s": 10, "over_expected": { "count": 0, "of": 2, "rate": 0.0 },
                    "deliverable_missing": 0, "output_fields_missing": 0,
-                   "models": { "GLM-5.3-Flash": 3 }, "model_mismatch": 3 } ],
+                   "models": { "GLM-5.3-Flash": 3 }, "model_mismatch": 3,
+                   "executors": [ { "profile": "1a2b3c4d5e6f", "bundle": "9f8e7d6c5b4a",
+                                    "executor": "0c1d2e3f4a5b", "ephemeral": false,
+                                    "runs": 2, "attempts": 3,
+                                    "steps": [ { "binding": "5e6f7a8b9c0d", "step": 0,
+                                                 "source": "primary", "executed_by": "cli",
+                                                 "attempts": 2, "successes": { "count": 1, "of": 2, "rate": 0.5 },
+                                                 "cost_known": { "count": 0, "of": 2, "rate": 0.0 },
+                                                 "reported_models": { "none": 2 },
+                                                 "closes_by_reason": { "check_rejected": 1 } },
+                                               { "binding": "5e6f7a8b9c0d", "step": 1,
+                                                 "source": "fallback", "executed_by": "cli",
+                                                 "attempts": 1, "successes": { "count": 1, "of": 1, "rate": 1.0 },
+                                                 "cost_known": { "count": 0, "of": 1, "rate": 0.0 },
+                                                 "reported_models": { "none": 1 },
+                                                 "closes_by_reason": {} } ],
+                                    "transitions": [ { "from_step": 0, "to_step": 1,
+                                                       "reason": "check_rejected", "count": 1 } ] } ] } ],
       "note": "2 runs: fewer than 10, the rates are indicative only"
     }
   ],

@@ -5,6 +5,7 @@
 
 import type { BudgetLimit, OnNoEstimate, RunEstimate, Spread } from './api.gen'
 import type { RunBudget } from './api'
+import { ESTIMATE_KEY_VERSION } from './consts.gen'
 
 // One amount in `unit`: one decimal below ten, whole above.
 function inUnit(x: number): number {
@@ -76,17 +77,32 @@ export function estimateRows(e: RunEstimate): EstimateRow[] {
   ]
 }
 
-// `7 comparable runs (cli); 3 attempts without usage`.
+// `7 comparable runs (cli); 3 attempts without usage`, and a note when the
+// estimate was matched by the profile-only key.
 export function comparableText(e: RunEstimate): string {
   const c = e.comparable
   let line = `${c.runs} comparable ${c.runs === 1 ? 'run' : 'runs'} (${e.execution})`
   if (c.attempts_without_usage > 0) {
     line += `; ${c.attempts_without_usage} ${c.attempts_without_usage === 1 ? 'attempt' : 'attempts'} without usage`
   }
+  if ((c.key_version ?? 1) < ESTIMATE_KEY_VERSION) {
+    line += '; matched by the profile-only key (written before executors were compared)'
+  }
   return line
 }
 
-// `triage (no history with this profile)`, one per gated node the gate
+// The part of the key a node's history differed in, outermost first, in
+// the words of `apb run --estimate`; null when every comparable run matched.
+function mismatchWord(e: RunEstimate, node: string): string | null {
+  const c = e.comparable
+  if (c.profile_mismatch?.[node]) return 'profile'
+  if (c.bundle_mismatch?.[node]) return 'skill set'
+  if (c.executor_mismatch?.[node]) return 'executor'
+  return null
+}
+
+// `triage (no history with this profile)` (or skill set, or executor: the
+// outermost part of the key that differed), one per gated node the gate
 // cannot weigh under `limit` (see `unestimatedFor`); a node with spend
 // history that lacks only its cost or token figure says which. Without a
 // limit, the nodes with no spend sample at all.
@@ -95,7 +111,8 @@ export function unestimatedText(e: RunEstimate, limit: BudgetLimit = {}): string
   const names = limited ? unestimatedFor(e, limit) : e.unestimated
   return names.map((n) => {
     if (e.unestimated.includes(n)) {
-      return e.comparable.profile_mismatch?.[n] ? `${n} (no history with this profile)` : `${n} (no history)`
+      const part = mismatchWord(e, n)
+      return part ? `${n} (no history with this ${part})` : `${n} (no history)`
     }
     return e.unestimated_cost?.includes(n) && limit.usd !== undefined ? `${n} (no cost figure)` : `${n} (no token figure)`
   })

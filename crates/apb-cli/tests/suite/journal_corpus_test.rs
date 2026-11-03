@@ -68,6 +68,15 @@
 //! the new binary's routing and stop it, and the new binary still reads
 //! every snapshot verified afterwards.
 //!
+//! Rows X1 and X2 cover execution identity: the new binary runs
+//! Rows X1 and X2 cover execution identity: the new binary runs
+//! `corpus-exec` with a stub agent, whose primary reply the
+//! `success_check` rejects, so the fallback is entered with its reason; a
+//! `--now` pause stops the closing answer's composer, and a synthetic host
+//! transition joins the journal. Both old binaries read, resume and stop
+//! that run, routing as the new binary does (X1). In X2 beta.1 writes a
+//! fallback run with no recorded position or reason, and the new binary's
+//! `apb stats` and `apb runs` read it as not recorded, never reclassified.
 //! Rows E2 to E8 cover the run guard of approvals and person-only gates
 //! (`run_guard`, written after every checkpoint while the definition uses
 //! `approves`, `person_only` or `requires_approval`), with their playbook
@@ -3121,6 +3130,289 @@ fn rowe1_result_stamps_old_binaries_read_resume_stop() {
         );
         case.stop(&reader, &run);
     }
+}
+
+// ------------------------------------------------- execution identity (21a)
+
+/// The writer playbook of rows X1 and X2 (`corpus-exec`).
+const EXEC: &str = "corpus-exec";
+
+impl Case {
+    /// Seeds `corpus-exec` with `writer`: the fixture, its profile (primary
+    /// `haiku`, one fallback `sonnet`) and a stub agent that prints the
+    /// `success_check` marker only on `sonnet`. While `compose.hold` exists
+    /// in the case directory every call waits.
+    fn seed_exec(&mut self, writer: &Path) {
+        self.seed(writer);
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/journal-corpus");
+        let pdir = self.root().join(".apb/playbooks").join(EXEC);
+        copy_tree(&fixtures.join(EXEC), &pdir.join("1.0.0"));
+        fs::write(pdir.join("current"), "1.0.0").unwrap();
+        let profile = self.root().join(".apb/profiles").join(EXEC);
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("profile.yaml"),
+            "name: corpus-exec\ndescription: the stub agent chain\nexecutor:\n  agent: claude-code\n  model: haiku\n  fallbacks:\n    - { agent: claude-code, model: sonnet }\n",
+        )
+        .unwrap();
+        fs::write(profile.join("SOUL.md"), "").unwrap();
+        let d = self.dir.path().display().to_string();
+        let stub = self.dir.path().join("exec-agent.sh");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nwhile [ -f '{d}/compose.hold' ]; do sleep 0.05; done\nfor a in \"$@\"; do\n  if [ \"$a\" = sonnet ]; then echo PASSES; exit 0; fi\ndone\necho done\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        self.env.push(("APB_AGENT_CMD", stub.display().to_string()));
+        self.env.push(("APB_PAUSE_GRACE_MS", "200".to_string()));
+    }
+
+    /// `writer` runs `corpus-exec` to its gate and the driver is killed:
+    /// `work`'s primary reply was rejected, its fallback passed.
+    fn write_exec_at_gate(&mut self, writer: &Path) -> String {
+        self.seed_exec(writer);
+        let run = self.start_inline(writer, EXEC, &[]);
+        self.wait_journal(&run, "the gate", |j| {
+            j.iter().any(|e| e["type"] == "review_requested")
+        });
+        self.kill_driver(&run);
+        run
+    }
+}
+
+/// The run of `reader` resumed from the saved state: it ends succeeded,
+/// with `ok` composed once.
+fn x_resume(case: &Case, reader: &Path, run: &str) {
+    case.restore();
+    let ran = case.run(reader, &["resume", run]);
+    assert!(ran.ok(), "{}: {} resume: {ran:?}", case.name, label(reader));
+    let journal = case.journal(run);
+    assert_eq!(
+        last_of(&journal, "run_finished").map(|e| e["outcome"].clone()),
+        Some(Value::from("succeeded")),
+        "{}: {} resumed the run to a success: {}",
+        case.name,
+        label(reader),
+        summary(&journal)
+    );
+}
+
+/// Row X1: the new binary writes an executor chain: `work`'s primary reply
+/// is rejected, so its fallback is entered with `check_rejected` on
+/// `fallback_triggered` (and `executed_by`) and on the fallback attempt's
+/// `exec.entered`. After the gate a `--now` pause stops the composer of
+/// `ok`: an `interrupted` attempt with its chain position, no transition,
+/// no `node_finished`. A synthetic host transition (`from`/`to` `host`,
+/// hint models, `agent_failed`, `executed_by: host`) goes after the real
+/// one. Both old binaries read the run without an unknown record, resume
+/// it composing again and routing as the new binary does, and stop it.
+#[test]
+fn rowx1_execution_identity_old_binaries_read_resume_stop() {
+    let new = new_binary();
+    let mut case = Case::new("row X1");
+    let run = case.write_exec_at_gate(&new);
+    let journal = case.journal(&run);
+    let fb: Vec<_> = journal
+        .iter()
+        .filter(|e| e["type"] == "fallback_triggered" && e["node"] == "work")
+        .collect();
+    assert_eq!(fb.len(), 1, "row X1: {}", summary(&journal));
+    assert_eq!(fb[0]["reason"], "check_rejected");
+    assert_eq!(fb[0]["executed_by"], "cli");
+    let entered = journal
+        .iter()
+        .rfind(|e| e["type"] == "attempt_started" && e["node"] == "work")
+        .map(|e| e["exec"]["entered"].clone());
+    assert_eq!(
+        entered
+            .as_ref()
+            .map(|e| (e["from_step"].clone(), e["reason"].clone())),
+        Some((Value::from(0), Value::from("check_rejected"))),
+        "row X1: {}",
+        summary(&journal)
+    );
+
+    // The composer, paused `--now` while it composes.
+    let hold = case.dir.path().join("compose.hold");
+    fs::write(&hold, "").unwrap();
+    let ran = case.run(&new, &["review", &run, "gate", "--decision", "approved"]);
+    assert!(ran.ok(), "row X1: review: {ran:?}");
+    let mut resume = case.spawn(&new, &["resume", &run]);
+    case.wait_journal(&run, "the composer's attempt", |j| {
+        j.iter()
+            .any(|e| e["type"] == "attempt_started" && e["node"] == "ok")
+    });
+    let ran = case.run(&new, &["pause", &run, "--now"]);
+    assert!(ran.ok(), "row X1: pause --now: {ran:?}");
+    case.wait_journal(&run, "the pause", |j| {
+        j.iter().any(|e| e["type"] == "run_paused")
+    });
+    let start = Instant::now();
+    while resume.child.try_wait().unwrap().is_none() {
+        assert!(start.elapsed() < DEADLINE, "row X1: the paused driver ends");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    fs::remove_file(&hold).unwrap();
+    let journal = case.journal(&run);
+    let of_ok = |kind: &str| {
+        journal
+            .iter()
+            .filter(|e| e["type"] == kind && e["node"] == "ok")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        of_ok("node_finished").len(),
+        0,
+        "row X1: {}",
+        summary(&journal)
+    );
+    assert_eq!(
+        of_ok("fallback_triggered").len(),
+        0,
+        "row X1: no transition"
+    );
+    let started = of_ok("attempt_started");
+    assert_eq!(started.len(), 1, "row X1: {}", summary(&journal));
+    assert_eq!(started[0]["exec"]["step"], 0, "row X1: {}", started[0]);
+    assert_eq!(of_ok("attempt_finished")[0]["status"], "interrupted");
+
+    rewrite_journal(&case.run_dir(&run), |mut records| {
+        let at = records
+            .iter()
+            .position(|e| e["type"] == "fallback_triggered" && e["node"] == "work")
+            .expect("work's transition");
+        let ts = records[at]["ts"].clone();
+        records.insert(
+            at + 1,
+            serde_json::json!({
+                "seq": 0, "ts": ts, "type": "fallback_triggered", "node": "work",
+                "from": "host", "to": "host", "from_model": "opus", "to_model": "sonnet",
+                "reason": "agent_failed", "executed_by": "host",
+            }),
+        );
+        records
+    });
+    case.save();
+
+    let from = case.journal(&run).len();
+    let ran = case.read(&new, &run);
+    assert!(
+        ran.stdout.contains("entered from step 0: check_rejected"),
+        "row X1: {ran:?}"
+    );
+    x_resume(&case, &new, &run);
+    let journal = case.journal(&run);
+    let composed: Vec<_> = journal[from..]
+        .iter()
+        .filter(|e| e["type"] == "attempt_started" && e["node"] == "ok")
+        .collect();
+    assert_eq!(composed.len(), 1, "row X1: {}", summary(&journal));
+    assert_eq!(
+        composed[0]["exec"]["step"], 0,
+        "the resume composes from step 0"
+    );
+    assert!(composed[0]["exec"].get("entered").is_none());
+    let expected = routing(&journal, from);
+    assert_eq!(expected, ["\"ok\" \"succeeded\""], "row X1");
+    case.stop(&new, &run);
+
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            !ran.stdout.contains("unknown event"),
+            "row X1: {} reads the new fields as fields it ignores: {ran:?}",
+            label(&reader)
+        );
+        x_resume(&case, &reader, &run);
+        assert_eq!(
+            routing(&case.journal(&run), from),
+            expected,
+            "row X1: {} routes as the new binary",
+            label(&reader)
+        );
+        case.stop(&reader, &run);
+    }
+}
+
+/// Row X2 (card A9): beta.1 writes a run whose `work` falls back (beta.1
+/// journals no chain position and no reason) and resumes it to its end.
+/// The new binary's `apb stats` reads it: the transition is `not_recorded`,
+/// never reclassified, the step row has no position, and the executor
+/// digest comes from the manifest. `apb runs <id>` says `position not
+/// recorded`.
+#[test]
+fn rowx2_beta1_fallback_run_new_report_reads_not_recorded() {
+    let mut case = Case::new("row X2");
+    let Some(beta1) = old_binary(BETA1, &case) else {
+        return;
+    };
+    let new = new_binary();
+    let run = case.write_exec_at_gate(&beta1);
+    case.save();
+    case.approve_and_resume(&beta1, &run);
+    let journal = case.journal(&run);
+    let fb = journal
+        .iter()
+        .find(|e| e["type"] == "fallback_triggered" && e["node"] == "work")
+        .unwrap_or_else(|| panic!("row X2: beta.1 fell back: {}", summary(&journal)));
+    assert!(fb.get("reason").is_none() && fb.get("executed_by").is_none());
+
+    let ran = case.run(&new, &["stats", "--playbook", EXEC, "--json"]);
+    assert!(ran.ok(), "row X2: stats: {ran:?}");
+    let report: Value = serde_json::from_str(&ran.stdout).unwrap();
+    let work = report["versions"][0]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["node"] == "work")
+        .cloned()
+        .unwrap_or_else(|| panic!("row X2: work in {report}"));
+    let groups = work["executors"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "row X2: {work}");
+    let g = &groups[0];
+    assert!(
+        g["executor"].as_str().is_some_and(|x| !x.is_empty()),
+        "row X2: the executor digest comes from the manifest: {g}"
+    );
+    let steps = g["steps"].as_array().unwrap();
+    assert!(
+        steps.iter().all(|s| s.get("step").is_none()),
+        "row X2: no position recorded: {g}"
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .map(|s| s["attempts"].as_u64().unwrap())
+            .sum::<u64>(),
+        2,
+        "row X2: {g}"
+    );
+    let reasons: Vec<_> = g["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["reason"].clone(), t["count"].clone()))
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![(Value::from("not_recorded"), Value::from(1))],
+        "row X2: {g}"
+    );
+
+    let ran = case.run(&new, &["runs", &run]);
+    assert!(ran.ok(), "row X2: runs: {ran:?}");
+    assert!(
+        ran.stdout.contains("position not recorded"),
+        "row X2: {ran:?}"
+    );
 }
 
 // ------------------------------------- approvals and person-only gates (20b)

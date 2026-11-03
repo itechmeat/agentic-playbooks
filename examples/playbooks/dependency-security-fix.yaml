@@ -101,7 +101,12 @@ nodes:
       RESULT:` and `TEST RESULT:` lines from {{nodes.prove.output}}, and
       the NOT FIXED list with its reasons from {{nodes.fix_findings.output}}.
       Open no second pull request for the unfixed findings; they belong in
-      this one's body. End with a line `CHANGE REQUEST: <html_url>`.
+      this one's body. Then delete the temporary files and logs this run
+      created and stop the processes it started, only those. Keep the fix
+      branch: it goes, with any worktree and build output made for it, once
+      the change request is merged; old build artifacts are pruned with a
+      build cache pruner (such as cargo sweep for Rust projects) rather
+      than wiped. End with a line `CHANGE REQUEST: <html_url>`.
     connectors:
       - { name: github, accounts: [default], functions: [create_pull], max_calls: 3 }
   - { id: finish, type: finish, outcome: success }

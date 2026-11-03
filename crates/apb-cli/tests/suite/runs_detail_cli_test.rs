@@ -600,3 +600,76 @@ fn runs_with_an_id_prints_one_line_per_read_only_check() {
     assert_eq!(rows[1]["violated"]["evidence"], "read_only/scan/1.json");
     assert_eq!(rows[2]["violated"]["changes"][0]["path"], ".env");
 }
+
+// --- PR 21a: the attempt identity in `apb runs <id>` ---
+
+/// One journal for the attempt identity surfaces (PR 21a, card A5): a CLI
+/// primary that fails and a fallback entered after `check_rejected`; a
+/// host attempt whose blocked task reported no model and whose follow-up
+/// reported `glm-5.3-flash` (partial); one whose two tasks reported
+/// different models (mixed); one that reported the hinted model.
+const IDENTITY_JOURNAL: &[&str] = &[
+    r#"{"seq":0,"ts":1790000002000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
+    r#"{"seq":1,"ts":1790000002001,"type":"attempt_started","node":"a","attempt":1,"agent":"claude","model":"sonnet","exec":{"binding":"sha256:aaaaaaaaaaaaaaaaaaaaaaaa","step":0,"source":{"kind":"primary"},"executed_by":"cli"}}"#,
+    r#"{"seq":2,"ts":1790000002002,"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#,
+    r#"{"seq":3,"ts":1790000002003,"type":"attempt_started","node":"a","attempt":2,"agent":"claude","model":"haiku","exec":{"binding":"sha256:aaaaaaaaaaaaaaaaaaaaaaaa","step":1,"source":{"kind":"fallback","index":1,"of":1},"executed_by":"cli","entered":{"from_step":0,"closed_attempt":1,"reason":"check_rejected"}}}"#,
+    r#"{"seq":4,"ts":1790000002004,"type":"attempt_finished","node":"a","attempt":2,"status":"succeeded"}"#,
+    r#"{"seq":5,"ts":1790000002005,"type":"host_task_requested","task_id":"b-1","node":"b","attempt":1,"model_hint":"opus"}"#,
+    r#"{"seq":6,"ts":1790000002006,"type":"attempt_started","node":"b","attempt":1,"agent":"host","model":"opus"}"#,
+    r#"{"seq":7,"ts":1790000002007,"type":"host_task_submitted","task_id":"b-1","status":"blocked","submitted_by":"host"}"#,
+    r#"{"seq":8,"ts":1790000002008,"type":"host_task_requested","task_id":"b-2","node":"b","attempt":1}"#,
+    r#"{"seq":9,"ts":1790000002009,"type":"host_task_submitted","task_id":"b-2","status":"succeeded","submitted_by":"host","model":"glm-5.3-flash"}"#,
+    r#"{"seq":10,"ts":1790000002010,"type":"attempt_finished","node":"b","attempt":1,"status":"succeeded"}"#,
+    r#"{"seq":11,"ts":1790000002011,"type":"host_task_requested","task_id":"c-1","node":"c","attempt":1,"model_hint":"opus"}"#,
+    r#"{"seq":12,"ts":1790000002012,"type":"attempt_started","node":"c","attempt":1,"agent":"host","model":"opus"}"#,
+    r#"{"seq":13,"ts":1790000002013,"type":"host_task_submitted","task_id":"c-1","status":"blocked","submitted_by":"host","model":"opus"}"#,
+    r#"{"seq":14,"ts":1790000002014,"type":"host_task_requested","task_id":"c-2","node":"c","attempt":1}"#,
+    r#"{"seq":15,"ts":1790000002015,"type":"host_task_submitted","task_id":"c-2","status":"succeeded","submitted_by":"host","model":"sonnet"}"#,
+    r#"{"seq":16,"ts":1790000002016,"type":"attempt_finished","node":"c","attempt":1,"status":"succeeded"}"#,
+    r#"{"seq":17,"ts":1790000002017,"type":"host_task_requested","task_id":"d-1","node":"d","attempt":1,"model_hint":"opus"}"#,
+    r#"{"seq":18,"ts":1790000002018,"type":"attempt_started","node":"d","attempt":1,"agent":"host","model":"opus"}"#,
+    r#"{"seq":19,"ts":1790000002019,"type":"host_task_submitted","task_id":"d-1","status":"succeeded","submitted_by":"host","model":"claude-opus-4-1"}"#,
+    r#"{"seq":20,"ts":1790000002020,"type":"attempt_finished","node":"d","attempt":1,"status":"succeeded"}"#,
+    r#"{"seq":21,"ts":1790000002021,"type":"host_task_requested","task_id":"e-2","node":"summarize-the-findings","attempt":2,"model_hint":"sonnet"}"#,
+    r#"{"seq":22,"ts":1790000002022,"type":"attempt_started","node":"summarize-the-findings","attempt":2,"agent":"host","model":"sonnet","exec":{"binding":"sha256:bbbbbbbbbbbbbbbbbbbbbbbb","step":1,"source":{"kind":"fallback","index":1,"of":1},"executed_by":"host","entered":{"from_step":0,"closed_attempt":17,"reason":"check_rejected"}}}"#,
+    r#"{"seq":23,"ts":1790000002023,"type":"host_task_submitted","task_id":"e-2","status":"succeeded","submitted_by":"host","model":"glm-5.3-flash"}"#,
+    r#"{"seq":24,"ts":1790000002024,"type":"attempt_finished","node":"summarize-the-findings","attempt":2,"status":"succeeded"}"#,
+    r#"{"seq":25,"ts":1790000002025,"type":"run_finished","outcome":"succeeded"}"#,
+];
+
+/// A CLI attempt names the model apb requested and its chain position, a
+/// fallback the reason its step was entered; a host attempt names what the
+/// host reported (partial, mixed or one model), never the hint as the
+/// model, and whether the hint was followed; the run's hint follow line
+/// counts them.
+#[test]
+fn runs_with_an_id_shows_requested_and_reported_models_and_why_a_step_was_entered() {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/ident-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("events.jsonl"), IDENTITY_JOURNAL.join("\n") + "\n").unwrap();
+    let out = apb_std()
+        .args(["runs", "ident-1"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "  model a attempt 1 (cli): sonnet requested by apb, step 0 primary\n",
+        "  model a attempt 2 (cli): haiku requested by apb, step 1 fallback 1 of 1, entered from step 0: check_rejected\n",
+        "  model b attempt 1 (host): partial, glm-5.3-flash reported by the host, 1 task not reported, hint opus not followed, position not recorded\n",
+        "  model c attempt 1 (host): mixed, opus, sonnet reported by the host, hint opus not followed, position not recorded\n",
+        "  model d attempt 1 (host): claude-opus-4-1 reported by the host, hint opus followed, position not recorded\n",
+        // A long host line keeps its reason: the line is not cut at the
+        // width of a question.
+        "  model summarize-the-findings attempt 2 (host): glm-5.3-flash reported by the host, hint sonnet not followed, step 1 fallback 1 of 1, entered from step 0: check_rejected\n",
+        "  hints: 4 hinted, 1 followed, 3 not followed, 0 not reported\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in:\n{text}");
+    }
+    assert!(
+        !text.contains("(host): opus"),
+        "a hint shown as the model:\n{text}"
+    );
+}

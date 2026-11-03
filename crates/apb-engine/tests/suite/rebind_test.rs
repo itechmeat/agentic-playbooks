@@ -413,4 +413,40 @@ fn each_attempt_names_the_binding_snapshot_it_ran_on() {
         .unwrap()
         .count();
     assert_eq!(stored, 3, "an unchanged binding reuses its snapshot");
+
+    // Plan row A2: a walk on a new binding starts with no `entered`; each
+    // attempt's identity carries the digests of its own snapshot.
+    assert!(steps.iter().all(|s| s.entered.is_none()));
+    let ids: Vec<_> = apb_engine::execution_identity::fold::identities(&run_dir, &events)
+        .into_iter()
+        .filter(|i| i.node == "work")
+        .collect();
+    let profiles: Vec<String> = ids
+        .iter()
+        .map(|i| i.profile_digest.clone().expect("a snapshot's digest"))
+        .collect();
+    assert_eq!(profiles[0], profiles[1]);
+    assert_eq!(profiles[2], profiles[3]);
+    assert_ne!(profiles[0], profiles[2]);
+    assert_ne!(profiles[2], profiles[4]);
+    // Design 2.6 item 4: the same journal without `exec`, as an older apb
+    // wrote it. The node was rebound, so no attempt is credited to the
+    // manifest entry or to the current overlay: the binding is not recorded.
+    let old: Vec<Event> = events
+        .iter()
+        .cloned()
+        .map(|mut e| {
+            if let EventPayload::AttemptStarted { exec, .. } = &mut e.payload {
+                *exec = None;
+            }
+            e
+        })
+        .collect();
+    let ids = apb_engine::execution_identity::fold::identities(&run_dir, &old);
+    assert!(
+        ids.iter()
+            .filter(|i| i.node == "work")
+            .all(|i| i.profile_digest.is_none() && i.executor_digest.is_none()),
+        "{ids:?}"
+    );
 }

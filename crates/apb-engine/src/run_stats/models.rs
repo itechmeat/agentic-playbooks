@@ -1,12 +1,14 @@
 //! The models attempts actually ran on, per node and per version (issue
-//! #193), from [`crate::attempt_models`].
+//! #193), from the identity fold ([`crate::execution_identity::fold`]): a
+//! CLI attempt by the model apb requested, a host attempt only when every
+//! host task reported the same model.
 
 use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::attempt_models::attempt_models;
 use crate::event::Event;
+use crate::execution_identity::fold::{ReportedModel, fold, view_of};
 
 /// The key of an attempt whose host reported no model.
 pub const UNREPORTED: &str = "unreported";
@@ -62,12 +64,17 @@ pub(super) fn model_use<'a>(
     let mut version = ModelUse::default();
     let mut nodes: BTreeMap<String, ModelUse> = BTreeMap::new();
     for (events, expected) in runs {
-        for a in attempt_models(events, expected) {
-            version.add(a.model.as_deref(), a.mismatch);
+        for a in fold(events).into_iter().map(|id| view_of(id, expected)) {
+            let model = match (&a.reported, a.executed_by.as_str()) {
+                (ReportedModel::One { model }, _) => Some(model.as_str()),
+                (_, crate::execution_identity::EXECUTED_BY_HOST) => None,
+                _ => a.requested_model.as_deref(),
+            };
+            version.add(model, a.mismatch);
             nodes
                 .entry(a.node.clone())
                 .or_default()
-                .add(a.model.as_deref(), a.mismatch);
+                .add(model, a.mismatch);
         }
     }
     (version, nodes)

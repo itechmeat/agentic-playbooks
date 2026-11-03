@@ -179,14 +179,23 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub estimate: Option<apb_engine::run_estimate::RunEstimate>,
-    /// The model each attempt actually ran on, against the profile's primary
-    /// model (issue #193); empty before the first attempt.
+    /// Each attempt's identity: the model apb requested, what a host
+    /// reported, the chain position and why a step was entered, against the
+    /// profile's primary model; empty before the first attempt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(
         test,
-        ts(as = "Option<Vec<apb_engine::attempt_models::AttemptModel>>", optional)
+        ts(
+            as = "Option<Vec<apb_engine::execution_identity::fold::ExecutionIdentityView>>",
+            optional
+        )
     )]
-    pub attempt_models: Vec<apb_engine::attempt_models::AttemptModel>,
+    pub attempt_models: Vec<apb_engine::execution_identity::fold::ExecutionIdentityView>,
+    /// How often a host followed the hints of the run's host attempts;
+    /// absent when no host attempt had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub hint_follow: Option<apb_engine::run_stats::executors::HintFollow>,
     /// What each isolated attempt's isolation held and did not (level,
     /// backend, network, limits); empty for a run without one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -387,7 +396,8 @@ pub(crate) async fn get_run_handler(
     let commits = view.commits();
     let publish = view.publish();
     let inbox_gaps = view.inbox_gaps();
-    let attempt_models = apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events);
+    let attempt_models = apb_engine::execution_identity::fold::views(&run_dir, &view.events);
+    let hint_follow = apb_engine::run_stats::executors::HintFollow::of_views(&attempt_models);
     let isolation = view.isolation();
     let read_only = view.read_only();
     let unattended = apb_engine::run_view::run_unattended(&run_dir);
@@ -472,6 +482,7 @@ pub(crate) async fn get_run_handler(
         run_outputs,
         lists,
         attempt_models,
+        hint_follow,
         isolation,
         read_only,
         unattended,

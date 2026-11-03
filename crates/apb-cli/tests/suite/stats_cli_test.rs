@@ -274,6 +274,78 @@ fn stats_shows_quality_per_version_and_its_deltas() {
     assert_eq!(outcome["poor_delta"], 0.5);
 }
 
+/// Cards A6 and A7 through the binary: an ephemeral override with the
+/// agent and model of the base profile is another executor. `apb run
+/// --estimate --overrides` counts the base runs of its node under
+/// `executor_mismatch`, and after a run with the override `apb stats` lists
+/// the node in two digest groups, the override one marked, and its
+/// executor report per group.
+#[cfg(unix)]
+#[test]
+fn an_override_equal_to_the_base_is_its_own_executor_in_estimates_and_stats() {
+    use crate::budget_cli_test::{history_run, seed};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let stub = seed(root, "1.0.0", "soul");
+    history_run(root, &stub);
+    history_run(root, &stub);
+    let ov = root.join("override.yaml");
+    fs::write(
+        &ov,
+        "nodes:\n  a:\n    ephemeral_executor: { agent: claude-code, model: haiku }\n",
+    )
+    .unwrap();
+    apb()
+        .args(["run", "bud", "--estimate", "--overrides"])
+        .arg(&ov)
+        .env("APB_AGENT_CMD", &stub)
+        .current_dir(root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "not estimated: a (no history with this executor)",
+        ));
+    apb()
+        .args(["run", "bud", "--overrides"])
+        .arg(&ov)
+        .env("APB_AGENT_CMD", &stub)
+        .current_dir(root)
+        .assert()
+        .success();
+    let out = apb()
+        .args(["stats", "--playbook", "bud", "--json"])
+        .current_dir(root)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let node = |n: &str| {
+        v["versions"][0]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["node"] == n)
+            .cloned()
+            .unwrap()
+    };
+    let a = node("a");
+    let groups = a["digests"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{a}");
+    assert_eq!(groups[0]["profile"], groups[1]["profile"]);
+    assert_ne!(groups[0]["executor"], groups[1]["executor"]);
+    assert_eq!(groups[1]["ephemeral"], true);
+    let executors = a["executors"].as_array().unwrap();
+    assert_eq!(executors.len(), 2, "{a}");
+    assert_eq!(executors[1]["ephemeral"], true);
+    assert_eq!(executors[1]["steps"][0]["source"], "ephemeral");
+    assert_eq!(executors[0]["steps"][0]["source"], "primary");
+    assert_eq!(executors[0]["runs"], 2);
+    // The node without an override kept one executor.
+    assert!(node("b")["digests"].is_null());
+}
+
 /// `apb stats` splits the reported cost by basis, so a subscription
 /// equivalent nobody is billed never reads as money spent.
 #[test]

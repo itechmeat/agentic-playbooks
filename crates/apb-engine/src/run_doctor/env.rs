@@ -204,7 +204,7 @@ fn host_rows(m: &RunExecutionManifest, events: &[Event]) -> Vec<RunCheck> {
         .iter()
         .filter_map(|e| match &e.payload {
             EventPayload::AttemptStarted { node, agent, .. }
-                if agent == crate::attempt_models::HOST_AGENT
+                if agent == crate::execution_identity::HOST_AGENT
                     && m.for_node(node)
                         .and_then(|p| p.process_env.as_ref())
                         .is_some_and(|p| p.is_allowlist()) =>

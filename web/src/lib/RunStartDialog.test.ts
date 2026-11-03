@@ -46,6 +46,7 @@ const estimate = (unestimated: string[], noCost: string[] = unestimated): RunEst
   version: '1.0.0',
   execution: 'cli',
   comparable: {
+    key_version: 2,
     runs: 2,
     succeeded: 2,
     window: 50,

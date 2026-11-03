@@ -267,71 +267,7 @@ pub(crate) fn snapshot_loaded_profile(
         }
     }
 
-    let mut chain = Vec::new();
-    if let Some(e) = eph {
-        let program = crate::invocation::program_for(&e.agent, global);
-        chain.push(crate::invocation::resolve_invocation(
-            &e.agent, &e.model, &program, global,
-        )?);
-    } else {
-        let ex = &loaded.doc.executor;
-        let program = crate::invocation::program_for(&ex.agent, global);
-        chain.push(crate::invocation::resolve_invocation(
-            &ex.agent, &ex.model, &program, global,
-        )?);
-        for f in &ex.fallbacks {
-            let p = crate::invocation::program_for(&f.agent, global);
-            chain.push(crate::invocation::resolve_invocation(
-                &f.agent, &f.model, &p, global,
-            )?);
-        }
-    }
-    let soul_empty = loaded.soul.trim().is_empty();
-    let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
-    // Executor tiers (issue #165 Part 12), resolved like the chain so an
-    // unknown agent fails the run start the same way. An ephemeral executor
-    // replaces the chain, so its entry is never routed and only the
-    // profile's other problems (its `process_env`, which applies to an
-    // ephemeral executor too) refuse the start.
-    let mut tiers = Vec::new();
-    let problems: Vec<String> = loaded
-        .doc
-        .problems()
-        .iter()
-        .filter(|p| eph.is_none() || p.code != apb_core::profile::PROFILE_TIERS_INVALID)
-        .map(ToString::to_string)
-        .collect();
-    if !problems.is_empty() {
-        return Err(EngineError::Invalid(format!(
-            "profile `{key}`: {}",
-            problems.join("; ")
-        )));
-    }
-    if eph.is_none() {
-        for (name, t) in loaded.doc.tiers.iter() {
-            let invocation = match t.executor() {
-                Some((agent, model)) => {
-                    let program = crate::invocation::program_for(agent, global);
-                    let ri = crate::invocation::resolve_invocation(agent, model, &program, global)?;
-                    // A tier whose agent cannot carry a required native
-                    // SOUL is left out, as `filter_chain` drops such a step.
-                    if loaded.doc.soul == apb_core::profile::SoulRequirement::NativeRequired
-                        && !soul_empty
-                        && ri.soul_delivery != apb_core::config::SoulDelivery::Native
-                    {
-                        continue;
-                    }
-                    Some(ri)
-                }
-                None => None,
-            };
-            tiers.push(crate::manifest::ManifestTier {
-                name: name.clone(),
-                for_work: t.for_work.clone(),
-                invocation,
-            });
-        }
-    }
+    let (chain, tiers) = crate::manifest::resolve_executor(loaded, eph, global)?;
 
     Ok(ManifestProfile {
         scope: scope.to_string(),

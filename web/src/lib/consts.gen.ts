@@ -111,6 +111,15 @@ export const EXPLAIN_CLASSES = ['observed', 'inferred', 'unknown'] as const
 /** Every code of a "why it did not run" statement. */
 export const NOT_RUN_CODES = ['source_not_executed', 'routed_elsewhere', 'condition_not_matched', 'budget_spent', 'loop_exhausted', 'no_failure_to_route', 'failure_routed_elsewhere', 'delivered_not_executed', 'run_ended_first', 'cancelled_by_race', 'unreachable', 'no_input_delivered', 'run_not_finished', 'definition_unknown', 'duplicate_pair_before_edges', 'old_loop_round', 'output_clipped', 'open_execution', 'routing_not_recorded', 'cannot_tell'] as const
 
+/** Every close reason of a chain step; a reason outside it shows as `other` unless it is a slug. */
+export const CLOSE_REASONS = ['failed', 'expired', 'timed_out', 'interrupted', 'cancelled', 'question_timeout', 'unstartable', 'superseded', 'check_rejected', 'protected_paths', 'quota', 'auth', 'budget', 'transient', 'agent_failed', 'routing', 'run_paused', 'run_aborted', 'supervisor_interrupted'] as const
+
+/** A transition whose journal recorded no reason. */
+export const CLOSE_REASON_NOT_RECORDED = "not_recorded"
+
+/** The estimate key version that matches history by profile, skill set and executor; an older snapshot used the profile-only key. */
+export const ESTIMATE_KEY_VERSION = 2
+
 /** Every boundary a scenario run answers. */
 export const BOUNDARY_KINDS = ['agent_attempt', 'question', 'success_check', 'completion_check', 'script', 'judge_native', 'judge_emulation', 'judge_edges', 'list_judge_check', 'engine_aid', 'list_source', 'review', 'publish', 'wait', 'child_playbook', 'baseline', 'goal_script', 'protect', 'worktree', 'provenance', 'notify', 'node_cache', 'retry_delay', 'infra_backoff', 'read_only_check', 'finish_hooks'] as const
 

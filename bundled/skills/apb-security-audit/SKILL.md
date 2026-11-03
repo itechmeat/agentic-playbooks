@@ -2,7 +2,7 @@
 name: apb-security-audit
 description: A focused, read-only security review of one change. Use on every diff the security review role reads, and when a change touches trust boundaries, input handling, files, permissions, secrets or dependencies. Each finding needs a concrete way to exploit it or a concrete failure.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Audit a change for security
@@ -73,6 +73,14 @@ A finding states:
 Without a concrete path it is not a finding. Record it as a question or a
 hardening note instead, labelled as such. Verify every finding against the
 source; say what you could not verify.
+
+## 3a. Clean up
+
+A proof may need scratch inputs, a local server, a browser session or a test
+account. Create scratch files under one directory named for the audit, and
+before you report delete them, stop the servers and close the sessions you
+started, and remove a test account you created where you are allowed to.
+Delete only what the audit created. The finding keeps its evidence as text.
 
 ## 4. Report
 

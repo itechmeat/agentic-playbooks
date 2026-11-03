@@ -54,10 +54,26 @@ pub enum EstimateBasis {
     None,
 }
 
+/// The key a node's history is matched by since the executor digest: the
+/// profile, the bundle and the executor of the binding.
+pub const ESTIMATE_KEY_VERSION: u32 = 2;
+/// The key of an estimate written before [`ESTIMATE_KEY_VERSION`]: the
+/// profile digest only.
+pub const PROFILE_ONLY_KEY: u32 = 1;
+
+fn profile_only_key() -> u32 {
+    PROFILE_ONLY_KEY
+}
+
 /// The counts behind an estimate.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Comparable {
+    /// How a node's history was matched: [`ESTIMATE_KEY_VERSION`] (profile,
+    /// bundle and executor), or [`PROFILE_ONLY_KEY`] for a snapshot written
+    /// before it, which has no such field.
+    #[serde(default = "profile_only_key")]
+    pub key_version: u32,
     /// Runs of the same version and execution mode within the window.
     pub runs: u32,
     pub succeeded: u32,
@@ -70,6 +86,76 @@ pub struct Comparable {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[cfg_attr(feature = "ts", ts(optional, as = "Option<BTreeMap<String, u32>>"))]
     pub profile_mismatch: BTreeMap<String, u32>,
+    /// Per node, the comparable runs that bound it to the same profile with
+    /// other skills (another bundle digest).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<BTreeMap<String, u32>>"))]
+    pub bundle_mismatch: BTreeMap<String, u32>,
+    /// Per node, the comparable runs that bound it to the same profile and
+    /// skills with another executor (chain, tiers, or an override).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<BTreeMap<String, u32>>"))]
+    pub executor_mismatch: BTreeMap<String, u32>,
+}
+
+impl Default for Comparable {
+    fn default() -> Self {
+        Comparable {
+            key_version: ESTIMATE_KEY_VERSION,
+            runs: 0,
+            succeeded: 0,
+            window: 0,
+            runs_without_usage: 0,
+            attempts_without_usage: 0,
+            attempts_without_cost: 0,
+            profile_mismatch: BTreeMap::new(),
+            bundle_mismatch: BTreeMap::new(),
+            executor_mismatch: BTreeMap::new(),
+        }
+    }
+}
+
+impl Comparable {
+    /// The runs of `node` counted under `part` of the key.
+    pub(super) fn mismatch_of(&mut self, part: KeyPart) -> &mut BTreeMap<String, u32> {
+        match part {
+            KeyPart::Profile => &mut self.profile_mismatch,
+            KeyPart::Bundle => &mut self.bundle_mismatch,
+            KeyPart::Executor => &mut self.executor_mismatch,
+        }
+    }
+
+    /// The part of the key a history of `node` differed in, outermost
+    /// first; `None` when every comparable run matched it.
+    pub fn mismatch_part(&self, node: &str) -> Option<KeyPart> {
+        [
+            (KeyPart::Profile, &self.profile_mismatch),
+            (KeyPart::Bundle, &self.bundle_mismatch),
+            (KeyPart::Executor, &self.executor_mismatch),
+        ]
+        .into_iter()
+        .find(|(_, m)| m.contains_key(node))
+        .map(|(p, _)| p)
+    }
+}
+
+/// A part of the key a node's history is matched by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPart {
+    Profile,
+    Bundle,
+    Executor,
+}
+
+impl KeyPart {
+    /// What the estimate text names: `profile`, `skill set` or `executor`.
+    pub fn word(self) -> &'static str {
+        match self {
+            KeyPart::Profile => "profile",
+            KeyPart::Bundle => "skill set",
+            KeyPart::Executor => "executor",
+        }
+    }
 }
 
 /// How long the run takes, active time (paused time left out).
@@ -238,15 +324,15 @@ impl RunEstimate {
 }
 
 /// What an estimate is for: a playbook version, the execution mode, and
-/// each node's profile digest.
+/// each node's key (profile, bundle and executor digest).
 #[derive(Debug, Clone)]
 pub struct EstimateTarget {
     pub playbook: Playbook,
     pub version: String,
     /// `cli` or `host`.
     pub execution: String,
-    /// Node id to profile digest.
-    pub node_profiles: BTreeMap<String, String>,
+    /// Node id to the key its history must match.
+    pub node_keys: BTreeMap<String, crate::execution_identity::digest::NodeExecKey>,
     /// A run left out of the history (the run being estimated).
     pub exclude_run: Option<String>,
 }

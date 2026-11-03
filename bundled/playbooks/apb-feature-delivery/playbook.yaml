@@ -10,7 +10,7 @@ description: >-
   reports how the candidate was reviewed; it does not certify that the
   reviewed candidate is the final one. No commit, push or pull request is
   made by the run.
-version: 1.1.0
+version: 1.1.1
 agent_launch: ask
 params:
   - name: change_kind
@@ -179,7 +179,10 @@ nodes:
       preservation. Gate every test you add or change with the authoring
       mode of the apb-test-audit skill. Run the project's own checks. Do
       not commit, push or
-      open a pull request, and preserve unrelated work. Write the outputs
+      open a pull request, and preserve unrelated work. Before you write
+      the outputs, clean up as the apb-delivery skill says: delete the
+      temporary files, logs and scratch output this step created and stop
+      the background processes it started, only those. Write the outputs
       changed_paths (a JSON array), evidence (checks run and their results)
       and gaps (what could not be shown, empty when none).
     outputs:
@@ -208,7 +211,10 @@ nodes:
       chain to an independent context when one is available, and repair
       what is confirmed. If the item section carries a check_note from an
       earlier round, fix what it names first. Do not commit, push or open a
-      pull request, and preserve unrelated work. Write the outputs
+      pull request, and preserve unrelated work. Before you write the
+      outputs, delete the temporary files, logs and scratch output this
+      step created and stop the background processes it started, only
+      those. Write the outputs
       changed_paths (a JSON array), evidence (checks run and their
       results), review (who reviewed, at which rung, the findings and their
       dispositions), gaps (empty when none) and self_check (pass only when
@@ -348,7 +354,9 @@ nodes:
       first. Fix the confirmed ones; reject the others with a reason. Do
       not drop reviewers, weaken checks, or delete or edit tests to make a
       finding go away. Rerun the affected project checks. Do not commit,
-      push or open a pull request. Write the outputs dispositions (a JSON
+      push or open a pull request. Before you write the outputs, delete the
+      temporary files, logs and scratch output this step created and stop
+      the background processes it started, only those. Write the outputs dispositions (a JSON
       array: finding id, fixed or rejected, evidence), changed_paths and
       evidence.
     outputs:
@@ -377,7 +385,11 @@ nodes:
       with a reason), the findings per role with their dispositions, the
       repair rounds used, and the measurements (change kind, risk triggers,
       findings per role accepted and rejected, wall time; unknown stays
-      unknown). Begin the report with the line DELIVERY REPORT: and write
+      unknown). End with the cleanup still due once the change is merged:
+      the task's worktrees and branches and the build output they used, and
+      old build artifacts pruned rather than wiped (a build cache pruner
+      such as cargo sweep for Rust projects); name only what this task
+      created. Begin the report with the line DELIVERY REPORT: and write
       the outputs outcomes, conformance, findings and measurements.
     outputs:
       fields: [outcomes, conformance, findings, measurements]

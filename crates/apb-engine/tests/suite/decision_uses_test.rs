@@ -657,6 +657,47 @@ fn retry_advice_enforce_skips_or_stops_and_journals_the_marker() {
     }
 }
 
+/// Card A8: a threshold stored for `retry_advice` before rule versions (the
+/// legacy file) was measured under `exec/0` labels, so it never enforces
+/// the advice: every decision journals `enforce_refused: no_threshold` and
+/// the node retries as today.
+#[test]
+fn retry_advice_enforce_with_only_a_legacy_threshold_refuses_no_threshold() {
+    let yaml = playbook(
+        "",
+        "  - { id: w, type: agent_task, prompt: \"Implement the parser\", max_retries: 2 }\n",
+        "  - { from: w, to: ok }\n",
+    )
+    .replace(
+        "  profile: main\n",
+        "  profile: main\n  retry_advice: enforce\n",
+    );
+    let p = Project::new(&yaml, FAILING);
+    with_fallback(p.root.path());
+    let server = StubServer::start_with_fallback(vec![], next_reply("switch_executor", 0.9, 0.1));
+    p.decisions(&config(
+        &server.base_url,
+        "enforce",
+        "  retry_advice: { mode: enforce }\n",
+    ));
+    fs::write(
+        p.cfg.path().join(apb_core::decision_thresholds::THRESHOLDS_FILE),
+        "version: 1\nthresholds:\n- use: retry_advice\n  provider: stub\n  model: jev-1.13.0\n  threshold: 0.7\n",
+    )
+    .unwrap();
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (_, _, events) = p.run();
+    assert!(!events.iter().any(|e| matches!(&e.payload, EventPayload::SupervisorAction { action, .. } if action == "retry_advice")));
+    assert_eq!(attempts(&events, "w").len(), 6, "today's retries");
+    let d = decisions(&events, "retry_advice");
+    assert!(!d.is_empty());
+    assert!(
+        d.iter()
+            .all(|d| d.enforce_refused.as_deref() == Some("no_threshold"))
+    );
+}
+
 // --- Part 11 review recommendation and Part 14.4 auto-decide ---------------
 
 fn gate_playbook(effects: &str, gate_extra: &str, after: &str) -> String {
@@ -1244,7 +1285,12 @@ fn routing_enforce_runs_the_tier_and_cascades_up_on_an_agent_failure() {
         "no same-tier retry on the light tier"
     );
     assert!(events.iter().any(|e| matches!(&e.payload, EventPayload::ProfileRebound { reason, .. } if reason.starts_with("routing: tier `light`"))));
-    assert!(events.iter().any(|e| matches!(&e.payload, EventPayload::FallbackTriggered { reason: Some(r), .. } if r == "routing")));
+    assert!(events.iter().any(|e| matches!(&e.payload, EventPayload::FallbackTriggered { reason: Some(r), .. } if r.as_str() == "routing")));
+    // Plan row A5: the step the cascade enters names `routing` as how the
+    // tier before it closed.
+    assert!(events.iter().any(|e| matches!(&e.payload,
+        EventPayload::AttemptStarted { exec: Some(x), .. }
+            if x.entered.as_ref().is_some_and(|en| en.reason.as_str() == "routing" && en.from_step == 0))));
     assert!(decisions(&events, "routing")[0].applied);
 }
 

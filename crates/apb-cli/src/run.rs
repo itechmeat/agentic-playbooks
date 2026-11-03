@@ -498,12 +498,12 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub notify: crate::notify::NotifyFlags,
     /// Print the estimate (time, tokens and cost from comparable runs) and
-    /// exit without starting a run. It is the playbook's own executors'
-    /// estimate, so it does not combine with --overrides or the start-only
+    /// exit without starting a run. With --overrides it is the estimate of
+    /// the overridden executors; it does not combine with the start-only
     /// flags
     #[arg(
         long,
-        conflicts_with_all = ["overrides", "detach", "supervise", "continued_from", "worktree", "confirm_irreversible"]
+        conflicts_with_all = ["detach", "supervise", "continued_from", "worktree", "confirm_irreversible"]
     )]
     pub estimate: bool,
     /// Remember the given --param values and --instruction for this
@@ -772,9 +772,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if estimate {
-        return crate::budget::estimate_cmd(root, name, version, execution_name, budget.as_ref());
-    }
     // Run-level overrides from a yaml file (spec 11).
     let overrides = match overrides_path.as_deref() {
         Some(path) => match std::fs::read_to_string(path)
@@ -789,6 +786,16 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         },
         None => None,
     };
+    if estimate {
+        return crate::budget::estimate_cmd(
+            root,
+            name,
+            version,
+            execution_name,
+            budget.as_ref(),
+            overrides.as_ref(),
+        );
+    }
     if supervise && overrides.is_some() {
         eprintln!("--overrides is not yet supported together with --supervise");
         return ExitCode::from(2);
@@ -853,13 +860,14 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         };
         let requested = version;
         let version = start_version.as_deref();
-        let budget = match crate::budget::prestart(root, name, version, execution_name, budget) {
-            Ok(b) => b.budget,
-            Err(e) => {
-                eprintln!("run failed: {e}");
-                return ExitCode::from(2);
-            }
-        };
+        let budget =
+            match crate::budget::prestart(root, name, version, execution_name, budget, None) {
+                Ok(b) => b.budget,
+                Err(e) => {
+                    eprintln!("run failed: {e}");
+                    return ExitCode::from(2);
+                }
+            };
         if let Err(e) = crate::notify::start_check(root, name, notify.as_ref()) {
             eprintln!("run failed: {e}");
             return ExitCode::from(2);
@@ -958,7 +966,14 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         }
     }
     let host = host && resolved.is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
-    match crate::budget::prestart(root, name, version, execution_name, budget) {
+    match crate::budget::prestart(
+        root,
+        name,
+        version,
+        execution_name,
+        budget,
+        opts.overrides.as_ref(),
+    ) {
         Ok(b) => {
             opts.budget = b.budget;
             opts.estimate = b.shown;
@@ -1647,25 +1662,17 @@ fn run_detail_text(
             sanitize_for_terminal(&line, OUTCOME_LINE_MAX)
         );
     }
-    // Issue #193: the model each attempt actually ran on.
-    for a in apb_engine::attempt_models::run_attempt_models(&run_dir, &view.events) {
-        let mut line = format!(
-            "{} attempt {}: {} ({})",
-            a.node,
-            a.attempt,
-            a.model.as_deref().unwrap_or("model not reported"),
-            a.executed_by
-        );
-        if a.mismatch {
-            line.push_str(&format!(
-                ", profile names {}: mismatch",
-                a.expected.as_deref().unwrap_or("?")
-            ));
-        }
+    // Each attempt's identity: the model apb requested, what a host
+    // reported, the chain position and why a step was entered.
+    let identities = apb_engine::execution_identity::fold::views(&run_dir, &view.events);
+    for v in &identities {
         say!(
             "  model {}",
-            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+            sanitize_for_terminal(&identity_line(v), IDENTITY_LINE_MAX)
         );
+    }
+    if let Some(h) = apb_engine::run_stats::executors::HintFollow::of_views(&identities) {
+        say!("  hints: {}", h.line());
     }
     // What each isolated attempt's isolation held and did not.
     for row in view.isolation() {
@@ -2691,6 +2698,69 @@ pub(crate) fn answer_cmd(
             ExitCode::from(2)
         }
     }
+}
+
+/// The longest attempt identity line `apb runs <id>` prints: room for a
+/// node id, a host's model names, the hint and the step with its reason,
+/// so the reason at the end is never cut at the width of a question.
+const IDENTITY_LINE_MAX: usize = 480;
+
+/// One attempt of `apb runs <id>`: `node attempt N (cli): M requested by
+/// apb, step 1 fallback 1 of 1, entered from step 0: check_rejected`, or
+/// for a host attempt what the host reported and what it did with the hint.
+/// A hint is never shown as the model that ran.
+fn identity_line(v: &apb_engine::execution_identity::fold::ExecutionIdentityView) -> String {
+    use apb_engine::execution_identity::fold::ReportedModel;
+    use apb_engine::run_stats::executors::HintFollow;
+    let mut line = match &v.item {
+        Some(item) => format!("{} item {item} attempt {}", v.node, v.attempt),
+        None => format!("{} attempt {}", v.node, v.attempt),
+    };
+    line.push_str(&format!(" ({}): ", v.executed_by));
+    if v.executed_by == apb_engine::execution_identity::EXECUTED_BY_HOST {
+        line.push_str(&match &v.reported {
+            ReportedModel::One { model } => format!("{model} reported by the host"),
+            ReportedModel::Mixed { models } => {
+                format!("mixed, {} reported by the host", models.join(", "))
+            }
+            ReportedModel::Partial {
+                known,
+                unknown_tasks,
+            } => format!(
+                "partial, {} reported by the host, {unknown_tasks} task{} not reported",
+                known.join(", "),
+                if *unknown_tasks == 1 { "" } else { "s" }
+            ),
+            ReportedModel::None => "model not reported".to_string(),
+        });
+        if let (Some(hint), Some(o)) = (&v.requested_model, HintFollow::of_view(v)) {
+            line.push_str(&format!(", hint {hint} {}", o.as_str()));
+        }
+    } else {
+        match &v.requested_model {
+            Some(m) => line.push_str(&format!("{m} requested by apb")),
+            None => line.push_str("no model requested"),
+        }
+    }
+    if v.mismatch {
+        line.push_str(&format!(
+            ", profile names {}: mismatch",
+            v.expected.as_deref().unwrap_or("?")
+        ));
+    }
+    match &v.step {
+        Some(s) => {
+            line.push_str(&format!(", step {} {}", s.step, s.source.words()));
+            if let Some(e) = &s.entered {
+                line.push_str(&format!(
+                    ", entered from step {}: {}",
+                    e.from_step, e.reason
+                ));
+            }
+        }
+        None => line.push_str(", position not recorded"),
+    }
+    line
 }
 
 #[cfg(test)]

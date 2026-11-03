@@ -1,9 +1,11 @@
 <script lang="ts">
   import type { StatsReport } from './api.gen'
   import { Spinner } from '$lib/components/ui/spinner'
+  import ExecutorReport from './ExecutorReport.svelte'
   import {
     costKnownText,
     executorGroups,
+    executorReports,
     modelsText,
     nodeStatsText,
     perRunText,
@@ -13,6 +15,7 @@
     qualityDeltas,
     qualityKey,
     qualityLabels,
+    qualityExecutorTexts,
     qualityText,
     rateText,
     spendText,
@@ -59,6 +62,7 @@
     {/if}
     {#each versions as v (v.version)}
       {@const executors = executorGroups(v)}
+      {@const reports = executorReports(v)}
       <section class="version" data-testid="playbook-stats-version">
         <div class="version-head">
           <span class="version-name">{v.version}</span>
@@ -119,6 +123,13 @@
             {/each}
           </ul>
         {/if}
+        {#if reports.length}
+          <div class="executor-reports" data-testid="playbook-stats-executor-report">
+            {#each reports as n (n.node)}
+              <ExecutorReport node={n.node} groups={n.groups} />
+            {/each}
+          </div>
+        {/if}
         {#if v.quality?.length}
           {@const labels = qualityLabels(v.quality)}
           <ul class="quality" data-testid="playbook-stats-quality">
@@ -126,6 +137,9 @@
               <li>
                 <span class="muted">quality {labels[i]}:</span>
                 {qualityText(q)}
+                {#each qualityExecutorTexts(q) as line, j (j)}
+                  <div class="group">{line}</div>
+                {/each}
               </li>
             {/each}
           </ul>
@@ -204,6 +218,12 @@
     gap: 0.25rem;
     margin-top: 0.25rem;
     overflow-wrap: anywhere;
+  }
+  .executor-reports {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
   }
   .group {
     padding-left: 0.75rem;

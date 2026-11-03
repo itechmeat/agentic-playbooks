@@ -3,7 +3,8 @@
 // progress), the one-line run log, the decision-layer bars and the counters.
 // Everything is read from the run detail the page already has; nothing here
 // fetches or keeps state, so each piece is unit-tested on plain data.
-import type { AttemptModel, RunDetail } from './api.gen'
+import type { ExecStepView, ExecutionIdentityView, RunDetail } from './api.gen'
+import { closeReasonWord } from './playbookstats'
 import { profileColor, accentVar } from './profilecolor'
 import { decisionRows } from './rundecisions'
 import { runEventJournal } from './journal'
@@ -166,28 +167,94 @@ export interface NodeRunData {
  * come in the order the attempts started (a second visit of a looping node
  * restarts its attempt numbers at 1).
  */
-function modelsByNode(models: AttemptModel[] | null | undefined): Map<string, AttemptModel> {
-  const out = new Map<string, AttemptModel>()
+function modelsByNode(models: ExecutionIdentityView[] | null | undefined): Map<string, ExecutionIdentityView> {
+  const out = new Map<string, ExecutionIdentityView>()
   for (const a of models ?? []) out.set(a.node, a)
   return out
 }
 
 /**
- * The model a node's card shows. A host attempt that reported no model
- * (its `attempt_models` row says none, or there is no row yet and the
- * attempt is a host one) stays `null`, with what it was asked for as a hint
- * only: the attempt's own model when `f` describes the same attempt as `m`
- * (a host task request opens a row before its `attempt_started`), else the
- * row's expected model.
+ * The model an attempt ran on as far as anyone knows: the one apb
+ * requested of a CLI, or for a host attempt the one every host task
+ * reported (`one`). A hint, a partial or a mixed report credits no model.
  */
-function modelFields(f: NodeFacts | undefined, m: AttemptModel | undefined): Pick<NodeRunData, 'model' | 'modelHint'> {
-  const unreported = m ? !m.model : f?.agent === 'host'
+export function ranModel(v: ExecutionIdentityView): string | null {
+  if (v.executed_by !== 'host') return v.requested_model ?? null
+  return v.reported.kind === 'one' ? v.reported.model : null
+}
+
+/**
+ * The model a node's card shows. A host attempt without one reported model
+ * (its `attempt_models` row says none, partial or mixed, or there is no row
+ * yet and the attempt is a host one) stays `null`, with what it was asked
+ * for as a hint only: the row's own hint, else the attempt's model when `f`
+ * describes the same attempt as `m` (a host task request opens a row before
+ * its `attempt_started`), else the row's expected model.
+ */
+function modelFields(f: NodeFacts | undefined, m: ExecutionIdentityView | undefined): Pick<NodeRunData, 'model' | 'modelHint'> {
+  const ran = m ? ranModel(m) : null
+  const unreported = m ? !ran : f?.agent === 'host'
   if (!unreported) {
-    const mdl = m?.model ?? f?.model
+    const mdl = ran ?? f?.model
     return mdl ? { model: mdl } : {}
   }
-  const hint = (m ? (f?.attempt === m.attempt ? f?.model : undefined) ?? m.expected : f?.model) ?? undefined
+  const hint =
+    (m ? (m.executed_by === 'host' ? m.requested_model : undefined) ?? (f?.attempt === m.attempt ? f?.model : undefined) ?? m.expected : f?.model) ??
+    undefined
   return hint ? { model: null, modelHint: hint } : { model: null }
+}
+
+/**
+ * The model of one attempt in words: `sonnet requested by apb` for a CLI
+ * attempt; for a host attempt what the host reported (`glm reported by the
+ * host`, `partial: glm reported, 1 task not reported`, `mixed: a, b
+ * reported by the host`, `not reported`) and the hint apart. A hint is
+ * never shown as the model that ran.
+ */
+export function attemptModelText(v: ExecutionIdentityView): string {
+  if (v.executed_by !== 'host') return v.requested_model ? `${v.requested_model} requested by apb` : 'no model requested'
+  const line = reportedText(v.reported)
+  return v.requested_model ? `${line}, hint ${v.requested_model}` : line
+}
+
+function reportedText(r: ExecutionIdentityView['reported']): string {
+  switch (r.kind) {
+    case 'one':
+      return `${r.model} reported by the host`
+    case 'mixed':
+      return `mixed: ${r.models.join(', ')} reported by the host`
+    case 'partial':
+      return `partial: ${r.known.join(', ')} reported, ${r.unknown_tasks} ${r.unknown_tasks === 1 ? 'task' : 'tasks'} not reported`
+    default:
+      return 'not reported'
+  }
+}
+
+function sourceText(s: ExecStepView['source']): string {
+  switch (s.kind) {
+    case 'fallback':
+      return `fallback ${s.index} of ${s.of}`
+    case 'tier':
+      return `tier ${s.name}`
+    case 'host_fallback':
+      return 'host fallback'
+    case 'ephemeral':
+      return 'ephemeral override'
+    default:
+      return 'primary'
+  }
+}
+
+/**
+ * `step 1 fallback 1 of 2, entered from step 0: check rejected`, or
+ * `position not recorded` for an attempt an older apb journaled.
+ */
+export function attemptStepText(v: ExecutionIdentityView): string {
+  const s = v.step
+  if (!s) return 'position not recorded'
+  let line = `step ${s.step} ${sourceText(s.source)}`
+  if (s.entered) line += `, entered from step ${s.entered.from_step}: ${closeReasonWord(s.entered.reason)}`
+  return line
 }
 
 /**
@@ -430,7 +497,7 @@ export function runProfiles(detail: RunDetail): { name: string; scope?: ProfileS
     const scope = nodeProfileScope(n, defaults)
     const key = profileModelKey(name, scope)
     const m = models.get(n.id)
-    const mdl = m?.model ?? m?.expected ?? undefined
+    const mdl = (m ? ranModel(m) : null) ?? m?.expected ?? undefined
     const prev = out.get(key)
     if (!prev) out.set(key, { name, ...(scope ? { scope } : {}), key, ...(mdl ? { model: mdl } : {}) })
     else if (!prev.model && mdl) prev.model = mdl

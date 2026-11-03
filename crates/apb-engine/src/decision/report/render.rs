@@ -56,9 +56,14 @@ fn group(out: &mut String, g: &GroupReport) {
     } else {
         "uncalibrated"
     };
+    let rule = g
+        .rule
+        .as_deref()
+        .map(|r| format!("  rule {r}"))
+        .unwrap_or_default();
     let _ = writeln!(
         out,
-        "{}  {}/{}  ({cal}{kind})",
+        "{}  {}/{}{rule}  ({cal}{kind})",
         g.use_site, g.provider, g.model
     );
     let _ = writeln!(

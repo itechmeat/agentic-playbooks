@@ -182,6 +182,13 @@ pub struct NodeStats {
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<digests::DigestStats>>", optional))]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub digests: Vec<digests::DigestStats>,
+    /// Its figures per executor group, step and transition ([`executors`]).
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<executors::ExecutorGroup>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub executors: Vec<executors::ExecutorGroup>,
 }
 
 /// One playbook version over its runs.
@@ -724,6 +731,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
                 output_fields_missing: a.output_fields_missing,
                 model_use: node_models.remove(&node).unwrap_or_default(),
                 digests: digests::node_digests(&node, runs, &samples),
+                executors: executors::node_executors(&node, runs),
                 node,
             }
         })
@@ -776,6 +784,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
 }
 
 pub mod digests;
+pub mod executors;
 pub mod findings;
 pub mod models;
 pub mod quality;

@@ -675,32 +675,65 @@ applied: number,
  */
 shadow_would_change: number, };
 
-export type AttemptModel = { node: string, 
+export type StepSource = { "kind": "primary" } | { "kind": "fallback", index: number, of: number, } | { "kind": "tier", name: string, } | { "kind": "host_fallback" } | { "kind": "ephemeral" };
+
+export type StepEntry = { from_step: number, 
 /**
- * The list item the attempt ran, for an item of a list node.
+ * The attempt id (the journal seq of its `attempt_started`) of the
+ * attempt that closed the step before.
  */
-item?: string, attempt: number, 
+closed_attempt: number, 
 /**
- * [`EXECUTED_BY_CLI`] or [`EXECUTED_BY_HOST`].
+ * A journal string; see [`CloseReason::label`] for what a surface shows.
  */
-executed_by: string, 
+reason: string, };
+
+export type ExecStepView = { 
 /**
- * The agent CLI of a CLI attempt.
+ * The binding snapshot's digest, shortened.
  */
-agent: string | null, 
+binding: string, step: number, source: StepSource, entered?: StepEntry, };
+
+export type HostTaskExec = { task_id: string, 
 /**
- * The model the attempt actually ran on; `None` when a host did not
- * report it.
+ * The task's closing status as journaled.
  */
-model: string | null, 
+status: string, 
+/**
+ * The model the task's submission reported; `None` when the host
+ * reported none or the engine closed the task.
+ */
+model?: string, };
+
+export type ReportedModel = { "kind": "one", model: string, } | { "kind": "mixed", models: Array<string>, } | { "kind": "partial", known: Array<string>, unknown_tasks: number, } | { "kind": "none" };
+
+export type ExecutionIdentityView = { node: string, item?: string, 
+/**
+ * The attempt number within its node execution.
+ */
+attempt: number, 
+/**
+ * `cli`, `host` or `scenario`.
+ */
+executed_by: string, agent: string, 
+/**
+ * The model apb requested: passed to the CLI, or the hint of a host
+ * attempt. Never shown as the model that ran.
+ */
+requested_model?: string, reported: ReportedModel, host_tasks?: Array<HostTaskExec>, 
 /**
  * The primary model of the node's profile, from the run manifest.
  */
-expected: string | null, 
+expected?: string, 
 /**
- * Both models are known and differ.
+ * Computed only for a host attempt whose reported model is `One` and
+ * for the requested model of a CLI attempt.
  */
-mismatch: boolean, };
+mismatch: boolean, 
+/**
+ * `None`: position not recorded.
+ */
+step?: ExecStepView, };
 
 export type IsolationViewEntry = { path: string, 
 /**
@@ -872,6 +905,12 @@ checked: number, passed: Rate, failed: number,
  */
 errors: number, manual: number, };
 
+export type ExecutorQuality = { 
+/**
+ * The executor digest, shortened.
+ */
+executor: string, good: Rate, poor: Rate, graded_runs: number, };
+
 export type QualityStats = { criterion: string, source: CriterionSource, 
 /**
  * `<kind>/<version>`.
@@ -892,7 +931,13 @@ good: Rate,
 /**
  * Poor over determinate levels.
  */
-poor: Rate, };
+poor: Rate, 
+/**
+ * The levels per executor group, only when the criterion's subject is
+ * a node and the graded runs bound it to more than one executor. A
+ * breakdown only: the comparable key and promotion never read it.
+ */
+by_executor?: Array<ExecutorQuality>, };
 
 export type QualityDelta = { criterion: string, grader: string, task_type: string, 
 /**
@@ -931,6 +976,15 @@ profile: string,
  */
 bundle: string, 
 /**
+ * The executor digest (chain, tiers, `ephemeral`), shortened; empty
+ * only for a binding no manifest recorded.
+ */
+executor?: string, 
+/**
+ * The group is a run-local ephemeral override.
+ */
+ephemeral?: boolean, 
+/**
  * Runs the node ran in under this executor.
  */
 runs: number, 
@@ -944,7 +998,84 @@ first_pass: Rate, duration: Waits,
  */
 tokens_per_visit?: number, };
 
-export type ExecutorChange = { node: string, base_profile: string, against_profile: string, base_bundle: string, against_bundle: string, };
+export type ExecutorChange = { node: string, base_profile: string, against_profile: string, base_bundle: string, against_bundle: string, 
+/**
+ * The executor digests, shortened; empty only for a binding no
+ * manifest recorded.
+ */
+base_executor?: string, against_executor?: string, };
+
+export type StepStats = { 
+/**
+ * The binding snapshot's digest, shortened; `None` when not recorded.
+ */
+binding?: string, 
+/**
+ * The step index in its binding's chain; `None`: position not
+ * recorded.
+ */
+step?: number, 
+/**
+ * `primary`, `fallback`, `tier`, `host_fallback` or `ephemeral`.
+ */
+source: string, 
+/**
+ * `cli`, `host` or `scenario`.
+ */
+executed_by: string, attempts: number, successes: Rate, median_attempt_ms?: number, 
+/**
+ * The reported cost of the step's finished attempts, summed like the
+ * version's spend.
+ */
+cost_usd?: number, 
+/**
+ * Finished attempts that reported a cost, over every finished one.
+ */
+cost_known: Rate, 
+/**
+ * `cost_usd` split by basis: billed, a subscription equivalent nobody
+ * is billed, or of unknown basis.
+ */
+cost_by_basis?: CostByBasis, 
+/**
+ * Attempts by reported model: `one:<model>`, `mixed`, `partial`,
+ * `none`.
+ */
+reported_models: { [key in string]: number }, 
+/**
+ * Closes of the step by reason (the close reason's label).
+ */
+closes_by_reason: { [key in string]: number }, };
+
+export type TransitionStats = { from_step?: number, to_step?: number, 
+/**
+ * The close reason's label, or [`NOT_RECORDED`].
+ */
+reason: string, count: number, };
+
+export type HintFollow = { hinted: number, followed: number, not_followed: number, not_reported: number, };
+
+export type ExecutorGroup = { 
+/**
+ * The profile digest, shortened.
+ */
+profile: string, 
+/**
+ * The bundle digest, shortened.
+ */
+bundle: string, 
+/**
+ * The executor digest, shortened.
+ */
+executor: string, 
+/**
+ * The group is a run-local ephemeral override.
+ */
+ephemeral: boolean, runs: number, attempts: number, steps: Array<StepStats>, transitions: Array<TransitionStats>, 
+/**
+ * Host groups only.
+ */
+hint_follow?: HintFollow, };
 
 export type NodeStats = { node: string, 
 /**
@@ -1014,6 +1145,10 @@ over_expected?: Rate, deliverable_missing: number, output_fields_missing: number
  * it to more than one ([`digests`]).
  */
 digests?: Array<DigestStats>, 
+/**
+ * Its figures per executor group, step and transition ([`executors`]).
+ */
+executors?: Array<ExecutorGroup>, 
 /**
  * Attempts per model actually used ([`UNREPORTED`] when a host said
  * nothing).
@@ -1279,6 +1414,12 @@ export type EstimateBasis = "history" | "declared" | "none";
 
 export type Comparable = { 
 /**
+ * How a node's history was matched: [`ESTIMATE_KEY_VERSION`] (profile,
+ * bundle and executor), or [`PROFILE_ONLY_KEY`] for a snapshot written
+ * before it, which has no such field.
+ */
+key_version: number, 
+/**
  * Runs of the same version and execution mode within the window.
  */
 runs: number, succeeded: number, window: number, 
@@ -1289,7 +1430,17 @@ runs_without_usage: number, attempts_without_usage: number, attempts_without_cos
 /**
  * Per node, the comparable runs that bound it to another profile.
  */
-profile_mismatch?: { [key in string]: number }, };
+profile_mismatch?: { [key in string]: number }, 
+/**
+ * Per node, the comparable runs that bound it to the same profile with
+ * other skills (another bundle digest).
+ */
+bundle_mismatch?: { [key in string]: number }, 
+/**
+ * Per node, the comparable runs that bound it to the same profile and
+ * skills with another executor (chain, tiers, or an override).
+ */
+executor_mismatch?: { [key in string]: number }, };
 
 export type TimeEstimate = { basis: EstimateBasis, spread?: Spread<number>, 
 /**
@@ -1953,10 +2104,16 @@ notify?: RunNotify,
  */
 estimate?: RunEstimate, 
 /**
- * The model each attempt actually ran on, against the profile's primary
- * model (issue #193); empty before the first attempt.
+ * Each attempt's identity: the model apb requested, what a host
+ * reported, the chain position and why a step was entered, against the
+ * profile's primary model; empty before the first attempt.
  */
-attempt_models?: Array<AttemptModel>, 
+attempt_models?: Array<ExecutionIdentityView>, 
+/**
+ * How often a host followed the hints of the run's host attempts;
+ * absent when no host attempt had one.
+ */
+hint_follow?: HintFollow, 
 /**
  * What each isolated attempt's isolation held and did not (level,
  * backend, network, limits); empty for a run without one.

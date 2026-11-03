@@ -76,6 +76,11 @@ pub(crate) enum ThresholdsAction {
         model: String,
         #[arg(long)]
         threshold: f64,
+        /// The labelling rule the threshold was measured under, for a use
+        /// whose labels have rule versions (retry_advice: exec/1); only the
+        /// current rule is accepted
+        #[arg(long)]
+        rule: Option<String>,
     },
     /// List the stored thresholds
     List {
@@ -206,44 +211,92 @@ pub(crate) fn roots(root: &Path, all_projects: bool) -> Vec<PathBuf> {
 }
 
 fn thresholds_cmd(dir: &Path, action: ThresholdsAction) -> ExitCode {
-    use apb_core::decision_thresholds::{THRESHOLDS_FILE, load_in, set_threshold_in};
+    use apb_core::decision_thresholds::{
+        load_in, load_v2_in, set_threshold_with_rule_in, versioned_use,
+    };
     match action {
         ThresholdsAction::Set {
             use_site,
             provider,
             model,
             threshold,
-        } => match set_threshold_in(dir, &use_site, &provider, &model, threshold) {
-            Ok(()) => {
-                println!(
-                    "stored {use_site} {provider}/{model}: {threshold} in {THRESHOLDS_FILE} (applies to this exact model id only)"
-                );
+            rule,
+        } => {
+            // A stored threshold turns enforcement on: a person sets it, a
+            // run step never does (the CLI runs in its caller's process).
+            if let Some(why) =
+                crate::util::StepCaller::from_env().refusal("storing a decision threshold")
+            {
+                eprintln!("decisions thresholds set: {why}");
+                return ExitCode::from(3);
+            }
+            match set_threshold_with_rule_in(
+                dir,
+                &use_site,
+                &provider,
+                &model,
+                threshold,
+                rule.as_deref(),
+            ) {
+                Ok(set) => {
+                    let rule = set
+                        .rule
+                        .map(|r| format!(" under rule {r}"))
+                        .unwrap_or_default();
+                    println!(
+                        "stored {use_site} {provider}/{model}: {threshold}{rule} in {} (applies to this exact model id only)",
+                        set.file
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("decisions thresholds set: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ThresholdsAction::List { json } => match (load_in(dir), load_v2_in(dir)) {
+            (Ok(all), Ok(v2)) if json => {
+                let mut rows = serde_json::to_value(&all).unwrap_or_default();
+                if let Some(rows) = rows.as_array_mut() {
+                    // A legacy entry of a use with rule versions is never
+                    // looked up any more: say so.
+                    for (row, t) in rows.iter_mut().zip(&all) {
+                        if let (Some(row), Some(_)) =
+                            (row.as_object_mut(), versioned_use(&t.use_name))
+                        {
+                            row.insert("legacy".into(), true.into());
+                            row.insert("enforced".into(), false.into());
+                        }
+                    }
+                    rows.extend(v2.iter().filter_map(|t| serde_json::to_value(t).ok()));
+                }
+                print_json(&rows);
                 ExitCode::SUCCESS
             }
-            Err(e) => {
-                eprintln!("decisions thresholds set: {e}");
-                ExitCode::from(2)
-            }
-        },
-        ThresholdsAction::List { json } => match load_in(dir) {
-            Ok(all) if json => {
-                print_json(&serde_json::to_value(&all).unwrap_or_default());
-                ExitCode::SUCCESS
-            }
-            Ok(all) if all.is_empty() => {
+            (Ok(all), Ok(v2)) if all.is_empty() && v2.is_empty() => {
                 println!("no stored thresholds");
                 ExitCode::SUCCESS
             }
-            Ok(all) => {
+            (Ok(all), Ok(v2)) => {
                 for t in all {
+                    let inert = versioned_use(&t.use_name)
+                        .map(|r| format!("\tlegacy, not enforced: re-measure under rule {r}"))
+                        .unwrap_or_default();
                     println!(
-                        "{}\t{}/{}\t{}",
+                        "{}\t{}/{}\t{}{inert}",
                         t.use_name, t.provider, t.model, t.threshold
+                    );
+                }
+                for t in v2 {
+                    println!(
+                        "{}\t{}/{}\t{}\trule {}",
+                        t.use_name, t.provider, t.model, t.threshold, t.rule
                     );
                 }
                 ExitCode::SUCCESS
             }
-            Err(e) => {
+            (Err(e), _) | (_, Err(e)) => {
                 eprintln!("decisions thresholds list: {e}");
                 ExitCode::from(2)
             }

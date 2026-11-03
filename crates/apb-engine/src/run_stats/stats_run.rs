@@ -1,6 +1,6 @@
 //! One run as `apb stats` and the run estimate read it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::decision::report::RunJournal;
@@ -39,6 +39,14 @@ pub struct StatsRun {
     /// production run counts as history
     /// ([`crate::run_history::counts_as_history`]).
     pub origin: crate::manifest::RunOrigin,
+    /// Every attempt's identity ([`crate::execution_identity::fold`]): its
+    /// chain position and the digests of the binding it ran on.
+    pub identities: Vec<crate::execution_identity::fold::ExecutionIdentity>,
+    /// The declared chain steps of every binding the run's attempts ran on,
+    /// by its full executor digest: each step's source, in chain order.
+    pub declared: BTreeMap<String, Vec<String>>,
+    /// The nodes the manifest bound to a run-local ephemeral override.
+    pub ephemeral_nodes: BTreeSet<String>,
 }
 
 impl StatsRun {
@@ -58,6 +66,8 @@ impl StatsRun {
         let manifest = read.ok().flatten();
         let definitions = crate::run_definitions::DefinitionsInForce::load(run_dir, &j.events);
         let m = manifest.as_ref();
+        let identities = crate::execution_identity::fold::identities(run_dir, &j.events);
+        let declared = declared_steps(run_dir, m, &identities);
         Some(StatsRun {
             run_id: j.run_id,
             playbook: j.playbook,
@@ -66,7 +76,7 @@ impl StatsRun {
             snapshot: crate::legacy_snapshot::load_run_playbook(run_dir),
             candidate_trial: m.is_some_and(|m| m.candidate_trial),
             expected_models: m
-                .map(crate::attempt_models::primary_models_of)
+                .map(crate::execution_identity::fold::primary_models_of)
                 .unwrap_or_default(),
             execution: match m {
                 None => Some(
@@ -83,6 +93,17 @@ impl StatsRun {
             definitions,
             diagnostics: crate::diagnostics::read(run_dir),
             origin,
+            ephemeral_nodes: m
+                .map(|m| {
+                    m.node_bindings
+                        .keys()
+                        .filter(|n| m.for_node(n).is_some_and(|p| p.ephemeral))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            identities,
+            declared,
         })
     }
 
@@ -98,4 +119,50 @@ impl StatsRun {
             _ => None,
         })
     }
+}
+
+/// The declared steps of every binding the attempts of a run ran on (their
+/// snapshots) and of the manifest's entries, by executor digest.
+fn declared_steps(
+    run_dir: &Path,
+    manifest: Option<&crate::manifest::RunExecutionManifest>,
+    identities: &[crate::execution_identity::fold::ExecutionIdentity],
+) -> BTreeMap<String, Vec<String>> {
+    let snapshots: BTreeSet<&str> = identities
+        .iter()
+        .filter_map(|id| id.step.as_ref().map(|s| s.binding.as_str()))
+        .collect();
+    let bindings = snapshots
+        .into_iter()
+        .filter_map(|d| crate::execution_identity::read_binding(run_dir, d))
+        .chain(
+            manifest
+                .into_iter()
+                .flat_map(|m| m.profiles.iter().cloned()),
+        );
+    bindings
+        .map(|b| (b.executor_digest(), declared_sources(&b)))
+        .collect()
+}
+
+/// The source of each declared step of `entry`'s chain, in chain order, as
+/// the drive names them on `exec` ([`crate::execution_identity::StepSource`]):
+/// the routed tiers in front, the profile's own executor, its fallbacks;
+/// every step of an ephemeral override is `ephemeral`.
+fn declared_sources(entry: &crate::manifest::ManifestProfile) -> Vec<String> {
+    let mut tiers = crate::decision::routing::routed_tier_names(entry).len();
+    if tiers >= entry.chain.len() {
+        tiers = 0;
+    }
+    (0..entry.chain.len())
+        .map(|i| {
+            match i {
+                _ if entry.ephemeral => "ephemeral",
+                i if i < tiers => "tier",
+                i if i == tiers => "primary",
+                _ => "fallback",
+            }
+            .to_string()
+        })
+        .collect()
 }
