@@ -17,6 +17,7 @@ pub mod budget;
 pub mod attempt_models;
 pub mod candidate;
 pub mod capture;
+pub(crate) mod citation;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;
@@ -29,6 +30,7 @@ pub mod driver;
 mod env_duration;
 pub mod error;
 pub mod event;
+pub mod evidence;
 pub mod exec_key;
 pub mod execution_identity;
 // --- 0.24.0 eval suites ---

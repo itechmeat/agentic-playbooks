@@ -109,8 +109,70 @@ fn list(root: &Path, run_id: &str, node: Option<&str>, json: bool) -> ExitCode {
         view.legacy.retain(|r| r.execution.node == node);
         view.not_stored.retain(|r| r.node == node);
     }
+    let sessions = apb_engine::evidence::view(&run_dir, node).unwrap_or_default();
     let redactor = apb_engine::run_redact::WorkspaceRedaction::new(root).run_dir(&run_dir);
-    crate::util::with_run_redaction(redactor, || list_text(run_id, &view))
+    crate::util::with_run_redaction(redactor, || {
+        let code = list_text(run_id, &view);
+        evidence_text(&sessions);
+        code
+    })
+}
+
+/// The claims of every evidence session: each with its verdict's fixed
+/// wording, the fragments it cites and its "worth a look" flags.
+fn evidence_text(sessions: &[apb_engine::evidence::SessionShown]) {
+    let clean = |t: &str, n: usize| sanitize_for_terminal(t, n);
+    for s in sessions {
+        say!(
+            "evidence: {} attempt {} ({}), read {} of {} chars",
+            s.node,
+            s.attempt,
+            s.state,
+            s.trace.as_ref().map_or(0, |t| t.read_chars),
+            s.trace.as_ref().map_or(0, |t| t.budget_chars)
+        );
+        for p in &s.packages {
+            say!(
+                "  package {}: {} records, {}",
+                clean(&p.view, 200),
+                p.records,
+                p.collector
+            );
+        }
+        for p in &s.problems {
+            say!("  {}", clean(p, 320));
+        }
+        for c in &s.claims {
+            say!("  claim {}: {}", clean(&c.id, 64), clean(&c.text, 320));
+            say!("    {}", c.wording);
+            for p in &c.problems {
+                say!("    {}", clean(p, 320));
+            }
+            for x in &c.cites {
+                match &x.fragment {
+                    Some(f) => say!("    cites {}: \"{}\"", clean(&x.r#ref, 200), clean(f, 320)),
+                    None => say!("    cites {}", clean(&x.r#ref, 200)),
+                }
+            }
+            if !c.flags.is_empty() {
+                let names: Vec<String> = c
+                    .flags
+                    .iter()
+                    .map(|f| {
+                        serde_json::to_value(f)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                say!(
+                    "    {}: {}",
+                    apb_engine::evidence::WORTH_A_LOOK,
+                    names.join(", ")
+                );
+            }
+        }
+    }
 }
 
 fn list_text(run_id: &str, view: &ResultsView) -> ExitCode {

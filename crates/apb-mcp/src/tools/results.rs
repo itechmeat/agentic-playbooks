@@ -32,16 +32,25 @@ pub fn run_results(root: &Path, run_id: &str, node: Option<&str>) -> Result<Valu
         "rows": view.rows,
         "legacy": view.legacy,
         "not_stored": view.not_stored,
+        "evidence": super::evidence::sessions_value(&dir, node),
     });
     Ok(redacted_answer(root, &dir, answer))
 }
 
 /// A citation as a caller passes it: `r:<snapshot_id>/<entry>` with an
 /// optional range `#[a,b)`.
+/// A package record (`...@<record id>`) is not an entry: it is read through
+/// an evidence session, where its range counts in the record's text.
 pub fn parse_ref(reference: &str) -> Result<Citation, ToolError> {
-    reference
+    let c = reference
         .parse::<Citation>()
-        .map_err(|e| ToolError::Engine(format!("invalid result reference `{reference}`: {e}")))
+        .map_err(|e| ToolError::Engine(format!("invalid result reference `{reference}`: {e}")))?;
+    if c.record.is_some() {
+        return Err(ToolError::Engine(
+            "a package record reference (`@<record id>`) is read through an evidence session (run_evidence_read, apb evidence read); read the whole entry without `@<record id>`".into(),
+        ));
+    }
+    Ok(c)
 }
 
 /// A snapshot id and an entry as two arguments (the HTTP routes).

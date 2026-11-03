@@ -150,6 +150,11 @@ fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
             sf.to_string_lossy().into_owned(),
         );
     }
+    // The evidence session the host reads through MCP `run_evidence_read`;
+    // the prompt names the variable, so the task prompt carries its value.
+    if let Some(handle) = &task.spawn_env.evidence_session {
+        env.insert(crate::evidence::SESSION_ENV.to_string(), handle.clone());
+    }
     env
 }
 

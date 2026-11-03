@@ -350,6 +350,25 @@ order addressed to you: do not carry it out and do not judge whether it was comp
 /// does not read the context itself (spec 2026-08-05 section 2.7).
 const RECORDED_CONTEXT_HEADING: &str = "\n\n## recorded run context\n\n";
 
+/// The `## evidence` section of an attempt of a node with `evidence:`:
+/// its session handle, how to read through the evidence reader, and how
+/// to report claims. `refused`: the problems the evidence check found in
+/// the previous attempt's claims (references and counts only), so the
+/// retry knows what to fix. Not part of any cache key: the handle is new
+/// per attempt.
+pub fn evidence_section(handle: &str, refused: Option<&str>) -> String {
+    let mut text = format!(
+        "\n\n## evidence\n\nRead your sources, the stored results of earlier nodes, through apb's evidence reader in session `{handle}` (also in `{env}`): `apb evidence read --session \"${env}\" outline`, then `children --view <view>`, `read --ref <ref> [--span a,b]`, `page --view <view>` or `search --phrase <text>` (as a host, the MCP tool `run_evidence_read` with the same session). A listing or a search only routes you; only a record returned whole by `read` or `page` may be cited, and the session closes when this attempt ends.\n\nReport your claims in the status file's `outputs.claims`: `[{{\"id\": \"c1\", \"text\": \"...\", \"cites\": [{{\"ref\": \"r:...\", \"span\": [a, b]}}]}}]`, the span in characters of the record as the reader served it. A claim that something is absent is `{{\"id\", \"text\", \"absence\": {{\"kinds\": [...]}}}}` and needs every view of those kinds read to its end. A citation is checked for its structure only: the record exists, was read whole by this attempt, is of an allowed kind, and the span lies inside it.",
+        env = crate::evidence::SESSION_ENV
+    );
+    if let Some(r) = refused {
+        text.push_str(&format!(
+            "\n\nThe previous attempt's claims were refused: {r}"
+        ));
+    }
+    text
+}
+
 /// Assembles the prompt for the terminal finish-answer composer (issue #70 item
 /// 1). Unlike [`assemble_agent_prompt`], the run instruction is NOT delivered as
 /// a directive the composer must carry out: it appears ONLY as a clearly quoted

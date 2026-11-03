@@ -5,6 +5,12 @@
 // no UI state; the panel is `RunResultsPanel.svelte`.
 
 import type {
+  ClaimShown,
+  CiteShown,
+  CitationFlag,
+  PackageShown,
+  SessionShown,
+  ClaimVerdict,
   CommitAttempt,
   EntryContent,
   EntryPart,
@@ -26,7 +32,14 @@ import type {
   SnapshotProvenance,
   Verified,
 } from './api.gen'
-import { RESULT_DISPLAY_CAP, RESULT_INCOMPLETE_REASONS, RESULT_OMISSION_REASONS, RESULT_OUTPUT_OMITTED } from './consts.gen'
+import {
+  EVIDENCE_VERDICT_TEXTS,
+  EVIDENCE_WORTH_A_LOOK,
+  RESULT_DISPLAY_CAP,
+  RESULT_INCOMPLETE_REASONS,
+  RESULT_OMISSION_REASONS,
+  RESULT_OUTPUT_OMITTED,
+} from './consts.gen'
 
 // Every reason this apb writes is a name the generated unions know; a
 // newer apb's name reads as `unknown` there.
@@ -38,6 +51,12 @@ RESULT_OUTPUT_OMITTED satisfies readonly OutputOmitted[]
 // `apb_engine::result_view` and the manifest parts of
 // `apb_core::result_store`.
 export type {
+  ClaimShown,
+  CiteShown,
+  CitationFlag,
+  PackageShown,
+  SessionShown,
+  ClaimVerdict,
   CommitAttempt,
   EntryContent,
   EntryPart,
@@ -59,6 +78,48 @@ export type {
   SnapshotProvenance,
   Verified,
 } from './api.gen'
+
+/** What `GET /api/runs/{id}/results` answers: the snapshot view and, for a
+ * node with `evidence:`, every attempt's evidence session with its claims
+ * (`apb_engine::evidence::view`). */
+export type ResultsAnswer = ResultsView & { evidence?: SessionShown[] }
+
+/** The fixed wording of a claim's verdict, the one every surface uses. */
+export function verdictText(v: ClaimVerdict): string {
+  return EVIDENCE_VERDICT_TEXTS[v] ?? v
+}
+
+/** Whether a verdict stands (structurally): shown as checked, never as a
+ * confirmed fact. */
+export function verdictStands(v: ClaimVerdict): boolean {
+  return v === 'structurally_valid' || v === 'absence_ok'
+}
+
+const FLAG_TEXTS: Record<CitationFlag, string> = {
+  whole_record: 'cites a whole record, no span',
+  short_span: 'the cited span is under 16 characters',
+  self_citation: "cites this node's own earlier output",
+  shared_record: 'the record is cited by more than 5 claims',
+  no_shared_words: 'no word of 4 or more letters is shared with the fragment',
+}
+
+/** The "worth a look" line of a claim's flags; empty without flags. */
+export function flagLine(flags: CitationFlag[]): string {
+  if (!flags.length) return ''
+  return `${EVIDENCE_WORTH_A_LOOK}: ${flags.map((f) => FLAG_TEXTS[f] ?? f).join('; ')}`
+}
+
+/** The heading of one evidence session. */
+export function sessionHead(s: SessionShown): string {
+  const item = s.item ? ` · item ${s.item}` : ''
+  const read = s.trace ? ` · read ${s.trace.read_chars} of ${s.trace.budget_chars} chars` : ''
+  return `${s.node} · attempt ${s.attempt}${item} · ${s.state}${read}`
+}
+
+/** A package's line: its records and what its collector says. */
+export function packageLine(p: PackageShown): string {
+  return `${p.view}: ${p.records} records, ${p.collector}`
+}
 
 /// The display cap of one inline read (`apb_engine::result_view::DISPLAY_CAP`).
 export const DISPLAY_CAP = RESULT_DISPLAY_CAP

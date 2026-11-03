@@ -1,5 +1,7 @@
 //! The one evidence validator every grader's output goes through, so a
-//! level always rests on what the grader actually read:
+//! level always rests on what the grader actually read. The citations and
+//! the absence rule are checked by `crate::citation`; this module adds
+//! what is a grade's own (levels, reason codes, correction rounds):
 //!
 //! - every citation names a record the grader read in full (an outline
 //!   entry, a child listing or a search hit routes, it never proves), in a
@@ -17,12 +19,13 @@
 
 use std::collections::BTreeMap;
 
-use apb_core::quality::criteria::{CriterionDef, EvidenceKind, ReadKind};
-use apb_core::quality::grade::{Cite, CriterionGrade, Level, ViewEnd};
+use apb_core::quality::criteria::{CriterionDef, EvidenceKind};
+use apb_core::quality::grade::{Cite, CriterionGrade, Level};
 use serde::{Deserialize, Serialize};
 
 use super::reader::ReadState;
 use super::sources::RunSources;
+use crate::citation::{self, Checked, Claim};
 
 /// The longest `why` a grade keeps.
 pub const WHY_MAX: usize = 300;
@@ -99,41 +102,6 @@ pub enum Validated {
     Rejected(Vec<Rejection>),
 }
 
-/// The problems of one citation for a criterion that reads `kinds`, if
-/// any.
-fn cite_problem(
-    cite: &Cite,
-    kinds: &[ReadKind],
-    sources: &RunSources,
-    state: &ReadState,
-) -> Option<String> {
-    let r = cite.r#ref.as_str();
-    if r.starts_with("n:") {
-        return Some(format!(
-            "`{r}` is an outline entry: outline entries never prove"
-        ));
-    }
-    let Some(rec) = sources.record(r) else {
-        return Some(format!("`{r}` names no record of this run"));
-    };
-    if !sources.views_holding(r).any(|v| kinds.contains(&v.kind)) {
-        return Some(format!("`{r}` is outside the views this criterion reads"));
-    }
-    if !state.full.contains(r) {
-        return Some(if state.routed.contains(r) {
-            format!("`{r}` was only seen in a listing or a search: read it before citing it")
-        } else {
-            format!("`{r}` was not read in full")
-        });
-    }
-    match cite.span {
-        Some([a, b]) if a >= b || b > rec.text.chars().count() as u64 => {
-            Some(format!("the span of `{r}` is outside the record"))
-        }
-        _ => None,
-    }
-}
-
 /// Validates one proposal against its criterion: the grade it stands for,
 /// or the problems found.
 fn check(
@@ -143,37 +111,18 @@ fn check(
     state: &ReadState,
 ) -> Result<CriterionGrade, Vec<String>> {
     let kinds = def.reads();
-    let mut problems: Vec<String> = p
-        .cites
-        .iter()
-        .filter_map(|c| cite_problem(c, &kinds, sources, state))
-        .collect();
+    let claim = Claim {
+        cites: &p.cites,
+        absence: p.absence,
+        absence_allowed: def.criterion.evidence != EvidenceKind::Presence,
+    };
+    let Checked {
+        mut problems,
+        absence_basis,
+    } = citation::check(&claim, &kinds, &sources.views, state);
     let mut level = p.level;
     let mut reason_code = reason_code_of(&p.reason_code, p.level);
-    let mut absence_basis = Vec::new();
     if p.absence {
-        if def.criterion.evidence == EvidenceKind::Presence {
-            problems.push("this criterion rests on what happened, not on an absence".into());
-        }
-        for v in sources.views_of(&kinds) {
-            let ended = state.ended(v);
-            if v.complete && !ended {
-                problems.push(format!("an absence needs `{}` read to its end", v.id));
-            }
-            absence_basis.push(ViewEnd {
-                view: v.id.clone(),
-                complete: v.complete,
-                ended,
-            });
-        }
-        if absence_basis.is_empty() {
-            // Nothing of the kinds the criterion reads exists: an absence
-            // resting on no view rests on nothing.
-            problems.push(
-                "the run has no view this criterion reads: an absence needs one read to its end"
-                    .into(),
-            );
-        }
         if level != Level::NotEnoughData && absence_basis.iter().any(|v| !v.complete) {
             level = Level::NotEnoughData;
             reason_code = "incomplete_view".into();

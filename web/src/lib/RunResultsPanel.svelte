@@ -7,8 +7,10 @@
   // (a `<pre>`, never rendered markup), up to the display cap at a time;
   // "Download" links the whole entry; "Compare with live" answers for a
   // workspace file in one word, never with live content. Artifact refs
-  // recorded without stored bytes are listed apart. Absent for a run with
-  // neither.
+  // recorded without stored bytes are listed apart. The claims of a node
+  // with `evidence:` follow (`EvidenceClaims`). Absent for a run with none
+  // of these.
+  import EvidenceClaims from './EvidenceClaims.svelte'
   import * as Card from '$lib/components/ui/card'
   import * as Dialog from '$lib/components/ui/dialog'
   import { Button } from '$lib/components/ui/button'
@@ -31,10 +33,13 @@
     type EntryContent,
     type EntryView,
     type ResultRow,
-    type ResultsView,
+    type ResultsAnswer,
   } from './results'
 
-  let { runId, view = null, workspace = '' }: { runId: string; view?: ResultsView | null; workspace?: string } = $props()
+  let { runId, view = null, workspace = '' }: { runId: string; view?: ResultsAnswer | null; workspace?: string } =
+    $props()
+
+  const sessions = $derived(view?.evidence ?? [])
 
   const groups = $derived(groupResults(view?.rows ?? []))
   const legacy = $derived(legacyLines(view?.legacy ?? []))
@@ -102,7 +107,7 @@
   const rowHead = (row: ResultRow, ordinal: number) => (row.item ? `#${ordinal} · item ${row.item.id}` : `#${ordinal}`)
 </script>
 
-{#if groups.length || legacy.length || notStored.length}
+{#if groups.length || legacy.length || notStored.length || sessions.length}
   <Card.Root data-testid="run-results">
     <Card.Header>
       <Card.Title>Results</Card.Title>
@@ -210,6 +215,8 @@
             </ul>
           </section>
         {/if}
+
+        <EvidenceClaims {sessions} />
 
         {#if legacy.length}
           <section class="group" data-testid="run-results-legacy">

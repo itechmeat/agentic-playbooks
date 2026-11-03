@@ -215,6 +215,13 @@ fn render_types() -> String {
         apb_engine::result_view::ResultsView::decl(&cfg),
         apb_engine::result_view::EntryContent::decl(&cfg),
         apb_engine::result_view::LiveComparison::decl(&cfg),
+        apb_engine::evidence::ClaimVerdict::decl(&cfg),
+        apb_engine::evidence::CitationFlag::decl(&cfg),
+        apb_engine::evidence::BoundSource::decl(&cfg),
+        apb_engine::evidence::CiteShown::decl(&cfg),
+        apb_engine::evidence::ClaimShown::decl(&cfg),
+        apb_engine::evidence::PackageShown::decl(&cfg),
+        apb_engine::evidence::SessionShown::decl(&cfg),
         apb_engine::run_outcome::commits::CommitAttempt::decl(&cfg),
         apb_core::run_outputs::Pick::decl(&cfg),
         apb_engine::run_outputs::OutputState::decl(&cfg),
@@ -661,6 +668,32 @@ fn render_result_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** The most bytes of one entry an inline result read returns. */\nexport const RESULT_DISPLAY_CAP = {}\n",
         apb_engine::result_view::DISPLAY_CAP
+    ));
+    render_evidence_consts(out);
+}
+
+/// The fixed wording of each claim verdict and of the flags' heading, so
+/// every surface says the same about a citation.
+fn render_evidence_consts(out: &mut String) {
+    use apb_engine::evidence::{self as ev, ClaimVerdict};
+    let quote = |t: &str| serde_json::to_string(t).unwrap_or_default();
+    let verdicts = [
+        ("structurally_valid", ClaimVerdict::StructurallyValid),
+        ("unsupported", ClaimVerdict::Unsupported),
+        ("absence_ok", ClaimVerdict::AbsenceOk),
+        ("not_enough_data", ClaimVerdict::NotEnoughData),
+    ];
+    let entries: Vec<String> = verdicts
+        .iter()
+        .map(|(k, v)| format!("{k}: {}", quote(ev::wording(*v))))
+        .collect();
+    out.push_str(&format!(
+        "\n/** What each claim verdict says, on every surface. */\nexport const EVIDENCE_VERDICT_TEXTS = {{ {} }} as const\n",
+        entries.join(", ")
+    ));
+    out.push_str(&format!(
+        "\n/** How the deterministic citation flags are introduced: never as errors. */\nexport const EVIDENCE_WORTH_A_LOOK = {}\n",
+        quote(ev::WORTH_A_LOOK)
     ));
 }
 

@@ -28,7 +28,7 @@ nodes:
       - path: notes/summary.txt
         scope: run                      # relative to the run directory
       - path: records.jsonl
-        format: records                 # stored as text, marked as a package
+        format: records                 # a record package (JSON Lines)
 ```
 
 Each entry has:
@@ -40,8 +40,12 @@ Each entry has:
   same root `outputs.files` uses; a node's own `workdir` does not move it.
   `run` is the run directory `runs/<id>/`.
 - `format`: `text` (default) or `records`. A `records` entry is stored and
-  shown like text; the format is kept as metadata for a later reader of
-  record packages.
+  shown like text and is read as a record package by an evidence session
+  (`docs/superpowers/specs/2026-11-03-evidence-citations-design.md`): UTF-8
+  JSON Lines with a header `{"apb_records": 1, "complete": ..., "source":
+  ...}` and one record per line. A text that is no package is kept as plain
+  text, and its manifest entry carries `records_invalid` with the first
+  problem (lines and fields only, never the text).
 
 `results: []` is a declaration too: the node keeps its output and fields,
 and no file.
@@ -320,6 +324,12 @@ r:<snapshot_id>/<entry>#[a,b)
 canonical bytes. `#[a,b)` is a byte range with `a <= b`, on character
 boundaries of the text. The dashboard converts it to UTF-16 offsets for
 display only.
+
+A record of a package entry is `r:<snapshot_id>/<entry>@<record id>`, the
+id percent-encoded, a range counting in the record's text. It is read
+through an evidence session (`run_evidence_read`, `apb evidence read`);
+`run_result_read` and `apb results show` refuse it and read whole entries
+only.
 
 ## Verification
 

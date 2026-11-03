@@ -1464,8 +1464,56 @@ pub struct Node {
     /// and runs the node without the check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_approval: Option<RequiresApproval>,
+    /// The sources an `agent_task` reads through the engine's evidence
+    /// reader and the claims it cites them in (see [`EvidenceDecl`]).
+    /// Additive to schema 2; an older apb drops it and runs the node
+    /// without a session or a check, which is why a run using it carries a
+    /// run guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceDecl>,
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// An `agent_task`'s `evidence:` block: the nodes whose stored snapshots
+/// its attempts read through the engine's reader, the record kinds a claim
+/// may cite, whether claims are required and what an invalid one does.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceDecl {
+    pub from: Vec<String>,
+    /// The view kinds a claim may cite (`output`, `fields`, `file`,
+    /// `records` or a record kind); absent: every kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub claims: EvidenceClaims,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub on_invalid: EvidenceOnInvalid,
+    /// The characters one attempt may read; absent: the reader's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_chars: Option<u64>,
+}
+
+/// Whether an attempt must report claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceClaims {
+    Required,
+    #[default]
+    Optional,
+}
+
+/// What a claim that is not structurally valid does to its attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceOnInvalid {
+    /// The node keeps its status; the claims are marked.
+    #[default]
+    Mark,
+    /// The attempt fails (`check_rejected`) and the retry path runs it
+    /// again with the problems in its prompt.
+    Fail,
 }
 
 /// A `human_review` gate's `approves:` block: the nodes whose latest result

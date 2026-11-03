@@ -62,6 +62,9 @@ pub struct SpawnEnv {
     /// The isolation sandbox the attempt's process runs in; `None` runs it
     /// as before.
     pub sandbox: Option<Arc<crate::sandbox::SandboxPlan>>,
+    /// The attempt's evidence session handle (`APB_EVIDENCE_SESSION`), for
+    /// a node with `evidence:`.
+    pub evidence_session: Option<String>,
 }
 
 impl SpawnEnv {
@@ -96,6 +99,14 @@ impl SpawnEnv {
         SpawnEnv {
             attempt: Some(attempt),
             attempt_token: Some(apb_core::connector::marker::new_nonce()),
+            ..self.clone()
+        }
+    }
+
+    /// This env with the evidence session `handle` (`None`: none).
+    pub fn with_evidence(&self, handle: Option<String>) -> Self {
+        SpawnEnv {
+            evidence_session: handle,
             ..self.clone()
         }
     }
@@ -179,6 +190,11 @@ impl SpawnEnv {
             Some(id) => cmd.env(ITEM_ID_ENV, id),
             // Never inherit another item's id from the parent.
             None => cmd.env_remove(ITEM_ID_ENV),
+        };
+        match &self.evidence_session {
+            Some(handle) => cmd.env(crate::evidence::SESSION_ENV, handle),
+            // Never inherit another attempt's session from the parent.
+            None => cmd.env_remove(crate::evidence::SESSION_ENV),
         };
         // A host task id belongs to the host's subagent, never to an agent
         // apb spawns itself.

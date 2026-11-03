@@ -2250,6 +2250,7 @@ mod results_routes {
                     digest,
                     redacted: false,
                     format: Default::default(),
+                    records_invalid: None,
                 }],
                 omitted: Vec::new(),
                 incomplete: None,
@@ -2293,6 +2294,9 @@ mod results_routes {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["rows"][0]["snapshot_id"], id.as_str());
         assert_eq!(listed["rows"][0]["entries"][0]["entry"], ENTRY);
+        // The evidence sessions of a run are part of the same answer (none
+        // here: no node declares `evidence:`).
+        assert_eq!(listed["evidence"], serde_json::json!([]));
 
         let (status, json) = get_json(
             app.clone(),

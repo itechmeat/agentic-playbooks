@@ -786,6 +786,64 @@ Limits, reasons, citations, verification and cleanup:
 | V153 | error | a `results` path breaks the grammar: empty, absolute or holding a NUL; `**`; an empty, `.` or `..` segment; `*` or `?` outside the last segment; `[`, `]`, `{`, `}` or `\`; a `workspace` path under `.git` or `.apb`; a `run` path naming apb's own storage (`results`, `definitions`, `bindings`, `diagnostics.jsonl`, `evidence`) |
 | V154 | error | more than 32 `results` entries on one node |
 
+### Citations for node outputs (evidence:)
+
+`evidence:` lets an `agent_task` cite what earlier nodes stored, and has
+apb check that each citation rests on a record the attempt actually read.
+
+```yaml
+- id: collect
+  type: script
+  script: scripts/collect.sh
+  results:
+    - path: mail.jsonl
+      format: records            # a record package, see below
+- id: answer
+  type: agent_task
+  prompt: "Answer the customer from the collected mail"
+  evidence:
+    from: [collect]              # nodes whose stored results are read
+    kinds: [email]               # optional: the kinds a claim may cite
+    claims: required             # required | optional (default)
+    on_invalid: fail             # mark (default) | fail
+```
+
+- Each attempt gets its own reading session over the latest stored snapshot
+  of every `from` node. Its prompt carries an `## evidence` section with
+  the session handle (also in `APB_EVIDENCE_SESSION`): the agent reads with
+  `apb evidence read --session "$APB_EVIDENCE_SESSION" outline` (then
+  `children`, `read`, `page`, `search`), a host with MCP
+  `run_evidence_read`. The session closes when the attempt ends.
+- The agent reports `outputs.claims` in its status file:
+  `[{ "id", "text", "cites": [{ "ref", "span"? }] }]`, or
+  `{ "id", "text", "absence": { "kinds": [...] } }` for something absent.
+- A citation stands only on a record of this session, of an allowed kind,
+  returned whole to this attempt by `read` or `page` (a listing or a search
+  only routes), the span inside it. An absence needs every view of its
+  kinds complete and read to its end. Each claim is `structurally_valid`,
+  `unsupported`, `absence_ok` or `not_enough_data`, with "worth a look"
+  flags (`whole_record`, `short_span`, `self_citation`, `shared_record`,
+  `no_shared_words`). The check proves structure, never that a record
+  supports the claim: every surface shows the cited fragment next to the
+  claim for a person to compare.
+- `on_invalid: mark` keeps the node's status; `on_invalid: fail` fails the
+  attempt (`check_rejected`) and the retry's prompt names the problems.
+- A records package is UTF-8 JSON Lines: a header
+  `{"apb_records": 1, "complete": true, "source": "..."}`, then one
+  `{ "id", "kind", "text", "source"?, "version"?, "at"? }` per line (ids
+  `[A-Za-z0-9._:-]`, unique; kinds are slugs; at most 10000 records). Its
+  records are cited as `r:<snapshot>/<entry>@<id>`. `complete` is the
+  collector's statement and is shown as such. A text that is no package is
+  kept as plain text with `records_invalid`.
+- Read the claims with `apb results <run>`, MCP `run_results` (`evidence`)
+  or the run page's Results panel.
+
+Spec: [docs/superpowers/specs/2026-11-03-evidence-citations-design.md](superpowers/specs/2026-11-03-evidence-citations-design.md).
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V159 | error | `evidence` on a node that is not an `agent_task`; an empty `from`; a `from` node that is not declared or never runs before the node; a `kinds` entry that is not a slug; `evidence` with `isolation: full` |
+
 ### Run outputs (outputs:)
 
 A playbook can declare the named values a run hands to whoever started it,

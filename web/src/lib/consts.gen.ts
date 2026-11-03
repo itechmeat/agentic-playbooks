@@ -42,6 +42,12 @@ export const RESULT_OUTPUT_OMITTED = ['run_limit', 'snapshot_limit', 'scrub_unav
 /** The most bytes of one entry an inline result read returns. */
 export const RESULT_DISPLAY_CAP = 65536
 
+/** What each claim verdict says, on every surface. */
+export const EVIDENCE_VERDICT_TEXTS = { structurally_valid: "Structurally valid: the cited record exists, was returned whole to this attempt, is of an allowed kind, and the span lies inside it. Whether it supports the claim was not checked.", unsupported: "not supported by a cited record (not shown as a fact)", absence_ok: "Absence structurally valid: every view of the named kinds was complete and read to its end. Whether the source holds nothing else was not checked.", not_enough_data: "not enough data: a view the absence rests on is not complete" } as const
+
+/** How the deterministic citation flags are introduced: never as errors. */
+export const EVIDENCE_WORTH_A_LOOK = "worth a look"
+
 /** Every reason a run output is missing. */
 export const MISSING_REASONS = ['not_run', 'not_succeeded', 'field_absent', 'not_json_object', 'truncated', 'item_not_passed', 'definition_unknown'] as const
 

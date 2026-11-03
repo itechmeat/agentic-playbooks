@@ -4,7 +4,8 @@
 //!
 //! - [`sources`]: every view of the run a grader may read;
 //! - [`reader`]: the bounded, redacting, traced reader;
-//! - [`evidence`]: the one validator every grader's output goes through;
+//! - [`evidence`]: the one validator every grader's output goes through,
+//!   checking citations through `crate::citation`;
 //! - [`rules`]: the rules grader for the built-in criteria;
 //! - [`model`]: the decision-model grader for the playbook's own criteria;
 //! - [`session`]: a host's grading session for the playbook's own criteria;

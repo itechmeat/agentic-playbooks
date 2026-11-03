@@ -1671,7 +1671,14 @@ digest: string,
 /**
  * The secret scrub changed the text; nothing of the original is kept.
  */
-redacted: boolean, format: ResultFormat, };
+redacted: boolean, format: ResultFormat, 
+/**
+ * A `format: records` entry whose text is no package
+ * ([`crate::records::parse`]): `records: invalid`, with the first
+ * problem. It is stored and read as plain text. Absent otherwise, so
+ * the canonical bytes of every other entry are unchanged.
+ */
+records_invalid?: string, };
 
 export type ResultStamp = { snapshot_id: string, entries: number, bytes: number, omitted?: number, incomplete?: boolean, };
 
@@ -1749,6 +1756,45 @@ size: number,
 range: [number, number], redacted_at_capture: boolean, redacted_on_read: boolean, };
 
 export type LiveComparison = "same" | "differs" | "missing" | "unreadable" | "not_comparable";
+
+export type ClaimVerdict = "structurally_valid" | "unsupported" | "absence_ok" | "not_enough_data";
+
+export type CitationFlag = "whole_record" | "short_span" | "self_citation" | "shared_record" | "no_shared_words";
+
+export type BoundSource = { node: string, execution: number, item?: string, snapshot_id: string, };
+
+export type CiteShown = { ref: string, span?: [number, number], stored?: string, 
+/**
+ * Absent when the record is not in the session.
+ */
+fragment?: string, };
+
+export type ClaimShown = { id: string, 
+/**
+ * The claim's text from the node output, redacted.
+ */
+text: string, verdict: ClaimVerdict, 
+/**
+ * The fixed wording of the verdict.
+ */
+wording: string, problems: Array<string>, flags: Array<CitationFlag>, cites: Array<CiteShown>, absence_kinds?: Array<string>, };
+
+export type PackageShown = { view: string, records: number, 
+/**
+ * The engine's own view: the snapshot is whole and the collector says
+ * so.
+ */
+complete: boolean, 
+/**
+ * The collector's own statement, as its wording.
+ */
+collector: string, };
+
+export type SessionShown = { node: string, item?: string, attempt: number, attempt_id: number, 
+/**
+ * `open`, `closed` (the attempt ended, no check) or `checked`.
+ */
+state: string, sources: Array<BoundSource>, packages: Array<PackageShown>, trace?: ReadTrace, problems: Array<string>, claims: Array<ClaimShown>, };
 
 export type CommitAttempt = { 
 /**

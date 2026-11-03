@@ -181,6 +181,13 @@ on what the grader actually read:
   that changed without a record newly read in full (an outline, a listing
   or a search does not count as reading).
 
+The citation rules and the bounded reader are shared with the check of a
+node's own claims (`evidence:`, see
+`docs/superpowers/specs/2026-11-03-evidence-citations-design.md`): both go
+through `crate::citation`, whose result snapshot references
+(`r:<snapshot>/<entry>[@<record>]`) are a second reference family in the
+same rules. A grade's references and levels mean what they did before.
+
 The grade stores the citations and a reading trace: the budget, the
 characters read, each reading step (operation, reference, characters) and
 per view whether it was complete and read to its end. No source text is

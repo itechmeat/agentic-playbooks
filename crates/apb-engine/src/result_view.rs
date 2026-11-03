@@ -619,6 +619,23 @@ pub(crate) fn verified_manifest(
     Ok(m)
 }
 
+/// A stamped snapshot's manifest with the stored text of each entry, in
+/// entry order, the manifest and every object re-hashed. The texts are as
+/// stored, before the run redactor: the one caller, the evidence reader
+/// (`crate::evidence::sources`), redacts every text it serves and marks a
+/// record the redactor changes as one no citation may rest on.
+pub(crate) fn stored_texts(
+    run_dir: &Path,
+    snapshot_id: &str,
+) -> Result<(SnapshotManifest, Vec<String>), ResultReadError> {
+    let (b, _, m) = stamped_manifest(run_dir, snapshot_id)?;
+    let mut texts = Vec::with_capacity(m.entries.len());
+    for e in &m.entries {
+        texts.push(read_object(&b, e)?.ok_or(ResultReadError::Corrupt)?);
+    }
+    Ok((m, texts))
+}
+
 /// The entry a reader names by its shown id ([`shown_ids`]), with whether
 /// its path is redacted on read.
 fn find_entry<'m>(

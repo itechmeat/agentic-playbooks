@@ -52,7 +52,7 @@ impl Grader for RulesGrader {
         defs: &[CriterionDef],
         reader: &mut Reader<'_>,
     ) -> Vec<Proposal> {
-        for v in &sources.views {
+        for v in sources.views.all() {
             reader.scan(&v.id);
         }
         let reads = skills::reads(sources);

@@ -98,6 +98,9 @@ pub const REMOVED_IN_READ_ONLY: &[&str] = &[
     "run_grade_start",
     "run_grade_read",
     "run_grade_submit",
+    // An evidence session's reads move its read state, and only an
+    // attempt's own step reads it.
+    "run_evidence_read",
     "known_problem_recheck",
     "known_problem_decide",
     // The judge sandbox and labelled examples: a live ask spends, a save

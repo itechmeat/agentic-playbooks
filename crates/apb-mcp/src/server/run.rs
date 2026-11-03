@@ -906,6 +906,42 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "One reading step of an attempt's evidence session (a node with evidence: reads the stored results of its sources through it): session is the handle <run_id>:<session> from your prompt or APB_EVIDENCE_SESSION. op outline lists the views (n:<view>), children a view's record refs with short snippets, read one record whole by ref (or a span of it), page consecutive records of a view each whole, search the refs whose text holds a phrase. Every text passes the run redactor and counts against the session's budget. Only items with citable: true may be cited, and only a record read whole by this attempt: listings and search hits only route. Cite records in the status file's outputs.claims as { id, text, cites: [{ ref, span? }] } or { id, text, absence: { kinds } }. The session closes when the attempt ends; a step of another run is refused.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    pub(crate) async fn run_evidence_read(
+        &self,
+        Parameters(a): Parameters<RunEvidenceReadArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(a.workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        let args = tools::evidence::ReadArgs {
+            op: a.op,
+            r#ref: a.r#ref,
+            span: a.span,
+            view: a.view,
+            from: a.from,
+            count: a.count,
+            phrase: a.phrase,
+        };
+        let session = a.session;
+        super::quality::off_runtime(move || {
+            let req = tools::evidence::read_request(&args)?;
+            let hint = std::env::var_os("APB_RUN_DIR").map(std::path::PathBuf::from);
+            tools::evidence::evidence_read(
+                &root,
+                &session,
+                &req,
+                &apb_core::step_env::StepCaller::from_env(),
+                hint.as_deref(),
+            )
+        })
+        .await
+    }
+
+    #[tool(
         description = "Change whether a person hears about a live run: notify true sends its transitions (a review or a question waiting, a pause nobody asked for, the end) through the run's current target, or the machine's notify target; false stops them; { on: [...], finished: [...] } keeps only these of the transitions it notifies about (review, question, paused, finished, host_task, supervisor) and of the outcomes its end-of-run notice covers (succeeded, needs_look, failed, aborted); a field left out keeps the run's. It never sets a target or widens the transitions or the outcomes: the person does that in the dashboard or with apb notify. Call it only when the person asked. The target is checked now (it can carry notifications, the connector and the account are approved) and its digests are pinned: a target that fails is refused with notify_unavailable and nothing changes. A run that has ended is refused with run_ended. Returns the run's notify block.",
         annotations(destructive_hint = true)
     )]

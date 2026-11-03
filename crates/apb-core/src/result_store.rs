@@ -131,7 +131,7 @@ impl ResultScope {
 }
 
 /// How a stored text entry is meant: plain text, or a records package
-/// (stored as metadata only until the records reader exists).
+/// ([`crate::records`]), which an evidence session reads record by record.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -238,6 +238,13 @@ pub struct SnapshotEntry {
     /// The secret scrub changed the text; nothing of the original is kept.
     pub redacted: bool,
     pub format: ResultFormat,
+    /// A `format: records` entry whose text is no package
+    /// ([`crate::records::parse`]): `records: invalid`, with the first
+    /// problem. It is stored and read as plain text. Absent otherwise, so
+    /// the canonical bytes of every other entry are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub records_invalid: Option<String>,
 }
 
 impl SnapshotEntry {
@@ -560,11 +567,15 @@ impl std::str::FromStr for EntryId {
 }
 
 /// `r:<snapshot_id>/<entry>` with an optional byte range `#[a,b)` into the
-/// stored UTF-8 text.
+/// stored UTF-8 text. A record of a package entry (`format: records`, see
+/// [`crate::records`]) is `r:<snapshot_id>/<entry>@<record id>`, the id
+/// percent-encoded, its range counting in the record's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Citation {
     pub snapshot_id: String,
     pub entry: EntryId,
+    /// The record of a package entry, decoded.
+    pub record: Option<String>,
     pub range: Option<(u64, u64)>,
 }
 
@@ -579,6 +590,8 @@ pub enum CitationError {
     Entry,
     /// The range is not `#[a,b)` with `a <= b`.
     Range,
+    /// The record id is not a record id ([`crate::records::is_record_id`]).
+    Record,
 }
 
 impl fmt::Display for CitationError {
@@ -588,6 +601,7 @@ impl fmt::Display for CitationError {
             CitationError::SnapshotId => "the snapshot id is not 64 lowercase hex characters",
             CitationError::Entry => "the entry is not output, fields or file:<scope>:<path>",
             CitationError::Range => "the range is not #[a,b) with a <= b",
+            CitationError::Record => "the record id is not [A-Za-z0-9._:-], 1 to 128 characters",
         })
     }
 }
@@ -597,6 +611,9 @@ impl std::error::Error for CitationError {}
 impl fmt::Display for Citation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "r:{}/{}", self.snapshot_id, self.entry)?;
+        if let Some(id) = &self.record {
+            write!(f, "@{}", utf8_percent_encode(id, SEGMENT))?;
+        }
         if let Some((a, b)) = self.range {
             write!(f, "#[{a},{b})")?;
         }
@@ -617,9 +634,24 @@ impl std::str::FromStr for Citation {
             Some((entry, range)) => (entry, Some(parse_range(range)?)),
             None => (rest, None),
         };
+        // An entry's own `@` is percent-encoded, so the last one starts
+        // the record.
+        let (entry, record) = match entry.rsplit_once('@') {
+            Some((entry, id)) => {
+                let id = percent_decode_str(id)
+                    .decode_utf8()
+                    .map_err(|_| CitationError::Record)?;
+                if !crate::records::is_record_id(&id) {
+                    return Err(CitationError::Record);
+                }
+                (entry, Some(id.into_owned()))
+            }
+            None => (entry, None),
+        };
         Ok(Citation {
             snapshot_id: snapshot_id.to_string(),
             entry: entry.parse()?,
+            record,
             range,
         })
     }

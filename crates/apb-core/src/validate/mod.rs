@@ -13,6 +13,7 @@ mod budget;
 mod connectors;
 mod decisions;
 mod edges;
+mod evidence;
 mod forks;
 mod graph;
 pub mod guarded;
@@ -389,6 +390,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     read_only::check_read_only(playbook, &mut r); // V137-V139
     results::check_results(playbook, &mut r); // V152-V154
     approval::check_approvals(playbook, &mut r); // V155-V158
+    evidence::check_evidence(playbook, &mut r); // V159
     unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08

@@ -15,8 +15,9 @@ use crate::result_store::{MAX_DECLARATIONS, ResultScope, is_reserved_first};
 /// The nodes whose executions take a snapshot: every node that declares
 /// `results:` (an empty list included), and every node a gate's
 /// `approves.results` or a node's `requires_approval.of` names (without
-/// its own `results:`, its snapshot keeps the output and fields only). The
-/// one place later references to a node's results (evidence) extend.
+/// its own `results:`, its snapshot keeps the output and fields only), and
+/// every node an `evidence.from` names: an evidence reader reads only
+/// stored snapshots.
 pub fn snapshotted_nodes(playbook: &Playbook) -> BTreeSet<String> {
     let named = playbook.nodes.iter().flat_map(|n| {
         let approved = n.approves.iter().flat_map(|a| a.results.iter());
@@ -24,7 +25,8 @@ pub fn snapshotted_nodes(playbook: &Playbook) -> BTreeSet<String> {
             .requires_approval
             .iter()
             .flat_map(|q| q.of.iter().flatten());
-        approved.chain(required)
+        let evidence = n.evidence.iter().flat_map(|e| e.from.iter());
+        approved.chain(required).chain(evidence)
     });
     playbook
         .nodes

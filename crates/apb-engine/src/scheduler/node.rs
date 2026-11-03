@@ -208,6 +208,9 @@ fn observe_control(
 struct Rejection {
     reason: String,
     fatal: bool,
+    /// The attempt's `failure_kind`, when the rejection names one (the
+    /// evidence check's `check_rejected`).
+    failure_kind: Option<&'static str>,
 }
 
 impl Rejection {
@@ -215,6 +218,7 @@ impl Rejection {
         Rejection {
             reason,
             fatal: false,
+            failure_kind: None,
         }
     }
 }
@@ -260,6 +264,7 @@ fn success_check_rejection(
                 return Ok(Some(Rejection {
                     reason: v.reason,
                     fatal: v.fatal,
+                    failure_kind: None,
                 }));
             }
             Ok((r.status != NodeStatus::Succeeded)
@@ -1348,6 +1353,9 @@ fn execute_node_kind(
             // A delayed retry continues the execution's attempt numbers.
             let mut attempt: u32 = continuation.as_ref().map_or(0, |c| c.attempt);
             let mut last_msg = String::new();
+            // The evidence check's refusal of the previous attempt's claims,
+            // handed to the next attempt's `## evidence` section.
+            let mut evidence_refused: Option<String> = None;
             // The ordinary retries of this node wait out its `retry_delay`
             // (`super::deferred`), never the first attempt of a step.
             let retry_delay = playbook.effective_retry_delay(node);
@@ -1822,10 +1830,33 @@ fn execute_node_kind(
                         )),
                     };
                     timeout_continuation = false;
+                    // The attempt's evidence session (`evidence:`): prepared
+                    // now, written once `attempt_started` gives it an id.
+                    let evidence = match &node.evidence {
+                        Some(_) => crate::evidence::session::prepare(
+                            run_dir,
+                            &read_all(run_dir)?,
+                            node,
+                            key,
+                            attempt,
+                        )?,
+                        None => None,
+                    };
+                    let attempt_prompt: std::borrow::Cow<'_, str> = match &evidence {
+                        Some(ev) => std::borrow::Cow::Owned(format!(
+                            "{attempt_prompt}{}",
+                            crate::context::evidence_section(
+                                &ev.handle(),
+                                evidence_refused.as_deref()
+                            )
+                        )),
+                        None => attempt_prompt,
+                    };
                     let attempt_policy = spawn_env
                         .with_attempt(attempt)
                         .with_process(step_env.process.clone())
-                        .with_sandbox(place.sandbox.clone());
+                        .with_sandbox(place.sandbox.clone())
+                        .with_evidence(evidence.as_ref().map(|ev| ev.handle()));
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
@@ -1928,6 +1959,11 @@ fn execute_node_kind(
                             Ok(seq) => {
                                 started_seq.set(seq);
                                 super::provenance::attempt_started(run_dir, node_id, seq);
+                                if let Some(ev) = &evidence
+                                    && let Err(e) = ev.open(run_dir, seq)
+                                {
+                                    *spawn_err.borrow_mut() = Some(e);
+                                }
                                 if let Err(e) = read_only::journal_check(
                                     journal,
                                     node_id,
@@ -2086,6 +2122,14 @@ fn execute_node_kind(
                         stall_hooks.as_ref(),
                         Some(&control_hooks),
                     );
+                    // The agent is gone: its evidence session closes, and
+                    // every later read is refused.
+                    let evidence_closed = match &evidence {
+                        Some(_) if spawn_at.get().is_some() => {
+                            crate::evidence::session::close(run_dir, started_seq.get())?
+                        }
+                        _ => None,
+                    };
                     if let Some(e) = spawn_err.borrow_mut().take() {
                         return Err(e);
                     }
@@ -2528,15 +2572,37 @@ fn execute_node_kind(
                                 // AFTER this branch's agent has succeeded (meaning this
                                 // branch was not cancelled) - we do not propagate
                                 // cancellation here.
-                                let rejection = success_check_rejection(
-                                    protect_violation.as_deref(),
-                                    node.success_check.as_ref(),
-                                    run_dir,
-                                    &attempt_workdir,
-                                    place.sandbox.as_deref(),
-                                    &report.output,
-                                    &key,
-                                )?;
+                                // The evidence check of the claims comes
+                                // first: `on_invalid: fail` rejects the
+                                // attempt like a success_check does.
+                                let evidence_rejection = match (&evidence_closed, &node.evidence) {
+                                    (Some(file), Some(decl)) => crate::evidence::check_attempt(
+                                        run_dir,
+                                        file,
+                                        decl,
+                                        &report.output,
+                                    )?,
+                                    _ => None,
+                                };
+                                let rejection = match evidence_rejection {
+                                    Some(note) => {
+                                        evidence_refused = Some(note.clone());
+                                        Some(Rejection {
+                                            reason: note,
+                                            fatal: false,
+                                            failure_kind: Some(crate::evidence::CHECK_REJECTED),
+                                        })
+                                    }
+                                    None => success_check_rejection(
+                                        protect_violation.as_deref(),
+                                        node.success_check.as_ref(),
+                                        run_dir,
+                                        &attempt_workdir,
+                                        place.sandbox.as_deref(),
+                                        &report.output,
+                                        &key,
+                                    )?,
+                                };
                                 match rejection {
                                     // Rejected: this is an attempt FAILURE, not a
                                     // terminal node failure. Journal it as `failed`
@@ -2547,7 +2613,11 @@ fn execute_node_kind(
                                     // and fallbacks exactly like an ordinary failure.
                                     // The raw agent text is preserved for the
                                     // downstream `nodes.<id>.rejected_output`.
-                                    Some(Rejection { reason, fatal }) => {
+                                    Some(Rejection {
+                                        reason,
+                                        fatal,
+                                        failure_kind,
+                                    }) => {
                                         journal.append(EventPayload::AttemptFinished {
                                             item: None,
                                             output_truncated: capture.truncated.clone(),
@@ -2560,7 +2630,7 @@ fn execute_node_kind(
                                             summary: Some(report.summary.clone()),
                                             rejected_output: Some(report.output.clone()),
                                             partial_output: None,
-                                            failure_kind: None,
+                                            failure_kind: failure_kind.map(str::to_string),
                                             usage: report.usage.clone(),
                                         })?;
                                         if fatal {
@@ -2789,15 +2859,36 @@ fn execute_node_kind(
                                     // exactly as on the Ok branch, and a rejection
                                     // consumes a retry with the discarded text
                                     // preserved (S3 behavior).
-                                    match success_check_rejection(
-                                        protect_violation.as_deref(),
-                                        node.success_check.as_ref(),
-                                        run_dir,
-                                        &attempt_workdir,
-                                        place.sandbox.as_deref(),
-                                        &output,
-                                        &key,
-                                    )? {
+                                    // So does the evidence check of its claims.
+                                    let evidence_rejection =
+                                        match (&evidence_closed, &node.evidence) {
+                                            (Some(file), Some(decl)) => {
+                                                crate::evidence::check_attempt(
+                                                    run_dir, file, decl, &output,
+                                                )?
+                                            }
+                                            _ => None,
+                                        };
+                                    let rejection = match evidence_rejection {
+                                        Some(note) => {
+                                            evidence_refused = Some(note.clone());
+                                            Some(Rejection {
+                                                reason: note,
+                                                fatal: false,
+                                                failure_kind: Some(crate::evidence::CHECK_REJECTED),
+                                            })
+                                        }
+                                        None => success_check_rejection(
+                                            protect_violation.as_deref(),
+                                            node.success_check.as_ref(),
+                                            run_dir,
+                                            &attempt_workdir,
+                                            place.sandbox.as_deref(),
+                                            &output,
+                                            &key,
+                                        )?,
+                                    };
+                                    match rejection {
                                         None => {
                                             let check = if item.is_some_and(|i| i.checked) {
                                                 Default::default()
@@ -2861,7 +2952,11 @@ fn execute_node_kind(
                                                 });
                                             }
                                         }
-                                        Some(Rejection { reason, fatal }) => {
+                                        Some(Rejection {
+                                            reason,
+                                            fatal,
+                                            failure_kind,
+                                        }) => {
                                             journal.append(EventPayload::AttemptFinished {
                                                 item: None,
                                                 output_truncated: capture.truncated.clone(),
@@ -2875,7 +2970,7 @@ fn execute_node_kind(
                                                 summary: None,
                                                 rejected_output: Some(output.clone()),
                                                 partial_output: None,
-                                                failure_kind: None,
+                                                failure_kind: failure_kind.map(str::to_string),
                                                 usage: failed_usage.clone(),
                                             })?;
                                             if fatal {

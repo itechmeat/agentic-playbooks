@@ -89,6 +89,10 @@
 //! reads an ended guard. E8 (synthetic): a `run_guard` naming a
 //! feature no apb knows; the new binary refuses to resume and stops it.
 //!
+//! Row E9 covers evidence sessions: a definition with `evidence` carries a
+//! `run_guard` naming `evidence` after `run_provenance`; both old binaries
+//! read the run, refuse to resume it and stop it.
+//!
 //! Row S1 covers scenario runs: a quick scenario run the new binary plays
 //! (`apb eval --level quick`) lives under `.apb/scenario-runs/` with
 //! `origin: scenario` in its manifest; neither old binary lists it, shows
@@ -3776,4 +3780,74 @@ fn e8_synthetic_unknown_guard_feature_new_refuses_resume_stop_goes_through() {
     );
     assert_eq!(case.journal_bytes(&run), before, "row E8: wrote nothing");
     case.stop(&new, &run);
+}
+
+// ------------------------------------- evidence sessions (20c)
+
+/// Row E9's playbook: `collect` (held while `hold.work` exists) keeps a
+/// records package, and `use`, an `agent_task`, reads it through its
+/// evidence session. The run is stopped while `collect` is held, so no
+/// agent runs.
+const E9_EVIDENCE: &str = r#"schema: 2
+id: corpus-evidence
+name: Journal corpus evidence run
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: collect, type: script, script: "scripts/work.sh", runner: sh, results: [ { path: report.md } ] }
+  - { id: use, type: agent_task, prompt: "answer", profile: corpus, evidence: { from: [collect] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: collect }
+  - { from: collect, to: use }
+  - { from: use, to: done }
+"#;
+
+/// Row E9: a definition with `evidence` carries a `run_guard` naming
+/// `evidence` right after `run_provenance`. Both old binaries read the run
+/// with the guard counted as unknown, refuse to resume it, naming
+/// `run_guard`, and stop it: an older apb would run `use` with no session
+/// and no check of its claims.
+#[test]
+fn e9_evidence_guard_old_binaries_read_refuse_and_stop() {
+    let mut case = Case::new("row E9");
+    let new = new_binary();
+    case.seed_inline(
+        &new,
+        "corpus-evidence",
+        E9_EVIDENCE,
+        &[("work.sh", E_WORK_SH)],
+    );
+    let profile = case.root().join(".apb/profiles/corpus");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(
+        profile.join("profile.yaml"),
+        "name: corpus\ndescription: the stub agent\nexecutor:\n  agent: claude-code\n  model: haiku\n",
+    )
+    .unwrap();
+    fs::write(profile.join("SOUL.md"), "").unwrap();
+    fs::write(case.root().join("hold.work"), "").unwrap();
+    let run = case.start_inline(&new, "corpus-evidence", &[]);
+    case.wait_file("work.started");
+    case.kill_driver(&run);
+    let journal = case.journal(&run);
+    let provenance = journal
+        .iter()
+        .position(|e| e["type"] == "run_provenance")
+        .expect("run_provenance");
+    assert_run_guard_after(&journal, provenance, case.name, &["evidence"]);
+    case.save();
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row E9: {} counts the guard it skipped: {ran:?}",
+            label(&reader)
+        );
+        case.resume_refused(&reader, &run, "run_guard");
+        case.stop(&reader, &run);
+    }
 }

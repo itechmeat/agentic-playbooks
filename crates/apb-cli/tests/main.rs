@@ -167,6 +167,8 @@ mod stats_cli_test;
 // --- 0.24.0 eval suites ---
 #[path = "suite/eval_cli_test.rs"]
 mod eval_cli_test;
+#[path = "suite/evidence_cli_test.rs"]
+mod evidence_cli_test;
 // --- end 0.24.0 eval suites ---
 #[path = "suite/read_only_unattended_cli_test.rs"]
 mod read_only_unattended_cli_test;

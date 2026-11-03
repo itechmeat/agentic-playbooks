@@ -23,6 +23,7 @@ mod discover;
 mod doctor;
 // --- 0.24.0 eval suites ---
 mod eval;
+mod evidence;
 // --- end 0.24.0 eval suites ---
 mod grade;
 mod hook;
@@ -311,6 +312,13 @@ enum Command {
         /// Machine-readable output (the same objects as MCP pending_tasks)
         #[arg(long)]
         json: bool,
+    },
+    /// Read an attempt's evidence session: the stored results of the
+    /// node's evidence sources, through the bounded reader its claims are
+    /// checked against
+    Evidence {
+        #[command(subcommand)]
+        action: evidence::EvidenceAction,
     },
     /// The result snapshots of a run: list them, show one entry's stored
     /// text, or clean up what no stamp names
@@ -1055,6 +1063,7 @@ fn main() -> ExitCode {
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
+        Some(Command::Evidence { action }) => evidence::evidence_cmd(&root, action),
         Some(Command::Results {
             action,
             run_id,
